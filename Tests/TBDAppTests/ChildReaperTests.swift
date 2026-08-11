@@ -56,7 +56,8 @@ struct ChildReaperTests {
         let pid: pid_t
         let polls: Int
         var description: String {
-            "pid \(pid) had not become a reapable zombie after \(polls) polls"
+            "pid \(pid) never became a reapable zombie after \(polls) polls "
+                + "(it exited and something else reaped it, or it never exited)"
         }
     }
 
@@ -174,6 +175,7 @@ struct ChildReaperTests {
         #expect(second == -1, "a second reap of the same pid must return -1 (ECHILD)")
     }
 
+    @MainActor
     @Test("background reap: fire-and-forget clears the zombie")
     func backgroundReapClearsTheZombie() async throws {
         let pid = try spawn("/bin/sleep", ["0"])
@@ -189,6 +191,7 @@ struct ChildReaperTests {
         }
     }
 
+    @MainActor
     @Test("background reap: an already-observed child is left alone")
     func backgroundReapSkipsObservedChild() async throws {
         let pid = try spawn("/bin/sleep", ["0"])
@@ -205,6 +208,62 @@ struct ChildReaperTests {
                 "an observed child must be left for its real waiter, not reaped here")
 
         // This test owns the zombie it deliberately kept; don't leak it.
+        _ = await reapOffPool(pid)
+    }
+
+    // MARK: - The claim can land after the call and still be honoured
+    //
+    // Both tests below exploit the same property to be deterministic rather
+    // than racy: a `@MainActor` test body *is* a block occupying the serial
+    // main queue (`Tests/CLAUDE.md`), so nothing else queued there can run
+    // until the body suspends. That lets each one enqueue work and then act
+    // "before" it runs, with no timing assumption at all.
+
+    @MainActor
+    @Test("the re-check after the main-queue hop skips a child claimed in the meantime")
+    func skipsWhenClaimLandsAfterTheSynchronousCheck() async throws {
+        let pid = try spawn("/bin/sleep", ["0"])
+        let observation = ChildExitObservation()
+
+        // Passes the synchronous gate and enqueues the hop...
+        ChildReaper.reap(pid: pid, unless: observation)
+        // ...and the claim lands before that hop can possibly run, since this
+        // body still holds the main queue. Only the post-hop re-check can
+        // catch this; delete it and the child below gets reaped.
+        observation.record()
+
+        try await waitUntilZombie(pid)
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(isUnreapedZombie(pid),
+                "a claim recorded before the hop ran must still stop the reap")
+
+        _ = await reapOffPool(pid)
+    }
+
+    @MainActor
+    @Test("an exit handler already queued on main beats teardown's reap")
+    func yieldsToAnAlreadyEnqueuedExitHandler() async throws {
+        let pid = try spawn("/bin/sleep", ["0"])
+        let observation = ChildExitObservation()
+
+        // Stands in for SwiftTerm's exit handler for a child that exited
+        // concurrently with teardown: a main-queue block, enqueued before
+        // teardown runs, that records the claim. (In production that same
+        // block does SwiftTerm's own `waitpid` first — which is why losing
+        // this race would mean two committed waiters on one pid.) Cancelling
+        // the source does not un-enqueue it, so teardown cannot assume it is
+        // gone; it can only queue itself behind it.
+        DispatchQueue.main.async { observation.record() }
+
+        // Teardown, still holding the main queue: the handler has NOT run yet,
+        // so the synchronous check sees an unclaimed child and proceeds.
+        ChildReaper.reap(pid: pid, unless: observation)
+
+        try await waitUntilZombie(pid)
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(isUnreapedZombie(pid),
+                "the queued handler runs before the hop, so the reap must stand down")
+
         _ = await reapOffPool(pid)
     }
 }

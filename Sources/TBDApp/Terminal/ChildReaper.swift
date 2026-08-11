@@ -11,22 +11,19 @@ private let reaperLogger = Logger(subsystem: "com.tbd.app", category: "childReap
 /// `LocalProcessDelegate.processTerminated` callback; `wasObserved` gates the
 /// teardown reap, both on the main queue and again on the reaper thread.
 ///
-/// Serialization note, stated precisely because the two call sites differ.
-/// The *writer* side is the same for both: `LocalProcess.init` defaults its
+/// Serialization note. The *writer* side: `LocalProcess.init` defaults its
 /// `dispatchQueue` to `DispatchQueue.main`, neither TBD call site passes one,
 /// and the `DispatchSourceProcess` is created with `queue: dispatchQueue`, so
 /// the monitor handler and the delegate callback that calls `record()` run on
-/// the main queue. The *reader* side is where the guarantee weakens:
-/// `TerminalPanelRepresentable.Coordinator.cleanup()` is `@MainActor`, so the
-/// compiler enforces it; `LocalPTYTerminalRepresentable.Coordinator.cleanup()`
-/// carries no isolation annotation, and its main-thread execution rests only
-/// on its sole caller being SwiftUI's `dismantleNSView` — a convention, not a
-/// type-system guarantee.
+/// the main queue. The *reader* side: both `cleanup()` implementations and
+/// `ChildReaper.reap` are `@MainActor`, so the compiler enforces it — this is
+/// a guarantee, not the `dismantleNSView` convention it used to rest on.
 ///
-/// So the lock is not decorative. It is real protection if that convention is
-/// ever violated (a coordinator torn down off the main thread), and it is
-/// load-bearing regardless of any of the above, because `ChildReaper.reap`
-/// re-reads this flag from its own background queue.
+/// The lock is still not decorative, on two independent grounds. It is what
+/// makes the flag safe to read from `ChildReaper`'s own background queue, which
+/// happens on every reap. And a future call site that passed an explicit
+/// `dispatchQueue:` would move the writer off main, where nothing above would
+/// protect it.
 final class ChildExitObservation: Sendable {
     private let observed = OSAllocatedUnfairLock<Bool>(initialState: false)
 
@@ -60,14 +57,32 @@ final class ChildExitObservation: Sendable {
 /// already exited is not guaranteed to deliver `NOTE_EXIT`, which is precisely
 /// the failure being fixed.
 ///
-/// **Sole-waiter invariant.** Never reap a pid that something else may also be
-/// waiting on: whoever wins frees the pid, and the OS may recycle it for
-/// another child of this process, so the loser's `waitpid` can steal an
-/// unrelated child's exit status. Two things establish it at the call sites.
-/// Each releases its `LocalProcess` inside `cleanup()`, so `deinit` runs there
-/// and cancels `childMonitor` at a known moment rather than whenever ARC gets
-/// round to it. And `ChildExitObservation` covers the case where the monitor
-/// had *already* fired, since that path has reaped the child itself.
+/// **Sole-waiter discipline — what is guaranteed, and what is not.** Never
+/// commit a `waitpid` for a pid another waiter may also claim: whoever wins
+/// frees the pid, the OS may recycle it for a newly forked child, and the loser
+/// can then steal that unrelated child's exit status. Three things narrow that
+/// to a residual, and the residual is real.
+///
+/// - Each call site releases its `LocalProcess` inside `cleanup()`, so `deinit`
+///   cancels `childMonitor` at a known moment rather than whenever ARC gets
+///   round to it. No exit handler is scheduled after that.
+/// - `reap` hops once through the main queue before committing. Cancelling a
+///   dispatch source does **not** retroactively un-enqueue a handler invocation
+///   that is already queued, so a child exiting concurrently with teardown can
+///   leave one behind — the case this hop exists for. That handler and this hop
+///   are both main-queue blocks and the main queue is FIFO, so a handler
+///   enqueued before the hop runs first. It records its claim synchronously
+///   (SwiftTerm does its own `waitpid`, then calls the delegate, all inside that
+///   one block), so the re-check after the hop sees the claim and skips.
+/// - `ChildExitObservation` is what carries that claim to the re-checks.
+///
+/// The residual, stated rather than glossed: this rests on libdispatch not
+/// invoking a cancelled source's handler for an event that was pending but not
+/// yet enqueued when `cancel()` ran, and the public contract promises nothing
+/// either way. Were that to happen, both waiters would commit; the loser gets
+/// `ECHILD`, which is harmless *unless* the pid had already been recycled into
+/// a new child of this process inside that window. So this is a narrow race
+/// made narrower, not an impossibility — do not restate it as an absolute.
 ///
 /// **Known limitation, deliberately not handled here:** a child that ignores
 /// `SIGHUP` (and `SIGTERM`, on the path that sends one) never exits, so its
@@ -93,15 +108,29 @@ enum ChildReaper {
 
     /// Reap `pid` in the background unless `observation` says SwiftTerm's own
     /// monitor already did. Fire-and-forget; returns immediately.
+    ///
+    /// `@MainActor` because the ordering argument above depends on it: the hop
+    /// below only orders us behind an already-enqueued exit handler if it is
+    /// enqueued from the main queue too. Both `cleanup()` implementations are
+    /// main-isolated, so this costs no call site anything and makes the
+    /// precondition compiler-enforced rather than assumed.
+    @MainActor
     static func reap(pid: pid_t, unless observation: ChildExitObservation) {
+        // Cheap early-out, and the only check a control-mode panel (pid 0)
+        // ever reaches — it keeps teardown from enqueuing a pointless block.
         guard shouldReap(pid: pid, alreadyObserved: observation.wasObserved) else { return }
-        queue.async {
-            // Re-checked here, not just at the call site: an unbounded amount
-            // of time can pass between that decision and this block running,
-            // and reaping a pid the monitor has since claimed is exactly the
-            // pid-reuse hazard the sole-waiter invariant exists to prevent.
+        DispatchQueue.main.async {
+            // The load-bearing check. A child that exited concurrently with
+            // teardown may have left an exit handler queued ahead of this
+            // block; by now it has run and recorded its claim, and cancelling
+            // the source did not un-enqueue it.
             guard shouldReap(pid: pid, alreadyObserved: observation.wasObserved) else { return }
-            reapBlocking(pid: pid)
+            queue.async {
+                // Belt and braces: an unbounded amount of time can pass before
+                // this block runs, and the check costs one lock acquisition.
+                guard shouldReap(pid: pid, alreadyObserved: observation.wasObserved) else { return }
+                reapBlocking(pid: pid)
+            }
         }
     }
 

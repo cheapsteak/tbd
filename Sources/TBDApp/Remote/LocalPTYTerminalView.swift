@@ -89,11 +89,10 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
         /// Recorded when `LocalProcess`'s own exit monitor fires — by then it
         /// has already called `waitpid`, so `cleanup()` must NOT reap this pid
         /// (it is free, and could have been recycled for another child of this
-        /// process). Both sides run on the main queue in practice, but unlike
-        /// the panel coordinator's `@MainActor cleanup()` that rests on
-        /// `dismantleNSView` convention rather than on isolation — see
-        /// `ChildExitObservation`, which spells out the difference and why the
-        /// flag is lock-guarded regardless.
+        /// process). Both sides are main-isolated — the callback by
+        /// `LocalProcess`'s default `dispatchQueue`, `cleanup()` by its
+        /// `@MainActor` below — so see `ChildExitObservation` for why the flag
+        /// is lock-guarded regardless.
         private let childExitObservation = ChildExitObservation()
 
         @MainActor
@@ -124,6 +123,11 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
             }
         }
 
+        /// `@MainActor` like the panel coordinator's sibling: SwiftUI already
+        /// calls `dismantleNSView` on the main thread, and annotating it turns
+        /// that convention into a compiler-enforced guarantee. `ChildReaper`'s
+        /// ordering fix depends on this teardown running on the main queue.
+        @MainActor
         func cleanup() {
             // Idempotent: a second call must not re-run the teardown (it would
             // reap a pid whose `LocalProcess` this method already released).
