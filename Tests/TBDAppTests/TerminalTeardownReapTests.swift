@@ -138,6 +138,16 @@ struct TerminalTeardownReapTests {
         #expect(reaped)
     }
 
+    /// Drops the coordinator's reference to a probe child's `LocalProcess`
+    /// (whose deinit cancels its exit monitor, making us the sole waiter), then
+    /// kills and reaps it. Probe children outlive their test by design, so
+    /// every test that starts one must call this.
+    private func disposeProbe(pid: pid_t, release: () -> Void) {
+        release()
+        kill(pid, SIGKILL)
+        ChildReaper.reapBlocking(pid: pid)
+    }
+
     /// The remote path *does* end its child — `cleanup()` calls
     /// `LocalProcess.terminate()`, which sends SIGTERM — so a long-lived child
     /// is production-faithful here. `terminate()` cancels the exit monitor
@@ -161,5 +171,94 @@ struct TerminalTeardownReapTests {
 
         reaped = await waitForChildToVanish(pid)
         #expect(reaped)
+    }
+
+    // MARK: - cleanup() is one-shot
+    //
+    // The `guard !isTornDown` / `guard !tornDown` guards make `cleanup()`
+    // idempotent. **What these tests can and cannot pin, stated plainly:** with
+    // the current code a second call is *already* harmless without the guard —
+    // the first call nils `localProcess`, so the pid capture yields 0 and
+    // `shouldReap` rejects it, and every other branch of `cleanup()` is a nil
+    // no-op. A test that merely called `cleanup()` twice would therefore stay
+    // green with the guard deleted, i.e. pin nothing at all.
+    //
+    // So these drive the guard's actual semantics — "once torn down, this
+    // coordinator does no further teardown work" — by handing it fresh state
+    // and requiring the second call to leave that state completely alone.
+    // Production never re-assigns a coordinator after dismantle; the fresh
+    // `LocalProcess` is a probe for the guard, not an endorsement of reuse.
+    // Deleting either guard reds these: the second `cleanup()` releases the
+    // probe, and on the remote path SIGTERMs its child as well.
+
+    @Test("a second TerminalPanelView cleanup() tears nothing down")
+    func panelCleanupIsOneShot() async throws {
+        let coordinator = TerminalPanelRepresentable.Coordinator()
+        let firstPid = startChild(delegate: coordinator, lifetime: "0.4") {
+            coordinator.localProcess = $0
+        }
+        try #require(firstPid > 0, "forkpty must have produced a child pid")
+
+        var firstReaped = false
+        defer {
+            if !firstReaped {
+                kill(firstPid, SIGKILL)
+                ChildReaper.reapBlocking(pid: firstPid)
+            }
+        }
+
+        coordinator.cleanup()
+        firstReaped = await waitForChildToVanish(firstPid)
+        try #require(firstReaped, "the first teardown must reap its child")
+
+        let probePid = startChild(delegate: coordinator, lifetime: "120") {
+            coordinator.localProcess = $0
+        }
+        try #require(probePid > 0, "forkpty must have produced a probe pid")
+        defer { disposeProbe(pid: probePid) { coordinator.localProcess = nil } }
+
+        coordinator.cleanup()
+
+        #expect(coordinator.localProcess != nil,
+                "a second cleanup() must not release state it never set up")
+        #expect(processExists(probePid),
+                "a second cleanup() must not reap or signal anything")
+    }
+
+    @Test("a second LocalPTYTerminalRepresentable cleanup() tears nothing down")
+    func localPTYCleanupIsOneShot() async throws {
+        let coordinator = LocalPTYTerminalRepresentable.Coordinator()
+        let firstPid = startChild(delegate: coordinator, lifetime: "120") {
+            coordinator.localProcess = $0
+        }
+        try #require(firstPid > 0, "forkpty must have produced a child pid")
+
+        var firstReaped = false
+        defer {
+            if !firstReaped {
+                kill(firstPid, SIGKILL)
+                ChildReaper.reapBlocking(pid: firstPid)
+            }
+        }
+
+        coordinator.cleanup()
+        firstReaped = await waitForChildToVanish(firstPid)
+        try #require(firstReaped, "the first teardown must kill and reap its child")
+
+        let probePid = startChild(delegate: coordinator, lifetime: "120") {
+            coordinator.localProcess = $0
+        }
+        try #require(probePid > 0, "forkpty must have produced a probe pid")
+        defer { disposeProbe(pid: probePid) { coordinator.localProcess = nil } }
+
+        coordinator.cleanup()
+
+        // Sharper here than on the panel path: without the guard this second
+        // call reaches `localProcess?.terminate()`, so the probe would be
+        // SIGTERMed as well as released.
+        #expect(coordinator.localProcess != nil,
+                "a second cleanup() must not release state it never set up")
+        #expect(processExists(probePid),
+                "a second cleanup() must not terminate a process it never started")
     }
 }

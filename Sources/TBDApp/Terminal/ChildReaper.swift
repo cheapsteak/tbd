@@ -11,14 +11,22 @@ private let reaperLogger = Logger(subsystem: "com.tbd.app", category: "childReap
 /// `LocalProcessDelegate.processTerminated` callback; `wasObserved` gates the
 /// teardown reap, both on the main queue and again on the reaper thread.
 ///
-/// Serialization note: with the pinned SwiftTerm revision this flag is only
-/// ever touched from the main queue. `LocalProcess.init` defaults its
+/// Serialization note, stated precisely because the two call sites differ.
+/// The *writer* side is the same for both: `LocalProcess.init` defaults its
 /// `dispatchQueue` to `DispatchQueue.main`, neither TBD call site passes one,
-/// and the `DispatchSourceProcess` is created with `queue: dispatchQueue` — so
-/// the monitor handler, the delegate callback and `@MainActor cleanup()` are
-/// all serialized on main. The lock is kept anyway as cheap defence: a future
-/// call site that passes an explicit `dispatchQueue:` would move the delegate
-/// callback off main, and the reaper thread reads this flag regardless.
+/// and the `DispatchSourceProcess` is created with `queue: dispatchQueue`, so
+/// the monitor handler and the delegate callback that calls `record()` run on
+/// the main queue. The *reader* side is where the guarantee weakens:
+/// `TerminalPanelRepresentable.Coordinator.cleanup()` is `@MainActor`, so the
+/// compiler enforces it; `LocalPTYTerminalRepresentable.Coordinator.cleanup()`
+/// carries no isolation annotation, and its main-thread execution rests only
+/// on its sole caller being SwiftUI's `dismantleNSView` — a convention, not a
+/// type-system guarantee.
+///
+/// So the lock is not decorative. It is real protection if that convention is
+/// ever violated (a coordinator torn down off the main thread), and it is
+/// load-bearing regardless of any of the above, because `ChildReaper.reap`
+/// re-reads this flag from its own background queue.
 final class ChildExitObservation: Sendable {
     private let observed = OSAllocatedUnfairLock<Bool>(initialState: false)
 
