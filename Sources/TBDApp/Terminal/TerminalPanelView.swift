@@ -446,6 +446,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         }
 
         @MainActor
+        func controlModeViewerDidStart() {
+            appState?.terminalViewerDidStart(terminalID: panelID)
+        }
+
+        @MainActor
         func worktreeIDForDiagnostics() -> UUID? {
             appState?.terminals.values
                 .lazy
@@ -897,6 +902,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // clear can't drop it (M3 review fix).
                 appState.controlModePaneAttached(
                     worktreeID: worktreeID, paneID: paneID, generation: generation)
+                controlModeViewerDidStart()
             } catch {
                 logger.warning("""
                     control-mode attach failed for pane \(paneID, privacy: .public); \

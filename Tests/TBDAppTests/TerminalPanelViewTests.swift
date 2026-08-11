@@ -70,6 +70,23 @@ struct TerminalPanelViewTests {
             .claimed(automaticAttempt: 1))
     }
 
+    @MainActor
+    @Test("control-mode live attachment resets the automatic recovery budget")
+    func controlModeAttachmentResetsRecoveryBudget() {
+        let state = AppState()
+        let terminalID = UUID()
+        _ = state.claimAutomaticTerminalRecreation(terminalID: terminalID)
+        state.finishTerminalRecreation(terminalID: terminalID)
+
+        let coordinator = TerminalPanelRepresentable.Coordinator()
+        coordinator.appState = state
+        coordinator.panelID = terminalID
+        coordinator.controlModeViewerDidStart()
+
+        #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
+            .claimed(automaticAttempt: 1))
+    }
+
     @Test("budget exhaustion renders stable recovery guidance")
     func budgetExhaustionRendersStableGuidance() {
         #expect(TerminalPanelRepresentable.Coordinator.recoveryMessage(for: .budgetExhausted) ==
