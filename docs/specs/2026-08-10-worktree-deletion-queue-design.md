@@ -244,20 +244,34 @@ CLAUDE.md requires large or risky new behavior to ship behind a default-off
 flag, and this qualifies on two counts: it replaces a load-bearing path and it
 deletes state from a background sweep.
 
-It ships without a new flag by maintainer decision. The reasoning: the bug is
-actively destroying disk and worsening under its own effects, and a default-off
-flag would leave the buggy path as the shipping default until graduation. The
-behavior runs under the existing `gcEnabled` master switch, which already
-defaults to true and already governs every other GC deletion, so the escape
-hatch exists and is one toggle.
+It ships without a new flag by maintainer decision, and the two halves are
+mitigated differently — the toggle covers one of them, not both.
 
-Two properties limit the risk. Reclamation touches only directories that pass
-the provenance gate, and the enqueue step trades a partial unlink for a rename:
-where an interrupted `git worktree remove` left a tree half-deleted in its pool
-slot, an interrupted archive now leaves it whole inside `.deleting/`. That is a
-crash-recovery property, not a window in which a user could change their mind —
-every call path drains immediately after enqueuing, and a holding period is
-rejected below.
+**The sweep-side additions are gated.** Draining queued entries, reclaiming
+interrupted archives, and pruning stale registrations all run inside
+`OrphanGC.sweep`, under the existing `gcEnabled` master switch. That switch
+already defaults to true and already governs every other GC deletion, so the
+escape hatch for the autonomous, state-deleting half is one toggle, and both
+branches are tested.
+
+**The archive-path replacement is ungated**, and there is no honest way to
+describe it otherwise: `completeArchiveWorktree` enqueues and drains on every
+`worktree.archive`, `repo.remove` cascade, and auto-archive on merge, with no
+`gcEnabled` check. `gcEnabled` mitigates nothing there. What justifies leaving
+it ungated is that the code it replaces was equally ungated: the deletion step
+of archiving has never been behind a flag, and the change swaps one
+unconditional deletion mechanism for another on the same path. A flag would not
+have added a safety margin that previously existed; it would have made the
+buggy path the shipping default until graduation, while the bug is actively
+destroying disk and worsening under its own effects.
+
+Two properties limit the risk that remains. Reclamation touches only
+directories that pass the provenance gate, and the enqueue step trades a
+partial unlink for a rename: where an interrupted `git worktree remove` left a
+tree half-deleted in its pool slot, an interrupted archive now leaves it whole
+inside `.deleting/`. That is a crash-recovery property, not a window in which a
+user could change their mind — every call path drains immediately after
+enqueuing, and a holding period is rejected below.
 
 ## Testing
 
