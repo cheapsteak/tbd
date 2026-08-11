@@ -17,9 +17,12 @@
 #      the hook.
 name: Verify review hook (throwaway)
 
+# `workflow_dispatch`, not `push`: claude-code-action@v1 rejects a push event
+# outright ("Unsupported event type: push") before any review logic runs, so a
+# push-triggered harness cannot exercise the session at all. Dispatch against
+# this branch instead — the workflow and the hook both come from the ref.
 on:
-  push:
-    branches: ["tbd/review-orchestrator-stall"]
+  workflow_dispatch:
 
 jobs:
   verify-hook:
