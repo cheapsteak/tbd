@@ -386,7 +386,7 @@ def main() -> int:
             if name is not None:
                 rejected_specialists.append(name)
             continue
-        # A specialist's own fail-closed channel, schema-blessed so the signal
+        # A specialist's own fail-closed channel, schema-declared so the signal
         # is machine-read rather than prose in a subagent summary the
         # orchestrator may not relay. Without it, a specialist whose pinned
         # diff errored has only an empty findings array to offer — which

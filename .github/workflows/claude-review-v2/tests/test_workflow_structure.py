@@ -247,10 +247,10 @@ def test_a_failed_pinned_diff_has_a_verdict_visible_channel() -> None:
     environment, _, fanout = prompt.partition("STEP 1 — FAN OUT")
     assert '{"infrastructure_failure":' in environment
     assert "empty findings array computes as APPROVE" in environment
-    # The specialists' copy of the channel is a schema-blessed FIELD, not prose
+    # The specialists' copy of the channel is a schema-declared FIELD, not prose
     # in a returned summary the orchestrator may not relay.
     assert '"infrastructure_failure": "<one line: what failed>"' in fanout
-    # And the one blessed fallback is named as such — gh pr diff computes the
+    # And the one sanctioned fallback is named as such — gh pr diff computes the
     # same merge-base diff server-side; origin/<base> stays forbidden.
     assert "the ONLY acceptable fallback is `gh pr diff`" in environment
 
@@ -721,3 +721,131 @@ def test_the_compose_step_refuses_an_empty_substitution_value(
     proc = _run_compose_step(tmp_path, {"MERGE_BASE": ""})
     assert proc.returncode != 0
     assert not (tmp_path / "github-output.txt").read_text(encoding="utf-8").strip()
+
+
+# --- the ensure step, executed for real --------------------------------------
+#
+# The merge-base repair/fail-closed shell is the gate's most safety-critical
+# new logic (two fetch strategies, captured stderr, reused variables under
+# `set -uo pipefail`), so like the compose step it is executed, not just
+# substring-matched. The fixtures are real git repos: the properties under test
+# — what unshallow repairs, what a severed ref does to merge-base — are
+# properties of git.
+
+_ENSURE_GIT_ENV = {
+    **os.environ,
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_AUTHOR_NAME": "acme-dev",
+    "GIT_AUTHOR_EMAIL": "dev@acme.invalid",
+    "GIT_COMMITTER_NAME": "acme-dev",
+    "GIT_COMMITTER_EMAIL": "dev@acme.invalid",
+}
+
+
+def _ensure_git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo, check=True, capture_output=True, text=True, env=_ENSURE_GIT_ENV,
+    ).stdout.strip()
+
+
+def _remote_with_pr(tmp_path: Path) -> Path:
+    """A file:// 'remote' whose main has advanced past the pr branch point."""
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    _ensure_git(remote, "init", "-q", "-b", "main")
+    for name in ("a", "b"):
+        (remote / f"{name}.txt").write_text(f"{name}\n", encoding="utf-8")
+        _ensure_git(remote, "add", "-A")
+        _ensure_git(remote, "commit", "-q", "-m", f"commit {name}")
+    _ensure_git(remote, "branch", "pr", "HEAD~1")
+    _ensure_git(remote, "checkout", "-q", "pr")
+    (remote / "pr.txt").write_text("pr\n", encoding="utf-8")
+    _ensure_git(remote, "add", "-A")
+    _ensure_git(remote, "commit", "-q", "-m", "pr commit")
+    _ensure_git(remote, "checkout", "-q", "main")
+    return remote
+
+
+def _run_ensure_step(repo: Path) -> subprocess.CompletedProcess[str]:
+    script = repo.parent / "ensure-step.sh"
+    script.write_text(
+        run_block(read_workflow(), ENSURE_MERGE_BASE_STEP), encoding="utf-8"
+    )
+    return subprocess.run(
+        ["bash", "-e", str(script)],
+        cwd=repo,
+        env={**_ENSURE_GIT_ENV, "BASE_REF": "main"},
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_the_ensure_step_repairs_a_shallow_clone(tmp_path: Path) -> None:
+    remote = _remote_with_pr(tmp_path)
+    clone = tmp_path / "clone"
+    subprocess.run(
+        ["git", "clone", "-q", "--depth=1", f"file://{remote}", str(clone)],
+        check=True, capture_output=True, env=_ENSURE_GIT_ENV,
+    )
+    _ensure_git(clone, "fetch", "-q", "--depth=1", "origin", "pr")
+    _ensure_git(clone, "checkout", "-q", "FETCH_HEAD")
+    assert _ensure_git(clone, "rev-parse", "--is-shallow-repository") == "true"
+
+    proc = _run_ensure_step(clone)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "Merge base with origin/main:" in proc.stdout
+    assert "::error::" not in proc.stdout
+
+
+def test_the_ensure_step_fails_closed_on_unrepairable_history(
+    tmp_path: Path,
+) -> None:
+    remote = _remote_with_pr(tmp_path)
+    clone = tmp_path / "clone"
+    subprocess.run(
+        ["git", "clone", "-q", f"file://{remote}", str(clone)],
+        check=True, capture_output=True, env=_ENSURE_GIT_ENV,
+    )
+    _ensure_git(clone, "fetch", "-q", "origin", "pr")
+    _ensure_git(clone, "checkout", "-q", "FETCH_HEAD")
+    # Sever origin/main to an orphan root, and point origin at an empty remote
+    # so the repair fetch cannot restore it — the state a depth-limited
+    # re-fetch of a moved ref leaves behind, with no way back.
+    empty_tree = _ensure_git(clone, "hash-object", "-w", "-t", "tree", os.devnull)
+    orphan = _ensure_git(clone, "commit-tree", empty_tree, "-m", "unrelated root")
+    _ensure_git(clone, "update-ref", "refs/remotes/origin/main", orphan)
+    dead_remote = tmp_path / "dead-remote"
+    subprocess.run(
+        ["git", "init", "-q", "--bare", str(dead_remote)],
+        check=True, capture_output=True, env=_ENSURE_GIT_ENV,
+    )
+    _ensure_git(clone, "remote", "set-url", "origin", f"file://{dead_remote}")
+
+    proc = _run_ensure_step(clone)
+    assert proc.returncode != 0
+    error_lines = [
+        line for line in proc.stdout.splitlines() if line.startswith("::error::")
+    ]
+    assert len(error_lines) == 1
+    assert "infrastructure error" in error_lines[0]
+    assert "NOT a verdict" in error_lines[0]
+    # The repair fetch's own failure is named, not blamed on history corruption.
+    assert "The repair fetch itself FAILED" in error_lines[0]
+
+
+def test_the_ensure_step_passes_a_healthy_complete_clone(tmp_path: Path) -> None:
+    remote = _remote_with_pr(tmp_path)
+    clone = tmp_path / "clone"
+    subprocess.run(
+        ["git", "clone", "-q", f"file://{remote}", str(clone)],
+        check=True, capture_output=True, env=_ENSURE_GIT_ENV,
+    )
+    _ensure_git(clone, "fetch", "-q", "origin", "pr")
+    _ensure_git(clone, "checkout", "-q", "FETCH_HEAD")
+
+    proc = _run_ensure_step(clone)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "Clone already complete — nothing to unshallow." in proc.stdout
+    assert "Merge base with origin/main:" in proc.stdout

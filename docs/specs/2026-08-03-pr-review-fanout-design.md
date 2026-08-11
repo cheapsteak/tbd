@@ -169,7 +169,7 @@ validate script checks only its *presence* (an ID-coverage count), not its judgm
   marker is recorded. That last part is the point — a run that cannot see the true
   diff must not cache a verdict about it, so the next run reviews fresh.
 - **The session's own fail-closed channel**: if the pinned diff errors *inside* the
-  session, the orchestrator's one blessed fallback is `gh pr diff` (the same
+  session, the orchestrator's one sanctioned fallback is `gh pr diff` (the same
   merge-base diff, computed server-side); failing that too, the prompt directs it to
   write `review-result.json` as `{"infrastructure_failure": "<why>"}` and stop. The
   validate script checks that key before any schema validation and exits non-zero
@@ -178,7 +178,7 @@ validate script checks only its *presence* (an ID-coverage count), not its judgm
   computes as a REJECT the patch-id skip then re-asserts on every re-run. The Stop
   hook is satisfied by the file existing and parsing, so the session ends promptly
   rather than being held. Specialists — who run no `gh` and have no fallback — carry
-  the same channel as a schema-blessed `infrastructure_failure` field in their
+  the same channel as a schema-declared `infrastructure_failure` field in their
   findings file, which the validate script likewise fails closed on: the signal is
   machine-read, never dependent on the orchestrator relaying subagent prose.
 - **Verdict**: the validate script computes `APPROVE`/`REJECT` from

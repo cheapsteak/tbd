@@ -150,7 +150,7 @@ distinguishing error line in the job log is what an operator reads:
   cache then re-asserts against the diff's patch-id. `validate.py` checks the
   key before any schema validation and fails closed with no verdict, so nothing
   is posted and nothing is cached; re-running the check reviews fresh. The
-  specialists carry the same channel one level down, as a schema-blessed
+  specialists carry the same channel one level down, as a schema-declared
   `infrastructure_failure` field in their findings file — machine-read by
   `validate.py`, so the signal does not depend on the orchestrator relaying
   prose from a subagent summary. (The orchestrator may first fall back to

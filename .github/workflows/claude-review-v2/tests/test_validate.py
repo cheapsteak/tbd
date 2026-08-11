@@ -1205,7 +1205,7 @@ def test_specialist_infra_failure_fails_closed_despite_valid_everything(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     # A specialist whose pinned diff errored writes empty findings PLUS the
-    # schema-blessed infrastructure_failure field. Everything else about the
+    # schema-declared infrastructure_failure field. Everything else about the
     # run is green — both lenses present, result file valid — and the run must
     # still fail with no verdict: two empty findings files otherwise compute
     # as APPROVE on a PR nobody reviewed, and the alternative signal (prose in
@@ -1303,3 +1303,23 @@ def test_specialist_infra_failure_is_the_decisive_last_error_line(
     assert error_lines
     assert "review-infrastructure failure" in error_lines[-1]
     assert "disposition" not in error_lines[-1]
+
+
+def test_the_schema_accepts_a_null_infra_field_with_findings(
+    tmp_path: Path,
+) -> None:
+    # Null is a model's natural spelling of absence (matching every optional
+    # sibling: file, line, body, confidence). It must read as "no infra
+    # report" — findings allowed, if/then not triggered — never as a
+    # self-contradiction.
+    path = _write(
+        tmp_path / "findings-correctness.json",
+        {
+            "specialist": "correctness",
+            "findings": [_finding()],
+            "infrastructure_failure": None,
+        },
+    )
+    data = validate_findings_file(path)
+    assert data["infrastructure_failure"] is None
+    assert len(data["findings"]) == 1
