@@ -13,9 +13,9 @@ import Foundation
         let local = try await db.worktrees.create(
             repoID: repo.id, name: "local", branch: "b1",
             path: "/tmp/r/local-\(UUID().uuidString)", tmuxServer: "srv")
-        let remote = try await db.worktrees.create(
-            repoID: repo.id, name: "remote", branch: "b2", path: "", tmuxServer: "",
-            location: .remote(provider: "agentbox", sessionID: "s-1"))
+        let remote = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "remote", branch: "b2",
+            provider: "agentbox", sessionID: "s-1")
         return (repo, local, remote)
     }
 

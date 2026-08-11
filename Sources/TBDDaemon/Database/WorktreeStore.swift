@@ -203,6 +203,14 @@ public struct WorktreeStore: Sendable {
     /// new worktree's sibling group (same parentWorktreeID), so nested
     /// children get their own contiguous ordering separate from top-level
     /// worktrees in the same repo.
+    ///
+    /// `path` is used verbatim for a local worktree and **ignored** for a
+    /// remote one, whose path is derived from `location` — see
+    /// `WorktreeLocation.storagePath` for why a remote row cannot store the
+    /// caller's value (or an empty placeholder). Deriving here rather than at
+    /// the call site means no future caller can forget and collide with an
+    /// existing remote row on the column's UNIQUE constraint. Prefer
+    /// `createRemote` for remote rows, which does not ask for a path at all.
     public func create(
         repoID: UUID,
         name: String,
@@ -235,7 +243,7 @@ public struct WorktreeStore: Sendable {
                 name: name,
                 displayName: displayName ?? name,
                 branch: branch,
-                path: path,
+                path: location.storagePath ?? path,
                 status: status,
                 tmuxServer: tmuxServer,
                 sortOrder: maxOrder + 1,
@@ -247,6 +255,36 @@ public struct WorktreeStore: Sendable {
             try record.insert(db)
             return wt
         }
+    }
+
+    /// Create a row for an agent session on a machine TBD does not manage.
+    ///
+    /// There is no path and no tmux server to pass: the path is derived from
+    /// the provider binding (`WorktreeLocation.storagePath`) and `tmuxServer`
+    /// is empty, since a remote lane has no tmux server of its own. Both facts
+    /// live here rather than at every call site so that "what does a remote
+    /// row store in the local-only columns" has exactly one answer.
+    public func createRemote(
+        repoID: UUID,
+        name: String,
+        displayName: String? = nil,
+        branch: String,
+        provider: String,
+        sessionID: String,
+        status: WorktreeStatus = .active,
+        parentWorktreeID: UUID? = nil
+    ) async throws -> Worktree {
+        try await create(
+            repoID: repoID,
+            name: name,
+            displayName: displayName,
+            branch: branch,
+            path: "",
+            tmuxServer: "",
+            status: status,
+            parentWorktreeID: parentWorktreeID,
+            location: .remote(provider: provider, sessionID: sessionID)
+        )
     }
 
     /// Create a repo-less "scratch" worktree row (repoID == nil). branch is "".

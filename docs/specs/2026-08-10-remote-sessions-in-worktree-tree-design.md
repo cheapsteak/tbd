@@ -108,8 +108,25 @@ case: it archives every DB row whose `path` is absent from git's worktree list,
 capturing scrollback and killing tmux windows on the way. A remote row's path is
 never in that list, so an unguarded reconcile tears down every remote lane on
 every sweep. A second loop in the same function rewrites the `tmuxServer` of any
-row whose value differs from the repo's canonical name, which an empty string
-always does.
+row whose value differs from the repo's canonical name, which a remote row's
+empty string always does.
+
+#### What a remote row stores in the local-only columns
+
+`worktree.path` is `NOT NULL UNIQUE`, so a remote row cannot leave it empty:
+the empty string admits exactly one remote row per install, and the second lane
+of a fan-out aborts on the constraint. A remote row therefore stores a
+synthetic `remote://<provider>/<sessionID>` URI, with each component
+percent-encoded so the mapping stays injective whatever delimiters a provider
+puts in its identifiers. The value is derived inside `WorktreeStore.create`
+from the row's `location`, not passed by callers, so it cannot be forgotten at
+a new call site. It is visibly not a filesystem path, which means a remote row
+that ever reaches path-consuming code fails loudly instead of quietly operating
+on the current directory.
+
+`tmuxServer` stays empty on a remote row: there is no tmux server, the column
+is not unique, and reconcile's canonicalization loop is fenced from remote rows
+anyway.
 
 No one would think to hand-write a guard in reconcile. The boundary therefore
 has to be one the compiler enforces.
@@ -118,13 +135,15 @@ has to be one the compiler enforces.
 
 `Worktree` keeps storing a non-optional path, renamed behind the existing
 `path:` argument label and `CodingKeys` mapping. All 158 construction sites and
-the wire format stay untouched. `Worktree` exposes only:
+the wire format stay untouched. The stored property becomes:
 
 ```swift
-public var localPath: String? { ... }   // nil when remote
+public var localPath: String     // stays non-optional; wire key and column stay `path`
 ```
 
-Every current reader of `worktree.path` becomes a compile error. That is the
+Non-optional, because making it optional was rejected below on what the
+enumeration would produce. The rename alone does the work: every current reader
+of `worktree.path` becomes a compile error. That is the
 audit: the change enumerates the code that assumes a local checkout without
 churning the code that merely builds a row.
 
@@ -412,6 +431,8 @@ Boundary, the tests that would have caught the hazard:
   `tmuxServer` rewrite.
 - `getLocal`/`listLocal` exclude remote rows; the 11 neutral fetches still
   return them.
+- Two remote rows for the same repo both persist — the synthetic path keeps
+  `worktree.path`'s UNIQUE constraint from admitting only one remote lane.
 - An orphan-GC sweep leaves a remote row intact.
 
 Behavior:

@@ -26,6 +26,11 @@ public struct LocalWorktree: Equatable, Sendable {
 
     /// Fails when the worktree is remote, or when it is local but has no
     /// directory yet (the `.creating` placeholder writes `path: ""`).
+    ///
+    /// Locality is checked FIRST and is the only thing that rejects a remote
+    /// row. A remote row's stored path is the synthetic `remote://` URI from
+    /// `WorktreeLocation.storagePath`, not an empty string, so the empty-path
+    /// arm would not catch it; that arm exists for the local placeholder alone.
     public init?(_ worktree: Worktree) {
         guard worktree.location.isLocal, !worktree.localPath.isEmpty else { return nil }
         self.worktree = worktree

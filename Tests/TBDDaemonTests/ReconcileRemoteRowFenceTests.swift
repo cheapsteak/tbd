@@ -23,16 +23,16 @@ import Foundation
 
     /// A real git repo with no extra worktrees, plus one remote row. `git
     /// worktree list` reports only the repo's own checkout, so the remote
-    /// row's (empty) path is absent from it — the exact state that made an
-    /// unfenced reconcile archive it.
+    /// row's synthetic `remote://` path is absent from it — the exact state
+    /// that made an unfenced reconcile archive it.
     private func seedRemoteRow(
         db: TBDDatabase, repoPath: String
     ) async throws -> (repo: Repo, remote: Worktree) {
         let repo = try await db.repos.create(
             path: repoPath, displayName: "acme", defaultBranch: "main")
-        let remote = try await db.worktrees.create(
-            repoID: repo.id, name: "remote", branch: "b", path: "", tmuxServer: "",
-            location: .remote(provider: "agentbox", sessionID: "s-1"))
+        let remote = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "remote", branch: "b",
+            provider: "agentbox", sessionID: "s-1")
         return (repo, remote)
     }
 

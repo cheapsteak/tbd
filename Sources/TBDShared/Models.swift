@@ -118,6 +118,42 @@ public enum WorktreeLocation: Equatable, Sendable, Hashable {
     case remote(provider: String, sessionID: String)
 
     public var isLocal: Bool { self == .local }
+
+    /// The value a row of this location stores in `worktree.path`, or nil when
+    /// the caller supplies the path itself.
+    ///
+    /// nil for `.local`: a local row's path is a real directory on this disk
+    /// and only the caller knows it.
+    ///
+    /// Non-nil for `.remote`, because `worktree.path` is `NOT NULL UNIQUE` and
+    /// a remote row has no path of its own. The empty string works for exactly
+    /// one remote row — the second lane in a fan-out aborts on the constraint.
+    /// A synthetic `remote://<provider>/<sessionID>` URI is unique per session
+    /// and visibly not a filesystem path, so a row that ever leaks into
+    /// path-consuming code fails loudly rather than silently operating on the
+    /// current directory.
+    ///
+    /// Provider names and session IDs are provider-supplied strings that may
+    /// contain `/` or other delimiters, so each component is percent-encoded
+    /// against RFC 3986's unreserved set. That encoding is injective and the
+    /// separator cannot survive it, so distinct `(provider, sessionID)` pairs
+    /// always yield distinct paths.
+    public var storagePath: String? {
+        switch self {
+        case .local:
+            return nil
+        case .remote(let provider, let sessionID):
+            return "remote://\(Self.pathEscaped(provider))/\(Self.pathEscaped(sessionID))"
+        }
+    }
+
+    /// RFC 3986's unreserved set; everything else is percent-encoded.
+    private static let unreserved = CharacterSet(
+        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+
+    private static func pathEscaped(_ component: String) -> String {
+        component.addingPercentEncoding(withAllowedCharacters: unreserved) ?? component
+    }
 }
 
 public struct Worktree: Codable, Sendable, Identifiable, Equatable {
@@ -132,6 +168,10 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     /// local-only assumption; code that must work for any worktree goes
     /// through `LocalWorktree` instead. The wire key and the DB column both
     /// stay `path`.
+    ///
+    /// On a remote row this is not a filesystem path at all but the synthetic
+    /// `remote://` URI from `WorktreeLocation.storagePath`, which exists only
+    /// to satisfy the column's `NOT NULL UNIQUE` constraint.
     public var localPath: String
     public var status: WorktreeStatus
     public var hasConflicts: Bool = false
