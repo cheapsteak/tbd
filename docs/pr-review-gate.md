@@ -149,9 +149,15 @@ distinguishing error line in the job log is what an operator reads:
   as APPROVE, and a fabricated finding would compute as a REJECT that the skip
   cache then re-asserts against the diff's patch-id. `validate.py` checks the
   key before any schema validation and fails closed with no verdict, so nothing
-  is posted and nothing is cached; re-running the check reviews fresh.
+  is posted and nothing is cached; re-running the check reviews fresh. The
+  specialists carry the same channel one level down, as a schema-blessed
+  `infrastructure_failure` field in their findings file — machine-read by
+  `validate.py`, so the signal does not depend on the orchestrator relaying
+  prose from a subagent summary. (The orchestrator may first fall back to
+  `gh pr diff`, which computes the same merge-base diff server-side; the
+  specialists run no `gh` and have no such fallback.)
 
-All four fail closed, and none of them posts a review comment: the post step runs
+All five fail closed, and none of them posts a review comment: the post step runs
 only behind a trustworthy verdict. A stall is therefore something you read in the
 run — `validate.py` writes the diagnosis to the job log — never on the PR. Whatever
 a step annotation or check summary shows alongside it is the workflow's and GitHub's

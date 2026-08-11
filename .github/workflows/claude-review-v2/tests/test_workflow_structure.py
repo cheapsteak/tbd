@@ -234,7 +234,12 @@ def test_a_failed_pinned_diff_has_a_verdict_visible_channel() -> None:
     environment, _, fanout = prompt.partition("STEP 1 — FAN OUT")
     assert '{"infrastructure_failure":' in environment
     assert "empty findings array computes as APPROVE" in environment
-    assert "state the failure prominently in your returned summary" in fanout
+    # The specialists' copy of the channel is a schema-blessed FIELD, not prose
+    # in a returned summary the orchestrator may not relay.
+    assert '"infrastructure_failure": "<one line: what failed>"' in fanout
+    # And the one blessed fallback is named as such — gh pr diff computes the
+    # same merge-base diff server-side; origin/<base> stays forbidden.
+    assert "the ONLY acceptable fallback is `gh pr diff`" in environment
 
 
 def test_the_prompt_teaches_graft_detection_for_history_checks() -> None:

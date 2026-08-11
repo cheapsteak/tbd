@@ -8,6 +8,10 @@
     "findings": {
       "type": "array",
       "items": { "$ref": "#/$defs/finding" }
+    },
+    "infrastructure_failure": {
+      "type": "string",
+      "description": "The specialist's deterministic 'I could not review' signal: set when the pinned merge-base diff itself errored, alongside an empty findings array. validate.py fails the run closed when any specialist file carries a non-empty value — an empty findings array alone would compute as APPROVE, greening a PR nobody reviewed, and escalation via prose in the specialist's returned summary depends on the orchestrator noticing it."
     }
   },
   "required": ["specialist", "findings"],

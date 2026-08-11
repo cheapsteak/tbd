@@ -409,7 +409,19 @@ def _compute_merge_base(base_ref: str) -> str:
             ["git", "merge-base", f"origin/{base_ref}", "HEAD"],
             capture_output=True, text=True, check=True,
         ).stdout
-        return out.strip()
+        sha = out.strip()
+        # Hex-or-empty is a published contract: the workflow interpolates this
+        # value into the session prompt and echoes it into $GITHUB_OUTPUT,
+        # where an embedded newline would inject extra step outputs. git
+        # prints one SHA here, so this is enforcement, not expectation.
+        if not re.fullmatch(r"[0-9a-f]{4,64}", sha):
+            print(
+                f"warning: merge-base output {sha!r} is not a SHA — treating "
+                "as no merge base",
+                file=sys.stderr,
+            )
+            return ""
+        return sha
     except Exception as exc:  # noqa: BLE001 — any failure means "no usable merge base"
         # git's own stderr names the resolvable causes (a missing ref after a
         # base-branch rename, git absent from PATH) that the exception's generic

@@ -1197,3 +1197,50 @@ def test_non_messages_do_not_trigger_the_infra_channel(
 
 def test_missing_result_file_is_not_an_infra_report(tmp_path: Path) -> None:
     assert read_infrastructure_failure(str(tmp_path / "absent.json")) is None
+
+
+def test_specialist_infra_failure_fails_closed_despite_valid_everything(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A specialist whose pinned diff errored writes empty findings PLUS the
+    # schema-blessed infrastructure_failure field. Everything else about the
+    # run is green — both lenses present, result file valid — and the run must
+    # still fail with no verdict: two empty findings files otherwise compute
+    # as APPROVE on a PR nobody reviewed, and the alternative signal (prose in
+    # the specialist's returned summary) depends on the orchestrator relaying
+    # it.
+    _write(
+        tmp_path / "findings-correctness.json",
+        {
+            "specialist": "correctness",
+            "findings": [],
+            "infrastructure_failure": "git diff <pinned> HEAD exited 128",
+        },
+    )
+    _write_specialist_file(tmp_path, "conventions")
+    _write_empty_result(tmp_path)
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
+    assert exit_code == 1
+    assert not (tmp_path / "verdict.txt").exists()
+    err = capsys.readouterr().err
+    assert "'correctness'" in err
+    assert "git diff <pinned> HEAD exited 128" in err
+    assert "NOT a verdict" in err
+    # And the lens is not misreported as having never run.
+    assert "never produced a findings file" not in err
+
+
+def test_the_schema_accepts_the_specialist_infra_field(tmp_path: Path) -> None:
+    # additionalProperties is false, so the field must be declared or the
+    # channel dies at schema validation with a misleading error.
+    path = _write(
+        tmp_path / "findings-correctness.json",
+        {
+            "specialist": "correctness",
+            "findings": [],
+            "infrastructure_failure": "diff errored",
+        },
+    )
+    assert validate_findings_file(path)["infrastructure_failure"] == "diff errored"

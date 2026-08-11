@@ -296,6 +296,17 @@ def read_infrastructure_failure(path: str) -> str | None:
         return None
     if not isinstance(data, dict):
         return None
+    return infrastructure_failure_message(data)
+
+
+def infrastructure_failure_message(data: dict) -> str | None:
+    """The dict's infrastructure_failure message, normalized, or None.
+
+    Whitespace-collapsed and capped so a runaway or multi-line string cannot
+    mangle the single-line ::error:: annotation the workflow builds from the
+    last error line. Empty and non-string values are None: they are not a
+    report, and the shapes that produce them belong to other diagnostics.
+    """
     value = data.get("infrastructure_failure")
     if not isinstance(value, str) or not value.strip():
         return None
@@ -374,9 +385,28 @@ def main() -> int:
             if name is not None:
                 rejected_specialists.append(name)
             continue
+        # A specialist's own fail-closed channel, schema-blessed so the signal
+        # is machine-read rather than prose in a subagent summary the
+        # orchestrator may not relay. Without it, a specialist whose pinned
+        # diff errored has only an empty findings array to offer — which
+        # computes as APPROVE.
+        specialist_infra = infrastructure_failure_message(data)
+        if specialist_infra is not None:
+            # Still counted as SEEN: this lens did report, and the completeness
+            # check calling it "never ran" would bury this precise error line
+            # under a misleading one.
+            print(
+                f"error: specialist {data['specialist']!r} reported a "
+                f"review-infrastructure failure and reviewed nothing: "
+                f"{specialist_infra} — this is NOT a verdict on the PR; "
+                "re-run the check",
+                file=sys.stderr,
+            )
+            failed = True
         seen_specialists.append(data["specialist"])
         specialist_ids.extend(finding["id"] for finding in data["findings"])
-        print(f"ok: {path} ({len(data['findings'])} finding(s))")
+        if specialist_infra is None:
+            print(f"ok: {path} ({len(data['findings'])} finding(s))")
 
     # PRESENCE, decided before validity: a result file that exists but fails
     # the schema is a session that reached its merge and got it wrong, not a
