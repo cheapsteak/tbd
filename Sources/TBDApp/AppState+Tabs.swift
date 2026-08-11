@@ -273,7 +273,18 @@ extension AppState {
         }
         if let storedOrder = worktreeTabOrders[worktreeID], !storedOrder.isEmpty,
            let arr = tabs[worktreeID] {
-            let storedIndex = Dictionary(uniqueKeysWithValues: storedOrder.enumerated().map { ($1, $0) })
+            var storedIndex: [UUID: Int] = [:]
+            var repairedOrder: [UUID] = []
+            repairedOrder.reserveCapacity(storedOrder.count)
+            for id in storedOrder where storedIndex[id] == nil {
+                storedIndex[id] = repairedOrder.count
+                repairedOrder.append(id)
+            }
+            if repairedOrder != storedOrder {
+                let discardedCount = storedOrder.count - repairedOrder.count
+                worktreeTabOrders[worktreeID] = repairedOrder
+                logger.warning("Repaired duplicate tab order for \(worktreeID, privacy: .public); discarded \(discardedCount, privacy: .public) entries")
+            }
             // Stable sort: known first (by stored position), unknown after (in input order).
             // Use enumerated original index as a tiebreaker so unknown tabs keep their input order.
             let withIndex = arr.enumerated().map { (origIdx: $0.offset, tab: $0.element) }

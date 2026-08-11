@@ -413,11 +413,7 @@ extension AppState {
                 // nothing to add or re-select here.
                 return
             }
-            let worktreeID = resultTerminal.worktreeID
-            terminals[worktreeID, default: []].append(resultTerminal)
-            let newTab = Tab(id: resultTerminal.id, content: .terminal(terminalID: resultTerminal.id))
-            tabs[worktreeID, default: []].append(newTab)
-            setActiveTab(worktreeID: worktreeID, tabIndex: (tabs[worktreeID]?.count ?? 1) - 1)
+            mergeCreatedTerminalAndSelect(resultTerminal)
         } catch {
             logger.error("Failed to swap profile on terminal: \(error, privacy: .public)")
             showAlert("Failed to swap profile: \(error.localizedDescription)", isError: true)
