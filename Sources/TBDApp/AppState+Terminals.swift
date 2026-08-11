@@ -4,11 +4,17 @@ import os
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "AppState+Terminals")
 
-enum TerminalRecreationClaim: Equatable {
+enum AutomaticTerminalRecreationClaim: Equatable {
     case alreadyInFlight
     case terminalUnavailable
-    case claimed(automaticAttempt: Int?)
+    case claimed(attempt: Int)
     case budgetExhausted
+}
+
+enum ManualTerminalRecreationClaim: Equatable {
+    case alreadyInFlight
+    case terminalUnavailable
+    case claimed
 }
 
 enum AutomaticTerminalRecreationOutcome: Equatable {
@@ -21,10 +27,11 @@ enum AutomaticTerminalRecreationOutcome: Equatable {
 
 extension AppState {
     /// Bounds stale-response suppression without retaining app-lifetime
-    /// terminal tombstones or scheduling a cleanup timer. DaemonClient may
-    /// wait 300 seconds for a response; the extra 30 seconds ensures any RPC
+    /// terminal tombstones or scheduling a cleanup timer. The extra 30 seconds
+    /// beyond DaemonClient's receive deadline ensures any RPC
     /// already in flight at deletion remains covered through its deadline.
-    nonisolated static let terminalDeletionTombstoneTTL: TimeInterval = 330
+    nonisolated static let terminalDeletionTombstoneTTL: TimeInterval =
+        DaemonClient.rpcRecvDeadlineSeconds + 30
 
     private func pruneRecentTerminalDeletions(date: Date) {
         recentlyDeletedTerminalIDs = recentlyDeletedTerminalIDs.filter { _, deletedAt in
@@ -260,8 +267,22 @@ extension AppState {
         mergeCreatedTerminal(terminal, date: date)
     }
 
-    /// Adopt a daemon snapshot without allowing a response that overlaps a
-    /// deletion/recreation race to resurrect that terminal locally.
+    /// Apply a recreation RPC response only to the terminal row that initiated
+    /// it. Replacement-only adoption plus the deletion guards prevent a late
+    /// response from appending or reviving an authoritatively removed terminal.
+    func adoptRecreatedTerminal(_ terminal: Terminal, date: Date = Date()) {
+        guard !terminalDeletionsAwaitingRecreationCompletion.contains(terminal.id),
+              !wasTerminalRecentlyDeleted(terminal.id, date: date),
+              let index = terminals[terminal.worktreeID]?.firstIndex(where: {
+                  $0.id == terminal.id
+              }) else { return }
+        terminals[terminal.worktreeID]?[index] = terminal
+    }
+
+    /// Adopt a daemon snapshot without allowing a response that overlaps an
+    /// authoritative deletion to resurrect that terminal locally. Snapshot
+    /// absence itself is observational only because responses may be unordered;
+    /// it must not alter deletion or recovery-budget state.
     func adoptTerminalSnapshot(
         _ snapshots: [Terminal],
         worktreeID: UUID,
@@ -273,10 +294,6 @@ extension AppState {
                 && recentlyDeletedTerminalIDs[$0.id] == nil
         }
         let existing = terminals[worktreeID] ?? []
-        let visibleIDs = Set(visible.map(\.id))
-        for removedID in existing.lazy.map(\.id) where !visibleIDs.contains(removedID) {
-            recordTerminalRemoval(terminalID: removedID, date: date)
-        }
         guard visible != existing else { return }
         terminals[worktreeID] = visible
         reconcileTabs(worktreeID: worktreeID, terminals: visible)
@@ -455,7 +472,9 @@ extension AppState {
         }
     }
 
-    func claimAutomaticTerminalRecreation(terminalID: UUID) -> TerminalRecreationClaim {
+    func claimAutomaticTerminalRecreation(
+        terminalID: UUID
+    ) -> AutomaticTerminalRecreationClaim {
         guard !recreatingTerminalIDs.contains(terminalID) else { return .alreadyInFlight }
         guard containsTerminal(terminalID) else { return .terminalUnavailable }
         guard let attempt = terminalRecoveryBudget.claimAttempt(for: terminalID) else {
@@ -464,14 +483,16 @@ extension AppState {
         }
         recreatingTerminalIDs.insert(terminalID)
         logger.info("Claimed automatic terminal recovery attempt \(attempt, privacy: .public) for \(terminalID, privacy: .public)")
-        return .claimed(automaticAttempt: attempt)
+        return .claimed(attempt: attempt)
     }
 
-    func claimManualTerminalRecreation(terminalID: UUID) -> TerminalRecreationClaim {
+    func claimManualTerminalRecreation(
+        terminalID: UUID
+    ) -> ManualTerminalRecreationClaim {
         guard !recreatingTerminalIDs.contains(terminalID) else { return .alreadyInFlight }
         guard containsTerminal(terminalID) else { return .terminalUnavailable }
         recreatingTerminalIDs.insert(terminalID)
-        return .claimed(automaticAttempt: nil)
+        return .claimed
     }
 
     func finishTerminalRecreation(terminalID: UUID) {
@@ -498,8 +519,7 @@ extension AppState {
             return .terminalUnavailable
         case .budgetExhausted:
             return .budgetExhausted
-        case .claimed(let automaticAttempt):
-            guard let attempt = automaticAttempt else { return .alreadyInFlight }
+        case .claimed(let attempt):
             defer { finishTerminalRecreation(terminalID: terminalID) }
             do {
                 try await performTerminalRecreation(terminalID: terminalID)
@@ -522,7 +542,7 @@ extension AppState {
 
     /// User-triggered recreation is independent of the automatic recovery budget.
     func recreateTerminalWindow(terminalID: UUID) async {
-        guard claimManualTerminalRecreation(terminalID: terminalID) == .claimed(automaticAttempt: nil) else {
+        guard claimManualTerminalRecreation(terminalID: terminalID) == .claimed else {
             return
         }
         defer { finishTerminalRecreation(terminalID: terminalID) }
@@ -542,9 +562,7 @@ extension AppState {
             cols: size.cols,
             rows: size.rows
         )
-        if let idx = terminals[updated.worktreeID]?.firstIndex(where: { $0.id == terminalID }) {
-            terminals[updated.worktreeID]?[idx] = updated
-        }
+        adoptRecreatedTerminal(updated)
     }
 
     /// Create a Claude terminal in a worktree and add a new tab for it.

@@ -19,7 +19,7 @@ struct TerminalRecoveryAppStateTests {
 
         state.finishTerminalRecreation(terminalID: terminalID)
         #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
-            .claimed(automaticAttempt: 1))
+            .claimed(attempt: 1))
     }
 
     @Test("automatic request preserves attempts across RPC failures")
@@ -66,7 +66,7 @@ struct TerminalRecoveryAppStateTests {
         #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) == .alreadyInFlight)
 
         state.finishTerminalRecreation(terminalID: terminalID)
-        #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) == .claimed(automaticAttempt: 1))
+        #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) == .claimed(attempt: 1))
     }
 
     @Test("automatic claims persist across reconstructed callers")
@@ -76,10 +76,10 @@ struct TerminalRecoveryAppStateTests {
         let terminalID = UUID()
         state.terminals[worktreeID] = [terminal(id: terminalID, worktreeID: worktreeID)]
 
-        #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) == .claimed(automaticAttempt: 1))
+        #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) == .claimed(attempt: 1))
         state.finishTerminalRecreation(terminalID: terminalID)
 
-        #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) == .claimed(automaticAttempt: 2))
+        #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) == .claimed(attempt: 2))
         state.finishTerminalRecreation(terminalID: terminalID)
 
         #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) == .budgetExhausted)
@@ -96,7 +96,7 @@ struct TerminalRecoveryAppStateTests {
         state.finishTerminalRecreation(terminalID: terminalID)
         state.terminalViewerDidStart(terminalID: terminalID)
 
-        #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) == .claimed(automaticAttempt: 1))
+        #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) == .claimed(attempt: 1))
     }
 
     @Test("deletion outside recovery clears automatic budget and blocks stale retry")
@@ -129,7 +129,7 @@ struct TerminalRecoveryAppStateTests {
 
         state.adoptCreatedTerminal(terminal(id: terminalID, worktreeID: worktreeID))
 
-        #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) == .claimed(automaticAttempt: 1))
+        #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) == .claimed(attempt: 1))
     }
 
     @Test("an absent snapshot merge does not reset an existing UUID budget")
@@ -156,7 +156,7 @@ struct TerminalRecoveryAppStateTests {
         state.terminals[worktreeID] = [snapshot]
 
         #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
-            .claimed(automaticAttempt: 1))
+            .claimed(attempt: 1))
 
         state.removeDeletedTerminalFromState(terminalID: terminalID, worktreeID: worktreeID)
 
@@ -186,10 +186,11 @@ struct TerminalRecoveryAppStateTests {
         let terminalID = UUID()
         let snapshot = terminal(id: terminalID, worktreeID: worktreeID)
         let deletedAt = Date(timeIntervalSince1970: 1_000)
-        #expect(AppState.terminalDeletionTombstoneTTL >= 330)
+        #expect(AppState.terminalDeletionTombstoneTTL ==
+            DaemonClient.rpcRecvDeadlineSeconds + 30)
         state.terminals[worktreeID] = [snapshot]
         #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
-            .claimed(automaticAttempt: 1))
+            .claimed(attempt: 1))
 
         state.removeDeletedTerminalFromState(
             terminalID: terminalID,
@@ -215,8 +216,8 @@ struct TerminalRecoveryAppStateTests {
         #expect(state.recentlyDeletedTerminalIDs[terminalID] == nil)
     }
 
-    @Test("snapshot disappearance clears completed budget and preserves in-flight dedup")
-    func snapshotDisappearanceCleansRecoveryStateSafely() {
+    @Test("snapshot disappearance preserves recovery budget and in-flight dedup")
+    func snapshotDisappearancePreservesRecoveryState() {
         let state = AppState()
         let worktreeID = UUID()
         let completedID = UUID()
@@ -228,19 +229,86 @@ struct TerminalRecoveryAppStateTests {
         _ = state.terminalRecoveryBudget.claimAttempt(for: completedID)
         _ = state.terminalRecoveryBudget.claimAttempt(for: completedID)
         #expect(state.claimAutomaticTerminalRecreation(terminalID: inFlightID) ==
-            .claimed(automaticAttempt: 1))
+            .claimed(attempt: 1))
 
         state.adoptTerminalSnapshot([], worktreeID: worktreeID)
 
         #expect(state.terminals[worktreeID]?.isEmpty == true)
-        #expect(state.terminalRecoveryBudget.claimAttempt(for: completedID) == 1)
+        #expect(state.terminalRecoveryBudget.claimAttempt(for: completedID) == nil)
         #expect(state.recreatingTerminalIDs.contains(inFlightID))
-        #expect(state.terminalDeletionsAwaitingRecreationCompletion.contains(inFlightID))
+        #expect(!state.terminalDeletionsAwaitingRecreationCompletion.contains(inFlightID))
+        #expect(state.recentlyDeletedTerminalIDs[completedID] == nil)
+        #expect(state.recentlyDeletedTerminalIDs[inFlightID] == nil)
         #expect(state.claimAutomaticTerminalRecreation(terminalID: inFlightID) == .alreadyInFlight)
 
         state.finishTerminalRecreation(terminalID: inFlightID)
         #expect(!state.terminalDeletionsAwaitingRecreationCompletion.contains(inFlightID))
-        #expect(state.terminalRecoveryBudget.claimAttempt(for: inFlightID) == 1)
+        #expect(state.terminalRecoveryBudget.claimAttempt(for: inFlightID) == 2)
+    }
+
+    @Test("a stale older omission cannot suppress a fresh terminal snapshot")
+    func unorderedSnapshotsDoNotTombstoneTerminalAbsence() {
+        let state = AppState()
+        let worktreeID = UUID()
+        let terminalID = UUID()
+        let snapshot = terminal(id: terminalID, worktreeID: worktreeID)
+        let olderRequestDate = Date(timeIntervalSince1970: 1_000)
+        let newerRequestDate = Date(timeIntervalSince1970: 1_001)
+        state.adoptTerminalSnapshot(
+            [snapshot],
+            worktreeID: worktreeID,
+            date: newerRequestDate
+        )
+        _ = state.terminalRecoveryBudget.claimAttempt(for: terminalID)
+        _ = state.terminalRecoveryBudget.claimAttempt(for: terminalID)
+
+        // A stale response completes after the newer response and omits the
+        // terminal; a subsequent fresh response must restore it immediately.
+        state.adoptTerminalSnapshot(
+            [],
+            worktreeID: worktreeID,
+            date: olderRequestDate
+        )
+        state.adoptTerminalSnapshot(
+            [snapshot],
+            worktreeID: worktreeID,
+            date: newerRequestDate.addingTimeInterval(1)
+        )
+
+        #expect(state.terminals[worktreeID] == [snapshot])
+        #expect(state.recentlyDeletedTerminalIDs[terminalID] == nil)
+        #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
+            .budgetExhausted)
+    }
+
+    @Test("recreation response updates only a live non-deleted terminal")
+    func recreatedTerminalAdoptionHonorsDeletionInvariant() {
+        let liveState = AppState()
+        let deletedState = AppState()
+        let worktreeID = UUID()
+        let liveID = UUID()
+        let deletedID = UUID()
+        let deletedAt = Date(timeIntervalSince1970: 1_000)
+        let liveOriginal = terminal(id: liveID, worktreeID: worktreeID, label: "Shell")
+        let liveUpdated = terminal(id: liveID, worktreeID: worktreeID, label: "Recovered")
+        let deletedOriginal = terminal(id: deletedID, worktreeID: worktreeID, label: "Shell")
+        let deletedUpdated = terminal(id: deletedID, worktreeID: worktreeID, label: "Recovered")
+        liveState.terminals[worktreeID] = [liveOriginal]
+        deletedState.terminals[worktreeID] = [deletedOriginal]
+
+        liveState.adoptRecreatedTerminal(liveUpdated)
+        deletedState.removeDeletedTerminalFromState(
+            terminalID: deletedID,
+            worktreeID: worktreeID,
+            date: deletedAt
+        )
+        deletedState.adoptRecreatedTerminal(
+            deletedUpdated,
+            date: deletedAt.addingTimeInterval(1)
+        )
+
+        #expect(liveState.terminals[worktreeID] == [liveUpdated])
+        #expect(deletedState.terminals[worktreeID]?.isEmpty == true)
     }
 
     @Test("terminal removal delta preserves in-flight dedup until recreation finishes")
@@ -251,7 +319,7 @@ struct TerminalRecoveryAppStateTests {
         state.terminals[worktreeID] = [terminal(id: terminalID, worktreeID: worktreeID)]
 
         #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
-            .claimed(automaticAttempt: 1))
+            .claimed(attempt: 1))
 
         state.handleDelta(.terminalRemoved(TerminalIDDelta(terminalID: terminalID)))
 
@@ -303,7 +371,7 @@ struct TerminalRecoveryAppStateTests {
         let terminalID = UUID()
         state.terminals[worktreeID] = [terminal(id: terminalID, worktreeID: worktreeID)]
         #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
-            .claimed(automaticAttempt: 1))
+            .claimed(attempt: 1))
         state.terminals[worktreeID] = []
 
         state.handleDelta(.terminalRemoved(TerminalIDDelta(terminalID: terminalID)))
@@ -328,7 +396,7 @@ struct TerminalRecoveryAppStateTests {
             terminal(id: completedID, worktreeID: worktreeID)
         ]
         #expect(state.claimAutomaticTerminalRecreation(terminalID: inFlightID) ==
-            .claimed(automaticAttempt: 1))
+            .claimed(attempt: 1))
         _ = state.terminalRecoveryBudget.claimAttempt(for: completedID)
         _ = state.terminalRecoveryBudget.claimAttempt(for: completedID)
 
@@ -357,7 +425,7 @@ struct TerminalRecoveryAppStateTests {
         ))
 
         #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
-            .claimed(automaticAttempt: 1))
+            .claimed(attempt: 1))
         state.finishTerminalRecreation(terminalID: terminalID)
 
         let refreshed = terminal(id: terminalID, worktreeID: worktreeID, label: "Shell")
@@ -365,7 +433,7 @@ struct TerminalRecoveryAppStateTests {
 
         #expect(state.terminals[worktreeID] == [refreshed])
         #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
-            .claimed(automaticAttempt: 2))
+            .claimed(attempt: 2))
     }
 
     @Test("manual recreation remains available after automatic exhaustion")
@@ -381,7 +449,7 @@ struct TerminalRecoveryAppStateTests {
         state.finishTerminalRecreation(terminalID: terminalID)
         #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) == .budgetExhausted)
 
-        #expect(state.claimManualTerminalRecreation(terminalID: terminalID) == .claimed(automaticAttempt: nil))
+        #expect(state.claimManualTerminalRecreation(terminalID: terminalID) == .claimed)
         state.finishTerminalRecreation(terminalID: terminalID)
         #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) == .budgetExhausted)
     }

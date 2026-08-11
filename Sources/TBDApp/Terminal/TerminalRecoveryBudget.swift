@@ -1,9 +1,8 @@
 import Foundation
 
 struct TerminalRecoveryBudget {
-    /// Preserve the approved two-attempt safety bound: it permits one retry
-    /// after an initial repair while preventing the unbounded recreation churn
-    /// observed in the terminal-crash incident.
+    /// Two attempts permit one retry after an initial repair while bounding
+    /// repeated recreation churn when attachment cannot recover.
     static let maximumAttempts = 2
 
     private var attemptCounts: [UUID: Int] = [:]

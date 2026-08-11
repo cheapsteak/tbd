@@ -52,7 +52,7 @@ struct TerminalPanelViewTests {
         #expect(coordinator.beginGroupedViewerAttachmentConfirmation() == generation)
 
         #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
-            .claimed(automaticAttempt: 2))
+            .claimed(attempt: 2))
         state.finishTerminalRecreation(terminalID: terminalID)
 
         #expect(coordinator.groupedViewerAttachmentProbeDidComplete(
@@ -66,7 +66,7 @@ struct TerminalPanelViewTests {
         ))
 
         #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
-            .claimed(automaticAttempt: 1))
+            .claimed(attempt: 1))
     }
 
     @MainActor
@@ -95,7 +95,7 @@ struct TerminalPanelViewTests {
         #expect(coordinator.beginGroupedViewerAttachmentConfirmation() == nil)
 
         #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
-            .claimed(automaticAttempt: 2))
+            .claimed(attempt: 2))
     }
 
     @MainActor
@@ -121,7 +121,7 @@ struct TerminalPanelViewTests {
         ))
 
         #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
-            .claimed(automaticAttempt: 2))
+            .claimed(attempt: 2))
         state.finishTerminalRecreation(terminalID: terminalID)
 
         #expect(coordinator.beginGroupedViewerAttachmentConfirmation() == liveGeneration)
@@ -130,7 +130,7 @@ struct TerminalPanelViewTests {
             processGeneration: liveGeneration
         ))
         #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
-            .claimed(automaticAttempt: 1))
+            .claimed(attempt: 1))
     }
 
     @MainActor
@@ -148,7 +148,7 @@ struct TerminalPanelViewTests {
         coordinator.controlModeViewerDidStart()
 
         #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
-            .claimed(automaticAttempt: 1))
+            .claimed(attempt: 1))
     }
 
     @Test("budget exhaustion renders stable recovery guidance")
