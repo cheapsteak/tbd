@@ -206,6 +206,17 @@ def test_the_specialist_handoff_carries_the_context_file() -> None:
     assert "discussion-context.txt" in fanout
 
 
+def test_the_description_cannot_clear_findings() -> None:
+    # The description is rewritable at any moment — including after a REJECT —
+    # so the clearing power STEP 2 grants to discussion must exclude it, or an
+    # author edits their way past a finding without changing a line of code.
+    prompt = step_source(read_workflow(), SESSION_STEP)
+    assert "NEVER clear, downgrade, or pre-empt a finding" in prompt
+    _, _, merge_section = prompt.partition("STEP 2 — MERGE")
+    assert merge_section, "the prompt no longer contains a `STEP 2 — MERGE` section"
+    assert "never downgrades or drops a finding" in merge_section
+
+
 def test_the_prompt_teaches_graft_detection_for_history_checks() -> None:
     # A graft on HEAD's own ancestry (PR up to date with its base) makes
     # `git blame`/`git log <path>` stop at the boundary SILENTLY — the same
