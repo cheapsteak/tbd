@@ -137,6 +137,25 @@ struct CapacityContractTests {
         #expect(object["defaultID"] == nil)
     }
 
+    @Test func envelopeSchemaVersionOverridesAPayloadsOwnKey() throws {
+        // The envelope encodes schemaVersion last, so a payload that ever
+        // grows a key of that name loses to it. The printed contract version
+        // is the CLI's to state.
+        struct PayloadWithItsOwnVersion: Encodable {
+            let schemaVersion = 99
+            let marker = "payload"
+        }
+        let text = try #require(jsonString(VersionedJSONEnvelope(
+            schemaVersion: profileListSchemaVersion,
+            payload: PayloadWithItsOwnVersion()
+        )))
+        let data = try #require(text.data(using: .utf8))
+        let object = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+        #expect(object["schemaVersion"] as? Int == 1)
+        #expect(object["marker"] as? String == "payload")
+    }
+
     // MARK: - Buckets and units
 
     @Test func profileListJSON_bucketFieldsCarryValuesAndUnits() throws {
@@ -234,6 +253,30 @@ struct CapacityContractTests {
         let buckets = try #require(composed["buckets"] as? [[String: Any]])
         #expect(buckets.count == 1)
         #expect(buckets[0]["percent"] as? Double == 99)
+    }
+
+    // MARK: - Refresh is an optimization, not a precondition
+
+    @Test func refreshFailureNote_namesTheCauseAndWhereStalenessShows() {
+        let note = refreshFailureNote(CLIError.rpcError("OAuth usage poller is not running"))
+        #expect(note.hasSuffix("\n"))
+        #expect(note.hasPrefix("warning: usage refresh failed ("))
+        #expect(note.contains("OAuth usage poller is not running"))
+        #expect(note.contains("listing persisted snapshots"))
+        #expect(note.contains("fetchedAt"))
+        #expect(note.contains("statusKind"))
+        // CLIError.rpcError's own "Error: " prefix is stripped, so the note
+        // reads as one sentence.
+        #expect(!note.contains("Error: "))
+    }
+
+    @Test func refreshFailureNote_carriesANonCLIErrorVerbatim() {
+        struct Transport: Error, CustomStringConvertible {
+            var description: String { "connection refused" }
+        }
+        let note = refreshFailureNote(Transport())
+        #expect(note.contains("connection refused"))
+        #expect(note.hasSuffix("\n"))
     }
 
     // MARK: - The terminal to profile join

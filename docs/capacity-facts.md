@@ -22,8 +22,11 @@ stable. That is what this document states.
   to refresh usage for stale logged-in OAuth profiles first. Fresh profiles
   and rate-limited ones are skipped, so `--refresh` is not a way to force a
   fetch; it is a way to say "don't hand me numbers that aged out while I
-  slept." A refresh failure does not fail the command — the snapshot's own
-  `status` fields carry the outcome.
+  slept." A refresh failure does not fail the command: the refusal is noted on
+  stderr, the listing still prints on stdout from persisted snapshots, and the
+  exit code stays 0 — each snapshot's own `fetchedAt` and `statusKind` say how
+  old its numbers are. A caller that needs fresh-or-nothing must decide that
+  from those fields, not from the exit code.
 - **`tbd terminal list --json <worktree>`** – per-terminal rows, of which only
   `profileID` participates in this contract: it is the join from a running
   session to the profile whose capacity governs it.
@@ -48,8 +51,11 @@ nonzero with the refusing condition named on stderr.
   a consumer that branches on `schemaVersion == 1` will not be surprised
   silently.
 
-This is the same convention the rest of TBD's JSON follows (see
-[`cli-supervise.md`](cli-supervise.md)).
+This is the convention newly versioned JSON surfaces in TBD adopt, stated for
+the planned supervision surfaces in [`cli-supervise.md`](cli-supervise.md).
+`tbd profile list --json` is its first shipped instance; TBD's older JSON
+output predates the convention and carries no version, so do not expect a
+`schemaVersion` from a command not documented as having one.
 
 `tbd terminal list --json` is the exception: it prints a **bare JSON array** at
 top level, so it has nowhere additive to put a version. It is unversioned and
@@ -90,20 +96,30 @@ Each element of `profiles`:
 
 ### Absence is not failure
 
-The single most important distinction in this document:
+The single most important distinction in this document. A missing
+`usageSnapshot` and a failing one are different states, and a missing one is
+itself two different states — three in all, each told apart from fields already
+in the payload:
 
-- **`usageSnapshot` ABSENT** – TBD has no usage tracking for this profile at
-  all. Either the kind is not OAuth (API-key and Bedrock profiles have no
-  usage API to poll), or it is an OAuth profile that has never been logged
-  into, or the poller has never attempted a fetch. There are no numbers, stale
-  or otherwise, and none are coming without operator action.
-- **`usageSnapshot` PRESENT with a failing status** – TBD tracks this profile
-  and its last attempt failed. There may still be numbers, from an earlier
-  successful fetch. The failure is classified (`statusKind`) and its recency
-  is knowable (`lastAttemptAt`).
+- **Durably untracked** – `kind` is not `oauth`, or `loginIdentity` is absent.
+  `usageSnapshot` is absent and will stay absent. API-key and Bedrock profiles
+  have no usage API to poll at all, and an OAuth profile nobody has run
+  `/login` into has no credential to poll with. No numbers are coming without
+  operator action — a login, or a different profile.
+- **Tracked, not yet fetched** – `kind` is `oauth`, `loginIdentity` is present,
+  and `usageSnapshot` is still absent. The poller has this profile but no
+  attempt has landed yet: the daemon started moments ago, or the login just
+  completed. This is transient and self-resolving; numbers are coming with no
+  operator action. Retry later rather than concluding anything.
+- **Tracked and failing** – `usageSnapshot` is present with a failing
+  `statusKind`. TBD tracks the profile and its last attempt failed. There may
+  still be numbers, from an earlier successful fetch, and the failure's
+  recency is knowable from `lastAttemptAt`.
 
-A program that collapses these two into "no data" will treat an untracked
-Bedrock lane the same as an account whose token just expired. Keep them apart.
+A program that collapses these into one "no data" bucket will treat an
+untracked Bedrock lane, a daemon that has been up for ten seconds, and an
+account whose token just expired as the same thing — and only the last of the
+three warrants telling an operator anything.
 
 ## The usage snapshot
 
@@ -275,8 +291,9 @@ Read this the way a holding program should:
   `statusKind: needsLogin` says the numbers will not improve on their own.
   A program should hold sessions on this profile and surface the login need,
   not retry into it.
-- **`bedrock-lane`** – no `usageSnapshot` key at all. TBD tracks no capacity
-  for it; sessions joined to it are unknown, not free.
+- **`bedrock-lane`** – no `usageSnapshot` key at all, and `kind` is not
+  `oauth`, so it is durably untracked rather than merely not fetched yet. TBD
+  tracks no capacity for it; sessions joined to it are unknown, not free.
 
 A terminal whose row carries no `profileID` is in that same unknown category,
 regardless of what `defaultID` says.

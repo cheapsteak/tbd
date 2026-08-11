@@ -26,7 +26,19 @@ func printJSON<T: Encodable>(_ value: T) {
 /// The payload encodes into the *same* keyed container as `schemaVersion`, so
 /// the envelope is drift-proof: any field the underlying RPC result gains
 /// flows through automatically, with no envelope-side mirror to update.
-/// The payload must therefore encode as a JSON object, not an array.
+///
+/// Two consequences of that sharing:
+///
+/// - **Object-shaped payloads only.** A payload that encodes as an array or a
+///   scalar has already claimed the encoder's single top-level container, and
+///   asking for a keyed one afterwards trips `JSONEncoder`'s
+///   `preconditionFailure` — a crash, not a thrown error, so `try?` will not
+///   save the call site. Bare-array output (`tbd terminal list --json`) must
+///   stay unversioned rather than be wrapped here.
+/// - **The envelope's `schemaVersion` wins.** It is encoded last, so if a
+///   payload ever grows a `schemaVersion` key of its own the envelope's value
+///   overwrites it. That is the intended authority order: the CLI's printed
+///   contract version is the CLI's to state, not the daemon's.
 struct VersionedJSONEnvelope<Payload: Encodable>: Encodable {
     let schemaVersion: Int
     let payload: Payload

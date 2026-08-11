@@ -88,6 +88,24 @@ func usageAgeMarker(fetchedAt: Date?, now: Date = Date()) -> String? {
     return "(updated \(hours / 24)d ago)"
 }
 
+/// The one-line stderr note `tbd profile list --refresh` emits when the
+/// refresh RPC refuses (poller not yet constructed during daemon startup, a
+/// mock daemon, a transport failure). The listing continues from persisted
+/// snapshots, so the note names where to read the resulting staleness from.
+/// Ends in a newline; callers write it to stderr verbatim.
+func refreshFailureNote(_ error: Error) -> String {
+    // CLIError.rpcError already prefixes "Error: "; strip it so the note reads
+    // as one sentence rather than two stacked prefixes.
+    let detail: String
+    if case CLIError.rpcError(let message) = error {
+        detail = message
+    } else {
+        detail = "\(error)"
+    }
+    return "warning: usage refresh failed (\(detail)); listing persisted snapshots — "
+        + "read each profile's fetchedAt and statusKind for staleness\n"
+}
+
 /// Resolve a user-supplied profile reference against the daemon's profile
 /// list. Accepts an exact name, a unique case-insensitive name, or a profile
 /// UUID (escape hatch for scripting). Throws a `CLIError` with actionable
@@ -195,11 +213,22 @@ struct ProfileList: AsyncParsableCommand {
         let client = SocketClient()
 
         if refresh {
-            _ = try client.call(
-                method: RPCMethod.modelProfileUsageRefresh,
-                params: ModelProfileUsageRefreshParams(id: nil),
-                resultType: ModelProfileUsageRefreshResult.self
-            )
+            // A refresh is an optimization, never a precondition: the listing
+            // is served from persisted snapshots either way, and each snapshot
+            // carries its own provenance (`fetchedAt`, `statusKind`), so a
+            // consumer can already see that its numbers aged. Failing the whole
+            // command would hand a scripted caller nothing at all — worse than
+            // slightly stale facts. The refusal goes to stderr so stdout stays
+            // parseable. Contract: docs/capacity-facts.md.
+            do {
+                _ = try client.call(
+                    method: RPCMethod.modelProfileUsageRefresh,
+                    params: ModelProfileUsageRefreshParams(id: nil),
+                    resultType: ModelProfileUsageRefreshResult.self
+                )
+            } catch {
+                FileHandle.standardError.write(Data(refreshFailureNote(error).utf8))
+            }
         }
 
         let result = try client.call(
