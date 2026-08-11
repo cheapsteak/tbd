@@ -305,9 +305,13 @@ extension WorktreeLifecycle {
         // left to flip or notify. A thrown DB error is NOT proof the row is
         // gone — treat it as transient and proceed with the spawn rather
         // than tear down a valid worktree.
+        // Location-neutral on purpose: the question is "did the row vanish",
+        // and `getLocal` would answer nil for a row that exists but is remote
+        // — indistinguishable here from deleted, and the branch below kills a
+        // live tmux window. Existence is not a locality question.
         let rowExists: Bool
         do {
-            rowExists = try await db.worktrees.getLocal(id: worktree.id) != nil
+            rowExists = try await db.worktrees.get(id: worktree.id) != nil
         } catch {
             logger.warning("phase-3: worktree existence check failed for \(worktree.id, privacy: .public): \(error.localizedDescription, privacy: .public) — assuming the row still exists and proceeding")
             rowExists = true
