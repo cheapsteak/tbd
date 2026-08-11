@@ -207,7 +207,10 @@ extension WorktreeLifecycle {
             // future CLI use) deliberately blocks until the drain finishes —
             // archive completion is meant to mean "the bytes are gone" there.
             // An interrupted drain leaves a queue entry the GC sweep finishes.
-            deletionQueue.drain(queued)
+            // The unlink itself runs on the queue's own serial dispatch queue,
+            // so a multi-minute removal neither holds a cooperative-pool
+            // thread nor races another archive's drain for the disk.
+            await deletionQueue.drain(queued)
         } catch {
             archiveLogger.error("""
             archive: could not queue \(worktree.path, privacy: .public) for deletion \

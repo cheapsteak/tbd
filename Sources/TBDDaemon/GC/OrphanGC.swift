@@ -243,7 +243,7 @@ public actor OrphanGC {
         for entry in deletionQueueCollector.pendingEntries(pools: Array(pools)) {
             planned.append("REAP queued-deletion \(entry.path)")
             guard !dryRun else { continue }
-            if deletionQueueCollector.drain(entry) {
+            if await deletionQueueCollector.drain(entry) {
                 reaped += 1
                 logger.info("gc: drained queued deletion \(entry.path, privacy: .public)")
             }
@@ -307,7 +307,7 @@ public actor OrphanGC {
                 // result is intentionally not gating either one. If this
                 // immediate drain doesn't finish, the entry stays in
                 // `.deleting/` and step 1 above reclaims it on a later sweep.
-                deletionQueueCollector.drain(entry)
+                await deletionQueueCollector.drain(entry)
                 await insertReapRecord(ReapRecord(
                     kind: .archivedWorktree,
                     repoPath: candidate.repoPath ?? "",

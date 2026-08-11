@@ -64,6 +64,29 @@ public struct WorktreeDeletionQueue: Sendable {
     /// other dotfiles.
     public static let dirName = ".deleting"
 
+    /// Where `drain`'s unlink loop actually runs.
+    ///
+    /// Serial, and `static` so every drain in the process shares it — an
+    /// archive's inline drain, a concurrent archive's, and the GC sweep's all
+    /// queue behind one another even though each holds its own
+    /// `WorktreeDeletionQueue` value. That is the design's stated position
+    /// (spec, "`WorktreeDeletionQueue`"): draining one entry at a time costs
+    /// nothing, because nothing waits on the queue emptying, while parallel
+    /// drains saturate the disk against whatever the developer is doing and
+    /// give each removal a quarter of the throughput anyway.
+    ///
+    /// It is also what keeps a minutes-long `removeItem` off the cooperative
+    /// pool. `drain` is called from detached tasks, so running the unlink
+    /// inline would park a pool thread for the whole removal — 70 s to several
+    /// minutes for a dependency-heavy worktree — and concurrent archives would
+    /// park one each.
+    ///
+    /// Internal rather than private so a test can occupy it and prove `drain`
+    /// really queues behind it instead of unlinking inline.
+    static let drainQueue = DispatchQueue(
+        label: "com.tbd.daemon.deletion-queue.drain", qos: .utility
+    )
+
     /// The rename primitive `enqueue` calls. Defaults to the real `rename(2)`
     /// syscall; tests substitute a stub to force specific `errno` values
     /// (e.g. `EXDEV`) without needing two real filesystems, and to prove that
@@ -138,8 +161,12 @@ public struct WorktreeDeletionQueue: Sendable {
     /// same defense `ScratchpadCollector.cleanUp` puts in front of its own
     /// `removeItem`. Returning `false` (not `true`) keeps the failure visible:
     /// nothing was reclaimed.
+    ///
+    /// The two guards are cheap `stat`-level checks and stay on the caller's
+    /// thread; only the unlink loop hops to `drainQueue` (see its comment for
+    /// why that queue is serial and process-wide).
     @discardableResult
-    public func drain(_ entry: QueuedDeletion) -> Bool {
+    public func drain(_ entry: QueuedDeletion) async -> Bool {
         guard (entry.path as NSString).pathComponents.contains(Self.dirName) else {
             logger.error("""
             deletionQueue: refusing to drain \(entry.path, privacy: .public) — \
@@ -148,16 +175,21 @@ public struct WorktreeDeletionQueue: Sendable {
             return false
         }
         guard FileManager.default.fileExists(atPath: entry.path) else { return true }
-        do {
-            try FileManager.default.removeItem(atPath: entry.path)
-            logger.debug("deletionQueue: drained \(entry.path, privacy: .public)")
-            return true
-        } catch {
-            logger.error("""
-            deletionQueue: drain of \(entry.path, privacy: .public) failed, \
-            will resume next sweep: \(error, privacy: .public)
-            """)
-            return false
+        let path = entry.path
+        return await withCheckedContinuation { continuation in
+            Self.drainQueue.async {
+                do {
+                    try FileManager.default.removeItem(atPath: path)
+                    logger.debug("deletionQueue: drained \(path, privacy: .public)")
+                    continuation.resume(returning: true)
+                } catch {
+                    logger.error("""
+                    deletionQueue: drain of \(path, privacy: .public) failed, \
+                    will resume next sweep: \(error, privacy: .public)
+                    """)
+                    continuation.resume(returning: false)
+                }
+            }
         }
     }
 }

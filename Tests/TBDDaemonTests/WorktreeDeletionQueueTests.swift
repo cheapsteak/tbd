@@ -111,30 +111,30 @@ struct WorktreeDeletionQueueTests {
         #expect(WorktreeDeletionQueue().pending(pool: pool).isEmpty)
     }
 
-    @Test func drainRemovesEntryBytesAndReportsSuccess() throws {
+    @Test func drainRemovesEntryBytesAndReportsSuccess() async throws {
         let (tmp, pool, wt) = try makePool()
         defer { try? FileManager.default.removeItem(at: tmp) }
 
         let queue = WorktreeDeletionQueue()
         let entry = try queue.enqueue(worktreePath: wt)
 
-        #expect(queue.drain(entry) == true)
+        #expect(await queue.drain(entry) == true)
         #expect(!FileManager.default.fileExists(atPath: entry.path))
         #expect(queue.pending(pool: pool).isEmpty)
     }
 
-    @Test func drainIsIdempotentOnAnAlreadyDrainedEntry() throws {
+    @Test func drainIsIdempotentOnAnAlreadyDrainedEntry() async throws {
         let (tmp, _, wt) = try makePool()
         defer { try? FileManager.default.removeItem(at: tmp) }
 
         let queue = WorktreeDeletionQueue()
         let entry = try queue.enqueue(worktreePath: wt)
-        #expect(queue.drain(entry) == true)
+        #expect(await queue.drain(entry) == true)
         // A second sweep must treat a vanished entry as done, not as failure.
-        #expect(queue.drain(entry) == true)
+        #expect(await queue.drain(entry) == true)
     }
 
-    @Test func drainResumesAfterAPartiallyDeletedEntry() throws {
+    @Test func drainResumesAfterAPartiallyDeletedEntry() async throws {
         let (tmp, pool, wt) = try makePool()
         defer { try? FileManager.default.removeItem(at: tmp) }
 
@@ -143,11 +143,11 @@ struct WorktreeDeletionQueueTests {
         // Simulate an interrupted drain: some children already gone, dir remains.
         try FileManager.default.removeItem(atPath: entry.path + "/file.txt")
 
-        #expect(queue.drain(entry) == true)
+        #expect(await queue.drain(entry) == true)
         #expect(queue.pending(pool: pool).isEmpty)
     }
 
-    @Test func drainRefusesAPathOutsideAQueueDirectory() throws {
+    @Test func drainRefusesAPathOutsideAQueueDirectory() async throws {
         let (tmp, _, wt) = try makePool()
         defer { try? FileManager.default.removeItem(at: tmp) }
 
@@ -157,7 +157,84 @@ struct WorktreeDeletionQueueTests {
         // Here the "entry" names a live worktree directory rather than
         // anything TBD renamed into `.deleting/`.
         let queue = WorktreeDeletionQueue()
-        #expect(queue.drain(QueuedDeletion(path: wt, originalPath: wt)) == false)
+        #expect(await queue.drain(QueuedDeletion(path: wt, originalPath: wt)) == false)
         #expect(FileManager.default.fileExists(atPath: wt + "/file.txt"))
+    }
+
+    /// Tier 2. The unlink must run on the type's serial drain queue, not on
+    /// the caller's thread: `drain` is reached from detached tasks on the
+    /// cooperative pool, and removing a dependency-heavy worktree takes
+    /// minutes, so an inline `removeItem` parks a pool thread for that long —
+    /// one per concurrent archive.
+    ///
+    /// Occupies the drain queue with a gated work item, then starts a drain
+    /// and shows the bytes are still there while the queue is busy, and gone
+    /// once it is released. An inline implementation — including an `async`
+    /// one that simply never hops — deletes the entry while the gate is still
+    /// held and fails the middle assertion.
+    @Test func drainQueuesTheUnlinkBehindTheSerialDrainQueue() async throws {
+        let (tmp, pool, wt) = try makePool()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let queue = WorktreeDeletionQueue()
+        let entry = try queue.enqueue(worktreePath: wt)
+
+        // Signalled in a `defer` so a failure anywhere below cannot leave the
+        // process-wide drain queue blocked for other suites.
+        let gate = DispatchSemaphore(value: 0)
+        defer { gate.signal() }
+        let occupied = Flag()
+        WorktreeDeletionQueue.drainQueue.async {
+            occupied.set()
+            gate.wait()
+        }
+        try await waitUntil(occupied.isSet, "drain queue never picked up the gate item")
+
+        let entered = Flag()
+        let drained = Task { () -> Bool in
+            entered.set()
+            return await queue.drain(entry)
+        }
+        try await waitUntil(entered.isSet, "drain task never started")
+        // Room for an inline implementation to have finished: the entry is one
+        // small file, so its removal would land in microseconds once the task
+        // is running.
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(FileManager.default.fileExists(atPath: entry.path))
+
+        gate.signal()
+        #expect(await drained.value == true)
+        #expect(!FileManager.default.fileExists(atPath: entry.path))
+        #expect(queue.pending(pool: pool).isEmpty)
+    }
+
+    /// Bounded poll (no wall-clock assertion): fails with a named diagnostic
+    /// rather than hanging if the condition never becomes true.
+    private func waitUntil(
+        _ condition: @autoclosure () -> Bool, _ what: String,
+        timeout: Duration = .seconds(10)
+    ) async throws {
+        let step = Duration.milliseconds(10)
+        var waited = Duration.zero
+        while !condition() {
+            if waited >= timeout { throw WaitTimeout(what: what, after: timeout) }
+            try await Task.sleep(for: step)
+            waited += step
+        }
+    }
+
+    private struct WaitTimeout: Error, CustomStringConvertible {
+        let what: String
+        let after: Duration
+        var description: String { "timed out after \(after): \(what)" }
+    }
+
+    /// Minimal lock-guarded boolean; the drain queue sets it from a dispatch
+    /// thread while the test task reads it.
+    private final class Flag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        func set() { lock.lock(); value = true; lock.unlock() }
+        var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
     }
 }

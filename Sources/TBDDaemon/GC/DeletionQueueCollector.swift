@@ -79,8 +79,8 @@ public struct DeletionQueueCollector: Sendable {
     }
 
     @discardableResult
-    public func drain(_ entry: QueuedDeletion) -> Bool {
-        queue.drain(entry)
+    public func drain(_ entry: QueuedDeletion) async -> Bool {
+        await queue.drain(entry)
     }
 
     // MARK: - Interrupted archives
