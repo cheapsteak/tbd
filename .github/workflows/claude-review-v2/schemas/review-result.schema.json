@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "review-result.schema.json",
   "title": "Merged review result (review-result.json)",
+  "$comment": "`additionalProperties: false` marks the known key set, but validate.py enforces it SOFTLY: unknown keys are stripped with a logged warning before the strict pass, rather than failing the gate closed. A review that ran must never have its findings discarded over a cosmetic extra key — the merge copies specialist findings forward, so a key borrowed from another finding vocabulary arrives here too. Value validation of the known keys stays strict, so everything the verdict and the disposition check read still fails closed.",
   "type": "object",
   "properties": {
     "findings": {

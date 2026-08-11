@@ -246,12 +246,26 @@ def test_findings_bad_severity_names_it(tmp_path: Path) -> None:
     assert "severity" in message
 
 
-def test_findings_rejects_unknown_top_level_key(tmp_path: Path) -> None:
+def test_findings_smuggled_top_level_verdict_is_stripped_not_fatal(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A model must not smuggle a verdict into a findings file — and it cannot:
+    # the verdict is COMPUTED by verdict_from_findings from the merged
+    # severities and is never read from any findings file, so the smuggled key
+    # is inert wherever it lands. That makes stripping-with-a-warning the right
+    # response rather than the fatal rejection this test used to pin: killing
+    # the file would discard the lens's real findings to punish a key nothing
+    # reads. See "unknown keys are stripped, not fatal" below for the rationale
+    # in full.
     data = _valid_findings()
-    data["verdict"] = "APPROVE"  # the model must not smuggle a verdict in
+    data["verdict"] = "APPROVE"
     path = _write(tmp_path / "findings-correctness.json", data)
-    with pytest.raises(SchemaValidationError, match="verdict"):
-        validate_findings_file(path)
+    parsed = validate_findings_file(path)
+    assert "verdict" not in parsed
+    assert len(parsed["findings"]) == 2
+    out = capsys.readouterr().out
+    assert "warning:" in out
+    assert "verdict" in out
 
 
 # --- `line` may be null: findings with no line anchor ----------------------
@@ -1121,3 +1135,255 @@ def test_main_still_reports_a_partial_fan_out_per_lens(
     err = capsys.readouterr().err
     assert "that review lens never ran" in err
     assert "INFRASTRUCTURE" not in err
+
+
+# --- unknown keys are stripped, not fatal -----------------------------------
+#
+# The observed failure: the correctness lens reported two real findings, each
+# carrying one extra key — `failure_scenario`, vocabulary borrowed from a
+# different finding format the model knows. `additionalProperties: false`
+# rejected the file, BOTH findings were discarded, and the gate failed closed
+# with no verdict. Nothing in the pipeline reads that key; the review was lost
+# to a typo in a vocabulary.
+#
+# The invariant these fixtures pin: a lens that RAN never contributes zero
+# findings over a cosmetic key. An unknown key carries no meaning to any
+# consumer, so the safe reading is to drop it — loudly, so the prompt drift that
+# produced it is visible in the log — and validate what remains.
+#
+# Value strictness is retained, and the distinction is the point. Stripping
+# answers only "this key is not in the vocabulary". It says nothing about
+# whether the KNOWN fields are well-formed, so a bad severity, an out-of-range
+# confidence, or a missing title is still a malformed finding that fails the
+# gate closed. Softening the key set must not soften the values the verdict and
+# the disposition check are computed from.
+
+
+def _finding_with_failure_scenario(**overrides: object) -> dict:
+    """The real shape from the observed run: a well-formed finding plus one
+    borrowed key."""
+    finding = {
+        "id": "correctness-1",
+        "file": "Sources/TBDDaemon/Example.swift",
+        "line": 128,
+        "severity": "HIGH",
+        "title": "retry loop drops the last attempt",
+        "body": "The loop exits one iteration early.",
+        "confidence": 0.8,
+        "failure_scenario": "3 retries configured, only 2 are attempted",
+    }
+    finding.update(overrides)
+    return finding
+
+
+def test_findings_file_with_a_borrowed_key_passes_and_strips_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write(
+        tmp_path / "findings-correctness.json",
+        {"specialist": "correctness", "findings": [_finding_with_failure_scenario()]},
+    )
+    parsed = validate_findings_file(path)
+    finding = parsed["findings"][0]
+    assert "failure_scenario" not in finding
+    # Everything the pipeline reads survived intact.
+    assert finding["id"] == "correctness-1"
+    assert finding["severity"] == "HIGH"
+    assert finding["title"] == "retry loop drops the last attempt"
+
+    out = capsys.readouterr().out
+    assert "warning:" in out
+    assert "failure_scenario" in out
+    assert "findings/0" in out
+    assert "findings-correctness.json" in out
+
+
+def test_main_a_borrowed_key_does_not_cost_the_lens_end_to_end(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The whole-run reproduction: the correctness lens reports two real
+    # findings, each carrying `failure_scenario`; the conventions lens is clean.
+    # Before the fix this discarded both findings, reported the correctness lens
+    # as "FAILED validation", and exited 1 with no verdict.
+    high = _finding_with_failure_scenario()
+    medium = _finding_with_failure_scenario(
+        id="correctness-2",
+        file="Sources/TBDDaemon/Other.swift",
+        line=44,
+        severity="MEDIUM",
+        title="timeout is not honored on the retry path",
+    )
+    _write(
+        tmp_path / "findings-correctness.json",
+        {"specialist": "correctness", "findings": [high, medium]},
+    )
+    _write(
+        tmp_path / "findings-conventions.json",
+        {"specialist": "conventions", "findings": []},
+    )
+    merged = [
+        {key: value for key, value in finding.items() if key != "failure_scenario"}
+        for finding in (_finding_with_failure_scenario(), medium)
+    ]
+    _write(
+        tmp_path / "review-result.json",
+        {
+            "findings": merged,
+            "disposition": [
+                {"id": "correctness-1", "action": "kept"},
+                {"id": "correctness-2", "action": "kept"},
+            ],
+            "comment_body": "## Review\nTwo findings.",
+        },
+    )
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
+    assert exit_code == 0
+    # The findings SURVIVED and drove the verdict — the whole point of the fix.
+    assert (tmp_path / "verdict.txt").read_text(encoding="utf-8") == "REJECT"
+
+
+def test_stripping_does_not_soften_a_bad_severity(tmp_path: Path) -> None:
+    # Same finding, one unknown key AND one invalid value: the value still
+    # fails the gate closed.
+    finding = _finding_with_failure_scenario(severity="CRITICAL")
+    path = _write(
+        tmp_path / "findings-correctness.json",
+        {"specialist": "correctness", "findings": [finding]},
+    )
+    with pytest.raises(SchemaValidationError) as excinfo:
+        validate_findings_file(path)
+    message = str(excinfo.value)
+    assert "CRITICAL" in message
+    assert "severity" in message
+
+
+def test_stripping_does_not_soften_a_missing_required_field(tmp_path: Path) -> None:
+    finding = _finding_with_failure_scenario()
+    del finding["title"]
+    path = _write(
+        tmp_path / "findings-correctness.json",
+        {"specialist": "correctness", "findings": [finding]},
+    )
+    with pytest.raises(SchemaValidationError, match="title"):
+        validate_findings_file(path)
+
+
+def test_result_finding_with_a_borrowed_key_passes_and_strips_it(
+    tmp_path: Path,
+) -> None:
+    # The merged result carries the same vocabulary risk: the orchestrator
+    # copies specialist findings forward, borrowed keys and all.
+    data = _valid_result()
+    data["findings"] = [_finding_with_failure_scenario()]
+    data["disposition"] = [{"id": "correctness-1", "action": "kept"}]
+    path = _write(tmp_path / "review-result.json", data)
+    parsed = validate_result_file(path)
+    assert "failure_scenario" not in parsed["findings"][0]
+    assert parsed["findings"][0]["severity"] == "HIGH"
+
+
+def test_result_disposition_entry_with_a_borrowed_key_passes_and_strips_it(
+    tmp_path: Path,
+) -> None:
+    data = _valid_result()
+    data["disposition"] = [
+        {"id": "correctness-1", "action": "kept", "category": "correctness"}
+    ]
+    path = _write(tmp_path / "review-result.json", data)
+    parsed = validate_result_file(path)
+    assert "category" not in parsed["disposition"][0]
+    assert parsed["disposition"][0]["action"] == "kept"
+
+
+def test_a_clean_file_prints_no_warning(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The warning must mean something: a file with nothing to strip is silent.
+    path = _write(tmp_path / "findings-correctness.json", _valid_findings())
+    validate_findings_file(path)
+    assert "warning:" not in capsys.readouterr().out
+
+
+# --- strip_unknown_keys as a pure function ----------------------------------
+
+from validate import strip_unknown_keys  # noqa: E402
+
+
+def _findings_validator() -> tuple[dict, type]:
+    """The real findings schema plus its validator class — the same pair
+    _validate_file builds, so these unit tests exercise production key sets."""
+    import jsonschema
+
+    with open(
+        validate._SCHEMAS_DIR / "findings.schema.json", encoding="utf-8"
+    ) as handle:
+        schema = json.load(handle)
+    return schema, jsonschema.validators.validator_for(schema)
+
+
+def test_strip_reports_and_removes_a_nested_unknown_key() -> None:
+    schema, validator_cls = _findings_validator()
+    data = {
+        "specialist": "correctness",
+        "findings": [_finding_with_failure_scenario()],
+    }
+    assert strip_unknown_keys(data, schema, validator_cls) == [
+        ("findings/0", ["failure_scenario"])
+    ]
+    assert "failure_scenario" not in data["findings"][0]
+    assert data["findings"][0]["id"] == "correctness-1"
+
+
+def test_strip_reports_the_root_as_root() -> None:
+    schema, validator_cls = _findings_validator()
+    data = _valid_findings()
+    data["verdict"] = "APPROVE"
+    assert strip_unknown_keys(data, schema, validator_cls) == [
+        ("<root>", ["verdict"])
+    ]
+    assert "verdict" not in data
+
+
+def test_strip_sorts_several_extras_within_one_object() -> None:
+    schema, validator_cls = _findings_validator()
+    finding = _finding_with_failure_scenario(short_summary="s", category="c")
+    data = {"specialist": "correctness", "findings": [finding]}
+    assert strip_unknown_keys(data, schema, validator_cls) == [
+        ("findings/0", ["category", "failure_scenario", "short_summary"])
+    ]
+
+
+def test_strip_output_is_ordered_by_path() -> None:
+    schema, validator_cls = _findings_validator()
+    data = {
+        "specialist": "correctness",
+        "findings": [
+            _finding_with_failure_scenario(id="correctness-1"),
+            _finding_with_failure_scenario(id="correctness-2"),
+        ],
+        "verdict": "APPROVE",
+    }
+    reported = strip_unknown_keys(data, schema, validator_cls)
+    assert [path for path, _ in reported] == sorted(path for path, _ in reported)
+    assert set(path for path, _ in reported) == {
+        "<root>",
+        "findings/0",
+        "findings/1",
+    }
+
+
+def test_strip_finds_nothing_in_a_clean_document() -> None:
+    schema, validator_cls = _findings_validator()
+    data = _valid_findings()
+    assert strip_unknown_keys(data, schema, validator_cls) == []
+    assert data == _valid_findings()
+
+
+@pytest.mark.parametrize("data", [[], ["a"], "nope", 42, None, True])
+def test_strip_tolerates_any_json_type(data: object) -> None:
+    # A findings file that decoded to a scalar or a list has no object to strip
+    # from. Stripping is not the place that diagnoses that — the strict
+    # validation immediately after is — so this must return quietly rather than
+    # raise and replace a precise schema error with a traceback.
+    schema, validator_cls = _findings_validator()
+    assert strip_unknown_keys(data, schema, validator_cls) == []

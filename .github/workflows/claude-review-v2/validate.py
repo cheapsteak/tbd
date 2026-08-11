@@ -5,6 +5,11 @@ Deterministic bookend that runs AFTER the model review session
 (docs/specs/2026-08-03-pr-review-fanout-design.md §3.2, §3.4, §3.5). It:
 
 - schema-validates every specialist findings file and the merged review-result,
+  stripping keys the schema does not know with a logged warning rather than
+  failing the gate on them (a lens that ran must never contribute zero findings
+  because the model borrowed a key name from another finding format). Value
+  validation of the KNOWN keys stays strict, so everything the verdict and the
+  disposition check are computed from still fails closed,
 - with `--expected-specialists`, checks that every named specialist actually
   produced a VALID findings file (a partial fan-out must never read as a clean
   run), reporting separately whether a lens produced nothing at all, produced a
@@ -212,6 +217,62 @@ def is_session_stall(
     return not any_specialist_file and not seen and not rejected
 
 
+def strip_unknown_keys(data, schema, validator_cls) -> list[tuple[str, list[str]]]:
+    """Delete keys the schema does not declare, in place; report what was cut.
+
+    Returns `(path, removed_keys)` pairs — path as a `/`-joined instance
+    pointer, `"<root>"` for the document itself — sorted by path so the log line
+    order is deterministic.
+
+    `additionalProperties: false` states the known key set, which is worth
+    stating: it is how prompt drift becomes visible instead of accumulating
+    silently. Enforcing it FATALLY is what costs too much. A specialist that
+    borrows one key name from another finding vocabulary it knows — writing
+    `failure_scenario` alongside a perfectly good `title` and `body` — loses its
+    entire file, and with it every real finding it reported, over a key no
+    consumer reads. The review the gate exists to deliver is thrown away to
+    punish a typo in a vocabulary.
+
+    So the key set is enforced softly and the VALUES are not. An unknown key
+    carries no meaning to anything downstream, so dropping it loses nothing a
+    reader would have seen; a malformed `severity` or a missing `title` is a
+    different failure entirely — the fields the verdict and the disposition
+    check are computed from — and the strict validation that runs immediately
+    after this still rejects those. Stripping answers "this key is not in the
+    vocabulary" and nothing else.
+
+    Tolerates any JSON type. A document that decoded to a list or a scalar has
+    no object to strip from, and diagnosing that is the strict validation's job:
+    raising here would replace a precise schema error with a traceback.
+    """
+    # Materialized before any mutation: iter_errors walks the instance lazily,
+    # and deleting keys mid-walk would mutate a dict the validator is iterating.
+    errors = list(validator_cls(schema).iter_errors(data))
+
+    reported: list[tuple[str, list[str]]] = []
+    for err in errors:
+        if err.validator != "additionalProperties":
+            continue
+        target = data
+        for part in err.absolute_path:
+            try:
+                target = target[part]
+            except (KeyError, IndexError, TypeError):
+                target = None
+                break
+        if not isinstance(target, dict):
+            continue
+        known = set(err.schema.get("properties", {}))
+        extras = sorted(key for key in target if key not in known)
+        if not extras:
+            continue
+        for key in extras:
+            del target[key]
+        path = "/".join(str(part) for part in err.absolute_path) or "<root>"
+        reported.append((path, extras))
+    return sorted(reported)
+
+
 def check_disposition(
     specialist_ids: list[str], disposition: list[dict]
 ) -> list[str]:
@@ -247,6 +308,18 @@ def _validate_file(path: str, schema_filename: str) -> dict:
         schema = json.load(handle)
 
     validator_cls = jsonschema.validators.validator_for(schema)
+
+    # Ingest before judgment: a key the schema never heard of is dropped and
+    # logged, so the strict pass below judges only the fields that mean
+    # something. Both callers get this — the merged review-result copies
+    # specialist findings forward, borrowed keys and all.
+    for stripped_path, keys in strip_unknown_keys(data, schema, validator_cls):
+        print(
+            f"warning: {path}: ignored unexpected key(s) at {stripped_path}: "
+            f"{', '.join(keys)} — not in the schema; known fields were kept and "
+            "validated, the unexpected key's content was dropped"
+        )
+
     errors = sorted(
         validator_cls(schema).iter_errors(data),
         key=lambda err: list(err.absolute_path),
