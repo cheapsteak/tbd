@@ -45,7 +45,7 @@ extension WorktreeLifecycle {
     /// Phase 1 (fast): Validates, updates DB status, kills tmux windows.
     /// Returns the worktree and repo for phase 2.
     public func beginArchiveWorktree(worktreeID: UUID, force: Bool = false) async throws -> (Worktree, Repo) {
-        guard let worktree = try await db.worktrees.get(id: worktreeID) else {
+        guard let worktree = try await db.worktrees.getLocal(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
 
@@ -128,7 +128,7 @@ extension WorktreeLifecycle {
             await pendingQuestions.clear(terminalID: terminal.id)
         }
 
-        return (worktree, repo)
+        return (worktree.worktree, repo)
     }
 
     /// Phase 2 (slow, fire-and-forget): Runs archive hook and removes git worktree.
@@ -266,10 +266,10 @@ extension WorktreeLifecycle {
         if case .preSessionPending(_, let phase3) = completion {
             await phase3.value
         }
-        guard let revived = try await db.worktrees.get(id: worktreeID) else {
+        guard let revived = try await db.worktrees.getLocal(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
-        return revived
+        return revived.worktree
     }
 
     /// Non-blocking revive. Validates, re-adds the git worktree, then:
@@ -290,7 +290,7 @@ extension WorktreeLifecycle {
     /// with revive semantics: the archived sessions are restored into
     /// terminals and the row finishes via `.revive(clearSessions: true)`.
     public func beginReviveWorktree(worktreeID: UUID, skipClaude: Bool = false, cols: Int? = nil, rows: Int? = nil, preferredSessionID: String? = nil) async throws -> WorktreeReviveCompletion {
-        guard let worktree = try await db.worktrees.get(id: worktreeID) else {
+        guard let worktree = try await db.worktrees.getLocal(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
 
@@ -357,7 +357,7 @@ extension WorktreeLifecycle {
         // Gated path: a preSession hook must finish before the primary
         // terminals spawn. Mirrors completeCreateWorktree's 5a branch.
         if let preSession = try await spawnPreSessionTerminal(
-            worktree: worktree, repo: repo,
+            worktree: worktree.worktree, repo: repo,
             worktreePath: worktree.path,
             cols: cols, rows: rows
         ) {
@@ -374,7 +374,7 @@ extension WorktreeLifecycle {
             let phase3 = Task.detached { [self] in
                 await runPreSessionPhase3(
                     preSession: preSession,
-                    worktree: worktree, repo: repo,
+                    worktree: worktree.worktree, repo: repo,
                     worktreePath: worktree.path,
                     skipClaude: skipClaude,
                     archivedClaudeSessions: sessions,
@@ -385,15 +385,15 @@ extension WorktreeLifecycle {
                     completionAction: .revive(clearSessions: !skipClaude)
                 )
             }
-            guard let pending = try await db.worktrees.get(id: worktreeID) else {
+            guard let pending = try await db.worktrees.getLocal(id: worktreeID) else {
                 throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
             }
-            return .preSessionPending(worktree: pending, phase3: phase3)
+            return .preSessionPending(worktree: pending.worktree, phase3: phase3)
         }
 
         // No preSession hook → spawn all terminals inline (today's behavior).
         _ = try await spawnPrimaryTerminals(
-            worktree: worktree, repo: repo,
+            worktree: worktree.worktree, repo: repo,
             worktreePath: worktree.path,
             skipClaude: skipClaude,
             archivedClaudeSessions: sessions,
@@ -421,9 +421,9 @@ extension WorktreeLifecycle {
         }
 
         // Return updated worktree
-        guard let revived = try await db.worktrees.get(id: worktreeID) else {
+        guard let revived = try await db.worktrees.getLocal(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
-        return .ready(revived)
+        return .ready(revived.worktree)
     }
 }
