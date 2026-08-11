@@ -2011,7 +2011,10 @@ def test_a_forged_glob_cannot_split_the_empty_glob_error(
 # outright writes no verdict and records no marker, so the next run reviews
 # fresh.
 
-from validate import read_infrastructure_failure  # noqa: E402
+from validate import (  # noqa: E402
+    infrastructure_failure_message,
+    read_infrastructure_failure,
+)
 
 
 def test_infra_failure_preempts_everything_and_fails_closed(
@@ -2201,3 +2204,24 @@ def test_the_schema_accepts_a_null_infra_field_with_findings(
     data = validate_findings_file(path)
     assert data["infrastructure_failure"] is None
     assert len(data["findings"]) == 1
+
+
+@pytest.mark.parametrize("value", ["", "   \n\t "])
+def test_a_blank_infra_field_reads_as_absence_in_schema_and_reader_alike(
+    tmp_path: Path, value: str
+) -> None:
+    # The schema's if/then and infrastructure_failure_message() must share one
+    # definition of "a report": substance after stripping. A blank string that
+    # the reader ignores but the schema treats as a report would discard a
+    # lens's genuine findings over a key that says nothing.
+    path = _write(
+        tmp_path / "findings-correctness.json",
+        {
+            "specialist": "correctness",
+            "findings": [_finding()],
+            "infrastructure_failure": value,
+        },
+    )
+    data = validate_findings_file(path)
+    assert len(data["findings"]) == 1
+    assert infrastructure_failure_message(data) is None

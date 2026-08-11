@@ -19,11 +19,11 @@
   "additionalProperties": false,
   "if": {
     "required": ["infrastructure_failure"],
-    "properties": { "infrastructure_failure": { "type": "string" } }
+    "properties": { "infrastructure_failure": { "type": "string", "pattern": "\\S" } }
   },
   "then": {
     "properties": { "findings": { "maxItems": 0 } },
-    "$comment": "infrastructure_failure (as a real string — a null reads as absence and constrains nothing) means 'I could not review', so findings alongside it are a self-contradiction — either the review happened or it didn't. Enforcing the scope here keeps the channel from discarding a run over a subordinate failure the specialist reviewed through: a file carrying both is rejected by schema with a message naming the contradiction, instead of being read as an infra abort."
+    "$comment": "infrastructure_failure (as a string with substance — the \\S pattern makes empty and whitespace-only strings read as absence, exactly matching validate.py's infrastructure_failure_message(), and a null constrains nothing either) means 'I could not review', so findings alongside it are a self-contradiction — either the review happened or it didn't. Enforcing the scope here keeps the channel from discarding a run over a subordinate failure the specialist reviewed through: a file carrying both is rejected by schema with a message naming the contradiction, instead of being read as an infra abort."
   },
   "$defs": {
     "finding": {
