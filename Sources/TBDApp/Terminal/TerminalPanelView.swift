@@ -399,7 +399,18 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// over this terminal and should receive scroll/click events instead of
         /// the terminal. Set by `TerminalPanelRepresentable.makeNSView`.
         var shouldSuppressEvents: @MainActor () -> Bool = { false }
-        private var localProcess: LocalProcess?
+        /// Internal rather than private so `TerminalTeardownReapTests` can hand
+        /// this coordinator a real `LocalProcess` and drive `cleanup()`
+        /// headlessly — the reap wiring is otherwise unreachable from a test,
+        /// since everything else about this type needs a live `NSView`.
+        var localProcess: LocalProcess?
+        /// Recorded when `LocalProcess`'s own exit monitor fires — by then it
+        /// has already called `waitpid`, so `cleanup()` must NOT reap this pid
+        /// (it is free, and could have been recycled for another child of this
+        /// process). Both sides run on the main queue with the pinned SwiftTerm
+        /// revision; see `ChildExitObservation` for why it is lock-guarded
+        /// anyway and for the reaper thread that also reads it.
+        private let childExitObservation = ChildExitObservation()
         private var scrollMonitor: Any?
         private var clickMonitor: Any?
         private var fedPreparationMessages: Set<String> = []
@@ -771,9 +782,15 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         @MainActor
         func cleanup() {
             debugLog("PANEL: cleanup for \(panelID.uuidString.prefix(8))")
+            // Idempotent: a second call must not re-run the teardown (it would
+            // reap a pid whose `LocalProcess` this method already released).
+            guard !isTornDown else { return }
             // Before anything else: any in-flight attach establishment must
             // see the teardown at its next await resumption (review H2).
             isTornDown = true
+            // Capture the pid BEFORE anything releases the `LocalProcess` —
+            // it is the only thing that knows it.
+            let ptyChildPid = localProcess?.shellPid ?? 0
             if let monitor = scrollMonitor {
                 NSEvent.removeMonitor(monitor)
                 scrollMonitor = nil
@@ -810,6 +827,26 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                         routingKey: attach.routingKey, generation: attach.generation)
                 }
             }
+            // Release the PTY child's `LocalProcess` and reap the child.
+            //
+            // How the child dies is unchanged by this block. In practice the
+            // dominant path is the `tmuxBridge?.cleanupSession` call above:
+            // it runs `tmux kill-session`, which ends the session this client
+            // is attached to, so the attach client exits on its own. Failing
+            // that, `LocalProcess.deinit` closes the master fd here and the
+            // child exits on the resulting SIGHUP.
+            //
+            // What *is* deliberate is niling `localProcess` rather than
+            // leaving it to ARC. deinit then runs at a known moment and
+            // cancels SwiftTerm's `childMonitor` here, which is what makes
+            // `ChildReaper` the sole `waitpid` waiter for this pid. deinit
+            // never calls `waitpid` itself, so without the reap the child
+            // stays `<defunct>` under TBDApp forever.
+            //
+            // Control-mode panels have no `LocalProcess` at all, so
+            // `ptyChildPid` is 0 for them and `shouldReap` rejects it.
+            localProcess = nil
+            ChildReaper.reap(pid: ptyChildPid, unless: childExitObservation)
         }
 
         /// Render this panel through the control-mode path: request an attach
@@ -1080,6 +1117,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
 
         func processTerminated(_ source: LocalProcess, exitCode: Int32?) {
             debugLog("PANEL: process terminated, exitCode=\(exitCode ?? -1)")
+            // `LocalProcess.processTerminated()` calls `waitpid` before it
+            // calls us, so this child is already reaped and its pid is free to
+            // be recycled — a later `cleanup()` must not wait on it. Recorded
+            // before the `async` below so the flag is set as early as this
+            // callback can set it.
+            childExitObservation.record()
             DispatchQueue.main.async { [weak self] in
                 // This fires when the *attach client* (the on-screen tmux
                 // viewer) dies. A clean exit (code 0) means the view was torn

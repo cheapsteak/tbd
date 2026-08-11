@@ -102,25 +102,61 @@ extension AppState {
             do {
                 let fetched = try await self.daemonClient.listTerminals(worktreeID: delta.worktreeID)
                 guard let terminal = fetched.first(where: { $0.id == delta.terminalID }) else { return }
-                self.appendCreatedTerminal(terminal)
+                self.mergeCreatedTerminal(terminal)
             } catch {
                 logger.error("terminalCreated delta fetch failed for \(delta.terminalID, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
         }
     }
 
-    /// Append a terminal announced by a `.terminalCreated` delta to state,
-    /// add a tab for it, and — when an agent terminal lands while the user is
-    /// still looking at the pre-session hook tab — move the selection to the
-    /// agent (matches the daemon's "active = primary" default).
+    /// Merge a terminal returned by any creation path into local state, add a
+    /// tab for it when needed, and — when an agent terminal lands while the
+    /// user is still looking at the pre-session hook tab — move the selection
+    /// to the agent (matches the daemon's "active = primary" default).
     ///
-    /// Idempotent: re-checks for the terminal so the direct-append path in
-    /// `createTerminal` (which races the delta) never produces duplicates.
-    func appendCreatedTerminal(_ terminal: Terminal) {
+    /// Idempotent: a repeated UUID replaces the earlier terminal snapshot so
+    /// whichever racing path lands last supplies the freshest daemon state.
+    func mergeCreatedTerminal(_ terminal: Terminal) {
         let worktreeID = terminal.worktreeID
-        guard !(terminals[worktreeID] ?? []).contains(where: { $0.id == terminal.id }) else { return }
-        terminalRecoveryBudget.reset(for: terminal.id)
-        terminals[worktreeID, default: []].append(terminal)
+        let previousActiveTabID = explicitActiveTabID(worktreeID: worktreeID)
+        let inserted: Bool
+        if let existingIndex = terminals[worktreeID]?.firstIndex(where: { $0.id == terminal.id }) {
+            terminals[worktreeID]?[existingIndex] = terminal
+            inserted = false
+        } else {
+            terminals[worktreeID, default: []].append(terminal)
+            inserted = true
+        }
+        if inserted {
+            terminalRecoveryBudget.reset(for: terminal.id)
+        }
+
+        let splitRepresentationTabIDs = Set((tabs[worktreeID] ?? []).compactMap { tab -> UUID? in
+            guard let layout = layouts[tab.id],
+                  case .split = layout,
+                  layout.allTerminalIDs().contains(terminal.id) else { return nil }
+            return tab.id
+        })
+
+        // A split layout is the authoritative representation. Otherwise keep
+        // the first standalone root and discard later racing copies.
+        var retainedRoot = false
+        var retainedSplitRootIDs = Set<UUID>()
+        tabs[worktreeID]?.removeAll { tab in
+            guard case .terminal(let terminalID) = tab.content,
+                  terminalID == terminal.id else { return false }
+            if splitRepresentationTabIDs.contains(tab.id) {
+                return !retainedSplitRootIDs.insert(tab.id).inserted
+            }
+            if !splitRepresentationTabIDs.isEmpty {
+                return true
+            }
+            if !retainedRoot {
+                retainedRoot = true
+                return false
+            }
+            return true
+        }
 
         // Add a tab unless the terminal is already represented as a tab root
         // or inside a split layout (same rule as reconcileTabs).
@@ -132,16 +168,18 @@ extension AppState {
                 Tab(id: terminal.id, content: .terminal(terminalID: terminal.id), label: initialTabLabel(for: terminal))
             )
         }
+        repointActiveTab(worktreeID: worktreeID, to: previousActiveTabID)
 
         // When the primary terminal (agent, or shell with skipClaude) arrives
         // while the user is still on the pre-session hook tab, follow it. Any
         // other active tab means the user navigated deliberately — leave the
         // selection alone. The parallel `setup` window never steals selection.
-        if isPrimaryTerminal(terminal),
+        if inserted,
+           isPrimaryTerminal(terminal),
            let activeID = activeTabTerminalID(worktreeID: worktreeID),
            activeID != terminal.id,
            self.terminal(id: activeID, in: worktreeID)?.label == Self.preSessionTerminalLabel,
-           let newIdx = tabs[worktreeID]?.firstIndex(where: { $0.id == terminal.id }) {
+           let newIdx = tabIndexRepresentingTerminal(terminal.id, worktreeID: worktreeID) {
             // The daemon already persisted the primary as the active tab
             // (setActiveTabID in spawnPrimaryTerminals) — only the in-memory
             // index needs to move, so skip setActiveTab's re-persist RPC.
@@ -157,10 +195,30 @@ extension AppState {
         // the persisted order and re-sort. applyStoredOrder follows the
         // active tab by ID, so neither the hand-off above nor a deliberate
         // user selection is clobbered.
-        if shouldReconcileTabOrderFromDaemon(after: terminal) {
+        if inserted, shouldReconcileTabOrderFromDaemon(after: terminal) {
             Task { [weak self] in
                 await self?.refreshStoredTabOrder(worktreeID: worktreeID)
             }
+        }
+    }
+
+    /// Merge a terminal returned by an explicit creation action and select
+    /// whichever root tab currently represents it, including a split root.
+    func mergeCreatedTerminalAndSelect(_ terminal: Terminal) {
+        mergeCreatedTerminal(terminal)
+        if let index = tabIndexRepresentingTerminal(
+            terminal.id, worktreeID: terminal.worktreeID
+        ) {
+            setActiveTab(worktreeID: terminal.worktreeID, tabIndex: index)
+        }
+    }
+
+    private func tabIndexRepresentingTerminal(
+        _ terminalID: UUID, worktreeID: UUID
+    ) -> Int? {
+        tabs[worktreeID]?.firstIndex { tab in
+            (layouts[tab.id] ?? .pane(tab.content))
+                .allTerminalIDs().contains(terminalID)
         }
     }
 
@@ -187,7 +245,7 @@ extension AppState {
     /// converges on the next full refresh or restart, exactly as before.
     func refreshStoredTabOrder(worktreeID: UUID) async {
         do {
-            let response = try await daemonClient.listTabs(worktreeID: worktreeID)
+            let response = try await tabStatesFetcher(worktreeID)
             adoptPersistedTabOrder(worktreeID: worktreeID, order: response.order)
         } catch {
             logger.error("tab order re-fetch failed for \(worktreeID, privacy: .public): \(error.localizedDescription, privacy: .public)")
@@ -250,10 +308,7 @@ extension AppState {
             let size = mainAreaTerminalSize()
             let colorFgBg = appearance?.currentColorFgBg
             let terminal = try await daemonClient.createTerminal(worktreeID: worktreeID, cmd: cmd, cols: size.cols, rows: size.rows, colorFgBg: colorFgBg)
-            terminalRecoveryBudget.reset(for: terminal.id)
-            terminals[worktreeID, default: []].append(terminal)
-            let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id), label: initialTabLabel(for: terminal))
-            tabs[worktreeID, default: []].append(tab)
+            mergeCreatedTerminal(terminal)
         } catch {
             logger.error("Failed to create terminal: \(error)")
             handleConnectionError(error)
@@ -395,10 +450,7 @@ extension AppState {
                 rows: size.rows,
                 colorFgBg: colorFgBg
             )
-            terminalRecoveryBudget.reset(for: terminal.id)
-            terminals[worktreeID, default: []].append(terminal)
-            let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id), label: initialTabLabel(for: terminal))
-            tabs[worktreeID, default: []].append(tab)
+            mergeCreatedTerminal(terminal)
             return terminal
         } catch {
             logger.error("Failed to create Claude terminal: \(error)")
@@ -423,10 +475,7 @@ extension AppState {
                 rows: size.rows,
                 colorFgBg: colorFgBg
             )
-            terminalRecoveryBudget.reset(for: terminal.id)
-            terminals[worktreeID, default: []].append(terminal)
-            let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id), label: initialTabLabel(for: terminal))
-            tabs[worktreeID, default: []].append(tab)
+            mergeCreatedTerminal(terminal)
         } catch {
             logger.error("Failed to create Codex terminal: \(error)")
             handleConnectionError(error)
@@ -451,7 +500,7 @@ extension AppState {
             guard let terminal = rows.first(where: { $0.id == result.terminalID }) else {
                 throw DaemonClientError.invalidResponse
             }
-            appendCreatedTerminal(terminal)
+            mergeCreatedTerminal(terminal)
             if let index = tabs[source.worktreeID]?.firstIndex(where: { tab in
                 (layouts[tab.id] ?? .pane(tab.content))
                     .allTerminalIDs().contains(terminal.id)

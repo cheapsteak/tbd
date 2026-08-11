@@ -73,9 +73,32 @@ struct TerminalRecoveryAppStateTests {
         _ = state.claimAutomaticTerminalRecreation(terminalID: terminalID)
         state.finishTerminalRecreation(terminalID: terminalID)
 
-        state.appendCreatedTerminal(terminal(id: terminalID, worktreeID: worktreeID))
+        state.mergeCreatedTerminal(terminal(id: terminalID, worktreeID: worktreeID))
 
         #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) == .claimed(automaticAttempt: 1))
+    }
+
+    @Test("repeated UUID merge preserves consumed automatic budget")
+    func repeatedUUIDMergePreservesConsumedAutomaticBudget() {
+        let state = AppState()
+        let worktreeID = UUID()
+        let terminalID = UUID()
+        state.mergeCreatedTerminal(terminal(
+            id: terminalID,
+            worktreeID: worktreeID,
+            label: "Starting Shell"
+        ))
+
+        #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
+            .claimed(automaticAttempt: 1))
+        state.finishTerminalRecreation(terminalID: terminalID)
+
+        let refreshed = terminal(id: terminalID, worktreeID: worktreeID, label: "Shell")
+        state.mergeCreatedTerminal(refreshed)
+
+        #expect(state.terminals[worktreeID] == [refreshed])
+        #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
+            .claimed(automaticAttempt: 2))
     }
 
     @Test("manual recreation remains available after automatic exhaustion")
@@ -94,13 +117,13 @@ struct TerminalRecoveryAppStateTests {
         #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) == .budgetExhausted)
     }
 
-    private func terminal(id: UUID, worktreeID: UUID) -> Terminal {
+    private func terminal(id: UUID, worktreeID: UUID, label: String = "Shell") -> Terminal {
         Terminal(
             id: id,
             worktreeID: worktreeID,
             tmuxWindowID: "@1",
             tmuxPaneID: "%1",
-            label: "Shell",
+            label: label,
             kind: .shell
         )
     }

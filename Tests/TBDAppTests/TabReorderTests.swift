@@ -110,6 +110,26 @@ import TBDShared
 }
 
 @MainActor
+@Test func applyStoredOrderRepairsDuplicateCachedOrder() {
+    // Tier 1: deterministic in-process state only.
+    let state = AppState()
+    let worktreeID = UUID()
+    let known = [UUID(), UUID()]
+    let unknown = [UUID(), UUID()]
+    state.tabs[worktreeID] = [unknown[0], known[0], unknown[1], known[1]].map {
+        Tab(id: $0, content: .terminal(terminalID: $0), label: nil)
+    }
+    state.activeTabIndices[worktreeID] = 0
+    state.worktreeTabOrders[worktreeID] = [known[1], known[0], known[1]]
+
+    state.applyStoredOrder(worktreeID: worktreeID)
+
+    #expect(state.worktreeTabOrders[worktreeID] == [known[1], known[0]])
+    #expect(state.tabs[worktreeID]?.map(\.id) == [known[1], known[0], unknown[0], unknown[1]])
+    #expect(state.explicitActiveTabID(worktreeID: worktreeID) == unknown[0])
+}
+
+@MainActor
 @Test func applyStoredOrderIsNoOpWhenStoredOrderEmpty() {
     let state = AppState()
     let worktreeID = UUID()

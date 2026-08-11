@@ -165,11 +165,7 @@ extension AppState {
                 resumeSessionID: sessionId,
                 colorFgBg: colorFgBg
             )
-            terminals[worktreeID, default: []].append(terminal)
-            let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id))
-            tabs[worktreeID, default: []].append(tab)
-            let index = (tabs[worktreeID]?.count ?? 1) - 1
-            setActiveTab(worktreeID: worktreeID, tabIndex: index)
+            mergeCreatedTerminalAndSelect(terminal)
             historyActiveWorktrees.remove(worktreeID)
         } catch {
             handleConnectionError(error)
@@ -184,11 +180,7 @@ extension AppState {
             let size = mainAreaTerminalSize()
             let terminal = try await daemonClient.reviveTerminalHistory(
                 worktreeID: worktreeID, id: entry.id, cols: size.cols, rows: size.rows)
-            terminals[worktreeID, default: []].append(terminal)
-            let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id), label: initialTabLabel(for: terminal))
-            tabs[worktreeID, default: []].append(tab)
-            let index = (tabs[worktreeID]?.count ?? 1) - 1
-            setActiveTab(worktreeID: worktreeID, tabIndex: index)
+            mergeCreatedTerminalAndSelect(terminal)
             historyActiveWorktrees.remove(worktreeID)
         } catch {
             handleConnectionError(error)
