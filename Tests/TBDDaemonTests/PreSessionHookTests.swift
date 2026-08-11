@@ -1358,6 +1358,37 @@ struct PreSessionHookTests {
         #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty,
                 "its terminal rows must be deleted with it")
     }
+
+    /// A daemon restart during a remote create must leave a resolvable row.
+    /// This sweep and reconcile are the only things that resolve a `.creating`
+    /// row, reconcile is fenced from remote rows, and a remote row has no
+    /// checkout to inspect — so skipping it here would spin the lane forever.
+    /// It gets the terminal state the creation flow already defines instead,
+    /// and is not deleted: a vanished row cannot be told apart from a create
+    /// that never ran.
+    @Test func recoveryMarksARemoteCreatingRowFailed() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+
+        let remote = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "lane", branch: "tbd/lane",
+            provider: "agentbox", sessionID: "s-1", status: .creating)
+
+        let resumed = await lifecycle.recoverCreatingWorktrees()
+        #expect(resumed.isEmpty, "a remote row has no pre-session wait to resume")
+        let after = try #require(try await db.worktrees.get(id: remote.id))
+        #expect(after.status == .failed,
+                "a remote .creating row must reach a terminal state, not be skipped forever")
+    }
+    // The local arms are unchanged and stay covered by the tests above —
+    // `recoveryResumesOrphanedPreSessionWait` in particular proves a local
+    // `.creating` row still resumes rather than being caught by the new guard.
 }
 }
 
