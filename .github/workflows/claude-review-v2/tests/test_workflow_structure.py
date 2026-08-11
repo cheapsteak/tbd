@@ -650,3 +650,74 @@ def test_no_expression_bearing_scalar_approaches_the_cap() -> None:
                     "expression cap. Move the text into a compose step output "
                     "(see COMPOSE_STEP) instead of growing the inline scalar."
                 )
+
+
+# --- the compose step, executed for real -------------------------------------
+#
+# The template assertions above read the compose step's TEXT; these run its
+# shell (the same extract-and-execute pattern as the validate-step cases), so a
+# broken substitution — a renamed placeholder, a heredoc quoting slip, a
+# malformed $GITHUB_OUTPUT write — fails here instead of shipping a literal
+# __TOKEN__ into the prompt of a required check.
+
+_COMPOSE_ENV = {
+    "REPOSITORY": "acme/acme-app",
+    "PR_NUMBER": "424",
+    "BASE_REF": "main",
+    "MERGE_BASE": "a" * 40,
+}
+
+
+def _run_compose_step(
+    tmp_path: Path, env_overrides: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir()
+    github_output = tmp_path / "github-output.txt"
+    github_output.touch()
+    script = tmp_path / "compose.sh"
+    script.write_text(run_block(read_workflow(), COMPOSE_STEP), encoding="utf-8")
+    env = {
+        "PATH": os.environ["PATH"],
+        "RUNNER_TEMP": str(runner_temp),
+        "GITHUB_OUTPUT": str(github_output),
+        **_COMPOSE_ENV,
+        **(env_overrides or {}),
+    }
+    return subprocess.run(
+        ["bash", "-e", str(script)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_the_compose_step_substitutes_every_placeholder(tmp_path: Path) -> None:
+    proc = _run_compose_step(tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    prompt = (tmp_path / "runner-temp" / "claude-review-v2" / "prompt.txt").read_text(
+        encoding="utf-8"
+    )
+    assert "acme/acme-app/pull/424" in prompt
+    assert f"git diff {'a' * 40} HEAD" in prompt
+    assert "origin/main" in prompt  # __BASE_REF__ substituted where referenced
+    assert not re.search(r"__[A-Z_]+__", prompt), "unsubstituted placeholder shipped"
+    # The multiline output is a well-formed heredoc the session step can read.
+    output_lines = (tmp_path / "github-output.txt").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    assert output_lines[0] == "prompt<<CLAUDE_REVIEW_PROMPT_EOF"
+    assert output_lines[-1] == "CLAUDE_REVIEW_PROMPT_EOF"
+    assert "\n".join(output_lines[1:-1]) == prompt.rstrip("\n")
+
+
+def test_the_compose_step_refuses_an_empty_substitution_value(
+    tmp_path: Path,
+) -> None:
+    # An empty MERGE_BASE would compose a prompt telling the session to run
+    # `git diff  HEAD` — the exact class of quiet corruption the self-check
+    # exists to stop. The step must fail, not compose.
+    proc = _run_compose_step(tmp_path, {"MERGE_BASE": ""})
+    assert proc.returncode != 0
+    assert not (tmp_path / "github-output.txt").read_text(encoding="utf-8").strip()
