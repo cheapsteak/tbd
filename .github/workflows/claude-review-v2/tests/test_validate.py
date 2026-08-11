@@ -1787,3 +1787,155 @@ def test_a_rejected_file_with_a_forged_name_stays_one_error_line(
     assert len(error_lines) == 1
     assert "findings-a\\n::error::forged.json" in error_lines[0]
     assert not any(line.startswith("::error::forged") for line in lines)
+
+
+def test_the_strip_warning_does_not_claim_the_file_validated(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The annotation is printed BEFORE the strict pass, so it cannot claim the
+    # file validated — sometimes the very next line rejects it. Here a `dropped`
+    # entry spells its reason `reason` instead of `note`: the unknown key is
+    # stripped and annotated, and then the file fails closed for want of the
+    # `note` a dropped finding must carry. The annotation stays (it is useful
+    # context on a rejected file); what it asserts is narrowed to what has
+    # actually happened by the time it prints.
+    data = _valid_result()
+    data["disposition"] = [
+        {"id": "correctness-1", "action": "dropped", "reason": "premise refuted"}
+    ]
+    path = _write(tmp_path / "review-result.json", data)
+    with pytest.raises(SchemaValidationError, match="note"):
+        validate_result_file(path)
+
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 1
+    assert "reason" in lines[0]
+    assert "validated" not in lines[0]
+    assert "kept for the validation that follows" in lines[0]
+
+
+# --- the sanitize invariant is per-SITE, not per-helper ---------------------
+#
+# `_sanitize_log_text` being correct proves nothing about a print that forgets
+# to call it, and a call site is exactly the kind of thing a later edit drops
+# while the helper's own tests stay green. So every site that interpolates
+# model-written text gets its own test, each crafting input that carries
+# "\n::error::forged" through that ONE site — a specialist name, a finding id, a
+# value quoted back by a schema error, an exception message — and each failing
+# if the call is removed from that site alone.
+
+_FORGED = "\n::error::forged"
+
+
+def _forged_lines(captured: str) -> list[str]:
+    return captured.splitlines()
+
+
+def _assert_one_line_and_inert(lines: list[str], needle: str) -> None:
+    matches = [line for line in lines if needle in line]
+    assert len(matches) == 1, f"expected exactly one line carrying {needle!r}"
+    assert "\\n::error::forged" in matches[0]
+    assert not any(line.startswith("::error::forged") for line in lines)
+
+
+def test_a_forged_specialist_name_cannot_split_the_unexpected_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The broadest surface of the four: `specialist` is free-form model-authored
+    # content inside a file that passes the schema, and the warning it feeds
+    # prints on a run that goes on to PASS.
+    _write(
+        tmp_path / "findings-correctness.json",
+        {"specialist": f"acme{_FORGED}", "findings": []},
+    )
+    _write_specialist_file(tmp_path, "conventions")
+    _write_empty_result(tmp_path)
+    assert _run_main(monkeypatch, tmp_path, "conventions") == 0
+
+    lines = _forged_lines(capsys.readouterr().out)
+    _assert_one_line_and_inert(lines, "unexpected specialist(s)")
+
+
+def test_a_forged_finding_id_cannot_split_the_disposition_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Finding ids are model-authored and reach the log whenever the merge fails
+    # to account for one.
+    _write(
+        tmp_path / "findings-correctness.json",
+        {
+            "specialist": "correctness",
+            "findings": [_high_finding(f"correctness-1{_FORGED}")],
+        },
+    )
+    _write_empty_result(tmp_path)
+    assert _run_main(monkeypatch, tmp_path, None) == 1
+
+    lines = _forged_lines(capsys.readouterr().err)
+    _assert_one_line_and_inert(lines, "disposition list does not account")
+
+
+def test_a_forged_result_error_cannot_split_its_line(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The result-error site's own test, reached by injecting the raise.
+
+    No crafted review-result.json reaches it. Two things stand in the way, and
+    both are worth naming because either could stop being true. jsonschema
+    `repr()`s the offending value into its message, so a newline a model writes
+    into a value arrives already escaped; and the only raw interpolation in a
+    schema error is the FILE PATH, which for the merged result is the
+    workflow's own `--result-file` literal rather than anything the session
+    named. (The specialist files are different — their names come from the
+    session's Write calls through a glob, which is why the sibling test above
+    can craft that one for real.)
+
+    The sanitize call stays and is pinned anyway: it costs nothing, and the
+    guarantee it backstops is two accidents deep — a schema gaining
+    `patternProperties` would put a model-written key straight into the
+    instance path this line prints.
+    """
+    _write_specialist_file(tmp_path, "correctness")
+    _write_empty_result(tmp_path)
+
+    def _raise(_path: str) -> dict:
+        raise SchemaValidationError(f"review-result.json{_FORGED}: bad")
+
+    monkeypatch.setattr(validate, "validate_result_file", _raise)
+    assert _run_main(monkeypatch, tmp_path, None) == 1
+
+    lines = _forged_lines(capsys.readouterr().err)
+    _assert_one_line_and_inert(lines, "review-result.json")
+
+
+def test_a_forged_verdict_error_cannot_split_its_line(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The verdict site's own test, reached by patching the raiser.
+
+    `verdict_from_findings` quotes the offending finding's id and severity, but
+    no schema-VALID file can reach it: `severity` is an enum, so anything the
+    function would reject the strict pass rejected first. The site is
+    defense-in-depth against that guarantee being weakened later, and its
+    sanitize call deserves a test regardless — so the raise is injected rather
+    than smuggled through a file that cannot exist today.
+    """
+    _write_specialist_file(tmp_path, "correctness")
+    _write_empty_result(tmp_path)
+
+    def _raise(_findings: list[dict]) -> str:
+        raise ValueError(f"finding 'x{_FORGED}' has unknown severity")
+
+    monkeypatch.setattr(validate, "verdict_from_findings", _raise)
+    assert _run_main(monkeypatch, tmp_path, None) == 1
+
+    lines = _forged_lines(capsys.readouterr().err)
+    _assert_one_line_and_inert(lines, "unknown severity")

@@ -245,6 +245,14 @@ def _sanitize_log_text(text: str) -> str:
     middles — a template that begins with a safe prefix stops being one line the
     moment an interpolated newline splits it. Escaping keeps each diagnostic on
     one line and leaves any forged directive as inert text inside it.
+
+    Applied at every diagnostic print rather than only the ones that carry model
+    text today, so the rule needs no per-site argument to stay true. Two sites
+    are currently no-ops and are wrapped anyway: `ok: <result file>` prints the
+    workflow's own `--result-file` literal, and the missing-specialist report
+    prints only names from `--expected-specialists` (a rejected file's name
+    decides which clause a lens lands in, never the text). Both would become
+    live the moment either input started carrying a session-chosen name.
     """
     return text.replace("\r", "\\r").replace("\n", "\\n")
 
@@ -413,6 +421,13 @@ def _validate_file(path: str, schema_filename: str) -> dict:
     # The whole composed line is sanitized, not just its variable middle: the
     # file path is model-written as well (the specialist names its own file with
     # the Write tool, and the workflow's glob matches a newline-bearing name).
+    #
+    # It prints BEFORE the strict pass, so it must not claim the file validated
+    # — the next line may reject it, as when a `dropped` entry spells its reason
+    # `reason` and loses the `note` the schema demands. The annotation is still
+    # worth printing on a file that goes on to fail (the stripped key is often
+    # the context for the rejection), so the wording is narrowed to what has
+    # actually happened by the time it appears rather than the print moved.
     stripped = strip_unknown_keys(data, schema, validator_cls)
     if stripped:
         sites = "; ".join(
@@ -422,8 +437,8 @@ def _validate_file(path: str, schema_filename: str) -> dict:
         print(
             _sanitize_log_text(
                 f"::warning::{path}: ignored unexpected key(s) not in the "
-                f"schema: {sites} — known fields were kept and validated, the "
-                "unexpected keys' content was dropped"
+                f"schema: {sites} — known fields were kept for the validation "
+                "that follows, the unexpected keys' content was dropped"
             )
         )
 
