@@ -31,6 +31,14 @@ interaction, …). -->
 
 <!-- The fix, and why this approach over the alternatives considered. -->
 
+## Assumptions
+
+<!-- Optional — delete if none worth recording. Things this change takes to be
+true but does not enforce or verify: environment invariants, other components'
+behavior, usage patterns, scale. State each so a future reader debugging a
+misbehavior can check whether it still holds — "assumes X; if X stops being
+true, Y breaks". -->
+
 ## Evidence & verification
 
 <!-- How we know the fix works — not just that nothing else broke:
@@ -63,6 +71,14 @@ Bullets are fine. -->
 
 <!-- Required when the feature is gated; delete otherwise. Flag name, default
 (should be OFF), how to enable it for the soak, and the graduation plan. -->
+
+## Assumptions
+
+<!-- Optional — delete if none worth recording. Things this change takes to be
+true but does not enforce or verify: environment invariants, other components'
+behavior, usage patterns, scale. State each so a future reader debugging a
+misbehavior can check whether it still holds — "assumes X; if X stops being
+true, Y breaks". -->
 
 ## Evidence & verification
 
