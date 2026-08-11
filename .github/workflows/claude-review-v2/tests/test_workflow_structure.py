@@ -949,3 +949,38 @@ def test_the_two_schemas_declare_the_same_finding_keys() -> None:
         "merge copies specialist findings forward, so the result schema must "
         "accept every key the findings schema does"
     )
+
+
+def test_the_compose_step_fails_on_a_placeholder_it_does_not_know(
+    tmp_path: Path,
+) -> None:
+    # Mutation-check of the production self-check. Rename one template token so
+    # the substitution loop (driven by the fixed `keys` tuple) misses it: the
+    # step itself must fail — by generic scan, not tuple re-walk — rather than
+    # ship the raw token into the prompt of a required check. The literal
+    # `__MERGE_BASE__` appears only in the template (the python builds its
+    # tokens from env names), so the rename cannot touch the substitution code.
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir()
+    github_output = tmp_path / "github-output.txt"
+    github_output.touch()
+    script_text = run_block(read_workflow(), COMPOSE_STEP).replace(
+        "__MERGE_BASE__", "__MERGE_BASE_SHA__", 1
+    )
+    script = tmp_path / "compose.sh"
+    script.write_text(script_text, encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", "-e", str(script)],
+        cwd=tmp_path,
+        env={
+            "PATH": os.environ["PATH"],
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_OUTPUT": str(github_output),
+            **_COMPOSE_ENV,
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode != 0
+    assert "__MERGE_BASE_SHA__" in proc.stderr
+    assert not github_output.read_text(encoding="utf-8").strip()

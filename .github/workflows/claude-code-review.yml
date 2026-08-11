@@ -539,6 +539,7 @@ jobs:
           CLAUDE_REVIEW_PROMPT_TEMPLATE_EOF
           python3 - <<'PY'
           import os
+          import re
           base = os.path.join(os.environ["RUNNER_TEMP"], "claude-review-v2")
           with open(os.path.join(base, "prompt-template.txt"), encoding="utf-8") as fh:
               text = fh.read()
@@ -550,11 +551,13 @@ jobs:
               value = os.environ[key]
               assert value.strip(), f"empty substitution value for {key}"
               text = text.replace(f"__{key}__", value)
-          # Self-check EVERY placeholder, from the same tuple the loop used: a
-          # renamed or typo'd token would otherwise ship literally into the
-          # prompt of a required check with nothing catching it.
-          for key in keys:
-              assert f"__{key}__" not in text, f"unsubstituted placeholder __{key}__"
+          # Self-check by GENERIC scan, deliberately not a re-walk of `keys`: a
+          # placeholder renamed or added in the template without updating the
+          # tuple is invisible to a tuple-driven check, and this step is what
+          # feeds the required check's prompt — it must fail closed on its own,
+          # not lean on a test suite that is not among the required contexts.
+          leftover = sorted(set(re.findall(r"__[A-Z_]+__", text)))
+          assert not leftover, f"unsubstituted placeholder(s) in the prompt: {leftover}"
           with open(os.path.join(base, "prompt.txt"), "w", encoding="utf-8") as fh:
               fh.write(text)
           PY
