@@ -88,20 +88,35 @@ func usageAgeMarker(fetchedAt: Date?, now: Date = Date()) -> String? {
     return "(updated \(hours / 24)d ago)"
 }
 
-/// The one-line stderr note `tbd profile list --refresh` emits when the
-/// refresh RPC refuses (poller not yet constructed during daemon startup, a
-/// mock daemon, a transport failure). The listing continues from persisted
-/// snapshots, so the note names where to read the resulting staleness from.
-/// Ends in a newline; callers write it to stderr verbatim.
-func refreshFailureNote(_ error: Error) -> String {
+/// The exact JSON text `tbd profile list --json` prints: the RPC result inside
+/// the versioned envelope this CLI's contract promises
+/// (`docs/capacity-facts.md`). The wrapping decision and the contract version
+/// live here, in one place, so the command body is a bare print of this and
+/// tests can assert against the real composed bytes.
+func profileListJSONOutput(_ result: ModelProfileListResult) -> String? {
+    jsonString(VersionedJSONEnvelope(
+        schemaVersion: profileListSchemaVersion,
+        payload: result
+    ))
+}
+
+/// Whether a failed usage-refresh may be tolerated, and if so the one-line
+/// note `tbd profile list --refresh` writes to stderr before listing anyway.
+/// Ends in a newline; callers write it verbatim.
+///
+/// Only a `CLIError.rpcError` is tolerable: the daemon answered and refused —
+/// its OAuth usage poller is not constructed yet during the startup window, or
+/// it is a mock daemon. The persisted snapshots are still there to list, and
+/// the note names where their staleness shows.
+///
+/// Every other error means the daemon never answered. Returning nil rethrows
+/// it, so `--refresh` fails fast exactly as a plain `profile list` would —
+/// promising "listing persisted snapshots" on stderr and then exiting nonzero
+/// with empty stdout would be a lie told one line before it was broken.
+func refreshFailureNote(for error: Error) -> String? {
     // CLIError.rpcError already prefixes "Error: "; strip it so the note reads
     // as one sentence rather than two stacked prefixes.
-    let detail: String
-    if case CLIError.rpcError(let message) = error {
-        detail = message
-    } else {
-        detail = "\(error)"
-    }
+    guard case CLIError.rpcError(let detail) = error else { return nil }
     return "warning: usage refresh failed (\(detail)); listing persisted snapshots — "
         + "read each profile's fetchedAt and statusKind for staleness\n"
 }
@@ -220,6 +235,11 @@ struct ProfileList: AsyncParsableCommand {
             // command would hand a scripted caller nothing at all — worse than
             // slightly stale facts. The refusal goes to stderr so stdout stays
             // parseable. Contract: docs/capacity-facts.md.
+            //
+            // Tolerance stops at a refusal the daemon actually sent: an
+            // unreachable daemon rethrows here, because the list call below
+            // would fail anyway and stderr must not promise a listing that
+            // never arrives. `refreshFailureNote(for:)` draws that line.
             do {
                 _ = try client.call(
                     method: RPCMethod.modelProfileUsageRefresh,
@@ -227,7 +247,8 @@ struct ProfileList: AsyncParsableCommand {
                     resultType: ModelProfileUsageRefreshResult.self
                 )
             } catch {
-                FileHandle.standardError.write(Data(refreshFailureNote(error).utf8))
+                guard let note = refreshFailureNote(for: error) else { throw error }
+                FileHandle.standardError.write(Data(note.utf8))
             }
         }
 
@@ -237,11 +258,11 @@ struct ProfileList: AsyncParsableCommand {
         )
 
         if json {
-            // Versioned contract surface — see docs/capacity-facts.md.
-            printJSON(VersionedJSONEnvelope(
-                schemaVersion: profileListSchemaVersion,
-                payload: result
-            ))
+            // Versioned contract surface — composed by profileListJSONOutput,
+            // printed verbatim. See docs/capacity-facts.md.
+            if let output = profileListJSONOutput(result) {
+                print(output)
+            }
             return
         }
         if result.profiles.isEmpty {

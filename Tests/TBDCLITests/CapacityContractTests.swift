@@ -6,10 +6,17 @@ import TBDShared
 
 /// The stated contract of `tbd profile list --json` (schemaVersion 1) and the
 /// `profileID` field of `tbd terminal list --json` — documented in
-/// `docs/capacity-facts.md`. Every assertion here runs the SAME composition
-/// path the commands use (`jsonString`, and the envelope for the versioned
-/// one), then parses the resulting text, so the tests break if the printed
-/// bytes change — not merely if a Swift model changes.
+/// `docs/capacity-facts.md`.
+///
+/// What is covered: the composition itself. `profileListJSONOutput` is the
+/// function `ProfileList.run()` calls — it owns the envelope wrapping and the
+/// contract version — and `jsonString` is what `printJSON` composes with, so
+/// these tests parse the same bytes a caller would read on stdout. Drop the
+/// envelope, change the version, or rename a field, and they go red.
+///
+/// What is not: the commands need a live daemon, so the last hop — `run()`
+/// printing this function's output, and `TerminalList.run()` printing
+/// `printJSON(terminals)` — is a one-line print each, verified by reading.
 @Suite("CapacityContract")
 struct CapacityContractTests {
 
@@ -77,15 +84,14 @@ struct CapacityContractTests {
 
     // MARK: - Composition helpers (the real command path)
 
-    /// Compose exactly what `ProfileList.run()` prints for `--json`, then
-    /// parse it back into untyped JSON.
+    /// Run the result through the command's own composition function, then
+    /// parse the text back into untyped JSON. The envelope is NOT built here —
+    /// `profileListJSONOutput` builds it, which is the point: a revert of the
+    /// wrapping reds every assertion below.
     private func composedProfileListJSON(
         _ result: ModelProfileListResult
     ) throws -> [String: Any] {
-        let text = try #require(jsonString(VersionedJSONEnvelope(
-            schemaVersion: profileListSchemaVersion,
-            payload: result
-        )))
+        let text = try #require(profileListJSONOutput(result))
         let data = try #require(text.data(using: .utf8))
         return try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
@@ -257,8 +263,9 @@ struct CapacityContractTests {
 
     // MARK: - Refresh is an optimization, not a precondition
 
-    @Test func refreshFailureNote_namesTheCauseAndWhereStalenessShows() {
-        let note = refreshFailureNote(CLIError.rpcError("OAuth usage poller is not running"))
+    @Test func refreshFailureNote_toleratesADaemonRefusalAndNamesTheCause() throws {
+        let note = try #require(
+            refreshFailureNote(for: CLIError.rpcError("OAuth usage poller is not running")))
         #expect(note.hasSuffix("\n"))
         #expect(note.hasPrefix("warning: usage refresh failed ("))
         #expect(note.contains("OAuth usage poller is not running"))
@@ -270,13 +277,17 @@ struct CapacityContractTests {
         #expect(!note.contains("Error: "))
     }
 
-    @Test func refreshFailureNote_carriesANonCLIErrorVerbatim() {
+    @Test func refreshFailureNote_rethrowsWhenTheDaemonNeverAnswered() {
+        // No note means the command rethrows: a transport failure would fail
+        // the list call a line later anyway, so promising a listing on stderr
+        // and then exiting nonzero with empty stdout is the one outcome worse
+        // than failing fast.
         struct Transport: Error, CustomStringConvertible {
             var description: String { "connection refused" }
         }
-        let note = refreshFailureNote(Transport())
-        #expect(note.contains("connection refused"))
-        #expect(note.hasSuffix("\n"))
+        #expect(refreshFailureNote(for: Transport()) == nil)
+        // An argument error is likewise not a daemon refusal.
+        #expect(refreshFailureNote(for: CLIError.invalidArgument("no such profile")) == nil)
     }
 
     // MARK: - The terminal to profile join

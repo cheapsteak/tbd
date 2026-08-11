@@ -44,9 +44,17 @@ nonzero with the refusing condition named on stderr.
   snapshot fields, and new bucket `kind` values. Unknown bucket kinds flow
   through from the usage API untouched by design, so new windows appear
   without a TBD release.
-- **A field never changes meaning or units** – `percent` stays a 0–100
-  utilization number; timestamps stay ISO 8601; an enum value already emitted
-  keeps its sense.
+- **A field never changes meaning within a version** – timestamps stay ISO
+  8601, an enum value already emitted keeps its sense, and a field TBD computes
+  keeps computing the same thing.
+- **Provider values are passed through as data, not restated as TBD's** –
+  `percent`, `severity`, and bucket `kind` come from the usage API and are
+  emitted verbatim. TBD promises only not to reinterpret or rescale them
+  within a version: the observed scale for `percent` is 0–100 utilization, and
+  if the provider ever changed it, the new scale would surface here as-is
+  rather than being silently converted. Read them as the provider's numbers,
+  and prefer relative judgments (this profile against itself over time) over
+  hard-coded absolute thresholds.
 - **Removing a field, or changing what one means, requires a version bump** –
   a consumer that branches on `schemaVersion == 1` will not be surprised
   silently.
@@ -102,10 +110,9 @@ itself two different states — three in all, each told apart from fields alread
 in the payload:
 
 - **Durably untracked** – `kind` is not `oauth`, or `loginIdentity` is absent.
-  `usageSnapshot` is absent and will stay absent. API-key and Bedrock profiles
-  have no usage API to poll at all, and an OAuth profile nobody has run
-  `/login` into has no credential to poll with. No numbers are coming without
-  operator action — a login, or a different profile.
+  API-key and Bedrock profiles have no usage API to poll at all, and an OAuth
+  profile nobody is logged into has no credential to poll with. No numbers are
+  coming without operator action — a login, or a different profile.
 - **Tracked, not yet fetched** – `kind` is `oauth`, `loginIdentity` is present,
   and `usageSnapshot` is still absent. The poller has this profile but no
   attempt has landed yet: the daemon started moments ago, or the login just
@@ -120,6 +127,17 @@ A program that collapses these into one "no data" bucket will treat an
 untracked Bedrock lane, a daemon that has been up for ten seconds, and an
 account whose token just expired as the same thing — and only the last of the
 three warrants telling an operator anything.
+
+**`loginIdentity` decides "untracked", even against a snapshot that is still
+there.** A profile can briefly show an absent `loginIdentity` alongside a
+present `usageSnapshot` — even one whose `statusKind` is `ok`. The poller
+seeds persisted snapshots when the daemon starts and prunes the ones that are
+no longer eligible on its next full sweep, so after a logout, or a restart
+following one, the old snapshot outlives the credential for up to one sweep
+interval. It is a ghost: the numbers describe an account nothing is running
+under any more, and it disappears on its own. Take the absent `loginIdentity`
+as authoritative and read that profile as durably untracked, whatever the
+lingering snapshot says.
 
 ## The usage snapshot
 
@@ -170,8 +188,10 @@ Each element of `buckets` is one rate-limit window as the usage API names it:
   applies to (e.g. `"Fable"`). Absent when the bucket is not model-scoped.
 - **`group`** – the API's grouping label (`session`, `weekly`). Absent if the
   API omits it.
-- **`percent`** – utilization of this window, a JSON number on a **0–100**
-  scale. `100` means the window is spent.
+- **`percent`** – utilization of this window, a JSON number carrying the
+  provider's own value. On observed responses the scale is 0–100, where `100`
+  means the window is spent. TBD does not rescale it (see "The versioning
+  promise").
 - **`resetsAt`** – ISO 8601 instant when the window resets. **Absent when the
   API sent null**, which happens for a scoped window that has not been used.
   Absent is not "resets now."
