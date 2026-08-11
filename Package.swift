@@ -28,6 +28,15 @@ let package = Package(
         // property (PR #531) hasn't shipped in a tagged release yet. Switch back
         // to `from: "1.14.0"` (or whichever) once SwiftTerm cuts a release that
         // includes commit dae32cc.
+        //
+        // Re-verify `Sources/TBDApp/Terminal/ChildReaper.swift` on any bump:
+        // it exists because at this revision `LocalProcess` calls `waitpid`
+        // only from its `DispatchSourceProcess` (`.exit`) handler, and both
+        // `deinit` and `terminate()` cancel that source before the child
+        // actually exits — so TBD must reap the PTY child itself. If a later
+        // revision reaps its own children, `ChildReaper` becomes a competing
+        // waiter on a pid the OS may have recycled, which is worse than the
+        // leak it fixes. Its doc comment names the exact lines to re-read.
         .package(url: "https://github.com/migueldeicaza/SwiftTerm", revision: "dae32cc8f9bcda15713f4091bb2ea7e11f6dd57c"),
         .package(url: "https://github.com/raspu/Highlightr", from: "2.2.1"),
         .package(url: "https://github.com/siteline/swiftui-introspect", from: "1.0.0"),

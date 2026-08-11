@@ -79,9 +79,20 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
     final class Coordinator: NSObject, TerminalViewDelegate, LocalProcessDelegate, @unchecked Sendable {
         weak var terminalView: TerminalView?
         var onExit: ((Int32?) -> Void)?
-        private var localProcess: LocalProcess?
+        /// Internal rather than private so `TerminalTeardownReapTests` can hand
+        /// this coordinator a real `LocalProcess` and drive `cleanup()`
+        /// headlessly — the reap wiring is otherwise unreachable from a test,
+        /// since `start()` needs a live `TerminalView`.
+        var localProcess: LocalProcess?
         private var started = false
         private var tornDown = false
+        /// Recorded when `LocalProcess`'s own exit monitor fires — by then it
+        /// has already called `waitpid`, so `cleanup()` must NOT reap this pid
+        /// (it is free, and could have been recycled for another child of this
+        /// process). Both sides run on the main queue with the pinned SwiftTerm
+        /// revision; see `ChildExitObservation` for why it is lock-guarded
+        /// anyway and for the reaper thread that also reads it.
+        private let childExitObservation = ChildExitObservation()
 
         @MainActor
         func start(terminalView: TerminalView, argv: [String], environment: [String: String]) {
@@ -112,7 +123,13 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
         }
 
         func cleanup() {
+            // Idempotent: a second call must not re-run the teardown (it would
+            // reap a pid whose `LocalProcess` this method already released).
+            guard !tornDown else { return }
             tornDown = true
+            // Capture the pid BEFORE releasing our reference — `LocalProcess`
+            // is the only thing that knows it.
+            let pid = localProcess?.shellPid ?? 0
             // Explicit terminate() — SwiftTerm's LocalProcess.deinit says
             // outright that it does NOT send SIGTERM (see its doc comment):
             // "we intentionally don't send SIGTERM here; terminate() remains
@@ -128,11 +145,24 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
             // unaffected (docs/remote-provider-contract.md § attach).
             localProcess?.terminate()
             localProcess = nil
+            // terminate() cancels `LocalProcess`'s exit monitor (via
+            // childStopped()) before the SIGTERM it just sent can land, so
+            // nothing left will `waitpid` this child — that cancellation is
+            // also what makes `ChildReaper` its sole waiter. Without the reap
+            // it stays `<defunct>` under TBDApp forever.
+            ChildReaper.reap(pid: pid, unless: childExitObservation)
         }
 
         // MARK: - LocalProcessDelegate
 
         func processTerminated(_ source: LocalProcess, exitCode: Int32?) {
+            // `LocalProcess.processTerminated()` calls `waitpid` before it
+            // calls us, so this child is already reaped and its pid is free to
+            // be recycled — a later `cleanup()` must not wait on it, and the
+            // `terminate()` below must not be read as re-killing it. Recorded
+            // before the `async` so the flag is set as early as this callback
+            // can set it.
+            childExitObservation.record()
             DispatchQueue.main.async { [weak self] in
                 guard let self, !self.tornDown else { return }
                 // The child already exited, but `LocalProcess` doesn't close
