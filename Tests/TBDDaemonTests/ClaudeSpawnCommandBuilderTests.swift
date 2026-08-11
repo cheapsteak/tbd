@@ -630,6 +630,224 @@ struct ClaudeSpawnCommandBuilderTests {
         #expect(!r.command.contains("--plugin-dir"))
     }
 
+    // MARK: - sessionName / --name (cross-session peer registry)
+
+    // Field-measured on CLI 2.1.227: `claude --name "TBD Name Probe"` writes
+    // `"name": "TBD Name Probe"` verbatim into its peer-registry row and omits
+    // the `"nameSource": "derived"` marker the cwd-slug default carries. So the
+    // string TBD passes here is exactly the address peers see in `ListAgents`.
+
+    @Test("resume branch emits --name after --dangerously-skip-permissions")
+    func resumeEmitsSessionName() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: "abc-123",
+            freshSessionID: nil,
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh",
+            sessionName: "acme-worker"
+        )
+        #expect(r.command == "claude --resume abc-123 --dangerously-skip-permissions --name 'acme-worker'")
+    }
+
+    @Test("fresh branch emits --name after --dangerously-skip-permissions")
+    func freshEmitsSessionName() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "sid-1",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh",
+            sessionName: "acme-worker"
+        )
+        #expect(r.command == "claude --session-id sid-1 --dangerously-skip-permissions --name 'acme-worker'")
+    }
+
+    @Test("nil sessionName emits no --name")
+    func nilSessionNameEmitsNothing() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "sid-1",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh",
+            sessionName: nil
+        )
+        #expect(r.command == "claude --session-id sid-1 --dangerously-skip-permissions")
+    }
+
+    @Test("empty sessionName emits no --name")
+    func emptySessionNameEmitsNothing() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "sid-1",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh",
+            sessionName: ""
+        )
+        #expect(r.command == "claude --session-id sid-1 --dangerously-skip-permissions")
+    }
+
+    @Test("whitespace-only sessionName emits no --name")
+    func whitespaceSessionNameEmitsNothing() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: "abc-123",
+            freshSessionID: nil,
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh",
+            sessionName: "  \n\t "
+        )
+        #expect(r.command == "claude --resume abc-123 --dangerously-skip-permissions")
+    }
+
+    @Test("sessionName with spaces, a single quote and a $ is shell-escaped")
+    func sessionNameIsShellEscaped() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "sid-1",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh",
+            sessionName: "acme's $HOME fix"
+        )
+        // Single-quoting keeps `$HOME` literal; the embedded quote closes,
+        // escapes, and reopens — the same shape the initial-prompt argv uses.
+        #expect(r.command == "claude --session-id sid-1 --dangerously-skip-permissions --name 'acme'\\''s $HOME fix'")
+    }
+
+    // MARK: - sessionName sanitizing
+    //
+    // Display names are unvalidated free text and now flow into the tmux
+    // command string. `shellEscape` single-quotes them, but a single-quoted
+    // newline is still a newline: it would split `#{pane_start_command}`.
+
+    @Test("an embedded newline is stripped, not escaped into the command")
+    func sessionNameNewlineIsStripped() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "sid-1",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh",
+            sessionName: "acme\nworker"
+        )
+        #expect(r.command == "claude --session-id sid-1 --dangerously-skip-permissions --name 'acmeworker'")
+        #expect(!r.command.contains("\n"))
+    }
+
+    @Test("control characters are stripped from the name")
+    func sessionNameControlCharactersAreStripped() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "sid-1",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh",
+            sessionName: "a\u{0007}b\u{001B}c\u{007F}d\r"
+        )
+        #expect(r.command == "claude --session-id sid-1 --dangerously-skip-permissions --name 'abcd'")
+    }
+
+    @Test("the name is surrounded-whitespace-trimmed but keeps its inner spaces")
+    func sessionNameIsTrimmed() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "sid-1",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh",
+            sessionName: "  acme worker  "
+        )
+        #expect(r.command == "claude --session-id sid-1 --dangerously-skip-permissions --name 'acme worker'")
+    }
+
+    @Test("an over-long name is capped, and the cap never leaves a trailing space")
+    func sessionNameIsLengthCapped() {
+        let cap = ClaudeSpawnCommandBuilder.maxSessionNameLength
+        // One char past the cap, with a space exactly at the boundary so a
+        // naive prefix would emit `--name 'aaa… '`.
+        let raw = String(repeating: "a", count: cap - 1) + " tail"
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "sid-1",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh",
+            sessionName: raw
+        )
+        let expected = String(repeating: "a", count: cap - 1)
+        #expect(r.command == "claude --session-id sid-1 --dangerously-skip-permissions --name '\(expected)'")
+    }
+
+    @Test("a name made only of control characters emits no flag")
+    func sessionNameOfOnlyControlCharactersEmitsNothing() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "sid-1",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh",
+            sessionName: "\u{0001}\u{0002}\n\r\t"
+        )
+        #expect(r.command == "claude --session-id sid-1 --dangerously-skip-permissions")
+    }
+
+    @Test("cmd branch is unchanged when sessionName is passed")
+    func cmdBranchIgnoresSessionName() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: nil,
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            cmd: "ls -la",
+            shellFallback: "/bin/zsh",
+            sessionName: "acme-worker"
+        )
+        #expect(r.command == "ls -la")
+        #expect(r.sensitiveEnv.isEmpty)
+    }
+
+    @Test("shell-fallback branch is unchanged when sessionName is passed")
+    func shellFallbackBranchIgnoresSessionName() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: nil,
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh",
+            sessionName: "acme-worker"
+        )
+        #expect(r.command == "/bin/zsh")
+        #expect(r.sensitiveEnv.isEmpty)
+    }
+
     // MARK: - Bedrock
 
     @Test("bedrock: full env set with AWS_PROFILE")

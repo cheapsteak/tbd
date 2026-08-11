@@ -63,6 +63,48 @@ struct ClaudeStateDetectorSessionPathTests {
         #expect(detector(environment: [:]).sessionFilePath(forPID: 99).path == expected)
     }
 
+    /// Pins the coupling between the session-file read and the profile
+    /// `sessions/` mirror slot, which is otherwise invisible from either side.
+    ///
+    /// A profile-spawned terminal runs with `CLAUDE_CONFIG_DIR` pointing at
+    /// `~/tbd/profiles/<id>/claude`, so it writes its registry row there — and
+    /// this detector reads the **host** store. That read missed for every
+    /// profile terminal until `ClaudeProfileConfigDirManager` began mirroring
+    /// the slot; now the profile's `sessions/` is a symlink to the host one and
+    /// the row lands where the detector looks. Post-`--fork-session` session-ID
+    /// recapture (`HibernationCoordinator`, `SessionRecaptureScheduler`)
+    /// depends on that, so deleting the mirror slot must red this test rather
+    /// than silently regress recapture.
+    @Test("a profile session's row is readable through the mirrored host registry")
+    func profileSessionRowIsReadableThroughTheHostMirror() throws {
+        let fm = FileManager.default
+        let tempRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tbd-detector-mirror-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+
+        let hostBase = tempRoot.appendingPathComponent("claude", isDirectory: true)
+        try fm.createDirectory(at: hostBase, withIntermediateDirectories: true)
+
+        let manager = ClaudeProfileConfigDirManager(
+            baseDirectory: tempRoot.appendingPathComponent("profiles", isDirectory: true),
+            hostBaseDirectory: hostBase
+        )
+        let profileDir = try manager.ensureOAuthDir(forProfileID: UUID())
+
+        // The row is written the way a profile-spawned session writes it:
+        // through `$CLAUDE_CONFIG_DIR/sessions/`, not to the host path.
+        try #"{"pid":31337,"sessionId":"mirrored-session"}"#.write(
+            to: profileDir.appendingPathComponent("sessions").appendingPathComponent("31337.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let detector = self.detector(environment: ["TBD_CLAUDE_HOST_HOME": hostBase.path])
+        #expect(detector.sessionFilePath(forPID: 31337).path
+            == hostBase.appendingPathComponent("sessions/31337.json").path)
+        #expect(detector.readSessionID(forPID: 31337) == "mirrored-session")
+    }
+
     /// An empty value is not an override — `TBDConstants.claudeHostHome`
     /// treats it as absent, and a detector that read it literally would resolve
     /// session files under `/sessions/…` at the filesystem root.

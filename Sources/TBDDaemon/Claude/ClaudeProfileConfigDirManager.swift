@@ -9,9 +9,12 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claudeProfil
 /// proxy apiKey profiles with an isolated config directory where they can
 /// maintain independent credentials.
 ///
-/// Each profile dir mirrors customization slots from the host's `~/.claude/`
-/// directory via symlinks: `projects/`, `plugins/`, `skills/`, `agents/`,
-/// `commands/`, `hooks/`, `CLAUDE.md`, and `settings.json`. Per-profile identity
+/// Each profile dir mirrors slots from the host's `~/.claude/` directory via
+/// symlinks. Eight are host *customizations* — `projects/`, `plugins/`,
+/// `skills/`, `agents/`, `commands/`, `hooks/`, `CLAUDE.md`, and
+/// `settings.json` — and the ninth, `sessions/`, is not a customization at all
+/// but Claude Code's live cross-session peer registry, mirrored so profiles can
+/// see each other's sessions (see `mirrorSlots`). Per-profile identity
 /// (`.claude.json`, Keychain entry keyed on `CLAUDE_CONFIG_DIR` path, and
 /// `.credentials.json` as a fallback when Keychain is unavailable) is
 /// owned by each profile. The `apiKeyHelper` mode uses the profile's Keychain
@@ -98,10 +101,11 @@ public struct ClaudeProfileConfigDirManager: Sendable {
     /// Slots that each TBD profile dir mirrors from the host's claude config dir.
     /// Symlinked from <profile>/claude/<slot> to <host-base>/<slot>.
     /// `projects` migrates pre-existing real-dir content into the host store
-    /// before symlinking (file-level collision check; atomic abort). Every other
-    /// slot with pre-existing real content is moved to `<slot>.profile-local`
-    /// as a sidecar before the symlink is created — see `ensureMirrorSlot` for
-    /// the full per-slot policy.
+    /// before symlinking (file-level collision check; atomic abort), `sessions`
+    /// merges its rows into the host registry, and every other slot with
+    /// pre-existing real content is moved to `<slot>.profile-local` as a sidecar
+    /// before the symlink is created — see `ensureMirrorSlot` for the full
+    /// per-slot policy.
     private static let mirrorSlots: [String] = [
         "projects",
         "plugins",
@@ -111,7 +115,66 @@ public struct ClaudeProfileConfigDirManager: Sendable {
         "hooks",
         "CLAUDE.md",
         "settings.json",
+        // Claude Code's cross-session peer registry: one small JSON row per
+        // live session (pid, session id, cwd, tmux pane, inbox socket path,
+        // name, status), written to `$CLAUDE_CONFIG_DIR/sessions/<pid>.json`.
+        // It is a discovery *index*, not transcript data, and because it lives
+        // under the config dir, TBD profiles are otherwise mutually invisible
+        // — measured: 24 live sessions in one profile could not be seen from a
+        // session in another. The message sockets themselves already live in a
+        // per-OS-user directory, so sharing the index is enough to make every
+        // TBD session discoverable regardless of which profile spawned it.
+        "sessions",
     ]
+
+    /// Slots whose host directory is created on demand when it does not exist
+    /// yet, instead of skipping the slot (the default in `ensureMirrorSlot`).
+    ///
+    /// Only `sessions` qualifies. The other eight are host *customizations* —
+    /// a profile has nothing to gain from a symlink to an empty directory the
+    /// user never created, and creating one would invent host state. The peer
+    /// registry is the opposite: Claude Code creates it the first time a
+    /// session registers, so on a machine where no session has run yet the
+    /// skip would silently no-op and leave profiles fragmented forever — the
+    /// exact failure this slot exists to prevent.
+    private static let slotsCreatedOnHostIfMissing: Set<String> = ["sessions"]
+
+    /// Slots whose pre-existing profile-side content is **merged** into the
+    /// host entry instead of being parked in a `<slot>.profile-local` sidecar
+    /// (the default in `ensureMirrorSlot`).
+    ///
+    /// Only `sessions` qualifies, and the distinction is not stylistic: the
+    /// other eight slots hold inert user content, while a `sessions/` row is
+    /// live process state. `ensureHostMirrors` runs on every spawn, so a
+    /// sidecar move there would relocate *running* sessions' rows out from
+    /// under them — nothing reads the sidecar, and each session's exit-time
+    /// unlink targets the host path, so the row would be orphaned for good.
+    /// Measured on one developer machine before this landed: 4 profiles held 48
+    /// rows, 47 of them belonging to live PIDs.
+    ///
+    /// Merging is collision-free by construction because rows are named
+    /// `<pid>.json` and PIDs are unique per OS user at any instant; the
+    /// newest-wins tiebreak below exists only for a *stale* row left by a dead
+    /// process whose PID a later session reused under another profile.
+    private static let slotsMergedIntoHost: Set<String> = ["sessions"]
+
+    /// Slots whose host entry must be a directory before it can be mirrored.
+    ///
+    /// Scoped to `sessions` deliberately. The other eight keep their
+    /// pre-existing unchecked behaviour — two of them (`CLAUDE.md`,
+    /// `settings.json`) are files by design, and the rest have never been
+    /// reported wedged. What makes `sessions` different is that TBD *writes*
+    /// through the mirror: a host `sessions` that is a regular file would give
+    /// every profile a symlink to a file and fail every registry write.
+    private static let slotsRequiringHostDirectory: Set<String> = ["sessions"]
+
+    /// Permissions Claude Code creates its own `sessions/` directory with.
+    /// Field-measured on this machine: the host `~/.claude/sessions` and the
+    /// `sessions/` dir of every profile that had run a session were all
+    /// `drwx------`. Matched so a TBD-created directory is indistinguishable
+    /// from one the CLI would have made, and so peer rows — which carry inbox
+    /// socket paths — are not world-readable.
+    private static let sessionsDirectoryPermissions = 0o700
 
     /// Walk `src` against `dst`, returning the path of the first real collision
     /// found, or nil if `src` can be merged into `dst` without overwriting any
@@ -179,8 +242,93 @@ public struct ClaudeProfileConfigDirManager: Sendable {
         try fm.removeItem(at: src)  // now empty
     }
 
+    /// Last-modified stamp for a filesystem entry, `.distantPast` when it
+    /// cannot be read. `attributesOfItem` does not follow symlinks, which is
+    /// what we want: the stamp should describe the entry we are about to move
+    /// or delete, not whatever it might point at.
+    private static func modificationDate(of url: URL) -> Date {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return (attributes?[.modificationDate] as? Date) ?? .distantPast
+    }
+
+    /// Move every row out of a profile's real registry directory into the host
+    /// registry, then remove the emptied profile directory. Returns false when
+    /// anything is left behind, in which case the caller must **not** symlink
+    /// over it — a partial merge is retried on the next spawn rather than
+    /// buried.
+    ///
+    /// Rows are named `<pid>.json` and PIDs are unique per OS user at any
+    /// instant, so the merge is collision-free by construction. A same-named
+    /// row on both sides therefore means one of them is stale — a dead
+    /// process's row whose PID a later session reused under another profile —
+    /// and the newer modification time wins. The loser is deleted, and logged
+    /// so the deletion is observable. An unreadable stamp loses, since the host
+    /// side is the one live sessions are writing to.
+    private func mergeRegistryRows(from profileEntry: URL, into hostEntry: URL, slot: String) -> Bool {
+        let fm = FileManager.default
+        let rows: [URL]
+        do {
+            rows = try fm.contentsOfDirectory(at: profileEntry, includingPropertiesForKeys: nil)
+        } catch {
+            logger.warning("failed listing profile \(slot, privacy: .public)/ for merge: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+
+        for row in rows {
+            let rowName = row.lastPathComponent
+            let destination = hostEntry.appendingPathComponent(rowName)
+            do {
+                if fm.fileExists(atPath: destination.path) {
+                    if Self.modificationDate(of: row) > Self.modificationDate(of: destination) {
+                        logger.warning("\(slot, privacy: .public) row \(rowName, privacy: .public) exists on both sides; discarding the older host copy")
+                        try fm.removeItem(at: destination)
+                        try fm.moveItem(at: row, to: destination)
+                    } else {
+                        logger.warning("\(slot, privacy: .public) row \(rowName, privacy: .public) exists on both sides; discarding the older profile copy")
+                        try fm.removeItem(at: row)
+                    }
+                } else {
+                    try fm.moveItem(at: row, to: destination)
+                }
+            } catch {
+                logger.warning("failed merging \(slot, privacy: .public) row \(rowName, privacy: .public) into the host registry: \(error.localizedDescription, privacy: .public)")
+                return false
+            }
+        }
+
+        do {
+            try fm.removeItem(at: profileEntry)
+        } catch {
+            logger.warning("failed removing merged profile \(slot, privacy: .public)/: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+        return true
+    }
+
     /// Ensure one host-mirror slot is a symlink from the profile dir into the
     /// host base. Best-effort: filesystem errors are logged and swallowed.
+    ///
+    /// **Host side.** The slot is skipped unless the host entry is usable: a
+    /// non-directory host entry for a slot in `slotsRequiringHostDirectory`, or
+    /// an entry that exists only as a dangling symlink, is logged and left
+    /// alone rather than symlinked at. When the host entry is absent, the slot
+    /// is normally skipped — except for `slotsCreatedOnHostIfMissing`
+    /// (`sessions`), where the directory is created on demand, non-recursively
+    /// and only if the host base directory already exists. TBD never conjures
+    /// the host store itself; a machine with no `~/.claude` gets no mirror.
+    ///
+    /// **Profile side**, in three policies:
+    ///
+    /// - `projects/` (migrateContent=true) migrates content into the host store
+    ///   with the collision check described below.
+    /// - `sessions/` (`slotsMergedIntoHost`) merges its rows into the host
+    ///   registry entry-by-entry — newest modification time wins a same-named
+    ///   row — then removes the emptied profile directory. It holds live
+    ///   process state, so parking it in a sidecar would orphan running
+    ///   sessions' rows.
+    /// - Everything else with real content is moved to a `<slot>.profile-local`
+    ///   sidecar, which lets the symlink be created without destroying what was
+    ///   there.
     ///
     /// For `projects/` (migrateContent=true), performs file-level collision detection
     /// by recursively walking the full tree structure. Same-named directories on both
@@ -202,8 +350,47 @@ public struct ClaudeProfileConfigDirManager: Sendable {
         let fm = FileManager.default
         let hostEntry = hostBaseDirectory.appendingPathComponent(name)
 
-        // Skip if the host doesn't have this slot at all.
-        guard fm.fileExists(atPath: hostEntry.path) else { return }
+        // Classify the host entry before treating it as a mirror target.
+        // `fileExists` resolves symlinks, so on its own it cannot tell a usable
+        // directory from a regular file, and it answers *false* for a dangling
+        // symlink. `attributesOfItem` does not resolve links, so an entry it can
+        // stat while `fileExists` denies is precisely a dangling link — which
+        // would otherwise send us down the create branch, where
+        // `createDirectory` fails EEXIST on every spawn, forever.
+        var hostIsDir: ObjCBool = false
+        let hostEntryResolves = fm.fileExists(atPath: hostEntry.path, isDirectory: &hostIsDir)
+        let hostPathOccupied = (try? fm.attributesOfItem(atPath: hostEntry.path)) != nil
+
+        if !hostEntryResolves {
+            if hostPathOccupied {
+                logger.warning("host slot \(name, privacy: .public) is a dangling symlink; leaving it alone")
+                return
+            }
+            // Absent host slot: normally "the user does not use this feature",
+            // so skip. For the create-on-demand slots it is instead the
+            // ordinary first-run state, so create it — but never invent the
+            // host store itself, and never recursively (see finding: 0700 on a
+            // conjured `~/.claude` would be host state TBD had no business
+            // making).
+            guard Self.slotsCreatedOnHostIfMissing.contains(name) else { return }
+            guard fm.fileExists(atPath: hostBaseDirectory.path) else {
+                logger.warning("host claude store is absent; not creating slot \(name, privacy: .public)")
+                return
+            }
+            do {
+                try fm.createDirectory(
+                    at: hostEntry,
+                    withIntermediateDirectories: false,
+                    attributes: [.posixPermissions: Self.sessionsDirectoryPermissions]
+                )
+            } catch {
+                logger.warning("failed creating host slot \(name, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                return
+            }
+        } else if Self.slotsRequiringHostDirectory.contains(name), !hostIsDir.boolValue {
+            logger.warning("host slot \(name, privacy: .public) is not a directory; leaving it alone")
+            return
+        }
 
         let profileEntry = profileClaudeDir.appendingPathComponent(name)
 
@@ -286,6 +473,13 @@ public struct ClaudeProfileConfigDirManager: Sendable {
                     logger.warning("failed migrating \(name, privacy: .public) for profile: \(error.localizedDescription, privacy: .public)")
                     return
                 }
+            } else if isDir.boolValue, Self.slotsMergedIntoHost.contains(name) {
+                // Live-registry directory in profile: merge its rows into the
+                // host registry rather than parking them in a sidecar nothing
+                // reads. Bail without symlinking if anything is left behind, so
+                // a partial merge is retried on the next spawn instead of being
+                // buried under a symlink.
+                guard mergeRegistryRows(from: profileEntry, into: hostEntry, slot: name) else { return }
             } else if isDir.boolValue {
                 // Non-projects directory in profile: move to sidecar if non-empty, otherwise remove.
                 let entries = (try? fm.contentsOfDirectory(at: profileEntry, includingPropertiesForKeys: nil)) ?? []

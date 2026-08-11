@@ -720,7 +720,8 @@ public actor HibernationCoordinator {
             shellFallback: defaultShell,
             settingsOverlayPath: overlayPath,
             pluginDirPath: PluginDirWriter.pluginDirPath,
-            envSettingOverrides: claudeEnvOverrides
+            envSettingOverrides: claudeEnvOverrides,
+            sessionName: worktree.displayName
         )
         // Inject TBD_WORKTREE_ID + TBD_TERMINAL_ID so notifications and the
         // SessionStart hook attribute to this terminal after the resume rollover.

@@ -860,7 +860,8 @@ extension WorktreeLifecycle {
                     extraSettingsJSON: isResume ? nil : claudeSettingsOverlay
                 ),
                 pluginDirPath: PluginDirWriter.pluginDirPath,
-                envSettingOverrides: claudeEnvOverrides
+                envSettingOverrides: claudeEnvOverrides,
+                sessionName: worktree.displayName
             )
             primaryCommand = spawn.command
             primaryEnv = [
@@ -1049,7 +1050,8 @@ extension WorktreeLifecycle {
                         repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id)
                     ),
                     pluginDirPath: PluginDirWriter.pluginDirPath,
-                    envSettingOverrides: claudeEnvOverrides
+                    envSettingOverrides: claudeEnvOverrides,
+                    sessionName: worktree.displayName
                 )
                 let perTermEnv: [String: String] = [
                     "TBD_WORKTREE_ID": worktreeID.uuidString,

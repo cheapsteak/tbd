@@ -45,6 +45,17 @@ public struct ClaudeStateDetector: Sendable {
     /// so the read lands inside `scripts/test.sh`'s scratch store rather than
     /// failing on the mode-000 decoy the fence puts in its place.
     ///
+    /// This reads the **host** store even for a session spawned under a TBD
+    /// profile, whose `CLAUDE_CONFIG_DIR` is `~/tbd/profiles/<id>/claude`. That
+    /// used to miss for every profile terminal, so session-ID recapture after a
+    /// `--fork-session` resume (`HibernationCoordinator`,
+    /// `SessionRecaptureScheduler`) silently found nothing there and fell back.
+    /// It resolves now only because `ClaudeProfileConfigDirManager` mirrors the
+    /// `sessions/` slot: each profile's `sessions/` is a symlink to the host
+    /// one, so a profile session's row lands at this path. Removing that mirror
+    /// slot would quietly re-break recapture — `ClaudeStateDetectorTests` pins
+    /// the coupling.
+    ///
     /// Internal rather than private so `ClaudeStateDetectorTests` can assert
     /// the path without a real session file to read.
     func sessionFilePath(forPID pid: Int) -> URL {
@@ -83,7 +94,11 @@ public struct ClaudeStateDetector: Sendable {
     }
 
     /// Read a Claude session file for a given PID. Returns nil if file doesn't exist or is invalid.
-    private func readSessionID(forPID pid: Int) -> String? {
+    ///
+    /// Internal rather than private so `ClaudeStateDetectorTests` can pin the
+    /// profile-mirror coupling described on `sessionFilePath(forPID:)` — that a
+    /// profile session's row really is readable through the host store.
+    func readSessionID(forPID pid: Int) -> String? {
         let sessionPath = sessionFilePath(forPID: pid)
         guard let json = try? String(contentsOf: sessionPath, encoding: .utf8) else { return nil }
         return Self.parseSessionID(from: json)
