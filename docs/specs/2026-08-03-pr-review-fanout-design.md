@@ -421,13 +421,24 @@ and the whole test suite.
 - **Resume-based retry loop**: a bounded workflow loop of run → check
   `review-result.json` → `claude -p --resume <session_id>` with a corrective
   prompt. Session state persists under `CLAUDE_CONFIG_DIR` and resumed requests
-  carry the full prior history. The loop does NOT recover in-flight work: when a
-  headless session ends, its background specialists die with the process and
-  their findings files never land — measured on PR #604, where the session
-  exited after 184s with both specialists pending and nothing on disk. A resume
-  therefore restarts the fan-out rather than collecting it, and the corrective
-  prompt must point at whichever `findings-*.json` did survive, whose content
-  never enters the orchestrator's own transcript. Two mechanics are mandatory:
+  carry the full prior history. **A resume may not assume that in-flight work
+  survived the previous invocation.** Measured on PR #604: the review step
+  returned success after 184s with both specialists still working, and no
+  `findings-*.json` was present in the workspace afterwards. That measurement
+  does not establish *why* the files are absent — whether the specialists were
+  killed with the process, or the action stopped consuming the CLI's output
+  stream at the first result message and so never saw their work — and a
+  separate diagnosis of the same failure attributes it to the abandoned stream.
+  The loop is therefore built against the disk under either reading: check what
+  is actually there, re-fan-out whatever is missing rather than waiting to
+  collect a fan-out already in flight, and point the corrective prompt at
+  whichever `findings-*.json` did survive, whose content never enters the
+  orchestrator's own transcript. The stub-API e2e test
+  (`.github/workflows/claude-review-v2/tests/e2e/test_resume_loop.py`) records
+  the small-scale behavior — a
+  specialist still pending about 3 seconds at session end does land its file —
+  which is two orders of magnitude below a real specialist's ten minutes and so
+  says nothing about the case above. Two mechanics are mandatory:
   reset all three of the Stop hook's state files between invocations — its nudge
   counter, its start stamp, and its hold counter (a stale counter at the ceiling
   silently disarms the nudge; a stale hold counter at its cap disarms the hold;

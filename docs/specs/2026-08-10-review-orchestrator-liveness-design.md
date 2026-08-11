@@ -18,9 +18,8 @@ the review session ends while its specialists are still running.
 
 The orchestrator spawns two specialist subagents, then ends its turn to wait for their
 completion notifications. Interactively a notification re-invokes the session. Headless —
-which is how the gate runs — ending the turn ends the session, and the specialists die
-with the process. No `findings-*.json` is written, `validate.py` finds nothing, and the
-gate fails closed.
+which is how the gate runs — ending the turn ends the session, and no `findings-*.json`
+reaches the workspace. `validate.py` finds nothing, and the gate fails closed.
 
 Measured on PR #604: the review step exited **success** after 184 seconds having written
 nothing, reporting `stop_reason: end_turn`, `is_error: false`, 35 turns, and the result
@@ -28,6 +27,15 @@ text *"Still running, no findings files yet. I have a monitor armed that will no
 the moment both appear — continuing to hold rather than write a premature merge."* A
 re-run of the same job on the same commit then succeeded in 13m57s and returned a real
 REJECT verdict. The specialists need roughly ten minutes; the session gave them three.
+
+What that measurement establishes is the empty workspace, not the route to it. Two
+readings fit it: the specialists are killed when the process exits, or the action stops
+consuming the CLI's output stream once the first result message arrives and so never
+takes delivery of their work. A separate diagnosis of the same failure favors the second.
+Nothing in this design turns on the answer — under either reading the specialists' output
+is lost the moment the orchestrator ends its turn early, and holding that turn open until
+the findings files exist is what removes the failure. A design that encoded one mechanism
+would be wrong half the time; this one is indifferent to which is right.
 
 Two independent defects produce this, and either alone is survivable.
 
@@ -177,8 +185,12 @@ misdiagnoses it, since its "orchestrator may have merged before all specialists 
 parenthetical describes a merge that never happened.
 
 All three classes still fail closed and write no verdict. Only the sentence differs, which
-is the point: the operator reading a red check must be able to tell a stalled session from
-a rejected diff without opening the job log.
+is the point: `validate.py` writes the diagnosis into the job log, so an operator looking
+into a red check reads a line that names a stalled session as an infrastructure failure
+rather than inferring it from an empty workspace. Whether any of that reaches a surface
+above the log — a step annotation, a check summary — depends on what the surrounding
+workflow step emits and on what GitHub renders; the scripts guarantee the log line and
+nothing beyond it.
 
 ### 3.4 The job carries an outer timeout
 
@@ -197,19 +209,23 @@ two clocks agreeing. If the preamble ever grows past that headroom, the symptom 
 killed at 45 minutes with the hook still holding, which the job log shows plainly; the fix
 is to widen the outer bound, not to add machinery for aligning the origins.
 
-### 3.5 What this corrects in the fan-out spec
+### 3.5 What the resume rung may rest on
 
-[`2026-08-03-pr-review-fanout-design.md`](2026-08-03-pr-review-fanout-design.md) §6
-describes a resume-based retry loop as the first upgrade rung, resting on a premise
-verified against the real CLI: that the process does not exit while background specialists
-are pending, so their findings files land before the post-exit check runs. PR #604 refutes
-that premise. Once the Stop hook stops blocking, the process exits with specialists in
-flight and their files never land.
+[`2026-08-03-pr-review-fanout-design.md`](2026-08-03-pr-review-fanout-design.md) §6 keeps a
+resume-based retry loop among its upgrade rungs. The tempting premise for such a loop is
+that a headless process stays alive while background specialists are pending, so their
+findings files are on disk for the next invocation to collect. PR #604 does not support it:
+the review step returned success after 184 seconds with both specialists still working, and
+the workspace held no `findings-*.json` afterwards. A resume into that state has nothing to
+collect.
 
-That passage is rewritten to state what is now known, so that whoever builds the next rung
-does not design on a false premise. The correction also reorders the rungs: this design
-occupies the "reviews die incomplete" slot the resume loop was reserved for, and the
-interactive PTY driver moves up to the named fallback.
+The rung stays available on a narrower premise. A resume must read the disk and re-fan-out
+whatever is missing, never treat a prior invocation's in-flight specialists as work it can
+wait on. That is also why the rung sits behind this design rather than ahead of it: holding
+the orchestrator's own turn open removes the die-incomplete case at its source, while a loop
+that restarts the fan-out pays for a second review to arrive at the same place. The
+interactive PTY driver is the fallback beyond both, because a session that wedges rather
+than ends is unreachable from between invocations.
 
 ## 4. Testability and verification
 
@@ -289,10 +305,10 @@ repeating the trust, checkout, and restore sequence per job.
   double the worst-case cost and latency. Rejected mainly because it makes a systematic
   regression present as an intermittent one, which is how a required check quietly stops
   being trusted.
-- **Building the resume rung now** — pre-decided in the fan-out spec, but its stated
-  premise is what PR #604 falsified (§3.5), so it would need re-verification before it
-  could be trusted, and it addresses a session that died with its turns exhausted rather
-  than one that ended cleanly having done nothing.
+- **Building the resume rung now** — available in the fan-out spec, but the premise that
+  makes it cheap is the one PR #604's empty workspace does not support (§3.5), so a resume
+  would have to re-run the fan-out rather than collect it. It also addresses a session that
+  died with its turns exhausted rather than one that ended cleanly having done nothing.
 
 ## 7. Out of scope
 
@@ -301,6 +317,7 @@ repeating the trust, checkout, and restore sequence per job.
   default-off flag" convention does not reach it.
 - **Anything about the specialists' review content.** The lenses, their prompts, the
   severity vocabulary, and the verdict rule are untouched.
-- **The stall diagnostic reaching the PR.** The distinct message lands in the job log and
-  the step annotation. A stalled run posts no comment, and this design does not change
-  that: the post step runs only behind a trustworthy verdict.
+- **The stall diagnostic reaching the PR.** The distinct message is written to the job
+  log, where an operator investigating the red check reads it. A stalled run posts no
+  comment, and this design does not change that: the post step runs only behind a
+  trustworthy verdict.

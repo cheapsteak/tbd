@@ -72,11 +72,11 @@ is deleted after checkout, before anything runs, so a PR cannot pre-commit a for
 
 ## Keeping the session alive long enough to report
 
-The review session runs headless, where ending a turn ends the whole process and
-takes any still-running specialist subagent with it. A review that needs roughly
-ten minutes must therefore be held open, while a session that will never produce a
-result must still terminate. Four mechanisms split that difference; the thresholds
-and the reasoning behind them are in
+The review session runs headless, where ending a turn ends the whole process — and a
+specialist subagent still working when that happens does not get its findings file
+onto disk. A review that needs roughly ten minutes must therefore be held open, while
+a session that will never produce a result must still terminate. Four mechanisms
+split that difference; the thresholds and the reasoning behind them are in
 [`docs/specs/2026-08-10-review-orchestrator-liveness-design.md`](specs/2026-08-10-review-orchestrator-liveness-design.md).
 
 - **The hook holds, uncounted, while specialist findings are pending.**
@@ -137,8 +137,10 @@ distinguishing error line in the job log is what an operator reads:
   checked, so nothing is trusted.
 
 All four fail closed, and none of them posts a review comment: the post step runs
-only behind a trustworthy verdict. A stall is therefore visible in the job log and
-the step annotation, never on the PR.
+only behind a trustworthy verdict. A stall is therefore something you read in the
+run — `validate.py` writes the diagnosis to the job log — never on the PR. Whatever
+a step annotation or check summary shows alongside it is the workflow's and GitHub's
+rendering of a failed step; the log line is the part the scripts guarantee.
 
 ## Trusted fork PRs need `allow-unsafe-pr-checkout`
 
