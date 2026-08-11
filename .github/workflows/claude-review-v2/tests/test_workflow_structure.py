@@ -32,6 +32,7 @@ from workflow_steps import (
 RESTORE_STEP = "Restore the review pipeline from the base branch"
 RE_RESTORE_STEP = "Re-restore the review pipeline from the base branch"
 SESSION_STEP = "Run Claude Code Review v2 (fan-out session)"
+RESUME_STEP = "Resume incomplete Claude review"
 VALIDATE_STEP = "Validate review result (schemas, disposition coverage, verdict)"
 POST_STEP = "Post review comment and enforce verdict"
 PREPARE_STEP = "Prepare (skip decision + discussion context)"
@@ -55,6 +56,7 @@ def test_the_pipeline_is_re_restored_between_the_session_and_the_verdict() -> No
         step_index(text, RESTORE_STEP)
         < step_index(text, PREPARE_STEP)
         < step_index(text, SESSION_STEP)
+        < step_index(text, RESUME_STEP)
         < step_index(text, RE_RESTORE_STEP)
         < step_index(text, VALIDATE_STEP)
         < step_index(text, POST_STEP)
@@ -85,6 +87,17 @@ def test_the_re_restore_is_gated_exactly_like_the_step_it_protects() -> None:
     # session-written copy.
     assert _condition(RE_RESTORE_STEP) == _condition(VALIDATE_STEP)
     assert "always()" not in _condition(RE_RESTORE_STEP)
+
+
+def test_recovery_is_gated_exactly_like_the_full_review() -> None:
+    assert _condition(RESUME_STEP) == _condition(SESSION_STEP)
+    assert _condition(RESUME_STEP) == _condition(RE_RESTORE_STEP)
+    assert "always()" not in _condition(RESUME_STEP)
+
+
+def test_recovery_resumes_the_action_session() -> None:
+    source = step_source(read_workflow(), RESUME_STEP)
+    assert "SESSION_ID: ${{ steps.claude-review.outputs.session_id }}" in source
 
 
 def test_the_re_restore_touches_only_the_pipeline_directory() -> None:

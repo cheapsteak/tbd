@@ -2,8 +2,9 @@
 # Stop hook for the claude-review-v2 session.
 # Part of the PR review v2 pipeline (docs/specs/2026-08-03-pr-review-fanout-design.md §3.5).
 #
-# Refuses to let the review session end until review-result.json exists in the
-# workspace root and parses as JSON. Unlike the v1 hook (claude-review-hooks/
+# Blocks a bounded number of stop attempts while review-result.json is absent
+# from the workspace root or does not parse as JSON. Unlike the v1 hook
+# (claude-review-hooks/
 # verdict-gate.sh), this hook does NOT gate on a verdict token — the model never
 # types the verdict in v2. The validate script computes APPROVE/REJECT from the
 # result file's findings, schema-validates it, and fails closed if the file is
@@ -48,7 +49,7 @@ if [ "$count" -ge "$max_blocks" ]; then
 fi
 printf '%s' "$((count + 1))" > "$count_file" 2>/dev/null || exit 0
 
-reason="You have not written the merged review result. Use the Write tool to create 'review-result.json' in the repository root (${CLAUDE_PROJECT_DIR:-the current working directory}). It must be valid JSON matching .github/workflows/claude-review-v2/schemas/review-result.schema.json: an object with 'findings' (the merged findings array), 'disposition' (one entry per specialist finding ID accounting for what happened to it: kept/merged/downgraded/dropped, with a note when downgraded or dropped), and 'comment_body' (the review comment markdown the workflow posts). Do NOT write a verdict anywhere — the verdict is computed by a script from the findings' severities. The session cannot end until this file exists and parses as JSON."
+reason="You have not written the merged review result. Use the Write tool to create 'review-result.json' in the repository root (${CLAUDE_PROJECT_DIR:-the current working directory}). It must be valid JSON matching .github/workflows/claude-review-v2/schemas/review-result.schema.json: an object with 'findings' (the merged findings array), 'disposition' (one entry per specialist finding ID accounting for what happened to it: kept/merged/downgraded/dropped, with a note when downgraded or dropped), and 'comment_body' (the review comment markdown the workflow posts). Do NOT write a verdict anywhere — the verdict is computed by a script from the findings' severities. Complete this file before stopping."
 
 jq -n --arg reason "$reason" '{decision: "block", reason: $reason}' 2>/dev/null \
   || printf '{"decision":"block","reason":"Write review-result.json (valid JSON per schemas/review-result.schema.json) in the repository root before stopping."}\n'

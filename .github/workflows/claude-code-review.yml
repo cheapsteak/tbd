@@ -400,10 +400,11 @@ jobs:
           # as outdated (spec §3.5), which is the opposite of editing a single
           # comment in place. It selects its own comments by its own sentinel.
           #
-          # Installs a Stop hook that refuses to end the session until
-          # review-result.json exists and parses as JSON. Unlike v1 it does NOT
-          # gate on a verdict token — in v2 the model never types the verdict;
-          # validate.py computes it from the findings' severities.
+          # Installs a bounded Stop hook that blocks repeated stop attempts while
+          # review-result.json is absent or malformed. Unlike v1 it does NOT gate
+          # on a verdict token — in v2 the model never types the verdict;
+          # validate.py computes it from the findings' severities, and the
+          # same-session recovery step below handles an exhausted hook ceiling.
           settings: ${{ github.workspace }}/.github/workflows/claude-review-v2/hooks/settings.json
           prompt: |
             You are the ORCHESTRATOR of a fan-out code review of ${{ github.repository }}/pull/${{ github.event.pull_request.number }} (base branch: ${{ github.event.pull_request.base.ref }}). You spawn exactly two specialist subagents, merge their findings, and write one machine-read result file. You post nothing: the workflow posts the review comment from that file, and a validation script — not you — computes the final verdict.
@@ -472,7 +473,7 @@ jobs:
               List any tool calls that failed or were denied (e.g. "Write to /tmp/ blocked", "gh api denied") — across the specialists too, if they reported any. If none failed, say so. This helps us tune the workflow permissions and allowedTools over time.
               </details>
 
-            STEP 3 — HAND OFF. Post NOTHING. The workflow posts the review itself: after validation it takes `review-result.json`'s `comment_body` verbatim, adds this run's machine-read state markers above it, and posts that as a new review comment on the PR. You have no GitHub write tool and must not reach for one: do NOT use `gh pr comment` (it would post a stray second comment), do NOT submit a formal GitHub review (no `gh pr review`), and do NOT write verdict.txt or claude-verdict.txt — the verdict is computed by the validation script from review-result.json. Your outputs are exactly two things: the two specialists' findings files (written by them) and `review-result.json`. A stop hook will refuse to let the session end until review-result.json exists and parses as JSON.
+            STEP 3 — HAND OFF. Post NOTHING. The workflow posts the review itself: after validation it takes `review-result.json`'s `comment_body` verbatim, adds this run's machine-read state markers above it, and posts that as a new review comment on the PR. You have no GitHub write tool and must not reach for one: do NOT use `gh pr comment` (it would post a stray second comment), do NOT submit a formal GitHub review (no `gh pr review`), and do NOT write verdict.txt or claude-verdict.txt — the verdict is computed by the validation script from review-result.json. Your outputs are exactly two things: the two specialists' findings files (written by them) and `review-result.json`. A bounded stop hook will block repeated stop attempts while review-result.json is absent or malformed; complete the artifacts before handing off.
           # 100 matches v1's budget rationale: 80 was set after a large review
           # (#364) exhausted its turns without writing its result (which fails
           # closed); the fan-out orchestration and the correctness specialist's
@@ -486,6 +487,82 @@ jobs:
           claude_args: |
             --max-turns 100
             --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(cat:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*),Bash(git merge-base:*),WebSearch,Read,Write,Glob,Grep,Task"
+
+      - name: Resume incomplete Claude review
+        if: steps.trust.outputs.trusted == 'true' && steps.prepare.outputs.skip != 'true'
+        # The action returns on the SDK's first result message. The Stop hook
+        # normally delays that result until review-result.json exists, but its
+        # five-block ceiling deliberately lets a persistently incomplete model
+        # terminate rather than wedging the job. If background specialists need
+        # longer than those rapid nudges, continue the SAME on-disk session in a
+        # fresh CLI process. Each resume is a full lifecycle opportunity, so two
+        # attempts bound token/process cost without turning the hook's nudge
+        # count into an accidental wall-clock timeout.
+        #
+        # Failure here remains fail-closed without stopping the deterministic
+        # bookends: this step never creates placeholder findings or a result.
+        # After bounded exhaustion, validate.py below remains the authority and
+        # rejects missing/invalid specialist and merged artifacts.
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          SESSION_ID: ${{ steps.claude-review.outputs.session_id }}
+        run: |
+          set -uo pipefail
+          result_file="$GITHUB_WORKSPACE/review-result.json"
+          counter_file="${TMPDIR:-/tmp}/claude-review-v2-block-count"
+          claude="$HOME/.local/bin/claude"
+          max_resume_attempts=2
+
+          result_is_parseable() {
+            python3 -c 'import json, sys; json.load(open(sys.argv[1], encoding="utf-8"))' \
+              "$result_file" >/dev/null 2>&1
+          }
+
+          if result_is_parseable; then
+            echo "Claude review result already parses; no resume needed."
+            exit 0
+          fi
+          if [ -z "$SESSION_ID" ]; then
+            echo "::warning::Claude review result is absent or malformed, but the action returned no session id. The validator will fail closed."
+            exit 0
+          fi
+          if [ ! -x "$claude" ]; then
+            echo "::warning::Claude review result is absent or malformed, but the installed Claude CLI is unavailable at $claude. The validator will fail closed."
+            exit 0
+          fi
+
+          corrective_prompt="$(cat <<'PROMPT'
+          The prior fan-out invocation ended before producing a parseable review-result.json. Continue this SAME review session and complete its existing contract. Work only from the checked-out repository and the review artifacts in its root; use no GitHub write commands or tools and post nothing.
+
+          Inspect the on-disk findings-correctness.json and findings-conventions.json; specialist findings content is not present in the orchestrator transcript. Do not fabricate either specialist's findings, replace missing work with empty findings, or write a partial merged result. Ensure both specialists actually complete: wait for any still-running specialist, and if a specialist is no longer running and its findings file is missing, malformed, or incomplete, relaunch only that missing specialist with its original role and instructions from this session's history and wait for it. Only after both valid findings files exist, read them, merge every finding with complete dispositions, and write review-result.json per .github/workflows/claude-review-v2/schemas/review-result.schema.json. The workflow's validator remains authoritative. Do not write a verdict file.
+          PROMPT
+          )"
+
+          attempt=1
+          while [ "$attempt" -le "$max_resume_attempts" ]; do
+            # The Stop hook counter lives outside session state. A counter left
+            # at its ceiling would silently disable every nudge in this process.
+            # If it cannot be reset, do not spend a resume that has no backstop.
+            if ! rm -f "$counter_file"; then
+              echo "::warning::Could not reset the Claude review Stop-hook counter before resume attempt $attempt. The validator will fail closed."
+              break
+            fi
+            echo "Resuming incomplete Claude review session (attempt $attempt/$max_resume_attempts)."
+            if "$claude" -p --resume "$SESSION_ID" "$corrective_prompt" \
+                 --max-turns 100 \
+                 --allowedTools "Bash(cat:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*),Bash(git merge-base:*),WebSearch,Read,Write,Glob,Grep,Task"; then
+              echo "Claude review resume attempt $attempt exited normally."
+            else
+              echo "::warning::Claude review resume attempt $attempt exited non-zero; checking artifacts before continuing."
+            fi
+            if result_is_parseable; then
+              echo "Claude review produced a parseable result after resume attempt $attempt."
+              exit 0
+            fi
+            attempt=$((attempt + 1))
+          done
+
+          echo "::warning::Claude review resume attempts exhausted without a parseable review-result.json; the validator will fail closed without fabricated output."
 
       - name: Re-restore the review pipeline from the base branch
         if: steps.trust.outputs.trusted == 'true' && steps.prepare.outputs.skip != 'true'

@@ -52,14 +52,25 @@ A single-session reviewer — one model session that types its own verdict into
 ### 3.1 Pipeline shape: deterministic bookends around one model session
 
 ```
-prepare (script)  →  review session (model, fan-out)  →  validate (script)  →  post + enforce (script)
+prepare (script) → review session (model, fan-out) → bounded same-session recovery if incomplete → validate (script) → post + enforce (script)
 ```
 
-Everything before and after the model session is plain Python: argument in, files out,
-no network beyond one `gh` boundary, unit-testable with hand-built fixtures. The model
-session's only contract is "write these files"; scripts own every machine-read decision.
-This is the inverse of a single-session gate, where the session both writes the review
-*and* types the verdict token.
+The deterministic prepare, validate, and render bookends are plain Python: argument in,
+files out, no network beyond one `gh` boundary, unit-testable with hand-built fixtures.
+The model session's only contract is "write these files"; scripts own every machine-read
+decision. This is the inverse of a single-session gate, where the session both writes the
+review *and* types the verdict token.
+
+The action's process can return while background specialists still need time: its SDK
+wrapper treats the first result message as terminal, while the Stop hook deliberately
+stops blocking after five nudges so a non-compliant model cannot wedge the job. A
+parseable `review-result.json` skips recovery. Otherwise the workflow makes at most two
+`claude -p --resume <session_id>` invocations against the same on-disk session, resetting
+the hook's external nudge-counter file before each invocation. The corrective prompt
+points at `findings-correctness.json` and `findings-conventions.json` on disk — specialist
+content does not enter the orchestrator transcript — and requires missing work to finish
+or be relaunched before the merged result is written. Recovery creates no placeholder
+artifact; exhaustion falls through to the unchanged validator and fails closed.
 
 The session holds **no GitHub write tool at all** — it does not post its own review. It
 writes `review-result.json`; the post step renders that file's `comment_body` into the
@@ -152,8 +163,10 @@ validate script checks only its *presence* (an ID-coverage count), not its judgm
 - **Verdict**: the validate script computes `APPROVE`/`REJECT` from
   `review-result.json` — REJECT iff any unaddressed `HIGH` or `MEDIUM` finding survives
   the merge. The model never types the verdict. The Stop hook gates on the *artifact*
-  rather than on a token: it refuses to end the session until `review-result.json`
-  exists and parses. The enforce step is fail-closed — a missing file is a red check.
+  rather than on a token: it blocks up to five stop attempts while
+  `review-result.json` is absent or malformed, after which the bounded same-session
+  recovery described in §3.1 gets another full lifecycle opportunity. The enforce step
+  is fail-closed — a missing file is a red check.
   The validate script also enforces specialist-set completeness
   (`--expected-specialists`): if any named
   specialist contributed no *valid* findings file it fails closed with no verdict
@@ -312,6 +325,10 @@ reviews code that is not in the PR.
   it — run against the real `jq` selector, since a stubbed selector would test the stub.
   Step *position* (the re-restore sits between the session and the verdict) is a
   structural assertion over the same by-name lookup.
+  The recovery step is exercised the same way with a stub CLI: a parseable result skips
+  resume, a missing result resumes the action's session id with a reset hook counter and
+  on-disk corrective prompt, and exhausted attempts leave no fabricated result for the
+  downstream validator.
 - **Where tests run**: scripts are Python 3 stdlib (the workflow already runs on
   `ubuntu-latest`, where the Swift toolchain is absent); a small CI job runs pytest
   over the workflow's script directory. The stub-API e2e test runs where a `claude`
@@ -418,18 +435,8 @@ and the whole test suite.
 - **Discussion fingerprint** (new comments defeat the patch-id skip): add it the first
   time an author's clarifying comment goes unreviewed because the skip suppressed a
   round.
-- **Resume-based retry loop** (the first upgrade rung if reviews die incomplete): a
-  bounded workflow loop of run → check `review-result.json` → `claude -p --resume
-  <session_id>` with a corrective prompt. Verified against the real CLI: session state
-  persists under `CLAUDE_CONFIG_DIR` and resumed requests carry the full prior history;
-  the process does not exit while background specialists are pending, so their findings
-  files land before the post-exit check runs. Two mechanics are mandatory: reset the
-  Stop hook's nudge-counter file between invocations (a stale counter at the ceiling
-  silently disarms the hook — measured), and the corrective prompt must point at the
-  on-disk `findings-*.json`, whose content never enters the orchestrator's own
-  transcript. Add it the first time a review dies incomplete on a real PR.
 - **Interactive PTY driver** (mid-flight nudges, deadline steering): the last-resort
-  rung, only if the resume loop above proves insufficient — e.g. sessions wedging
+  rung, only if the resume loop in §3.1 proves insufficient — e.g. sessions wedging
   rather than ending, which a between-invocation loop cannot reach.
 - **Inline review comments**: findings state their file path and line numbers inside
   the one review comment rather than being anchored to diff lines.

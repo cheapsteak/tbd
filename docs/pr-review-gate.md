@@ -51,18 +51,24 @@ why, and for what reviving it actually takes.
 4. **Review.** One model session orchestrates two specialist subagents
    (`correctness`, `conventions`). Each specialist writes a schema-validated
    `findings-<name>.json`; the orchestrator merges them into `review-result.json`
-   with a per-finding disposition list and the review comment's prose. The session
-   holds **no GitHub write tool** — it posts nothing.
+   with a per-finding disposition list and the review comment's prose. If the action
+   returns before that result parses, the workflow makes at most two process-level
+   resumes of the same on-disk session. Before each resume it resets the Stop hook's
+   bounded nudge counter; the corrective prompt requires both specialists' real
+   on-disk findings and forbids placeholder output. The session holds **no GitHub
+   write tool** — it posts nothing.
 5. **Verdict.** `validate.py`, not the model, computes the verdict: it
    schema-validates the findings and the merged result, checks the disposition list
    accounts for every specialist finding id, and writes `REJECT` to `verdict.txt`
    iff any HIGH or MEDIUM finding survives the merge, otherwise `APPROVE`. A `Stop`
    hook
    ([`claude-review-v2/hooks/stop-hook.sh`](../.github/workflows/claude-review-v2/hooks/stop-hook.sh))
-   refuses to end the session until `review-result.json` exists and parses. The job
-   then enforces the verdict with an exact string match: `APPROVE` passes, `REJECT`
-   blocks the merge, and anything else (missing / malformed / killed session) fails
-   closed.
+   blocks up to five stop attempts while `review-result.json` is absent or malformed.
+   That ceiling prevents a non-compliant session from wedging the job; it is not a
+   specialist-completion timeout. The bounded same-session resume step handles
+   incomplete action exits, then the job enforces the verdict with an exact string
+   match: `APPROVE` passes, `REJECT` blocks the merge, and anything else (missing /
+   malformed / killed session) fails closed.
 
 Every file the pipeline reads back out of the workspace — `review-result.json`,
 `verdict.txt`, `skip-decision.json`, `discussion-context.txt`, `findings-*.json` —
