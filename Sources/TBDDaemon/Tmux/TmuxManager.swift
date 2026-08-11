@@ -1,4 +1,5 @@
 import Foundation
+import TBDShared
 import os
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "TmuxManager")
@@ -1048,28 +1049,21 @@ public struct TmuxManager: Sendable {
 
     // MARK: - Private
 
-    /// Resolves tmux from the daemon's inherited PATH without adding fallback directories.
+    /// Resolves tmux from the daemon's inherited PATH, then the saved executable fallback.
     static func tmuxPath(
-        path: String? = ProcessInfo.processInfo.environment["PATH"]
+        path: String? = ProcessInfo.processInfo.environment["PATH"],
+        configurationURL: URL? = nil
     ) -> String? {
-        guard let path, !path.isEmpty else { return nil }
-
-        for entry in path.split(separator: ":", omittingEmptySubsequences: false) {
-            let directory = String(entry)
-            guard !directory.isEmpty, (directory as NSString).isAbsolutePath else {
-                continue
-            }
-
-            let candidate = URL(fileURLWithPath: directory, isDirectory: true)
-                .appendingPathComponent("tmux")
-                .standardizedFileURL
-                .path
-            if FileManager.default.isExecutableFile(atPath: candidate) {
-                return candidate
-            }
+        var environment = ProcessInfo.processInfo.environment
+        if let path {
+            environment["PATH"] = path
+        } else {
+            environment.removeValue(forKey: "PATH")
         }
-
-        return nil
+        return TmuxExecutableResolver(
+            environment: environment,
+            configurationURL: configurationURL
+        ).resolve()?.path
     }
 
     @discardableResult
@@ -1078,7 +1072,7 @@ public struct TmuxManager: Sendable {
             throw TmuxError.commandFailed(
                 command: "tmux " + arguments.joined(separator: " "),
                 status: 127,
-                output: "tmux is unavailable on PATH"
+                output: "tmux executable is unavailable"
             )
         }
         return try await Self.runExternalCommand(

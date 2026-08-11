@@ -528,11 +528,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             guard let tmuxBridge,
                   let processGeneration = beginGroupedViewerAttachmentConfirmation() else { return }
             let server = tmuxServer
-            let sessionName = TmuxBridge.sessionName(for: panelID)
+            let panelID = panelID
             Task { [weak self] in
                 let attached = await tmuxBridge.hasAttachedClient(
-                    server: server,
-                    sessionName: sessionName
+                    panelID: panelID,
+                    server: server
                 )
                 let shouldRetry = self?.groupedViewerAttachmentProbeDidComplete(
                     clientAttached: attached,

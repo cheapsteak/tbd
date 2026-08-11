@@ -60,7 +60,10 @@ struct AttachRPCStubTests {
         let worktreeID = try await makeWorktree(in: db)
         router.controlMode = TmuxControlModeBridge(
             supervisor: TmuxControlSupervisor(),
-            tmuxVersion: TmuxVersion(major: 3, minor: 6),
+            startupTmux: TmuxVersionSnapshot(
+                executablePath: TmuxExecutableResolver().resolve()?.path,
+                version: TmuxVersion(major: 3, minor: 6)
+            ),
             environment: ["TBD_TMUX_CONTROL_MODE": "1"],
             fdVending: FDVendingServer())
         let request = try RPCRequest(
@@ -99,7 +102,10 @@ struct AttachRPCStubTests {
         let (router, _) = try makeRouterAndDB()
         router.controlMode = TmuxControlModeBridge(
             supervisor: TmuxControlSupervisor(),
-            tmuxVersion: TmuxVersion(major: 3, minor: 6),
+            startupTmux: TmuxVersionSnapshot(
+                executablePath: TmuxExecutableResolver().resolve()?.path,
+                version: TmuxVersion(major: 3, minor: 6)
+            ),
             environment: ["TBD_TMUX_CONTROL_MODE": "1"],
             fdVending: FDVendingServer())
         let request = RPCRequest(method: RPCMethod.daemonCapabilities)
@@ -144,7 +150,10 @@ struct AttachRPCOrchestrationTests {
     ) -> TmuxControlModeBridge {
         TmuxControlModeBridge(
             supervisor: supervisor,
-            tmuxVersion: TmuxVersion(major: 3, minor: 6),
+            startupTmux: TmuxVersionSnapshot(
+                executablePath: TmuxExecutableResolver().resolve()?.path,
+                version: TmuxVersion(major: 3, minor: 6)
+            ),
             environment: gateOn ? ["TBD_TMUX_CONTROL_MODE": "1"] : [:],
             fdVending: vending,
             readyTimeout: readyTimeout,

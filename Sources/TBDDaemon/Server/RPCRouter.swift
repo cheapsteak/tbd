@@ -527,12 +527,15 @@ public final class RPCRouter: Sendable {
     /// visible on the next fetch without a daemon restart.
     func handleDaemonCapabilities() async throws -> RPCResponse {
         let enabled: Bool
+        let version: TmuxVersion?
         if let bridge = controlMode {
-            enabled = await bridge.gateEnabled()
+            let gateState = await bridge.currentGateState()
+            enabled = gateState.enabled
+            version = gateState.tmuxVersion
         } else {
             enabled = false
+            version = nil
         }
-        let version = controlMode?.tmuxVersion
         let config = try await db.config.get()
         return try RPCResponse(result: DaemonCapabilitiesResult(
             controlModeEnabled: enabled,

@@ -1,7 +1,23 @@
 import Foundation
+import TBDShared
 
-/// Bundles the per-daemon `TmuxControlSupervisor` with the once-detected tmux
-/// version so every `ensureServer()` call site can open a gated control-mode
+/// A tmux version paired with the exact executable path it was detected from.
+/// Keeping the two values together prevents a resolver change between version
+/// detection and bridge construction from mislabeling one executable's version
+/// as another's.
+struct TmuxVersionSnapshot: Sendable {
+    let executablePath: String?
+    let version: TmuxVersion?
+
+    static func detect(using resolver: TmuxExecutableResolver) async -> TmuxVersionSnapshot {
+        let executablePath = resolver.resolve()?.path
+        let version = await TmuxVersion.detect(tmuxBinary: executablePath)
+        return TmuxVersionSnapshot(executablePath: executablePath, version: version)
+    }
+}
+
+/// Bundles the per-daemon `TmuxControlSupervisor` with tmux version resolution
+/// so every `ensureServer()` call site can open a gated control-mode
 /// connection through a single shared owner.
 ///
 /// `Daemon` constructs exactly one of these at startup and hands the same
@@ -12,9 +28,12 @@ struct TmuxControlModeBridge: Sendable {
     /// The single per-daemon supervisor. Connections are keyed by server name
     /// and `ensureConnection` is idempotent, so all call sites share one.
     let supervisor: TmuxControlSupervisor
-    /// tmux version detected once at daemon startup; `nil` when detection
-    /// failed (tmux missing/unparseable), which keeps the gate closed.
-    let tmuxVersion: TmuxVersion?
+    /// Path/version pair detected at daemon startup. Its version is reused only
+    /// while the resolver still selects the paired executable.
+    let startupTmux: TmuxVersionSnapshot
+    /// Resolves PATH first and the live saved fallback second on every gate
+    /// and capabilities decision.
+    let tmuxExecutableResolver: TmuxExecutableResolver
     /// Environment the gate reads. Injectable so tests can flip the gate.
     let environment: [String: String]
     /// Sidecar over which attach handlers vend pane fds.
@@ -56,7 +75,8 @@ struct TmuxControlModeBridge: Sendable {
     let clock: any Clock<Duration>
 
     init(supervisor: TmuxControlSupervisor,
-         tmuxVersion: TmuxVersion?,
+         startupTmux: TmuxVersionSnapshot,
+         tmuxExecutableResolver: TmuxExecutableResolver = TmuxExecutableResolver(),
          environment: [String: String] = ProcessInfo.processInfo.environment,
          fdVending: FDVendingServer,
          readyTimeout: Duration = .seconds(5),
@@ -68,7 +88,8 @@ struct TmuxControlModeBridge: Sendable {
          clock: any Clock<Duration> = ContinuousClock()) {
         self.supervisor = supervisor
         self.clock = clock
-        self.tmuxVersion = tmuxVersion
+        self.tmuxExecutableResolver = tmuxExecutableResolver
+        self.startupTmux = startupTmux
         self.environment = environment
         self.fdVending = fdVending
         self.readyTimeout = readyTimeout
@@ -110,15 +131,35 @@ struct TmuxControlModeBridge: Sendable {
         }
     }
 
+    /// Current tmux version. The startup result is cached only for the same
+    /// effective executable path; a changed PATH or saved fallback is detected
+    /// at use so Settings changes take effect without a daemon restart.
+    func currentTmuxVersion() async -> TmuxVersion? {
+        guard let executablePath = tmuxExecutableResolver.resolve()?.path else { return nil }
+        if executablePath == startupTmux.executablePath, let version = startupTmux.version {
+            return version
+        }
+        return await TmuxVersion.detect(tmuxBinary: executablePath)
+    }
+
+    /// Effective gate decision and the version used for it, evaluated from one
+    /// snapshot so capability fields cannot disagree with the enabled state.
+    func currentGateState() async -> (enabled: Bool, tmuxVersion: TmuxVersion?) {
+        let version = await currentTmuxVersion()
+        let enabled = ControlModeGate.shouldEnable(
+            environment: environment,
+            persistedFlag: await persistedFlagProvider(),
+            tmuxVersion: version
+        )
+        return (enabled, version)
+    }
+
     /// Effective gate decision, evaluated fresh on every call:
     /// `(env opt-in || persisted flag) && tmux >= 3.2`. The persisted flag is
     /// read through `persistedFlagProvider`, so a Settings toggle takes
     /// effect on the next decision without a daemon restart.
     func gateEnabled() async -> Bool {
-        ControlModeGate.shouldEnable(
-            environment: environment,
-            persistedFlag: await persistedFlagProvider(),
-            tmuxVersion: tmuxVersion)
+        await currentGateState().enabled
     }
 
     /// Open a logging-only `tmux -CC` connection for `serverName` when the
