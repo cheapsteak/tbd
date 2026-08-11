@@ -216,7 +216,7 @@ struct ArchiveHarness {
             db: db,
             git: lifecycle.git,
             repoPath: repo.path,
-            worktreePath: worktree.path,
+            worktreePath: worktree.localPath,
             worktreeID: worktree.id,
             tempDir: tempDir
         )

@@ -234,7 +234,7 @@ public actor OrphanGC {
         // `.deleting/<uuid>` is there because TBD renamed it there, so it
         // needs no provenance gate.
         for row in archived {
-            let parent = (row.path as NSString).deletingLastPathComponent
+            let parent = (row.localPath as NSString).deletingLastPathComponent
             guard parent.hasPrefix("/"), parent != "/" else { continue }
             pools.insert(parent)
         }
@@ -365,9 +365,9 @@ public actor OrphanGC {
         dryRun: Bool, planned: inout [String]
     ) async {
         var goneByRepo: [String: [String]] = [:]
-        for row in archived where !FileManager.default.fileExists(atPath: row.path) {
+        for row in archived where !FileManager.default.fileExists(atPath: row.localPath) {
             guard let repoID = row.repoID, let repoPath = repoPathByID[repoID] else { continue }
-            goneByRepo[repoPath, default: []].append(row.path)
+            goneByRepo[repoPath, default: []].append(row.localPath)
         }
 
         for (repoPath, paths) in goneByRepo.sorted(by: { $0.key < $1.key }) {

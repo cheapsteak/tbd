@@ -194,7 +194,7 @@ struct RepoRemoveCascadeTests {
         #expect(rowWhileParked?.status == .archived,
                 "phase 1 must have run synchronously, flipping the row before the RPC answered")
 
-        gate.open(worktree.path)
+        gate.open(worktree.localPath)
 
         try await waitUntil("the detached tail to delete the repo row") {
             ((try? await db.repos.get(id: repo.id)) ?? nil) == nil
@@ -249,7 +249,7 @@ struct RepoRemoveCascadeTests {
             observed: { "entered=\(gate.enteredPaths())" }
         ) { !gate.enteredPaths().isEmpty }
         let released = gate.enteredPaths()[0]
-        let stillParked = try #require([first, second].first { $0.path != released })
+        let stillParked = try #require([first, second].first { $0.localPath != released })
         gate.open(released)
 
         // Its completion finishes; the other is still parked, so nothing
@@ -257,7 +257,7 @@ struct RepoRemoveCascadeTests {
         try await waitUntil(
             "the second archive to reach phase 2",
             observed: { "entered=\(gate.enteredPaths())" }
-        ) { gate.enteredPaths().contains(stillParked.path) }
+        ) { gate.enteredPaths().contains(stillParked.localPath) }
 
         let reposAfterFirst = try await db.repos.list()
         #expect(reposAfterFirst.contains { $0.id == repo.id },
@@ -265,7 +265,7 @@ struct RepoRemoveCascadeTests {
         let archivedAfterFirst = try await db.worktrees.list(status: .archived)
         #expect(archivedAfterFirst.contains { $0.id == stillParked.id })
 
-        gate.open(stillParked.path)
+        gate.open(stillParked.localPath)
         try await waitUntil("the detached tail to delete the repo row") {
             ((try? await db.repos.get(id: repo.id)) ?? nil) == nil
         }

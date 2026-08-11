@@ -4,6 +4,17 @@ import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
 
+/// Carries the observed state on the primary failure line (assertion-hygiene
+/// rule 4: only `Issue.record(_: some Error)` — which a thrown error becomes —
+/// survives into the CI summary).
+private struct RepoRemoveWaitTimeout: Error, CustomStringConvertible {
+    let what: String
+    let seconds: TimeInterval
+    var description: String {
+        "timed out waiting for \(what) — the row was still present after polling up to \(seconds) seconds"
+    }
+}
+
 // Repo-scoped RPC methods: repo.add, repo.list, repo.remove,
 // repo.updateInstructions, plus the unknown-method fallthrough (a
 // generic router behavior that doesn't belong with any single subsystem).
@@ -149,12 +160,34 @@ extension RPCRouterTests {
             method: RPCMethod.repoRemove,
             params: RepoRemoveParams(repoID: repo.id, force: true)))
 
+        // A forced removal answers as soon as phase 1 has archived every local
+        // worktree; the row deletions run in `handleRepoRemove`'s detached
+        // tail, so the cascade's outcome has to be waited for, not read
+        // straight after the response.
         #expect(response.success, "the cascade aborted: \(response.error ?? "no error")")
-        #expect(try await db.repos.get(id: repo.id) == nil)
+        try await waitUntilRemoved("the detached tail to delete the repo row") {
+            ((try? await db.repos.get(id: repo.id)) ?? nil) == nil
+        }
         #expect(try await db.worktrees.get(id: local.id) == nil,
                 "a local worktree row outlived its removed repo")
         #expect(try await db.worktrees.get(id: remote.id) == nil,
                 "a remote worktree row outlived its removed repo")
+    }
+
+    /// Polls `condition` until it holds or the deadline passes, then throws so
+    /// the diagnostic lands on the primary failure line (assertion-hygiene
+    /// rule 4). Mirrors `RepoRemoveCascadeTests.waitUntil`, whose error type is
+    /// file-private to that suite.
+    private func waitUntilRemoved(
+        _ what: String, timeout: TimeInterval = 10,
+        _ condition: @Sendable () async -> Bool
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if await condition() { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw RepoRemoveWaitTimeout(what: what, seconds: timeout)
     }
 
     /// Medium-2 review finding: `repo.remove` hard-deletes every worktree
