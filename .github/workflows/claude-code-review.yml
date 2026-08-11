@@ -37,6 +37,19 @@ jobs:
     if: github.event.pull_request.draft != true
 
     runs-on: ubuntu-latest
+
+    # A wedged session must not run to GitHub's 6-hour cap. 45 minutes is a
+    # generous outer bound on a pipeline whose good runs finish in ~14
+    # (docs/specs/2026-08-10-review-orchestrator-liveness-design.md §2).
+    timeout-minutes: 45
+
+    env:
+      # The specialist set, declared ONCE. The Stop hook reads it to know which
+      # findings-<name>.json files must exist before the orchestrator can merge,
+      # and the validate step passes it as --expected-specialists. Two literals
+      # would let the hook and the validator drift apart silently.
+      REVIEW_SPECIALISTS: correctness,conventions
+
     permissions:
       contents: read
       pull-requests: write
@@ -422,7 +435,7 @@ jobs:
             - Severity is HIGH, MEDIUM, or MINOR. High severity should NOT be measured as high relative to other feedback, but should try to use an objective scale.
             - An empty findings array is a valid result — do not invent findings to appear thorough.
 
-            STEP 1 — FAN OUT. Spawn EXACTLY two specialists via the Task tool, both in parallel (one message, two Task calls). The Task tool results return IMMEDIATELY with launch acknowledgments — the specialists run in the background, and each one's completion arrives later as an automated background-task notification. A launch acknowledgment is NOT a specialist's output. Each specialist must be told: review the diff (`git diff origin/${{ github.event.pull_request.base.ref }}...HEAD`); use only Read/Glob/Grep/git commands — run NO GitHub commands (no `gh`, no comment tools) and post nothing; write ONLY the file `findings-<name>.json` in the repository root with the Write tool, valid JSON per `.github/workflows/claude-review-v2/schemas/findings.schema.json`: `{"specialist": "<name>", "findings": [...]}` where each finding has required `id` (e.g. "<name>-1"), `file`, `severity` (HIGH/MEDIUM/MINOR), `title`, and should carry `line`, `body`, and `confidence` (0..1) whenever known. A finding with no single line anchor — repo-wide, convention, or architectural — sets `line` to null or omits it; both are valid, and neither is a reason to withhold the finding or to invent a line. A finding that is a property of the tree rather than of any one file sets `file` to null too (the key is required, its value may be null) — do not name an arbitrary file just to fill it in. Include the SHARED REVIEW POLICY and the UNTRUSTED DATA NOTICE in each specialist prompt.
+            STEP 1 — FAN OUT. Spawn EXACTLY two specialists via the Task tool, both in parallel (one message, two Task calls), and request FOREGROUND execution for each so its tool result carries that specialist's actual output. CRITICAL — DO NOT END YOUR TURN while either specialist's findings file is missing. This session is headless: ending your turn ends the entire session and kills the specialists with it, no findings are ever written, and the review gate fails with no verdict. If a Task result reads as a launch acknowledgment rather than a specialist's output, the specialists are still running — that is not permission to stop, and there is no notification coming that you can wait for. Your stopping condition is a FILE, never a message: keep working in this turn until both `findings-correctness.json` and `findings-conventions.json` exist in the repository root and parse as JSON. A launch acknowledgment is NOT a specialist's output. Each specialist must be told: review the diff (`git diff origin/${{ github.event.pull_request.base.ref }}...HEAD`); use only Read/Glob/Grep/git commands — run NO GitHub commands (no `gh`, no comment tools) and post nothing; write ONLY the file `findings-<name>.json` in the repository root with the Write tool, valid JSON per `.github/workflows/claude-review-v2/schemas/findings.schema.json`: `{"specialist": "<name>", "findings": [...]}` where each finding has required `id` (e.g. "<name>-1"), `file`, `severity` (HIGH/MEDIUM/MINOR), `title`, and should carry `line`, `body`, and `confidence` (0..1) whenever known. A finding with no single line anchor — repo-wide, convention, or architectural — sets `line` to null or omits it; both are valid, and neither is a reason to withhold the finding or to invent a line. A finding that is a property of the tree rather than of any one file sets `file` to null too (the key is required, its value may be null) — do not name an arbitrary file just to fill it in. Include the SHARED REVIEW POLICY and the UNTRUSTED DATA NOTICE in each specialist prompt.
 
             Specialist (a) — `correctness`, writes findings-correctness.json: the logic of the diff — bugs, broken edge cases, incorrect error handling, claims the tests don't actually prove. Include the following section in its prompt:
 
@@ -455,7 +468,7 @@ jobs:
 
               Theory placement: when the diff compiles a new fork, constant, threshold, or default that answers a question two reasonable projects could answer differently, that is a theory in the sense of docs/theory-placement.md — read that doc and run its placement battery before flagging. First distinguish a theory from its three non-theory neighbors, which compile freely: a fact (differing isn't reasonable), a mechanism (differing isn't meaningful — no project's convention changes what a dead tmux pane is), and an invariant (differing is corruption, not customization); telling them apart is most of the work, and theories usually arrive fused to a mechanism inside a noun. Flag as Medium severity a compiled theory that neither the PR description nor a committed spec shows a human chose — the failure this lens prevents is TBD holding a theory nobody chose, because the code happened to be where a decision landed; it is not the existence of compiled theories, and the doc names what legitimately stays compiled. Explicitly do not flag mechanisms, facts, invariants, or theories whose choice is documented.
 
-            STEP 2 — MERGE. Wait until you have received the background-task completion notification for BOTH specialists before merging — do not merge on launch acknowledgments, and do not merge after only one completion. Only then read the two findings files. Deduplicate: findings from different specialists on the same file within about 3 lines of each other are the same finding — merge them, keeping the clearest title/body and the higher severity unless you have a stated reason to reconcile downward. Weigh the PR discussion (discussion-context.txt) here: a finding the author has already substantively addressed in discussion may be downgraded or dropped, with the reason recorded. Also drop findings you judge invalid or persnickety on re-examination, and keep a count of how many you dropped as invalid. Then use the Write tool to create `review-result.json` in the repository root, valid JSON per `.github/workflows/claude-review-v2/schemas/review-result.schema.json`, containing:
+            STEP 2 — MERGE. Merge only once BOTH findings files exist on disk and parse as JSON — check the files themselves rather than relying on any message. Do not merge on launch acknowledgments, and do not merge while either file is missing: a merge from one lens produces a verdict from half a review, which is worse than no verdict at all. Read the two findings files only after both are present. Deduplicate: findings from different specialists on the same file within about 3 lines of each other are the same finding — merge them, keeping the clearest title/body and the higher severity unless you have a stated reason to reconcile downward. Weigh the PR discussion (discussion-context.txt) here: a finding the author has already substantively addressed in discussion may be downgraded or dropped, with the reason recorded. Also drop findings you judge invalid or persnickety on re-examination, and keep a count of how many you dropped as invalid. Then use the Write tool to create `review-result.json` in the repository root, valid JSON per `.github/workflows/claude-review-v2/schemas/review-result.schema.json`, containing:
             - `findings`: the merged findings array (same finding shape as the specialists').
             - `disposition`: one entry for EVERY specialist finding id — action `kept`, `merged`, `downgraded`, or `dropped`, with `note` REQUIRED for downgraded/dropped (the validation script fails the job if any specialist id is unaccounted for).
             - `comment_body`: the review comment markdown, described next.
@@ -536,14 +549,16 @@ jobs:
         # merged findings' severities, and writes verdict.txt. Any failure exits
         # non-zero and no verdict is written — the gate fails closed.
         # --expected-specialists makes completeness of the specialist set a script
-        # check, not prompt prose: if either of the two named specialists never
-        # produced a findings file (orchestrator merged early), validate fails
-        # closed instead of approving on a partial review.
+        # check, not prompt prose: if either named specialist never produced a
+        # findings file, validate fails closed instead of approving on a partial
+        # review. The set comes from the job-level REVIEW_SPECIALISTS so the Stop
+        # hook — which holds the session open until those same files exist — reads
+        # the identical list.
         run: |
           set -uo pipefail
           if ! python3 .github/workflows/claude-review-v2/validate.py \
                  --specialist-files 'findings-*.json' \
-                 --expected-specialists 'correctness,conventions' \
+                 --expected-specialists "$REVIEW_SPECIALISTS" \
                  --result-file review-result.json; then
             echo "::error::Claude review produced no valid result (missing/invalid findings or result file, or uncovered dispositions) — failing closed. Re-run the review."
             exit 1

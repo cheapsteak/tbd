@@ -210,3 +210,29 @@ def test_the_legacy_reviewer_stays_dispatch_only() -> None:
     assert _triggers(_WORKFLOWS_DIR / "claude-code-review-legacy.yml") == [
         "workflow_dispatch"
     ]
+
+
+# --- liveness wiring --------------------------------------------------------
+
+
+def _review_job() -> dict:
+    data = yaml.safe_load(read_workflow())
+    return data["jobs"]["claude-review"]
+
+
+def test_the_review_job_carries_an_outer_timeout() -> None:
+    """Without one, a wedged session runs to GitHub's 6-hour cap while the
+    author waits for a check that never reports."""
+    assert _review_job()["timeout-minutes"] == 45
+
+
+def test_the_specialist_set_is_declared_once_at_job_level() -> None:
+    assert _review_job()["env"]["REVIEW_SPECIALISTS"] == "correctness,conventions"
+
+
+def test_validate_reads_the_specialist_set_from_that_declaration() -> None:
+    """The hook and the validator must agree about which lenses to expect. A
+    second literal is how they silently drift apart."""
+    body = run_block(read_workflow(), VALIDATE_STEP)
+    assert "REVIEW_SPECIALISTS" in body
+    assert "'correctness,conventions'" not in body
