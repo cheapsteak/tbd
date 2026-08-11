@@ -393,7 +393,16 @@ def _compute_merge_base(base_ref: str) -> str:
         ).stdout
         return out.strip()
     except Exception as exc:  # noqa: BLE001 — any failure means "no usable merge base"
-        print(f"warning: merge-base computation failed: {exc}", file=sys.stderr)
+        # git's own stderr names the resolvable causes (a missing ref after a
+        # base-branch rename, git absent from PATH) that the exception's generic
+        # "exit status N" hides — and this is the fail-closed path whose whole
+        # point is telling an operator what to fix.
+        stderr = getattr(exc, "stderr", None)
+        detail = f" — git said: {stderr.strip()}" if stderr and stderr.strip() else ""
+        print(
+            f"warning: merge-base computation failed: {exc}{detail}",
+            file=sys.stderr,
+        )
         return ""
 
 

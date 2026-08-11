@@ -211,11 +211,21 @@ local objects, so the graft cannot corrupt it. `git diff origin/<base>...HEAD` a
 `git diff <merge-base> HEAD` are the same diff, which is also what keeps patch-ids
 comparable with the markers earlier runs recorded.
 
+Pinning protects the diff; it cannot protect history walks. When the PR is up to
+date with its base, the grafted commit sits on HEAD's own ancestry, and
+`git blame` / `git log <path>` stop there silently — blame attributes every older
+line to the boundary commit. The prompt therefore tells the session how to detect
+the graft (`cat .git/shallow` — the `Bash(cat:*)` grant already covers it), to
+avoid premise-audit conclusions that depend on history beyond the boundary, and to
+note the limitation in the review diagnostics.
+
 **Both merge-base checks fail closed, and say they are not verdicts.** The **Ensure
 a merge-base with the base branch** step runs `git fetch --unshallow origin` when
 (and only when) the clone is shallow — `--unshallow` errors on a complete repo —
 then resolves the merge base. If that fails it fetches the base branch explicitly
-at full depth and retries; if it fails again the step prints an `::error::` naming
+and retries — with `--unshallow` when a shallow boundary still exists, because a
+plain fetch into a shallow repo stops at the boundary and adds no ancestry; if it
+fails again the step prints an `::error::` naming
 the failure as review infrastructure, not a verdict on the PR, and exits 1.
 `prepare.py` applies the same rule at its own layer: an unresolvable merge base
 aborts the run non-zero *without writing* `skip-decision.json` or

@@ -118,7 +118,15 @@ def test_the_re_restore_touches_only_the_pipeline_directory() -> None:
 
 def test_the_ensure_step_repairs_at_full_depth_then_fails_closed() -> None:
     body = run_block(read_workflow(), ENSURE_MERGE_BASE_STEP)
-    # One repair attempt: an explicit full-depth fetch of the base branch.
+    # One repair attempt: an explicit fetch of the base branch that actually
+    # deepens. A plain fetch into a STILL-shallow repo stops at the shallow
+    # boundary and adds no ancestry, so the repair needs both variants: an
+    # --unshallow fetch when a boundary exists, and a plain full fetch when the
+    # repo is complete but the ref is wrong.
+    assert (
+        'git fetch --no-tags --unshallow origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"'
+        in body
+    )
     assert (
         'git fetch --no-tags origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"'
         in body
@@ -184,6 +192,29 @@ def test_the_prompt_tells_the_session_what_an_empty_context_file_means() -> None
     prompt = step_source(read_workflow(), SESSION_STEP)
     assert "EMPTY file means the fetch FAILED" in prompt
     assert "title and description" in prompt
+
+
+def test_the_specialist_handoff_carries_the_context_file() -> None:
+    # The measured #614 failure was the orchestrator telling both specialists no
+    # PR description was available. An orchestrator that composes specialist
+    # prompts from the STEP 1 checklist alone reproduces that exactly, so the
+    # checklist itself — not just the earlier context paragraph — must name the
+    # file.
+    prompt = step_source(read_workflow(), SESSION_STEP)
+    _, _, fanout = prompt.partition("STEP 1 — FAN OUT")
+    assert fanout, "the fan-out prompt no longer contains a `STEP 1 — FAN OUT` section"
+    assert "discussion-context.txt" in fanout
+
+
+def test_the_prompt_teaches_graft_detection_for_history_checks() -> None:
+    # A graft on HEAD's own ancestry (PR up to date with its base) makes
+    # `git blame`/`git log <path>` stop at the boundary SILENTLY — the same
+    # confident-wrong-answer class as the diff, aimed at the premise audit.
+    # `cat .git/shallow` is the deterministic detector, and Bash(cat:*) is
+    # already in the session's allowedTools.
+    prompt = step_source(read_workflow(), SESSION_STEP)
+    assert "cat .git/shallow" in prompt
+    assert "WITH FULL GIT HISTORY (all branches)" not in prompt
 
 
 # --- the session is told what the restore did to its checkout ---------------

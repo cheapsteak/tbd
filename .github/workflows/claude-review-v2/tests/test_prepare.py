@@ -611,6 +611,11 @@ def _run_prepare(
     body_file = repo.parent / "prior-review-body.txt"
     body_file.write_text(prior_body, encoding="utf-8")
     monkeypatch.setattr(_gh, "run_gh", lambda args: _graphql_payload())
+    # prepare.py's own git subprocesses must see the same scrubbed config as
+    # the fixture's (_GIT_ENV), or a developer's global diff.* settings change
+    # the diff text on one side of the patch-id comparison only.
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     monkeypatch.setattr(
         prepare.sys,
         "argv",
