@@ -102,6 +102,61 @@ extension RPCRouterTests {
         #expect(response.error?.contains("active worktree") == true)
     }
 
+    /// A remote lane still counts as something the operator would lose, so it
+    /// blocks an unforced removal exactly like a local worktree does.
+    @Test("repo.remove refuses when only a remote worktree is active, without force")
+    func repoRemoveRefusesActiveRemoteWorktree() async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/test-repo-\(UUID().uuidString)",
+            displayName: "test-repo",
+            defaultBranch: "main"
+        )
+        _ = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "remote-wt", branch: "tbd/remote-wt",
+            provider: "stub", sessionID: "s-1")
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.repoRemove,
+            params: RepoRemoveParams(repoID: repo.id, force: false)))
+
+        #expect(!response.success)
+        #expect(response.error?.contains("active worktree") == true)
+    }
+
+    /// The cascade must not half-complete. `archiveWorktree` resolves its row
+    /// through `getLocal`, which has nothing to return for a remote lane, so a
+    /// cascade fed every active row threw `worktreeNotFound` partway through:
+    /// the local worktree stayed torn down, the repo stayed registered, and the
+    /// caller got a not-found error naming a worktree it never asked about.
+    /// The remote row is skipped by the cascade and removed by `deleteForRepo`
+    /// with the rest — archiving a lane means stopping its provider session,
+    /// which nothing here can do.
+    @Test("repo.remove --force clears a repo owning both a local and a remote worktree")
+    func repoRemoveForceCascadesPastARemoteRow() async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/test-repo-\(UUID().uuidString)",
+            displayName: "test-repo",
+            defaultBranch: "main"
+        )
+        let local = try await db.worktrees.create(
+            repoID: repo.id, name: "local-wt", branch: "tbd/local-wt",
+            path: "/tmp/test-wt-\(UUID().uuidString)", tmuxServer: "tbd-test")
+        let remote = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "remote-wt", branch: "tbd/remote-wt",
+            provider: "stub", sessionID: "s-1")
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.repoRemove,
+            params: RepoRemoveParams(repoID: repo.id, force: true)))
+
+        #expect(response.success, "the cascade aborted: \(response.error ?? "no error")")
+        #expect(try await db.repos.get(id: repo.id) == nil)
+        #expect(try await db.worktrees.get(id: local.id) == nil,
+                "a local worktree row outlived its removed repo")
+        #expect(try await db.worktrees.get(id: remote.id) == nil,
+                "a remote worktree row outlived its removed repo")
+    }
+
     /// Medium-2 review finding: `repo.remove` hard-deletes every worktree
     /// row for the repo (`deleteForRepo`, all statuses) with no chance for
     /// the sweep's own reconciliation to catch up afterward — the rows are

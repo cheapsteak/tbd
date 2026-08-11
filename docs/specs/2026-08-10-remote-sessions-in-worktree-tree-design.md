@@ -377,6 +377,23 @@ archives or dismisses it. Nothing mutates it in the background. Auto-archiving
 after the tombstone window would save one keystroke per rare event and cost a
 background mutation of persisted state, a default-off flag, and a soak.
 
+### Removing a repo that owns lanes
+
+`repo.remove` counts remote lanes among the active worktrees that block an
+unforced removal — a lane is as much a live thing to lose as a local worktree.
+Under `--force`, though, only the local worktrees are cascade-archived: stopping
+a provider session is archive's job, and the cascade has no provider to talk to.
+The lane's row is removed by the same `deleteForRepo` that clears the repo's
+archived and main rows, and no actuation row is written for it, because none of
+its sessions were torn down and the record may only claim acts that were
+attempted.
+
+The lane's provider session therefore outlives the row. That is the honest
+shape for a repo the user is unregistering: TBD is forgetting a repository, not
+promising to reach across the network on the way out — and a cascade that
+half-succeeded, tearing down local worktrees and then failing on a provider
+call, would be strictly worse than one that never claimed the provider work.
+
 ### Does not apply
 
 Hibernation, relocate, forget, scratch promote, and adopt-existing-directory
@@ -457,6 +474,9 @@ Boundary, the tests that would have caught the hazard:
 - A remote `.creating` row left behind by a daemon restart reaches `.failed`
   rather than spinning.
 - An orphan-GC sweep leaves a remote row intact.
+- `repo.remove --force` on a repo owning a local worktree and a remote lane
+  clears the repo and both rows without throwing, and writes a dispose row for
+  the local worktree only.
 
 Behavior:
 
