@@ -13,12 +13,12 @@ import Foundation
         #expect(makeWorktree().location == .local)
     }
 
-    @Test func remoteCarriesProviderAndSessionID() {
+    @Test func remoteCarriesProviderAndSessionID() throws {
         let wt = makeWorktree(location: .remote(provider: "agentbox", sessionID: "s-1"))
         #expect(wt.location == .remote(provider: "agentbox", sessionID: "s-1"))
-        let binding = try? #require(wt.providerBinding)
-        #expect(binding?.provider == "agentbox")
-        #expect(binding?.sessionID == "s-1")
+        let binding = try #require(wt.providerBinding)
+        #expect(binding.provider == "agentbox")
+        #expect(binding.sessionID == "s-1")
     }
 
     @Test func localHasNoProviderBinding() {
