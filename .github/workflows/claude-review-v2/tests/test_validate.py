@@ -1657,3 +1657,133 @@ def test_the_strip_warning_is_an_annotation(
     out = capsys.readouterr().out
     assert out.startswith("::warning::")
     assert "failure_scenario" in out
+
+
+def test_a_file_name_cannot_forge_an_annotation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The path is model-written too: the specialist names its own file with the
+    # Write tool, and the workflow's `findings-*.json` glob matches a name
+    # carrying a newline as readily as any other.
+    finding = _finding_with_failure_scenario()
+    path = _write(
+        tmp_path / "findings-a\n::error::forged.json",
+        {"specialist": "correctness", "findings": [finding]},
+    )
+    validate_findings_file(path)
+
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 1
+    assert "findings-a\\n::error::forged.json" in lines[0]
+    assert not any(line.startswith("::error::forged") for line in lines)
+
+
+def test_finding_shaped_content_below_root_is_dropped_by_design(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A nested container CAN hold finding-shaped content, and it is dropped.
+
+    Pinned so it reads as a decision rather than an accident. The guarantee the
+    depth rule makes is narrower than "nothing important can hide below the
+    root": a strip there never removes an element of the DECLARED findings array
+    and never touches a known field, but content the model wrote into a slot the
+    format does not have goes with the key, warning and all.
+
+    Failing closed on it instead is the worse trade. `related_findings` is
+    indistinguishable by type from `"failure_scenario": ["step one", "step
+    two"]` — the incident's own borrowed vocabulary spelled as a list — so a
+    rule that caught one would cost a whole lens for the other. And a rejection
+    would not have surfaced the nested finding either: it would have discarded
+    the declared ones too and forced a re-run.
+    """
+    smuggled = _high_finding("correctness-nested")
+    finding = _finding_with_failure_scenario()
+    del finding["failure_scenario"]
+    finding["related_findings"] = [smuggled]
+    path = _write(
+        tmp_path / "findings-correctness.json",
+        {"specialist": "correctness", "findings": [finding]},
+    )
+    parsed = validate_findings_file(path)
+
+    assert "related_findings" not in parsed["findings"][0]
+    # Only the DECLARED array feeds the verdict; the smuggled finding is gone.
+    assert [f["id"] for f in parsed["findings"]] == ["correctness-1"]
+    out = capsys.readouterr().out
+    assert "related_findings" in out
+    assert "findings/0" in out
+
+
+def test_one_annotation_per_file_lists_every_site(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The incident's real shape: a lens that borrows a key name writes it on
+    # every finding it reports. One annotation naming every site, not one per
+    # site — twenty near-identical notes would hit GitHub's per-step annotation
+    # display cap and bury whatever else the run had to say.
+    path = _write(
+        tmp_path / "findings-correctness.json",
+        {
+            "specialist": "correctness",
+            "findings": [
+                _finding_with_failure_scenario(id="correctness-1"),
+                _finding_with_failure_scenario(id="correctness-2"),
+                _finding_with_failure_scenario(id="correctness-3"),
+            ],
+        },
+    )
+    validate_findings_file(path)
+
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 1
+    for index in range(3):
+        assert f"at findings/{index}: failure_scenario" in lines[0]
+
+
+# --- every model-derived interpolation goes through the choke point ---------
+#
+# The strip warning is not the only line that carries model-written text into a
+# log GitHub parses for `::` commands. A file's PATH is model-written — the
+# specialist names its own file with the Write tool, and `findings-*.json`
+# matches a newline-bearing name — and it appears in the `ok:` line of a
+# perfectly VALID file and in the `error:` line of a rejected one. So does file
+# CONTENT: the `specialist` name, and the finding ids the disposition check
+# reports. Every one of those is routed through `_sanitize_log_text`, which
+# stays the single place the escaping is defined.
+#
+# The `ok:` line is the sharper of the two, because it prints on success: a
+# forged annotation there rides a run that goes on to post a review.
+
+_FORGED_NAME = "findings-a\n::error::forged.json"
+
+
+def test_a_valid_file_with_a_forged_name_stays_one_ok_line(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write(tmp_path / _FORGED_NAME, {"specialist": "correctness", "findings": []})
+    _write_empty_result(tmp_path)
+    assert _run_main(monkeypatch, tmp_path, None) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    ok_lines = [line for line in lines if line.startswith("ok: ")]
+    assert len(ok_lines) == 2  # the findings file and the result file
+    assert "findings-a\\n::error::forged.json" in ok_lines[0]
+    assert not any(line.startswith("::error::forged") for line in lines)
+
+
+def test_a_rejected_file_with_a_forged_name_stays_one_error_line(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write(tmp_path / _FORGED_NAME, {"specialist": "correctness"})  # no findings
+    _write_empty_result(tmp_path)
+    assert _run_main(monkeypatch, tmp_path, None) == 1
+
+    lines = capsys.readouterr().err.splitlines()
+    error_lines = [line for line in lines if line.startswith("error: ")]
+    assert len(error_lines) == 1
+    assert "findings-a\\n::error::forged.json" in error_lines[0]
+    assert not any(line.startswith("::error::forged") for line in lines)

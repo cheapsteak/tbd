@@ -11,10 +11,12 @@ Deterministic bookend that runs AFTER the model review session
   format). One carve-out, at the document ROOT only: an unknown ROOT key
   holding an object or an array is left in place and still fails closed,
   because the verdict's inputs are root keys and a misnamed container there may
-  be the findings. Below the root nothing verdict-bearing can hide in an
-  unknown key, so any of them is stripped. Value validation of the KNOWN keys
-  stays strict throughout, so everything the verdict and the disposition check
-  are computed from still fails closed,
+  be the findings. Below the root every unknown key is stripped: a strip there
+  can never remove an element of the declared findings array nor alter a known
+  field, and content written into a slot the format does not have is dropped
+  with the warning naming the key. Value validation of the KNOWN keys stays
+  strict throughout, so everything the verdict and the disposition check are
+  computed from still fails closed,
 - with `--expected-specialists`, checks that every named specialist actually
   produced a VALID findings file (a partial fan-out must never read as a clean
   run), reporting separately whether a lens produced nothing at all, produced a
@@ -225,14 +227,24 @@ def is_session_stall(
 def _sanitize_log_text(text: str) -> str:
     """Escape line breaks so model-written text cannot forge a workflow command.
 
-    Everything interpolated into the strip warning is model-written: the key
-    names, and the path components that are themselves object keys. GitHub
-    parses a job's stdout line by line for `::` workflow commands, so a key
-    containing a newline would let a review session emit its own `::error::`,
-    or a `::stop-commands::` that disables annotation parsing for the rest of
-    the job — on a run that is otherwise GREEN and posts a review. Escaping the
-    breaks keeps the warning one line and leaves any forged directive as inert
-    text inside it.
+    The single choke point every diagnostic passes through before it is printed,
+    because almost everything these lines interpolate was written by the review
+    session. File PATHS are: a specialist names its own file with the Write
+    tool, and the workflow's `findings-*.json` glob matches a newline-bearing
+    name as readily as any other. So is file CONTENT — key names, the
+    `specialist` field, finding ids, the values quoted back in a schema error.
+
+    GitHub parses a job's stdout line by line for `::` workflow commands, so a
+    newline anywhere in that text would let a review session emit its own
+    `::error::`, or a `::stop-commands::` that disables annotation parsing for
+    the rest of the job. The `ok:` line is the one that matters most, precisely
+    because it prints on SUCCESS: a forged directive there rides a green run
+    that goes on to post a review.
+
+    Whole composed lines are passed through here, not just their variable
+    middles — a template that begins with a safe prefix stops being one line the
+    moment an interpolated newline splits it. Escaping keeps each diagnostic on
+    one line and leaves any forged directive as inert text inside it.
     """
     return text.replace("\r", "\\r").replace("\n", "\\n")
 
@@ -277,16 +289,23 @@ def strip_unknown_keys(data, schema, validator_cls) -> list[tuple[str, list[str]
     root is left alone too: a gate whose behavior depended on how much the
     model happened to write would be the worse rule.
 
-    BELOW the root, every unknown key is stripped whatever it holds. Nothing
-    verdict-bearing can hide in one. A finding's own keys — `id`, `severity`,
-    `title` — are KNOWN keys and are never stripping candidates, and neither are
-    a disposition entry's `action` and `note`; stripping inside a finding cannot
-    remove a finding from the array, change a severity, or alter a disposition.
-    What an unknown key holds there is elaboration that had no slot in the
-    format, and failing the gate over it recreates the exact loss the soft key
-    set exists to prevent: `"failure_scenario": ["step one", "step two"]` is the
-    same borrowed vocabulary spelled as a list, and a depth-free container rule
-    would discard the whole lens for it.
+    BELOW the root, every unknown key is stripped whatever it holds. What that
+    guarantees is bounded and worth stating exactly: a strip below the root can
+    never remove an element of the DECLARED findings array and never alters a
+    known field, because known keys are never stripping candidates — `id`,
+    `severity` and `title` on a finding, `action` and `note` on a disposition
+    entry, all untouched. It does not guarantee that nothing of substance is
+    dropped. A model can write finding-shaped content into a slot the format
+    does not have — `"related_findings": [<a HIGH finding>]` inside a finding —
+    and that content is discarded, with the warning naming the key.
+
+    That is the accepted cost, not an oversight. Failing the gate on it would
+    recreate the loss the soft key set exists to prevent, since
+    `"failure_scenario": ["step one", "step two"]` — the borrowed vocabulary
+    from the incident, spelled as a list — is indistinguishable by type from the
+    speculative case; and rejecting the file would not have surfaced the nested
+    findings either, only forced a re-run. Dropping them with a named warning
+    and keeping the declared ones is the better of the two available outcomes.
 
     Tolerates any JSON type. A document that decoded to a list or a scalar has
     no object to strip from, and diagnosing that is the strict validation's job:
@@ -384,12 +403,28 @@ def _validate_file(path: str, schema_filename: str) -> dict:
     # go on to pass: a note buried in a green job's stdout is exactly where
     # prompt drift accumulates unread, and every other operator-facing note in
     # this workflow surfaces the same way.
-    for stripped_path, keys in strip_unknown_keys(data, schema, validator_cls):
-        located = _sanitize_log_text(f"{stripped_path}: {', '.join(keys)}")
+    #
+    # ONE annotation per file, listing every site. The drift this reports is a
+    # habit rather than a slip — a lens that borrows a key name writes it on
+    # every finding it reports — so per-site annotations would post twenty
+    # near-identical notes, hit GitHub's per-step annotation display cap, and
+    # bury the annotations that are not this one.
+    #
+    # The whole composed line is sanitized, not just its variable middle: the
+    # file path is model-written as well (the specialist names its own file with
+    # the Write tool, and the workflow's glob matches a newline-bearing name).
+    stripped = strip_unknown_keys(data, schema, validator_cls)
+    if stripped:
+        sites = "; ".join(
+            f"at {stripped_path}: {', '.join(keys)}"
+            for stripped_path, keys in stripped
+        )
         print(
-            f"::warning::{path}: ignored unexpected key(s) at {located} — not "
-            "in the schema; known fields were kept and validated, the "
-            "unexpected key's content was dropped"
+            _sanitize_log_text(
+                f"::warning::{path}: ignored unexpected key(s) not in the "
+                f"schema: {sites} — known fields were kept and validated, the "
+                "unexpected keys' content was dropped"
+            )
         )
 
     errors = sorted(
@@ -466,7 +501,9 @@ def main() -> int:
         try:
             data = validate_findings_file(path)
         except SchemaValidationError as exc:
-            print(f"error: {exc}", file=sys.stderr)
+            # Sanitized at the PRINT site, not in the constructor: the raised
+            # message keeps its raw text for callers and tests that match on it.
+            print(_sanitize_log_text(f"error: {exc}"), file=sys.stderr)
             failed = True
             # Remember WHICH lens this rejected file belonged to, so the
             # completeness diagnostic below can say "ran but was rejected"
@@ -477,7 +514,7 @@ def main() -> int:
             continue
         seen_specialists.append(data["specialist"])
         specialist_ids.extend(finding["id"] for finding in data["findings"])
-        print(f"ok: {path} ({len(data['findings'])} finding(s))")
+        print(_sanitize_log_text(f"ok: {path} ({len(data['findings'])} finding(s))"))
 
     # PRESENCE, decided before validity: a result file that exists but fails
     # the schema is a session that reached its merge and got it wrong, not a
@@ -489,7 +526,7 @@ def main() -> int:
     result_error = None
     try:
         result = validate_result_file(args.result_file)
-        print(f"ok: {args.result_file}")
+        print(_sanitize_log_text(f"ok: {args.result_file}"))
     except SchemaValidationError as exc:
         result_error = str(exc)
 
@@ -526,31 +563,37 @@ def main() -> int:
                 # operator isn't sent hunting an orchestrator race that isn't
                 # there.
                 print(
-                    "error: "
-                    f"{missing_specialist_report(missing, rejected_specialists)}",
+                    _sanitize_log_text(
+                        "error: "
+                        f"{missing_specialist_report(missing, rejected_specialists)}"
+                    ),
                     file=sys.stderr,
                 )
                 failed = True
         if result_error is not None:
-            print(f"error: {result_error}", file=sys.stderr)
+            print(_sanitize_log_text(f"error: {result_error}"), file=sys.stderr)
             failed = True
 
     if expected:
         unexpected = sorted(set(seen_specialists) - set(expected))
         if unexpected:
             print(
-                "warning: findings file(s) from unexpected specialist(s): "
-                f"{', '.join(unexpected)} — not in --expected-specialists; "
-                "validated and merged as usual"
+                _sanitize_log_text(
+                    "warning: findings file(s) from unexpected specialist(s): "
+                    f"{', '.join(unexpected)} — not in --expected-specialists; "
+                    "validated and merged as usual"
+                )
             )
 
     if result is not None:
         uncovered = check_disposition(specialist_ids, result["disposition"])
         if uncovered:
             print(
-                "error: disposition list does not account for specialist "
-                f"finding(s): {', '.join(uncovered)} — every specialist finding "
-                "needs a kept/merged/downgraded/dropped entry",
+                _sanitize_log_text(
+                    "error: disposition list does not account for specialist "
+                    f"finding(s): {', '.join(uncovered)} — every specialist "
+                    "finding needs a kept/merged/downgraded/dropped entry"
+                ),
                 file=sys.stderr,
             )
             failed = True
@@ -562,7 +605,9 @@ def main() -> int:
     try:
         verdict = verdict_from_findings(result["findings"])
     except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        # The message quotes the offending finding's id and severity — both
+        # model-written.
+        print(_sanitize_log_text(f"error: {exc}"), file=sys.stderr)
         print("validation FAILED — no verdict written (gate fails closed)")
         return 1
 

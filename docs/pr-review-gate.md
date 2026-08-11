@@ -135,8 +135,8 @@ distinguishing error line in the job log is what an operator reads:
   what produces this: it is stripped, a `::warning::` names it, and the file
   validates on its known fields. What still lands here is an unknown key at a file's
   TOP level holding an object or an array — it may be the findings under a wrong
-  name, where stripping would fabricate an APPROVE — and any malformed value in a
-  known field.
+  name, where stripping would fabricate an APPROVE — along with a missing required
+  key and any malformed value in a known field.
 - **A broken invocation** — `--expected-specialists` supplied while naming no lens,
   which is what an unset or blank `REVIEW_SPECIALISTS` expands to. Nothing can be
   checked, so nothing is trusted.

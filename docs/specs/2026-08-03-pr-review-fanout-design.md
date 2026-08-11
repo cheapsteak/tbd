@@ -123,11 +123,17 @@ rejection costs a re-run; a fabricated APPROVE merges the diff. The carve-out re
 value's type and not its content, so an empty root array is left alone too — a rule that
 turned on how much the model happened to write would be worse than one that fails closed.
 Below the root the carve-out does not apply and any unknown key is stripped whatever it
-holds, because nothing verdict-bearing can hide in one: known keys are never stripped, so
-a strip inside a finding cannot remove a finding, change a `severity`, or alter a
-disposition's `action` or `note`. Extending the container rule downward would fail the
-gate on `"failure_scenario": ["step one", "step two"]` — the same borrowed vocabulary the
-soft key set exists for, spelled as a list.
+holds. The guarantee that buys is bounded and worth stating exactly: because known keys
+are never stripped, a strip below the root can never remove an element of the declared
+findings array and never alters a known field — no `severity` changes, no disposition
+`action` or `note` moves. It does not guarantee that nothing of substance is dropped: a
+model can write finding-shaped content into a slot the format does not have, such as
+`"related_findings": [ ... ]` inside a finding, and that content is discarded with the
+warning naming the key. That is the accepted cost. Extending the container rule downward
+would fail the gate on `"failure_scenario": ["step one", "step two"]` — the borrowed
+vocabulary the soft key set exists for, spelled as a list, and indistinguishable by type
+from the speculative case — while rejecting the file would not have surfaced nested
+findings either, only forced a re-run.
 
 Value validation of the known keys is untouched by any of this: a bad `severity` or a
 missing `title` still fails the gate closed, because those are the fields the verdict and
