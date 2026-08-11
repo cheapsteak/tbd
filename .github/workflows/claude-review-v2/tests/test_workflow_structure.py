@@ -446,13 +446,14 @@ def _schema_finding_keys() -> set[str]:
 def test_the_prompt_names_exactly_the_schema_s_finding_keys() -> None:
     """The fan-out prompt spells the finding vocabulary a second time.
 
-    It has to: the validator strips unknown keys rather than failing on them, so
-    a key the prompt permits and the schema does not is deleted in silence and
-    whatever the model wrote in it never reaches a reader. That makes prompt
-    drift invisible at exactly the moment it starts costing content — the
-    opposite of the loud schema rejection that used to catch it. Nothing else
-    compares these two lists, so this test is the comparison: add a key to
-    `$defs/finding/properties` and it fails until the prompt names it too.
+    It has to: an unknown key INSIDE a finding is stripped with a warning
+    rather than rejected, so a key the prompt permits and the schema does not
+    is deleted and whatever the model wrote in it never reaches a reader. The
+    run stays green and the loss is a line in the log. (A misnamed key at a
+    file's top level still fails closed — that half of the drift is loud.)
+    Nothing else compares these two lists, so this test is the comparison: add
+    a key to `$defs/finding/properties` and it fails until the prompt names it
+    too.
 
     The count word is checked with the set, because "Those seven keys" naming
     eight is its own quiet contradiction for a model reading the sentence.
@@ -463,13 +464,18 @@ def test_the_prompt_names_exactly_the_schema_s_finding_keys() -> None:
         "the fan-out prompt no longer carries the `Those <n> keys — ... — are "
         "the ONLY keys a finding may carry` sentence. If the prompt states the "
         "finding vocabulary another way, retarget this test rather than "
-        "deleting it: unknown keys are stripped silently, so nothing else "
-        "catches the drift"
+        "deleting it: an unknown key inside a finding is stripped rather than "
+        "rejected, so nothing else catches this drift"
     )
 
-    named = set(re.findall(r"`([a-z_]+)`", match.group("keys")))
+    named = set(re.findall(r"`([A-Za-z0-9_]+)`", match.group("keys")))
     schema_keys = _schema_finding_keys()
     assert named == schema_keys
+    assert len(schema_keys) < len(_NUMBER_WORDS), (
+        f"the finding schema declares {len(schema_keys)} keys, past the "
+        f"{len(_NUMBER_WORDS) - 1} this test can spell — extend _NUMBER_WORDS "
+        "so the count word is still checked rather than skipped"
+    )
     assert match.group("count") == _NUMBER_WORDS[len(schema_keys)]
 
     # And every one of them is backtick-quoted somewhere in the prompt, so the

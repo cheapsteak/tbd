@@ -1389,17 +1389,17 @@ def test_strip_tolerates_any_json_type(data: object) -> None:
     assert strip_unknown_keys(data, schema, validator_cls) == []
 
 
-# --- a misnamed CONTAINER must still fail the gate closed -------------------
+# --- a misnamed ROOT container must still fail the gate closed --------------
 #
-# The limit of the soft key set, and the reason it is drawn by TYPE. Stripping
-# an unknown key is safe exactly when the key carries nothing a reader would
-# have seen. A scalar under a wrong name qualifies. A container does not: the
-# most likely reason a lens writes `{"findings": [], "results": [...]}` is that
-# it reported real findings and misnamed the list, and deleting `results`
-# converts a fail-closed schema rejection into a silent APPROVE over unread
-# code. So an unknown key holding an object or an array is left where it is and
-# the strict pass rejects the file exactly as it always did — a rejection costs
-# a re-run, a fabricated APPROVE merges the diff.
+# The limit of the soft key set. Stripping an unknown key is safe exactly when
+# the key carries nothing a reader would have seen, and at the document ROOT a
+# container can carry the review itself: the most likely reason a lens writes
+# `{"findings": [], "results": [...]}` is that it reported real findings and
+# misnamed the list, and deleting `results` converts a fail-closed schema
+# rejection into a silent APPROVE over unread code. `findings` and
+# `disposition` are root keys, so the root is the only depth where that
+# substitution is possible — the section after this one pins the other side,
+# where an unknown key can hold anything and still reach nothing.
 
 
 def _high_finding(finding_id: str = "correctness-1") -> dict:
@@ -1488,7 +1488,9 @@ def test_main_merged_findings_smuggled_under_a_wrong_key_fails_closed(
         [],
     ],
 )
-def test_strip_leaves_container_valued_unknown_keys_alone(value: object) -> None:
+def test_strip_leaves_container_valued_unknown_root_keys_alone(
+    value: object,
+) -> None:
     schema, validator_cls = _findings_validator()
     data = {"specialist": "correctness", "findings": [], "results": value}
     assert strip_unknown_keys(data, schema, validator_cls) == []
@@ -1512,27 +1514,146 @@ def test_strip_takes_the_scalars_and_leaves_the_container_in_one_object() -> Non
     assert data["results"] == [_high_finding()]
 
 
-@pytest.mark.parametrize(
-    "additional",
-    [
-        # Schema-valued `additionalProperties` and a `patternProperties` sibling
-        # both make keys legal that `properties` never names, so `properties`
-        # is not the key set and stripping by it would delete legal data.
-        {"additionalProperties": {"type": "string"}},
-        {"additionalProperties": False, "patternProperties": {"^x-": {}}},
-    ],
-)
-def test_strip_declines_schemas_whose_key_set_properties_does_not_state(
-    additional: dict,
-) -> None:
+def test_strip_declines_a_schema_whose_key_set_properties_does_not_state() -> None:
+    # `patternProperties` makes keys legal that `properties` never names, so
+    # `properties` is not the key set and stripping by it would delete legal
+    # data. (The schema-valued `additionalProperties` form needs no guard: it
+    # validates each extra key against its subschema and reports under that
+    # subschema's keyword, never under `additionalProperties`.)
     import jsonschema
 
     schema = {
         "type": "object",
         "properties": {"known": {"type": "string"}},
-        **additional,
+        "additionalProperties": False,
+        "patternProperties": {"^x-": {}},
     }
     validator_cls = jsonschema.validators.validator_for(schema)
     data = {"known": "a", "extra": 42}
     assert strip_unknown_keys(data, schema, validator_cls) == []
     assert data["extra"] == 42
+
+
+# --- the container carve-out is a ROOT rule, not a depth-free one ------------
+#
+# The carve-out above exists because a misnamed container at the document root
+# can BE the verdict's input: `findings`, `disposition`, and the severities
+# inside them are root-anchored, so deleting `results` there fabricates an
+# APPROVE. None of that is reachable below the root. A finding's own keys are
+# the ones the schema names — `id`, `severity`, `title` and the rest are KNOWN
+# keys and are never candidates for stripping — so an unknown key inside a
+# finding or a disposition entry cannot remove a finding, cannot change a
+# severity, and cannot alter a disposition's action. Whatever it holds is
+# elaboration that had no slot in the format, and the only question is whether
+# losing it is worth failing the gate over. It is not: applying the container
+# rule at every depth turns `"failure_scenario": ["step one", "step two"]` —
+# the same borrowed vocabulary the soft key set exists for, spelled as a list —
+# back into a whole discarded lens.
+
+
+def test_a_container_valued_borrowed_key_inside_a_finding_is_stripped(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The reproduction: the incident's key, written as a list instead of a
+    # string. Below the root, the value's type buys nothing.
+    finding = _finding_with_failure_scenario(
+        failure_scenario=["step one", "step two"]
+    )
+    path = _write(
+        tmp_path / "findings-correctness.json",
+        {"specialist": "correctness", "findings": [finding]},
+    )
+    parsed = validate_findings_file(path)
+    assert "failure_scenario" not in parsed["findings"][0]
+    assert parsed["findings"][0]["severity"] == "HIGH"
+    out = capsys.readouterr().out
+    assert "failure_scenario" in out
+    assert "findings/0" in out
+
+
+def test_a_container_valued_unknown_key_in_a_disposition_entry_is_stripped(
+    tmp_path: Path,
+) -> None:
+    data = _valid_result()
+    data["disposition"] = [
+        {
+            "id": "correctness-1",
+            "action": "kept",
+            "evidence": {"file": "Sources/A.swift", "lines": [1, 2]},
+        }
+    ]
+    path = _write(tmp_path / "review-result.json", data)
+    parsed = validate_result_file(path)
+    assert "evidence" not in parsed["disposition"][0]
+    assert parsed["disposition"][0]["action"] == "kept"
+
+
+def test_depth_stripping_does_not_soften_a_missing_dropped_note(
+    tmp_path: Path,
+) -> None:
+    # The known keys are never stripped, so the one place a note is load-bearing
+    # still fails closed even when the entry also carries an unknown container.
+    data = _valid_result()
+    data["disposition"] = [
+        {"id": "correctness-1", "action": "dropped", "rationale": {"why": "n/a"}}
+    ]
+    path = _write(tmp_path / "review-result.json", data)
+    with pytest.raises(SchemaValidationError, match="note"):
+        validate_result_file(path)
+
+
+# --- the warning is model-written text, and GitHub reads stdout -------------
+#
+# Every part of the strip warning that varies — the key names, and the path
+# components that are themselves object keys — was written by the review
+# session. GitHub parses a job's stdout line by line for `::` workflow
+# commands, so a key spelled with a newline in it would let the session emit
+# its own annotations, or a `::stop-commands::` that switches annotation
+# parsing off for the rest of the job. The run that carries it is GREEN — the
+# keys were stripped, the file validated — which is what makes it worth
+# defending: nothing else is failing to draw attention.
+
+
+def test_sanitize_flattens_line_breaks() -> None:
+    assert validate._sanitize_log_text("a\nb") == "a\\nb"
+    assert validate._sanitize_log_text("a\r\nb") == "a\\r\\nb"
+    assert validate._sanitize_log_text("plain") == "plain"
+
+
+def test_a_key_name_cannot_forge_a_second_annotation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    finding = _finding_with_failure_scenario()
+    del finding["failure_scenario"]
+    finding["x\n::warning::forged"] = "payload"
+    path = _write(
+        tmp_path / "findings-correctness.json",
+        {"specialist": "correctness", "findings": [finding]},
+    )
+    validate_findings_file(path)
+
+    lines = capsys.readouterr().out.splitlines()
+    warnings = [line for line in lines if line.startswith("::warning::")]
+    assert len(warnings) == 1
+    # The break is escaped in place, so the forged directive stays inside the
+    # one real annotation as text.
+    assert "x\\n::warning::forged" in warnings[0]
+    assert not any(line.startswith("::warning::forged") for line in lines)
+
+
+def test_the_strip_warning_is_an_annotation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # It fires on runs that go on to PASS, so a bare stdout line is where it
+    # would go unread.
+    path = _write(
+        tmp_path / "findings-correctness.json",
+        {
+            "specialist": "correctness",
+            "findings": [_finding_with_failure_scenario()],
+        },
+    )
+    validate_findings_file(path)
+    out = capsys.readouterr().out
+    assert out.startswith("::warning::")
+    assert "failure_scenario" in out

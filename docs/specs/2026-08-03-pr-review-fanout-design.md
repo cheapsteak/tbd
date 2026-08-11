@@ -111,19 +111,27 @@ states the vocabulary, which is how prompt drift stays visible rather than accum
 unseen; enforcing it fatally is what costs too much. A specialist that borrows one key
 name from another finding format it knows — writing `failure_scenario` beside a
 well-formed `title` and `body` — has still reported real findings, and rejecting the file
-discards every one of them over a name no consumer reads. So an unknown key whose value
-is a SCALAR is stripped before the strict pass, with a warning naming the file and the
-offending path so the drift is visible in the run. An unknown key holding an object or an
-array is left in place and the file is rejected as any malformed file is: a scalar under
-a wrong name is cosmetic, but a container under a wrong name may BE the findings —
-`{"findings": [], "results": [ ... ]}` is a lens that reported and misnamed its list, and
-deleting `results` would compute APPROVE over unread code. A rejection costs a re-run; a
-fabricated APPROVE merges the diff. The boundary reads the value's type and not its
-content, so an empty array is left alone too — a rule that turned on how much the model
-happened to write would be worse than one that fails closed. Value validation of the
-known keys is untouched by any of this: a bad `severity` or a missing `title` still fails
-the gate closed, because those are the fields the verdict and the coverage check are
-computed from.
+discards every one of them over a name no consumer reads. So an unknown key is stripped
+before the strict pass, and the run carries a `::warning::` naming the file, the path and
+the key, so the drift is visible rather than silent.
+
+One carve-out, at the document ROOT. An unknown ROOT key holding an object or an array is
+left in place and the file is rejected as any malformed file is, because the verdict's
+inputs are root keys: `{"findings": [], "results": [ ... ]}` is a lens that reported and
+misnamed its list, and deleting `results` would compute APPROVE over unread code. A
+rejection costs a re-run; a fabricated APPROVE merges the diff. The carve-out reads the
+value's type and not its content, so an empty root array is left alone too — a rule that
+turned on how much the model happened to write would be worse than one that fails closed.
+Below the root the carve-out does not apply and any unknown key is stripped whatever it
+holds, because nothing verdict-bearing can hide in one: known keys are never stripped, so
+a strip inside a finding cannot remove a finding, change a `severity`, or alter a
+disposition's `action` or `note`. Extending the container rule downward would fail the
+gate on `"failure_scenario": ["step one", "step two"]` — the same borrowed vocabulary the
+soft key set exists for, spelled as a list.
+
+Value validation of the known keys is untouched by any of this: a bad `severity` or a
+missing `title` still fails the gate closed, because those are the fields the verdict and
+the coverage check are computed from.
 
 Initial specialist set (2, deliberately small):
 

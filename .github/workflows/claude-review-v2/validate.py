@@ -5,14 +5,16 @@ Deterministic bookend that runs AFTER the model review session
 (docs/specs/2026-08-03-pr-review-fanout-design.md §3.2, §3.4, §3.5). It:
 
 - schema-validates every specialist findings file and the merged review-result,
-  stripping unknown SCALAR-valued keys with a logged warning rather than
-  failing the gate on them (a lens that ran must never contribute zero findings
-  because the model borrowed a key name from another finding format). An
-  unknown key holding an object or an array is NOT stripped — it may be the
-  findings under a wrong name, and deleting it would turn a rejection into a
-  silent APPROVE. Value validation of the KNOWN keys stays strict too, so
-  everything the verdict and the disposition check are computed from still
-  fails closed,
+  stripping keys the schema does not know, with a `::warning::` annotation,
+  rather than failing the gate on them (a lens that ran must never contribute
+  zero findings because the model borrowed a key name from another finding
+  format). One carve-out, at the document ROOT only: an unknown ROOT key
+  holding an object or an array is left in place and still fails closed,
+  because the verdict's inputs are root keys and a misnamed container there may
+  be the findings. Below the root nothing verdict-bearing can hide in an
+  unknown key, so any of them is stripped. Value validation of the KNOWN keys
+  stays strict throughout, so everything the verdict and the disposition check
+  are computed from still fails closed,
 - with `--expected-specialists`, checks that every named specialist actually
   produced a VALID findings file (a partial fan-out must never read as a clean
   run), reporting separately whether a lens produced nothing at all, produced a
@@ -220,8 +222,27 @@ def is_session_stall(
     return not any_specialist_file and not seen and not rejected
 
 
+def _sanitize_log_text(text: str) -> str:
+    """Escape line breaks so model-written text cannot forge a workflow command.
+
+    Everything interpolated into the strip warning is model-written: the key
+    names, and the path components that are themselves object keys. GitHub
+    parses a job's stdout line by line for `::` workflow commands, so a key
+    containing a newline would let a review session emit its own `::error::`,
+    or a `::stop-commands::` that disables annotation parsing for the rest of
+    the job — on a run that is otherwise GREEN and posts a review. Escaping the
+    breaks keeps the warning one line and leaves any forged directive as inert
+    text inside it.
+    """
+    return text.replace("\r", "\\r").replace("\n", "\\n")
+
+
 def strip_unknown_keys(data, schema, validator_cls) -> list[tuple[str, list[str]]]:
-    """Delete unknown SCALAR-valued keys, in place; report what was cut.
+    """Delete keys the schema does not declare, in place; report what was cut.
+
+    The one exception — a container-valued key at the document root — is left
+    in place for the strict pass to reject; the carve-out paragraph below says
+    why.
 
     Returns `(path, removed_keys)` pairs — path as a `/`-joined instance
     pointer, `"<root>"` for the document itself — sorted by path so the log line
@@ -244,18 +265,28 @@ def strip_unknown_keys(data, schema, validator_cls) -> list[tuple[str, list[str]
     after this still rejects those. Stripping answers "this key is not in the
     vocabulary" and nothing else.
 
-    **The boundary is the value's type, and it is what keeps the gate closed.**
-    Only a scalar value (string, number, boolean, null) is dropped. An unknown
-    key holding an object or an array is left exactly where it is, so the strict
-    pass still rejects the file. The asymmetry is not fastidiousness: a scalar
-    under a wrong name is cosmetic vocabulary drift, but a CONTAINER under a
-    wrong name can be the findings themselves — `{"findings": [], "results":
-    [<a HIGH finding>]}` is a lens that reported and misnamed its list, and
-    silently deleting `results` leaves an empty `findings` that computes to
-    APPROVE. A rejected file costs a re-run; a fabricated APPROVE merges unread
-    code. An empty array is left too, by the same rule read on TYPE rather than
-    on content: judging emptiness would make the gate's behavior depend on how
-    much the model happened to write.
+    **One carve-out, and it is anchored at the document ROOT.** At the root, an
+    unknown key holding an object or an array is NOT stripped: it is left in
+    place so the strict pass rejects the file. The root is where the verdict's
+    inputs live — `findings` and `disposition` are root keys — so a misnamed
+    container there can BE the review. `{"findings": [], "results": [<a HIGH
+    finding>]}` is a lens that reported and misnamed its list, and silently
+    deleting `results` leaves an empty `findings` that computes to APPROVE. A
+    rejected file costs a re-run; a fabricated APPROVE merges unread code. The
+    rule reads the value's TYPE and not its content, so an empty array at the
+    root is left alone too: a gate whose behavior depended on how much the
+    model happened to write would be the worse rule.
+
+    BELOW the root, every unknown key is stripped whatever it holds. Nothing
+    verdict-bearing can hide in one. A finding's own keys — `id`, `severity`,
+    `title` — are KNOWN keys and are never stripping candidates, and neither are
+    a disposition entry's `action` and `note`; stripping inside a finding cannot
+    remove a finding from the array, change a severity, or alter a disposition.
+    What an unknown key holds there is elaboration that had no slot in the
+    format, and failing the gate over it recreates the exact loss the soft key
+    set exists to prevent: `"failure_scenario": ["step one", "step two"]` is the
+    same borrowed vocabulary spelled as a list, and a depth-free container rule
+    would discard the whole lens for it.
 
     Tolerates any JSON type. A document that decoded to a list or a scalar has
     no object to strip from, and diagnosing that is the strict validation's job:
@@ -267,17 +298,15 @@ def strip_unknown_keys(data, schema, validator_cls) -> list[tuple[str, list[str]
 
     reported: list[tuple[str, list[str]]] = []
     for err in errors:
+        # This keyword only ever fires for `additionalProperties: false`; the
+        # schema-valued form validates each extra key against its subschema and
+        # surfaces under that subschema's own keyword (`type`, `enum`, …), which
+        # this filter has already excluded. `patternProperties` is the one
+        # sibling that still needs guarding: it makes keys legal that
+        # `properties` never names, so `properties` would not be the key set and
+        # stripping by it would delete legal data. Leave those to the strict
+        # pass, which fails closed rather than guessing.
         if err.validator != "additionalProperties":
-            continue
-        # Only the plain `additionalProperties: false` form declares its whole
-        # key set in `properties`. A schema-valued `additionalProperties` or a
-        # `patternProperties` sibling makes keys legal that `properties` never
-        # names, so reading `properties` as "everything known" would delete
-        # legal data; leave those subschemas to the strict pass, which fails
-        # closed rather than guessing.
-        if not isinstance(err.schema, dict):
-            continue
-        if err.schema.get("additionalProperties") is not False:
             continue
         if "patternProperties" in err.schema:
             continue
@@ -292,10 +321,14 @@ def strip_unknown_keys(data, schema, validator_cls) -> list[tuple[str, list[str]
         if not isinstance(target, dict):
             continue
         known = set(err.schema.get("properties", {}))
+        # The carve-out is the root's alone: only there can a misnamed container
+        # be the verdict's input.
+        at_root = not err.absolute_path
         extras = sorted(
             key
             for key, value in target.items()
-            if key not in known and not isinstance(value, (dict, list))
+            if key not in known
+            and not (at_root and isinstance(value, (dict, list)))
         )
         if not extras:
             continue
@@ -343,14 +376,20 @@ def _validate_file(path: str, schema_filename: str) -> dict:
     validator_cls = jsonschema.validators.validator_for(schema)
 
     # Ingest before judgment: a key the schema never heard of is dropped and
-    # logged, so the strict pass below judges only the fields that mean
+    # annotated, so the strict pass below judges only the fields that mean
     # something. Both callers get this — the merged review-result copies
     # specialist findings forward, borrowed keys and all.
+    #
+    # An ANNOTATION rather than a bare log line, because this fires on runs that
+    # go on to pass: a note buried in a green job's stdout is exactly where
+    # prompt drift accumulates unread, and every other operator-facing note in
+    # this workflow surfaces the same way.
     for stripped_path, keys in strip_unknown_keys(data, schema, validator_cls):
+        located = _sanitize_log_text(f"{stripped_path}: {', '.join(keys)}")
         print(
-            f"warning: {path}: ignored unexpected key(s) at {stripped_path}: "
-            f"{', '.join(keys)} — not in the schema; known fields were kept and "
-            "validated, the unexpected key's content was dropped"
+            f"::warning::{path}: ignored unexpected key(s) at {located} — not "
+            "in the schema; known fields were kept and validated, the "
+            "unexpected key's content was dropped"
         )
 
     errors = sorted(
