@@ -600,6 +600,12 @@ public final class RPCRouter: Sendable {
     /// failure so the app sees an RPC error instead of a silently-stale snapshot;
     /// `PRListCoordinator` propagates the error to every concurrent caller.
     private func computePRList() async throws -> PRListResult {
+        // Open the pass BEFORE anything can observe a merge. One pass raises
+        // both merge edges for a worktree whose already-merged PR is discovered
+        // with nothing bound yet — `fetchAll` fires the un-bound fallback, then
+        // `refreshBindingStatuses` judges the binding this pass just created —
+        // and the trigger dedupes the fan-out within the pass it is told about.
+        await mergeTrigger?.beginPollPass()
         // Fetch fresh PR data for all active worktrees before returning the cache.
         let worktrees = Self.pollableWorktrees(try await db.worktrees.list(status: .active))
         // Each repo's default branch, fetched once per pass rather than per

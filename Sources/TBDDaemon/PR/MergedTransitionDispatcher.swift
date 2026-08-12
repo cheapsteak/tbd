@@ -89,6 +89,30 @@ public actor AllResolvedMergeTrigger {
     /// from then on, on a merge `evaluate` never saw and cannot re-derive.
     private var unboundMergeFired: Set<UUID> = []
 
+    /// Worktrees this poll pass has already fanned out for, through either
+    /// entry point. Cleared by `beginPollPass()`.
+    ///
+    /// The two sets above are per-*edge* memories and stay independent — that
+    /// independence is what stops either path suppressing the other's
+    /// legitimate first fire. This one is a per-*pass* memory, and it exists
+    /// because one pass can legitimately raise both edges for the same
+    /// worktree: `PRStatusManager.apply` observes an already-merged PR from
+    /// inside `fetchAll` with nothing bound yet, so `observedMerge` fires; the
+    /// same pass then creates the binding and `evaluate` judges it resolved.
+    /// That is the ordinary path for a worktree whose PR merged while the
+    /// daemon was down, so it is not a rare race.
+    ///
+    /// Both fires are correct as *edges*; what must not happen twice is the
+    /// **actuation**. Today no duplicate is user-visible, but only because both
+    /// coordinators happen to re-check state on entry — a property of those two
+    /// coordinators, not of this trigger. Deduplicating here makes "at most one
+    /// fan-out per worktree per pass" a guarantee the trigger owns.
+    ///
+    /// The edge memories are still recorded when a fire is suppressed here: the
+    /// fan-out DID happen this pass, through the other path, so neither edge
+    /// should fire again on the next one.
+    private var firedThisPass: Set<UUID> = []
+
     private let onResolved: @Sendable (UUID, Int) async -> Void
 
     /// `onResolved` receives the worktree and the PR number to attribute the
@@ -96,6 +120,27 @@ public actor AllResolvedMergeTrigger {
     /// (see `makeAllResolvedTrigger`); tests pass a recorder.
     public init(onResolved: @escaping @Sendable (UUID, Int) async -> Void) {
         self.onResolved = onResolved
+    }
+
+    /// Open a poll pass: forget which worktrees the previous one fanned out for.
+    ///
+    /// Called at the very top of `computePRList`, before anything can observe a
+    /// merge. `pr.list` is single-flighted, so passes never overlap, and both
+    /// entry points fire strictly inside one — `observedMerge` from `fetchAll`,
+    /// `evaluate` from `refreshBindingStatuses`. A merge observed OUTSIDE a pass
+    /// (the targeted `pr.refresh`) is remembered here too and cleared by the
+    /// next pass before any `evaluate` can run, so it can never suppress one.
+    public func beginPollPass() {
+        firedThisPass.removeAll()
+    }
+
+    /// Fan out at most once per worktree per poll pass. See `firedThisPass`.
+    private func fanOut(worktreeID: UUID, prNumber: Int) async {
+        guard firedThisPass.insert(worktreeID).inserted else {
+            logger.debug("merged fan-out already ran this pass for \(worktreeID, privacy: .public) — not repeating")
+            return
+        }
+        await onResolved(worktreeID, prNumber)
     }
 
     /// Judge one worktree against its current bindings. Call after each poll has
@@ -130,7 +175,7 @@ public actor AllResolvedMergeTrigger {
         }
         guard allResolvedFired.insert(worktreeID).inserted else { return }
         logger.info("all bound PRs resolved for \(worktreeID, privacy: .public) (\(live.count, privacy: .public) binding(s), attributing to PR #\(merged.number, privacy: .public))")
-        await onResolved(worktreeID, merged.number)
+        await fanOut(worktreeID: worktreeID, prNumber: merged.number)
     }
 
     /// Re-arm every polled worktree that no longer has a live binding.
@@ -173,6 +218,6 @@ public actor AllResolvedMergeTrigger {
             return
         }
         guard unboundMergeFired.insert(worktreeID).inserted else { return }
-        await onResolved(worktreeID, prNumber)
+        await fanOut(worktreeID: worktreeID, prNumber: prNumber)
     }
 }

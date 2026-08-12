@@ -325,7 +325,13 @@ final class MergeTriggerHarness {
     /// worktree with no live bindings is not in the poll's grouping at all, so
     /// `evaluate` is never called for it; `retainBound` runs first, before that
     /// early return, which is the only thing that can re-arm it.
+    ///
+    /// Each helper call here is ONE pass, so both this and `observeMerge` open
+    /// with `beginPollPass()` the way `computePRList` does. These tests are
+    /// about the two edge memories; a single pass raising both edges at once is
+    /// `PRPollReconcileTests.onePassFansOutOnceForBothEdges`.
     func poll() async {
+        await trigger.beginPollPass()
         let bindings = (try? await db.prBindings.list(worktreeID: worktreeID)) ?? []
         await trigger.retainBound(polled: [worktreeID],
                                   bound: bindings.isEmpty ? [] : [worktreeID])
@@ -337,8 +343,10 @@ final class MergeTriggerHarness {
 
     /// The un-bound fallback, driven the way `PRStatusManager.onMergedTransition`
     /// drives it in `Daemon.swift`: the worktree's live bindings are read fresh
-    /// and handed along with the observed merge.
+    /// and handed along with the observed merge. One call, one pass — see
+    /// `poll()`.
     func observeMerge(_ prNumber: Int) async {
+        await trigger.beginPollPass()
         let bindings = (try? await db.prBindings.list(worktreeID: worktreeID)) ?? []
         await trigger.observedMerge(worktreeID: worktreeID, prNumber: prNumber,
                                     bindings: bindings)

@@ -90,11 +90,22 @@ struct PRPollReconcileTests {
         let gh: ScriptedGH
         let prManager: PRStatusManager
         let repoID: UUID
-        /// The merged-transition fan-out, replaced by a recorder: these tests
-        /// assert *whether the poll fired*, never that anything was archived.
+        /// Every merged-transition fan-out the poll drove, in order. Most tests
+        /// assert *whether the poll fired* and stop there; with
+        /// `fanOutToCoordinators` the same records also count how many times the
+        /// real dispatcher was entered.
         let fired: FiredTransitionRecorder
+        /// Where the archive rail's actuation rows land. Non-nil only when the
+        /// harness was built with `fanOutToCoordinators`.
+        let actuationLogPath: String?
 
-        init() async throws {
+        /// `fanOutToCoordinators` swaps the recorder-only sink for the REAL
+        /// `MergedTransitionDispatcher` over real auto-archive and
+        /// auto-hibernate coordinators — the closure `makeAllResolvedTrigger()`
+        /// installs in production, plus the recorder as an observer. Off by
+        /// default: the ordering tests below assert what the poll decided, and
+        /// archiving a worktree mid-suite would obscure that.
+        init(fanOutToCoordinators: Bool = false) async throws {
             let db = try TBDDatabase(inMemory: true)
             self.db = db
             let gh = ScriptedGH()
@@ -113,11 +124,14 @@ struct PRPollReconcileTests {
                 path: "/tmp/prpoll-repo-\(UUID().uuidString)",
                 displayName: "acme-prod", defaultBranch: "main")
             repoID = created.id
+            let subscriptions = StateSubscriptionManager()
+            let lifecycle = WorktreeLifecycle(
+                db: db, git: GitManager(),
+                tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+                subscriptions: subscriptions)
             router = RPCRouter(
                 db: db,
-                lifecycle: WorktreeLifecycle(
-                    db: db, git: GitManager(),
-                    tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+                lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
                 startTime: Date(),
                 prManager: manager,
@@ -129,8 +143,46 @@ struct PRPollReconcileTests {
             // on — are unreachable.
             let recorder = FiredTransitionRecorder()
             fired = recorder
-            router.mergeTrigger = AllResolvedMergeTrigger { worktreeID, prNumber in
+            let dispatcher: MergedTransitionDispatcher?
+            if fanOutToCoordinators {
+                let logDirectory = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("tbd-actuation-prpoll-\(UUID().uuidString)",
+                                            isDirectory: true)
+                try FileManager.default.createDirectory(at: logDirectory,
+                                                        withIntermediateDirectories: true)
+                let logPath = logDirectory.appendingPathComponent("actuations.jsonl").path
+                actuationLogPath = logPath
+                let hibernation = HibernationCoordinator(
+                    db: db, tmux: TmuxManager(dryRun: true), subscriptions: subscriptions,
+                    configDirManager: makeIsolatedConfigDirManager(tag: "prpoll"),
+                    actuationLog: makeTestActuationLog())
+                dispatcher = MergedTransitionDispatcher(
+                    archive: AutoArchiveOnMergeCoordinator(
+                        db: db, lifecycle: lifecycle, subscriptions: subscriptions,
+                        actuationLog: ActuationLog(path: logPath)),
+                    hibernate: AutoHibernateOnMergeCoordinator(
+                        db: db, hibernation: hibernation, subscriptions: subscriptions))
+            } else {
+                actuationLogPath = nil
+                dispatcher = nil
+            }
+            // Exactly what `MergedTransitionDispatcher.makeAllResolvedTrigger()`
+            // installs, with the recorder added as an observer so a test can
+            // count fan-outs as well as their effects.
+            let trigger = AllResolvedMergeTrigger { worktreeID, prNumber in
                 await recorder.record(worktreeID: worktreeID, prNumber: prNumber)
+                await dispatcher?.handleMergedTransition(worktreeID: worktreeID,
+                                                         prNumber: prNumber)
+            }
+            router.mergeTrigger = trigger
+            // Production wires this in `Daemon.swift` as well: the worktree-keyed
+            // cache still observes merges for worktrees nothing has bound a PR
+            // to, and routes them to the un-bound fallback. It is what fires
+            // FIRST on a pass that discovers an already-merged PR.
+            await manager.setOnMergedTransition { [db] worktreeID, prNumber in
+                let bindings = (try? await db.prBindings.list(worktreeID: worktreeID)) ?? []
+                await trigger.observedMerge(
+                    worktreeID: worktreeID, prNumber: prNumber, bindings: bindings)
             }
         }
 
@@ -436,5 +488,69 @@ struct PRPollReconcileTests {
         try await harness.setDetached(1, worktreeID: wt, false)
         #expect(await harness.poll())
         #expect(await harness.firedWorktreeIDs() == [wt, wt])
+    }
+
+    // MARK: - Finding F: one poll pass fans out at most once per worktree
+
+    /// The pass that discovers an already-merged PR with nothing bound yet
+    /// raises BOTH merge edges — and must still actuate once.
+    ///
+    /// `PRStatusManager.apply` observes the merge from inside `fetchAll` while
+    /// the live binding set is empty, so the un-bound fallback fires; the same
+    /// pass then branch-binds that PR and `refreshBindingStatuses` judges it
+    /// all-resolved, raising the second edge. Both edges are correct — the two
+    /// once-only sets are deliberately independent so neither can suppress the
+    /// other's legitimate first fire — and this is the ordinary path for every
+    /// worktree that predates bindings and for any whose PR merged while the
+    /// daemon was down, not a rare race.
+    ///
+    /// What must not happen twice is the ACTUATION. Before the per-pass guard
+    /// nothing in the trigger prevented it; the archive and hibernate
+    /// coordinators merely happened to re-check state on entry, which is a
+    /// property of those two coordinators rather than of the trigger. So this
+    /// asserts the fan-out itself ran once, over the real dispatcher, in
+    /// addition to its effects.
+    @Test("one poll pass raising both merge edges fans out, archives and notifies once")
+    func onePassFansOutOnceForBothEdges() async throws {
+        let harness = try await Harness(fanOutToCoordinators: true)
+        let wt = try await harness.newWorktree()
+        _ = try await harness.db.terminals.create(
+            worktreeID: wt, tmuxWindowID: "@0", tmuxPaneID: "%0",
+            label: "claude", claudeSessionID: "sess-1", kind: .claude)
+        try await harness.db.worktrees.setAutoArchiveOnMerge(id: wt, value: true)
+        try await harness.db.worktrees.setAutoHibernateOnMerge(id: wt, value: true)
+        #expect(try await harness.bindings(wt).isEmpty)
+
+        // The viewer batch offers PR #30, already MERGED, on the worktree's own
+        // branch: `fetchAll` matches it (firing the un-bound fallback) and the
+        // branch matcher binds it in the same pass.
+        let merged = Self.nodeJSON(number: 30, head: "tbd/feature", state: "MERGED")
+        await harness.gh.set(viewerNodes: [merged])
+        await harness.gh.set(nodesByNumber: [30: merged])
+        #expect(await harness.poll())
+
+        // Both edges were raised — the binding exists and is merged, and the
+        // fallback ran before it did — but the fan-out entered once.
+        #expect(try await harness.bindings(wt).first?.status?.state == .merged)
+        #expect(await harness.firedWorktreeIDs() == [wt])
+        #expect(try await harness.db.worktrees.get(id: wt)?.status == .archived)
+        let logPath = try #require(harness.actuationLogPath)
+        let requests = try Self.actuationRequests(at: logPath)
+        #expect(requests.count == 1)
+        #expect(requests.first?["kind"] as? String == "dispose")
+        #expect(try await harness.db.notifications.unread(worktreeID: wt).count == 1)
+    }
+
+    /// Rows the archive rail wrote. Request rows carry `kind`; outcome rows
+    /// carry `confirms`.
+    private static func actuationRequests(at path: String) throws -> [[String: Any]] {
+        guard let contents = try? String(contentsOfFile: path, encoding: .utf8) else { return [] }
+        return try contents
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map { line in
+                try #require(
+                    try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+            }
+            .filter { $0["confirms"] == nil }
     }
 }

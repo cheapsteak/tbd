@@ -254,9 +254,22 @@ A worktree with **no** live bindings keeps the pre-binding behavior: a merge
 observed through the worktree-keyed cache fires the same fan-out directly. That
 fallback is not vestigial — it is the only path covering a worktree whose PR was
 rejected as belonging to another repo, or whose provenance seed deferred because
-the repo could not be resolved. Gating it on the empty binding set is what stops
-a worktree from firing through both paths for the same merge; the two paths keep
-separate once-only memories, so neither can suppress the other's first fire.
+the repo could not be resolved. The two paths keep separate once-only memories,
+so neither can suppress the other's legitimate first fire.
+
+Independent memories mean one poll pass can raise both edges for the same
+worktree, and for a whole population it routinely does: a worktree whose PR is
+first seen already merged fires the un-bound fallback from inside the status
+fetch, then the same pass binds that PR and judges it resolved. That is the
+ordinary path for every worktree predating bindings and for any whose PR merged
+while the daemon was down. Both edges are correct; the **actuation** is what
+must not repeat, so the trigger also remembers which worktrees it has fanned out
+for within the current pass and declines the second. That memory is cleared when
+the poll opens a pass, before anything can observe a merge, so it never suppresses
+a fire in a later one. Resting on the coordinators' own re-checks instead would
+make single-actuation a property of those two coordinators rather than of the
+trigger; they keep re-checking, as the second line of defence for the merges
+observed outside a pass by a targeted refresh.
 
 `.merged` remains unpersisted, preserving the existing recovery guarantee: a
 merge observed while the daemon was down is re-observed as a transition after

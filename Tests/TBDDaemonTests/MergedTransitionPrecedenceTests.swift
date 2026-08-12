@@ -131,20 +131,14 @@ struct MergedTransitionPrecedenceTests {
 
     // MARK: - Idempotency: two fan-outs in one pass
 
-    /// One poll pass CAN fan out twice for the same worktree, and this is what
-    /// makes that harmless.
+    /// A repeated fan-out for the same worktree must archive and notify once.
     ///
-    /// `PRStatusManager.apply` fires the un-bound fallback from inside
-    /// `fetchAll`, *before* the same pass creates the branch binding; the poll
-    /// then judges that fresh binding with `evaluate`. The two once-only sets
-    /// are deliberately independent, so neither suppresses the other, and both
-    /// fire on the first pass that ever sees an already-merged PR with nothing
-    /// bound yet — the ordinary upgrade path for any worktree whose PR merged
-    /// while the daemon was down.
-    ///
-    /// Safety therefore rests entirely on the coordinators being idempotent
-    /// rather than on the firing order. These two tests pin that; if either
-    /// coordinator ever starts acting twice, they are what catches it.
+    /// `AllResolvedMergeTrigger` now dedupes within a poll pass, so this is the
+    /// coordinators' own second line of defence rather than the only one — and
+    /// it still covers what the per-pass guard cannot: a merge observed outside
+    /// a pass by the targeted `pr.refresh`, and a re-attach that legitimately
+    /// re-arms an edge in a later pass. If either coordinator ever starts acting
+    /// twice, these two tests are what catches it.
     @Test("firing the fan-out twice archives once and notifies once")
     func doubledFanOutArchivesOnce() async throws {
         let deps = try makeDeps()
@@ -188,20 +182,22 @@ struct MergedTransitionPrecedenceTests {
         #expect(try actuationRequests(at: deps.actuationLogPath).isEmpty)
     }
 
-    /// The same claim, driven end to end through the REAL dual-path trigger
-    /// instead of by calling the dispatcher twice.
+    /// The same claim, driven through the REAL dual-path trigger over the real
+    /// coordinators instead of by calling the dispatcher twice.
     ///
     /// This is the ordinary upgrade path: a worktree whose PR merged while the
     /// daemon was down, seen for the first time by a poll that has bound
     /// nothing yet. `PRStatusManager.apply` observes the merge from inside
     /// `fetchAll` with an empty live set, so the un-bound fallback fires; the
     /// same pass then creates the branch binding and `refreshBindingStatuses`
-    /// judges it with `evaluate`, which fires the same fan-out again. Both
-    /// fires are correct — the two once-only sets are deliberately independent,
-    /// so neither may suppress the other's first fire — and safety rests
-    /// entirely on the coordinators being idempotent. The two tests above pin
-    /// that at the dispatcher; this one pins that the real trigger really does
-    /// reach it twice in one pass and the worktree is still archived once.
+    /// judges it with `evaluate`. Both EDGES are correct — the two once-only
+    /// sets are deliberately independent, so neither may suppress the other's
+    /// legitimate first fire — and the per-pass guard is what turns them into
+    /// one actuation.
+    ///
+    /// The steps below are hand-driven; the same sequence through a whole
+    /// `pr.list` pass, counting fan-outs rather than only their effects, is
+    /// `PRPollReconcileTests.onePassFansOutOnceForBothEdges`.
     @Test("one poll pass firing both trigger paths archives once and notifies once")
     func realTriggerBothPathsInOnePassActsOnce() async throws {
         let deps = try makeDeps()
@@ -209,6 +205,8 @@ struct MergedTransitionPrecedenceTests {
         try await deps.db.worktrees.setAutoArchiveOnMerge(id: wtID, value: true)
         try await deps.db.worktrees.setAutoHibernateOnMerge(id: wtID, value: true)
         let trigger = deps.dispatcher.makeAllResolvedTrigger()
+        // The poll opens the pass before anything can observe a merge.
+        await trigger.beginPollPass()
 
         // 1. `PRStatusManager.apply` observes the merge — nothing is bound yet,
         //    so the un-bound fallback owns this worktree and fires.
