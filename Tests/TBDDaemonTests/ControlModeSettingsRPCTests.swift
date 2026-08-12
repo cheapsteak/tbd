@@ -61,7 +61,7 @@ struct ControlModeSettingsRPCTests {
         vending: FDVendingServer = FDVendingServer(),
         environment: [String: String] = [:],
         tmuxVersion: TmuxVersion? = TmuxVersion(major: 3, minor: 6),
-        tmuxExecutableResolver: TmuxExecutableResolver = TmuxExecutableResolver(),
+        tmuxExecutableResolver: TmuxExecutableResolver,
         startupTmux: TmuxVersionSnapshot? = nil
     ) -> TmuxControlModeBridge {
         TmuxControlModeBridge(
@@ -110,8 +110,14 @@ struct ControlModeSettingsRPCTests {
 
     @Test("capabilities carries the tmux version and support flag")
     func capabilitiesCarriesVersion() async throws {
+        let tmux = try TmuxExecutableTestFixture(version: "3.6a")
+        defer { tmux.remove() }
         let (router, db) = try makeRouterAndDB()
-        router.controlMode = bridge(db: db, tmuxVersion: TmuxVersion(major: 3, minor: 6, suffix: "a"))
+        router.controlMode = bridge(
+            db: db,
+            tmuxVersion: TmuxVersion(major: 3, minor: 6, suffix: "a"),
+            tmuxExecutableResolver: tmux.resolver
+        )
         let response = await router.handle(RPCRequest(method: RPCMethod.daemonCapabilities))
         let result = try response.decodeResult(DaemonCapabilitiesResult.self)
         #expect(result.tmuxVersion == "3.6a")
@@ -120,9 +126,15 @@ struct ControlModeSettingsRPCTests {
 
     @Test("capabilities reports unsupported (and gate closed) for tmux < 3.2 even with the flag on")
     func capabilitiesUnsupportedOldTmux() async throws {
+        let tmux = try TmuxExecutableTestFixture(version: "3.1")
+        defer { tmux.remove() }
         let (router, db) = try makeRouterAndDB()
         try await db.config.setControlModeEnabled(true)
-        router.controlMode = bridge(db: db, tmuxVersion: TmuxVersion(major: 3, minor: 1))
+        router.controlMode = bridge(
+            db: db,
+            tmuxVersion: TmuxVersion(major: 3, minor: 1),
+            tmuxExecutableResolver: tmux.resolver
+        )
         let response = await router.handle(RPCRequest(method: RPCMethod.daemonCapabilities))
         let result = try response.decodeResult(DaemonCapabilitiesResult.self)
         #expect(result.tmuxVersion == "3.1")
@@ -142,8 +154,10 @@ struct ControlModeSettingsRPCTests {
 
     @Test("capabilities reflects a flag flip without a daemon restart")
     func capabilitiesReEvaluatesFlag() async throws {
+        let tmux = try TmuxExecutableTestFixture()
+        defer { tmux.remove() }
         let (router, db) = try makeRouterAndDB()
-        router.controlMode = bridge(db: db)
+        router.controlMode = bridge(db: db, tmuxExecutableResolver: tmux.resolver)
 
         var response = await router.handle(RPCRequest(method: RPCMethod.daemonCapabilities))
         var result = try response.decodeResult(DaemonCapabilitiesResult.self)
@@ -286,6 +300,8 @@ struct ControlModeSettingsRPCTests {
 
     @Test("flag on, env off: attach proceeds (fd vended)")
     func attachProceedsOnFlag() async throws {
+        let tmux = try TmuxExecutableTestFixture()
+        defer { tmux.remove() }
         let (serverSide, clientSide) = try makeSocketPair()
         defer { Darwin.close(clientSide) }
 
@@ -294,7 +310,11 @@ struct ControlModeSettingsRPCTests {
         let (router, db) = try makeRouterAndDB()
         let worktreeID = try await makeWorktree(in: db)
         try await db.config.setControlModeEnabled(true)
-        router.controlMode = bridge(db: db, vending: vending)
+        router.controlMode = bridge(
+            db: db,
+            vending: vending,
+            tmuxExecutableResolver: tmux.resolver
+        )
 
         let result = try await attach(router, worktreeID: worktreeID, paneID: "%11", windowID: "@11")
         #expect(result.status == "pending")
@@ -306,6 +326,8 @@ struct ControlModeSettingsRPCTests {
 
     @Test("flag off, env off: attach is unavailable; flipping the flag affects the NEXT attach")
     func toggleMidSessionAffectsNextAttach() async throws {
+        let tmux = try TmuxExecutableTestFixture()
+        defer { tmux.remove() }
         let (serverSide, clientSide) = try makeSocketPair()
         defer { Darwin.close(clientSide) }
 
@@ -313,7 +335,11 @@ struct ControlModeSettingsRPCTests {
         await vending.adoptConnection(fd: serverSide)
         let (router, db) = try makeRouterAndDB()
         let worktreeID = try await makeWorktree(in: db)
-        router.controlMode = bridge(db: db, vending: vending)
+        router.controlMode = bridge(
+            db: db,
+            vending: vending,
+            tmuxExecutableResolver: tmux.resolver
+        )
 
         let before = try await attach(router, worktreeID: worktreeID, paneID: "%12", windowID: "@12")
         #expect(before.status == "unavailable")
@@ -328,6 +354,8 @@ struct ControlModeSettingsRPCTests {
 
     @Test("env on, flag off: attach proceeds (env is the developer override)")
     func envOverridePrecedence() async throws {
+        let tmux = try TmuxExecutableTestFixture()
+        defer { tmux.remove() }
         let (serverSide, clientSide) = try makeSocketPair()
         defer { Darwin.close(clientSide) }
 
@@ -337,7 +365,11 @@ struct ControlModeSettingsRPCTests {
         let worktreeID = try await makeWorktree(in: db)
         try await db.config.setControlModeEnabled(false)
         router.controlMode = bridge(
-            db: db, vending: vending, environment: ["TBD_TMUX_CONTROL_MODE": "1"])
+            db: db,
+            vending: vending,
+            environment: ["TBD_TMUX_CONTROL_MODE": "1"],
+            tmuxExecutableResolver: tmux.resolver
+        )
 
         let result = try await attach(router, worktreeID: worktreeID, paneID: "%13", windowID: "@13")
         #expect(result.status == "pending")
@@ -347,10 +379,16 @@ struct ControlModeSettingsRPCTests {
 
     @Test("flag on but tmux < 3.2: attach stays unavailable")
     func flagOnOldTmuxUnavailable() async throws {
+        let tmux = try TmuxExecutableTestFixture(version: "3.1")
+        defer { tmux.remove() }
         let (router, db) = try makeRouterAndDB()
         let worktreeID = try await makeWorktree(in: db)
         try await db.config.setControlModeEnabled(true)
-        router.controlMode = bridge(db: db, tmuxVersion: TmuxVersion(major: 3, minor: 1))
+        router.controlMode = bridge(
+            db: db,
+            tmuxVersion: TmuxVersion(major: 3, minor: 1),
+            tmuxExecutableResolver: tmux.resolver
+        )
 
         let result = try await attach(router, worktreeID: worktreeID, paneID: "%14", windowID: "@14")
         #expect(result.status == "unavailable")

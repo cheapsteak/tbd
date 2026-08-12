@@ -56,14 +56,17 @@ struct AttachRPCStubTests {
 
     @Test("attach.ready without a live attach fails (M4.3: app must fall back)")
     func readyWithoutAttachFails() async throws {
+        let tmux = try TmuxExecutableTestFixture()
+        defer { tmux.remove() }
         let (router, db) = try makeRouterAndDB()
         let worktreeID = try await makeWorktree(in: db)
         router.controlMode = TmuxControlModeBridge(
             supervisor: TmuxControlSupervisor(),
             startupTmux: TmuxVersionSnapshot(
-                executablePath: TmuxExecutableResolver().resolve()?.path,
+                executablePath: tmux.resolver.resolve()?.path,
                 version: TmuxVersion(major: 3, minor: 6)
             ),
+            tmuxExecutableResolver: tmux.resolver,
             environment: ["TBD_TMUX_CONTROL_MODE": "1"],
             fdVending: FDVendingServer())
         let request = try RPCRequest(
@@ -99,13 +102,16 @@ struct AttachRPCStubTests {
 
     @Test("daemon.capabilities reports control mode on when the bridge gate passes")
     func capabilitiesOnWhenGated() async throws {
+        let tmux = try TmuxExecutableTestFixture()
+        defer { tmux.remove() }
         let (router, _) = try makeRouterAndDB()
         router.controlMode = TmuxControlModeBridge(
             supervisor: TmuxControlSupervisor(),
             startupTmux: TmuxVersionSnapshot(
-                executablePath: TmuxExecutableResolver().resolve()?.path,
+                executablePath: tmux.resolver.resolve()?.path,
                 version: TmuxVersion(major: 3, minor: 6)
             ),
+            tmuxExecutableResolver: tmux.resolver,
             environment: ["TBD_TMUX_CONTROL_MODE": "1"],
             fdVending: FDVendingServer())
         let request = RPCRequest(method: RPCMethod.daemonCapabilities)
@@ -131,6 +137,7 @@ struct AttachRPCOrchestrationTests {
     private func bridge(
         supervisor: TmuxControlSupervisor,
         vending: FDVendingServer,
+        tmuxExecutableResolver: TmuxExecutableResolver,
         gateOn: Bool = true,
         // Effectively-infinite default: the ready-timeout is incidental
         // machinery in these orchestration tests, and it spawns a REAL
@@ -151,9 +158,10 @@ struct AttachRPCOrchestrationTests {
         TmuxControlModeBridge(
             supervisor: supervisor,
             startupTmux: TmuxVersionSnapshot(
-                executablePath: TmuxExecutableResolver().resolve()?.path,
+                executablePath: tmuxExecutableResolver.resolve()?.path,
                 version: TmuxVersion(major: 3, minor: 6)
             ),
+            tmuxExecutableResolver: tmuxExecutableResolver,
             environment: gateOn ? ["TBD_TMUX_CONTROL_MODE": "1"] : [:],
             fdVending: vending,
             readyTimeout: readyTimeout,
@@ -213,6 +221,8 @@ struct AttachRPCOrchestrationTests {
 
     @Test("attach.request with the gate on vends an fd whose header carries the pane identity")
     func vendsFDWhenGateOn() async throws {
+        let tmux = try TmuxExecutableTestFixture()
+        defer { tmux.remove() }
         let (serverSide, clientSide) = try makeSocketPair()
         defer { Darwin.close(clientSide) }
 
@@ -221,7 +231,11 @@ struct AttachRPCOrchestrationTests {
         await vending.adoptConnection(fd: serverSide)
         let (router, db) = try makeRouterAndDB()
         let worktreeID = try await makeWorktree(in: db)
-        router.controlMode = bridge(supervisor: supervisor, vending: vending)
+        router.controlMode = bridge(
+            supervisor: supervisor,
+            vending: vending,
+            tmuxExecutableResolver: tmux.resolver
+        )
 
         let request = try RPCRequest(
             method: RPCMethod.attachRequest,
@@ -239,6 +253,8 @@ struct AttachRPCOrchestrationTests {
 
     @Test("attach.request with the gate off returns unavailable and does not send an fd")
     func gateOffReturnsUnavailable() async throws {
+        let tmux = try TmuxExecutableTestFixture()
+        defer { tmux.remove() }
         let (serverSide, clientSide) = try makeSocketPair()
         defer {
             Darwin.close(serverSide)
@@ -249,7 +265,12 @@ struct AttachRPCOrchestrationTests {
         let vending = FDVendingServer()
         let (router, db) = try makeRouterAndDB()
         let worktreeID = try await makeWorktree(in: db)
-        router.controlMode = bridge(supervisor: supervisor, vending: vending, gateOn: false)
+        router.controlMode = bridge(
+            supervisor: supervisor,
+            vending: vending,
+            tmuxExecutableResolver: tmux.resolver,
+            gateOn: false
+        )
 
         let request = try RPCRequest(
             method: RPCMethod.attachRequest,
@@ -261,6 +282,8 @@ struct AttachRPCOrchestrationTests {
 
     @Test("attach.request for an unknown worktree fails")
     func unknownWorktreeFails() async throws {
+        let tmux = try TmuxExecutableTestFixture()
+        defer { tmux.remove() }
         let (serverSide, clientSide) = try makeSocketPair()
         defer { Darwin.close(clientSide) }
 
@@ -268,7 +291,11 @@ struct AttachRPCOrchestrationTests {
         let vending = FDVendingServer()
         await vending.adoptConnection(fd: serverSide)
         let (router, _) = try makeRouterAndDB()
-        router.controlMode = bridge(supervisor: supervisor, vending: vending)
+        router.controlMode = bridge(
+            supervisor: supervisor,
+            vending: vending,
+            tmuxExecutableResolver: tmux.resolver
+        )
 
         let request = try RPCRequest(
             method: RPCMethod.attachRequest,
@@ -279,6 +306,8 @@ struct AttachRPCOrchestrationTests {
 
     @Test("an attach the app never acks is torn down after readyTimeout")
     func unackedAttachTornDownAfterTimeout() async throws {
+        let tmux = try TmuxExecutableTestFixture()
+        defer { tmux.remove() }
         let (serverSide, clientSide) = try makeSocketPair()
         defer { Darwin.close(clientSide) }
 
@@ -290,7 +319,12 @@ struct AttachRPCOrchestrationTests {
         let clock = TestClock<Duration>()
         let readyTimeout: Duration = .seconds(5)
         router.controlMode = bridge(
-            supervisor: supervisor, vending: vending, readyTimeout: readyTimeout, clock: clock)
+            supervisor: supervisor,
+            vending: vending,
+            tmuxExecutableResolver: tmux.resolver,
+            readyTimeout: readyTimeout,
+            clock: clock
+        )
 
         let request = try RPCRequest(
             method: RPCMethod.attachRequest,
@@ -314,6 +348,8 @@ struct AttachRPCOrchestrationTests {
 
     @Test("attach.ready triggers the replay sequence; the gate opens only after the replay lands")
     func readyTriggersSequenceGateOpensAfterReplay() async throws {
+        let tmux = try TmuxExecutableTestFixture()
+        defer { tmux.remove() }
         let (serverSide, clientSide) = try makeSocketPair()
         defer { Darwin.close(clientSide) }
 
@@ -324,7 +360,11 @@ struct AttachRPCOrchestrationTests {
         let worktreeID = try await makeWorktree(in: db, tmuxServer: "tbd-gate-test")
         let (client, recorder) = makeFakeClient()
         router.controlMode = bridge(
-            supervisor: supervisor, vending: vending, commandProvider: { _ in client })
+            supervisor: supervisor,
+            vending: vending,
+            tmuxExecutableResolver: tmux.resolver,
+            commandProvider: { _ in client }
+        )
 
         let attach = try RPCRequest(
             method: RPCMethod.attachRequest,
@@ -366,6 +406,8 @@ struct AttachRPCOrchestrationTests {
 
     @Test("an acked attach whose replay is still in flight survives the ready-timeout")
     func ackedReplayInFlightSurvivesTimeout() async throws {
+        let tmux = try TmuxExecutableTestFixture()
+        defer { tmux.remove() }
         let (serverSide, clientSide) = try makeSocketPair()
         defer { Darwin.close(clientSide) }
 
@@ -378,8 +420,13 @@ struct AttachRPCOrchestrationTests {
         let clock = TestClock<Duration>()
         let readyTimeout: Duration = .seconds(5)
         router.controlMode = bridge(
-            supervisor: supervisor, vending: vending,
-            readyTimeout: readyTimeout, commandProvider: { _ in client }, clock: clock)
+            supervisor: supervisor,
+            vending: vending,
+            tmuxExecutableResolver: tmux.resolver,
+            readyTimeout: readyTimeout,
+            commandProvider: { _ in client },
+            clock: clock
+        )
 
         let attach = try RPCRequest(
             method: RPCMethod.attachRequest,
@@ -415,6 +462,8 @@ struct AttachRPCOrchestrationTests {
 
     @Test("a re-attach mid-sequence supersedes: attach.ready still returns success")
     func supersededMidSequenceReturnsSuccess() async throws {
+        let tmux = try TmuxExecutableTestFixture()
+        defer { tmux.remove() }
         let (serverSide, clientSide) = try makeSocketPair()
         defer { Darwin.close(clientSide) }
 
@@ -425,7 +474,11 @@ struct AttachRPCOrchestrationTests {
         let worktreeID = try await makeWorktree(in: db, tmuxServer: "tbd-supersede-test")
         let (client, recorder) = makeFakeClient()
         router.controlMode = bridge(
-            supervisor: supervisor, vending: vending, commandProvider: { _ in client })
+            supervisor: supervisor,
+            vending: vending,
+            tmuxExecutableResolver: tmux.resolver,
+            commandProvider: { _ in client }
+        )
 
         func attachRequest() throws -> RPCRequest {
             try RPCRequest(
@@ -466,6 +519,8 @@ struct AttachRPCOrchestrationTests {
 
     @Test("a stale attach.ready (echoed older generation) sends ZERO commands on the shared correlator")
     func staleReadyEchoedGenerationSendsNothing() async throws {
+        let tmux = try TmuxExecutableTestFixture()
+        defer { tmux.remove() }
         let (serverSide, clientSide) = try makeSocketPair()
         defer { Darwin.close(clientSide) }
 
@@ -479,7 +534,11 @@ struct AttachRPCOrchestrationTests {
         // the reviewer flagged as untested with per-generation clients.
         let (client, recorder) = makeFakeClient()
         router.controlMode = bridge(
-            supervisor: supervisor, vending: vending, commandProvider: { _ in client })
+            supervisor: supervisor,
+            vending: vending,
+            tmuxExecutableResolver: tmux.resolver,
+            commandProvider: { _ in client }
+        )
 
         func attach() async throws -> UInt64 {
             let request = try RPCRequest(
@@ -523,6 +582,8 @@ struct AttachRPCOrchestrationTests {
 
     @Test("mid-sequence supersession on ONE shared correlator: stale generation sends no continue; the successor's sequence ends with its own")
     func midSequenceSupersedeOnSharedClientSkipsUnpause() async throws {
+        let tmux = try TmuxExecutableTestFixture()
+        defer { tmux.remove() }
         let (serverSide, clientSide) = try makeSocketPair()
         defer { Darwin.close(clientSide) }
 
@@ -533,7 +594,11 @@ struct AttachRPCOrchestrationTests {
         let worktreeID = try await makeWorktree(in: db, tmuxServer: "tbd-sharedsup-test")
         let (client, recorder) = makeFakeClient()
         router.controlMode = bridge(
-            supervisor: supervisor, vending: vending, commandProvider: { _ in client })
+            supervisor: supervisor,
+            vending: vending,
+            tmuxExecutableResolver: tmux.resolver,
+            commandProvider: { _ in client }
+        )
 
         func attach() async throws -> UInt64 {
             let request = try RPCRequest(
@@ -587,6 +652,8 @@ struct AttachRPCOrchestrationTests {
 
     @Test("a stale attach's late failure must not kill a healthy successor's sink")
     func staleFailureCleanupSparesSuccessor() async throws {
+        let tmux = try TmuxExecutableTestFixture()
+        defer { tmux.remove() }
         let (serverSide, clientSide) = try makeSocketPair()
         defer { Darwin.close(clientSide) }
 
@@ -604,8 +671,11 @@ struct AttachRPCOrchestrationTests {
         let (clientB, recorderB) = makeFakeClient()
         let calls = CallCounter()
         router.controlMode = bridge(
-            supervisor: supervisor, vending: vending,
-            commandProvider: { _ in calls.next() == 0 ? clientA : clientB })
+            supervisor: supervisor,
+            vending: vending,
+            tmuxExecutableResolver: tmux.resolver,
+            commandProvider: { _ in calls.next() == 0 ? clientA : clientB }
+        )
 
         func attachRequest() throws -> RPCRequest {
             try RPCRequest(
@@ -663,6 +733,8 @@ struct AttachRPCOrchestrationTests {
 
     @Test("a stale pane.detach (older generation) no-ops against a newer attach's sink")
     func stalePaneDetachSparesSuccessor() async throws {
+        let tmux = try TmuxExecutableTestFixture()
+        defer { tmux.remove() }
         let (serverSide, clientSide) = try makeSocketPair()
         defer { Darwin.close(clientSide) }
 
@@ -671,7 +743,11 @@ struct AttachRPCOrchestrationTests {
         await vending.adoptConnection(fd: serverSide)
         let (router, db) = try makeRouterAndDB()
         let worktreeID = try await makeWorktree(in: db, tmuxServer: "tbd-staledet-test")
-        router.controlMode = bridge(supervisor: supervisor, vending: vending)
+        router.controlMode = bridge(
+            supervisor: supervisor,
+            vending: vending,
+            tmuxExecutableResolver: tmux.resolver
+        )
 
         func attach() async throws -> AttachRequestResult {
             let request = try RPCRequest(
@@ -729,6 +805,8 @@ struct AttachRPCOrchestrationTests {
 
     @Test("pane.detach without a generation detaches unconditionally (back-compat)")
     func paneDetachWithoutGenerationDetaches() async throws {
+        let tmux = try TmuxExecutableTestFixture()
+        defer { tmux.remove() }
         let (serverSide, clientSide) = try makeSocketPair()
         defer { Darwin.close(clientSide) }
 
@@ -737,7 +815,11 @@ struct AttachRPCOrchestrationTests {
         await vending.adoptConnection(fd: serverSide)
         let (router, db) = try makeRouterAndDB()
         let worktreeID = try await makeWorktree(in: db, tmuxServer: "tbd-nogendet-test")
-        router.controlMode = bridge(supervisor: supervisor, vending: vending)
+        router.controlMode = bridge(
+            supervisor: supervisor,
+            vending: vending,
+            tmuxExecutableResolver: tmux.resolver
+        )
 
         let request = try RPCRequest(
             method: RPCMethod.attachRequest,
@@ -759,6 +841,8 @@ struct AttachRPCOrchestrationTests {
 
     @Test("a capture failure detaches the pane and fails the RPC (app falls back)")
     func captureFailureDetachesAndErrors() async throws {
+        let tmux = try TmuxExecutableTestFixture()
+        defer { tmux.remove() }
         let (serverSide, clientSide) = try makeSocketPair()
         defer { Darwin.close(clientSide) }
 
@@ -769,7 +853,11 @@ struct AttachRPCOrchestrationTests {
         let worktreeID = try await makeWorktree(in: db, tmuxServer: "tbd-capfail-test")
         let (client, recorder) = makeFakeClient()
         router.controlMode = bridge(
-            supervisor: supervisor, vending: vending, commandProvider: { _ in client })
+            supervisor: supervisor,
+            vending: vending,
+            tmuxExecutableResolver: tmux.resolver,
+            commandProvider: { _ in client }
+        )
 
         let attach = try RPCRequest(
             method: RPCMethod.attachRequest,
