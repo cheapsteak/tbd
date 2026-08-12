@@ -123,10 +123,13 @@ the shared fallback-file location. They resolve again at operation boundaries in
 of permanently caching the selected path.
 
 This means a Settings save or clear affects later terminal preparation, later daemon
-tmux commands, and later control-mode gate or capability decisions. Control-mode gate
-and capability decisions resolve the executable and detect its version again for each
-decision, so replacing the executable in place at an unchanged path also takes effect
-without a daemon restart.
+tmux commands, and later control-mode gate or capability decisions. An operational
+control-mode gate check short-circuits without resolving the executable or detecting
+its version when both the environment and persisted opt-ins are off. When either
+opt-in is on, the gate resolves the executable and detects its version again. Explicit
+capability queries also resolve and detect the version while the gate is off so
+Settings can report support and allow opt-in. These live checks make replacing the
+executable in place at an unchanged path take effect without a daemon restart.
 
 Within one terminal preparation, TBD resolves exactly once. The absolute executable
 path is carried through session creation, window selection, confirmation, cleanup,
