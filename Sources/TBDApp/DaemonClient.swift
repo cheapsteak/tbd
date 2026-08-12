@@ -784,6 +784,28 @@ actor DaemonClient {
         return result.statuses
     }
 
+    /// Fetch EVERY worktree's live PR bindings (tombstoned ones are excluded by
+    /// the daemon), each with a count of how many of its bindings ARE
+    /// tombstoned, in a single round trip — the app's poll.
+    ///
+    /// Deliberately not a per-worktree call fanned out. The app has no way to
+    /// name the worktrees worth asking about: a hook-bound PR on a branch the
+    /// worktree never checked out appears in no branch-derived status cache, so
+    /// a targeted fetch reaches only worktrees already known to have PRs and the
+    /// hook-bound case stays invisible. One call also has one outcome, which is
+    /// what lets a failure keep the previous map wholesale.
+    ///
+    /// The whole result is returned rather than just the bindings, because an
+    /// empty list means two different things and only the tombstone count
+    /// separates them — see `PRBindingsResult.detachedCount`. The per-worktree
+    /// `pr.bindings` remains for `tbd pr list`.
+    func listAllPRBindings() async throws -> PRBindingsAllResult {
+        try await callNoParamsAsync(
+            method: RPCMethod.prBindingsAll,
+            resultType: PRBindingsAllResult.self
+        )
+    }
+
     /// Push the user's Claude spawn-env setting overrides to the daemon.
     func setClaudeSpawnPreferences(_ preferences: ClaudeSpawnPreferences) async throws {
         try await callVoidAsync(

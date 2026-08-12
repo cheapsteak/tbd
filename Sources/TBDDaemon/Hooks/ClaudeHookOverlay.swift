@@ -33,6 +33,12 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claude-overl
 ///   render the question before Claude flushes the assistant message
 ///   to the JSONL. Pre sets activity to waiting_for_user; post sets
 ///   it back to working (Claude continues processing after user answers).
+/// - `PostToolUse:Bash`: greps the payload for `pr create` and, only on
+///   a match, pipes it to `tbd pr bind --from-hook` to bind any PR the
+///   command reported. The grep prefilter keeps every other Bash call
+///   (the overwhelming majority) from spawning a `tbd` process. It is a
+///   cost optimization, not a gate — `PRBindingExtractor`'s tokenizer
+///   decides what actually counts as a create.
 ///
 /// The overlay is regenerated on every daemon startup so changes to the
 /// shape (new hooks, new commands) take effect on the next worktree open.
@@ -100,6 +106,87 @@ public enum ClaudeHookOverlay {
     static let waitingForUserCommand =
         #"tbd terminal-activity waiting_for_user 2>/dev/null || true"#
 
+    /// The extended regex the prefilter greps a Bash hook payload for.
+    ///
+    /// **Deliberately permissive, and it must stay that way.** The prefilter is
+    /// a COST OPTIMIZATION, never a gate: `PRBindingExtractor`'s tokenizer is
+    /// the sole authority on what counts as a `gh pr create`, and it can only
+    /// judge payloads this pattern lets through. A payload the grep drops never
+    /// reaches `tbd` at all, so a false negative loses the bind in silence.
+    ///
+    /// **What it guarantees:** every command the tokenizer accepts with `pr` and
+    /// `create` as *adjacent* subcommand words is admitted — however the segment
+    /// is quoted, whichever global flags precede the subcommand, and whether or
+    /// not `gh` is path-qualified. Two properties carry that, and neither is
+    /// obvious from the pattern alone.
+    ///
+    /// It does not require `gh` adjacency, because
+    /// `gh -R acme/acme-prod pr create` and `gh --repo acme/acme-prod pr create`
+    /// are exactly the flagged forms the tokenizer was built to accept, and a
+    /// `gh[[:space:]]+pr` requirement here silently dropped every one of them
+    /// before the tokenizer ever ran.
+    ///
+    /// And it separates the two words by any run of non-alphanumeric characters
+    /// rather than by whitespace, because the tokenizer *strips quotes* while
+    /// splitting words: `gh "pr" create` and `gh pr 'create'` are real creates,
+    /// yet the raw JSON this grep reads still carries the quote — and, for a
+    /// double quote, JSON's own backslash — between them. `\t` and `\r` are
+    /// spelled out alongside the class because JSON escapes a tab or carriage
+    /// return to a backslash followed by an *alphanumeric* letter, which the
+    /// class alone would reject. The run is unbounded on purpose: a length cap
+    /// would reintroduce a false negative for nothing, since alphanumerics are
+    /// excluded and so the run can never cross a word.
+    ///
+    /// **What it does not guarantee**, so the invariant is stated rather than
+    /// implied: a flag word *between* the two subcommand words
+    /// (`gh pr --draft create`, `gh pr -R acme/acme-prod create`), which the
+    /// tokenizer skips over but which no pattern can span without also matching
+    /// ordinary prose — the intervening flag and its value are alphanumeric
+    /// words indistinguishable from any other; and quoting *inside* a word
+    /// (`gh p"r" create`), where the literal `pr` never appears in the payload
+    /// at all and only a tokenizer could recover it. Both fail closed to a lost
+    /// fast path, not a lost binding: branch matching still binds the PR on the
+    /// next poll, the same recovery a hook timeout relies on.
+    ///
+    /// The resulting over-match is the right trade and is accepted knowingly: a
+    /// payload that merely mentions "pr create" now spawns one short-lived
+    /// `tbd`, which reads the payload and correctly declines to bind. A false
+    /// negative loses a PR binding silently; a false positive costs one
+    /// process.
+    ///
+    /// Lives in its own constant so the test can grep with the same literal the
+    /// shell command runs — hand-copying it into the test is how the two drift
+    /// apart. It is embedded in a single-quoted shell word, so it must never
+    /// contain a `'`.
+    static let prBindGrepPattern = #"pr([^[:alnum:]]|\\[tr])+create"#
+
+    /// Binds any PR created by a `gh pr create` in this session.
+    ///
+    /// The `grep -qE` is a deliberate prefilter: this hook fires on EVERY Bash
+    /// tool call across the whole fleet, and without it each one would spawn a
+    /// `tbd` process — a daemon round trip. With it, an unrelated Bash call
+    /// costs the hook's own shell, the `$(cat)` command substitution that holds
+    /// the payload, and one `grep` over it; no `tbd` runs and nothing reaches
+    /// the daemon. It filters for cost only — see `prBindGrepPattern` for why
+    /// it is deliberately wider than the rule it prefilters for. `-E` (extended
+    /// regex) rather than a GNU-only `\+` in basic regex — BSD/macOS grep is the
+    /// one this hook actually runs under. `|| true` guarantees the hook cannot
+    /// fail the tool call it observes.
+    static let prBindCommand =
+        #"payload=$(cat); printf '%s' "$payload" | grep -qE '\#(prBindGrepPattern)' && printf '%s' "$payload" | tbd pr bind --from-hook || true"#
+
+    /// Seconds Claude Code will wait for `prBindCommand` before killing it.
+    ///
+    /// Explicit because this is the first TBD hook matching a universally-used
+    /// tool: it fires on EVERY Bash call across the whole fleet, so Claude
+    /// Code's 60 s default would turn one wedged daemon socket into a 60 s stall
+    /// on every shell command every agent runs. Three seconds is far more than
+    /// the happy path needs — the common case is a `cat` and a `grep` that
+    /// matches nothing, so no `tbd` is spawned — and the binding is re-derivable
+    /// by branch matching on the next poll, so a timeout costs at most a
+    /// delayed binding.
+    static let prBindTimeoutSeconds = 3
+
     /// Build the JSON-encoded overlay body.
     ///
     /// When `fallbackModels` is non-nil and non-empty, a top-level
@@ -166,6 +253,13 @@ public enum ClaudeHookOverlay {
                         "matcher": "AskUserQuestion",
                         "hooks": [
                             ["type": "command", "command": askUserQuestionPostCommand]
+                        ]
+                    ],
+                    [
+                        "matcher": "Bash",
+                        "hooks": [
+                            ["type": "command", "command": prBindCommand,
+                             "timeout": prBindTimeoutSeconds] as [String: Any]
                         ]
                     ]
                 ]

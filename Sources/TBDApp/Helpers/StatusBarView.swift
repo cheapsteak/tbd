@@ -75,6 +75,52 @@ struct StatusBarView: View {
         )
     }
 
+    /// One status-bar PR chip: a status dot plus `#N` that opens that PR.
+    /// A plain value so the row can be asserted without a view — `state` is
+    /// what the dot's color is derived from, and `id` is the binding's own id
+    /// so a chip keeps its identity across status refreshes.
+    ///
+    /// `nonisolated` throughout — `StatusBarView`'s `View` conformance infers
+    /// whole-type `@MainActor` isolation onto even a nested value type, and a
+    /// main-actor `init` called from a nonisolated `map` closure traps at
+    /// runtime rather than failing to compile (same reason
+    /// `WorktreeRowView.rowHeight` is `nonisolated`).
+    nonisolated struct PRChip: Identifiable, Equatable {
+        let id: UUID
+        /// The PR number, kept alongside the rendered `label` because opening
+        /// the PR names its tab `PR #N` and must not have to re-parse "#412".
+        let number: Int
+        let label: String
+        let url: URL?
+        let state: PRMergeableState?
+    }
+
+    /// How many chips the bar shows before the rest collapse into `+N`. Four
+    /// keeps the cluster narrower than the path it sits beside on a typical
+    /// window; past that the dropdown is the better surface.
+    nonisolated static let prChipLimit = 4
+
+    /// The chip row for `bindings`, plus how many did not fit. Pure: delegates
+    /// the cap and the bind-order guarantee to `PRBindingPresentation` so the
+    /// status bar cannot disagree with the toolbar about which PRs are shown
+    /// or in what order.
+    nonisolated static func prChips(
+        _ bindings: [PRBinding],
+        limit: Int = prChipLimit
+    ) -> (chips: [PRChip], overflow: Int) {
+        let selected = PRBindingPresentation.statusBarChips(bindings, limit: limit)
+        let chips = selected.chips.map { binding in
+            PRChip(
+                id: binding.id,
+                number: binding.number,
+                label: "#\(binding.number)",
+                url: URL(string: binding.url),
+                state: binding.status?.state
+            )
+        }
+        return (chips, selected.overflow)
+    }
+
     private var footerLabel: (text: String, tooltip: String?) {
         let version = "v\(TBDConstants.version)"
         guard let sourcePath = Self.sourceWorktreePath,
@@ -121,6 +167,22 @@ struct StatusBarView: View {
                 // is short and must never truncate.
                 .layoutPriority(-1)
             }
+            // Chips render for a SINGLE selection only — `selected` is already
+            // nil for a multi-selection, matching the path/branch cluster and
+            // the toolbar's PR control.
+            if let selected {
+                // Same accessor as the toolbar control and the sidebar
+                // indicator — bindings when there are any, else the legacy
+                // single status lifted into one synthetic binding — so the
+                // three surfaces cannot show different PRs for one worktree.
+                let bindings = appState.effectivePRBindings(worktreeID: selected.id)
+                if !bindings.isEmpty {
+                    PRChipCluster(bindings: bindings)
+                        // Same reason as the path cluster: yield width to the
+                        // version/display-name label rather than squeezing it.
+                        .layoutPriority(-1)
+                }
+            }
             Spacer()
             if let info = selectedInfo {
                 OpenInEditorButton(path: info.path, repoID: info.repoID)
@@ -139,6 +201,153 @@ struct StatusBarView: View {
         .padding(.horizontal)
         .padding(.vertical, 4)
         .background(.bar)
+    }
+}
+
+/// The status bar's shared hover affordance: a pointing-hand cursor pushed on
+/// enter and popped on exit.
+///
+/// The `onDisappear` arm is the load-bearing half. Selecting a different
+/// worktree tears these labels down while the pointer is still over them, and
+/// an `NSCursor.push()` with no matching `pop()` leaves the pointing hand stuck
+/// for the whole application — there is no later event that would balance it.
+/// Every hoverable status-bar label must use this modifier rather than wiring
+/// `onHover` by hand, so the two halves can never drift apart.
+private struct StatusBarHoverAffordance: ViewModifier {
+    @Binding var isHovering: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .onHover { hovering in
+                guard hovering != isHovering else { return }
+                isHovering = hovering
+                if hovering {
+                    NSCursor.pointingHand.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
+            .onDisappear {
+                if isHovering {
+                    isHovering = false
+                    NSCursor.pop()
+                }
+            }
+    }
+}
+
+/// The status bar's PR cluster: one chip per bound PR up to
+/// `StatusBarView.prChipLimit`, then a `+N` chip listing the rest.
+private struct PRChipCluster: View {
+    let bindings: [PRBinding]
+
+    var body: some View {
+        let model = StatusBarView.prChips(bindings)
+        HStack(spacing: 6) {
+            ForEach(model.chips) { chip in
+                PRChipView(chip: chip)
+            }
+            if model.overflow > 0 {
+                PRChipOverflowMenu(bindings: bindings, overflow: model.overflow)
+            }
+        }
+    }
+}
+
+/// One `● #412` chip. Chrome-less like `CopyableStatusText` — the hover
+/// underline plus pointing-hand cursor are the whole affordance.
+private struct PRChipView: View {
+    let chip: StatusBarView.PRChip
+
+    @State private var isHovering = false
+
+    /// Tooltip and accessibility hint, e.g. `Open PR #412 — Checks failing`.
+    private var tooltip: String {
+        guard let state = chip.state else { return "Open PR \(chip.label)" }
+        return "Open PR \(chip.label) — \(state.displayReason)"
+    }
+
+    /// The dot color, taken from the shared PR palette so a chip cannot drift
+    /// from the sidebar glyph or the toolbar icon for the same state. The
+    /// synthetic `PRStatus` exists only to reach that palette — `make(for:)`
+    /// reads nothing but `state` once `mergeQueuePosition` is nil.
+    private var dotColor: Color {
+        guard let state = chip.state,
+              let presentation = PRStatusPresentation.make(
+                for: PRStatus(number: 0, url: "", state: state)
+              ) else { return .secondary }
+        return presentation.color
+    }
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Circle()
+                .fill(dotColor)
+                .frame(width: 6, height: 6)
+            Text(chip.label)
+                .lineLimit(1)
+                .underline(isHovering)
+        }
+        .foregroundStyle(.secondary)
+        // The dot and the gap beside it are part of the click target.
+        .contentShape(Rectangle())
+        .help(tooltip)
+        .modifier(StatusBarHoverAffordance(isHovering: $isHovering))
+        // Opens the DEFAULT BROWSER, not an in-app tab. Intentional, and the
+        // one place the status bar and the toolbar deliberately differ: the
+        // toolbar control and its dropdown open a webview tab, while the status
+        // bar agrees with the sidebar row indicator and shells out. Not drift —
+        // the status bar is an at-a-glance strip, and a click there is a "take
+        // me to GitHub" gesture rather than a request to park a tab in the
+        // worktree.
+        .onTapGesture {
+            guard let url = chip.url else { return }
+            NSWorkspace.shared.open(url)
+        }
+        .accessibilityElement()
+        .accessibilityLabel("PR \(chip.label)")
+        .accessibilityHint(tooltip)
+        .accessibilityAddTraits(.isButton)
+    }
+}
+
+/// The `+N` chip. Clicking it drops down the same list the toolbar's multi-PR
+/// dropdown shows — `PRBindingPresentation.menuRows`, in bind order — so the
+/// two surfaces cannot describe the same worktree differently.
+private struct PRChipOverflowMenu: View {
+    let bindings: [PRBinding]
+    let overflow: Int
+
+    @State private var isHovering = false
+
+    var body: some View {
+        Menu {
+            ForEach(PRBindingPresentation.menuRows(bindings)) { row in
+                // The default browser, matching the chips beside it — see
+                // `PRChipView`'s tap handler for why the status bar differs
+                // from the toolbar here.
+                Button(row.title) {
+                    guard let url = row.url else { return }
+                    NSWorkspace.shared.open(url)
+                }
+                .disabled(row.url == nil)
+            }
+        } label: {
+            Text("+\(overflow)")
+                .lineLimit(1)
+                .underline(isHovering)
+                .foregroundStyle(.secondary)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        // The label counts what didn't fit; the menu lists everything. The
+        // wording says so — see `PRBindingPresentation.overflowChipTooltip`.
+        .help(PRBindingPresentation.overflowChipTooltip(
+            total: bindings.count, overflow: overflow))
+        .modifier(StatusBarHoverAffordance(isHovering: $isHovering))
+        .accessibilityLabel(PRBindingPresentation.overflowChipAccessibilityLabel(
+            total: bindings.count, overflow: overflow))
     }
 }
 
@@ -177,23 +386,7 @@ private struct CopyableStatusText: View {
             // not just the glyphs.
             .contentShape(Rectangle())
             .help(tooltip)
-            .onHover { hovering in
-                guard hovering != isHovering else { return }
-                isHovering = hovering
-                if hovering {
-                    NSCursor.pointingHand.push()
-                } else {
-                    NSCursor.pop()
-                }
-            }
-            .onDisappear {
-                // Selection changes can tear the label down mid-hover, and an
-                // unmatched push leaves the pointing hand stuck app-wide.
-                if isHovering {
-                    isHovering = false
-                    NSCursor.pop()
-                }
-            }
+            .modifier(StatusBarHoverAffordance(isHovering: $isHovering))
             .onTapGesture {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(copyValue, forType: .string)

@@ -28,6 +28,7 @@ public final class TBDDatabase: Sendable {
     public let panelSurface: PanelSurfaceStore
     public let remoteSessions: RemoteSessionStore
     public let watchDeskLeases: WatchDeskLeaseStore
+    public let prBindings: PRBindingStore
 
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "migrations")
 
@@ -68,6 +69,7 @@ public final class TBDDatabase: Sendable {
         self.panelSurface = PanelSurfaceStore(writer: pool)
         self.remoteSessions = RemoteSessionStore(writer: pool)
         self.watchDeskLeases = WatchDeskLeaseStore(writer: pool)
+        self.prBindings = PRBindingStore(writer: pool)
 
         let migrator = Self.buildMigrator()
         if fileExisted {
@@ -108,6 +110,7 @@ public final class TBDDatabase: Sendable {
         self.panelSurface = PanelSurfaceStore(writer: queue)
         self.remoteSessions = RemoteSessionStore(writer: queue)
         self.watchDeskLeases = WatchDeskLeaseStore(writer: queue)
+        self.prBindings = PRBindingStore(writer: queue)
         try Self.buildMigrator().migrate(queue)
     }
 
@@ -1232,6 +1235,46 @@ public final class TBDDatabase: Sendable {
                 table: "worktree", column: "providerName", type: .text)
             try db.addColumnIfMissing(
                 table: "worktree", column: "providerSessionID", type: .text)
+        }
+
+        // Multi-PR support: one durable binding row per (worktree, PR).
+        // `detached` is a tombstone — a deleted row would be re-created by the
+        // next poll or hook fire, so a user's removal has to be recorded.
+        //
+        // Numbered v71 because main took v70 for `worktree_location` while this
+        // branch was open. Renumbering an additive migration is only safe
+        // because the body goes through the idempotent helpers: a machine that
+        // already applied it under the old ID re-runs this body and finds the
+        // table and both indexes present, so it logs a no-op instead of
+        // throwing on a duplicate.
+        migrator.registerMigration("v71_worktree_pull_request") { db in
+            try db.createTableIfNotExists("worktree_pull_request") { t in
+                t.primaryKey("id", .text).notNull()
+                t.column("worktreeID", .text).notNull()
+                    .references("worktree", onDelete: .cascade)
+                t.column("host", .text).notNull().defaults(to: "github.com")
+                t.column("owner", .text).notNull()
+                t.column("repo", .text).notNull()
+                t.column("number", .integer).notNull()
+                t.column("url", .text).notNull()
+                t.column("headBranch", .text)
+                t.column("baseRef", .text)
+                t.column("prStatus", .text)              // PRStatus JSON
+                t.column("source", .text).notNull()
+                t.column("detached", .boolean).notNull().defaults(to: false)
+                t.column("boundAt", .datetime).notNull()
+            }
+            try db.addIndexIfMissing(
+                "idx_worktree_pull_request_worktree",
+                on: "worktree_pull_request", columns: ["worktreeID"])
+            // Owner and repo are stored lowercased by PRBindingStore, so this
+            // unique index is effectively case-insensitive without a collation
+            // change.
+            try db.addIndexIfMissing(
+                "idx_worktree_pull_request_identity",
+                on: "worktree_pull_request",
+                columns: ["worktreeID", "host", "owner", "repo", "number"],
+                unique: true)
         }
 
         return migrator

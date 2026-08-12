@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftUI
 import TBDShared
@@ -474,6 +475,63 @@ extension AppState {
                 logger.error("reorderTab persist failed for \(worktreeID, privacy: .public): \(error, privacy: .public)")
                 handleConnectionError(error)
             }
+        }
+    }
+
+    // MARK: - PR tabs
+
+    /// Where a request to show `url` should land: the index of the worktree's
+    /// existing webview tab already on that URL, or nil when none is and a new
+    /// tab has to be created.
+    ///
+    /// Pure and static so the reuse rule — the one thing that makes clicking
+    /// the same PR twice idempotent instead of piling up duplicate tabs — can
+    /// be asserted without a toolbar, a status bar, or a running app.
+    nonisolated static func webviewTabIndex(in tabs: [TBDShared.Tab], showing url: URL) -> Int? {
+        tabs.firstIndex {
+            if case .webview(_, let tabURL) = $0.content { return tabURL == url }
+            return false
+        }
+    }
+
+    /// Open one bound PR: an in-app webview tab, reusing an existing tab for the
+    /// same URL, or the default browser when ⌘ is held.
+    ///
+    /// The single entry point for the TOOLBAR's PR surfaces — the split
+    /// button's primary action and its multi-PR dropdown rows — so those two
+    /// cannot drift apart on which opens a tab and which shells out.
+    ///
+    /// The toolbar is the only in-app-tab surface, deliberately. The status-bar
+    /// chips and the sidebar row indicator open the default browser directly
+    /// (`NSWorkspace.shared.open`) and are not callers here: a click on the
+    /// at-a-glance strip or on a sidebar glyph is a "take me to GitHub" gesture,
+    /// while the toolbar control is where a PR gets parked as a tab in the
+    /// worktree. That difference is a product decision, not an oversight.
+    ///
+    /// `inBrowser` defaults to the ⌘ state *at the call site* (default
+    /// arguments are evaluated there), which keeps the modifier check next to
+    /// the click that carries it and lets tests drive both arms without
+    /// synthesizing an `NSEvent` — or launching a browser.
+    func openPR(
+        url: URL,
+        number: Int,
+        worktreeID: UUID,
+        inBrowser: Bool = NSEvent.modifierFlags.contains(.command)
+    ) {
+        if inBrowser {
+            NSWorkspace.shared.open(url)
+            return
+        }
+        if let existingIndex = Self.webviewTabIndex(in: tabs[worktreeID] ?? [], showing: url) {
+            activeTabIndices[worktreeID] = existingIndex
+        } else {
+            let tab = TBDShared.Tab(
+                id: UUID(),
+                content: .webview(id: UUID(), url: url),
+                label: "PR #\(number)"
+            )
+            tabs[worktreeID, default: []].append(tab)
+            activeTabIndices[worktreeID] = (tabs[worktreeID]?.count ?? 1) - 1
         }
     }
 }

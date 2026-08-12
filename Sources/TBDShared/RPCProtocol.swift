@@ -146,8 +146,12 @@ public enum RPCMethod {
     public static let resolvePath = "resolve.path"
     public static let notificationsList = "notifications.list"
     public static let notificationsMarkRead = "notifications.markRead"
-    public static let prList    = "pr.list"
-    public static let prRefresh = "pr.refresh"
+    public static let prList     = "pr.list"
+    public static let prRefresh  = "pr.refresh"
+    public static let prBindings = "pr.bindings"
+    public static let prBindingsAll = "pr.bindingsAll"
+    public static let prAttach   = "pr.attach"
+    public static let prDetach   = "pr.detach"
     public static let cleanup = "cleanup"
     public static let claudeSetSpawnPreferences = "claude.setSpawnPreferences"
     public static let claudeRateLimitDetected = "claude.rateLimitDetected"
@@ -849,6 +853,111 @@ public struct PRRefreshParams: Codable, Sendable {
 public struct PRRefreshResult: Codable, Sendable {
     public let status: PRStatus?
     public init(status: PRStatus?) { self.status = status }
+}
+
+// MARK: - PR bindings (multi-PR per worktree)
+
+public struct PRBindingsParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public init(worktreeID: UUID) { self.worktreeID = worktreeID }
+}
+
+public struct PRBindingsResult: Codable, Sendable {
+    /// Live bindings only — tombstoned ones are not reported.
+    public let bindings: [PRBinding]
+    /// How many of this worktree's bindings are tombstoned (detached).
+    ///
+    /// This is what separates the two ways `bindings` comes back empty. The app
+    /// falls back to the worktree's cached single `prStatus` when a worktree has
+    /// no bindings, because a worktree whose repo `gh` cannot resolve never gets
+    /// one and would otherwise lose its PR control entirely. But a user who ran
+    /// `tbd pr detach` on their last PR reaches the same empty list, and there
+    /// the fallback resurrects exactly what they asked to remove. A non-zero
+    /// count says the emptiness is a decision, not an absence.
+    ///
+    /// Optional so a response from an older daemon still decodes; `nil` reads as
+    /// "unknown", which every caller treats as zero — the pre-existing
+    /// behaviour.
+    public let detachedCount: Int?
+    public init(bindings: [PRBinding], detachedCount: Int? = nil) {
+        self.bindings = bindings
+        self.detachedCount = detachedCount
+    }
+}
+
+/// One worktree's row in a `pr.bindingsAll` response.
+public struct PRBindingsAllEntry: Codable, Sendable {
+    public let worktreeID: UUID
+    /// Live bindings only, in bind order — tombstoned ones are not reported.
+    public let bindings: [PRBinding]
+    /// How many of this worktree's bindings are tombstoned. Carries the same
+    /// meaning as `PRBindingsResult.detachedCount` and is optional for the same
+    /// reason: an older daemon omits it and `nil` reads as zero.
+    public let detachedCount: Int?
+    public init(worktreeID: UUID, bindings: [PRBinding], detachedCount: Int? = nil) {
+        self.worktreeID = worktreeID
+        self.bindings = bindings
+        self.detachedCount = detachedCount
+    }
+}
+
+/// Every worktree's bindings in ONE round trip — what the app polls.
+///
+/// The per-worktree `pr.bindings` cannot answer the app's question, because the
+/// app does not know which worktrees to ask about: a worktree whose only PR was
+/// bound by the `gh pr create` hook, on a branch it never checked out, appears
+/// in no branch-derived status cache, so a per-worktree fan-out can only reach
+/// worktrees already known to have PRs. This method carries no worktree
+/// parameter for exactly that reason — the daemon reports the whole table and
+/// the app replaces its map wholesale.
+///
+/// A worktree appears here when it has at least one live binding OR at least one
+/// tombstone; a worktree with neither is simply absent.
+public struct PRBindingsAllResult: Codable, Sendable {
+    public let worktrees: [PRBindingsAllEntry]
+    public init(worktrees: [PRBindingsAllEntry]) {
+        self.worktrees = worktrees
+    }
+}
+
+/// Identify a PR either by full URL or by number within the worktree's own repo.
+///
+/// `source` decides tombstone semantics, so it is part of the reference rather
+/// than a handler default: a `hook` attach must not revive a PR the user
+/// detached, while a `manual` one must.
+public struct PRBindingRefParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public let url: String?
+    public let number: Int?
+    /// A `PRBindingSource` raw value. Absent or unrecognised means `manual` —
+    /// the safe reading for a hand-typed attach, and what older clients send.
+    public let source: String?
+    public init(worktreeID: UUID, url: String? = nil, number: Int? = nil,
+                source: String? = nil) {
+        self.worktreeID = worktreeID
+        self.url = url
+        self.number = number
+        self.source = source
+    }
+}
+
+public struct PRAttachResult: Codable, Sendable {
+    /// Mirrors `PRBindingCoordinator.BindOutcome`, flattened for the wire.
+    public let outcome: String
+    public let binding: PRBinding?
+    /// Populated for `rejectedWrongRepo` so the CLI can name the other repo.
+    public let detail: String?
+    public init(outcome: String, binding: PRBinding? = nil, detail: String? = nil) {
+        self.outcome = outcome
+        self.binding = binding
+        self.detail = detail
+    }
+}
+
+public struct PRDetachResult: Codable, Sendable {
+    /// False when this worktree had no such binding — not an error.
+    public let detached: Bool
+    public init(detached: Bool) { self.detached = detached }
 }
 
 // MARK: - Parameter Structs

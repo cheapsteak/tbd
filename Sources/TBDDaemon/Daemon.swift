@@ -534,8 +534,22 @@ public final class Daemon: Sendable {
             db: database, hibernation: rpcRouter.hibernationCoordinator, subscriptions: subs)
         let mergedTransitionDispatcher = MergedTransitionDispatcher(
             archive: autoArchiveCoordinator, hibernate: autoHibernateCoordinator)
-        await prManager.setOnMergedTransition { worktreeID, prNumber in
-            await mergedTransitionDispatcher.handleMergedTransition(worktreeID: worktreeID, prNumber: prNumber)
+        // One worktree may own several PRs, so the fan-out runs behind the
+        // all-resolved gate: every non-detached binding terminal, at least one
+        // merged, and at least one merged binding the worktree's own work. The
+        // gate is also the once-only guard, so both entry points below must
+        // share ONE trigger instance.
+        let allResolvedTrigger = mergedTransitionDispatcher.makeAllResolvedTrigger()
+        rpcRouter.mergeTrigger = allResolvedTrigger
+        // The worktree-keyed cache still observes merges for worktrees nothing
+        // ever bound a PR to (a PR known only by number, or a branch match the
+        // binding coordinator rejected). `observedMerge` fires only in that
+        // un-bound case; a worktree WITH bindings is judged by the poll's
+        // `evaluate` above, on statuses that are fresh for every one of its PRs.
+        await prManager.setOnMergedTransition { [database] worktreeID, prNumber in
+            let bindings = (try? await database.prBindings.list(worktreeID: worktreeID)) ?? []
+            await allResolvedTrigger.observedMerge(
+                worktreeID: worktreeID, prNumber: prNumber, bindings: bindings)
         }
 
         self.router = rpcRouter
