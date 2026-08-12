@@ -117,9 +117,10 @@ of permanently caching the selected path.
 
 This means a Settings save or clear affects later terminal preparation, later daemon
 tmux commands, and later control-mode gate or capability decisions. The daemon pairs a
-detected tmux version with the executable path that produced it. It may reuse a startup
-version only while the effective path remains unchanged; otherwise it detects the
-version from the newly resolved executable.
+detected tmux version with the executable path that produced it. Control-mode gate and
+capability decisions detect the version again from each newly resolved executable, so
+replacing the executable in place at an unchanged path also takes effect without a
+daemon restart.
 
 Within one terminal preparation, TBD resolves exactly once. The absolute executable
 path is carried through session creation, window selection, confirmation, cleanup,

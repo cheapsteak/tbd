@@ -28,8 +28,8 @@ struct TmuxControlModeBridge: Sendable {
     /// The single per-daemon supervisor. Connections are keyed by server name
     /// and `ensureConnection` is idempotent, so all call sites share one.
     let supervisor: TmuxControlSupervisor
-    /// Path/version pair detected at daemon startup. Its version is reused only
-    /// while the resolver still selects the paired executable.
+    /// Path/version pair detected at daemon startup. Live decisions do not
+    /// reuse its version because the executable may be replaced in place.
     let startupTmux: TmuxVersionSnapshot
     /// Resolves PATH first and the live saved fallback second on every gate
     /// and capabilities decision.
@@ -131,14 +131,11 @@ struct TmuxControlModeBridge: Sendable {
         }
     }
 
-    /// Current tmux version. The startup result is cached only for the same
-    /// effective executable path; a changed PATH or saved fallback is detected
-    /// at use so Settings changes take effect without a daemon restart.
+    /// Current tmux version. Both the effective path and the version are
+    /// detected at use so Settings changes and in-place executable upgrades
+    /// take effect without a daemon restart.
     func currentTmuxVersion() async -> TmuxVersion? {
         guard let executablePath = tmuxExecutableResolver.resolve()?.path else { return nil }
-        if executablePath == startupTmux.executablePath, let version = startupTmux.version {
-            return version
-        }
         return await TmuxVersion.detect(tmuxBinary: executablePath)
     }
 

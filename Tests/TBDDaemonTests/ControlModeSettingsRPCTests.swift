@@ -245,6 +245,46 @@ struct ControlModeSettingsRPCTests {
     }
 
     // Tier 2: real filesystem and fixture-owned version subprocesses.
+    @Test("capabilities and gate follow an executable replaced at the same path")
+    func capabilitiesFollowSamePathExecutableReplacement() async throws {
+        let fixture = try TmuxVersionFallbackFixture()
+        defer { fixture.remove() }
+        let emptyDirectory = try fixture.directory(named: "empty-path")
+        let executable = try fixture.versionExecutable(version: "3.6")
+        let resolver = TmuxExecutableResolver(
+            environment: ["PATH": emptyDirectory.path],
+            configurationURL: fixture.configurationURL
+        )
+        try resolver.save(executable.path)
+        let startupVersion = try #require(await TmuxVersion.detect(tmuxBinary: executable.path))
+        let (router, db) = try makeRouterAndDB()
+        try await db.config.setControlModeEnabled(true)
+        let liveBridge = bridge(
+            db: db,
+            tmuxVersion: startupVersion,
+            tmuxExecutableResolver: resolver,
+            startupTmux: TmuxVersionSnapshot(
+                executablePath: executable.path,
+                version: startupVersion
+            )
+        )
+        router.controlMode = liveBridge
+
+        #expect(await liveBridge.currentTmuxVersion()?.description == "3.6")
+        #expect(await liveBridge.gateEnabled())
+
+        _ = try fixture.versionExecutable(version: "3.1")
+
+        #expect(await liveBridge.currentTmuxVersion()?.description == "3.1")
+        #expect(await liveBridge.gateEnabled() == false)
+        let response = await router.handle(RPCRequest(method: RPCMethod.daemonCapabilities))
+        let result = try response.decodeResult(DaemonCapabilitiesResult.self)
+        #expect(result.tmuxVersion == "3.1")
+        #expect(result.controlModeSupported == false)
+        #expect(result.controlModeEnabled == false)
+    }
+
+    // Tier 2: real filesystem and fixture-owned version subprocesses.
     @Test("startup detection remains paired with its executable when fallback changes before bridge construction")
     func startupDetectionKeepsItsExecutablePath() async throws {
         let fixture = try TmuxVersionFallbackFixture()
