@@ -297,6 +297,12 @@ whole binding set — every number and state, not just one status.
 PR, capped at four with a `+N` overflow chip that opens the full list. The
 cluster yields width to the path label the way the branch label already does.
 
+Chips and the overflow rows open the **default browser**, while the toolbar and
+its dropdown open an **in-app tab**. The split is deliberate and matches the
+sidebar row indicator, which already opened the browser: the status bar is an
+at-a-glance strip where a click means "take me to GitHub", and the toolbar is
+where a PR gets parked as a tab to work against.
+
 **Sidebar.** The row indicator takes the same worst-state rule, so sidebar and
 toolbar cannot disagree.
 
