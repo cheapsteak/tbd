@@ -37,6 +37,12 @@ The app passes its inherited environment to the daemon. The daemon does not appe
 directories, invoke a shell, or otherwise reinterpret `PATH`. This gives the app and
 daemon one installation-defined search path instead of competing policies.
 
+This policy is daemon-wide, not limited to tmux. Every process the daemon starts,
+including `git` and helpers that `git` invokes such as `git-lfs`, inherits the captured
+installation `PATH`. Those tools must therefore be available through that path. Tmux
+alone has the explicit saved-executable fallback described below; other daemon
+descendants do not gain per-tool fallbacks.
+
 Only `PATH` is captured. TBD does not persist the installation shell's whole
 environment.
 
@@ -150,7 +156,9 @@ Searching package-manager or system directories outside `PATH` creates a second,
 hidden precedence policy and can silently select a different tmux than the installer
 selected. There is no universal directory list across package managers, architectures,
 or user-managed toolchains. TBD searches only the authoritative inherited `PATH` and
-the explicit saved fallback.
+the explicit saved tmux fallback. Restoring fixed-directory augmentation for `git-lfs`
+or other daemon descendants would reintroduce the same hidden policy daemon-wide and
+could make subprocess behavior differ from the installation environment.
 
 ### Login shell or `path_helper`
 
@@ -183,8 +191,10 @@ changes.
 
 ## Verification contract
 
-- Installation-path tests verify exact round trips, replacement, invalid input, source
-  plist preservation, and generated plist validity.
+- The installation-path shell harness verifies the plist-generation helper's exact
+  round trips, replacement, invalid input, source plist preservation, and generated
+  plist validity. It does not exercise an OS-level crash and LaunchServices relaunch
+  end to end.
 - Resolver tests verify PATH order, executable validation, ignored entries, paths with
   spaces, fallback precedence, and absence of implicit directory search.
 - App tests verify startup prompting, saving, clearing, PATH authority, live
