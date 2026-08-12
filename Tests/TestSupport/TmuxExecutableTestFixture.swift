@@ -7,17 +7,20 @@ import TBDShared
 public struct TmuxExecutableTestFixture: Sendable {
     public let root: URL
     public let executableURL: URL
+    public let invocationLogURL: URL
     public let configurationURL: URL
 
     public init(version: String = "3.6") throws {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("TmuxExecutableTestFixture-\(UUID().uuidString)", isDirectory: true)
         executableURL = root.appendingPathComponent("tmux")
+        invocationLogURL = root.appendingPathComponent("invocations")
         configurationURL = root.appendingPathComponent("tmux-executable-path")
 
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         let script = """
         #!/bin/sh
+        printf '%s\\n' invoked >> '\(invocationLogURL.path)'
         printf '%s\\n' 'tmux \(version)'
         """
         try script.write(to: executableURL, atomically: true, encoding: .utf8)

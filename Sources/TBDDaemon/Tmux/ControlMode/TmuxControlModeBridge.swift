@@ -121,6 +121,8 @@ struct TmuxControlModeBridge: Sendable {
 
     /// Effective gate decision and the version used for it, evaluated from one
     /// snapshot so capability fields cannot disagree with the enabled state.
+    /// Capability queries report tmux support even while control mode is off,
+    /// so this path intentionally detects the version before applying the gate.
     func currentGateState() async -> (enabled: Bool, tmuxVersion: TmuxVersion?) {
         let version = await currentTmuxVersion()
         let enabled = ControlModeGate.shouldEnable(
@@ -134,9 +136,18 @@ struct TmuxControlModeBridge: Sendable {
     /// Effective gate decision, evaluated fresh on every call:
     /// `(env opt-in || persisted flag) && tmux >= 3.2`. The persisted flag is
     /// read through `persistedFlagProvider`, so a Settings toggle takes
-    /// effect on the next decision without a daemon restart.
+    /// effect on the next decision without a daemon restart. Hot-path gate
+    /// checks avoid resolving or launching tmux while both opt-ins are off.
     func gateEnabled() async -> Bool {
-        await currentGateState().enabled
+        let persistedFlag = await persistedFlagProvider()
+        guard ControlModeGate.optedIn(environment: environment) || persistedFlag else {
+            return false
+        }
+        return ControlModeGate.shouldEnable(
+            environment: environment,
+            persistedFlag: persistedFlag,
+            tmuxVersion: await currentTmuxVersion()
+        )
     }
 
     /// Open a logging-only `tmux -CC` connection for `serverName` when the

@@ -113,6 +113,7 @@ struct ControlModeSettingsRPCTests {
         )
         let response = await router.handle(RPCRequest(method: RPCMethod.daemonCapabilities))
         let result = try response.decodeResult(DaemonCapabilitiesResult.self)
+        #expect(result.controlModeEnabled == false)
         #expect(result.tmuxVersion == "3.6a")
         #expect(result.controlModeSupported == true)
     }
@@ -293,7 +294,7 @@ struct ControlModeSettingsRPCTests {
         #expect(header.paneID == "%11")
     }
 
-    @Test("flag off, env off: attach is unavailable; flipping the flag affects the NEXT attach")
+    @Test("gate-off attach skips version detection; flipping the flag affects the NEXT attach")
     func toggleMidSessionAffectsNextAttach() async throws {
         let tmux = try TmuxExecutableTestFixture()
         defer { tmux.remove() }
@@ -312,11 +313,13 @@ struct ControlModeSettingsRPCTests {
 
         let before = try await attach(router, worktreeID: worktreeID, paneID: "%12", windowID: "@12")
         #expect(before.status == "unavailable")
+        #expect(!FileManager.default.fileExists(atPath: tmux.invocationLogURL.path))
 
         try await setControlMode(router, enabled: true)
 
         let after = try await attach(router, worktreeID: worktreeID, paneID: "%12", windowID: "@12")
         #expect(after.status == "pending")
+        #expect(FileManager.default.fileExists(atPath: tmux.invocationLogURL.path))
         let (rxFD, _) = try SidecarTestSupport.receiveVend(from: clientSide)
         Darwin.close(rxFD)
     }
