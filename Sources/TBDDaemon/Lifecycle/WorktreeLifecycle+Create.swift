@@ -281,6 +281,21 @@ extension WorktreeLifecycle {
                 // get `git worktree add <path> <branch>`; remote refs get
                 // `--track -b <localName> <path> origin/<name>` to create a
                 // local tracking branch.
+                //
+                // Two of the three legs below CREATE a local branch before the
+                // step that can fail, and git fails *after* creating it in the
+                // ordinary case — a stale `.git/config.lock` makes the upstream
+                // config write fail while the branch stands (verified against
+                // git 2.50). Those two record what they made here so the `catch`
+                // can hand it to the same `cleanUpFailedWorktreeAdd` the
+                // fresh-create path uses, with the same pre-existence gates.
+                //
+                // The plain `worktreeAddExisting` leg creates NOTHING and checks
+                // out a branch the caller owns, so it leaves this nil and the
+                // catch only removes the directory. Deleting there would destroy
+                // a user's branch — the worst outcome this path has.
+                var branchCreatedByThisAttempt: String?
+                var createdBranchPreExisted: Bool?
                 do {
                     if checkoutPRHead, let prNumber = worktree.prNumber {
                         // Fork-PR checkout: the PR head has no local ref, so
@@ -297,6 +312,12 @@ extension WorktreeLifecycle {
                         let localBranch = try await uniqueLocalBranchName(
                             repoPath: repo.path, base: worktree.branch
                         )
+                        // `uniqueLocalBranchName` returns only a name whose
+                        // `refs/heads/<name>` does not exist — it throws rather
+                        // than hand back a taken one — so the fetch below is the
+                        // only thing that can have created it.
+                        branchCreatedByThisAttempt = localBranch
+                        createdBranchPreExisted = false
                         try await git.fetchPullRequestHead(
                             repoPath: repo.path, number: prNumber, localBranch: localBranch
                         )
@@ -313,6 +334,15 @@ extension WorktreeLifecycle {
                         checkedOutForeignHead = true
                         try await db.worktrees.markForeignHead(id: worktreeID)
                     } else if ref.hasPrefix("origin/") {
+                        // `--track -b <localBranch>` creates the branch. Probe
+                        // first so cleanup can tell a branch this attempt made
+                        // from one that was already standing; the tri-state is
+                        // kept (`nil` = the probe itself failed) for the same
+                        // reason the fresh-create path keeps it.
+                        createdBranchPreExisted = try? await git.localBranchExists(
+                            repoPath: repo.path, name: worktree.branch
+                        )
+                        branchCreatedByThisAttempt = worktree.branch
                         try await git.worktreeAddTrackingRemote(
                             repoPath: repo.path,
                             worktreePath: worktree.path,
@@ -328,8 +358,21 @@ extension WorktreeLifecycle {
                     }
                     resultPath = worktree.path
                 } catch {
-                    // Clean up any partially-created directory before bubbling.
-                    try? FileManager.default.removeItem(atPath: worktree.path)
+                    if let branchCreatedByThisAttempt {
+                        // Removes the partially-created directory too, then
+                        // deletes the branch only if all three gates hold.
+                        await cleanUpFailedWorktreeAdd(
+                            repoPath: repo.path,
+                            worktreePath: worktree.path,
+                            branch: branchCreatedByThisAttempt,
+                            branchPreExisted: createdBranchPreExisted,
+                            branchNameWasAlreadyTaken: gitRefusedToCreateBranch(error)
+                        )
+                    } else {
+                        // Nothing was created; only the partially-written
+                        // directory needs removing.
+                        try? FileManager.default.removeItem(atPath: worktree.path)
+                    }
                     throw WorktreeLifecycleError.createFailed(
                         "git worktree add failed for existing branch '\(ref)': \(error)"
                     )
@@ -583,7 +626,24 @@ extension WorktreeLifecycle {
             }
         }
 
-        // Both bases are spent. A fresh name is the only remaining move, and it
+        // Both bases are spent. When the caller NAMED the branch, the retry
+        // below keeps that name and changes only the folder — so if the branch
+        // name is what stands in the way, the retry re-attempts the identical
+        // name against both bases, fails identically twice, and lands on the
+        // generic "after all attempts" with the real cause buried. Say what
+        // collided instead.
+        //
+        // Deliberately narrower than the whole `.nameCollision` case: an
+        // occupied worktree *path* is also a collision, and there a fresh folder
+        // is exactly the remedy.
+        if lastKind == .nameCollision, userSpecifiedBranch,
+           let lastError, gitSaysBranchNameIsTaken(lastError) {
+            throw WorktreeLifecycleError.createFailed(
+                "could not create branch '\(branch)' — the name is already taken\(formatErrorForMessage(lastError))"
+            )
+        }
+
+        // A fresh name is the only remaining move, and it
         // is worth making only for a collision — `.baseUnresolvable` means no
         // ref resolved, which no folder or branch name changes, so retrying
         // would burn two more identical failures and then report the generic
@@ -644,6 +704,11 @@ extension WorktreeLifecycle {
                     throw WorktreeLifecycleError.createFailed(
                         "git worktree add failed\(repoLevelHint(error))\(formatErrorForMessage(error))"
                     )
+                }
+                if lastKind == .nameCollision {
+                    // Base-independent here for the same reason as in the first
+                    // loop: the second base would fail identically.
+                    break
                 }
             }
         }
@@ -717,6 +782,30 @@ extension WorktreeLifecycle {
     private func gitRefusedToCreateBranch(_ error: Error) -> Bool {
         guard let gitError = error as? GitError else { return false }
         return gitError.stderr.lowercased().contains("a branch named")
+    }
+
+    /// True when git's stderr says the *branch name* is what is taken, as
+    /// opposed to the worktree path. Two phrasings mean it, both verified
+    /// against git 2.50:
+    ///
+    /// - `fatal: a branch named 'x' already exists` — the ref is there.
+    /// - `fatal: 'x' is already used by worktree at '<path>'` — the ref is
+    ///   checked out elsewhere, or a registration claims it is (an unborn
+    ///   orphan branch in the main checkout produces exactly this while
+    ///   `refs/heads/x` does not yet exist, which is why the pre-existence
+    ///   probe alone cannot answer this question).
+    ///
+    /// An occupied path says `fatal: '<path>' already exists` instead — no
+    /// overlap, so a fresh folder name stays the remedy for that one.
+    ///
+    /// Distinct from `gitRefusedToCreateBranch`, which gates branch *deletion*
+    /// and stays narrower on purpose: this one only decides whether to keep
+    /// retrying, where being wrong costs an attempt rather than a branch.
+    private func gitSaysBranchNameIsTaken(_ error: Error) -> Bool {
+        guard let gitError = error as? GitError else { return false }
+        let stderr = gitError.stderr.lowercased()
+        return stderr.contains("a branch named")
+            || stderr.contains("is already used by worktree at")
     }
 
     /// Cleans up whatever a single failed `worktreeAdd` attempt left behind:

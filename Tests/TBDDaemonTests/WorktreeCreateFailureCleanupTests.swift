@@ -22,7 +22,16 @@ import Testing
     /// A bare remote plus a clone with `main` pushed, so `origin/main` resolves
     /// and the upstream-config write is actually attempted. Returns the clone's
     /// host directory (the caller's `tempDir`) and the clone itself.
-    private func makeClonedTestRepo() async throws -> (parentDir: URL, hostDir: URL, repoDir: URL) {
+    ///
+    /// `remoteOnlyBranches` are pushed to the remote and then deleted from the
+    /// source, so the clone sees `origin/<name>` with no local counterpart —
+    /// the shape that makes `--track -b <name>` create a branch.
+    /// `pullRequestHeads` plant `refs/pull/<n>/head` on the remote, which is
+    /// what a fork-PR checkout fetches.
+    private func makeClonedTestRepo(
+        remoteOnlyBranches: [String] = [],
+        pullRequestHeads: [Int] = []
+    ) async throws -> (parentDir: URL, hostDir: URL, repoDir: URL) {
         let parentDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-create-failure-\(UUID().uuidString)")
         let remoteDir = parentDir.appendingPathComponent("remote.git")
@@ -39,8 +48,32 @@ import Testing
         try await shell("git remote add origin '\(remoteDir.path)'", at: sourceDir)
         try await shell("git push origin main", at: sourceDir)
 
+        for branch in remoteOnlyBranches {
+            try await shell(
+                "git checkout -b '\(branch)' && git commit --allow-empty -m '\(branch)'"
+                + " && git push origin '\(branch)' && git checkout main",
+                at: sourceDir
+            )
+        }
+        for number in pullRequestHeads {
+            try await shell(
+                "git update-ref refs/pull/\(number)/head refs/heads/main", at: remoteDir
+            )
+        }
+
         try await shell("git clone '\(remoteDir.path)' '\(repoDir.path)'", at: hostDir)
         return (parentDir, hostDir, repoDir)
+    }
+
+    /// Occupies `path` with a stray file, so the next `git worktree add`
+    /// targeting it fails with `fatal: '<path>' already exists`.
+    private func occupy(_ path: String) throws {
+        try FileManager.default.createDirectory(
+            atPath: path, withIntermediateDirectories: true
+        )
+        try Data("occupied".utf8).write(
+            to: URL(fileURLWithPath: path).appendingPathComponent("stray.txt")
+        )
     }
 
     /// Jams the repo so `git worktree add -b … origin/main` fails *after*
@@ -186,7 +219,11 @@ import Testing
             let text = String(describing: error)
             #expect(text.contains("no usable base branch"),
                     "unresolvable base reported as something else: \(text)")
-            #expect(text.contains("origin/no-such-base") && text.contains("no-such-base"),
+            // Both bases, in the order they were tried. Asserting the joined
+            // list rather than each name separately: "origin/no-such-base"
+            // contains "no-such-base", so a per-name check would pass on a
+            // message that named only the remote one.
+            #expect(text.contains("tried origin/no-such-base, no-such-base"),
                     "the bases tried are not named: \(text)")
             #expect(!text.contains("after all attempts"),
                     "a second name was attempted for an unresolvable base: \(text)")
@@ -221,12 +258,7 @@ import Testing
         // Reserve the name, then occupy its path so the FIRST attempt fails
         // with "fatal: '<path>' already exists" after having created the branch.
         let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id, skipClaude: true)
-        try FileManager.default.createDirectory(
-            atPath: pending.localPath, withIntermediateDirectories: true
-        )
-        try Data("occupied".utf8).write(
-            to: URL(fileURLWithPath: pending.localPath).appendingPathComponent("stray.txt")
-        )
+        try occupy(pending.localPath)
 
         let completion = try await lifecycle.completeCreateWorktree(
             worktreeID: pending.id, skipClaude: true
@@ -326,12 +358,7 @@ import Testing
         let pending = try await lifecycle.beginCreateWorktree(
             repoID: repo.id, branch: "owned-by-caller", skipClaude: true
         )
-        try FileManager.default.createDirectory(
-            atPath: pending.localPath, withIntermediateDirectories: true
-        )
-        try Data("occupied".utf8).write(
-            to: URL(fileURLWithPath: pending.localPath).appendingPathComponent("stray.txt")
-        )
+        try occupy(pending.localPath)
 
         await #expect(throws: WorktreeLifecycleError.self) {
             _ = try await lifecycle.completeCreateWorktree(
@@ -386,5 +413,236 @@ import Testing
         let branches = try await localBranches(repoDir)
         #expect(branches.contains(pending.branch),
                 "cleanup deleted the pre-existing colliding branch: \(branches)")
+    }
+
+    // MARK: - The existing-branch flow leaks the same way
+
+    /// `--track -b <local> <path> origin/<name>` has the same shape as the
+    /// fresh-create path: git creates the local branch, then writes upstream
+    /// tracking configuration, and a jammed `.git/config.lock` fails only the
+    /// second half. Reproduced by hand against git 2.50:
+    /// `git worktree add --track -b tracked ../wt origin/tracked` leaves
+    /// `tracked` standing and creates no directory.
+    @Test func failedTrackingCheckoutLeavesNoBranchBehind() async throws {
+        let (parentDir, hostDir, repoDir) = try await makeClonedTestRepo(
+            remoteOnlyBranches: ["feature"]
+        )
+        defer { try? FileManager.default.removeItem(at: parentDir) }
+        try jamConfigLock(repoDir)
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        let repo = try await makeTestRepo(db: db, tempDir: hostDir, repoDir: repoDir)
+
+        await #expect(throws: WorktreeLifecycleError.self) {
+            _ = try await lifecycle.createWorktree(
+                repoID: repo.id, branch: "origin/feature", skipClaude: true,
+                useExistingBranch: true
+            )
+        }
+
+        let branches = try await localBranches(repoDir)
+        #expect(!branches.contains("feature"),
+                "the tracking checkout leaked the branch it created: \(branches)")
+    }
+
+    /// The fork-PR leg creates a fresh local branch of its own (the fetch's
+    /// `+refs/pull/<n>/head:refs/heads/<name>` refspec), so a failure in the
+    /// checkout that follows leaks it just the same. The name comes from
+    /// `uniqueLocalBranchName`, so it is never one the caller brought.
+    @Test func failedPullRequestCheckoutLeavesNoBranchBehind() async throws {
+        let (parentDir, hostDir, repoDir) = try await makeClonedTestRepo(
+            pullRequestHeads: [7]
+        )
+        defer { try? FileManager.default.removeItem(at: parentDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        let repo = try await makeTestRepo(db: db, tempDir: hostDir, repoDir: repoDir)
+
+        let pending = try await lifecycle.beginCreateWorktree(
+            repoID: repo.id, branch: "pr-7", skipClaude: true,
+            useExistingBranch: true, prNumber: 7
+        )
+        // Fail the checkout that follows the fetch, so the failure lands with
+        // the fetched branch already created.
+        try occupy(pending.localPath)
+
+        await #expect(throws: WorktreeLifecycleError.self) {
+            _ = try await lifecycle.completeCreateWorktree(
+                worktreeID: pending.id, skipClaude: true,
+                existingBranchRef: "pr-7", checkoutPRHead: true
+            )
+        }
+
+        let branches = try await localBranches(repoDir)
+        #expect(!branches.contains("pr-7"),
+                "the PR-head checkout leaked the branch it fetched: \(branches)")
+    }
+
+    /// The third leg of the same `catch` creates NOTHING — it checks out a
+    /// branch the caller owns — so it must delete nothing. The hard constraint
+    /// of this fix, and the one whose failure destroys a user's work.
+    ///
+    /// Not red against the unfixed tree, which deletes no branches on this path
+    /// at all; it is mutation-checked instead: routing this leg's failure
+    /// through `cleanUpFailedWorktreeAdd(branchPreExisted: false,
+    /// branchNameWasAlreadyTaken: false)` — treating all three legs alike —
+    /// makes it fail.
+    @Test func failedExistingBranchCheckoutKeepsTheCallersBranch() async throws {
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        try await shell("git branch owned-by-caller", at: repoDir)
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+
+        let pending = try await lifecycle.beginCreateWorktree(
+            repoID: repo.id, branch: "owned-by-caller", skipClaude: true,
+            useExistingBranch: true
+        )
+        try occupy(pending.localPath)
+
+        await #expect(throws: WorktreeLifecycleError.self) {
+            _ = try await lifecycle.completeCreateWorktree(
+                worktreeID: pending.id, skipClaude: true,
+                existingBranchRef: "owned-by-caller"
+            )
+        }
+
+        let branches = try await localBranches(repoDir)
+        #expect(branches.contains("owned-by-caller"),
+                "the existing-branch checkout deleted the caller's branch: \(branches)")
+    }
+
+    // MARK: - Bug 2, continued: don't retry what the retry keeps
+
+    /// A user-specified branch is carried across the folder-rename retry
+    /// unchanged, so when the BRANCH NAME is what stands in the way the retry
+    /// re-attempts it against both bases and fails identically twice, ending on
+    /// the generic "after all attempts".
+    ///
+    /// Reached without a race by putting the main checkout on an unborn orphan
+    /// branch: `refs/heads/pending` does not exist — so the pre-existence probe
+    /// answers "absent" and the check-out-the-existing-branch path is skipped —
+    /// while git still reports the name as used by that worktree. Verified
+    /// against git 2.50: attempt 1 says "'pending' is already used by worktree
+    /// at …", and every later attempt says "a branch named 'pending' already
+    /// exists".
+    @Test func aTakenBranchNameFailsFastInsteadOfRetryingTheSameName() async throws {
+        let (parentDir, hostDir, repoDir) = try await makeClonedTestRepo()
+        defer { try? FileManager.default.removeItem(at: parentDir) }
+        try await shell("git checkout --orphan pending", at: repoDir)
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        let repo = try await makeTestRepo(db: db, tempDir: hostDir, repoDir: repoDir)
+
+        do {
+            _ = try await lifecycle.createWorktree(
+                repoID: repo.id, branch: "pending", skipClaude: true
+            )
+            Issue.record("expected a taken branch name to fail the create")
+        } catch {
+            let text = String(describing: error)
+            #expect(text.contains("could not create branch 'pending'"),
+                    "the collision was not attributed to the branch name: \(text)")
+            #expect(!text.contains("after all attempts"),
+                    "the same branch name was retried under a fresh folder: \(text)")
+        }
+
+        let base = WorktreeLayout().basePath(for: repo)
+        let survivors = (try? FileManager.default.contentsOfDirectory(atPath: base)) ?? []
+        #expect(survivors.isEmpty, "failed create left worktree directories: \(survivors)")
+    }
+
+    /// The other arm of that gate: when the FOLDER is what collided, a fresh
+    /// folder is exactly the remedy — even though git reports it as an
+    /// "already exists" collision too. Widening the fast-fail to the whole
+    /// `.nameCollision` classification passes the test above and breaks this
+    /// one, which is the mutation it is here to catch.
+    @Test func aTakenFolderStillRetriesKeepingTheCallersBranch() async throws {
+        let (parentDir, hostDir, repoDir) = try await makeClonedTestRepo()
+        defer { try? FileManager.default.removeItem(at: parentDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        let repo = try await makeTestRepo(db: db, tempDir: hostDir, repoDir: repoDir)
+
+        // A cloned repo so `origin/main` resolves and the FIRST attempt is the
+        // one that trips over the occupied path (see the occupied-path test
+        // above for why an origin-less repo dissolves the setup).
+        let pending = try await lifecycle.beginCreateWorktree(
+            repoID: repo.id, branch: "mine", skipClaude: true
+        )
+        try occupy(pending.localPath)
+
+        let completion = try await lifecycle.completeCreateWorktree(
+            worktreeID: pending.id, skipClaude: true, userSpecifiedBranch: true
+        )
+        if case .preSessionPending(let phase3) = completion {
+            await phase3.value
+        }
+
+        let listed = try await GitManager().worktreeList(repoPath: repoDir.path)
+        #expect(listed.contains { $0.branch == "mine" },
+                "the retry never happened for an occupied folder: \(listed)")
+    }
+
+    // MARK: - The retry leg's own fail-fast guard
+
+    /// Every other test here jams the repo before the FIRST attempt, so the
+    /// first loop always throws and the retry leg's copy of the `.repoLevel`
+    /// guard never runs. This one reaches it: the canonical folder is occupied
+    /// (attempt 1 → collision → out of the first loop) and the worktree base
+    /// directory is read-only, so the retry's fresh folder gets past the
+    /// existence check and dies creating its directory.
+    ///
+    /// Asserts preserved behavior rather than a fix, so it is mutation-checked:
+    /// deleting the retry loop's `.repoLevel` throw makes it report the generic
+    /// "after all attempts" instead of git's own words.
+    @Test func repoLevelFailureInsideTheRetryLegAlsoFailsFast() async throws {
+        let (parentDir, hostDir, repoDir) = try await makeClonedTestRepo()
+        defer { try? FileManager.default.removeItem(at: parentDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        let repo = try await makeTestRepo(db: db, tempDir: hostDir, repoDir: repoDir)
+
+        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id, skipClaude: true)
+        try occupy(pending.localPath)
+
+        let base = WorktreeLayout().basePath(for: repo)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o555], ofItemAtPath: base
+        )
+        // Registered after the temp-dir cleanup above, so it runs BEFORE it —
+        // a read-only directory cannot be emptied.
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o755], ofItemAtPath: base
+            )
+        }
+
+        do {
+            _ = try await lifecycle.completeCreateWorktree(
+                worktreeID: pending.id, skipClaude: true
+            )
+            Issue.record("expected the read-only worktree base to fail the create")
+        } catch {
+            let text = String(describing: error)
+            // Only the retry leg can produce this: attempt 1's path exists, so
+            // it fails on the existence check long before any mkdir.
+            #expect(text.contains("could not create leading directories"),
+                    "the retry leg's real cause was not surfaced: \(text)")
+            #expect(!text.contains("after all attempts"),
+                    "the retry leg burned a second base on a repo-level cause: \(text)")
+        }
+
+        let branches = try await localBranches(repoDir)
+        #expect(branches.filter { $0.hasPrefix("tbd/") }.isEmpty,
+                "the retry leg leaked a branch: \(branches)")
     }
 }
