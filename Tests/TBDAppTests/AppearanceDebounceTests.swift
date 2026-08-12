@@ -198,14 +198,14 @@ struct AppearanceDebounceTests {
             // subscription time in `subscribe()`. Assert on the SLEEPER, not on
             // `fired`: with no advance yet, `fired` is empty either way, so
             // checking it would pass just as happily with `dropFirst()` deleted
-            // from production. The settle is what makes the negative worth
-            // anything — the timer a missing `dropFirst()` would arm needs a
-            // scheduling turn to appear, so give it several before looking. It
-            // is a weaker proof than the old "a registered sleeper makes
-            // `checkSuspension()` throw", and one-sided like every negative
-            // here: it can only ever false-pass.
-            await settle()
-            #expect(h.clock.hasSleeper == false,
+            // from production. And *watch* rather than settle: the timer a
+            // missing `dropFirst()` arms needs a scheduling turn to appear, so
+            // a fixed settle buys its whole proof at one instant and can miss
+            // the arming entirely under saturation — the one condition where a
+            // mutation most needs catching. The watch keeps looking for a
+            // second and returns the moment a sleeper shows up. One-sided as
+            // ever: absence holds only up to the window.
+            #expect(await watchForSleeper(on: h.clock) == false,
                     "the subscriber-time replay must not arm a timer at all")
             #expect(h.fired.values.isEmpty)
 

@@ -666,7 +666,24 @@ its `advanceWhenSuspended(by:)` — parks on a continuation instead of polling
 `advance` does **no** yielding, so it never accidentally runs the resumed task's
 post-sleep code for you. Positive assertions must await the paired
 `FireRecorder.next()`; negative ones read `values` (or `hasSleeper`) and stay
-one-sided as they always were. **Count each `FireRecorder.next()` in the
+one-sided as they always were — and a negative of the shape "production must
+arm no timer here" belongs on `watchForSleeper(on:upTo:)` rather than
+`settle()`, because a fixed settle samples once at the end of its window and can
+miss an arming that lands late under exactly the load that makes the assertion
+worth having.
+
+**Re-arming follows from the same no-yielding property, and it is the sharper
+edge.** A task that fires and immediately re-sleeps — any poller loop — cannot
+have re-registered by the time `advance` returns, so after a fire the *next*
+advance must go through `advanceWhenArmed(by:)`. A bare `advance` moves `now`
+past a deadline that is not in the ledger yet; the re-armed sleep is then
+measured from the new `now` and never fires, and the suite desyncs permanently —
+the same hang described above for `TestClock` under load, except deterministic
+rather than probabilistic. It is the first thing to get right when migrating a
+poller suite (`GatedIntervalSleepTests`, `DaywatchRunnerTests`), where every
+advance past the first is a re-arm.
+
+**Count each `FireRecorder.next()` in the
 `.clockDriven` tally too**: it carries its own 45 s hang guard, exactly like a
 `waitForSuspension`, so a test with 2 `advanceWhenArmed` + 2 `next()` has a
 180 s worst case against the 240 s limit. Either clock is a legitimate choice

@@ -434,6 +434,19 @@ public final class EventDrivenTestClock: Clock, @unchecked Sendable {
     /// until the effect actually lands. A *negative* assertion ("nothing fired
     /// yet") reads the snapshot directly and stays one-sided, as it always was.
     ///
+    /// **Re-arming has the same consequence, and it bites harder.** A task that
+    /// fires and immediately sleeps again — a poller loop — cannot possibly have
+    /// re-registered by the time `advance` returns, because `advance` never
+    /// yields it the chance. So after a fire, the **next** advance must go
+    /// through ``advanceWhenArmed(by:sourceLocation:)``: a bare `advance` moves
+    /// `now` past a deadline that is not in the ledger yet, and the sleep that
+    /// registers afterwards is measured from the new `now` and never fires —
+    /// permanent desync, the hang `Tests/CLAUDE.md` documents for `TestClock`
+    /// under load, except here it is deterministic rather than probabilistic.
+    /// This is the rule to carry into any future poller-suite migration
+    /// (`GatedIntervalSleepTests`, `DaywatchRunnerTests`), where every advance
+    /// after the first is a re-arm.
+    ///
     /// A deadline in the past is a no-op: virtual time never moves backwards.
     public func advance(to deadline: Instant) async {
         // Scoped locking only: `NSLock.lock()`/`unlock()` are unavailable from
@@ -517,20 +530,32 @@ private struct NoSleeperArmed: Error, CustomStringConvertible {
 /// Lock-guarded rather than an actor, because ``record(_:)`` is called from a
 /// synchronous callback (`@MainActor (String) -> Void`) that cannot await.
 public final class FireRecorder<Value: Sendable>: @unchecked Sendable {
+    /// How a parked `next()` was settled. Three verdicts rather than two,
+    /// because "returned nil" is not one situation: a *displaced* consumer was
+    /// released deliberately by the code that already recorded
+    /// ``ConcurrentConsumers`` naming the breach, so adding a fabricated
+    /// "no value was recorded within 10 s" on a call that returned in
+    /// milliseconds would misdescribe what happened and point the reader at a
+    /// timeout that never elapsed.
+    private enum ConsumerOutcome {
+        case value(Value)
+        case timedOut
+        case displaced
+    }
+
     /// A parked `next()`. Like the clock's arming waiter, the continuation
-    /// carries the verdict — a value, or "the hang guard gave up" — so the
-    /// consumer's own result is authoritative regardless of which task the
-    /// group sees finish first.
+    /// carries the verdict, so the consumer's own result is authoritative
+    /// regardless of which task the group sees finish first.
     private struct Consumer {
         let id: UUID
-        let continuation: CheckedContinuation<(value: Value?, timedOut: Bool), Never>
+        let continuation: CheckedContinuation<ConsumerOutcome, Never>
     }
 
     /// One outcome of `next()`'s two-task race, tagged by its producer. Only
     /// the consumer's verdict is authoritative; the hang guard's is not, since
     /// it cannot see a value `record(_:)` delivered a moment earlier.
     private enum ConsumerRace {
-        case consumer(value: Value?, timedOut: Bool)
+        case consumer(ConsumerOutcome)
         case hangGuard
     }
 
@@ -559,7 +584,7 @@ public final class FireRecorder<Value: Sendable>: @unchecked Sendable {
         consumer = nil
         if waiting != nil { consumed += 1 }
         lock.unlock()
-        waiting?.continuation.resume(returning: (value, false))
+        waiting?.continuation.resume(returning: .value(value))
     }
 
     /// A snapshot of every value recorded so far, in order. Never drained by
@@ -578,26 +603,28 @@ public final class FireRecorder<Value: Sendable>: @unchecked Sendable {
     ///   cancellation the wait ends without a diagnostic**: the consumer is
     ///   still released and `nil` returned, but the failure belongs to whatever
     ///   cancelled the test rather than to this call site.
-    /// - Returns: the value, or `nil` after recording a diagnostic on timeout.
+    /// - Returns: the value, or `nil` after recording a diagnostic on timeout —
+    ///   or, for a wait displaced by a second concurrent `next()`, `nil` with
+    ///   only the ``ConcurrentConsumers`` breach already recorded against it.
     ///   Returning an optional rather than continuing silently means a test that
     ///   asserts on the result gets a comparison against `nil` *after* the real
     ///   diagnostic has already been recorded, never instead of it.
     public func next(timeout: Swift.Duration = .seconds(45),
                      sourceLocation: SourceLocation = #_sourceLocation) async -> Value? {
         let consumerID = UUID()
-        let outcome: (value: Value?, timedOut: Bool) = await withTaskGroup(
+        let outcome: ConsumerOutcome = await withTaskGroup(
             of: ConsumerRace.self,
-            returning: (value: Value?, timedOut: Bool).self
+            returning: ConsumerOutcome.self
         ) { group in
             group.addTask { [self] in
                 let settled = await withCheckedContinuation {
-                    (continuation: CheckedContinuation<(value: Value?, timedOut: Bool), Never>) in
+                    (continuation: CheckedContinuation<ConsumerOutcome, Never>) in
                     lock.lock()
                     if consumed < recorded.count {
                         let buffered = recorded[consumed]
                         consumed += 1
                         lock.unlock()
-                        continuation.resume(returning: (buffered, false))
+                        continuation.resume(returning: .value(buffered))
                         return
                     }
                     if expiredConsumers.remove(consumerID) != nil {
@@ -605,7 +632,7 @@ public final class FireRecorder<Value: Sendable>: @unchecked Sendable {
                         // not parked yet: settle here rather than park on a
                         // continuation nothing is watching.
                         lock.unlock()
-                        continuation.resume(returning: (nil, true))
+                        continuation.resume(returning: .timedOut)
                         return
                     }
                     // A consumer already parked here means two `next()` calls
@@ -616,9 +643,12 @@ public final class FireRecorder<Value: Sendable>: @unchecked Sendable {
                     // the displaced `next()` never returns. Report the contract
                     // breach and release the displaced consumer instead: a
                     // diagnostic beats a hang. The displaced call returns `nil`
-                    // and, like any unsatisfied wait, records its own hang-guard
-                    // diagnostic on the way out — two issues for one breach,
-                    // both naming the offending test.
+                    // carrying the `.displaced` verdict — **one** issue for one
+                    // breach. It must not also report a hang guard it never sat
+                    // out: that wait returned in milliseconds, so a "no value
+                    // was recorded within 45 s" beside it would describe an
+                    // elapsed timeout that never happened and send the reader
+                    // hunting a fire nobody owed.
                     let displaced = consumer
                     consumer = Consumer(id: consumerID, continuation: continuation)
                     lock.unlock()
@@ -627,10 +657,10 @@ public final class FireRecorder<Value: Sendable>: @unchecked Sendable {
                             ConcurrentConsumers(),
                             sourceLocation: sourceLocation
                         )
-                        displaced.continuation.resume(returning: (nil, true))
+                        displaced.continuation.resume(returning: .displaced)
                     }
                 }
-                return .consumer(value: settled.value, timedOut: settled.timedOut)
+                return .consumer(settled)
             }
             group.addTask { [self] in
                 try? await Task.sleep(for: timeout)
@@ -646,17 +676,17 @@ public final class FireRecorder<Value: Sendable>: @unchecked Sendable {
                     consumer = nil
                     return waiting
                 }
-                stranded?.continuation.resume(returning: (nil, true))
+                stranded?.continuation.resume(returning: .timedOut)
                 return .hangGuard
             }
             // The consumer's verdict is the authoritative one. Reading whichever
             // result arrived first would let the guard both report a spurious
             // timeout and *discard* a value `record(_:)` had already handed over
             // — with `consumed` already advanced, so the value is gone for good.
-            var verdict: (value: Value?, timedOut: Bool) = (nil, true)
+            var verdict: ConsumerOutcome = .timedOut
             while let raced = await group.next() {
-                if case .consumer(let value, let timedOut) = raced {
-                    verdict = (value, timedOut)
+                if case .consumer(let settled) = raced {
+                    verdict = settled
                     break
                 }
             }
@@ -667,19 +697,31 @@ public final class FireRecorder<Value: Sendable>: @unchecked Sendable {
         // marker the guard left for a consumer that had already settled.
         lock.withLock { _ = expiredConsumers.remove(consumerID) }
 
-        // Same rule as the clock's arming guard: a cancelled enclosing task
-        // cancels this hang guard's sleep, which releases the consumer with
-        // `timedOut == true` for a fire that was never given its chance. The
-        // wait still ends — `nil` is returned, so an assertion on the result
-        // still fails — but the "within 45 s" diagnostic would name an innocent
-        // call site for someone else's cancellation, so it is suppressed.
-        if outcome.timedOut && !Task.isCancelled {
-            Issue.record(
-                NoValueRecorded(timeout: timeout, observed: values),
-                sourceLocation: sourceLocation
-            )
+        switch outcome {
+        case .value(let value):
+            return value
+        case .displaced:
+            // The breach was already reported at the moment of displacement, by
+            // the call that did the displacing. Reporting again here would
+            // manufacture a timeout diagnostic for a wait that returned
+            // promptly.
+            return nil
+        case .timedOut:
+            // Same rule as the clock's arming guard: a cancelled enclosing task
+            // cancels this hang guard's sleep, which releases the consumer as
+            // timed out for a fire that was never given its chance. The wait
+            // still ends — `nil` is returned, so an assertion on the result
+            // still fails — but the "within 45 s" diagnostic would name an
+            // innocent call site for someone else's cancellation, so it is
+            // suppressed.
+            if !Task.isCancelled {
+                Issue.record(
+                    NoValueRecorded(timeout: timeout, observed: values),
+                    sourceLocation: sourceLocation
+                )
+            }
+            return nil
         }
-        return outcome.value
     }
 }
 
@@ -736,4 +778,40 @@ private struct NoValueRecorded<Value: Sendable>: Error, CustomStringConvertible 
 /// effect instead of hoping it arrived.
 public func settle() async {
     for _ in 0..<3 { try? await Task.sleep(for: .milliseconds(10)) }
+}
+
+/// Watches for a sleeper to appear on `clock`, for a **negative** assertion of
+/// the shape "the code under test must arm no timer at all".
+///
+/// Why this rather than ``settle()`` there. Arming takes a scheduling turn, so
+/// the thing being ruled out cannot appear instantly — and a fixed settle
+/// window buys its whole proof at one instant at the end of that window. Under
+/// saturation the turn can land later than the window, and the negative passes
+/// against production that *did* arm a timer: the assertion stops
+/// discriminating exactly when the machine is busy, which is when it matters.
+/// Watching instead keeps looking, so the window is a patience budget rather
+/// than a single sample, and a regression is caught the moment it shows up
+/// instead of only if it happens to show up early.
+///
+/// **Still one-sided, in the same direction as everything else here.** Absence
+/// is proven only up to `window` — a pathologically late arming can make this
+/// false-*pass*, never false-fail. Presence, by contrast, is detected the
+/// instant it happens, which is what makes the failing direction prompt: the
+/// caller learns within one poll interval rather than after the full window.
+///
+/// - Parameters:
+///   - clock: the clock whose ledger is watched.
+///   - window: how long to keep watching before concluding absence. A second is
+///     ~100× the scheduling turn being ruled out, and a passing test pays it
+///     only when the code under test is behaving.
+/// - Returns: `true` if a sleeper appeared (assert `false` on this), `false` if
+///   none appeared within `window`.
+public func watchForSleeper(on clock: EventDrivenTestClock,
+                            upTo window: Swift.Duration = .seconds(1)) async -> Bool {
+    let deadline = ContinuousClock.now.advanced(by: window)
+    repeat {
+        if clock.hasSleeper { return true }
+        try? await Task.sleep(for: .milliseconds(10))
+    } while ContinuousClock.now < deadline
+    return clock.hasSleeper
 }

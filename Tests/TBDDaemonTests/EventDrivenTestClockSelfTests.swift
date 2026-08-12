@@ -390,14 +390,25 @@ struct EventDrivenTestClockSelfTests {
     @Test("next() survives a hang guard that expires before the consumer parks")
     func recorderSurvivesGuardExpiringBeforePark() async {
         let recorders = (0..<32).map { _ in FireRecorder<String>() }
+        // Results are hoisted out of the block and asserted after it: a
+        // matcher-less `withKnownIssue` suppresses *every* issue recorded
+        // inside, an `#expect` failure among them, so an assertion written in
+        // there could never go red (`Tests/CLAUDE.md`, assertion hygiene).
+        var results: [String?] = []
         await withKnownIssue("nothing is ever recorded, so every wait must give up",
                              isIntermittent: false) {
-            await withTaskGroup(of: Void.self) { group in
+            results = await withTaskGroup(of: String?.self, returning: [String?].self) { group in
                 for recorder in recorders {
-                    group.addTask { #expect(await recorder.next(timeout: .zero) == nil) }
+                    group.addTask { await recorder.next(timeout: .zero) }
                 }
+                var settled: [String?] = []
+                while let value = await group.next() { settled.append(value) }
+                return settled
             }
         }
+        #expect(results.count == recorders.count)
+        #expect(results.allSatisfy { $0 == nil },
+                "an expired wait must return nil, not a value nobody recorded")
 
         for recorder in recorders {
             recorder.record("after")
@@ -423,10 +434,19 @@ struct EventDrivenTestClockSelfTests {
     /// Neither call sits out its guard on a healthy run — the displaced one
     /// returns immediately and the `record` releases the survivor — so a
     /// regression shows up as this test hanging, not as a slow pass.
+    ///
+    /// Those same generous guards are what the matcher below polices. The
+    /// displaced wait returns in milliseconds, so a hang-guard diagnostic from
+    /// it would be pure fabrication — a "no value was recorded within 10 s" on
+    /// a call that never waited ten seconds, sending a reader after a fire
+    /// nobody owed. The matcher therefore accepts **only** the contract issue:
+    /// any timeout issue reaching it is unmatched, which `withKnownIssue`
+    /// surfaces as a real failure.
     @Test("two concurrent next() calls report the single-consumer contract instead of hanging")
     func recorderReportsConcurrentConsumers() async {
         let recorder = FireRecorder<String>()
         let sawContractIssue = Latch()
+        let sawTimeoutIssue = Latch()
         var results: [String?] = []
 
         await withKnownIssue("a second next() displaces the first, which the contract forbids",
@@ -444,12 +464,16 @@ struct EventDrivenTestClockSelfTests {
             }
         } matching: { issue in
             let text = (issue.error.map { String(describing: $0) } ?? "") + issue.description
-            if text.contains("single-consumer slot") { sawContractIssue.latch() }
-            return true
+            let isContract = text.contains("single-consumer slot")
+            if isContract { sawContractIssue.latch() }
+            if text.contains("no value was recorded within") { sawTimeoutIssue.latch() }
+            return isContract
         }
 
         #expect(sawContractIssue.isLatched,
                 "displacing a parked consumer must name the contract, not pass in silence")
+        #expect(sawTimeoutIssue.isLatched == false,
+                "the displaced wait returned promptly — it must not also report a hang guard it never sat out")
         #expect(results.count == 2)
         #expect(results.contains(nil), "the displaced next() must return nil rather than park forever")
         #expect(results.contains("after-displacement"), "the surviving consumer must still be served")
