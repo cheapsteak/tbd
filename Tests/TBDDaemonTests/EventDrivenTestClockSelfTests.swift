@@ -129,6 +129,46 @@ struct EventDrivenTestClockSelfTests {
                 "a stranded waiter must be deregistered, or a later signal resumes a dead continuation")
     }
 
+    /// The hang guard and the waiter it guards are two child tasks in one
+    /// group, and their order is not fixed: the guard can run its whole body
+    /// *before* the waiter reaches its park. A guard that only ever rescued an
+    /// already-parked waiter then resumed nobody, and the waiter parked on a
+    /// continuation nothing was watching — a hang until the suite time limit
+    /// rather than the named diagnostic.
+    ///
+    /// Reproducing that ordering takes both halves of the shape below, and a
+    /// mutation check paid for the second. A zero timeout alone is not enough:
+    /// with waits issued one at a time the waiter child reliably reached its
+    /// park first, and a clock with the fix deleted still passed. A **burst**
+    /// of concurrent waits is what puts enough waiter children behind the
+    /// executor for some guard to expire first, and against the same weakened
+    /// clock it hangs every time.
+    ///
+    /// The second half of the test is the second half of the fix: whatever the
+    /// guard left behind must be cleaned up, so the *next* wait on the same
+    /// clock still parks and is still released by a real registration.
+    @Test("sleeperArmed survives a hang guard that expires before the waiter parks")
+    func armedSurvivesGuardExpiringBeforePark() async {
+        let clock = EventDrivenTestClock()
+        await withKnownIssue("no sleeper ever registers, so every wait must give up",
+                             isIntermittent: false) {
+            await withTaskGroup(of: Void.self) { group in
+                for _ in 0..<32 { group.addTask { await clock.sleeperArmed(timeout: .zero) } }
+            }
+        }
+        #expect(clock.hasParkedArmingWaiter == false)
+
+        let recorder = FireRecorder<String>()
+        let sleeper = Task { [clock] in
+            try? await clock.sleep(for: .seconds(1))
+            recorder.record("woke")
+        }
+        await clock.advanceWhenArmed(by: .seconds(1))
+        #expect(await recorder.next() == "woke",
+                "an expired waiter must not poison the ledger for later waits")
+        _ = await sleeper.value
+    }
+
     // MARK: Cancellation
 
     /// Pre-cancellation must be invisible to the clock: no ledger entry, and no
@@ -320,5 +360,39 @@ struct EventDrivenTestClockSelfTests {
         recorder.record("after")
         #expect(recorder.values == ["after"])
         #expect(await recorder.next() == "after")
+    }
+
+    /// The recorder's half of `armedSurvivesGuardExpiringBeforePark`: the hang
+    /// guard can finish before the consumer installs itself, and "no consumer
+    /// is parked" reads identically to "the consumer already settled". A guard
+    /// that resumed nobody in that case left the consumer parked forever.
+    ///
+    /// Same burst-of-concurrent-waits shape, and for the same measured reason —
+    /// see that test. **One recorder each**, though: a `FireRecorder` holds a
+    /// single consumer slot and documents that callers await sequentially, so
+    /// 32 consumers sharing one recorder would be testing a contract violation
+    /// rather than this bug. The burst is only there to load the executor.
+    ///
+    /// Each recorder then takes a real record/consume pair, so a leftover
+    /// expiry marker cannot pass unnoticed: it would swallow the `next()` that
+    /// should have delivered.
+    @Test("next() survives a hang guard that expires before the consumer parks")
+    func recorderSurvivesGuardExpiringBeforePark() async {
+        let recorders = (0..<32).map { _ in FireRecorder<String>() }
+        await withKnownIssue("nothing is ever recorded, so every wait must give up",
+                             isIntermittent: false) {
+            await withTaskGroup(of: Void.self) { group in
+                for recorder in recorders {
+                    group.addTask { #expect(await recorder.next(timeout: .zero) == nil) }
+                }
+            }
+        }
+
+        for recorder in recorders {
+            recorder.record("after")
+            #expect(await recorder.next() == "after",
+                    "an expired consumer must not poison the recorder for later waits")
+            #expect(recorder.values == ["after"])
+        }
     }
 }

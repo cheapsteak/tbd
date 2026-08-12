@@ -127,11 +127,19 @@ public final class EventDrivenTestClock: Clock, @unchecked Sendable {
 
     /// A parked `sleeperArmed` waiter. The continuation carries *why* it was
     /// resumed — `true` for "a sleeper registered", `false` for "the hang guard
-    /// stranded you" — so the waiter reports the same verdict as the timeout
-    /// task no matter which of the two the task group observes finishing first.
+    /// gave up" — which is what lets the waiter's own result be the
+    /// authoritative verdict no matter which task the group sees finish first.
     private struct ArmingWaiter {
         let id: UUID
         let continuation: CheckedContinuation<Bool, Never>
+    }
+
+    /// One outcome of `sleeperArmed`'s two-task race, tagged by which task
+    /// produced it. Only the waiter's verdict is authoritative: the hang guard
+    /// finishing first says nothing about how the waiter settled.
+    private enum ArmingRace {
+        case waiter(timedOut: Bool)
+        case hangGuard
     }
 
     /// Virtual time has no resolution floor: a test may advance by any duration.
@@ -141,6 +149,12 @@ public final class EventDrivenTestClock: Clock, @unchecked Sendable {
     private var currentNow: Instant
     private var suspensions: [Suspension] = []
     private var armingWaiters: [ArmingWaiter] = []
+    /// Waiter ids whose hang guard expired *before* the waiter reached its park.
+    /// Without this, the guard would resume nobody and the waiter would then
+    /// park on a continuation no one is watching any more — a hang, not a
+    /// diagnostic. Each id is consumed by its own park, and every call removes
+    /// its id on the way out, so the set never grows across calls.
+    private var expiredArmingWaiters: Set<UUID> = []
 
     /// - Parameter now: starting instant, offset zero by default.
     public init(now: Instant = .init()) {
@@ -292,7 +306,7 @@ public final class EventDrivenTestClock: Clock, @unchecked Sendable {
         if hasSleeper { return }
 
         let waiterID = UUID()
-        let timedOut = await withTaskGroup(of: Bool.self, returning: Bool.self) { group in
+        let timedOut = await withTaskGroup(of: ArmingRace.self, returning: Bool.self) { group in
             group.addTask { [self] in
                 let armed = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
                     lock.lock()
@@ -303,28 +317,57 @@ public final class EventDrivenTestClock: Clock, @unchecked Sendable {
                         continuation.resume(returning: true)
                         return
                     }
+                    if expiredArmingWaiters.remove(waiterID) != nil {
+                        // The hang guard already gave up on a waiter that had
+                        // not parked yet, so nothing is left watching for this
+                        // continuation. Settle here instead of parking forever.
+                        lock.unlock()
+                        continuation.resume(returning: false)
+                        return
+                    }
                     armingWaiters.append(ArmingWaiter(id: waiterID, continuation: continuation))
                     lock.unlock()
                 }
-                return !armed
+                return .waiter(timedOut: !armed)
             }
             group.addTask { [self] in
                 try? await Task.sleep(for: timeout)
                 // Deregistering is what makes this safe: whoever removes the
                 // waiter owns resuming it, so a signal arriving after the
-                // timeout finds nothing to resume, and a timeout arriving after
-                // the signal reports nothing.
+                // timeout finds nothing to resume. Three cases here, and the
+                // last is why the expiry marker exists: the waiter is parked
+                // (strand it), the waiter already settled (nothing owed), or
+                // the waiter has not reached its park yet — where an unmarked
+                // give-up would leave it to park on a dead continuation.
                 let stranded: ArmingWaiter? = lock.withLock {
-                    guard let index = armingWaiters.firstIndex(where: { $0.id == waiterID }) else { return nil }
+                    guard let index = armingWaiters.firstIndex(where: { $0.id == waiterID }) else {
+                        expiredArmingWaiters.insert(waiterID)
+                        return nil
+                    }
                     return armingWaiters.remove(at: index)
                 }
                 stranded?.continuation.resume(returning: false)
-                return stranded != nil
+                return .hangGuard
             }
-            let first = await group.next() ?? false
+            // Consume results until the waiter's, which is the only
+            // authoritative one — the guard can finish first without knowing
+            // how the waiter settled. Defaulting to "timed out" keeps an
+            // impossible group (a waiter that never returns) loud rather than
+            // silently green.
+            var verdict = true
+            while let outcome = await group.next() {
+                if case .waiter(let waiterTimedOut) = outcome {
+                    verdict = waiterTimedOut
+                    break
+                }
+            }
             group.cancelAll()
-            return first
+            return verdict
         }
+        // The guard may have marked an id whose waiter had already settled. The
+        // group has awaited both children by now, so this is the last word: no
+        // call leaves an entry behind for the next one to trip over.
+        lock.withLock { _ = expiredArmingWaiters.remove(waiterID) }
 
         if timedOut {
             Issue.record(
@@ -384,7 +427,10 @@ public final class EventDrivenTestClock: Clock, @unchecked Sendable {
                 currentNow = deadline
                 return .finished
             }
-            currentNow = next.deadline
+            // Virtual time is monotonic: a sleeper whose deadline is already in
+            // the past (its task read `now` before an interleaved advance)
+            // fires here without rewinding the clock under everyone else.
+            currentNow = max(currentNow, next.deadline)
             suspensions.removeFirst()
             guard !next.box.isSettled else { return .fired(nil) }
             next.box.isSettled = true
@@ -451,9 +497,21 @@ private struct NoSleeperArmed: Error, CustomStringConvertible {
 /// Lock-guarded rather than an actor, because ``record(_:)`` is called from a
 /// synchronous callback (`@MainActor (String) -> Void`) that cannot await.
 public final class FireRecorder<Value: Sendable>: @unchecked Sendable {
+    /// A parked `next()`. Like the clock's arming waiter, the continuation
+    /// carries the verdict — a value, or "the hang guard gave up" — so the
+    /// consumer's own result is authoritative regardless of which task the
+    /// group sees finish first.
     private struct Consumer {
         let id: UUID
-        let continuation: CheckedContinuation<Value?, Never>
+        let continuation: CheckedContinuation<(value: Value?, timedOut: Bool), Never>
+    }
+
+    /// One outcome of `next()`'s two-task race, tagged by its producer. Only
+    /// the consumer's verdict is authoritative; the hang guard's is not, since
+    /// it cannot see a value `record(_:)` delivered a moment earlier.
+    private enum ConsumerRace {
+        case consumer(value: Value?, timedOut: Bool)
+        case hangGuard
     }
 
     private let lock = NSLock()
@@ -464,6 +522,10 @@ public final class FireRecorder<Value: Sendable>: @unchecked Sendable {
     private var consumed = 0
     /// At most one consumer parks at a time: these tests await sequentially.
     private var consumer: Consumer?
+    /// Consumer ids whose hang guard expired *before* the consumer reached its
+    /// park — the same hazard, and the same remedy, as the clock's
+    /// `expiredArmingWaiters`. Each `next()` removes its id on the way out.
+    private var expiredConsumers: Set<UUID> = []
 
     public init() {}
 
@@ -477,7 +539,7 @@ public final class FireRecorder<Value: Sendable>: @unchecked Sendable {
         consumer = nil
         if waiting != nil { consumed += 1 }
         lock.unlock()
-        waiting?.continuation.resume(returning: value)
+        waiting?.continuation.resume(returning: (value, false))
     }
 
     /// A snapshot of every value recorded so far, in order. Never drained by
@@ -500,47 +562,76 @@ public final class FireRecorder<Value: Sendable>: @unchecked Sendable {
     public func next(timeout: Swift.Duration = .seconds(45),
                      sourceLocation: SourceLocation = #_sourceLocation) async -> Value? {
         let consumerID = UUID()
-        let value: Value? = await withTaskGroup(of: (Bool, Value?).self,
-                                                returning: Value?.self) { group in
+        let outcome: (value: Value?, timedOut: Bool) = await withTaskGroup(
+            of: ConsumerRace.self,
+            returning: (value: Value?, timedOut: Bool).self
+        ) { group in
             group.addTask { [self] in
-                let value = await withCheckedContinuation { (continuation: CheckedContinuation<Value?, Never>) in
+                let settled = await withCheckedContinuation {
+                    (continuation: CheckedContinuation<(value: Value?, timedOut: Bool), Never>) in
                     lock.lock()
                     if consumed < recorded.count {
                         let buffered = recorded[consumed]
                         consumed += 1
                         lock.unlock()
-                        continuation.resume(returning: buffered)
+                        continuation.resume(returning: (buffered, false))
+                        return
+                    }
+                    if expiredConsumers.remove(consumerID) != nil {
+                        // The hang guard already gave up on a consumer that had
+                        // not parked yet: settle here rather than park on a
+                        // continuation nothing is watching.
+                        lock.unlock()
+                        continuation.resume(returning: (nil, true))
                         return
                     }
                     consumer = Consumer(id: consumerID, continuation: continuation)
                     lock.unlock()
                 }
-                return (false, value)
+                return .consumer(value: settled.value, timedOut: settled.timedOut)
             }
             group.addTask { [self] in
                 try? await Task.sleep(for: timeout)
-                // Same ownership rule as the clock's arming waiter: whoever
-                // removes the parked consumer owns resuming it.
+                // Same ownership rule, and same three cases, as the clock's
+                // arming waiter: whoever removes the parked consumer owns
+                // resuming it, and a consumer that has not parked yet is marked
+                // expired so its own park can settle itself.
                 let stranded: Consumer? = lock.withLock {
-                    guard let waiting = consumer, waiting.id == consumerID else { return nil }
+                    guard let waiting = consumer, waiting.id == consumerID else {
+                        expiredConsumers.insert(consumerID)
+                        return nil
+                    }
                     consumer = nil
                     return waiting
                 }
-                stranded?.continuation.resume(returning: nil)
-                return (stranded != nil, nil)
+                stranded?.continuation.resume(returning: (nil, true))
+                return .hangGuard
             }
-            let (timedOut, value) = await group.next() ?? (false, nil)
+            // The consumer's verdict is the authoritative one. Reading whichever
+            // result arrived first would let the guard both report a spurious
+            // timeout and *discard* a value `record(_:)` had already handed over
+            // — with `consumed` already advanced, so the value is gone for good.
+            var verdict: (value: Value?, timedOut: Bool) = (nil, true)
+            while let raced = await group.next() {
+                if case .consumer(let value, let timedOut) = raced {
+                    verdict = (value, timedOut)
+                    break
+                }
+            }
             group.cancelAll()
-            return timedOut ? nil : value
+            return verdict
         }
+        // Both children have been awaited by now, so this is the last word on a
+        // marker the guard left for a consumer that had already settled.
+        lock.withLock { _ = expiredConsumers.remove(consumerID) }
 
-        if value == nil {
+        if outcome.timedOut {
             Issue.record(
                 NoValueRecorded(timeout: timeout, observed: values),
                 sourceLocation: sourceLocation
             )
         }
-        return value
+        return outcome.value
     }
 }
 
