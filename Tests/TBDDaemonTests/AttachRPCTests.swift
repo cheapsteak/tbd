@@ -62,10 +62,6 @@ struct AttachRPCStubTests {
         let worktreeID = try await makeWorktree(in: db)
         router.controlMode = TmuxControlModeBridge(
             supervisor: TmuxControlSupervisor(),
-            startupTmux: TmuxVersionSnapshot(
-                executablePath: tmux.resolver.resolve()?.path,
-                version: TmuxVersion(major: 3, minor: 6)
-            ),
             tmuxExecutableResolver: tmux.resolver,
             environment: ["TBD_TMUX_CONTROL_MODE": "1"],
             fdVending: FDVendingServer())
@@ -107,10 +103,6 @@ struct AttachRPCStubTests {
         let (router, _) = try makeRouterAndDB()
         router.controlMode = TmuxControlModeBridge(
             supervisor: TmuxControlSupervisor(),
-            startupTmux: TmuxVersionSnapshot(
-                executablePath: tmux.resolver.resolve()?.path,
-                version: TmuxVersion(major: 3, minor: 6)
-            ),
             tmuxExecutableResolver: tmux.resolver,
             environment: ["TBD_TMUX_CONTROL_MODE": "1"],
             fdVending: FDVendingServer())
@@ -157,10 +149,6 @@ struct AttachRPCOrchestrationTests {
     ) -> TmuxControlModeBridge {
         TmuxControlModeBridge(
             supervisor: supervisor,
-            startupTmux: TmuxVersionSnapshot(
-                executablePath: tmuxExecutableResolver.resolve()?.path,
-                version: TmuxVersion(major: 3, minor: 6)
-            ),
             tmuxExecutableResolver: tmuxExecutableResolver,
             environment: gateOn ? ["TBD_TMUX_CONTROL_MODE": "1"] : [:],
             fdVending: vending,

@@ -1,21 +1,6 @@
 import Foundation
 import TBDShared
 
-/// A tmux version paired with the exact executable path it was detected from.
-/// Keeping the two values together prevents a resolver change between version
-/// detection and bridge construction from mislabeling one executable's version
-/// as another's.
-struct TmuxVersionSnapshot: Sendable {
-    let executablePath: String?
-    let version: TmuxVersion?
-
-    static func detect(using resolver: TmuxExecutableResolver) async -> TmuxVersionSnapshot {
-        let executablePath = resolver.resolve()?.path
-        let version = await TmuxVersion.detect(tmuxBinary: executablePath)
-        return TmuxVersionSnapshot(executablePath: executablePath, version: version)
-    }
-}
-
 /// Bundles the per-daemon `TmuxControlSupervisor` with tmux version resolution
 /// so every `ensureServer()` call site can open a gated control-mode
 /// connection through a single shared owner.
@@ -28,9 +13,6 @@ struct TmuxControlModeBridge: Sendable {
     /// The single per-daemon supervisor. Connections are keyed by server name
     /// and `ensureConnection` is idempotent, so all call sites share one.
     let supervisor: TmuxControlSupervisor
-    /// Path/version pair detected at daemon startup. Live decisions do not
-    /// reuse its version because the executable may be replaced in place.
-    let startupTmux: TmuxVersionSnapshot
     /// Resolves PATH first and the live saved fallback second on every gate
     /// and capabilities decision.
     let tmuxExecutableResolver: TmuxExecutableResolver
@@ -75,7 +57,6 @@ struct TmuxControlModeBridge: Sendable {
     let clock: any Clock<Duration>
 
     init(supervisor: TmuxControlSupervisor,
-         startupTmux: TmuxVersionSnapshot,
          tmuxExecutableResolver: TmuxExecutableResolver = TmuxExecutableResolver(),
          environment: [String: String] = ProcessInfo.processInfo.environment,
          fdVending: FDVendingServer,
@@ -89,7 +70,6 @@ struct TmuxControlModeBridge: Sendable {
         self.supervisor = supervisor
         self.clock = clock
         self.tmuxExecutableResolver = tmuxExecutableResolver
-        self.startupTmux = startupTmux
         self.environment = environment
         self.fdVending = fdVending
         self.readyTimeout = readyTimeout

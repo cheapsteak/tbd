@@ -389,13 +389,11 @@ public final class Daemon: Sendable {
         )
         let pendingQuestions = PendingQuestionStore()
 
-        // Snapshot the effective tmux path and its version together. The
-        // control-mode bridge is shared
-        // by lifecycle + router so every `ensureServer()` call site can open a
-        // gated control connection through a single supervisor. When the gate
-        // is off (the default), `enableIfGated` is a no-op.
+        // The control-mode bridge is shared by lifecycle + router so every
+        // `ensureServer()` call site can open a gated control connection
+        // through a single supervisor. When the gate is off (the default),
+        // `enableIfGated` is a no-op.
         let tmuxExecutableResolver = TmuxExecutableResolver()
-        let startupTmux = await TmuxVersionSnapshot.detect(using: tmuxExecutableResolver)
         // Input activity tracker: records the timestamp of the last keystroke
         // routed to each pane so the idle sweep can veto a park if input arrived
         // after the session went idle (pending-input detection).
@@ -418,7 +416,6 @@ public final class Daemon: Sendable {
         )
         let controlModeBridge = TmuxControlModeBridge(
             supervisor: controlModeSupervisor,
-            startupTmux: startupTmux,
             tmuxExecutableResolver: tmuxExecutableResolver,
             fdVending: fdVendingServer,
             inputRouter: controlModeInputRouter,

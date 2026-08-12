@@ -7,6 +7,18 @@ import Testing
 @MainActor
 @Suite("Tmux executable settings")
 struct TmuxExecutableSettingsTests {
+    @Test func startupDiagnosticDistinguishesResolutionSourceAndUnavailability() {
+        #expect(TmuxStartupResolutionDiagnostic(resolution: TmuxExecutableResolution(
+            path: "/opt/tools/tmux",
+            source: .path
+        )) == .path("/opt/tools/tmux"))
+        #expect(TmuxStartupResolutionDiagnostic(resolution: TmuxExecutableResolution(
+            path: "/custom/tools/tmux",
+            source: .savedFallback
+        )) == .savedFallback("/custom/tools/tmux"))
+        #expect(TmuxStartupResolutionDiagnostic(resolution: nil) == .unavailable)
+    }
+
     @Test func backingFilePresentationAbbreviatesHomeAndPreservesCopyPath() {
         let presentation = TmuxConfigurationPathPresentation(
             configurationURL: URL(fileURLWithPath: "/Users/acme/tbd/tmux-executable-path"),

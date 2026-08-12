@@ -6,6 +6,10 @@ import TBDShared
 import os
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "AppState")
+private let tmuxResolutionLogger = Logger(
+    subsystem: "com.tbd.app",
+    category: "tmux"
+)
 /// Spec C §11.3 — log-only shadow-compare diagnostic. Dedicated category so
 /// it can be streamed/filtered independently of the rest of AppState.
 private let shadowCompareLogger = Logger(subsystem: "com.tbd.app", category: "panelShadow")
@@ -39,6 +43,41 @@ struct TabCloseContext: Equatable {
 struct ControlModePaneKey: Hashable {
     let worktreeID: UUID
     let paneID: String
+}
+
+enum TmuxStartupResolutionDiagnostic: Equatable {
+    case path(String)
+    case savedFallback(String)
+    case unavailable
+
+    init(resolution: TmuxExecutableResolution?) {
+        switch resolution {
+        case .some(let resolution):
+            switch resolution.source {
+            case .path:
+                self = .path(resolution.path)
+            case .savedFallback:
+                self = .savedFallback(resolution.path)
+            }
+        case .none:
+            self = .unavailable
+        }
+    }
+
+    func log() {
+        switch self {
+        case .path(let path):
+            tmuxResolutionLogger.notice(
+                "startup resolution source=PATH path=\(path, privacy: .public)"
+            )
+        case .savedFallback(let path):
+            tmuxResolutionLogger.notice(
+                "startup resolution source=saved-fallback path=\(path, privacy: .public)"
+            )
+        case .unavailable:
+            tmuxResolutionLogger.error("startup resolution source=unavailable")
+        }
+    }
 }
 
 @MainActor
@@ -1274,6 +1313,7 @@ final class AppState: ObservableObject {
         guard !hasCheckedTmuxAvailabilityAtStartup else { return }
         hasCheckedTmuxAvailabilityAtStartup = true
         refreshTmuxExecutableState()
+        TmuxStartupResolutionDiagnostic(resolution: tmuxExecutableResolution).log()
         isTmuxLocationPromptPresented = tmuxExecutableResolution == nil
     }
 

@@ -37,11 +37,12 @@ The app passes its inherited environment to the daemon. The daemon does not appe
 directories, invoke a shell, or otherwise reinterpret `PATH`. This gives the app and
 daemon one installation-defined search path instead of competing policies.
 
-This policy is daemon-wide, not limited to tmux. Every process the daemon starts,
-including `git` and helpers that `git` invokes such as `git-lfs`, inherits the captured
-installation `PATH`. Those tools must therefore be available through that path. Tmux
-alone has the explicit saved-executable fallback described below; other daemon
-descendants do not gain per-tool fallbacks.
+This policy is daemon-wide, not limited to tmux. Every process the daemon starts
+inherits the captured installation `PATH`. The daemon launches the `git` executable
+at its existing fixed `/usr/bin/git` path, while helpers that `git` invokes, such as
+`git-lfs`, depend on the inherited `PATH`. Tmux alone has the explicit
+saved-executable fallback described below; other daemon descendants do not gain
+per-tool fallbacks.
 
 Only `PATH` is captured. TBD does not persist the installation shell's whole
 environment.
@@ -91,6 +92,12 @@ executable with the system file picker or dismiss the prompt. The prompt appears
 most once during one app-state lifetime; clearing or invalidating the value later does
 not repeatedly interrupt the same running session.
 
+The same once-per-lifetime startup check emits a diagnostic that reports the resolved
+tmux path and whether it came from `PATH` or the saved fallback, or reports that tmux
+is unavailable. It does not log the complete `PATH` or any other environment value.
+This makes field regressions in LaunchServices relaunches diagnosable, but does not
+replace an OS-level crash-and-relaunch test.
+
 A successful selection is validated, saved, and immediately reflected in app state.
 Cancelling the picker or dismissing the prompt does not write configuration.
 
@@ -116,11 +123,10 @@ the shared fallback-file location. They resolve again at operation boundaries in
 of permanently caching the selected path.
 
 This means a Settings save or clear affects later terminal preparation, later daemon
-tmux commands, and later control-mode gate or capability decisions. The daemon pairs a
-detected tmux version with the executable path that produced it. Control-mode gate and
-capability decisions detect the version again from each newly resolved executable, so
-replacing the executable in place at an unchanged path also takes effect without a
-daemon restart.
+tmux commands, and later control-mode gate or capability decisions. Control-mode gate
+and capability decisions resolve the executable and detect its version again for each
+decision, so replacing the executable in place at an unchanged path also takes effect
+without a daemon restart.
 
 Within one terminal preparation, TBD resolves exactly once. The absolute executable
 path is carried through session creation, window selection, confirmation, cleanup,
@@ -195,7 +201,8 @@ changes.
 - The installation-path shell harness verifies the plist-generation helper's exact
   round trips, replacement, invalid input, source plist preservation, and generated
   plist validity. It does not exercise an OS-level crash and LaunchServices relaunch
-  end to end.
+  end to end; the once-per-startup resolution diagnostic is the explicit field
+  observability mitigation for that automation gap.
 - Resolver tests verify PATH order, executable validation, ignored entries, paths with
   spaces, fallback precedence, and absence of implicit directory search.
 - App tests verify startup prompting, saving, clearing, PATH authority, live

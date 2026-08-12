@@ -60,16 +60,10 @@ struct ControlModeSettingsRPCTests {
         db: TBDDatabase,
         vending: FDVendingServer = FDVendingServer(),
         environment: [String: String] = [:],
-        tmuxVersion: TmuxVersion? = TmuxVersion(major: 3, minor: 6),
-        tmuxExecutableResolver: TmuxExecutableResolver,
-        startupTmux: TmuxVersionSnapshot? = nil
+        tmuxExecutableResolver: TmuxExecutableResolver
     ) -> TmuxControlModeBridge {
         TmuxControlModeBridge(
             supervisor: TmuxControlSupervisor(),
-            startupTmux: startupTmux ?? TmuxVersionSnapshot(
-                executablePath: tmuxExecutableResolver.resolve()?.path,
-                version: tmuxVersion
-            ),
             tmuxExecutableResolver: tmuxExecutableResolver,
             environment: environment,
             fdVending: vending,
@@ -115,7 +109,6 @@ struct ControlModeSettingsRPCTests {
         let (router, db) = try makeRouterAndDB()
         router.controlMode = bridge(
             db: db,
-            tmuxVersion: TmuxVersion(major: 3, minor: 6, suffix: "a"),
             tmuxExecutableResolver: tmux.resolver
         )
         let response = await router.handle(RPCRequest(method: RPCMethod.daemonCapabilities))
@@ -132,7 +125,6 @@ struct ControlModeSettingsRPCTests {
         try await db.config.setControlModeEnabled(true)
         router.controlMode = bridge(
             db: db,
-            tmuxVersion: TmuxVersion(major: 3, minor: 1),
             tmuxExecutableResolver: tmux.resolver
         )
         let response = await router.handle(RPCRequest(method: RPCMethod.daemonCapabilities))
@@ -181,11 +173,7 @@ struct ControlModeSettingsRPCTests {
         )
         let (router, db) = try makeRouterAndDB()
         try await db.config.setControlModeEnabled(true)
-        let liveBridge = bridge(
-            db: db,
-            tmuxVersion: nil,
-            tmuxExecutableResolver: resolver
-        )
+        let liveBridge = bridge(db: db, tmuxExecutableResolver: resolver)
         router.controlMode = liveBridge
 
         #expect(await liveBridge.currentTmuxVersion() == nil)
@@ -204,7 +192,7 @@ struct ControlModeSettingsRPCTests {
     }
 
     // Tier 2: real filesystem and fixture-owned version subprocesses.
-    @Test("capabilities and gate follow a changed saved fallback after successful startup detection")
+    @Test("capabilities and gate follow a changed saved fallback")
     func capabilitiesFollowChangedSavedFallback() async throws {
         let fixture = try TmuxVersionFallbackFixture()
         defer { fixture.remove() }
@@ -216,18 +204,9 @@ struct ControlModeSettingsRPCTests {
             configurationURL: fixture.configurationURL
         )
         try resolver.save(executableA.path)
-        let startupVersion = try #require(await TmuxVersion.detect(tmuxBinary: executableA.path))
         let (router, db) = try makeRouterAndDB()
         try await db.config.setControlModeEnabled(true)
-        let liveBridge = bridge(
-            db: db,
-            tmuxVersion: startupVersion,
-            tmuxExecutableResolver: resolver,
-            startupTmux: TmuxVersionSnapshot(
-                executablePath: executableA.path,
-                version: startupVersion
-            )
-        )
+        let liveBridge = bridge(db: db, tmuxExecutableResolver: resolver)
         router.controlMode = liveBridge
 
         #expect(await liveBridge.currentTmuxVersion()?.description == "3.6")
@@ -256,65 +235,15 @@ struct ControlModeSettingsRPCTests {
             configurationURL: fixture.configurationURL
         )
         try resolver.save(executable.path)
-        let startupVersion = try #require(await TmuxVersion.detect(tmuxBinary: executable.path))
         let (router, db) = try makeRouterAndDB()
         try await db.config.setControlModeEnabled(true)
-        let liveBridge = bridge(
-            db: db,
-            tmuxVersion: startupVersion,
-            tmuxExecutableResolver: resolver,
-            startupTmux: TmuxVersionSnapshot(
-                executablePath: executable.path,
-                version: startupVersion
-            )
-        )
+        let liveBridge = bridge(db: db, tmuxExecutableResolver: resolver)
         router.controlMode = liveBridge
 
         #expect(await liveBridge.currentTmuxVersion()?.description == "3.6")
         #expect(await liveBridge.gateEnabled())
 
         _ = try fixture.versionExecutable(version: "3.1")
-
-        #expect(await liveBridge.currentTmuxVersion()?.description == "3.1")
-        #expect(await liveBridge.gateEnabled() == false)
-        let response = await router.handle(RPCRequest(method: RPCMethod.daemonCapabilities))
-        let result = try response.decodeResult(DaemonCapabilitiesResult.self)
-        #expect(result.tmuxVersion == "3.1")
-        #expect(result.controlModeSupported == false)
-        #expect(result.controlModeEnabled == false)
-    }
-
-    // Tier 2: real filesystem and fixture-owned version subprocesses.
-    @Test("startup detection remains paired with its executable when fallback changes before bridge construction")
-    func startupDetectionKeepsItsExecutablePath() async throws {
-        let fixture = try TmuxVersionFallbackFixture()
-        defer { fixture.remove() }
-        let emptyDirectory = try fixture.directory(named: "empty-path")
-        let executableA = try fixture.versionExecutable(named: "tmux-a", version: "3.6")
-        let executableB = try fixture.versionExecutable(named: "tmux-b", version: "3.1")
-        let resolver = TmuxExecutableResolver(
-            environment: ["PATH": emptyDirectory.path],
-            configurationURL: fixture.configurationURL
-        )
-        try resolver.save(executableA.path)
-        let startupVersion = try #require(await TmuxVersion.detect(tmuxBinary: executableA.path))
-
-        // Model a Settings write in the interval between startup detection and
-        // bridge construction. The detected version still belongs to A.
-        try resolver.save(executableB.path)
-
-        let (router, db) = try makeRouterAndDB()
-        try await db.config.setControlModeEnabled(true)
-        let liveBridge = bridge(
-            db: db,
-            tmuxVersion: startupVersion,
-            tmuxExecutableResolver: resolver,
-            startupTmux: TmuxVersionSnapshot(
-                executablePath: executableA.path,
-                version: startupVersion
-            )
-        )
-        router.controlMode = liveBridge
 
         #expect(await liveBridge.currentTmuxVersion()?.description == "3.1")
         #expect(await liveBridge.gateEnabled() == false)
@@ -426,7 +355,6 @@ struct ControlModeSettingsRPCTests {
         try await db.config.setControlModeEnabled(true)
         router.controlMode = bridge(
             db: db,
-            tmuxVersion: TmuxVersion(major: 3, minor: 1),
             tmuxExecutableResolver: tmux.resolver
         )
 
