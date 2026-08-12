@@ -725,6 +725,18 @@ public struct GitManager: Sendable {
         _ = try await run(arguments: ["update-ref", "-d", ref], at: repoPath)
     }
 
+    /// Deletes the local branch `name`.
+    ///
+    /// `git branch -D` rather than `deleteRef`'s plumbing `update-ref -d`
+    /// deliberately: git refuses to delete a branch that is checked out in a
+    /// live worktree, and that refusal is a genuine safety net for the
+    /// failed-create cleanup path — plumbing would happily unhook a branch
+    /// somebody is working in. Run `worktreePrune` first so a stale
+    /// registration can't manufacture that refusal.
+    public func deleteLocalBranch(repoPath: String, name: String) async throws {
+        _ = try await run(arguments: ["branch", "-D", name], at: repoPath)
+    }
+
     /// Lists all ref names under `prefix` (e.g. `refs/tbd/snapshots`).
     public func listRefs(repoPath: String, prefix: String) async throws -> [String] {
         let output = try await run(

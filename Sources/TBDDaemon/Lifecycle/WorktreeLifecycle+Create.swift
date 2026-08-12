@@ -522,8 +522,12 @@ extension WorktreeLifecycle {
         //
         // A failed existence probe falls through to the old path rather than
         // failing creation: not knowing is not the same as knowing it's absent.
-        let branchExistsLocally = (try? await git.localBranchExists(repoPath: repoPath, name: branch)) ?? false
-        if userSpecifiedBranch && branchExistsLocally {
+        //
+        // The tri-state is kept (rather than collapsed with `?? false`) because
+        // failure cleanup needs it: `nil` means the probe itself failed, and a
+        // branch we cannot prove was absent beforehand must never be deleted.
+        let branchPreExisted: Bool? = try? await git.localBranchExists(repoPath: repoPath, name: branch)
+        if userSpecifiedBranch && branchPreExisted == true {
             do {
                 try await git.worktreeAddExisting(
                     repoPath: repoPath,
@@ -544,6 +548,8 @@ extension WorktreeLifecycle {
             }
         }
 
+        var lastKind: WorktreeAddFailureKind = .baseUnresolvable
+
         for baseBranch in baseBranches {
             do {
                 try await git.worktreeAdd(
@@ -555,9 +561,24 @@ extension WorktreeLifecycle {
                 return (name: name, branch: branch, path: worktreePath)
             } catch {
                 lastError = error
+                lastKind = classifyWorktreeAddFailure(error)
                 logger.warning("Failed to add worktree with base branch \(baseBranch, privacy: .public): \(String(describing: error), privacy: .public)")
-                // Clean up the directory if it was partially created
-                try? FileManager.default.removeItem(atPath: worktreePath)
+                await cleanUpFailedWorktreeAdd(
+                    repoPath: repoPath, worktreePath: worktreePath,
+                    branch: branch, branchPreExisted: branchPreExisted
+                )
+                if lastKind == .repoLevel {
+                    // Nothing downstream can help: not the other base, not a
+                    // fresh name. Surface git's own words instead of guessing.
+                    throw WorktreeLifecycleError.createFailed(
+                        "git worktree add failed\(repoLevelHint(error))\(formatErrorForMessage(error))"
+                    )
+                }
+                if lastKind == .nameCollision {
+                    // The name collides regardless of base, so the second base
+                    // would fail identically. A fresh name is the only remedy.
+                    break
+                }
             }
         }
 
@@ -566,7 +587,7 @@ extension WorktreeLifecycle {
         if userSpecifiedFolder || !retryGeneratedNameOnCollision {
             let errorDetail = lastError.flatMap { formatErrorForMessage($0) } ?? ""
             throw WorktreeLifecycleError.createFailed(
-                "git worktree add failed — the folder or branch may already exist\(errorDetail)"
+                "\(describeExhaustedBases(lastKind, baseBranches: baseBranches))\(errorDetail)"
             )
         }
 
@@ -580,6 +601,17 @@ extension WorktreeLifecycle {
             withIntermediateDirectories: true
         )
 
+        // The retry leg usually uses a DIFFERENT branch name, so it needs its
+        // own pre-existence answer: a freshly generated name that happens to
+        // collide with somebody's branch is exactly the case where deleting on
+        // failure would destroy work we did not create. When the name is
+        // unchanged (a user-specified branch is kept across the retry) the
+        // original probe still holds — the loop above deleted the branch only
+        // if it had created it.
+        let retryBranchPreExisted: Bool? = retryBranch == branch
+            ? branchPreExisted
+            : (try? await git.localBranchExists(repoPath: repoPath, name: retryBranch))
+
         for baseBranch in baseBranches {
             do {
                 try await git.worktreeAdd(
@@ -591,8 +623,17 @@ extension WorktreeLifecycle {
                 return (name: retryName, branch: retryBranch, path: retryPath)
             } catch {
                 lastError = error
+                lastKind = classifyWorktreeAddFailure(error)
                 logger.warning("Failed to add worktree with retry path and base branch \(baseBranch, privacy: .public): \(String(describing: error), privacy: .public)")
-                try? FileManager.default.removeItem(atPath: retryPath)
+                await cleanUpFailedWorktreeAdd(
+                    repoPath: repoPath, worktreePath: retryPath,
+                    branch: retryBranch, branchPreExisted: retryBranchPreExisted
+                )
+                if lastKind == .repoLevel {
+                    throw WorktreeLifecycleError.createFailed(
+                        "git worktree add failed\(repoLevelHint(error))\(formatErrorForMessage(error))"
+                    )
+                }
             }
         }
 
@@ -600,6 +641,110 @@ extension WorktreeLifecycle {
         throw WorktreeLifecycleError.createFailed(
             "git worktree add failed after all attempts\(errorDetail)"
         )
+    }
+
+    /// Why a `git worktree add` failed — and therefore which of the two
+    /// retries above can possibly help.
+    ///
+    /// Classification is a whitelist of known-recoverable stderr shapes;
+    /// anything unrecognized is `.repoLevel` and fails fast. That direction is
+    /// the safe one: an unclassifiable error retried under a second base and
+    /// then a second name manufactures orphan branches, while a recoverable
+    /// error misread as fatal merely surfaces git's real message.
+    enum WorktreeAddFailureKind {
+        /// The base ref did not resolve. The *next base branch* may — this is
+        /// exactly what the two-base loop exists for.
+        case baseUnresolvable
+        /// The branch name, the folder path, or the checkout is already taken.
+        /// Every base fails identically; only a *fresh name* can help.
+        case nameCollision
+        /// Anything else: a stale `.git/config.lock`, a corrupt repo, a full
+        /// disk. Neither another base nor another name changes the outcome.
+        case repoLevel
+    }
+
+    /// Classifies a `worktreeAdd` failure off `GitError.stderr`. A non-`GitError`
+    /// (spawn failure, timeout) is `.repoLevel` — it says nothing about the
+    /// base or the name.
+    private func classifyWorktreeAddFailure(_ error: Error) -> WorktreeAddFailureKind {
+        guard let gitError = error as? GitError else { return .repoLevel }
+        let stderr = gitError.stderr.lowercased()
+
+        // "fatal: invalid reference: origin/main"
+        // "fatal: not a valid object name: 'origin/main'"
+        // "fatal: ambiguous argument 'origin/main': unknown revision or path
+        //  not in the working tree."
+        if stderr.contains("invalid reference")
+            || stderr.contains("not a valid object name")
+            || stderr.contains("unknown revision") {
+            return .baseUnresolvable
+        }
+
+        // "fatal: a branch named 'tbd/quiet-fox' already exists"
+        // "fatal: '../w3' already exists"
+        // "fatal: 'main' is already used by worktree at '/path/to/wt'"
+        if stderr.contains("already exists")
+            || stderr.contains("is already used by worktree at") {
+            return .nameCollision
+        }
+
+        return .repoLevel
+    }
+
+    /// Cleans up whatever a single failed `worktreeAdd` attempt left behind.
+    ///
+    /// Three things, in order: the partially-written directory, any worktree
+    /// registration git recorded before failing, and — only when we positively
+    /// know the branch was absent beforehand and is present now — the branch
+    /// `-b` created. Git can fail *after* creating the branch (a stale
+    /// `.git/config.lock` makes the upstream-config write fail while the branch
+    /// stands), which is how a failed create used to leak a `tbd/<name>` branch
+    /// and then mask the real cause behind "a branch named … already exists" on
+    /// the next attempt.
+    ///
+    /// `branchPreExisted == nil` means the probe itself failed. Not knowing is
+    /// not the same as knowing it's absent, so nothing is deleted.
+    private func cleanUpFailedWorktreeAdd(
+        repoPath: String,
+        worktreePath: String,
+        branch: String,
+        branchPreExisted: Bool?
+    ) async {
+        try? FileManager.default.removeItem(atPath: worktreePath)
+        try? await git.worktreePrune(repoPath: repoPath)
+
+        guard branchPreExisted == false else { return }
+        guard (try? await git.localBranchExists(repoPath: repoPath, name: branch)) == true else {
+            return
+        }
+        do {
+            try await git.deleteLocalBranch(repoPath: repoPath, name: branch)
+            logger.info("Deleted branch \(branch, privacy: .public) left behind by a failed worktree add")
+        } catch {
+            logger.warning("Failed to delete branch \(branch, privacy: .public) left behind by a failed worktree add: \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    /// Message for "both base branches were tried and none worked", worded to
+    /// match what actually went wrong rather than always guessing collision.
+    private func describeExhaustedBases(
+        _ kind: WorktreeAddFailureKind, baseBranches: [String]
+    ) -> String {
+        switch kind {
+        case .baseUnresolvable:
+            return "git worktree add failed — no usable base branch (tried \(baseBranches.joined(separator: ", ")))"
+        case .nameCollision, .repoLevel:
+            return "git worktree add failed — the folder or branch may already exist"
+        }
+    }
+
+    /// A hint for the one repo-level failure a user can clear themselves.
+    private func repoLevelHint(_ error: Error) -> String {
+        guard let gitError = error as? GitError,
+              gitError.stderr.lowercased().contains("could not lock config file") else {
+            return ""
+        }
+        return " — a stale .git/config.lock in the repo can be deleted once no git process is holding it"
     }
 
     /// Formats an error for inclusion in a user-facing message, truncated to ~500 chars.
