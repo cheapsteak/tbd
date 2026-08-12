@@ -779,6 +779,30 @@ public struct GitManager: Sendable {
 
     // MARK: - Private
 
+    /// The environment every git subprocess runs with: the daemon's own
+    /// environment, with the locale pinned to `C`.
+    ///
+    /// Git's stderr is the only signal several callers have for *why* a command
+    /// failed, and one of those decisions is destructive: `WorktreeLifecycle`'s
+    /// failed-create cleanup decides whether it may `branch -D` off "a branch
+    /// named … already exists". Git localizes those messages when the ambient
+    /// locale asks it to, so without this pin the matching is only as stable as
+    /// whatever `LANG` the daemon happened to launch with — and a miss there
+    /// re-opens the "delete a branch we don't own" hazard the gate exists to
+    /// close.
+    ///
+    /// It **merges onto** the inherited environment rather than replacing it: a
+    /// bare dict would drop `PATH`, `HOME`, `SSH_AUTH_SOCK` and friends from
+    /// every git call the daemon makes. (Same mistake, different subsystem:
+    /// commit 56fa912f had to restore the launch `PATH` for tmux.)
+    static func gitEnvironment(
+        inheriting base: [String: String] = ProcessInfo.processInfo.environment
+    ) -> [String: String] {
+        // `LC_ALL` is the one git actually obeys last; `LANG` is pinned too so
+        // the child's own subprocesses don't see a mixed locale.
+        return base.merging(["LC_ALL": "C", "LANG": "C"]) { _, pinned in pinned }
+    }
+
     /// Runs a git command with the given arguments at the given directory and returns stdout.
     /// Throws `GitError` on non-zero exit.
     /// Package-internal test seam: drives `run()`'s timeout/kill wrapper against
@@ -809,6 +833,7 @@ public struct GitManager: Sendable {
             executable: executable,
             arguments: arguments,
             currentDirectory: directory,
+            environment: Self.gitEnvironment(),
             timeout: resolvedTimeout,
             clock: clock
         ) {

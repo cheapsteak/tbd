@@ -249,6 +249,52 @@ struct GitManagerTests {
         cleanup()
     }
 
+    // MARK: - Subprocess environment
+
+    /// Tier 2. Git's stderr is safety-critical here — `WorktreeLifecycle`'s
+    /// failed-create cleanup decides whether it may delete a branch by matching
+    /// English phrases in it — so the locale every git child runs under is
+    /// pinned rather than inherited.
+    ///
+    /// Driven through the same `run()` wrapper production calls use (via the
+    /// package-internal timeout seam, pointed at `/bin/sh` instead of git) so
+    /// this asserts what actually reaches the child process, not what a helper
+    /// returns. Asserting the inherited `HOME` in the same breath is the
+    /// load-bearing half: pinning by *replacing* the environment instead of
+    /// merging onto it would strip `HOME`, `PATH` and `SSH_AUTH_SOCK` from
+    /// every git call the daemon makes — the tmux-launch-`PATH` regression, one
+    /// subsystem over. `HOME` and not `PATH` because a POSIX shell invents a
+    /// default `PATH` when it finds none, which would mask the replacement.
+    @Test func gitSubprocessesInheritTheEnvironmentWithTheLocalePinned() async throws {
+        defer { cleanup() }
+        let inheritedHome = ProcessInfo.processInfo.environment["HOME"] ?? ""
+        let output = try await git.runForTimeoutTesting(
+            executable: "/bin/sh",
+            arguments: ["-c", #"printf '%s|%s|%s' "$LC_ALL" "$LANG" "$HOME""#],
+            at: repoDir.path
+        )
+        #expect(output == "C|C|\(inheritedHome)",
+                "git subprocess environment was not pinned-and-inherited: \(output)")
+    }
+
+    /// The composition itself, including the case the process environment
+    /// cannot produce on demand: a hostile locale already set. Both arms —
+    /// hostile values overridden, unrelated values untouched.
+    @Test func gitEnvironmentOverridesAHostileLocaleAndKeepsEverythingElse() {
+        let composed = GitManager.gitEnvironment(inheriting: [
+            "LANG": "fr_FR.UTF-8",
+            "LC_ALL": "fr_FR.UTF-8",
+            "PATH": "/opt/homebrew/bin:/usr/bin",
+            "HOME": "/Users/test",
+            "SSH_AUTH_SOCK": "/tmp/agent.sock",
+        ])
+        #expect(composed["LC_ALL"] == "C")
+        #expect(composed["LANG"] == "C")
+        #expect(composed["PATH"] == "/opt/homebrew/bin:/usr/bin")
+        #expect(composed["HOME"] == "/Users/test")
+        #expect(composed["SSH_AUTH_SOCK"] == "/tmp/agent.sock")
+    }
+
     // MARK: - Helpers
 
     func cleanup() {
