@@ -6,6 +6,28 @@ import UniformTypeIdentifiers
 
 private typealias SwiftUIColor = SwiftUI.Color
 
+struct TmuxConfigurationPathPresentation: Equatable {
+    let fullPath: String
+    let displayPath: String
+
+    init(
+        configurationURL: URL = TBDConstants.tmuxExecutablePathFile,
+        homeDirectory: String = NSHomeDirectory()
+    ) {
+        fullPath = configurationURL.path
+        let home = homeDirectory.hasSuffix("/")
+            ? String(homeDirectory.dropLast())
+            : homeDirectory
+        if !home.isEmpty, fullPath == home {
+            displayPath = "~"
+        } else if !home.isEmpty, fullPath.hasPrefix(home + "/") {
+            displayPath = "~" + fullPath.dropFirst(home.count)
+        } else {
+            displayPath = fullPath
+        }
+    }
+}
+
 struct TerminalSettingsView: View {
     @EnvironmentObject var appearance: AppearanceSettings
     @EnvironmentObject var appState: AppState
@@ -163,6 +185,28 @@ struct TerminalSettingsView: View {
                     Button("Choose…") { chooseTmuxFallback() }
                     Button("Clear") { clearTmuxFallback() }
                         .disabled(appState.savedTmuxExecutablePath == nil)
+                }
+
+                LabeledContent("Fallback file") {
+                    HStack(spacing: 4) {
+                        let path = TmuxConfigurationPathPresentation()
+                        Text(path.displayPath)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(path.fullPath, forType: .string)
+                        } label: {
+                            Image(systemName: "doc.on.doc")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(.secondary)
+                        .help("Copy full path")
+                    }
                 }
             } header: {
                 Text("tmux")

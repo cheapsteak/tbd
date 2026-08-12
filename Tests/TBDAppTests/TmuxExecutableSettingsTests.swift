@@ -7,6 +7,16 @@ import Testing
 @MainActor
 @Suite("Tmux executable settings")
 struct TmuxExecutableSettingsTests {
+    @Test func backingFilePresentationAbbreviatesHomeAndPreservesCopyPath() {
+        let presentation = TmuxConfigurationPathPresentation(
+            configurationURL: URL(fileURLWithPath: "/Users/acme/tbd/tmux-executable-path"),
+            homeDirectory: "/Users/acme"
+        )
+
+        #expect(presentation.displayPath == "~/tbd/tmux-executable-path")
+        #expect(presentation.fullPath == "/Users/acme/tbd/tmux-executable-path")
+    }
+
     @Test func missingExecutablePromptsOnlyOncePerAppStateLifetime() throws {
         try withFixture { fixture, state in
             #expect(state.tmuxExecutableResolution == nil)
