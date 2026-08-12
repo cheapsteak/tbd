@@ -111,12 +111,42 @@ public enum ClaudeHookOverlay {
     /// **Deliberately permissive, and it must stay that way.** The prefilter is
     /// a COST OPTIMIZATION, never a gate: `PRBindingExtractor`'s tokenizer is
     /// the sole authority on what counts as a `gh pr create`, and it can only
-    /// judge payloads this pattern lets through. So the pattern must be wide
-    /// enough that it can never produce a false negative — which is why it does
-    /// not require `gh` adjacency. `gh -R acme/acme-prod pr create` and
-    /// `gh --repo acme/acme-prod pr create` are exactly the flagged forms the
-    /// tokenizer was built to accept, and a `gh[[:space:]]+pr` requirement here
-    /// silently dropped every one of them before the tokenizer ever ran.
+    /// judge payloads this pattern lets through. A payload the grep drops never
+    /// reaches `tbd` at all, so a false negative loses the bind in silence.
+    ///
+    /// **What it guarantees:** every command the tokenizer accepts with `pr` and
+    /// `create` as *adjacent* subcommand words is admitted — however the segment
+    /// is quoted, whichever global flags precede the subcommand, and whether or
+    /// not `gh` is path-qualified. Two properties carry that, and neither is
+    /// obvious from the pattern alone.
+    ///
+    /// It does not require `gh` adjacency, because
+    /// `gh -R acme/acme-prod pr create` and `gh --repo acme/acme-prod pr create`
+    /// are exactly the flagged forms the tokenizer was built to accept, and a
+    /// `gh[[:space:]]+pr` requirement here silently dropped every one of them
+    /// before the tokenizer ever ran.
+    ///
+    /// And it separates the two words by any run of non-alphanumeric characters
+    /// rather than by whitespace, because the tokenizer *strips quotes* while
+    /// splitting words: `gh "pr" create` and `gh pr 'create'` are real creates,
+    /// yet the raw JSON this grep reads still carries the quote — and, for a
+    /// double quote, JSON's own backslash — between them. `\t` and `\r` are
+    /// spelled out alongside the class because JSON escapes a tab or carriage
+    /// return to a backslash followed by an *alphanumeric* letter, which the
+    /// class alone would reject. The run is unbounded on purpose: a length cap
+    /// would reintroduce a false negative for nothing, since alphanumerics are
+    /// excluded and so the run can never cross a word.
+    ///
+    /// **What it does not guarantee**, so the invariant is stated rather than
+    /// implied: a flag word *between* the two subcommand words
+    /// (`gh pr --draft create`, `gh pr -R acme/acme-prod create`), which the
+    /// tokenizer skips over but which no pattern can span without also matching
+    /// ordinary prose — the intervening flag and its value are alphanumeric
+    /// words indistinguishable from any other; and quoting *inside* a word
+    /// (`gh p"r" create`), where the literal `pr` never appears in the payload
+    /// at all and only a tokenizer could recover it. Both fail closed to a lost
+    /// fast path, not a lost binding: branch matching still binds the PR on the
+    /// next poll, the same recovery a hook timeout relies on.
     ///
     /// The resulting over-match is the right trade and is accepted knowingly: a
     /// payload that merely mentions "pr create" now spawns one short-lived
@@ -126,8 +156,9 @@ public enum ClaudeHookOverlay {
     ///
     /// Lives in its own constant so the test can grep with the same literal the
     /// shell command runs — hand-copying it into the test is how the two drift
-    /// apart.
-    static let prBindGrepPattern = #"pr[[:space:]]+create"#
+    /// apart. It is embedded in a single-quoted shell word, so it must never
+    /// contain a `'`.
+    static let prBindGrepPattern = #"pr([^[:alnum:]]|\\[tr])+create"#
 
     /// Binds any PR created by a `gh pr create` in this session.
     ///

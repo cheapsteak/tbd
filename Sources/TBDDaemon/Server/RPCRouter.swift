@@ -194,8 +194,11 @@ public final class RPCRouter: Sendable {
         self.usageFetcher = usageFetcher
         // Captures the `db` / `prManager` parameters rather than `self`, so the
         // coordinator can be a `let` built during initialization.
+        // `getLocal` rather than `get`: resolving a repo identity means running
+        // git in the worktree's directory, which a remote row does not have on
+        // this machine. Its nil is the correct "nothing here to resolve".
         let repoResolver = prBindingRepoResolver ?? { [db, prManager] worktreeID in
-            guard let worktree = try? await db.worktrees.get(id: worktreeID) else { return nil }
+            guard let worktree = try? await db.worktrees.getLocal(id: worktreeID) else { return nil }
             return await prManager.repoIdentity(repoPath: worktree.path)
         }
         self.prBindingRepoResolver = repoResolver

@@ -106,16 +106,49 @@ extension TBDHomeSerialized {
     /// of the `&&` short-circuit, meant `tbd pr bind --from-hook` never ran for
     /// any flagged form: `PRBindingExtractor`'s tokenizer — built specifically
     /// to accept `-R` / `--repo` / `--hostname` — never saw them, and hook
-    /// binding was defeated for exactly the case the feature exists for.
+    /// binding was defeated for exactly the case the feature exists for. The
+    /// quoted forms below are the same bug through a different door: the
+    /// tokenizer strips quotes when it splits words, so `gh "pr" create` is a
+    /// real create, while the raw JSON keeps the quote (and JSON's backslash
+    /// before a double one) between the two words.
+    ///
+    /// Each command is run past BOTH sides, so the two cannot drift: the
+    /// tokenizer must accept it — otherwise the case proves nothing about the
+    /// invariant — and the grep must then admit it.
     ///
     /// Tier 2: spawns a real, bounded `grep`. Asserting against a Swift regex
     /// engine instead would test a different matcher than the one that ships.
     @Test("the grep prefilter admits every form the tokenizer can bind")
     func prefilterAdmitsEveryBindableCreateForm() throws {
-        #expect(try prefilterAdmits("gh pr create --fill"))
-        #expect(try prefilterAdmits("gh -R acme/acme-prod pr create"))
-        #expect(try prefilterAdmits("gh --repo acme/acme-prod pr create --fill"))
-        #expect(try prefilterAdmits("cd /tmp && gh pr create -t x"))
+        let bindable = [
+            "gh pr create --fill",
+            "gh -R acme/acme-prod pr create",
+            "gh --repo acme/acme-prod pr create --fill",
+            "gh --hostname github.com pr create",
+            "cd /tmp && gh pr create -t x",
+            "/usr/local/bin/gh pr create",
+            #"gh "pr" create"#,
+            #"gh pr "create""#,
+            #"gh "pr" "create""#,
+            "gh 'pr' create",
+            "gh pr 'create'",
+            "gh 'pr' 'create'",
+            "gh pr\tcreate",
+            "gh pr    create"
+        ]
+        for command in bindable {
+            #expect(PRBindingExtractor.isPRCreateCommand(command),
+                    "the tokenizer must accept this form: \(command)")
+            #expect(try prefilterAdmits(command),
+                    "the prefilter silently dropped a bindable create: \(command)")
+        }
+        // Two tokenizer-accepted shapes are deliberately absent, and the
+        // limitation is stated on `prBindGrepPattern` rather than hidden: a flag
+        // word BETWEEN the two subcommand words (`gh pr --draft create`), which
+        // no pattern can span without matching ordinary prose, and quoting
+        // inside a word (`gh p"r" create`), which never spells `pr` in the
+        // payload at all. Both fail closed to a lost fast path — branch matching
+        // still binds the PR on the next poll.
     }
 
     /// The other half of the trade: the filter still filters, so the ordinary
