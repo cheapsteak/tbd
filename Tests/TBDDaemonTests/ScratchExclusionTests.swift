@@ -27,6 +27,25 @@ struct ScratchExclusionTests {
         #expect(!pollable.contains { $0.id == scratch.id })
     }
 
+    /// The same guard, for the other kind of row the poller must not touch:
+    /// everything downstream of `pollableWorktrees` runs `git` and `gh` inside
+    /// the worktree's path and caches branch facts keyed on it, and a remote
+    /// row's path is not a directory on this machine.
+    @Test("pollableWorktrees drops remote rows and keeps local rows")
+    func pollableWorktreesDiscriminatesRemoteFromLocal() {
+        let local = Worktree(
+            repoID: UUID(), name: "l", displayName: "l", branch: "tbd/l",
+            path: "/tmp/local", tmuxServer: "tbd-l")
+        let remote = Worktree(
+            repoID: UUID(), name: "r", displayName: "r", branch: "tbd/r",
+            path: "remote://agentbox/s-1", tmuxServer: "",
+            location: .remote(provider: "agentbox", sessionID: "s-1"))
+
+        let pollable = RPCRouter.pollableWorktrees([local, remote])
+
+        #expect(pollable.map(\.id) == [local.id])
+    }
+
     @Test("pr.list never includes a scratch worktree")
     func prListExcludesScratch() async throws {
         let db = try TBDDatabase(inMemory: true)

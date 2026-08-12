@@ -43,7 +43,10 @@ enum ParkedPaneWakeModel {
 /// based on PaneContent type. Replaces the former TerminalPanelPlaceholder.
 struct PanePlaceholder: View {
     let content: PaneContent
-    let worktree: Worktree
+    /// Panes root a terminal's working directory and the code viewer's file
+    /// resolution at this worktree's checkout, so the pane tree carries the
+    /// proven-local wrapper rather than a bare `Worktree`.
+    let worktree: LocalWorktree
     let tabID: UUID?
     @Binding var layout: LayoutNode
     @EnvironmentObject var appState: AppState

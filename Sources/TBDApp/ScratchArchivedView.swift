@@ -73,7 +73,7 @@ struct ScratchArchivedView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
-                    Text(worktree.path)
+                    Text(worktree.localPath)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)

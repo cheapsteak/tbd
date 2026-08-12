@@ -80,12 +80,12 @@ extension RPCRouter {
         }
 
         subscriptions.broadcast(delta: .worktreeCreated(WorktreeDelta(
-            worktreeID: wt.id, repoID: nil, name: wt.name, path: wt.path, status: wt.status)))
+            worktreeID: wt.id, repoID: nil, name: wt.name, path: wt.localPath, status: wt.status)))
         for terminal in createdTerminals {
             subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
                 terminalID: terminal.id, worktreeID: wt.id, label: terminal.label)))
         }
-        scratchLogger.info("scratch.create: \(wt.id, privacy: .public) at \(wt.path, privacy: .public)")
+        scratchLogger.info("scratch.create: \(wt.id, privacy: .public) at \(wt.localPath, privacy: .public)")
         return try RPCResponse(result: wt)
     }
 
@@ -115,7 +115,7 @@ extension RPCRouter {
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
         let params = try decoder.decode(ScratchDeleteParams.self, from: paramsData)
-        guard let wt = try await db.worktrees.get(id: params.worktreeID) else {
+        guard let wt = try await db.worktrees.getLocal(id: params.worktreeID) else {
             return RPCResponse(error: "Scratch space not found: \(params.worktreeID)")
         }
         guard wt.isScratch else {
@@ -130,7 +130,7 @@ extension RPCRouter {
         let actuationID = try await beginActuation(
             .scratchDelete, actor: actor,
             target: ActuationTarget(worktree: wt.id.uuidString))
-        try await actuating(actuationID) { try await closeScratchTerminals(wt) }
+        try await actuating(actuationID) { try await closeScratchTerminals(wt.worktree) }
         await finishActuation(actuationID, .dispatched)
 
         // Move the folder to Trash — never rm -rf. Promoted rows already had
@@ -177,7 +177,7 @@ extension RPCRouter {
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
         let params = try decoder.decode(ScratchArchiveParams.self, from: paramsData)
-        guard let wt = try await db.worktrees.get(id: params.worktreeID) else {
+        guard let wt = try await db.worktrees.getLocal(id: params.worktreeID) else {
             return RPCResponse(error: "Scratch space not found: \(params.worktreeID)")
         }
         guard wt.isScratch else {
@@ -189,7 +189,7 @@ extension RPCRouter {
         let actuationID = try await beginActuation(
             .scratchArchive, actor: actor,
             target: ActuationTarget(worktree: wt.id.uuidString))
-        try await actuating(actuationID) { try await closeScratchTerminals(wt) }
+        try await actuating(actuationID) { try await closeScratchTerminals(wt.worktree) }
         await finishActuation(actuationID, .dispatched)
         try await db.worktrees.archive(id: wt.id)
 
@@ -207,7 +207,7 @@ extension RPCRouter {
     /// repo-scoped revive.
     func handleScratchRevive(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(ScratchReviveParams.self, from: paramsData)
-        guard let wt = try await db.worktrees.get(id: params.worktreeID) else {
+        guard let wt = try await db.worktrees.getLocal(id: params.worktreeID) else {
             return RPCResponse(error: "Scratch space not found: \(params.worktreeID)")
         }
         guard wt.isScratch else {
@@ -230,7 +230,7 @@ extension RPCRouter {
 
     func handleScratchPromote(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(ScratchPromoteParams.self, from: paramsData)
-        guard let wt = try await db.worktrees.get(id: params.worktreeID) else {
+        guard let wt = try await db.worktrees.getLocal(id: params.worktreeID) else {
             return RPCResponse(error: "Scratch space not found")
         }
         guard wt.isScratch else { return RPCResponse(error: "Not a scratch space") }
@@ -303,7 +303,7 @@ extension RPCRouter {
         // addRepo just created the repo's main worktree; fetch it. Defensive
         // guard only — addRepo unconditionally calls createMain, so the else
         // branch is unreachable short of DB corruption.
-        if let mainWorktree = try await db.worktrees.list(repoID: repo.id, status: .main).first {
+        if let mainWorktree = try await db.worktrees.listLocal(repoID: repo.id, status: .main).first {
             // ALL row mutations in ONE transaction (terminals re-parented, tab
             // state migrated, main worktree inheriting the scratch tmux server
             // so the live panes stay reachable, scratch row retired with its

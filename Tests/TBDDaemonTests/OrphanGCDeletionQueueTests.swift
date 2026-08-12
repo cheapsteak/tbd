@@ -325,7 +325,7 @@ struct OrphanGCDeletionQueueTests {
         let path = try await makeInterruptedArchive(
             db: db, repo: repo, repoID: repoRow.id, name: "forgotten")
         let wtID = try #require(
-            (try await db.worktrees.list(status: .archived)).first { $0.path == path }?.id)
+            (try await db.worktrees.list(status: .archived)).first { $0.localPath == path }?.id)
 
         // Interleaved exactly where the race lives: after the candidate list
         // was built, before anything is reaped.
@@ -355,7 +355,7 @@ struct OrphanGCDeletionQueueTests {
         let path = try await makeInterruptedArchive(
             db: db, repo: repo, repoID: repoRow.id, name: "revived")
         let wtID = try #require(
-            (try await db.worktrees.list(status: .archived)).first { $0.path == path }?.id)
+            (try await db.worktrees.list(status: .archived)).first { $0.localPath == path }?.id)
 
         let gc = makeGC(db: db, beforeInterruptedArchiveReap: {
             try? await db.worktrees.updateStatus(id: wtID, status: .active)

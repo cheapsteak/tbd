@@ -431,7 +431,7 @@ extension TBDHomeSerialized {
             )
 
             let desk = try await manager.ensureDeskSession(mode: .nightwatch)
-            let instructions = URL(fileURLWithPath: desk.path)
+            let instructions = URL(fileURLWithPath: desk.localPath)
                 .appendingPathComponent(NightwatchDeskPrompts.judgeInstructionsFileName)
 
             // Written at spawn, before any tick fires.
@@ -492,7 +492,7 @@ extension TBDHomeSerialized {
             )
 
             let desk = try await manager.ensureDeskSession(mode: .daywatch)
-            let instructions = URL(fileURLWithPath: desk.path)
+            let instructions = URL(fileURLWithPath: desk.localPath)
                 .appendingPathComponent(NightwatchDeskPrompts.judgeInstructionsFileName)
 
             await manager.nudgeDeskSession(worktreeID: desk.id, act: false)
@@ -548,7 +548,7 @@ extension TBDHomeSerialized {
             )
 
             let desk = try await manager.ensureDeskSession(mode: .daywatch)
-            let instructions = URL(fileURLWithPath: desk.path)
+            let instructions = URL(fileURLWithPath: desk.localPath)
                 .appendingPathComponent(NightwatchDeskPrompts.judgeInstructionsFileName)
 
             // Nothing nudged yet: a judge that has read nothing must read.

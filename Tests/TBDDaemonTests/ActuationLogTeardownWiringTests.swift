@@ -355,6 +355,40 @@ struct ActuationLogTeardownWiringTests {
         #expect(confirmed == Set(requests.compactMap { $0["id"] as? String }))
     }
 
+    /// A row per teardown means a row per teardown that actually happens. The
+    /// cascade cannot archive a remote lane — that means stopping its provider
+    /// session — so it does not claim to have: the lane's row is removed with
+    /// the rest of the repo's rows and no dispose row names it.
+    @Test("a forced repo.remove writes no dispose row for a remote lane it cannot tear down")
+    func repoRemoveWritesNoRowForARemoteLane() async throws {
+        let logPath = try makeLogPath()
+        let db = try TBDDatabase(inMemory: true)
+        let router = makeRouter(db: db, logPath: logPath)
+        let repo = try await db.repos.create(
+            path: "/tmp/acme-\(UUID().uuidString)", displayName: "acme", defaultBranch: "main")
+        let local = try await db.worktrees.create(
+            repoID: repo.id, name: "acme-wt", branch: "acme-branch",
+            path: "/tmp/acme-wt-\(UUID().uuidString)", tmuxServer: "tbd-acme")
+        _ = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "acme-lane", branch: "acme-lane-branch",
+            provider: "stub", sessionID: "s-1")
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.repoRemove,
+            params: RepoRemoveParams(repoID: repo.id, force: true)))
+        #expect(response.success, "the cascade aborted: \(response.error ?? "no error")")
+
+        let written = try rows(at: logPath)
+        let requests = written.filter { $0["kind"] as? String != "outcome" }
+        let named = Set(requests.compactMap {
+            ($0["target"] as? [String: Any])?["worktree"] as? String
+        })
+        #expect(named == [local.id.uuidString])
+        let outcomes = written.filter { $0["kind"] as? String == "outcome" }
+        #expect(outcomes.count == 1)
+        #expect(outcomes.allSatisfy { $0["result"] as? String == "dispatched" })
+    }
+
     @Test("a repo with nothing active to tear down writes no row")
     func repoRemoveWithoutWorktreesWritesNothing() async throws {
         let logPath = try makeLogPath()

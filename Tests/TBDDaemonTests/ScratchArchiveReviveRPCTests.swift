@@ -39,7 +39,7 @@ struct ScratchArchiveReviveRPCTests {
         let (router, deltas) = makeRouter(db: db)
         let created = await router.handle(try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: "to-archive")))
         let wt = try created.decodeResult(Worktree.self)
-        #expect(FileManager.default.fileExists(atPath: wt.path))
+        #expect(FileManager.default.fileExists(atPath: wt.localPath))
 
         let archive = await router.handle(try RPCRequest(method: RPCMethod.scratchArchive, params: ScratchArchiveParams(worktreeID: wt.id)))
         #expect(archive.success)
@@ -49,7 +49,7 @@ struct ScratchArchiveReviveRPCTests {
         #expect(reloaded?.archivedAt != nil)
 
         // Folder is left untouched on disk — unlike delete, no Trash move.
-        #expect(FileManager.default.fileExists(atPath: wt.path))
+        #expect(FileManager.default.fileExists(atPath: wt.localPath))
 
         let archived = deltas.snapshot().filter {
             if case .worktreeArchived(let d) = $0 { return d.worktreeID == wt.id }
@@ -125,7 +125,7 @@ struct ScratchArchiveReviveRPCTests {
         #expect(archive.success)
 
         // Simulate the folder disappearing out from under the archived row.
-        try FileManager.default.removeItem(atPath: wt.path)
+        try FileManager.default.removeItem(atPath: wt.localPath)
 
         let revive = await router.handle(try RPCRequest(method: RPCMethod.scratchRevive, params: ScratchReviveParams(worktreeID: wt.id)))
         #expect(!revive.success)
@@ -150,7 +150,7 @@ struct ScratchArchiveReviveRPCTests {
         let del = await router.handle(try RPCRequest(method: RPCMethod.scratchDelete, params: ScratchDeleteParams(worktreeID: wt.id)))
         #expect(del.success)
         #expect(try await db.worktrees.get(id: wt.id) == nil)
-        #expect(!FileManager.default.fileExists(atPath: wt.path))  // moved to Trash
+        #expect(!FileManager.default.fileExists(atPath: wt.localPath))  // moved to Trash
     }
 }
 }

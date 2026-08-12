@@ -20,7 +20,7 @@ extension RPCRouter {
         guard let bridge = controlMode, await bridge.gateEnabled() else {
             return try RPCResponse(result: AttachRequestResult(status: "unavailable"))
         }
-        guard let worktree = try? await db.worktrees.get(id: params.worktreeID) else {
+        guard let worktree = try? await db.worktrees.getLocal(id: params.worktreeID) else {
             return RPCResponse(error: "Worktree not found")
         }
         let server = worktree.tmuxServer
@@ -169,7 +169,7 @@ extension RPCRouter {
         guard let bridge = controlMode else {
             return RPCResponse(error: "control mode not configured")
         }
-        guard let worktree = try? await db.worktrees.get(id: params.worktreeID) else {
+        guard let worktree = try? await db.worktrees.getLocal(id: params.worktreeID) else {
             return RPCResponse(error: "Worktree not found")
         }
         let server = worktree.tmuxServer
@@ -229,7 +229,7 @@ extension RPCRouter {
     func handlePaneDetach(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(PaneDetachParams.self, from: paramsData)
         if let bridge = controlMode,
-           let worktree = try? await db.worktrees.get(id: params.worktreeID) {
+           let worktree = try? await db.worktrees.getLocal(id: params.worktreeID) {
             let server = worktree.tmuxServer
             if let generation = params.generation {
                 if await bridge.supervisor.detachIfGeneration(
@@ -252,7 +252,7 @@ extension RPCRouter {
     func handlePaneResize(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(PaneResizeParams.self, from: paramsData)
         if let bridge = controlMode,
-           let worktree = try? await db.worktrees.get(id: params.worktreeID) {
+           let worktree = try? await db.worktrees.getLocal(id: params.worktreeID) {
             await bridge.resizeCoordinator.resize(
                 server: worktree.tmuxServer,
                 windowID: params.windowID,

@@ -23,12 +23,12 @@ struct ScratchDeleteRPCTests {
             tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
         let created = await router.handle(try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: "gone")))
         let wt = try created.decodeResult(Worktree.self)
-        #expect(FileManager.default.fileExists(atPath: wt.path))
+        #expect(FileManager.default.fileExists(atPath: wt.localPath))
 
         let del = await router.handle(try RPCRequest(method: RPCMethod.scratchDelete, params: ScratchDeleteParams(worktreeID: wt.id)))
         #expect(del.success)
         #expect(try await db.worktrees.get(id: wt.id) == nil)
-        #expect(!FileManager.default.fileExists(atPath: wt.path))  // moved to Trash
+        #expect(!FileManager.default.fileExists(atPath: wt.localPath))  // moved to Trash
     }
 
     @Test func closesTerminalsAndTabsBeforeDeleting() async throws {
@@ -83,7 +83,7 @@ struct ScratchDeleteRPCTests {
         #expect(!del.success)
         #expect(del.error != nil)
         #expect(try await db.worktrees.get(id: wt.id) != nil)  // row survives so a retry is possible
-        #expect(FileManager.default.fileExists(atPath: wt.path))  // folder untouched
+        #expect(FileManager.default.fileExists(atPath: wt.localPath))  // folder untouched
     }
 
     /// Medium-1 review finding: `scratch.delete` must reclaim the scratch
@@ -108,7 +108,7 @@ struct ScratchDeleteRPCTests {
             method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: "with-claude-scratchpad")))
         let wt = try created.decodeResult(Worktree.self)
 
-        let slug = ScratchpadCollector.slug(forWorktreePath: wt.path)
+        let slug = ScratchpadCollector.slug(forWorktreePath: wt.localPath)
         let claudeScratchDir = scratchpadBase.appendingPathComponent(slug)
         try FileManager.default.createDirectory(at: claudeScratchDir, withIntermediateDirectories: true)
         try "hi".write(to: claudeScratchDir.appendingPathComponent("f.txt"), atomically: true, encoding: .utf8)
@@ -145,7 +145,7 @@ struct ScratchDeleteRPCTests {
             method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: "with-claude-scratchpad-disabled")))
         let wt = try created.decodeResult(Worktree.self)
 
-        let slug = ScratchpadCollector.slug(forWorktreePath: wt.path)
+        let slug = ScratchpadCollector.slug(forWorktreePath: wt.localPath)
         let claudeScratchDir = scratchpadBase.appendingPathComponent(slug)
         try FileManager.default.createDirectory(at: claudeScratchDir, withIntermediateDirectories: true)
 

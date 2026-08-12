@@ -1999,3 +1999,229 @@ def test_a_forged_glob_cannot_split_the_empty_glob_error(
 
     lines = _forged_lines(capsys.readouterr().err)
     _assert_one_line_and_inert(lines, "no specialist findings files match")
+
+
+# --- the infrastructure-failure channel --------------------------------------
+#
+# The session's deterministic "I cannot review" path. Without it, a session
+# whose pinned-SHA diff errors has only bad options: an empty findings array
+# computes as APPROVE (an unreviewed PR goes green on the required check), and
+# a fabricated HIGH finding computes as REJECT — which the skip cache then
+# re-asserts against the diff's patch-id on every re-run. Failing validation
+# outright writes no verdict and records no marker, so the next run reviews
+# fresh.
+
+from validate import (  # noqa: E402
+    infrastructure_failure_message,
+    read_infrastructure_failure,
+)
+
+
+def test_infra_failure_preempts_everything_and_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Even with both specialist files present and valid, the channel wins.
+    for name in ("correctness", "conventions"):
+        _write_specialist_file(tmp_path, name)
+    _write(
+        tmp_path / "review-result.json",
+        {"infrastructure_failure": "pinned merge-base diff errored"},
+    )
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
+    assert exit_code == 1
+    assert not (tmp_path / "verdict.txt").exists()
+    err = capsys.readouterr().err
+    assert "review-infrastructure failure" in err
+    assert "pinned merge-base diff errored" in err
+    assert "NOT a verdict" in err
+
+
+def test_infra_failure_message_is_single_line_and_capped() -> None:
+    # A runaway or multi-line message must not mangle the single-line
+    # ::error:: annotation the workflow builds from the last error line.
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "review-result.json"
+        path.write_text(
+            json.dumps({"infrastructure_failure": "line one\nline two  " + "x" * 900}),
+            encoding="utf-8",
+        )
+        message = read_infrastructure_failure(str(path))
+    assert message is not None
+    assert "\n" not in message
+    assert message.startswith("line one line two x")
+    assert len(message) <= 500
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '{"infrastructure_failure": ""}',
+        '{"infrastructure_failure": "   "}',
+        '{"infrastructure_failure": 7}',
+        '["infrastructure_failure"]',
+        "not json at all",
+    ],
+)
+def test_non_messages_do_not_trigger_the_infra_channel(
+    tmp_path: Path, content: str
+) -> None:
+    # Empty, non-string, non-object, and unparseable shapes all fall through to
+    # the stall/schema diagnostics, which name those states more precisely.
+    path = tmp_path / "review-result.json"
+    path.write_text(content, encoding="utf-8")
+    assert read_infrastructure_failure(str(path)) is None
+
+
+def test_missing_result_file_is_not_an_infra_report(tmp_path: Path) -> None:
+    assert read_infrastructure_failure(str(tmp_path / "absent.json")) is None
+
+
+def test_specialist_infra_failure_fails_closed_despite_valid_everything(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A specialist whose pinned diff errored writes empty findings PLUS the
+    # schema-declared infrastructure_failure field. Everything else about the
+    # run is green — both lenses present, result file valid — and the run must
+    # still fail with no verdict: two empty findings files otherwise compute
+    # as APPROVE on a PR nobody reviewed, and the alternative signal (prose in
+    # the specialist's returned summary) depends on the orchestrator relaying
+    # it.
+    _write(
+        tmp_path / "findings-correctness.json",
+        {
+            "specialist": "correctness",
+            "findings": [],
+            "infrastructure_failure": "git diff <pinned> HEAD exited 128",
+        },
+    )
+    _write_specialist_file(tmp_path, "conventions")
+    _write_empty_result(tmp_path)
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
+    assert exit_code == 1
+    assert not (tmp_path / "verdict.txt").exists()
+    err = capsys.readouterr().err
+    assert "'correctness'" in err
+    assert "git diff <pinned> HEAD exited 128" in err
+    assert "NOT a verdict" in err
+    # And the lens is not misreported as having never run.
+    assert "never produced a findings file" not in err
+
+
+def test_the_schema_accepts_the_specialist_infra_field(tmp_path: Path) -> None:
+    # additionalProperties is false, so the field must be declared or the
+    # channel dies at schema validation with a misleading error.
+    path = _write(
+        tmp_path / "findings-correctness.json",
+        {
+            "specialist": "correctness",
+            "findings": [],
+            "infrastructure_failure": "diff errored",
+        },
+    )
+    assert validate_findings_file(path)["infrastructure_failure"] == "diff errored"
+
+
+def test_the_schema_rejects_findings_alongside_the_infra_field(
+    tmp_path: Path,
+) -> None:
+    # infrastructure_failure means "I could not review"; findings mean the
+    # review happened. A file claiming both is self-contradictory, and reading
+    # it as an infra abort would discard a run over a subordinate failure the
+    # specialist reviewed through — so the schema rejects the combination and
+    # the rejected-file diagnostics take over.
+    path = _write(
+        tmp_path / "findings-correctness.json",
+        {
+            "specialist": "correctness",
+            "findings": [_finding()],
+            "infrastructure_failure": "a subordinate git blame was denied",
+        },
+    )
+    with pytest.raises(SchemaValidationError):
+        validate_findings_file(path)
+
+
+def test_specialist_infra_failure_is_the_decisive_last_error_line(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The workflow annotates the LAST `error:` line. A result file with an
+    # uncovered disposition would otherwise print after the specialist's infra
+    # report and send the operator after the wrong problem.
+    _write(
+        tmp_path / "findings-correctness.json",
+        {
+            "specialist": "correctness",
+            "findings": [],
+            "infrastructure_failure": "pinned diff errored",
+        },
+    )
+    _write_specialist_file(tmp_path, "conventions")
+    _write(
+        tmp_path / "review-result.json",
+        {
+            "findings": [],
+            "disposition": [
+                {"id": "ghost-1", "action": "kept"}
+            ],
+            "comment_body": "## Review",
+        },
+    )
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
+    assert exit_code == 1
+    error_lines = [
+        line
+        for line in capsys.readouterr().err.splitlines()
+        if line.startswith("error: ")
+    ]
+    assert error_lines
+    assert "review-infrastructure failure" in error_lines[-1]
+    assert "disposition" not in error_lines[-1]
+
+
+def test_the_schema_accepts_a_null_infra_field_with_findings(
+    tmp_path: Path,
+) -> None:
+    # Null is a model's natural spelling of absence (matching every optional
+    # sibling: file, line, body, confidence). It must read as "no infra
+    # report" — findings allowed, if/then not triggered — never as a
+    # self-contradiction.
+    path = _write(
+        tmp_path / "findings-correctness.json",
+        {
+            "specialist": "correctness",
+            "findings": [_finding()],
+            "infrastructure_failure": None,
+        },
+    )
+    data = validate_findings_file(path)
+    assert data["infrastructure_failure"] is None
+    assert len(data["findings"]) == 1
+
+
+@pytest.mark.parametrize("value", ["", "   \n\t "])
+def test_a_blank_infra_field_reads_as_absence_in_schema_and_reader_alike(
+    tmp_path: Path, value: str
+) -> None:
+    # The schema's if/then and infrastructure_failure_message() must share one
+    # definition of "a report": substance after stripping. A blank string that
+    # the reader ignores but the schema treats as a report would discard a
+    # lens's genuine findings over a key that says nothing.
+    path = _write(
+        tmp_path / "findings-correctness.json",
+        {
+            "specialist": "correctness",
+            "findings": [_finding()],
+            "infrastructure_failure": value,
+        },
+    )
+    data = validate_findings_file(path)
+    assert len(data["findings"]) == 1
+    assert infrastructure_failure_message(data) is None

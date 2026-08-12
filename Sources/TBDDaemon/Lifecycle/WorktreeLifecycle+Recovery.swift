@@ -18,6 +18,7 @@ extension WorktreeLifecycle {
     /// startup BEFORE the per-repo reconcile loop.
     ///
     /// Per `.creating` row:
+    /// - Remote row → mark it `.failed`; see the guard below.
     /// - Checkout missing on disk → creation never completed; delete the row
     ///   (and its terminal/tab records).
     /// - Checkout exists and primary (non-pre-session) terminals exist → the
@@ -43,23 +44,51 @@ extension WorktreeLifecycle {
     /// ignores them.
     @discardableResult
     public func recoverCreatingWorktrees() async -> [Task<Void, Never>] {
+        // Location-neutral: this sweep is the only thing that resolves a
+        // `.creating` row, so fencing it to local rows would strand every
+        // remote one. The fence is the per-row guard below instead, which
+        // gives a remote row an outcome rather than skipping it.
         let creating = (try? await db.worktrees.list(status: .creating)) ?? []
         var resumed: [Task<Void, Never>] = []
-        for worktree in creating {
-            let terminals = (try? await db.terminals.list(worktreeID: worktree.id)) ?? []
+        for row in creating {
+            // A remote `.creating` row has no checkout to inspect and no
+            // pre-session wait to resume, and reconcile is fenced from remote
+            // rows too — so nothing else would ever resolve it and the lane
+            // would spin forever. Mark it `.failed`, the terminal state the
+            // creation flow already uses for a create that did not finish.
+            // Deleting instead would make "the create never ran" and "the row
+            // silently vanished" indistinguishable, and would orphan a session
+            // the provider may well have started before the daemon died.
+            guard row.location.isLocal else {
+                logger.warning("recovery: marking remote .creating worktree \(row.id, privacy: .public) as .failed — the daemon died mid-create and no other sweep resolves a remote creating row")
+                do {
+                    try await db.worktrees.updateStatus(id: row.id, status: .failed)
+                } catch {
+                    logger.warning("recovery: failed to mark remote .creating worktree \(row.id, privacy: .public) as .failed: \(error.localizedDescription, privacy: .public)")
+                }
+                continue
+            }
+
+            let terminals = (try? await db.terminals.list(worktreeID: row.id)) ?? []
             let preSessionTerminal = terminals.first { $0.label == TerminalLabel.preSession }
             let hasPrimaries = terminals.contains { $0.label != TerminalLabel.preSession }
 
-            guard FileManager.default.fileExists(atPath: worktree.path) else {
-                logger.warning("recovery: deleting .creating worktree \(worktree.id, privacy: .public) — checkout missing at \(worktree.path, privacy: .public)")
+            // Everything past here needs a directory, so convert once. The
+            // conversion also covers a local row with no path at all — the
+            // daemon computes the path before the insert, so that shape should
+            // not persist, and if it ever does it is the same "creation never
+            // completed" case as a missing checkout.
+            guard FileManager.default.fileExists(atPath: row.localPath),
+                  let worktree = LocalWorktree(row) else {
+                logger.warning("recovery: deleting .creating worktree \(row.id, privacy: .public) — checkout missing at \(row.localPath, privacy: .public)")
                 do {
-                    try await db.terminals.deleteForWorktree(worktreeID: worktree.id)
-                    try await db.tabs.deleteForWorktree(worktreeID: worktree.id)
+                    try await db.terminals.deleteForWorktree(worktreeID: row.id)
+                    try await db.tabs.deleteForWorktree(worktreeID: row.id)
                     // Hard delete: closed-terminal history (rows + files) goes too.
-                    try await db.terminalHistory.deleteForWorktree(worktreeID: worktree.id)
-                    try await db.worktrees.delete(id: worktree.id)
+                    try await db.terminalHistory.deleteForWorktree(worktreeID: row.id)
+                    try await db.worktrees.delete(id: row.id)
                 } catch {
-                    logger.warning("recovery: cleanup of missing-checkout worktree \(worktree.id, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+                    logger.warning("recovery: cleanup of missing-checkout worktree \(row.id, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
                 }
                 continue
             }
@@ -146,7 +175,7 @@ extension WorktreeLifecycle {
             let task = Task.detached { [self] in
                 await runPreSessionPhase3(
                     preSession: spawn,
-                    worktree: worktree, repo: repo,
+                    worktree: worktree.worktree, repo: repo,
                     worktreePath: worktree.path,
                     skipClaude: false,
                     archivedClaudeSessions: isMidRevive ? archivedSessions : nil,

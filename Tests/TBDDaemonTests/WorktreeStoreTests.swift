@@ -151,7 +151,7 @@ import TBDShared
         )
         try await db.worktrees.updatePath(id: wt.id, path: "/tmp/new/w")
         let fetched = try await db.worktrees.get(id: wt.id)
-        #expect(fetched?.path == "/tmp/new/w")
+        #expect(fetched?.localPath == "/tmp/new/w")
     }
 
     @Test func worktreeStoreCanMarkFailed() async throws {

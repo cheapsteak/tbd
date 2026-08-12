@@ -99,7 +99,7 @@ public struct DeletionQueueCollector: Sendable {
         scratchPrefix: String
     ) async -> [InterruptedArchive] {
         let surviving = worktrees.filter {
-            $0.status == .archived && FileManager.default.fileExists(atPath: $0.path)
+            $0.status == .archived && FileManager.default.fileExists(atPath: $0.localPath)
         }
 
         // repoPath -> (lockedPaths, listingSucceeded)
@@ -122,10 +122,10 @@ public struct DeletionQueueCollector: Sendable {
             let prefixes = wt.repoID.flatMap { prefixesByRepoID[$0] } ?? [scratchPrefix]
             var locked = false
             if let repoPath, let state = lockState[repoPath] {
-                locked = !state.ok || state.locked.contains(resolvedPath(wt.path))
+                locked = !state.ok || state.locked.contains(resolvedPath(wt.localPath))
             }
             return InterruptedArchive(
-                worktreeID: wt.id, path: wt.path,
+                worktreeID: wt.id, path: wt.localPath,
                 repoPath: repoPath, allowedPrefixes: prefixes, locked: locked,
                 archivedAt: wt.archivedAt
             )

@@ -49,9 +49,12 @@ extension RPCRouter {
         try await db.repos.updatePath(id: repo.id, path: newPath)
         repo.path = newPath
 
-        // 3 + 4. Rewrite worktree paths and repair git bookkeeping.
-        let activeWorktrees = try await db.worktrees.list(repoID: repo.id, status: .active)
-        let mainWorktrees = try await db.worktrees.list(repoID: repo.id, status: .main)
+        // 3 + 4. Rewrite worktree paths and repair git bookkeeping. Local rows
+        // only: every step below rewrites a filesystem path and shells out to
+        // `git worktree repair` against it. A remote row has no checkout to
+        // move, and relocating the repo on this machine says nothing about it.
+        let activeWorktrees = try await db.worktrees.listLocal(repoID: repo.id, status: .active)
+        let mainWorktrees = try await db.worktrees.listLocal(repoID: repo.id, status: .main)
         let allWorktrees = activeWorktrees + mainWorktrees
 
         var worktreesRepaired: [UUID] = []

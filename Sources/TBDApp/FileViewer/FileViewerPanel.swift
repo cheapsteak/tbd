@@ -144,7 +144,9 @@ private func parseBranchDiff(_ output: String) -> [BranchFileChange] {
 // MARK: - FileViewerPanel
 
 struct FileViewerPanel: View {
-    let worktree: Worktree
+    /// Every read below is of a directory on this disk, so the panel takes the
+    /// proven-local wrapper rather than a bare `Worktree`.
+    let worktree: LocalWorktree
     @EnvironmentObject var appState: AppState
 
     @State private var staged: [GitFileStatus] = []

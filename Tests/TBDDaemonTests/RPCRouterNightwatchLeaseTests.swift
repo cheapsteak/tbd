@@ -90,7 +90,7 @@ struct RPCRouterNightwatchLeaseTests {
 
         // The capability lives under TBD_HOME, never inside the shared desk.
         #expect(result.credentialFile.hasPrefix(home.path))
-        #expect(!result.credentialFile.hasPrefix(f.desk.path))
+        #expect(!result.credentialFile.hasPrefix(f.desk.localPath))
         let mode = try FileManager.default
             .attributesOfItem(atPath: result.credentialFile)[.posixPermissions]
         #expect((mode as? NSNumber)?.intValue == 0o600)

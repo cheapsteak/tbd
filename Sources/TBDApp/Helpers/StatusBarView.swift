@@ -5,11 +5,13 @@ import TBDShared
 struct StatusBarView: View {
     @EnvironmentObject var appState: AppState
 
-    /// Path + repo of the resolved single-selected worktree (nil when it has
-    /// no path yet). The caller resolves the selection once per body
-    /// evaluation and passes it in, so this never re-runs `findWorktree`.
-    private static func selectedWorktreeInfo(_ worktree: Worktree?) -> (path: String, repoID: UUID?)? {
-        guard let worktree, !worktree.path.isEmpty else { return nil }
+    /// Path + repo of the resolved single-selected worktree. Taking a
+    /// `LocalWorktree?` is what makes "nil when it has no path yet" true —
+    /// the wrapper refuses an empty path, so no hand-written guard is needed.
+    /// The caller resolves the selection once per body evaluation and passes
+    /// it in, so this never re-runs `findWorktree`.
+    private static func selectedWorktreeInfo(_ worktree: LocalWorktree?) -> (path: String, repoID: UUID?)? {
+        guard let worktree else { return nil }
         return (worktree.path, worktree.repoID)
     }
 
@@ -26,10 +28,10 @@ struct StatusBarView: View {
     /// Pure helper so tests can exercise the formatting without a view.
     /// `home` is injected for the same reason.
     static func locationLabel(
-        _ worktree: Worktree?,
+        _ worktree: LocalWorktree?,
         home: String = NSHomeDirectory()
     ) -> LocationLabel? {
-        guard let worktree, !worktree.path.isEmpty else { return nil }
+        guard let worktree else { return nil }
         let branch = worktree.branch.trimmingCharacters(in: .whitespacesAndNewlines)
         return LocationLabel(
             path: worktree.path,
@@ -76,7 +78,7 @@ struct StatusBarView: View {
     private var footerLabel: (text: String, tooltip: String?) {
         let version = "v\(TBDConstants.version)"
         guard let sourcePath = Self.sourceWorktreePath,
-              let worktree = appState.worktrees.values.flatMap({ $0 }).first(where: { $0.path == sourcePath }) else {
+              let worktree = appState.worktrees.values.flatMap({ $0 }).first(where: { $0.localPath == sourcePath }) else {
             return (version, nil)
         }
         return (worktree.displayName, version)
@@ -87,7 +89,9 @@ struct StatusBarView: View {
         // selectedWorktreeInfo (the editor button) uses it, instead of
         // re-running findWorktree per render.
         let selected = appState.selectedWorktreeIDs.count == 1
-            ? appState.selectedWorktreeIDs.first.flatMap { appState.findWorktree(id: $0) }
+            ? appState.selectedWorktreeIDs.first
+                .flatMap { appState.findWorktree(id: $0) }
+                .flatMap(LocalWorktree.init)
             : nil
         let selectedInfo = Self.selectedWorktreeInfo(selected)
         HStack {

@@ -1219,6 +1219,21 @@ public final class TBDDatabase: Sendable {
                 type: .boolean, defaults: false)
         }
 
+        // Where a worktree's files live. Backfilling 'local' states a fact
+        // rather than a preference — every pre-v70 row IS local — so no later
+        // migration has to force it (contrast auto_hibernate_enabled, whose
+        // backfilled default needed a forcing UPDATE in v50). `providerName`
+        // and `providerSessionID` are set together with location = 'remote'
+        // and are null for every local row.
+        migrator.registerMigration("v70_worktree_location") { db in
+            try db.addColumnIfMissing(
+                table: "worktree", column: "location", type: .text, defaults: "local")
+            try db.addColumnIfMissing(
+                table: "worktree", column: "providerName", type: .text)
+            try db.addColumnIfMissing(
+                table: "worktree", column: "providerSessionID", type: .text)
+        }
+
         return migrator
     }
 }

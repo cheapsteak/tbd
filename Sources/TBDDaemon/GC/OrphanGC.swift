@@ -234,7 +234,7 @@ public actor OrphanGC {
         // `.deleting/<uuid>` is there because TBD renamed it there, so it
         // needs no provenance gate.
         for row in archived {
-            let parent = (row.path as NSString).deletingLastPathComponent
+            let parent = (row.localPath as NSString).deletingLastPathComponent
             guard parent.hasPrefix("/"), parent != "/" else { continue }
             pools.insert(parent)
         }
@@ -365,9 +365,9 @@ public actor OrphanGC {
         dryRun: Bool, planned: inout [String]
     ) async {
         var goneByRepo: [String: [String]] = [:]
-        for row in archived where !FileManager.default.fileExists(atPath: row.path) {
+        for row in archived where !FileManager.default.fileExists(atPath: row.localPath) {
             guard let repoID = row.repoID, let repoPath = repoPathByID[repoID] else { continue }
-            goneByRepo[repoPath, default: []].append(row.path)
+            goneByRepo[repoPath, default: []].append(row.localPath)
         }
 
         for (repoPath, paths) in goneByRepo.sorted(by: { $0.key < $1.key }) {
@@ -425,7 +425,16 @@ public actor OrphanGC {
         planned: inout [String], reaped: inout Int
     ) async {
         let repoPathByID = Dictionary(uniqueKeysWithValues: repos.map { ($0.id, $0.path) })
+        // Narrowed to local rows, and that is load-bearing rather than
+        // tidiness: "its directory is already gone" is the whole reap
+        // criterion, and a remote row's path — the synthetic `remote://` URI —
+        // is absent from disk by construction, so every archived remote lane
+        // would otherwise be a standing reap candidate on every sweep. The
+        // narrowing happens here rather than at the caller's shared read
+        // because `reclaimDeletionQueue` consumes that same list and asks a
+        // different question of it.
         let gone = archived
+            .compactMap(LocalWorktree.init)
             .filter { !FileManager.default.fileExists(atPath: $0.path) }
             .map { (worktreePath: $0.path, repoPath: $0.repoID.flatMap { repoPathByID[$0] } ?? "") }
 
@@ -471,7 +480,11 @@ public actor OrphanGC {
             """)
             return
         }
-        guard let rows = try? await db.worktrees.list(repoID: repoID) else { return }
+        // `listLocal` for the same reason the sweep's own reconciliation
+        // narrows: a remote row's synthetic `remote://` path is absent from
+        // disk by construction, which is exactly the shape `reconcile` reads
+        // as "the worktree is gone, reap its scratchpad".
+        guard let rows = try? await db.worktrees.listLocal(repoID: repoID) else { return }
         let pairs = rows.map { (worktreePath: $0.path, repoPath: repoPath) }
         let records = await scratchpadCollector.reconcile(knownPaths: pairs, now: now())
         for record in records {

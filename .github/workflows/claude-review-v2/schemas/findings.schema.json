@@ -9,10 +9,22 @@
     "findings": {
       "type": "array",
       "items": { "$ref": "#/$defs/finding" }
+    },
+    "infrastructure_failure": {
+      "type": ["string", "null"],
+      "description": "The specialist's deterministic 'I could not review' signal: set when the pinned merge-base diff itself errored, alongside an empty findings array. validate.py fails the run closed when any specialist file carries a non-empty string value — an empty findings array alone would compute as APPROVE, greening a PR nobody reviewed, and escalation via prose in the specialist's returned summary depends on the orchestrator noticing it. Nullable like every optional sibling: a model's natural null-for-absence must read as absence (no infra report, findings allowed), not trip validation."
     }
   },
   "required": ["specialist", "findings"],
   "additionalProperties": false,
+  "if": {
+    "required": ["infrastructure_failure"],
+    "properties": { "infrastructure_failure": { "type": "string", "pattern": "\\S" } }
+  },
+  "then": {
+    "properties": { "findings": { "maxItems": 0 } },
+    "$comment": "infrastructure_failure (as a string with substance — the \\S pattern makes empty and whitespace-only strings read as absence, exactly matching validate.py's infrastructure_failure_message(), and a null constrains nothing either) means 'I could not review', so findings alongside it are a self-contradiction — either the review happened or it didn't. Enforcing the scope here keeps the channel from discarding a run over a subordinate failure the specialist reviewed through: a file carrying both is rejected by schema with a message naming the contradiction, instead of being read as an infra abort."
+  },
   "$defs": {
     "finding": {
       "type": "object",

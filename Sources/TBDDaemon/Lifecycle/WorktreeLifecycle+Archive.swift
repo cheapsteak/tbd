@@ -45,7 +45,7 @@ extension WorktreeLifecycle {
     /// Phase 1 (fast): Validates, updates DB status, kills tmux windows.
     /// Returns the worktree and repo for phase 2.
     public func beginArchiveWorktree(worktreeID: UUID, force: Bool = false) async throws -> (Worktree, Repo) {
-        guard let worktree = try await db.worktrees.get(id: worktreeID) else {
+        guard let worktree = try await db.worktrees.getLocal(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
 
@@ -76,8 +76,8 @@ extension WorktreeLifecycle {
         // captured before we lose the live worktree. Without this, revive
         // would later try to check out a stale branch that no longer exists.
         // git canonicalizes worktree paths (e.g. /var → /private/var on macOS),
-        // so compare resolved-symlink forms when matching against `worktree.path`.
-        let resolvedWtPath = (URL(fileURLWithPath: worktree.path).resolvingSymlinksInPath()).path
+        // so compare resolved-symlink forms when matching against `worktree.localPath`.
+        let resolvedWtPath = (URL(fileURLWithPath: worktree.localPath).resolvingSymlinksInPath()).path
         if let gitWorktrees = try? await git.worktreeList(repoPath: repo.path),
            let gitWt = gitWorktrees.first(where: {
                let resolvedGitPath = (URL(fileURLWithPath: $0.path).resolvingSymlinksInPath()).path
@@ -97,11 +97,11 @@ extension WorktreeLifecycle {
         // exists on disk. Persisted as a fallback for revive when the branch
         // has been renamed or deleted.
         var capturedSHA: String? = nil
-        if FileManager.default.fileExists(atPath: worktree.path) {
+        if FileManager.default.fileExists(atPath: worktree.localPath) {
             do {
-                capturedSHA = try await git.headSHA(worktreePath: worktree.path)
+                capturedSHA = try await git.headSHA(worktreePath: worktree.localPath)
             } catch {
-                archiveLogger.warning("archive: failed to capture HEAD SHA for \(worktreeID, privacy: .public) at \(worktree.path, privacy: .public): \(error, privacy: .public)")
+                archiveLogger.warning("archive: failed to capture HEAD SHA for \(worktreeID, privacy: .public) at \(worktree.localPath, privacy: .public): \(error, privacy: .public)")
             }
         }
 
@@ -128,7 +128,7 @@ extension WorktreeLifecycle {
             await pendingQuestions.clear(terminalID: terminal.id)
         }
 
-        return (worktree, repo)
+        return (worktree.worktree, repo)
     }
 
     /// Phase 2 (slow, fire-and-forget): Runs archive hook and removes git worktree.
@@ -137,7 +137,7 @@ extension WorktreeLifecycle {
         if !force {
             let archiveHookPath = hooks.resolve(
                 event: .archive,
-                repoPath: worktree.path,
+                repoPath: worktree.localPath,
                 appHookPath: worktree.repoID.map {
                     TBDConstants.hookPath(repoID: $0, eventName: HookEvent.archive.rawValue)
                 }
@@ -145,12 +145,12 @@ extension WorktreeLifecycle {
             if let hookPath = archiveHookPath {
                 _ = try? await hooks.execute(
                     hookPath: hookPath,
-                    cwd: worktree.path,
+                    cwd: worktree.localPath,
                     env: [
                         "TBD_EVENT": "archive",
                         "TBD_WORKTREE_ID": worktree.id.uuidString,
                         "TBD_WORKTREE_NAME": worktree.name,
-                        "TBD_WORKTREE_PATH": worktree.path,
+                        "TBD_WORKTREE_PATH": worktree.localPath,
                         "TBD_REPO_PATH": repo.path,
                         "TBD_BRANCH": worktree.branch,
                     ],
@@ -168,7 +168,7 @@ extension WorktreeLifecycle {
         // archive completes regardless of tree size and the bytes are reclaimed
         // afterwards with no clock attached.
         do {
-            let queued = try deletionQueue.enqueue(worktreePath: worktree.path)
+            let queued = try deletionQueue.enqueue(worktreePath: worktree.localPath)
 
             // The directory no longer sits at the registered path, so git's
             // administrative entry is stale — drop it. A failure here is
@@ -183,7 +183,7 @@ extension WorktreeLifecycle {
             } catch {
                 archiveLogger.error("""
                 archive: prune failed for \(repo.path, privacy: .public) \
-                after queueing \(worktree.path, privacy: .public): \(error, privacy: .public)
+                after queueing \(worktree.localPath, privacy: .public): \(error, privacy: .public)
                 """)
             }
 
@@ -195,7 +195,7 @@ extension WorktreeLifecycle {
             // the event-driven scratchpad cleanup this callback exists to
             // trigger prompt even when the drain that follows is slow.
             if let onWorktreeRemoved {
-                await onWorktreeRemoved(worktree.path, repo.path)
+                await onWorktreeRemoved(worktree.localPath, repo.path)
             }
 
             // Reclaim the bytes inline, with no deadline attached. Every
@@ -213,26 +213,26 @@ extension WorktreeLifecycle {
             await deletionQueue.drain(queued)
         } catch {
             archiveLogger.error("""
-            archive: could not queue \(worktree.path, privacy: .public) for deletion \
+            archive: could not queue \(worktree.localPath, privacy: .public) for deletion \
             (\(error, privacy: .public)) — falling back to in-place removal
             """)
             do {
                 try await git.worktreeRemove(
                     repoPath: repo.path,
-                    worktreePath: worktree.path,
+                    worktreePath: worktree.localPath,
                     timeout: GitManager.worktreeRemoveFallbackTimeout
                 )
                 // Only claim the directory is gone when it actually is. This
                 // callback drives scratchpad reclamation, whose consumer
                 // previously had to re-check the path itself because this
                 // fired unconditionally after a swallowed failure.
-                let removed = !FileManager.default.fileExists(atPath: worktree.path)
+                let removed = !FileManager.default.fileExists(atPath: worktree.localPath)
                 if removed, let onWorktreeRemoved {
-                    await onWorktreeRemoved(worktree.path, repo.path)
+                    await onWorktreeRemoved(worktree.localPath, repo.path)
                 }
             } catch {
                 archiveLogger.error("""
-                archive: in-place removal of \(worktree.path, privacy: .public) \
+                archive: in-place removal of \(worktree.localPath, privacy: .public) \
                 also failed: \(error, privacy: .public) — the GC sweep will retry
                 """)
             }
@@ -266,10 +266,10 @@ extension WorktreeLifecycle {
         if case .preSessionPending(_, let phase3) = completion {
             await phase3.value
         }
-        guard let revived = try await db.worktrees.get(id: worktreeID) else {
+        guard let revived = try await db.worktrees.getLocal(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
-        return revived
+        return revived.worktree
     }
 
     /// Non-blocking revive. Validates, re-adds the git worktree, then:
@@ -290,7 +290,7 @@ extension WorktreeLifecycle {
     /// with revive semantics: the archived sessions are restored into
     /// terminals and the row finishes via `.revive(clearSessions: true)`.
     public func beginReviveWorktree(worktreeID: UUID, skipClaude: Bool = false, cols: Int? = nil, rows: Int? = nil, preferredSessionID: String? = nil) async throws -> WorktreeReviveCompletion {
-        guard let worktree = try await db.worktrees.get(id: worktreeID) else {
+        guard let worktree = try await db.worktrees.getLocal(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
 
@@ -303,21 +303,21 @@ extension WorktreeLifecycle {
         }
 
         // Create parent directory if needed
-        let parentDir = (worktree.path as NSString).deletingLastPathComponent
+        let parentDir = (worktree.localPath as NSString).deletingLastPathComponent
         try FileManager.default.createDirectory(
             atPath: parentDir,
             withIntermediateDirectories: true
         )
 
         // Preflight: ensure nothing exists at the target path on disk.
-        if FileManager.default.fileExists(atPath: worktree.path) {
-            throw WorktreeLifecycleError.worktreePathAlreadyExists(worktree.path)
+        if FileManager.default.fileExists(atPath: worktree.localPath) {
+            throw WorktreeLifecycleError.worktreePathAlreadyExists(worktree.localPath)
         }
 
         // Preflight: ensure git does not already have a worktree registered at this path.
         let existing = (try? await git.worktreeList(repoPath: repo.path)) ?? []
-        if existing.contains(where: { $0.path == worktree.path }) {
-            throw WorktreeLifecycleError.worktreeAlreadyRegistered(worktree.path)
+        if existing.contains(where: { $0.path == worktree.localPath }) {
+            throw WorktreeLifecycleError.worktreeAlreadyRegistered(worktree.localPath)
         }
 
         // Re-add the git worktree. Prefer the existing branch; fall back to
@@ -327,14 +327,14 @@ extension WorktreeLifecycle {
         if branchExists {
             try await git.worktreeAddExisting(
                 repoPath: repo.path,
-                worktreePath: worktree.path,
+                worktreePath: worktree.localPath,
                 branch: worktree.branch
             )
         } else if let sha = worktree.archivedHeadSHA, !sha.isEmpty {
             archiveLogger.info("revive: branch '\(worktree.branch, privacy: .public)' missing for \(worktreeID, privacy: .public), recreating from archived SHA \(sha, privacy: .public)")
             try await git.worktreeAddNewBranch(
                 repoPath: repo.path,
-                worktreePath: worktree.path,
+                worktreePath: worktree.localPath,
                 branch: worktree.branch,
                 sha: sha
             )
@@ -357,8 +357,8 @@ extension WorktreeLifecycle {
         // Gated path: a preSession hook must finish before the primary
         // terminals spawn. Mirrors completeCreateWorktree's 5a branch.
         if let preSession = try await spawnPreSessionTerminal(
-            worktree: worktree, repo: repo,
-            worktreePath: worktree.path,
+            worktree: worktree.worktree, repo: repo,
+            worktreePath: worktree.localPath,
             cols: cols, rows: rows
         ) {
             subscriptions?.broadcast(delta: .terminalCreated(TerminalDelta(
@@ -374,8 +374,8 @@ extension WorktreeLifecycle {
             let phase3 = Task.detached { [self] in
                 await runPreSessionPhase3(
                     preSession: preSession,
-                    worktree: worktree, repo: repo,
-                    worktreePath: worktree.path,
+                    worktree: worktree.worktree, repo: repo,
+                    worktreePath: worktree.localPath,
                     skipClaude: skipClaude,
                     archivedClaudeSessions: sessions,
                     cols: cols, rows: rows,
@@ -385,16 +385,16 @@ extension WorktreeLifecycle {
                     completionAction: .revive(clearSessions: !skipClaude)
                 )
             }
-            guard let pending = try await db.worktrees.get(id: worktreeID) else {
+            guard let pending = try await db.worktrees.getLocal(id: worktreeID) else {
                 throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
             }
-            return .preSessionPending(worktree: pending, phase3: phase3)
+            return .preSessionPending(worktree: pending.worktree, phase3: phase3)
         }
 
         // No preSession hook → spawn all terminals inline (today's behavior).
         _ = try await spawnPrimaryTerminals(
-            worktree: worktree, repo: repo,
-            worktreePath: worktree.path,
+            worktree: worktree.worktree, repo: repo,
+            worktreePath: worktree.localPath,
             skipClaude: skipClaude,
             archivedClaudeSessions: sessions,
             cols: cols, rows: rows,
@@ -421,9 +421,9 @@ extension WorktreeLifecycle {
         }
 
         // Return updated worktree
-        guard let revived = try await db.worktrees.get(id: worktreeID) else {
+        guard let revived = try await db.worktrees.getLocal(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
-        return .ready(revived)
+        return .ready(revived.worktree)
     }
 }

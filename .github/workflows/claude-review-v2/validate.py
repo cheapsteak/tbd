@@ -472,6 +472,44 @@ def validate_result_file(path: str) -> dict:
     return _validate_file(path, "review-result.schema.json")
 
 
+def read_infrastructure_failure(path: str) -> str | None:
+    """The session's deterministic fail-closed channel for "I cannot review".
+
+    When the review session cannot produce the PR's diff at all (the pinned
+    merge-base diff itself errors), it is told to write review-result.json as
+    `{"infrastructure_failure": "<why>"}` instead of inventing an empty review
+    — because an empty findings array computes as APPROVE, which would turn an
+    unreviewed PR into a green required check. This reader returns that message
+    (whitespace-collapsed, capped so a runaway string cannot mangle the
+    single-line ::error:: annotation) when the file is a JSON object carrying a
+    non-empty string under that key, and None otherwise. Missing or unparseable
+    files are None on purpose: those states belong to the stall and schema
+    diagnostics, which name them more precisely.
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return infrastructure_failure_message(data)
+
+
+def infrastructure_failure_message(data: dict) -> str | None:
+    """The dict's infrastructure_failure message, normalized, or None.
+
+    Whitespace-collapsed and capped so a runaway or multi-line string cannot
+    mangle the single-line ::error:: annotation the workflow builds from the
+    last error line. Empty and non-string values are None: they are not a
+    report, and the shapes that produce them belong to other diagnostics.
+    """
+    value = data.get("infrastructure_failure")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return " ".join(value.split())[:500]
+
+
 # --- main (the only I/O shell) ----------------------------------------------
 
 
@@ -506,6 +544,25 @@ def main() -> int:
         print("validation FAILED — no verdict written (gate fails closed)")
         return 1
 
+    # The infrastructure-failure channel preempts every other check: the
+    # session is saying it could not review at all, and the one wrong response
+    # to that is computing a verdict from whatever else reached disk. Exiting
+    # here writes no verdict.txt, the enforce step fails closed, nothing is
+    # posted, and no patch-id/verdict marker is recorded — so the failure is
+    # never cached against the diff the way a REJECT would be.
+    infra = read_infrastructure_failure(args.result_file)
+    if infra is not None:
+        print(
+            _sanitize_log_text(
+                "error: the review session reported a review-infrastructure "
+                f"failure and reviewed nothing: {infra} — this is NOT a "
+                "verdict on the PR; re-run the check"
+            ),
+            file=sys.stderr,
+        )
+        print("validation FAILED — no verdict written (gate fails closed)")
+        return 1
+
     failed = False
 
     specialist_paths = sorted(glob.glob(args.specialist_files))
@@ -514,6 +571,7 @@ def main() -> int:
     specialist_ids: list[str] = []
     seen_specialists: list[str] = []
     rejected_specialists: list[str] = []
+    infra_reports: list[tuple[str, str]] = []
     for path in specialist_paths:
         try:
             data = validate_findings_file(path)
@@ -529,9 +587,41 @@ def main() -> int:
             if name is not None:
                 rejected_specialists.append(name)
             continue
+        # A specialist's own fail-closed channel, schema-declared so the signal
+        # is machine-read rather than prose in a subagent summary the
+        # orchestrator may not relay. Without it, a specialist whose pinned
+        # diff errored has only an empty findings array to offer — which
+        # computes as APPROVE. The schema scopes the field: findings alongside
+        # it are a self-contradiction it rejects, so a file that reaches here
+        # with the field is a lens that reviewed nothing.
+        specialist_infra = infrastructure_failure_message(data)
+        if specialist_infra is not None:
+            infra_reports.append((str(data["specialist"]), specialist_infra))
         seen_specialists.append(data["specialist"])
         specialist_ids.extend(finding["id"] for finding in data["findings"])
-        print(_sanitize_log_text(f"ok: {path} ({len(data['findings'])} finding(s))"))
+        if specialist_infra is None:
+            print(_sanitize_log_text(f"ok: {path} ({len(data['findings'])} finding(s))"))
+
+    # Specialist infrastructure reports preempt every later check, exactly like
+    # the result-level channel: the run is an infrastructure failure, and the
+    # disposition/schema errors that would otherwise print afterwards would
+    # displace this as the LAST error line — the one the workflow annotates —
+    # sending an operator after the wrong problem.
+    if infra_reports:
+        for name, message in infra_reports:
+            # name and message are model-written; the choke point keeps a
+            # newline in either from forging a workflow command.
+            print(
+                _sanitize_log_text(
+                    f"error: specialist {name!r} reported a "
+                    f"review-infrastructure failure and reviewed nothing: "
+                    f"{message} — this is NOT a verdict on the PR; re-run "
+                    "the check"
+                ),
+                file=sys.stderr,
+            )
+        print("validation FAILED — no verdict written (gate fails closed)")
+        return 1
 
     # PRESENCE, decided before validity: a result file that exists but fails
     # the schema is a session that reached its merge and got it wrong, not a
