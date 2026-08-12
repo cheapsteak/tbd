@@ -44,6 +44,17 @@ struct EventDrivenTestClockSelfTests {
         )
     }
 
+    /// Lock-guarded latch for observing a specific issue from
+    /// `withKnownIssue`'s matcher, which runs outside the test body and is not
+    /// a place to mutate a captured `var`.
+    private final class Latch: @unchecked Sendable {
+        private let lock = NSLock()
+        private var latched = false
+
+        func latch() { lock.withLock { latched = true } }
+        var isLatched: Bool { lock.withLock { latched } }
+    }
+
     private struct HandshakeTimeout: Error, CustomStringConvertible {
         let what: String
         let timeout: Swift.Duration
@@ -394,5 +405,59 @@ struct EventDrivenTestClockSelfTests {
                     "an expired consumer must not poison the recorder for later waits")
             #expect(recorder.values == ["after"])
         }
+    }
+
+    /// A `FireRecorder` holds a single consumer slot and *documents* that its
+    /// callers await sequentially — but documented is not enforced, and this is
+    /// the enforcement. A second `next()` used to overwrite the slot in
+    /// silence, orphaning the first continuation: the displaced call's own hang
+    /// guard recognises a parked consumer by id, finds the newcomer's instead,
+    /// and so resumes nobody. The displaced `next()` then never returns at all —
+    /// a diagnostic-free hang, the worst failure shape available. It now
+    /// reports the contract and releases the displaced consumer with `nil`.
+    ///
+    /// The deliberately generous 10 s guards are what make the displacement
+    /// deterministic instead of a race against expiry: with nothing recorded,
+    /// whichever call parks first is still parked when the second arrives, so
+    /// exactly one displacement happens whichever order the executor picks.
+    /// Neither call sits out its guard on a healthy run — the displaced one
+    /// returns immediately and the `record` releases the survivor — so a
+    /// regression shows up as this test hanging, not as a slow pass.
+    @Test("two concurrent next() calls report the single-consumer contract instead of hanging")
+    func recorderReportsConcurrentConsumers() async {
+        let recorder = FireRecorder<String>()
+        let sawContractIssue = Latch()
+        var results: [String?] = []
+
+        await withKnownIssue("a second next() displaces the first, which the contract forbids",
+                             isIntermittent: false) {
+            results = await withTaskGroup(of: String?.self, returning: [String?].self) { group in
+                group.addTask { await recorder.next(timeout: .seconds(10)) }
+                group.addTask { await recorder.next(timeout: .seconds(10)) }
+                var settled: [String?] = []
+                if let displaced = await group.next() { settled.append(displaced) }
+                // The displaced call is back, so the survivor is the one parked
+                // in the slot: recording releases it.
+                recorder.record("after-displacement")
+                while let remaining = await group.next() { settled.append(remaining) }
+                return settled
+            }
+        } matching: { issue in
+            let text = (issue.error.map { String(describing: $0) } ?? "") + issue.description
+            if text.contains("single-consumer slot") { sawContractIssue.latch() }
+            return true
+        }
+
+        #expect(sawContractIssue.isLatched,
+                "displacing a parked consumer must name the contract, not pass in silence")
+        #expect(results.count == 2)
+        #expect(results.contains(nil), "the displaced next() must return nil rather than park forever")
+        #expect(results.contains("after-displacement"), "the surviving consumer must still be served")
+
+        // And the recorder is intact afterwards: the breach cost one wait, not
+        // the recorder.
+        recorder.record("after")
+        #expect(await recorder.next() == "after")
+        #expect(recorder.values == ["after-displacement", "after"])
     }
 }

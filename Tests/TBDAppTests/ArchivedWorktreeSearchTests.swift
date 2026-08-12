@@ -335,14 +335,6 @@ struct ArchivedRefreshPlanTests {
 struct SearchQueryDebouncerTests {
     private static let interval = Duration.milliseconds(250)
 
-    /// Hands the main actor back for a few real turns so a fire that *would*
-    /// land gets the chance to before a negative assertion reads the recorder.
-    /// One-sided by nature: it can only ever false-pass, exactly as the old
-    /// synchronous read after a megaYielding `advance` could.
-    private static func settle() async {
-        for _ in 0..<3 { try? await Task.sleep(for: .milliseconds(10)) }
-    }
-
     @Test("a burst within one window collapses to a single fire with the last value")
     func burstCollapsesToLastValue() async {
         let clock = EventDrivenTestClock()
@@ -367,11 +359,12 @@ struct SearchQueryDebouncerTests {
         debouncer.schedule("wolv") { [fired] in fired.record($0) }
 
         await clock.advanceWhenArmed(by: Self.interval - .milliseconds(1))
-        await Self.settle()
+        await settle()
         #expect(fired.values.isEmpty, "one millisecond short of the window must not fire")
 
         await clock.advance(by: .milliseconds(1))
         #expect(await fired.next() == "wolv")
+        #expect(fired.values == ["wolv"], "the boundary must fire once, not twice")
     }
 
     @Test("cancel() drops a pending fire")
@@ -385,7 +378,7 @@ struct SearchQueryDebouncerTests {
 
         debouncer.cancel()
         await clock.advance(by: Self.interval)
-        await Self.settle()
+        await settle()
         #expect(fired.values.isEmpty, "a cancelled query must never reach the daemon")
     }
 

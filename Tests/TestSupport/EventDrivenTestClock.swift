@@ -292,7 +292,10 @@ public final class EventDrivenTestClock: Clock, @unchecked Sendable {
     ///     from `waitForSuspension`, whose derivation against `.clockDriven`'s
     ///     240 s limit is documented in `ClockTestSupport.swift` and
     ///     `Tests/CLAUDE.md` ("Population is the scheduler"); the value is kept
-    ///     so that a chain of these still tallies the same way.
+    ///     so that a chain of these still tallies the same way. **On task
+    ///     cancellation the wait ends without a diagnostic**: the waiter is
+    ///     still released, but the failure belongs to whatever cancelled the
+    ///     test, not to this call site.
     ///   - sourceLocation: reported location of the diagnostic, so it lands on
     ///     the caller's line rather than in this file.
     ///
@@ -331,6 +334,13 @@ public final class EventDrivenTestClock: Clock, @unchecked Sendable {
                 return .waiter(timedOut: !armed)
             }
             group.addTask { [self] in
+                // `try?`, so a *cancelled* guard still runs the rescue below: a
+                // waiter parked on a continuation nobody is watching hangs, and
+                // that stays true when the reason the guard woke early is
+                // cancellation rather than expiry. Whether the wait *reports*
+                // anything is decided by the caller, which can tell the two
+                // apart; this child cannot, because the group's own
+                // `cancelAll()` cancels it on the healthy path too.
                 try? await Task.sleep(for: timeout)
                 // Deregistering is what makes this safe: whoever removes the
                 // waiter owns resuming it, so a signal arriving after the
@@ -369,7 +379,17 @@ public final class EventDrivenTestClock: Clock, @unchecked Sendable {
         // call leaves an entry behind for the next one to trip over.
         lock.withLock { _ = expiredArmingWaiters.remove(waiterID) }
 
-        if timedOut {
+        // Cancellation is not expiry. A cancelled enclosing task — `.clockDriven`'s
+        // time limit firing, a sibling's `cancelAll()` — cancels the hang guard's
+        // sleep, so the waiter is released early and `timedOut` says `true` for a
+        // timer that may well have been about to arm. Reporting that would put a
+        // fabricated "within 45 s" on an innocent call site and hide the real
+        // cause, so the diagnostic is suppressed and the attribution left to
+        // whatever did the cancelling. The check belongs *here* rather than in
+        // the guard child: cancellation is monotonic, so the enclosing task's
+        // flag is unambiguous, while the child cannot distinguish its parent's
+        // cancellation from the group's own `cancelAll()` on the healthy path.
+        if timedOut && !Task.isCancelled {
             Issue.record(
                 NoSleeperArmed(timeout: timeout, virtualNow: now),
                 sourceLocation: sourceLocation
@@ -554,7 +574,10 @@ public final class FireRecorder<Value: Sendable>: @unchecked Sendable {
     /// - Parameter timeout: hang guard only, in the same family as
     ///   ``EventDrivenTestClock/sleeperArmed(timeout:sourceLocation:)`` — it
     ///   turns "the effect never landed" into a named failure instead of a park
-    ///   until the suite time limit. Never reached on a healthy path.
+    ///   until the suite time limit. Never reached on a healthy path. **On task
+    ///   cancellation the wait ends without a diagnostic**: the consumer is
+    ///   still released and `nil` returned, but the failure belongs to whatever
+    ///   cancelled the test rather than to this call site.
     /// - Returns: the value, or `nil` after recording a diagnostic on timeout.
     ///   Returning an optional rather than continuing silently means a test that
     ///   asserts on the result gets a comparison against `nil` *after* the real
@@ -585,8 +608,27 @@ public final class FireRecorder<Value: Sendable>: @unchecked Sendable {
                         continuation.resume(returning: (nil, true))
                         return
                     }
+                    // A consumer already parked here means two `next()` calls
+                    // are in flight on one recorder, which the single-consumer
+                    // contract forbids. Overwriting the slot silently would
+                    // orphan that continuation — its own hang guard looks for
+                    // its own id and finds this one, so it resumes nobody and
+                    // the displaced `next()` never returns. Report the contract
+                    // breach and release the displaced consumer instead: a
+                    // diagnostic beats a hang. The displaced call returns `nil`
+                    // and, like any unsatisfied wait, records its own hang-guard
+                    // diagnostic on the way out — two issues for one breach,
+                    // both naming the offending test.
+                    let displaced = consumer
                     consumer = Consumer(id: consumerID, continuation: continuation)
                     lock.unlock()
+                    if let displaced {
+                        Issue.record(
+                            ConcurrentConsumers(),
+                            sourceLocation: sourceLocation
+                        )
+                        displaced.continuation.resume(returning: (nil, true))
+                    }
                 }
                 return .consumer(value: settled.value, timedOut: settled.timedOut)
             }
@@ -625,13 +667,35 @@ public final class FireRecorder<Value: Sendable>: @unchecked Sendable {
         // marker the guard left for a consumer that had already settled.
         lock.withLock { _ = expiredConsumers.remove(consumerID) }
 
-        if outcome.timedOut {
+        // Same rule as the clock's arming guard: a cancelled enclosing task
+        // cancels this hang guard's sleep, which releases the consumer with
+        // `timedOut == true` for a fire that was never given its chance. The
+        // wait still ends — `nil` is returned, so an assertion on the result
+        // still fails — but the "within 45 s" diagnostic would name an innocent
+        // call site for someone else's cancellation, so it is suppressed.
+        if outcome.timedOut && !Task.isCancelled {
             Issue.record(
                 NoValueRecorded(timeout: timeout, observed: values),
                 sourceLocation: sourceLocation
             )
         }
         return outcome.value
+    }
+}
+
+/// Diagnostic for two `next()` calls racing on one recorder. Thrown-`Error`
+/// shape for the same reason as ``NoSleeperArmed``: the text has to reach the
+/// primary failure line, because the symptom it explains (a `next()` that
+/// returned `nil` for no visible reason) is otherwise unattributable.
+private struct ConcurrentConsumers: Error, CustomStringConvertible {
+    var description: String {
+        """
+        FireRecorder: a second next() parked while one was already waiting — this \
+        recorder holds a single-consumer slot and its callers must await \
+        sequentially. The displaced wait was released with nil so it does not \
+        hang; await one next() at a time, or give each concurrent waiter its own \
+        FireRecorder.
+        """
     }
 }
 
@@ -650,4 +714,26 @@ private struct NoValueRecorded<Value: Sendable>: Error, CustomStringConvertible 
         test never fired, or virtual time was never advanced past its deadline.
         """
     }
+}
+
+// MARK: - Settling
+
+/// Hands the current executor back for a few real turns, so a fire that *would*
+/// land gets the chance to before a **negative** assertion reads the recorder.
+///
+/// Shared by the suites on ``EventDrivenTestClock`` because its ``advance`` does
+/// no yielding: where `TestClock.advance`'s trailing megaYield supplied this
+/// settling incidentally, here it is explicit and bounded. From a `@MainActor`
+/// test body this is what returns the main queue, which is the only way the
+/// deferred work becomes observable at all (`Tests/CLAUDE.md`, "`@MainActor`
+/// tests: suspend to drain, never pump").
+///
+/// **One-sided, and only ever worth this much:** it proves absence up to the
+/// settle window and no further, so a pathologically late fire can make a
+/// negative assertion false-*pass*, never false-fail. That is unchanged from
+/// the synchronous read it replaces. Every *positive* assertion must still go
+/// through ``FireRecorder/next(timeout:sourceLocation:)``, which waits for the
+/// effect instead of hoping it arrived.
+public func settle() async {
+    for _ in 0..<3 { try? await Task.sleep(for: .milliseconds(10)) }
 }

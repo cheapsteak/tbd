@@ -666,9 +666,13 @@ its `advanceWhenSuspended(by:)` — parks on a continuation instead of polling
 `advance` does **no** yielding, so it never accidentally runs the resumed task's
 post-sleep code for you. Positive assertions must await the paired
 `FireRecorder.next()`; negative ones read `values` (or `hasSleeper`) and stay
-one-sided as they always were. Either clock is a legitimate choice for a new
-clock-driven test. Existing `TestClock` suites migrate on field evidence, not
-wholesale — currently `AppearanceDebounceTests` and `SearchQueryDebouncerTests`,
+one-sided as they always were. **Count each `FireRecorder.next()` in the
+`.clockDriven` tally too**: it carries its own 45 s hang guard, exactly like a
+`waitForSuspension`, so a test with 2 `advanceWhenArmed` + 2 `next()` has a
+180 s worst case against the 240 s limit. Either clock is a legitimate choice
+for a new clock-driven test. Existing `TestClock` suites migrate on field
+evidence, not wholesale — currently `AppearanceDebounceTests` and
+`SearchQueryDebouncerTests`,
 which reproduced the starvation in a full-suite soak. Design:
 `docs/specs/2026-08-11-event-driven-test-clock-design.md`.
 

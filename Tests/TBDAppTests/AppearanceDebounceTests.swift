@@ -107,17 +107,6 @@ struct AppearanceDebounceTests {
         }
     }
 
-    /// Hands the main actor back for a few real turns, so a fire that *would*
-    /// land gets the chance to before a negative assertion reads the recorder.
-    ///
-    /// Negative assertions are one-sided by nature — a pathologically late fire
-    /// can make one false-*pass*, never false-fail — and that was equally true
-    /// when `TestClock.advance`'s trailing megaYield supplied the same settling
-    /// incidentally. This makes the settle explicit and bounded instead.
-    private static func settle() async {
-        for _ in 0..<3 { try? await Task.sleep(for: .milliseconds(10)) }
-    }
-
     @MainActor
     private static func withHarness(_ body: (Harness) async -> Void) async {
         let harness = Harness()
@@ -151,11 +140,12 @@ struct AppearanceDebounceTests {
             h.appearance.schemeID = "scheme-a"
 
             await h.clock.advanceWhenArmed(by: Self.interval - .milliseconds(1))
-            await Self.settle()
+            await settle()
             #expect(h.fired.values.isEmpty, "one millisecond short of the window must not fire")
 
             await h.clock.advance(by: .milliseconds(1))
             #expect(await h.fired.next() == "scheme-a")
+            #expect(h.fired.values == ["scheme-a"], "the boundary must fire once, not twice")
         }
     }
 
@@ -165,7 +155,7 @@ struct AppearanceDebounceTests {
         await Self.withHarness { h in
             h.appearance.schemeID = "scheme-a"
             await h.clock.advanceWhenArmed(by: .milliseconds(150))
-            await Self.settle()
+            await settle()
             #expect(h.fired.values.isEmpty)
 
             // Restarts the window: the first sleeper is cancelled, a fresh
@@ -176,7 +166,7 @@ struct AppearanceDebounceTests {
             // left to signal is the new sleeper's.
             h.appearance.schemeID = "scheme-b"
             await h.clock.advanceWhenArmed(by: .milliseconds(150))
-            await Self.settle()
+            await settle()
             #expect(h.fired.values.isEmpty, "only 150ms since the restart — must not fire yet")
 
             await h.clock.advance(by: .milliseconds(50))
@@ -214,7 +204,7 @@ struct AppearanceDebounceTests {
             // is a weaker proof than the old "a registered sleeper makes
             // `checkSuspension()` throw", and one-sided like every negative
             // here: it can only ever false-pass.
-            await Self.settle()
+            await settle()
             #expect(h.clock.hasSleeper == false,
                     "the subscriber-time replay must not arm a timer at all")
             #expect(h.fired.values.isEmpty)
@@ -265,7 +255,7 @@ struct AppearanceDebounceTests {
 
         appearance.schemeID = "scheme-a"
         await base.advanceWhenArmed(by: Self.interval)
-        await Self.settle()
+        await settle()
         #expect(fired.values.isEmpty, "a fire cancelled after its sleep resumed must not land")
     }
 
@@ -278,7 +268,7 @@ struct AppearanceDebounceTests {
 
             h.debouncer.cancel()
             await h.clock.advance(by: Self.interval)
-            await Self.settle()
+            await settle()
             #expect(h.fired.values.isEmpty)
         }
     }
