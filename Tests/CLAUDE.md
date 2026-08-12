@@ -655,6 +655,23 @@ same signature is ~180 s). When an assertion failure took far longer than an
 assertion failure should, suspect a swallowed waiter before you believe the
 message.
 
+### The event-driven alternative — `Tests/TestSupport/EventDrivenTestClock.swift`
+
+Everything above describes `TestClock` and stays true for its consumers.
+Alongside it, `EventDrivenTestClock` exists for suites whose arming handshake has
+been **observed** starving under saturation: it signals arming from inside the
+same critical section that registers the sleeper, so `advanceWhenArmed(by:)` —
+its `advanceWhenSuspended(by:)` — parks on a continuation instead of polling
+`checkSuspension()` and its megaYield. The trade to know before choosing it: its
+`advance` does **no** yielding, so it never accidentally runs the resumed task's
+post-sleep code for you. Positive assertions must await the paired
+`FireRecorder.next()`; negative ones read `values` (or `hasSleeper`) and stay
+one-sided as they always were. Either clock is a legitimate choice for a new
+clock-driven test. Existing `TestClock` suites migrate on field evidence, not
+wholesale — currently `AppearanceDebounceTests` and `SearchQueryDebouncerTests`,
+which reproduced the starvation in a full-suite soak. Design:
+`docs/specs/2026-08-11-event-driven-test-clock-design.md`.
+
 `PollerClock` is **not** this seam and must not be copied as a template — see
 its doc comment. Full rationale:
 `docs/specs/2026-07-24-test-hardening-design.md` §5.

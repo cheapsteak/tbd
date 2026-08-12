@@ -1,4 +1,3 @@
-import Clocks
 import Foundation
 import Testing
 @testable import TBDApp
@@ -320,74 +319,89 @@ struct ArchivedRefreshPlanTests {
 /// keystrokes must cost one RPC, not one per character. Entirely virtual time —
 /// see `Tests/CLAUDE.md` "Clock and date seams".
 ///
-/// `.serialized` for the same reason as `AppearanceDebounceTests`: every test
-/// here drives a `TestClock`, and each advance costs a `Task.megaYield()`; run
-/// in parallel these starve each other on the arming handshake.
+/// The clock is `EventDrivenTestClock`, whose arming signal is emitted from
+/// inside the same critical section that registers the sleeper, so
+/// `advanceWhenArmed` is not a megaYield-driven probe that a saturated process
+/// can starve — the failure this suite reproduced under full-suite load. Its
+/// `advance` does no yielding, so every *positive* assertion awaits
+/// `fired.next()`: advancing resumes the sleeper's continuation, it does not
+/// run the resumed task's next statement. Design:
+/// `docs/specs/2026-08-11-event-driven-test-clock-design.md`.
+///
+/// `.serialized` is retained as cheap isolation between four tests that each
+/// build their own debouncer; it is no longer load-bearing for the handshake.
 @MainActor
 @Suite("Archived search debounce", .clockDriven, .serialized)
 struct SearchQueryDebouncerTests {
     private static let interval = Duration.milliseconds(250)
 
-    @MainActor
-    private final class Box {
-        var values: [String] = []
+    /// Hands the main actor back for a few real turns so a fire that *would*
+    /// land gets the chance to before a negative assertion reads the recorder.
+    /// One-sided by nature: it can only ever false-pass, exactly as the old
+    /// synchronous read after a megaYielding `advance` could.
+    private static func settle() async {
+        for _ in 0..<3 { try? await Task.sleep(for: .milliseconds(10)) }
     }
 
     @Test("a burst within one window collapses to a single fire with the last value")
     func burstCollapsesToLastValue() async {
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let debouncer = SearchQueryDebouncer(interval: Self.interval, clock: clock)
-        let fired = Box()
+        let fired = FireRecorder<String>()
 
-        debouncer.schedule("w") { [fired] in fired.values.append($0) }
-        debouncer.schedule("wo") { [fired] in fired.values.append($0) }
-        debouncer.schedule("wolv") { [fired] in fired.values.append($0) }
+        debouncer.schedule("w") { [fired] in fired.record($0) }
+        debouncer.schedule("wo") { [fired] in fired.record($0) }
+        debouncer.schedule("wolv") { [fired] in fired.record($0) }
 
-        await clock.advanceWhenSuspended(by: Self.interval)
+        await clock.advanceWhenArmed(by: Self.interval)
+        #expect(await fired.next() == "wolv")
         #expect(fired.values == ["wolv"])
     }
 
     @Test("nothing fires until the full interval has elapsed")
     func firesOnTheBoundary() async {
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let debouncer = SearchQueryDebouncer(interval: Self.interval, clock: clock)
-        let fired = Box()
+        let fired = FireRecorder<String>()
 
-        debouncer.schedule("wolv") { [fired] in fired.values.append($0) }
+        debouncer.schedule("wolv") { [fired] in fired.record($0) }
 
-        await clock.advanceWhenSuspended(by: Self.interval - .milliseconds(1))
+        await clock.advanceWhenArmed(by: Self.interval - .milliseconds(1))
+        await Self.settle()
         #expect(fired.values.isEmpty, "one millisecond short of the window must not fire")
 
         await clock.advance(by: .milliseconds(1))
-        #expect(fired.values == ["wolv"])
+        #expect(await fired.next() == "wolv")
     }
 
     @Test("cancel() drops a pending fire")
     func cancelDropsPendingFire() async {
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let debouncer = SearchQueryDebouncer(interval: Self.interval, clock: clock)
-        let fired = Box()
+        let fired = FireRecorder<String>()
 
-        debouncer.schedule("wolv") { [fired] in fired.values.append($0) }
-        await clock.advanceWhenSuspended(by: .milliseconds(100))
+        debouncer.schedule("wolv") { [fired] in fired.record($0) }
+        await clock.advanceWhenArmed(by: .milliseconds(100))
 
         debouncer.cancel()
         await clock.advance(by: Self.interval)
+        await Self.settle()
         #expect(fired.values.isEmpty, "a cancelled query must never reach the daemon")
     }
 
     @Test("queries separated by a full window fire twice, in order")
     func separatedQueriesFireTwice() async {
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let debouncer = SearchQueryDebouncer(interval: Self.interval, clock: clock)
-        let fired = Box()
+        let fired = FireRecorder<String>()
 
-        debouncer.schedule("wolv") { [fired] in fired.values.append($0) }
-        await clock.advanceWhenSuspended(by: Self.interval)
-        #expect(fired.values == ["wolv"])
+        debouncer.schedule("wolv") { [fired] in fired.record($0) }
+        await clock.advanceWhenArmed(by: Self.interval)
+        #expect(await fired.next() == "wolv")
 
-        debouncer.schedule("otter") { [fired] in fired.values.append($0) }
-        await clock.advanceWhenSuspended(by: Self.interval)
+        debouncer.schedule("otter") { [fired] in fired.record($0) }
+        await clock.advanceWhenArmed(by: Self.interval)
+        #expect(await fired.next() == "otter")
         #expect(fired.values == ["wolv", "otter"])
     }
 }
