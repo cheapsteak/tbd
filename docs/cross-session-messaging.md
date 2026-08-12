@@ -59,10 +59,32 @@ session's **next respawn or resume**; until then the running session
 still answers to its spawn-time name. Nothing breaks in the meantime —
 the listing tells the two apart, as described next.
 
-## Addressing a peer when names collide
+## Addressing a peer
 
-A name is a label, not a unique address. Two things make one name answer
-for several sessions:
+Addressing starts at the listing. Run `/list-agents` — or call the
+`ListAgents` tool — and each row carries the session's name and a short
+`[ref]`, an identifier unique to that live session, alongside its working
+directory and status.
+
+**Address a peer you have not messaged before as `name [ref]`.** A bare
+name may be refused even when exactly one row answers to it, and nothing
+is delivered when it is:
+
+```
+'acme-worker' is not an agent in this conversation. Re-send with the ref
+to confirm you mean: acme-worker [<ref>] — Claude session, on this
+machine, active 11h ago
+```
+
+The refusal names the ref you need, so a bare-name send costs a round
+trip rather than failing silently: re-send addressed as
+`acme-worker [<ref>]` and it lands. Sending with the ref up front skips
+that round trip. Once a message to that peer has gone through, the bare
+name works for it for the rest of the conversation.
+
+**The ref is also how you pick when a name is ambiguous.** A name is a
+label, not a unique address, and TBD makes one name answering for several
+sessions ordinary:
 
 - **One worktree, several Claude terminals.** Every Claude session spawned
   in a worktree gets that worktree's display name, so a worktree running
@@ -70,17 +92,12 @@ for several sessions:
 - **Two worktrees, one name.** Display names are yours to choose and
   nothing stops you reusing one.
 
-`/list-agents` handles this. Each row carries a short `[ref]` — an
-identifier unique to that live session — alongside the name, working
-directory, and status. Read the listing first, then:
-
-- if exactly one row answers to the name you want, address it by name;
-- if more than one does, address the one you want by its `[ref]`. The
-  working directory and status in the row are how you tell which is
-  which.
+The working directory and status in the row are how you tell which is
+which; the `[ref]` is how you say which one you meant.
 
 Pull a fresh listing rather than reusing one from earlier in a long
-conversation — the pool changes as sessions spawn, respawn, and exit.
+conversation — refs belong to live sessions, and the pool changes as
+sessions spawn, respawn, and exit.
 
 ## Reach
 

@@ -102,9 +102,12 @@ one and exists even when every name is current.
 
 Disambiguation therefore belongs at the addressing layer, not the naming
 one. `ListAgents` prints a short `[ref]` beside each row, unique per
-live session; a sender uses that ref whenever more than one row answers
-to the name it wants, and may use the plain name only when exactly one
-does. Keeping `--name` as the unadorned display name is what makes the
+live session, and a sender addresses a peer it has not messaged before
+as `name [ref]` — a bare name may be refused with an error naming the
+ref, measured even where exactly one row answered to that name, and the
+ref is likewise how a sender picks between rows sharing a name. Once a
+message to that peer has gone through, its bare name works. Keeping
+`--name` as the unadorned display name is what makes the
 listing legible against the app sidebar — a human reading either surface
 sees the same words — while the ref is what makes a row addressable.
 Decorating the name to force uniqueness would trade the first property

@@ -107,11 +107,15 @@ Two channels reach another TBD session.
 If `ListAgents` and `SendMessage` are among your tools, sibling sessions on this
 machine should show up in `ListAgents` — registration is best-effort, so a
 running session can be missing — and `SendMessage` hands one plain text,
-delivered between the recipient's turns. Rows are labelled with the
-worktree display name, which is **not** unique: several terminals in one
-worktree share it, and so can worktrees in different repos. `ListAgents` prints
-a short `[ref]` on each row; address a peer by that `[ref]` whenever more than
-one row shares a name. If those tools aren't there, use `tbd terminal send`.
+delivered between the recipient's turns. Each row carries the
+worktree display name plus a short `[ref]`. Address a peer you
+have not messaged before as `name [ref]`: a bare name may be refused with an
+error naming the ref you need, even when only one row answers to it, and the
+ref is also how you pick when several rows share a name (several terminals in
+one worktree do, and so can worktrees in different repos). Once a message to
+that peer has gone through, its bare name works. Refs belong to live sessions —
+re-read `ListAgents` instead of reusing an old listing. If those tools aren't
+there, use `tbd terminal send`.
 
 `tbd terminal send` / `tbd terminal output` (above) is the daemon-mediated
 channel: it works from any harness, and it can also drive input into a

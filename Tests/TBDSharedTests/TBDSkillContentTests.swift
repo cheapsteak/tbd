@@ -46,10 +46,14 @@ import Foundation
     #expect(body.contains("worktree display name"))
     #expect(body.contains("tbd terminal send"))
     #expect(body.contains("tbd terminal output"))
-    // Display names are not unique — several terminals share one worktree's,
-    // and worktrees in different repos can share one too — so the text must
-    // point at the per-row `[ref]` as the address.
-    #expect(body.contains("[ref]"))
+    // The `[ref]` is the address, not merely a tiebreak for ambiguous names:
+    // a peer that has not been messaged before must be addressed `name [ref]`,
+    // and a bare name is refused even where exactly one row answers to it.
+    // Pin the addressing form and the refusal together — text that described
+    // the ref as only-for-collisions would satisfy neither.
+    #expect(body.contains("name [ref]"))
+    #expect(body.contains("a bare name may be refused"))
+    #expect(body.contains("have not messaged before"))
     // Missing tools have several causes (four env killswitches, and the
     // non-Claude harnesses this same body is fed to), so the text must not
     // name one. It states the fallback instead.
