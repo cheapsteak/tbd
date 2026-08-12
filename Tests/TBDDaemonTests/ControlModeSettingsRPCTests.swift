@@ -60,11 +60,11 @@ struct ControlModeSettingsRPCTests {
         db: TBDDatabase,
         vending: FDVendingServer = FDVendingServer(),
         environment: [String: String] = [:],
-        tmuxVersion: TmuxVersion? = TmuxVersion(major: 3, minor: 6)
+        tmuxExecutableResolver: TmuxExecutableResolver
     ) -> TmuxControlModeBridge {
         TmuxControlModeBridge(
             supervisor: TmuxControlSupervisor(),
-            tmuxVersion: tmuxVersion,
+            tmuxExecutableResolver: tmuxExecutableResolver,
             environment: environment,
             fdVending: vending,
             persistedFlagProvider: { [config = db.config] in
@@ -104,19 +104,30 @@ struct ControlModeSettingsRPCTests {
 
     @Test("capabilities carries the tmux version and support flag")
     func capabilitiesCarriesVersion() async throws {
+        let tmux = try TmuxExecutableTestFixture(version: "3.6a")
+        defer { tmux.remove() }
         let (router, db) = try makeRouterAndDB()
-        router.controlMode = bridge(db: db, tmuxVersion: TmuxVersion(major: 3, minor: 6, suffix: "a"))
+        router.controlMode = bridge(
+            db: db,
+            tmuxExecutableResolver: tmux.resolver
+        )
         let response = await router.handle(RPCRequest(method: RPCMethod.daemonCapabilities))
         let result = try response.decodeResult(DaemonCapabilitiesResult.self)
+        #expect(result.controlModeEnabled == false)
         #expect(result.tmuxVersion == "3.6a")
         #expect(result.controlModeSupported == true)
     }
 
     @Test("capabilities reports unsupported (and gate closed) for tmux < 3.2 even with the flag on")
     func capabilitiesUnsupportedOldTmux() async throws {
+        let tmux = try TmuxExecutableTestFixture(version: "3.1")
+        defer { tmux.remove() }
         let (router, db) = try makeRouterAndDB()
         try await db.config.setControlModeEnabled(true)
-        router.controlMode = bridge(db: db, tmuxVersion: TmuxVersion(major: 3, minor: 1))
+        router.controlMode = bridge(
+            db: db,
+            tmuxExecutableResolver: tmux.resolver
+        )
         let response = await router.handle(RPCRequest(method: RPCMethod.daemonCapabilities))
         let result = try response.decodeResult(DaemonCapabilitiesResult.self)
         #expect(result.tmuxVersion == "3.1")
@@ -136,8 +147,10 @@ struct ControlModeSettingsRPCTests {
 
     @Test("capabilities reflects a flag flip without a daemon restart")
     func capabilitiesReEvaluatesFlag() async throws {
+        let tmux = try TmuxExecutableTestFixture()
+        defer { tmux.remove() }
         let (router, db) = try makeRouterAndDB()
-        router.controlMode = bridge(db: db)
+        router.controlMode = bridge(db: db, tmuxExecutableResolver: tmux.resolver)
 
         var response = await router.handle(RPCRequest(method: RPCMethod.daemonCapabilities))
         var result = try response.decodeResult(DaemonCapabilitiesResult.self)
@@ -147,6 +160,99 @@ struct ControlModeSettingsRPCTests {
         response = await router.handle(RPCRequest(method: RPCMethod.daemonCapabilities))
         result = try response.decodeResult(DaemonCapabilitiesResult.self)
         #expect(result.controlModeEnabled == true)
+    }
+
+    // Tier 2: real filesystem and a fixture-owned version subprocess.
+    @Test("capabilities and gate retry version detection after a fallback is saved")
+    func capabilitiesRetryVersionDetectionAfterSavedFallback() async throws {
+        let fixture = try TmuxVersionFallbackFixture()
+        defer { fixture.remove() }
+        let emptyDirectory = try fixture.directory(named: "empty-path")
+        let resolver = TmuxExecutableResolver(
+            environment: ["PATH": emptyDirectory.path],
+            configurationURL: fixture.configurationURL
+        )
+        let (router, db) = try makeRouterAndDB()
+        try await db.config.setControlModeEnabled(true)
+        let liveBridge = bridge(db: db, tmuxExecutableResolver: resolver)
+        router.controlMode = liveBridge
+
+        #expect(await liveBridge.currentTmuxVersion() == nil)
+        #expect(await liveBridge.gateEnabled() == false)
+
+        let executable = try fixture.versionExecutable(version: "3.6a")
+        try resolver.save(executable.path)
+
+        #expect(await liveBridge.currentTmuxVersion()?.description == "3.6a")
+        #expect(await liveBridge.gateEnabled() == true)
+        let response = await router.handle(RPCRequest(method: RPCMethod.daemonCapabilities))
+        let result = try response.decodeResult(DaemonCapabilitiesResult.self)
+        #expect(result.tmuxVersion == "3.6a")
+        #expect(result.controlModeSupported == true)
+        #expect(result.controlModeEnabled == true)
+    }
+
+    // Tier 2: real filesystem and fixture-owned version subprocesses.
+    @Test("capabilities and gate follow a changed saved fallback")
+    func capabilitiesFollowChangedSavedFallback() async throws {
+        let fixture = try TmuxVersionFallbackFixture()
+        defer { fixture.remove() }
+        let emptyDirectory = try fixture.directory(named: "empty-path")
+        let executableA = try fixture.versionExecutable(named: "tmux-a", version: "3.6")
+        let executableB = try fixture.versionExecutable(named: "tmux-b", version: "3.1")
+        let resolver = TmuxExecutableResolver(
+            environment: ["PATH": emptyDirectory.path],
+            configurationURL: fixture.configurationURL
+        )
+        try resolver.save(executableA.path)
+        let (router, db) = try makeRouterAndDB()
+        try await db.config.setControlModeEnabled(true)
+        let liveBridge = bridge(db: db, tmuxExecutableResolver: resolver)
+        router.controlMode = liveBridge
+
+        #expect(await liveBridge.currentTmuxVersion()?.description == "3.6")
+        #expect(await liveBridge.gateEnabled())
+
+        try resolver.save(executableB.path)
+
+        #expect(await liveBridge.currentTmuxVersion()?.description == "3.1")
+        #expect(await liveBridge.gateEnabled() == false)
+        let response = await router.handle(RPCRequest(method: RPCMethod.daemonCapabilities))
+        let result = try response.decodeResult(DaemonCapabilitiesResult.self)
+        #expect(result.tmuxVersion == "3.1")
+        #expect(result.controlModeSupported == false)
+        #expect(result.controlModeEnabled == false)
+    }
+
+    // Tier 2: real filesystem and fixture-owned version subprocesses.
+    @Test("capabilities and gate follow an executable replaced at the same path")
+    func capabilitiesFollowSamePathExecutableReplacement() async throws {
+        let fixture = try TmuxVersionFallbackFixture()
+        defer { fixture.remove() }
+        let emptyDirectory = try fixture.directory(named: "empty-path")
+        let executable = try fixture.versionExecutable(version: "3.6")
+        let resolver = TmuxExecutableResolver(
+            environment: ["PATH": emptyDirectory.path],
+            configurationURL: fixture.configurationURL
+        )
+        try resolver.save(executable.path)
+        let (router, db) = try makeRouterAndDB()
+        try await db.config.setControlModeEnabled(true)
+        let liveBridge = bridge(db: db, tmuxExecutableResolver: resolver)
+        router.controlMode = liveBridge
+
+        #expect(await liveBridge.currentTmuxVersion()?.description == "3.6")
+        #expect(await liveBridge.gateEnabled())
+
+        _ = try fixture.versionExecutable(version: "3.1")
+
+        #expect(await liveBridge.currentTmuxVersion()?.description == "3.1")
+        #expect(await liveBridge.gateEnabled() == false)
+        let response = await router.handle(RPCRequest(method: RPCMethod.daemonCapabilities))
+        let result = try response.decodeResult(DaemonCapabilitiesResult.self)
+        #expect(result.tmuxVersion == "3.1")
+        #expect(result.controlModeSupported == false)
+        #expect(result.controlModeEnabled == false)
     }
 
     /// Codable back-compat: capabilities JSON from a pre-M5 daemon (no new
@@ -164,6 +270,8 @@ struct ControlModeSettingsRPCTests {
 
     @Test("flag on, env off: attach proceeds (fd vended)")
     func attachProceedsOnFlag() async throws {
+        let tmux = try TmuxExecutableTestFixture()
+        defer { tmux.remove() }
         let (serverSide, clientSide) = try makeSocketPair()
         defer { Darwin.close(clientSide) }
 
@@ -172,7 +280,11 @@ struct ControlModeSettingsRPCTests {
         let (router, db) = try makeRouterAndDB()
         let worktreeID = try await makeWorktree(in: db)
         try await db.config.setControlModeEnabled(true)
-        router.controlMode = bridge(db: db, vending: vending)
+        router.controlMode = bridge(
+            db: db,
+            vending: vending,
+            tmuxExecutableResolver: tmux.resolver
+        )
 
         let result = try await attach(router, worktreeID: worktreeID, paneID: "%11", windowID: "@11")
         #expect(result.status == "pending")
@@ -182,8 +294,10 @@ struct ControlModeSettingsRPCTests {
         #expect(header.paneID == "%11")
     }
 
-    @Test("flag off, env off: attach is unavailable; flipping the flag affects the NEXT attach")
+    @Test("gate-off attach skips version detection; flipping the flag affects the NEXT attach")
     func toggleMidSessionAffectsNextAttach() async throws {
+        let tmux = try TmuxExecutableTestFixture()
+        defer { tmux.remove() }
         let (serverSide, clientSide) = try makeSocketPair()
         defer { Darwin.close(clientSide) }
 
@@ -191,21 +305,29 @@ struct ControlModeSettingsRPCTests {
         await vending.adoptConnection(fd: serverSide)
         let (router, db) = try makeRouterAndDB()
         let worktreeID = try await makeWorktree(in: db)
-        router.controlMode = bridge(db: db, vending: vending)
+        router.controlMode = bridge(
+            db: db,
+            vending: vending,
+            tmuxExecutableResolver: tmux.resolver
+        )
 
         let before = try await attach(router, worktreeID: worktreeID, paneID: "%12", windowID: "@12")
         #expect(before.status == "unavailable")
+        #expect(!FileManager.default.fileExists(atPath: tmux.invocationLogURL.path))
 
         try await setControlMode(router, enabled: true)
 
         let after = try await attach(router, worktreeID: worktreeID, paneID: "%12", windowID: "@12")
         #expect(after.status == "pending")
+        #expect(FileManager.default.fileExists(atPath: tmux.invocationLogURL.path))
         let (rxFD, _) = try SidecarTestSupport.receiveVend(from: clientSide)
         Darwin.close(rxFD)
     }
 
     @Test("env on, flag off: attach proceeds (env is the developer override)")
     func envOverridePrecedence() async throws {
+        let tmux = try TmuxExecutableTestFixture()
+        defer { tmux.remove() }
         let (serverSide, clientSide) = try makeSocketPair()
         defer { Darwin.close(clientSide) }
 
@@ -215,7 +337,11 @@ struct ControlModeSettingsRPCTests {
         let worktreeID = try await makeWorktree(in: db)
         try await db.config.setControlModeEnabled(false)
         router.controlMode = bridge(
-            db: db, vending: vending, environment: ["TBD_TMUX_CONTROL_MODE": "1"])
+            db: db,
+            vending: vending,
+            environment: ["TBD_TMUX_CONTROL_MODE": "1"],
+            tmuxExecutableResolver: tmux.resolver
+        )
 
         let result = try await attach(router, worktreeID: worktreeID, paneID: "%13", windowID: "@13")
         #expect(result.status == "pending")
@@ -225,12 +351,53 @@ struct ControlModeSettingsRPCTests {
 
     @Test("flag on but tmux < 3.2: attach stays unavailable")
     func flagOnOldTmuxUnavailable() async throws {
+        let tmux = try TmuxExecutableTestFixture(version: "3.1")
+        defer { tmux.remove() }
         let (router, db) = try makeRouterAndDB()
         let worktreeID = try await makeWorktree(in: db)
         try await db.config.setControlModeEnabled(true)
-        router.controlMode = bridge(db: db, tmuxVersion: TmuxVersion(major: 3, minor: 1))
+        router.controlMode = bridge(
+            db: db,
+            tmuxExecutableResolver: tmux.resolver
+        )
 
         let result = try await attach(router, worktreeID: worktreeID, paneID: "%14", windowID: "@14")
         #expect(result.status == "unavailable")
+    }
+}
+
+private struct TmuxVersionFallbackFixture {
+    let root: URL
+    let configurationURL: URL
+
+    init() throws {
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TmuxVersionFallbackTests-\(UUID().uuidString)", isDirectory: true)
+        configurationURL = root.appendingPathComponent("tmux-executable-path")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+    }
+
+    func directory(named name: String) throws -> URL {
+        let directory = root.appendingPathComponent(name, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        return directory
+    }
+
+    func versionExecutable(named name: String = "custom-tmux", version: String) throws -> URL {
+        let executable = root.appendingPathComponent(name)
+        let script = """
+        #!/bin/sh
+        printf '%s\\n' 'tmux \(version)'
+        """
+        try script.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: executable.path
+        )
+        return executable
+    }
+
+    func remove() {
+        try? FileManager.default.removeItem(at: root)
     }
 }

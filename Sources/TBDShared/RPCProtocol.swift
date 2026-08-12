@@ -1994,8 +1994,8 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// Effective control-mode gate: `(env || persisted flag) && tmux >= 3.2`,
     /// re-evaluated by the daemon on every call.
     public let controlModeEnabled: Bool
-    /// tmux version the daemon detected at startup (e.g. "3.6a"); nil when
-    /// detection failed (tmux missing/unparseable).
+    /// tmux version the daemon detects for this request (e.g. "3.6a"); nil
+    /// when detection fails (tmux missing/unparseable).
     public let tmuxVersion: String?
     /// Whether the detected tmux meets the control-mode minimum (>= 3.2).
     /// Computed daemon-side so the app never parses version strings.

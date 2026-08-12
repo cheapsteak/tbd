@@ -1,4 +1,5 @@
 import Foundation
+import TBDShared
 import os
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "TmuxManager")
@@ -1048,20 +1049,34 @@ public struct TmuxManager: Sendable {
 
     // MARK: - Private
 
-    /// Resolves the path to the tmux binary, checking common locations.
-    static func tmuxPath() -> String {
-        for candidate in ["/usr/bin/tmux", "/usr/local/bin/tmux", "/opt/homebrew/bin/tmux"] {
-            if FileManager.default.fileExists(atPath: candidate) {
-                return candidate
-            }
+    /// Resolves tmux from the daemon's inherited PATH, then the saved executable fallback.
+    static func tmuxPath(
+        path: String? = ProcessInfo.processInfo.environment["PATH"],
+        configurationURL: URL? = nil
+    ) -> String? {
+        var environment = ProcessInfo.processInfo.environment
+        if let path {
+            environment["PATH"] = path
+        } else {
+            environment.removeValue(forKey: "PATH")
         }
-        return "/usr/bin/tmux"
+        return TmuxExecutableResolver(
+            environment: environment,
+            configurationURL: configurationURL
+        ).resolve()?.path
     }
 
     @discardableResult
     private func runTmux(_ arguments: [String]) async throws -> String {
-        try await Self.runExternalCommand(
-            executable: Self.tmuxPath(),
+        guard let executable = Self.tmuxPath() else {
+            throw TmuxError.commandFailed(
+                command: "tmux " + arguments.joined(separator: " "),
+                status: 127,
+                output: "tmux executable is unavailable"
+            )
+        }
+        return try await Self.runExternalCommand(
+            executable: executable,
             arguments: arguments,
             label: "tmux",
             timeout: subprocessTimeout

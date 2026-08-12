@@ -528,11 +528,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             guard let tmuxBridge,
                   let processGeneration = beginGroupedViewerAttachmentConfirmation() else { return }
             let server = tmuxServer
-            let sessionName = TmuxBridge.sessionName(for: panelID)
+            let panelID = panelID
             Task { [weak self] in
                 let attached = await tmuxBridge.hasAttachedClient(
-                    server: server,
-                    sessionName: sessionName
+                    panelID: panelID,
+                    server: server
                 )
                 let shouldRetry = self?.groupedViewerAttachmentProbeDidComplete(
                     clientAttached: attached,
@@ -709,7 +709,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 prepared = value
             }
 
-            let tmuxPath = findExecutable(prepared.executablePath)
+            let tmuxPath = prepared.executablePath
             let processArgs = prepared.arguments
 
             debugLog("PANEL: Starting: \(tmuxPath) \(processArgs.joined(separator: " "))")
@@ -1404,13 +1404,5 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}
         func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
 
-        // MARK: - Helpers
-
-        private func findExecutable(_ name: String) -> String {
-            for path in ["/opt/homebrew/bin/\(name)", "/usr/local/bin/\(name)", "/usr/bin/\(name)"] {
-                if FileManager.default.isExecutableFile(atPath: path) { return path }
-            }
-            return "/usr/bin/env"
-        }
     }
 }

@@ -13,7 +13,20 @@ set -e
 #   scripts/restart.sh --wip    # force install even if on a WIP branch
 #   TBD_INSTALL_WIP=1 scripts/restart.sh # same as --wip
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="${BASH_SOURCE[0]%/*}"
+if [ "$SCRIPT_DIR" = "${BASH_SOURCE[0]}" ]; then
+    SCRIPT_DIR="."
+fi
+SCRIPT_DIR="$(cd "$SCRIPT_DIR" && pwd)"
+
+# The shell that installs this bundle defines the PATH contract for every TBD
+# process launched from it. Reject a missing contract before any build or
+# installation work begins.
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/restart-environment-lib.sh"
+require_restart_path "${PATH-}"
+
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_DIR="$REPO_ROOT/.build/debug"
 
 app_only=false
@@ -156,6 +169,10 @@ SOURCE_PLIST="$REPO_ROOT/Resources/TBDApp.Info.plist"
 
 mkdir -p "$BUNDLE_MACOS"
 
+# Recreate the generated plist from the machine-independent source every run,
+# then embed and verify the installation's exact PATH before signing.
+write_restart_environment_plist "$SOURCE_PLIST" "$BUNDLE_PLIST" "$PATH"
+
 # Resolve the absolute real path of the swift-build output. We need this
 # first so we can pass an absolute path to `ln` below (sidesteps any
 # cwd-relative resolution issues) and so we have a stable pgrep/pkill
@@ -173,11 +190,6 @@ APP_EXEC_PATH="$(/usr/bin/readlink -f "$BUILD_DIR/TBDApp")"
 # `ln -f` replaces any existing entry (including a stale symlink from
 # previous restart.sh versions) idempotently.
 ln -f "$APP_EXEC_PATH" "$BUNDLE_MACOS/TBDApp"
-
-# Copy the Info.plist if missing or older than the source.
-if [ ! -f "$BUNDLE_PLIST" ] || [ "$SOURCE_PLIST" -nt "$BUNDLE_PLIST" ]; then
-    cp "$SOURCE_PLIST" "$BUNDLE_PLIST"
-fi
 
 # Copy the on-disk AppIcon.icns into the bundle. macOS reads this for
 # Notification Center banners, System Settings → Notifications, and Finder —
@@ -337,10 +349,10 @@ if [ "$daemon_only" = false ]; then
     echo "Starting app..."
     if [ "$install_to_applications" = true ]; then
         # Launch from /Applications (install-ready or --wip override)
-        open "$INSTALLED_BUNDLE" --stdout /tmp/tbdapp.log --stderr /tmp/tbdapp.log
+        open --env "PATH=$PATH" "$INSTALLED_BUNDLE" --stdout /tmp/tbdapp.log --stderr /tmp/tbdapp.log
     else
         # Launch from .build/debug (WIP worktree, no install to /Applications)
-        open "$BUNDLE_DIR" --stdout /tmp/tbdapp.log --stderr /tmp/tbdapp.log
+        open --env "PATH=$PATH" "$BUNDLE_DIR" --stdout /tmp/tbdapp.log --stderr /tmp/tbdapp.log
     fi
 
     # `open` returns immediately after asking LaunchServices to spawn the app.

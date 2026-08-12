@@ -694,7 +694,6 @@ struct PaneRepairCoordinatorTests {
         let clock = TestClock<Duration>()
         let bridge = TmuxControlModeBridge(
             supervisor: supervisor,
-            tmuxVersion: TmuxVersion(major: 3, minor: 6),
             environment: [:],
             fdVending: FDVendingServer(),
             commandProvider: { [server] in $0 == server ? client : nil },

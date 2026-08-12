@@ -21,7 +21,7 @@ import os
 /// once BEFORE `start()` and is read only by the reader thread afterwards.
 final class TmuxControlConnection: @unchecked Sendable {
     let serverName: String
-    private let tmuxBinary: String
+    private let tmuxBinary: String?
     private let logger = Logger(subsystem: "com.tbd.daemon", category: "tmuxControlMode")
 
     private let process = Process()
@@ -50,7 +50,7 @@ final class TmuxControlConnection: @unchecked Sendable {
     let events: AsyncStream<TmuxControlEvent>
     private let eventContinuation: AsyncStream<TmuxControlEvent>.Continuation
 
-    init(serverName: String, tmuxBinary: String = TmuxManager.tmuxPath()) {
+    init(serverName: String, tmuxBinary: String? = TmuxManager.tmuxPath()) {
         self.serverName = serverName
         self.tmuxBinary = tmuxBinary
         var continuation: AsyncStream<TmuxControlEvent>.Continuation!
@@ -61,6 +61,7 @@ final class TmuxControlConnection: @unchecked Sendable {
     /// Spawn `tmux -CC attach` over a pty and begin draining its output.
     /// Throws if the pty cannot be allocated or the process fails to launch.
     func start() throws {
+        guard let tmuxBinary else { throw POSIXError(.ENOENT) }
         var primary: Int32 = -1
         var replica: Int32 = -1
         var term = termios()

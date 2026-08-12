@@ -19,6 +19,16 @@ public enum TBDConstants {
     /// or empty, preserving production behavior.
     public static var configDir: URL { configDir(environment: ProcessInfo.processInfo.environment) }
 
+    /// File containing the user-selected tmux executable fallback. Honors
+    /// `TBD_HOME` so the app and daemon share the same configured value.
+    public static func tmuxExecutablePathFile(environment: [String: String]) -> URL {
+        configDir(environment: environment).appendingPathComponent("tmux-executable-path")
+    }
+
+    public static var tmuxExecutablePathFile: URL {
+        tmuxExecutablePathFile(environment: ProcessInfo.processInfo.environment)
+    }
+
     /// Unix socket path resolved from the given environment dictionary.
     /// Honors `TBD_SOCKET_PATH` independently of `TBD_HOME` — darwin caps
     /// `sun_path` at ~104 bytes, so a deep `TBD_HOME` can overflow even though

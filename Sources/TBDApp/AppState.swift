@@ -6,6 +6,10 @@ import TBDShared
 import os
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "AppState")
+private let tmuxResolutionLogger = Logger(
+    subsystem: "com.tbd.app",
+    category: "tmux"
+)
 /// Spec C §11.3 — log-only shadow-compare diagnostic. Dedicated category so
 /// it can be streamed/filtered independently of the rest of AppState.
 private let shadowCompareLogger = Logger(subsystem: "com.tbd.app", category: "panelShadow")
@@ -39,6 +43,41 @@ struct TabCloseContext: Equatable {
 struct ControlModePaneKey: Hashable {
     let worktreeID: UUID
     let paneID: String
+}
+
+enum TmuxStartupResolutionDiagnostic: Equatable {
+    case path(String)
+    case savedFallback(String)
+    case unavailable
+
+    init(resolution: TmuxExecutableResolution?) {
+        switch resolution {
+        case .some(let resolution):
+            switch resolution.source {
+            case .path:
+                self = .path(resolution.path)
+            case .savedFallback:
+                self = .savedFallback(resolution.path)
+            }
+        case .none:
+            self = .unavailable
+        }
+    }
+
+    func log() {
+        switch self {
+        case .path(let path):
+            tmuxResolutionLogger.notice(
+                "startup resolution source=PATH path=\(path, privacy: .public)"
+            )
+        case .savedFallback(let path):
+            tmuxResolutionLogger.notice(
+                "startup resolution source=saved-fallback path=\(path, privacy: .public)"
+            )
+        case .unavailable:
+            tmuxResolutionLogger.error("startup resolution source=unavailable")
+        }
+    }
 }
 
 @MainActor
@@ -1040,10 +1079,16 @@ final class AppState: ObservableObject {
     @Published var alertMessage: String? = nil
     @Published var alertIsError: Bool = false
 
+    @Published private(set) var tmuxExecutableResolution: TmuxExecutableResolution?
+    @Published private(set) var savedTmuxExecutablePath: String?
+    @Published private(set) var isTmuxLocationPromptPresented = false
+    private var hasCheckedTmuxAvailabilityAtStartup = false
+
     let themeStore = ThemeStore()
 
     let daemonClient = DaemonClient()
-    let tmuxBridge = TmuxBridge()
+    let tmuxExecutableResolver: TmuxExecutableResolver
+    let tmuxBridge: TmuxBridge
     /// App-scoped owner of control-mode stream readers (Phase 2 FD vending).
     /// Lives here — not on any view — so SwiftUI view destruction cannot tear
     /// down an active reader. Keyed by `FDVendHeader.routingKey`.
@@ -1214,8 +1259,15 @@ final class AppState: ObservableObject {
     /// so they never clobber the developer's running app preferences.
     let userDefaults: UserDefaults
 
-    init(userDefaults: UserDefaults = .standard) {
+    init(
+        userDefaults: UserDefaults = .standard,
+        tmuxExecutableResolver: TmuxExecutableResolver = TmuxExecutableResolver()
+    ) {
         self.userDefaults = userDefaults
+        self.tmuxExecutableResolver = tmuxExecutableResolver
+        self.tmuxBridge = TmuxBridge(tmuxExecutableResolver: tmuxExecutableResolver)
+        self.tmuxExecutableResolution = tmuxExecutableResolver.resolve()
+        self.savedTmuxExecutablePath = tmuxExecutableResolver.savedPath
         restoreLayouts()
         restorePaneHistories()
         restoreRemoteSessionDisplayNames()
@@ -1250,6 +1302,34 @@ final class AppState: ObservableObject {
                 startPolling()
             }
         }
+    }
+
+    func refreshTmuxExecutableState() {
+        savedTmuxExecutablePath = tmuxExecutableResolver.savedPath
+        tmuxExecutableResolution = tmuxExecutableResolver.resolve()
+    }
+
+    func checkTmuxAvailabilityAtStartup() {
+        guard !hasCheckedTmuxAvailabilityAtStartup else { return }
+        hasCheckedTmuxAvailabilityAtStartup = true
+        refreshTmuxExecutableState()
+        TmuxStartupResolutionDiagnostic(resolution: tmuxExecutableResolution).log()
+        isTmuxLocationPromptPresented = tmuxExecutableResolution == nil
+    }
+
+    func dismissTmuxLocationPrompt() {
+        isTmuxLocationPromptPresented = false
+    }
+
+    func saveTmuxExecutableFallback(_ path: String) throws {
+        try tmuxExecutableResolver.save(path)
+        refreshTmuxExecutableState()
+        isTmuxLocationPromptPresented = false
+    }
+
+    func clearTmuxExecutableFallback() throws {
+        try tmuxExecutableResolver.clear()
+        refreshTmuxExecutableState()
     }
 
     /// True when this process is a SwiftPM / XCTest test harness. Detected by

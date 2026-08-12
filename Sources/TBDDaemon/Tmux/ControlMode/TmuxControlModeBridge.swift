@@ -1,7 +1,8 @@
 import Foundation
+import TBDShared
 
-/// Bundles the per-daemon `TmuxControlSupervisor` with the once-detected tmux
-/// version so every `ensureServer()` call site can open a gated control-mode
+/// Bundles the per-daemon `TmuxControlSupervisor` with tmux version resolution
+/// so every `ensureServer()` call site can open a gated control-mode
 /// connection through a single shared owner.
 ///
 /// `Daemon` constructs exactly one of these at startup and hands the same
@@ -12,9 +13,9 @@ struct TmuxControlModeBridge: Sendable {
     /// The single per-daemon supervisor. Connections are keyed by server name
     /// and `ensureConnection` is idempotent, so all call sites share one.
     let supervisor: TmuxControlSupervisor
-    /// tmux version detected once at daemon startup; `nil` when detection
-    /// failed (tmux missing/unparseable), which keeps the gate closed.
-    let tmuxVersion: TmuxVersion?
+    /// Resolves PATH first and the live saved fallback second on every gate
+    /// and capabilities decision.
+    let tmuxExecutableResolver: TmuxExecutableResolver
     /// Environment the gate reads. Injectable so tests can flip the gate.
     let environment: [String: String]
     /// Sidecar over which attach handlers vend pane fds.
@@ -56,7 +57,7 @@ struct TmuxControlModeBridge: Sendable {
     let clock: any Clock<Duration>
 
     init(supervisor: TmuxControlSupervisor,
-         tmuxVersion: TmuxVersion?,
+         tmuxExecutableResolver: TmuxExecutableResolver = TmuxExecutableResolver(),
          environment: [String: String] = ProcessInfo.processInfo.environment,
          fdVending: FDVendingServer,
          readyTimeout: Duration = .seconds(5),
@@ -68,7 +69,7 @@ struct TmuxControlModeBridge: Sendable {
          clock: any Clock<Duration> = ContinuousClock()) {
         self.supervisor = supervisor
         self.clock = clock
-        self.tmuxVersion = tmuxVersion
+        self.tmuxExecutableResolver = tmuxExecutableResolver
         self.environment = environment
         self.fdVending = fdVending
         self.readyTimeout = readyTimeout
@@ -110,15 +111,43 @@ struct TmuxControlModeBridge: Sendable {
         }
     }
 
+    /// Current tmux version. Both the effective path and the version are
+    /// detected at use so Settings changes and in-place executable upgrades
+    /// take effect without a daemon restart.
+    func currentTmuxVersion() async -> TmuxVersion? {
+        guard let executablePath = tmuxExecutableResolver.resolve()?.path else { return nil }
+        return await TmuxVersion.detect(tmuxBinary: executablePath)
+    }
+
+    /// Effective gate decision and the version used for it, evaluated from one
+    /// snapshot so capability fields cannot disagree with the enabled state.
+    /// Capability queries report tmux support even while control mode is off,
+    /// so this path intentionally detects the version before applying the gate.
+    func currentGateState() async -> (enabled: Bool, tmuxVersion: TmuxVersion?) {
+        let version = await currentTmuxVersion()
+        let enabled = ControlModeGate.shouldEnable(
+            environment: environment,
+            persistedFlag: await persistedFlagProvider(),
+            tmuxVersion: version
+        )
+        return (enabled, version)
+    }
+
     /// Effective gate decision, evaluated fresh on every call:
     /// `(env opt-in || persisted flag) && tmux >= 3.2`. The persisted flag is
     /// read through `persistedFlagProvider`, so a Settings toggle takes
-    /// effect on the next decision without a daemon restart.
+    /// effect on the next decision without a daemon restart. Hot-path gate
+    /// checks avoid resolving or launching tmux while both opt-ins are off.
     func gateEnabled() async -> Bool {
-        ControlModeGate.shouldEnable(
+        let persistedFlag = await persistedFlagProvider()
+        guard ControlModeGate.optedIn(environment: environment) || persistedFlag else {
+            return false
+        }
+        return ControlModeGate.shouldEnable(
             environment: environment,
-            persistedFlag: await persistedFlagProvider(),
-            tmuxVersion: tmuxVersion)
+            persistedFlag: persistedFlag,
+            tmuxVersion: await currentTmuxVersion()
+        )
     }
 
     /// Open a logging-only `tmux -CC` connection for `serverName` when the

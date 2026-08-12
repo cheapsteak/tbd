@@ -6,6 +6,28 @@ import UniformTypeIdentifiers
 
 private typealias SwiftUIColor = SwiftUI.Color
 
+struct TmuxConfigurationPathPresentation: Equatable {
+    let fullPath: String
+    let displayPath: String
+
+    init(
+        configurationURL: URL = TBDConstants.tmuxExecutablePathFile,
+        homeDirectory: String = NSHomeDirectory()
+    ) {
+        fullPath = configurationURL.path
+        let home = homeDirectory.hasSuffix("/")
+            ? String(homeDirectory.dropLast())
+            : homeDirectory
+        if !home.isEmpty, fullPath == home {
+            displayPath = "~"
+        } else if !home.isEmpty, fullPath.hasPrefix(home + "/") {
+            displayPath = "~" + fullPath.dropFirst(home.count)
+        } else {
+            displayPath = fullPath
+        }
+    }
+}
+
 struct TerminalSettingsView: View {
     @EnvironmentObject var appearance: AppearanceSettings
     @EnvironmentObject var appState: AppState
@@ -20,6 +42,7 @@ struct TerminalSettingsView: View {
     @State private var pendingSchemeSwitch: String?
     @State private var saveAsError: String?
     @State private var showingPendingSwitchConfirm = false
+    @State private var tmuxFallbackDraft = ""
 
     var body: some View {
         Form {
@@ -134,6 +157,66 @@ struct TerminalSettingsView: View {
             }
 
             Section {
+                LabeledContent("Active executable") {
+                    if let resolution = appState.tmuxExecutableResolution {
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text(resolution.path)
+                                .font(.system(.body, design: .monospaced))
+                                .textSelection(.enabled)
+                            Text(resolution.source == .path ? "From PATH" : "Saved fallback")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        Text("Not found")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                TextField(
+                    "Fallback executable",
+                    text: $tmuxFallbackDraft,
+                    prompt: Text("/absolute/path/to/tmux")
+                )
+                .onSubmit { saveTmuxFallback() }
+
+                HStack {
+                    Button("Save") { saveTmuxFallback() }
+                    Button("Choose…") { chooseTmuxFallback() }
+                    Button("Clear") { clearTmuxFallback() }
+                        .disabled(appState.savedTmuxExecutablePath == nil)
+                }
+
+                LabeledContent("Fallback file") {
+                    HStack(spacing: 4) {
+                        let path = TmuxConfigurationPathPresentation()
+                        Text(path.displayPath)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(path.fullPath, forType: .string)
+                        } label: {
+                            Image(systemName: "doc.on.doc")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(.secondary)
+                        .help("Copy full path")
+                    }
+                }
+            } header: {
+                Text("tmux")
+            } footer: {
+                Text("TBD uses tmux from PATH when available. The saved executable is a fallback for app launches whose PATH does not contain tmux.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
                 Toggle("Auto-resize tmux windows to match the app pane (WIP)", isOn: $enableTerminalAutoResize)
                     .help("When on, TBD broadcasts the live pane size to the daemon and resizes every tmux window on app resize. Currently unstable — can leave panes smaller than the visible area and clip the bottom rows.")
             } header: {
@@ -160,6 +243,13 @@ struct TerminalSettingsView: View {
         }
         .formStyle(.grouped)
         .padding()
+        .onAppear {
+            appState.refreshTmuxExecutableState()
+            tmuxFallbackDraft = appState.savedTmuxExecutablePath ?? ""
+        }
+        .onChange(of: appState.savedTmuxExecutablePath) { _, savedPath in
+            tmuxFallbackDraft = savedPath ?? ""
+        }
         .sheet(isPresented: $showingSaveAsDialog, onDismiss: {
             pendingSchemeSwitch = nil
             saveAsError = nil
@@ -259,6 +349,47 @@ struct TerminalSettingsView: View {
     }
 
     // MARK: - Actions
+
+    private func saveTmuxFallback() {
+        do {
+            try appState.saveTmuxExecutableFallback(tmuxFallbackDraft)
+            tmuxFallbackDraft = appState.savedTmuxExecutablePath ?? ""
+        } catch {
+            showTmuxError(error)
+        }
+    }
+
+    private func chooseTmuxFallback() {
+        let panel = NSOpenPanel()
+        panel.title = "Locate tmux"
+        panel.message = "Choose the tmux executable."
+        panel.prompt = "Choose"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        do {
+            try appState.saveTmuxExecutableFallback(url.path)
+            tmuxFallbackDraft = appState.savedTmuxExecutablePath ?? ""
+        } catch {
+            showTmuxError(error)
+        }
+    }
+
+    private func clearTmuxFallback() {
+        do {
+            try appState.clearTmuxExecutableFallback()
+            tmuxFallbackDraft = ""
+        } catch {
+            showTmuxError(error)
+        }
+    }
+
+    private func showTmuxError(_ error: any Error) {
+        errorTitle = "Couldn’t save tmux"
+        importError = error.localizedDescription
+    }
 
     private func performSave() {
         do {
