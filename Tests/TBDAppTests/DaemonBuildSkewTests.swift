@@ -19,6 +19,32 @@ private let identity: @Sendable (String) -> String = { $0 }
     #expect(message == nil)
 }
 
+@Test func warningMessage_daemonMatchesSourceWorktreeReleaseBuild_returnsNil() {
+    // `scripts/restart.sh --release` topology: same worktree, optimized
+    // build. Only the .build subdirectory differs from the debug case, so
+    // this is a deliberate configuration choice and NOT cross-build skew.
+    let message = DaemonBuildSkew.warningMessage(
+        daemonExecutablePath: "/Users/me/proj/tbd/.build/release/TBDDaemon",
+        appSiblingDaemonPath: "/Applications/TBD.app/Contents/MacOS/TBDDaemon",
+        sourceWorktreePath: "/Users/me/proj/tbd",
+        resolvePath: identity
+    )
+    #expect(message == nil)
+}
+
+@Test func warningMessage_releaseDaemonFromOtherWorktree_stillWarns() {
+    // Widening to release must not blunt the real signal: a release daemon
+    // from a DIFFERENT worktree is still skew.
+    let otherBuild = "/Users/me/proj/tbd/.claude/worktrees/other-wt/.build/release/TBDDaemon"
+    let message = DaemonBuildSkew.warningMessage(
+        daemonExecutablePath: otherBuild,
+        appSiblingDaemonPath: "/Applications/TBD.app/Contents/MacOS/TBDDaemon",
+        sourceWorktreePath: "/Users/me/proj/tbd",
+        resolvePath: identity
+    )
+    #expect(message?.contains(otherBuild) == true)
+}
+
 @Test func warningMessage_daemonMatchesAppSibling_returnsNil() {
     // App-spawned daemon: TBDDaemon sits next to the app executable.
     let message = DaemonBuildSkew.warningMessage(
