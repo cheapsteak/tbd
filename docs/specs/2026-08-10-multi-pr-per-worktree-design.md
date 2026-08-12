@@ -101,10 +101,21 @@ value instead. This is the same reason `PRStatusManager` has never persisted
 **Hook binding** is the primary source, and the only one that can see a
 subagent's PR. `ClaudeHookOverlay` gains a `PostToolUse` entry matching `Bash`.
 The hook command reads its stdin into a shell variable, greps it for
-`gh pr create`, and only then pipes the payload to `tbd pr bind --from-hook`;
+`pr create`, and only then pipes the payload to `tbd pr bind --from-hook`;
 every other Bash call costs the hook's own shell, one `cat` command substitution
-and one `grep` — but no `tbd` spawn and no daemon round trip. The CLI reads the
-hook JSON, confirms `tool_input.command`
+and one `grep` — but no `tbd` spawn and no daemon round trip.
+
+That grep is a **cost optimization, never a gate**, and its pattern is
+deliberately wider than the rule it prefilters for: the tokenizer below is the
+sole authority on what counts as a create, and it can only judge payloads the
+grep lets through. So the pattern drops the `gh` adjacency entirely — requiring
+it silently discarded `gh -R owner/repo pr create` and `gh --repo owner/repo pr
+create`, the very flagged forms the tokenizer was built to accept, because the
+`&&` short-circuit meant the CLI never ran on them. The over-match is priced in:
+a payload that merely mentions "pr create" spawns one short-lived `tbd` that
+then declines to bind, while a false negative loses a binding silently.
+
+The CLI reads the hook JSON, confirms `tool_input.command`
 matches `gh pr create`, and extracts PR URLs from `tool_response` with
 
 ```

@@ -47,10 +47,10 @@ extension TBDHomeSerialized {
         let bash = postToolUse.first { $0["matcher"] as? String == "Bash" }
         #expect(bash != nil)
         let command = ((bash?["hooks"] as? [[String: Any]])?.first?["command"] as? String) ?? ""
-        // The grep prefilter is what keeps every other Bash call from spawning tbd.
-        #expect(command.contains("gh"))
-        #expect(command.contains("pr"))
-        #expect(command.contains("create"))
+        // The grep prefilter is what keeps every other Bash call from spawning
+        // tbd. What it actually matches is asserted by
+        // `prefilterAdmitsEveryBindableCreateForm` below, by running grep.
+        #expect(command.contains("grep -qE '\(ClaudeHookOverlay.prBindGrepPattern)'"))
         #expect(command.contains("pr bind --from-hook"))
         // A hook must never fail the tool call it observes.
         #expect(command.contains("|| true"))
@@ -65,6 +65,68 @@ extension TBDHomeSerialized {
         // The pre-existing AskUserQuestion entry must survive alongside it.
         #expect(postToolUse.contains { $0["matcher"] as? String == "AskUserQuestion" })
         #expect(postToolUse.count == 2)
+    }
+
+    /// Does the real `grep -qE` admit a payload carrying `command`?
+    ///
+    /// Runs the pattern the hook actually ships — read from the constant the
+    /// shell command is built from, never re-typed — through the same
+    /// `/usr/bin/grep -E` the hook runs under, with the payload on stdin. The
+    /// shell passes the pattern single-quoted, so handing it to grep as one
+    /// argv element is exactly what the hook does.
+    ///
+    /// The payload is the hook's own JSON envelope rather than a bare command
+    /// string, because that is what `$(cat)` holds and JSON escaping is part of
+    /// what the pattern has to survive.
+    private func prefilterAdmits(_ command: String) throws -> Bool {
+        let payload = try #require(
+            String(data: try JSONSerialization.data(withJSONObject: [
+                "tool_name": "Bash",
+                "tool_input": ["command": command],
+                "tool_response": ["stdout": "https://github.com/acme/acme-prod/pull/7\n"]
+            ]), encoding: .utf8))
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/grep")
+        process.arguments = ["-qE", ClaudeHookOverlay.prBindGrepPattern]
+        let input = Pipe()
+        process.standardInput = input
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        input.fileHandleForWriting.write(Data(payload.utf8))
+        try input.fileHandleForWriting.close()
+        process.waitUntilExit()
+        return process.terminationStatus == 0
+    }
+
+    /// The prefilter is a COST OPTIMIZATION, not a gate — so it may never
+    /// produce a false negative for a command the tokenizer would accept.
+    ///
+    /// A `gh[[:space:]]+pr[[:space:]]+create` pattern shipped once and, because
+    /// of the `&&` short-circuit, meant `tbd pr bind --from-hook` never ran for
+    /// any flagged form: `PRBindingExtractor`'s tokenizer — built specifically
+    /// to accept `-R` / `--repo` / `--hostname` — never saw them, and hook
+    /// binding was defeated for exactly the case the feature exists for.
+    ///
+    /// Tier 2: spawns a real, bounded `grep`. Asserting against a Swift regex
+    /// engine instead would test a different matcher than the one that ships.
+    @Test("the grep prefilter admits every form the tokenizer can bind")
+    func prefilterAdmitsEveryBindableCreateForm() throws {
+        #expect(try prefilterAdmits("gh pr create --fill"))
+        #expect(try prefilterAdmits("gh -R acme/acme-prod pr create"))
+        #expect(try prefilterAdmits("gh --repo acme/acme-prod pr create --fill"))
+        #expect(try prefilterAdmits("cd /tmp && gh pr create -t x"))
+    }
+
+    /// The other half of the trade: the filter still filters, so the ordinary
+    /// Bash call spawns no `tbd`. Over-match is deliberate and priced in — a
+    /// payload merely mentioning "pr create" spawns one short-lived process
+    /// that then declines to bind, which is far cheaper than a lost binding.
+    @Test("the grep prefilter still rejects unrelated Bash calls")
+    func prefilterRejectsUnrelatedCommands() throws {
+        #expect(try prefilterAdmits("ls -la /tmp") == false)
+        #expect(try prefilterAdmits("git status --short") == false)
+        #expect(try prefilterAdmits("gh pr view 12 --json state") == false)
     }
 
     @Test func registersStopFailureNotifyHook() throws {

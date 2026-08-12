@@ -33,10 +33,12 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claude-overl
 ///   render the question before Claude flushes the assistant message
 ///   to the JSONL. Pre sets activity to waiting_for_user; post sets
 ///   it back to working (Claude continues processing after user answers).
-/// - `PostToolUse:Bash`: greps the payload for `gh pr create` and, only
-///   on a match, pipes it to `tbd pr bind --from-hook` to bind any PR
-///   the command reported. The grep prefilter keeps every other Bash
-///   call (the overwhelming majority) from spawning a `tbd` process.
+/// - `PostToolUse:Bash`: greps the payload for `pr create` and, only on
+///   a match, pipes it to `tbd pr bind --from-hook` to bind any PR the
+///   command reported. The grep prefilter keeps every other Bash call
+///   (the overwhelming majority) from spawning a `tbd` process. It is a
+///   cost optimization, not a gate — `PRBindingExtractor`'s tokenizer
+///   decides what actually counts as a create.
 ///
 /// The overlay is regenerated on every daemon startup so changes to the
 /// shape (new hooks, new commands) take effect on the next worktree open.
@@ -104,6 +106,29 @@ public enum ClaudeHookOverlay {
     static let waitingForUserCommand =
         #"tbd terminal-activity waiting_for_user 2>/dev/null || true"#
 
+    /// The extended regex the prefilter greps a Bash hook payload for.
+    ///
+    /// **Deliberately permissive, and it must stay that way.** The prefilter is
+    /// a COST OPTIMIZATION, never a gate: `PRBindingExtractor`'s tokenizer is
+    /// the sole authority on what counts as a `gh pr create`, and it can only
+    /// judge payloads this pattern lets through. So the pattern must be wide
+    /// enough that it can never produce a false negative — which is why it does
+    /// not require `gh` adjacency. `gh -R acme/acme-prod pr create` and
+    /// `gh --repo acme/acme-prod pr create` are exactly the flagged forms the
+    /// tokenizer was built to accept, and a `gh[[:space:]]+pr` requirement here
+    /// silently dropped every one of them before the tokenizer ever ran.
+    ///
+    /// The resulting over-match is the right trade and is accepted knowingly: a
+    /// payload that merely mentions "pr create" now spawns one short-lived
+    /// `tbd`, which reads the payload and correctly declines to bind. A false
+    /// negative loses a PR binding silently; a false positive costs one
+    /// process.
+    ///
+    /// Lives in its own constant so the test can grep with the same literal the
+    /// shell command runs — hand-copying it into the test is how the two drift
+    /// apart.
+    static let prBindGrepPattern = #"pr[[:space:]]+create"#
+
     /// Binds any PR created by a `gh pr create` in this session.
     ///
     /// The `grep -qE` is a deliberate prefilter: this hook fires on EVERY Bash
@@ -111,11 +136,13 @@ public enum ClaudeHookOverlay {
     /// `tbd` process — a daemon round trip. With it, an unrelated Bash call
     /// costs the hook's own shell, the `$(cat)` command substitution that holds
     /// the payload, and one `grep` over it; no `tbd` runs and nothing reaches
-    /// the daemon. `-E` (extended regex) rather than a GNU-only `\+` in basic
-    /// regex — BSD/macOS grep is the one this hook actually runs under.
-    /// `|| true` guarantees the hook cannot fail the tool call it observes.
+    /// the daemon. It filters for cost only — see `prBindGrepPattern` for why
+    /// it is deliberately wider than the rule it prefilters for. `-E` (extended
+    /// regex) rather than a GNU-only `\+` in basic regex — BSD/macOS grep is the
+    /// one this hook actually runs under. `|| true` guarantees the hook cannot
+    /// fail the tool call it observes.
     static let prBindCommand =
-        #"payload=$(cat); printf '%s' "$payload" | grep -qE 'gh[[:space:]]+pr[[:space:]]+create' && printf '%s' "$payload" | tbd pr bind --from-hook || true"#
+        #"payload=$(cat); printf '%s' "$payload" | grep -qE '\#(prBindGrepPattern)' && printf '%s' "$payload" | tbd pr bind --from-hook || true"#
 
     /// Seconds Claude Code will wait for `prBindCommand` before killing it.
     ///
