@@ -79,7 +79,20 @@ import Testing
     /// Jams the repo so `git worktree add -b … origin/main` fails *after*
     /// creating the branch. No process holds this lock; it is exactly the
     /// residue a crashed git leaves.
-    private func jamConfigLock(_ repoDir: URL) throws {
+    ///
+    /// It jams only the *remote* base by default, and that asymmetry is the
+    /// point: `-b <new> origin/main` writes upstream tracking configuration,
+    /// while `-b <new> main` writes none and therefore never touches
+    /// `.git/config`. Pass `includingTheLocalBase: true` to set
+    /// `branch.autoSetupMerge = always`, which makes a local base configure
+    /// upstream too — the way to build one cause that both bases hit. Both
+    /// halves verified against git 2.50.
+    private func jamConfigLock(
+        _ repoDir: URL, includingTheLocalBase: Bool = false
+    ) async throws {
+        if includingTheLocalBase {
+            try await shell("git config branch.autoSetupMerge always", at: repoDir)
+        }
         try Data().write(to: repoDir.appendingPathComponent(".git/config.lock"))
     }
 
@@ -100,10 +113,13 @@ import Testing
 
     // MARK: - Bug 1: a failed create must not leak the branch it just made
 
+    /// Jammed for BOTH bases: a lock that stops only the remote base is now
+    /// recovered by the local one (see `remoteBaseFailureRecoversOnTheLocalBase`),
+    /// so making the create fail at all takes a cause neither base escapes.
     @Test func failedCreateLeavesNothingBehind() async throws {
         let (parentDir, hostDir, repoDir) = try await makeClonedTestRepo()
         defer { try? FileManager.default.removeItem(at: parentDir) }
-        try jamConfigLock(repoDir)
+        try await jamConfigLock(repoDir, includingTheLocalBase: true)
 
         let db = try TBDDatabase(inMemory: true)
         let lifecycle = makeLifecycle(db: db)
@@ -132,12 +148,82 @@ import Testing
         #expect(survivors.isEmpty, "failed create left worktree directories: \(survivors)")
     }
 
-    // MARK: - Bug 2: a repo-level failure must fail fast, with git's own words
+    // MARK: - Bug 2: a repo-level failure earns the other base, but never a name
 
-    @Test func repoLevelFailureSurfacesGitStderr() async throws {
+    /// The two bases are not interchangeable, so a repo-level failure on the
+    /// remote one is not the end of the road: `origin/main` makes `-b` write
+    /// upstream configuration, and a stale `.git/config.lock` fails exactly that
+    /// write, while the plain local `main` writes no configuration at all and
+    /// succeeds with the lock still sitting there.
+    ///
+    /// What makes continuing safe is the branch cleanup this suite's first test
+    /// covers: attempt 1 leaves `tbd/<name>` standing, cleanup removes it, and
+    /// attempt 2 finds the name free. Failing fast here spent that cleanup for
+    /// nothing.
+    @Test func remoteBaseFailureRecoversOnTheLocalBase() async throws {
         let (parentDir, hostDir, repoDir) = try await makeClonedTestRepo()
         defer { try? FileManager.default.removeItem(at: parentDir) }
-        try jamConfigLock(repoDir)
+        try await jamConfigLock(repoDir)
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        let repo = try await makeTestRepo(db: db, tempDir: hostDir, repoDir: repoDir)
+
+        let created = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
+
+        let listed = try await GitManager().worktreeList(repoPath: repoDir.path)
+        #expect(listed.contains { $0.branch == created.branch },
+                "the local base did not recover the create: \(listed)")
+        #expect(FileManager.default.fileExists(atPath: created.localPath),
+                "the create reported success without a checkout at \(created.localPath)")
+
+        // Exactly the branch the create started with — a fresh name would show
+        // up here as a second `tbd/…`, and an uncleaned attempt 1 as a leftover.
+        let branches = try await localBranches(repoDir)
+        #expect(branches.filter { $0.hasPrefix("tbd/") } == [created.branch],
+                "the recovery burned a second name or leaked a branch: \(branches)")
+    }
+
+    /// The second verified shape of the same thing, and the one that regressed
+    /// outright: a local branch literally named `origin/main` makes base 1 fatal
+    /// on `fatal: ambiguous object name: 'origin/main'` — creating nothing at
+    /// all, so there is not even a branch to clean up — while base 2 resolves
+    /// the unambiguous local `main` and succeeds.
+    ///
+    /// Distinct from the config-lock shape above because its stderr is a
+    /// *reference* complaint that the base-unresolvable whitelist deliberately
+    /// does not match ("ambiguous object name" is not "not a valid object
+    /// name"), so it lands in `.repoLevel` and depends on that case continuing.
+    @Test func aShadowingLocalBranchStillResolvesOnTheLocalBase() async throws {
+        let (parentDir, hostDir, repoDir) = try await makeClonedTestRepo()
+        defer { try? FileManager.default.removeItem(at: parentDir) }
+        try await shell("git branch origin/main", at: repoDir)
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        let repo = try await makeTestRepo(db: db, tempDir: hostDir, repoDir: repoDir)
+
+        let created = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
+
+        let listed = try await GitManager().worktreeList(repoPath: repoDir.path)
+        #expect(listed.contains { $0.branch == created.branch },
+                "the local base did not resolve past the shadowing branch: \(listed)")
+        let branches = try await localBranches(repoDir)
+        #expect(branches.filter { $0.hasPrefix("tbd/") } == [created.branch],
+                "the recovery burned a second name or leaked a branch: \(branches)")
+    }
+
+    /// Once BOTH bases hit the same repo-level cause the create is over: git's
+    /// own words reach the user, with the one hint they can act on.
+    ///
+    /// Asserts preserved behavior, so it is mutation-checked: deleting the
+    /// `.repoLevel` fast-exit from both loops drops the create through to the
+    /// generic "after all attempts" message, which carries no
+    /// `.git/config.lock` hint.
+    @Test func repoLevelFailureOnBothBasesSurfacesGitStderr() async throws {
+        let (parentDir, hostDir, repoDir) = try await makeClonedTestRepo()
+        defer { try? FileManager.default.removeItem(at: parentDir) }
+        try await jamConfigLock(repoDir, includingTheLocalBase: true)
 
         let db = try TBDDatabase(inMemory: true)
         let lifecycle = makeLifecycle(db: db)
@@ -160,20 +246,53 @@ import Testing
         }
     }
 
-    @Test func repoLevelFailureDoesNotGenerateASecondName() async throws {
+    /// A fresh name genuinely cannot help a repo-level cause, so spending the
+    /// other base must not turn into spending a second name too.
+    ///
+    /// The read-only worktree base is chosen over a jammed config lock because
+    /// it makes the answer *directly* observable: git names the path it could
+    /// not create, so the surfaced message says which folder the create died
+    /// on. A jammed lock cannot settle this — its stderr names no folder, and
+    /// the retry leg's own `.repoLevel` exit produces a byte-identical message,
+    /// so both outcomes read the same.
+    ///
+    /// Preserved behavior, so it is mutation-checked: deleting the FIRST loop's
+    /// post-loop `.repoLevel` throw makes the create generate a second folder
+    /// and branch, and the reported path becomes that second folder's.
+    @Test func repoLevelFailureOnBothBasesKeepsTheOriginalName() async throws {
         let (parentDir, hostDir, repoDir) = try await makeClonedTestRepo()
         defer { try? FileManager.default.removeItem(at: parentDir) }
-        try jamConfigLock(repoDir)
 
         let db = try TBDDatabase(inMemory: true)
         let lifecycle = makeLifecycle(db: db)
         let repo = try await makeTestRepo(db: db, tempDir: hostDir, repoDir: repoDir)
 
+        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id, skipClaude: true)
+        let base = WorktreeLayout().basePath(for: repo)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o555], ofItemAtPath: base
+        )
+        // Registered after the temp-dir cleanup above, so it runs BEFORE it —
+        // a read-only directory cannot be emptied.
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o755], ofItemAtPath: base
+            )
+        }
+
         do {
-            _ = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
-            Issue.record("expected the jammed config lock to fail the create")
+            _ = try await lifecycle.completeCreateWorktree(
+                worktreeID: pending.id, skipClaude: true
+            )
+            Issue.record("expected the read-only worktree base to fail the create")
         } catch {
             let text = String(describing: error)
+            #expect(text.contains("could not create leading directories"),
+                    "the real cause was masked: \(text)")
+            // The folder git died on is the one the create started with. A
+            // fresh name would put a different folder in this message.
+            #expect(text.contains("/\(pending.name)/.git"),
+                    "a second folder name was generated: \(text)")
             // "after all attempts" is produced ONLY by the name-retry leg, so
             // its absence is direct evidence that no second folder/branch name
             // was generated for a cause no name can fix.
@@ -183,11 +302,56 @@ import Testing
                     "a second name was attempted and collided: \(text)")
         }
 
+        // Both attempts created `tbd/<name>` before dying on the mkdir, and both
+        // were cleaned up.
         let branches = try await localBranches(repoDir)
-        #expect(branches.filter { $0.hasPrefix("tbd/") }.isEmpty)
-        let base = WorktreeLayout().basePath(for: repo)
+        #expect(branches.filter { $0.hasPrefix("tbd/") }.isEmpty,
+                "a repo-level failure leaked branches: \(branches)")
         let survivors = (try? FileManager.default.contentsOfDirectory(atPath: base)) ?? []
         #expect(survivors.isEmpty, "second name left a directory: \(survivors)")
+    }
+
+    /// The other side of that split. A failure git never reported — the
+    /// subprocess timed out or could not be spawned — says nothing about the
+    /// base, and buying a second opinion costs another full
+    /// `GitManager.commandTimeout` (120 s in production), so it fails fast where
+    /// `.repoLevel` continues.
+    ///
+    /// Driven end to end through a real killed `git worktree add`: the
+    /// lifecycle's own `GitManager` carries a 1 ms subprocess timeout, which no
+    /// fork+exec of git survives. The message is what discriminates the branch —
+    /// only the `.gitUnusable` arm says "did not complete", while every
+    /// `.repoLevel` exit says "git worktree add failed" — so classifying a
+    /// non-`GitError` as `.repoLevel` again fails this test.
+    @Test func aTimedOutGitFailsFastInsteadOfSpendingTheOtherBase() async throws {
+        let (parentDir, hostDir, repoDir) = try await makeClonedTestRepo()
+        defer { try? FileManager.default.removeItem(at: parentDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = WorktreeLifecycle(
+            db: db,
+            git: GitManager(subprocessTimeout: .milliseconds(1)),
+            tmux: TmuxManager(dryRun: true),
+            hooks: HookResolver()
+        )
+        let repo = try await makeTestRepo(db: db, tempDir: hostDir, repoDir: repoDir)
+
+        do {
+            _ = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
+            Issue.record("expected a timed-out git subprocess to fail the create")
+        } catch {
+            let text = String(describing: error)
+            #expect(text.contains("did not complete"),
+                    "a timeout was reported as an ordinary git failure: \(text)")
+            #expect(text.contains("timed out after"),
+                    "the timeout's own words did not reach the user: \(text)")
+            #expect(!text.contains("after all attempts"),
+                    "a second name was attempted for a wedged git: \(text)")
+        }
+
+        let branches = try await localBranches(repoDir)
+        #expect(branches.filter { $0.hasPrefix("tbd/") }.isEmpty,
+                "a timed-out attempt leaked a branch: \(branches)")
     }
 
     /// An unresolvable base is not fixable by a fresh name either, so it must
@@ -428,7 +592,7 @@ import Testing
             remoteOnlyBranches: ["feature"]
         )
         defer { try? FileManager.default.removeItem(at: parentDir) }
-        try jamConfigLock(repoDir)
+        try await jamConfigLock(repoDir)
 
         let db = try TBDDatabase(inMemory: true)
         let lifecycle = makeLifecycle(db: db)
@@ -595,14 +759,16 @@ import Testing
 
     /// Every other test here jams the repo before the FIRST attempt, so the
     /// first loop always throws and the retry leg's copy of the `.repoLevel`
-    /// guard never runs. This one reaches it: the canonical folder is occupied
-    /// (attempt 1 → collision → out of the first loop) and the worktree base
-    /// directory is read-only, so the retry's fresh folder gets past the
-    /// existence check and dies creating its directory.
+    /// handling never runs. This one reaches it: the canonical folder is
+    /// occupied (attempt 1 → collision → out of the first loop) and the worktree
+    /// base directory is read-only, so the retry's fresh folder gets past the
+    /// existence check and dies creating its directory — on both of the retry
+    /// leg's own bases, since a read-only parent is not something a base ref
+    /// changes.
     ///
     /// Asserts preserved behavior rather than a fix, so it is mutation-checked:
-    /// deleting the retry loop's `.repoLevel` throw makes it report the generic
-    /// "after all attempts" instead of git's own words.
+    /// deleting the retry loop's post-loop `.repoLevel` throw makes it report
+    /// the generic "after all attempts" instead of git's own words.
     @Test func repoLevelFailureInsideTheRetryLegAlsoFailsFast() async throws {
         let (parentDir, hostDir, repoDir) = try await makeClonedTestRepo()
         defer { try? FileManager.default.removeItem(at: parentDir) }
@@ -638,7 +804,7 @@ import Testing
             #expect(text.contains("could not create leading directories"),
                     "the retry leg's real cause was not surfaced: \(text)")
             #expect(!text.contains("after all attempts"),
-                    "the retry leg burned a second base on a repo-level cause: \(text)")
+                    "the retry leg fell through to the generic message: \(text)")
         }
 
         let branches = try await localBranches(repoDir)

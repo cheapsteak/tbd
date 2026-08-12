@@ -611,11 +611,14 @@ extension WorktreeLifecycle {
                     branch: branch, branchPreExisted: branchPreExisted,
                     branchNameWasAlreadyTaken: gitRefusedToCreateBranch(error)
                 )
-                if lastKind == .repoLevel {
-                    // Nothing downstream can help: not the other base, not a
-                    // fresh name. Surface git's own words instead of guessing.
+                if lastKind == .gitUnusable {
+                    // git returned no verdict at all, so nothing was learned
+                    // about the base or the name — and every further attempt
+                    // costs another full `GitManager.commandTimeout` (120 s).
+                    // Continuing here would make a wedged git report after
+                    // 240 s, and after 480 s once the rename retry ran too.
                     throw WorktreeLifecycleError.createFailed(
-                        "git worktree add failed\(repoLevelHint(error))\(formatErrorForMessage(error))"
+                        "git worktree add did not complete\(formatErrorForMessage(error))"
                     )
                 }
                 if lastKind == .nameCollision {
@@ -624,6 +627,24 @@ extension WorktreeLifecycle {
                     break
                 }
             }
+        }
+
+        // A repo-level cause that survived both bases. `.repoLevel` deliberately
+        // does NOT break out of the loop above, because the two bases are not
+        // interchangeable: base 1 is a remote-tracking ref, so `-b` writes
+        // upstream configuration, while base 2 is a plain local ref and writes
+        // none. Verified against git 2.50, the local base recovers from causes
+        // the remote base cannot survive — a stale `.git/config.lock` fails only
+        // the config write (and the cleanup above clears the branch it left, so
+        // the second attempt starts clean), and a local branch literally named
+        // `origin/main` makes base 1 fatal on `ambiguous object name` while base
+        // 2 resolves. A *fresh name* still cannot help, though, so this throws
+        // rather than falling through to the rename retry. Surface git's own
+        // words instead of guessing.
+        if lastKind == .repoLevel, let lastError {
+            throw WorktreeLifecycleError.createFailed(
+                "git worktree add failed\(repoLevelHint(lastError))\(formatErrorForMessage(lastError))"
+            )
         }
 
         // Both bases are spent. When the caller NAMED the branch, the retry
@@ -648,7 +669,7 @@ extension WorktreeLifecycle {
         // ref resolved, which no folder or branch name changes, so retrying
         // would burn two more identical failures and then report the generic
         // "after all attempts" instead of naming the bases that were tried.
-        // (`.repoLevel` never reaches here; it throws inside the loop.)
+        // (`.repoLevel` and `.gitUnusable` never reach here; both already threw.)
         //
         // Explicit folders and identity-sensitive callers cannot silently
         // switch to a different generated folder and branch either.
@@ -700,9 +721,12 @@ extension WorktreeLifecycle {
                     branch: retryBranch, branchPreExisted: retryBranchPreExisted,
                     branchNameWasAlreadyTaken: gitRefusedToCreateBranch(error)
                 )
-                if lastKind == .repoLevel {
+                if lastKind == .gitUnusable {
+                    // Fail fast for the same reason as in the first loop: git
+                    // said nothing, and another base costs another full
+                    // subprocess timeout.
                     throw WorktreeLifecycleError.createFailed(
-                        "git worktree add failed\(repoLevelHint(error))\(formatErrorForMessage(error))"
+                        "git worktree add did not complete\(formatErrorForMessage(error))"
                     )
                 }
                 if lastKind == .nameCollision {
@@ -711,6 +735,16 @@ extension WorktreeLifecycle {
                     break
                 }
             }
+        }
+
+        // Mirrors the first loop: `.repoLevel` is worth the other base, whose
+        // plain local ref skips the upstream-config write the remote base
+        // performs, but is never worth a further name. "Spent" here means this
+        // loop's bases — the first loop already spent its own.
+        if lastKind == .repoLevel, let lastError {
+            throw WorktreeLifecycleError.createFailed(
+                "git worktree add failed\(repoLevelHint(lastError))\(formatErrorForMessage(lastError))"
+            )
         }
 
         let errorDetail = lastError.flatMap { formatErrorForMessage($0) } ?? ""
@@ -723,10 +757,10 @@ extension WorktreeLifecycle {
     /// retries above can possibly help.
     ///
     /// Classification is a whitelist of known-recoverable stderr shapes;
-    /// anything unrecognized is `.repoLevel` and fails fast. That direction is
-    /// the safe one: an unclassifiable error retried under a second base and
-    /// then a second name manufactures orphan branches, while a recoverable
-    /// error misread as fatal merely surfaces git's real message.
+    /// anything unrecognized is `.repoLevel`, which never earns a fresh name.
+    /// That direction is the safe one: an unclassifiable error retried under a
+    /// second *name* manufactures orphan branches, while a recoverable error
+    /// misread as fatal merely surfaces git's real message.
     enum WorktreeAddFailureKind {
         /// The base ref did not resolve. The *next base branch* may — this is
         /// exactly what the two-base loop exists for.
@@ -734,16 +768,25 @@ extension WorktreeLifecycle {
         /// The branch name, the folder path, or the checkout is already taken.
         /// Every base fails identically; only a *fresh name* can help.
         case nameCollision
-        /// Anything else: a stale `.git/config.lock`, a corrupt repo, a full
-        /// disk. Neither another base nor another name changes the outcome.
+        /// Anything else git reported: a stale `.git/config.lock`, a corrupt
+        /// repo, a full disk, a local branch shadowing `origin/<default>`.
+        /// No *name* changes the outcome, but the *other base* still can —
+        /// the two are not interchangeable, since only the remote-tracking one
+        /// makes `-b` write upstream configuration. So the loop continues and
+        /// this only becomes fatal once both bases are spent.
         case repoLevel
+        /// git returned no verdict at all — the subprocess timed out or could
+        /// not be spawned. Nothing was learned about the base or the name, and
+        /// unlike `.repoLevel` there is no cheap second opinion to buy: another
+        /// base costs another full `GitManager.commandTimeout`. Fails fast.
+        case gitUnusable
     }
 
     /// Classifies a `worktreeAdd` failure off `GitError.stderr`. A non-`GitError`
-    /// (spawn failure, timeout) is `.repoLevel` — it says nothing about the
-    /// base or the name.
+    /// (spawn failure, timeout) is `.gitUnusable` — git never got far enough to
+    /// say anything about the base or the name.
     private func classifyWorktreeAddFailure(_ error: Error) -> WorktreeAddFailureKind {
-        guard let gitError = error as? GitError else { return .repoLevel }
+        guard let gitError = error as? GitError else { return .gitUnusable }
         let stderr = gitError.stderr.lowercased()
 
         // "fatal: invalid reference: origin/main"
@@ -872,13 +915,17 @@ extension WorktreeLifecycle {
 
     /// Message for "both base branches were tried and none worked", worded to
     /// match what actually went wrong rather than always guessing collision.
+    ///
+    /// Only `.baseUnresolvable` and `.nameCollision` reach it; `.repoLevel` and
+    /// `.gitUnusable` throw git's own words earlier and are covered here only
+    /// for exhaustiveness.
     private func describeExhaustedBases(
         _ kind: WorktreeAddFailureKind, baseBranches: [String]
     ) -> String {
         switch kind {
         case .baseUnresolvable:
             return "git worktree add failed — no usable base branch (tried \(baseBranches.joined(separator: ", ")))"
-        case .nameCollision, .repoLevel:
+        case .nameCollision, .repoLevel, .gitUnusable:
             return "git worktree add failed — the folder or branch may already exist"
         }
     }
@@ -898,6 +945,11 @@ extension WorktreeLifecycle {
         if let gitError = error as? GitError {
             let stderr = gitError.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
             detail = stderr
+        } else if let timeout = error as? GitTimeoutError {
+            // `localizedDescription` on a bare `Error` struct renders as
+            // "The operation couldn't be completed. (… error 1.)", which names
+            // neither the timeout nor the command. Its own description does.
+            detail = timeout.description
         } else {
             detail = error.localizedDescription
         }
