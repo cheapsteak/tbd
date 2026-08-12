@@ -100,6 +100,23 @@ tbd terminal send --terminal <id> --text "..." [--submit]
 tbd terminal output <id> [--lines N]
 ```
 
+### Message a sibling session
+
+Two channels reach another TBD session.
+
+If `ListAgents` and `SendMessage` are among your tools, sibling sessions on this
+machine should show up in `ListAgents` — registration is best-effort, so a
+running session can be missing — and `SendMessage` hands one plain text,
+delivered between the recipient's turns. Rows are labelled with the
+worktree display name, which is **not** unique: several terminals in one
+worktree share it, and so can worktrees in different repos. `ListAgents` prints
+a short `[ref]` on each row; address a peer by that `[ref]` whenever more than
+one row shares a name. If those tools aren't there, use `tbd terminal send`.
+
+`tbd terminal send` / `tbd terminal output` (above) is the daemon-mediated
+channel: it works from any harness, and it can also drive input into a
+session's composer rather than only handing it a message.
+
 ### Pin / unpin a terminal
 
 Pin a terminal to keep it docked and quickly reachable; unpin to remove it from the dock.

@@ -36,6 +36,26 @@ import Foundation
     #expect(body.contains("--help"))
 }
 
+@Test func bodyContainsSiblingMessagingSection() {
+    let body = TBDSkillContent.body
+    #expect(body.contains("### Message a sibling session"))
+    // Both channels are stated; neither is recommended over the other, so
+    // both names must survive an edit of this section.
+    #expect(body.contains("ListAgents"))
+    #expect(body.contains("SendMessage"))
+    #expect(body.contains("worktree display name"))
+    #expect(body.contains("tbd terminal send"))
+    #expect(body.contains("tbd terminal output"))
+    // Display names are not unique — several terminals share one worktree's,
+    // and worktrees in different repos can share one too — so the text must
+    // point at the per-row `[ref]` as the address.
+    #expect(body.contains("[ref]"))
+    // Missing tools have several causes (four env killswitches, and the
+    // non-Claude harnesses this same body is fed to), so the text must not
+    // name one. It states the fallback instead.
+    #expect(!body.contains("predates the feature"))
+}
+
 @Test func bodyContainsScratchPromotionSection() {
     let body = TBDSkillContent.body
     #expect(body.contains("## Scratch spaces & promotion"))

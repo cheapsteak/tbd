@@ -21,6 +21,17 @@ import TBDShared
 ///   with optional `--append-system-prompt` and trailing initial-prompt arg.
 /// - Otherwise → `cmd` if set, else `shellFallback`.
 ///
+/// `sessionName`, when non-nil and not blank, adds ` --name <escaped>` to both
+/// claude branches (never to `cmd` / `shellFallback`, which are not claude).
+/// Callers pass the worktree's display name so the session announces itself
+/// under the name the user sees in the app — that is the address peers use for
+/// Claude Code's cross-session `ListAgents` / `SendMessage`. Without it a
+/// session names itself after its working-directory folder slug, which never
+/// matches an app-side rename. The name is fixed at spawn, so a later rename
+/// applies at the next respawn or resume. Display names are unvalidated free
+/// text, so the name is sanitized here rather than at the rename handler (see
+/// `sanitizedSessionName`) — renaming must keep meaning what the user typed.
+///
 /// If we built a claude command (resume or fresh), `sensitiveEnv` carries the
 /// auth + routing env vars for the spawned session (plus
 /// `DISABLE_AUTO_UPDATE=true`, an rc-affecting toggle that must reach the
@@ -67,6 +78,7 @@ enum ClaudeSpawnCommandBuilder {
         settingsOverlayPath: String? = nil,
         pluginDirPath: String? = nil,
         envSettingOverrides: [String: ClaudeEnvValue] = [:],
+        sessionName: String? = nil,
         fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
     ) -> Result {
         // Optional --settings flag merged into the claude invocation.
@@ -90,16 +102,27 @@ enum ClaudeSpawnCommandBuilder {
             pluginFlag = ""
         }
 
+        // Session name for Claude Code's cross-session peer registry. Blank,
+        // whitespace-only and control-character-only names are dropped rather
+        // than passed through: `--name ''` would register an unaddressable
+        // session.
+        let nameFlag: String
+        if let sanitized = sanitizedSessionName(sessionName) {
+            nameFlag = " --name \(SystemPromptBuilder.shellEscape(sanitized))"
+        } else {
+            nameFlag = ""
+        }
+
         let base: String
         if let resumeID {
             let forkFlag = forkSession ? " --fork-session" : ""
-            var b = "claude --resume \(resumeID)\(forkFlag) --dangerously-skip-permissions\(settingsFlag)\(pluginFlag)"
+            var b = "claude --resume \(resumeID)\(forkFlag) --dangerously-skip-permissions\(nameFlag)\(settingsFlag)\(pluginFlag)"
             if let p = initialPrompt, !p.isEmpty {
                 b += " \(SystemPromptBuilder.shellEscape(p))"
             }
             base = b
         } else if let sessionID = freshSessionID {
-            var b = "claude --session-id \(sessionID) --dangerously-skip-permissions\(settingsFlag)\(pluginFlag)"
+            var b = "claude --session-id \(sessionID) --dangerously-skip-permissions\(nameFlag)\(settingsFlag)\(pluginFlag)"
             if let prompt = appendSystemPrompt {
                 b += " --append-system-prompt \(SystemPromptBuilder.shellEscape(prompt))"
             }
@@ -189,5 +212,37 @@ enum ClaudeSpawnCommandBuilder {
             .joined(separator: " ")
         let command = inlineExports.isEmpty ? base : "\(inlineExports) \(base)"
         return Result(command: command, sensitiveEnv: env)
+    }
+
+    /// Longest `--name` value TBD will emit. Display names are free text with
+    /// no length ceiling of their own, and the whole invocation ends up in
+    /// `#{pane_start_command}` and in `ps` argv; a name long enough to matter
+    /// there is not an address anyone types anyway.
+    static let maxSessionNameLength = 64
+
+    /// The `--name` value for a display name, or nil when nothing addressable
+    /// survives.
+    ///
+    /// `shellEscape` single-quotes and handles embedded apostrophes, but a
+    /// single-quoted newline is still a newline: it would split
+    /// `#{pane_start_command}` across lines and corrupt anything that reads the
+    /// pane's command back. Control and format characters are stripped rather
+    /// than escaped — they carry no meaning in an address — then the result is
+    /// trimmed, length-capped, and trimmed again so a cap landing mid-space
+    /// cannot leave a trailing blank.
+    ///
+    /// Deliberately here and not in the rename handler: sanitizing there would
+    /// change what a rename means to the user, and the display name has many
+    /// consumers that are perfectly happy with newlines.
+    static func sanitizedSessionName(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let stripped = String(String.UnicodeScalarView(
+            raw.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }
+        ))
+        let trimmed = stripped.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let capped = String(trimmed.prefix(maxSessionNameLength))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return capped.isEmpty ? nil : capped
     }
 }

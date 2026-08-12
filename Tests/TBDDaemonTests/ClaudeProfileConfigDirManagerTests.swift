@@ -1099,6 +1099,382 @@ struct ClaudeProfileConfigDirManagerTests {
         // Verify: profile projects/ is still a real directory (NOT a symlink)
         #expect((try? fm.destinationOfSymbolicLink(atPath: profileProjectsBase.path)) == nil)
     }
+
+    // MARK: - sessions/ mirror slot (cross-session peer registry)
+    //
+    // Claude Code registers each live session as one JSON row under
+    // `$CLAUDE_CONFIG_DIR/sessions/`, so without this slot two TBD profiles
+    // cannot see each other's sessions in `ListAgents`. It differs from the
+    // other eight slots twice over: an absent host `sessions/` is the ordinary
+    // first-run state, so it is created rather than skipped; and pre-existing
+    // profile-side rows are live process state, so they are merged into the
+    // host registry rather than parked in a sidecar nothing reads.
+
+    /// Resolve the symlink at `link` and compare it to `expected`.
+    private func symlinkPoints(_ link: URL, to expected: URL) throws -> Bool {
+        let dest = try FileManager.default.destinationOfSymbolicLink(atPath: link.path)
+        let resolved = URL(fileURLWithPath: dest, relativeTo: link.deletingLastPathComponent())
+            .standardizedFileURL
+        return resolved == expected.standardizedFileURL
+    }
+
+    @Test("sessions/ is symlinked to the host registry when the host slot already exists")
+    func sessionsSlotSymlinkedWhenHostSlotExists() throws {
+        let tempBase = tempBase()
+        let tempHost = tempHostBase()
+        defer {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHost)
+        }
+
+        let fm = FileManager.default
+        let hostSessions = tempHost.appendingPathComponent("sessions", isDirectory: true)
+        try fm.createDirectory(at: hostSessions, withIntermediateDirectories: true)
+        // A peer row already registered by some other session must remain
+        // visible through the profile's symlink.
+        try #"{"pid":1}"#.write(to: hostSessions.appendingPathComponent("1.json"),
+                                atomically: true, encoding: .utf8)
+
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+        let dir = try manager.ensureOAuthDir(forProfileID: UUID())
+
+        let link = dir.appendingPathComponent("sessions")
+        #expect(try symlinkPoints(link, to: hostSessions))
+        #expect(fm.fileExists(atPath: link.appendingPathComponent("1.json").path))
+    }
+
+    @Test("sessions/ host dir is created 0700 and symlinked when the host lacks it")
+    func sessionsSlotCreatesHostDirWhenMissing() throws {
+        let tempBase = tempBase()
+        let tempHost = tempHostBase()
+        defer {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHost)
+        }
+
+        let fm = FileManager.default
+        // Host store exists but has never run a session — no sessions/ yet.
+        try fm.createDirectory(at: tempHost, withIntermediateDirectories: true)
+
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+        let dir = try manager.ensureOAuthDir(forProfileID: UUID())
+
+        let hostSessions = tempHost.appendingPathComponent("sessions", isDirectory: true)
+        var isDir: ObjCBool = false
+        #expect(fm.fileExists(atPath: hostSessions.path, isDirectory: &isDir))
+        #expect(isDir.boolValue)
+
+        // 0700 matches how Claude Code creates the registry itself — peer rows
+        // carry inbox socket paths and should not be world-readable.
+        let mode = try fm.attributesOfItem(atPath: hostSessions.path)[.posixPermissions] as? NSNumber
+        #expect(mode?.int16Value == 0o700)
+
+        #expect(try symlinkPoints(dir.appendingPathComponent("sessions"), to: hostSessions))
+    }
+
+    @Test("sessions/ slot is idempotent — a second ensure leaves the same symlink")
+    func sessionsSlotIdempotent() throws {
+        let tempBase = tempBase()
+        let tempHost = tempHostBase()
+        defer {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHost)
+        }
+
+        let fm = FileManager.default
+        try fm.createDirectory(at: tempHost, withIntermediateDirectories: true)
+
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+        let profileID = UUID()
+
+        let dir1 = try manager.ensureOAuthDir(forProfileID: profileID)
+        let link = dir1.appendingPathComponent("sessions")
+        let dest1 = try fm.destinationOfSymbolicLink(atPath: link.path)
+
+        let dir2 = try manager.ensureOAuthDir(forProfileID: profileID)
+        let dest2 = try fm.destinationOfSymbolicLink(atPath: link.path)
+
+        #expect(dir1 == dir2)
+        #expect(dest1 == dest2)
+        // No `sessions.profile-local` invented on the idempotent pass.
+        #expect(!fm.fileExists(atPath: dir2.appendingPathComponent("sessions.profile-local").path))
+    }
+
+    /// Seed a profile-side real `sessions/` directory with rows, before any
+    /// `ensure…` call has had a chance to symlink it.
+    private func seedProfileSessions(
+        _ manager: ClaudeProfileConfigDirManager,
+        profileID: UUID,
+        rows: [String: String],
+        modified: Date? = nil
+    ) throws -> URL {
+        let fm = FileManager.default
+        let profileSessions = manager.configDirectory(forProfileID: profileID)
+            .appendingPathComponent("sessions", isDirectory: true)
+        try fm.createDirectory(at: profileSessions, withIntermediateDirectories: true)
+        for (rowName, contents) in rows {
+            let row = profileSessions.appendingPathComponent(rowName)
+            try contents.write(to: row, atomically: true, encoding: .utf8)
+            if let modified {
+                try fm.setAttributes([.modificationDate: modified], ofItemAtPath: row.path)
+            }
+        }
+        return profileSessions
+    }
+
+    /// The merge, not the sidecar: a `sessions/` row is live process state, and
+    /// the row's owner unlinks the *host* path when it exits — so a sidecar
+    /// move would orphan a running session's row where nothing ever reads it.
+    @Test("pre-existing profile sessions/ rows are merged into the host registry")
+    func sessionsSlotMergesProfileRowsIntoHost() throws {
+        let tempBase = tempBase()
+        let tempHost = tempHostBase()
+        defer {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHost)
+        }
+
+        let fm = FileManager.default
+        let hostSessions = tempHost.appendingPathComponent("sessions", isDirectory: true)
+        try fm.createDirectory(at: hostSessions, withIntermediateDirectories: true)
+        try #"{"pid":1}"#.write(to: hostSessions.appendingPathComponent("1.json"),
+                                atomically: true, encoding: .utf8)
+
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+        let profileID = UUID()
+        let profileSessions = try seedProfileSessions(
+            manager, profileID: profileID,
+            rows: ["4242.json": #"{"pid":4242}"#, "77.json": #"{"pid":77}"#]
+        )
+
+        let dir = try manager.ensureOAuthDir(forProfileID: profileID)
+
+        // Both profile rows now live in the host registry, contents intact.
+        #expect(try String(contentsOf: hostSessions.appendingPathComponent("4242.json"),
+                           encoding: .utf8) == #"{"pid":4242}"#)
+        #expect(try String(contentsOf: hostSessions.appendingPathComponent("77.json"),
+                           encoding: .utf8) == #"{"pid":77}"#)
+        // The row that was already host-side is untouched.
+        #expect(fm.fileExists(atPath: hostSessions.appendingPathComponent("1.json").path))
+
+        // The emptied profile directory is gone, replaced by the symlink — and
+        // no sidecar was invented on the way.
+        #expect(try symlinkPoints(dir.appendingPathComponent("sessions"), to: hostSessions))
+        #expect(!fm.fileExists(atPath: dir.appendingPathComponent("sessions.profile-local").path))
+        // Reachable through the link the spawned session will actually use.
+        #expect(fm.fileExists(atPath: profileSessions.appendingPathComponent("4242.json").path))
+    }
+
+    /// A duplicate `<pid>.json` across two profiles means one row is stale —
+    /// a dead process whose PID was reused. Newest modification time wins,
+    /// in both directions.
+    @Test("a same-named row on both sides keeps the newer copy")
+    func sessionsSlotMergeKeepsNewerRow() throws {
+        let fm = FileManager.default
+        let old = Date(timeIntervalSince1970: 1_000_000)
+        let new = Date(timeIntervalSince1970: 2_000_000)
+
+        // Arm 1: the profile copy is newer and must replace the host copy.
+        // Arm 2: the host copy is newer and the profile copy is discarded.
+        for profileIsNewer in [true, false] {
+            let tempBase = tempBase()
+            let tempHost = tempHostBase()
+            defer {
+                try? fm.removeItem(at: tempBase)
+                try? fm.removeItem(at: tempHost)
+            }
+
+            let hostSessions = tempHost.appendingPathComponent("sessions", isDirectory: true)
+            try fm.createDirectory(at: hostSessions, withIntermediateDirectories: true)
+            let hostRow = hostSessions.appendingPathComponent("500.json")
+            try #"{"pid":500,"side":"host"}"#.write(to: hostRow, atomically: true, encoding: .utf8)
+            try fm.setAttributes([.modificationDate: profileIsNewer ? old : new],
+                                 ofItemAtPath: hostRow.path)
+
+            let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+            let profileID = UUID()
+            _ = try seedProfileSessions(
+                manager, profileID: profileID,
+                rows: ["500.json": #"{"pid":500,"side":"profile"}"#],
+                modified: profileIsNewer ? new : old
+            )
+
+            let dir = try manager.ensureOAuthDir(forProfileID: profileID)
+
+            let surviving = try String(contentsOf: hostRow, encoding: .utf8)
+            #expect(surviving == (profileIsNewer ? #"{"pid":500,"side":"profile"}"#
+                                                 : #"{"pid":500,"side":"host"}"#),
+                    "newer row must win (profileIsNewer=\(profileIsNewer))")
+            // Exactly one copy survives, and the profile dir is a symlink.
+            #expect(try fm.contentsOfDirectory(atPath: hostSessions.path) == ["500.json"])
+            #expect(try symlinkPoints(dir.appendingPathComponent("sessions"), to: hostSessions))
+            #expect(!fm.fileExists(atPath: dir.appendingPathComponent("sessions.profile-local").path))
+        }
+    }
+
+    @Test("an empty profile sessions/ dir is just replaced by the symlink")
+    func sessionsSlotEmptyProfileDirJustSymlinks() throws {
+        let tempBase = tempBase()
+        let tempHost = tempHostBase()
+        defer {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHost)
+        }
+
+        let fm = FileManager.default
+        let hostSessions = tempHost.appendingPathComponent("sessions", isDirectory: true)
+        try fm.createDirectory(at: hostSessions, withIntermediateDirectories: true)
+        try #"{"pid":9}"#.write(to: hostSessions.appendingPathComponent("9.json"),
+                                atomically: true, encoding: .utf8)
+
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+        let profileID = UUID()
+        _ = try seedProfileSessions(manager, profileID: profileID, rows: [:])
+
+        let dir = try manager.ensureOAuthDir(forProfileID: profileID)
+
+        #expect(try symlinkPoints(dir.appendingPathComponent("sessions"), to: hostSessions))
+        #expect(!fm.fileExists(atPath: dir.appendingPathComponent("sessions.profile-local").path))
+        #expect(try fm.contentsOfDirectory(atPath: hostSessions.path) == ["9.json"])
+    }
+
+    /// The merge is scoped to `sessions`. Every other slot still parks
+    /// pre-existing profile content in a `<slot>.profile-local` sidecar — if
+    /// the merge leaked, the profile's file would have landed in the host store
+    /// instead, silently overwriting nothing but destroying the isolation.
+    @Test("merge does not leak — a non-sessions slot still uses the sidecar")
+    func mergeIsScopedToSessionsSlot() throws {
+        let tempBase = tempBase()
+        let tempHost = tempHostBase()
+        defer {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHost)
+        }
+
+        let fm = FileManager.default
+        let hostCommands = tempHost.appendingPathComponent("commands", isDirectory: true)
+        try fm.createDirectory(at: hostCommands, withIntermediateDirectories: true)
+
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+        let profileID = UUID()
+        let profileCommands = manager.configDirectory(forProfileID: profileID)
+            .appendingPathComponent("commands", isDirectory: true)
+        try fm.createDirectory(at: profileCommands, withIntermediateDirectories: true)
+        try "profile-only".write(to: profileCommands.appendingPathComponent("mine.md"),
+                                 atomically: true, encoding: .utf8)
+
+        let dir = try manager.ensureOAuthDir(forProfileID: profileID)
+
+        let sidecarEntry = dir.appendingPathComponent("commands.profile-local")
+            .appendingPathComponent("mine.md")
+        #expect(try String(contentsOf: sidecarEntry, encoding: .utf8) == "profile-only")
+        // The merge must NOT have moved it into the host store.
+        #expect(try fm.contentsOfDirectory(atPath: hostCommands.path).isEmpty)
+        #expect(try symlinkPoints(dir.appendingPathComponent("commands"), to: hostCommands))
+    }
+
+    /// `fileExists` says "true" for a regular file, so an unvalidated guard
+    /// would symlink every profile at it and fail every registry write.
+    @Test("a host sessions/ that is a regular file is left alone, not symlinked at")
+    func hostSessionsRegularFileIsLeftAlone() throws {
+        let tempBase = tempBase()
+        let tempHost = tempHostBase()
+        defer {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHost)
+        }
+
+        let fm = FileManager.default
+        try fm.createDirectory(at: tempHost, withIntermediateDirectories: true)
+        let hostSessions = tempHost.appendingPathComponent("sessions")
+        try "not a directory".write(to: hostSessions, atomically: true, encoding: .utf8)
+
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+        let dir = try manager.ensureOAuthDir(forProfileID: UUID())
+
+        #expect((try? fm.destinationOfSymbolicLink(atPath: dir.appendingPathComponent("sessions").path)) == nil)
+        #expect(!fm.fileExists(atPath: dir.appendingPathComponent("sessions").path))
+        // The host file is untouched — TBD does not clobber what it cannot use.
+        #expect(try String(contentsOf: hostSessions, encoding: .utf8) == "not a directory")
+    }
+
+    /// `fileExists` says "false" for a *dangling* symlink, so an unvalidated
+    /// guard would take the create branch, hit EEXIST, log, and return — every
+    /// spawn, forever.
+    @Test("a host sessions/ that is a dangling symlink is left alone")
+    func hostSessionsDanglingSymlinkIsLeftAlone() throws {
+        let tempBase = tempBase()
+        let tempHost = tempHostBase()
+        defer {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHost)
+        }
+
+        let fm = FileManager.default
+        try fm.createDirectory(at: tempHost, withIntermediateDirectories: true)
+        let hostSessions = tempHost.appendingPathComponent("sessions")
+        let missingTarget = tempHost.appendingPathComponent("gone", isDirectory: true)
+        try fm.createSymbolicLink(at: hostSessions, withDestinationURL: missingTarget)
+
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+        let dir = try manager.ensureOAuthDir(forProfileID: UUID())
+
+        #expect((try? fm.destinationOfSymbolicLink(atPath: dir.appendingPathComponent("sessions").path)) == nil)
+        #expect(!fm.fileExists(atPath: dir.appendingPathComponent("sessions").path))
+        // Still dangling: nothing was created behind it either.
+        #expect(try fm.destinationOfSymbolicLink(atPath: hostSessions.path) == missingTarget.path)
+        #expect(!fm.fileExists(atPath: missingTarget.path))
+    }
+
+    /// Creating the slot must never conjure the host store itself. On a machine
+    /// with no `~/.claude` at all there is nothing to mirror, and inventing one
+    /// (0700, owned by TBD) is exactly the host state the other slots take care
+    /// not to fabricate.
+    @Test("an absent host base directory is never created for the sessions slot")
+    func absentHostBaseDirectoryIsNeverCreated() throws {
+        let tempBase = tempBase()
+        let tempHost = tempHostBase()
+        defer {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHost)
+        }
+
+        let fm = FileManager.default
+        // Deliberately NOT created: the host store does not exist.
+        #expect(!fm.fileExists(atPath: tempHost.path))
+
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+        let dir = try manager.ensureOAuthDir(forProfileID: UUID())
+
+        #expect(!fm.fileExists(atPath: tempHost.path), "host store must not be conjured")
+        #expect(!fm.fileExists(atPath: tempHost.appendingPathComponent("sessions").path))
+        #expect((try? fm.destinationOfSymbolicLink(atPath: dir.appendingPathComponent("sessions").path)) == nil)
+    }
+
+    @Test("create-on-missing does not leak to the other slots — absent host slots still skip")
+    func createOnMissingIsScopedToSessionsSlot() throws {
+        let tempBase = tempBase()
+        let tempHost = tempHostBase()
+        defer {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHost)
+        }
+
+        let fm = FileManager.default
+        // Host store is entirely empty: only `sessions` may be conjured.
+        try fm.createDirectory(at: tempHost, withIntermediateDirectories: true)
+
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+        let dir = try manager.ensureOAuthDir(forProfileID: UUID())
+
+        for slot in ["projects", "plugins", "skills", "agents", "commands", "hooks", "CLAUDE.md", "settings.json"] {
+            #expect(!fm.fileExists(atPath: tempHost.appendingPathComponent(slot).path),
+                    "host slot \(slot) must not be created")
+            #expect((try? fm.destinationOfSymbolicLink(atPath: dir.appendingPathComponent(slot).path)) == nil,
+                    "profile slot \(slot) must not be symlinked")
+        }
+        #expect(fm.fileExists(atPath: tempHost.appendingPathComponent("sessions").path))
+    }
 }
 
 // Nested under TBDHomeSerialized: mutates a process-global environment

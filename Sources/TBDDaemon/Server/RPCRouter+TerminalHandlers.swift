@@ -400,7 +400,8 @@ extension RPCRouter {
                   )
                 : nil,
             pluginDirPath: isClaudeType ? PluginDirWriter.pluginDirPath : nil,
-            envSettingOverrides: claudeEnvOverrides
+            envSettingOverrides: claudeEnvOverrides,
+            sessionName: worktree.displayName
         )
 
         // For Claude terminals, layer the builder's auth/routing env ON TOP of
@@ -738,7 +739,8 @@ extension RPCRouter {
                     repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id)
                 ),
                 pluginDirPath: PluginDirWriter.pluginDirPath,
-                envSettingOverrides: claudeEnvOverrides
+                envSettingOverrides: claudeEnvOverrides,
+                sessionName: worktree.displayName
             )
             let env: [String: String] = [
                 "TBD_WORKTREE_ID": worktree.id.uuidString,
@@ -1587,7 +1589,8 @@ extension RPCRouter {
                     repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id)
                 ),
                 pluginDirPath: PluginDirWriter.pluginDirPath,
-                envSettingOverrides: claudeEnvOverrides
+                envSettingOverrides: claudeEnvOverrides,
+                sessionName: worktree.displayName
             )
             storedSessionID = resumeID
             scheduleRecapture = true
@@ -1617,7 +1620,8 @@ extension RPCRouter {
                     repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id)
                 ),
                 pluginDirPath: PluginDirWriter.pluginDirPath,
-                envSettingOverrides: claudeEnvOverrides
+                envSettingOverrides: claudeEnvOverrides,
+                sessionName: worktree.displayName
             )
             storedSessionID = newSessionID
             scheduleRecapture = false

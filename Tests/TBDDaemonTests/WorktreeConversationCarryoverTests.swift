@@ -152,9 +152,12 @@ struct WorktreeConversationCarryoverTests {
             db: db, recorder: recorder, claudeHome: claudeHome
         )
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        // Display name deliberately differs from `name`: the `--name` assertion
+        // below would pass on either if they matched.
         let worktree = try await db.worktrees.create(
             repoID: repo.id,
             name: "resume-source",
+            displayName: "Resume Source",
             branch: "tbd/resume-source",
             path: tempDir.appendingPathComponent("resume-source").path,
             tmuxServer: "tbd-test"
@@ -180,6 +183,15 @@ struct WorktreeConversationCarryoverTests {
         #expect(
             isPromptFreeResumeInvocation(command, forkSession: false),
             "archived-session resume must carry no trailing prompt argument: \(command)"
+        )
+        // The one positive assertion on a REAL spawn path that `--name` is
+        // emitted at all. `sessionName:` has a nil default, so dropping it from
+        // a call site compiles, changes behaviour, and is invisible to the
+        // builder unit tests and to the whitelist above (which makes `--name`
+        // optional by design — it must tolerate the non-claude branches).
+        #expect(
+            command.contains("--name 'Resume Source'"),
+            "resume spawn must announce the worktree display name: \(command)"
         )
     }
 
@@ -227,6 +239,27 @@ struct WorktreeConversationCarryoverTests {
         #expect(isPromptFreeResumeInvocation(base, forkSession: true))
         #expect(!isPromptFreeResumeInvocation(base + " 'You have been moved.'", forkSession: true))
         #expect(!isPromptFreeResumeInvocation(base + " 'anything at all'", forkSession: true))
+
+        // `--name '<worktree display name>'` is a permitted flag, not a
+        // positional — its quoted value must not smuggle a prompt past the
+        // guard, so the trailing-argument rejection still has to hold with it
+        // present.
+        let named = "export CLAUDE_CONFIG_DIR='/tmp/cfg'; claude --resume ABC-123"
+            + " --fork-session --dangerously-skip-permissions --name 'acme-worker'"
+            + " --settings '/tmp/overlay.json'"
+        #expect(isPromptFreeResumeInvocation(named, forkSession: true))
+        #expect(!isPromptFreeResumeInvocation(named + " 'You have been moved.'", forkSession: true))
+
+        // A display name containing an apostrophe is escaped as `'acme'\''s'`.
+        // The guard must accept that shape (or it would report a conforming
+        // command as non-conforming) and must still reject a trailing prompt
+        // after it — the escape must not become a hole.
+        let escaped = "export CLAUDE_CONFIG_DIR='/tmp/cfg'; claude --resume ABC-123"
+            + " --fork-session --dangerously-skip-permissions --name 'acme'\\''s worktree'"
+            + " --settings '/tmp/overlay.json'"
+        #expect(isPromptFreeResumeInvocation(escaped, forkSession: true))
+        #expect(!isPromptFreeResumeInvocation(escaped + " 'You have been moved.'", forkSession: true))
+        #expect(!isPromptFreeResumeInvocation(escaped + " 'anything at all'", forkSession: true))
     }
 
     /// Whitelists the permitted shape rather than blacklisting a phrase: the
@@ -240,9 +273,17 @@ struct WorktreeConversationCarryoverTests {
         let invocation = String(command[start.lowerBound...])
         let fork = forkSession ? " --fork-session" : ""
         let permitted = "^claude --resume [-0-9A-Za-z]+\(fork) --dangerously-skip-permissions"
-            + "( --settings '[^']*')?( --plugin-dir '[^']*')?$"
+            + "( --name \(Self.shellEscapedWordPattern))?( --settings '[^']*')?( --plugin-dir '[^']*')?$"
         return invocation.range(of: permitted, options: .regularExpression) != nil
     }
+
+    /// A single-quoted word as `SystemPromptBuilder.shellEscape` actually emits
+    /// it: an apostrophe inside the value closes the quote, escapes the
+    /// apostrophe and reopens (`'acme'\''s'`), so a naive `'[^']*'` cannot
+    /// match a legitimate command whose display name contains one. The helper
+    /// fails closed there, so it was never a safety hole — but a guard that
+    /// misreads a conforming command is a guard nobody trusts.
+    static let shellEscapedWordPattern = #"'(?:[^']|'\\'')*'"#
 
     private func makeCarryoverLifecycle(
         db: TBDDatabase,
