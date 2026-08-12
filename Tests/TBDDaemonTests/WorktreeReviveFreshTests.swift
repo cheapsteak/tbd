@@ -909,6 +909,19 @@ struct WorktreeReviveFreshTests {
             .write(to: source, atomically: true, encoding: .utf8)
     }
 
+    /// Declines the first `rejections` updates to a `refs/heads/tbd/` ref, and
+    /// declines them *in git's own collision vocabulary*.
+    ///
+    /// The echoed line is what makes this a collision rather than an arbitrary
+    /// hook veto: `worktreeAdd` failures are classified off `GitError.stderr`,
+    /// and a hook's stderr is git's stderr, so this reaches the classifier as
+    /// `.nameCollision` — the failure kind whose only remedy is a fresh name.
+    /// Without it the decline reads as a repo-level veto that fails fast, the
+    /// caller never reaches its `retryGeneratedNameOnCollision` decision, and a
+    /// test asserting that decision passes no matter which way the flag is set.
+    /// (Measured: flipping `WorktreeLifecycle+ReviveFresh`'s
+    /// `retryGeneratedNameOnCollision` to `true` left the veto-only version of
+    /// this suite green.)
     private func installGeneratedBranchCollisionHook(
         repoDir: URL,
         rejections: Int
@@ -927,6 +940,7 @@ struct WorktreeReviveFreshTests {
             if [ "$count" -lt \(rejections) ]; then
                 count=$((count + 1))
                 echo "$count" > "\(rejectionCount.path)"
+                echo "fatal: a branch named 'tbd/simulated-collision' already exists" >&2
                 exit 1
             fi
         fi

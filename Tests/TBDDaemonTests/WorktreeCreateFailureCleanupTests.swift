@@ -157,13 +157,157 @@ import Testing
         #expect(survivors.isEmpty, "second name left a directory: \(survivors)")
     }
 
+    /// An unresolvable base is not fixable by a fresh name either, so it must
+    /// fail fast the same way a repo-level cause does, and say which bases it
+    /// tried. Without the `lastKind == .baseUnresolvable` arm the create falls
+    /// through to the name-retry leg, burns two more identical failures, and
+    /// reports the generic "after all attempts" — the mutation this asserts
+    /// against.
+    @Test func unresolvableBaseFailsFastNamingTheBasesTried() async throws {
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // No `origin`, and a default branch that does not exist locally either,
+        // so BOTH bases are unresolvable rather than just the remote one.
+        let db = try TBDDatabase(inMemory: true)
+        let created = try await db.repos.create(
+            path: repoDir.path, displayName: "test", defaultBranch: "no-such-base"
+        )
+        try await db.repos.updateWorktreeRoot(
+            id: created.id, path: tempDir.appendingPathComponent(".tbd/worktrees").path
+        )
+        let repo = try #require(try await db.repos.get(id: created.id))
+        let lifecycle = makeLifecycle(db: db)
+
+        do {
+            _ = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
+            Issue.record("expected an unresolvable base to fail the create")
+        } catch {
+            let text = String(describing: error)
+            #expect(text.contains("no usable base branch"),
+                    "unresolvable base reported as something else: \(text)")
+            #expect(text.contains("origin/no-such-base") && text.contains("no-such-base"),
+                    "the bases tried are not named: \(text)")
+            #expect(!text.contains("after all attempts"),
+                    "a second name was attempted for an unresolvable base: \(text)")
+        }
+
+        let base = WorktreeLayout().basePath(for: repo)
+        let survivors = (try? FileManager.default.contentsOfDirectory(atPath: base)) ?? []
+        #expect(survivors.isEmpty, "failed create left worktree directories: \(survivors)")
+    }
+
     // MARK: - Branches we did NOT create are never deleted
+
+    /// An occupied worktree *path* is the case that keeps the deletion gate
+    /// honest in the other direction: git creates the branch, then discovers the
+    /// path is taken and fails — so this failure really does leak a branch we
+    /// made, even though its stderr says "already exists" like a branch
+    /// collision does. Widening the gate from "git refused to create the branch"
+    /// to the whole `.nameCollision` classification passes every other test in
+    /// this file and reintroduces the leak here.
+    @Test func occupiedPathLeaksNoBranchEvenThoughItLooksLikeACollision() async throws {
+        // A cloned repo, so `origin/main` resolves and the FIRST attempt is the
+        // one that trips over the path. Against an origin-less repo the base
+        // fallback gets there first, and its cleanup deletes the planted
+        // directory before any branch exists — the leak never forms.
+        let (parentDir, hostDir, repoDir) = try await makeClonedTestRepo()
+        defer { try? FileManager.default.removeItem(at: parentDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        let repo = try await makeTestRepo(db: db, tempDir: hostDir, repoDir: repoDir)
+
+        // Reserve the name, then occupy its path so the FIRST attempt fails
+        // with "fatal: '<path>' already exists" after having created the branch.
+        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id, skipClaude: true)
+        try FileManager.default.createDirectory(
+            atPath: pending.localPath, withIntermediateDirectories: true
+        )
+        try Data("occupied".utf8).write(
+            to: URL(fileURLWithPath: pending.localPath).appendingPathComponent("stray.txt")
+        )
+
+        let completion = try await lifecycle.completeCreateWorktree(
+            worktreeID: pending.id, skipClaude: true
+        )
+        if case .preSessionPending(let phase3) = completion {
+            await phase3.value
+        }
+
+        let branches = try await localBranches(repoDir)
+        #expect(!branches.contains(pending.branch),
+                "an occupied path leaked the branch git created: \(branches)")
+    }
+
+    /// The probe→attempt window, driven directly because no test can reliably
+    /// win a race against a subprocess spawn: a branch that appeared after the
+    /// probe answered "absent" is indistinguishable from one we created by
+    /// bookkeeping alone, and only git's own "a branch named … already exists"
+    /// tells the two apart. Both arms asserted — the same inputs with that
+    /// signal absent must still delete, or the gate would just be a synonym for
+    /// "never clean up".
+    @Test func branchTakenBetweenProbeAndAddIsNeverDeleted() async throws {
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        try await shell("git branch appeared-mid-flight", at: repoDir)
+        try await shell("git branch ours-to-clean-up", at: repoDir)
+
+        await lifecycle.cleanUpFailedWorktreeAdd(
+            repoPath: repoDir.path,
+            worktreePath: tempDir.appendingPathComponent("never-created").path,
+            branch: "appeared-mid-flight",
+            branchPreExisted: false,
+            branchNameWasAlreadyTaken: true
+        )
+        await lifecycle.cleanUpFailedWorktreeAdd(
+            repoPath: repoDir.path,
+            worktreePath: tempDir.appendingPathComponent("never-created").path,
+            branch: "ours-to-clean-up",
+            branchPreExisted: false,
+            branchNameWasAlreadyTaken: false
+        )
+
+        let branches = try await localBranches(repoDir)
+        #expect(branches.contains("appeared-mid-flight"),
+                "cleanup deleted a branch git had refused to create: \(branches)")
+        #expect(!branches.contains("ours-to-clean-up"),
+                "cleanup left behind a branch it did create: \(branches)")
+    }
+
+    /// A failed probe (`nil`) is not the same answer as "absent", so it must
+    /// keep the branch — the third arm of the pre-existence tri-state, which the
+    /// other tests only reach as `false` or `true`.
+    @Test func unknownPreExistenceNeverDeletes() async throws {
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        try await shell("git branch probe-failed", at: repoDir)
+
+        await lifecycle.cleanUpFailedWorktreeAdd(
+            repoPath: repoDir.path,
+            worktreePath: tempDir.appendingPathComponent("never-created").path,
+            branch: "probe-failed",
+            branchPreExisted: nil,
+            branchNameWasAlreadyTaken: false
+        )
+
+        let branches = try await localBranches(repoDir)
+        #expect(branches.contains("probe-failed"),
+                "cleanup deleted a branch whose pre-existence was unknown: \(branches)")
+    }
 
     /// The `worktreeAddExisting` leg creates no branch and must therefore never
     /// delete one. Not red against the unfixed tree — which deletes no branches
     /// anywhere — so it is mutation-checked instead: routing that leg's `catch`
-    /// through `cleanUpFailedWorktreeAdd(branchPreExisted: false)`, the obvious
-    /// over-eager version of this fix, makes it fail.
+    /// through `cleanUpFailedWorktreeAdd(branchPreExisted: false,
+    /// branchNameWasAlreadyTaken: false)`, the obvious over-eager version of
+    /// this fix, makes it fail.
     @Test func preExistingBranchSurvivesAFailedCheckout() async throws {
         let (tempDir, repoDir) = try await createTestRepo()
         defer { try? FileManager.default.removeItem(at: tempDir) }

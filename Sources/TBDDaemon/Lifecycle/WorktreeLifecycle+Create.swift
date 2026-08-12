@@ -565,7 +565,8 @@ extension WorktreeLifecycle {
                 logger.warning("Failed to add worktree with base branch \(baseBranch, privacy: .public): \(String(describing: error), privacy: .public)")
                 await cleanUpFailedWorktreeAdd(
                     repoPath: repoPath, worktreePath: worktreePath,
-                    branch: branch, branchPreExisted: branchPreExisted
+                    branch: branch, branchPreExisted: branchPreExisted,
+                    branchNameWasAlreadyTaken: gitRefusedToCreateBranch(error)
                 )
                 if lastKind == .repoLevel {
                     // Nothing downstream can help: not the other base, not a
@@ -582,9 +583,16 @@ extension WorktreeLifecycle {
             }
         }
 
+        // Both bases are spent. A fresh name is the only remaining move, and it
+        // is worth making only for a collision — `.baseUnresolvable` means no
+        // ref resolved, which no folder or branch name changes, so retrying
+        // would burn two more identical failures and then report the generic
+        // "after all attempts" instead of naming the bases that were tried.
+        // (`.repoLevel` never reaches here; it throws inside the loop.)
+        //
         // Explicit folders and identity-sensitive callers cannot silently
-        // switch to a different generated folder and branch.
-        if userSpecifiedFolder || !retryGeneratedNameOnCollision {
+        // switch to a different generated folder and branch either.
+        if lastKind == .baseUnresolvable || userSpecifiedFolder || !retryGeneratedNameOnCollision {
             let errorDetail = lastError.flatMap { formatErrorForMessage($0) } ?? ""
             throw WorktreeLifecycleError.createFailed(
                 "\(describeExhaustedBases(lastKind, baseBranches: baseBranches))\(errorDetail)"
@@ -606,8 +614,10 @@ extension WorktreeLifecycle {
         // collide with somebody's branch is exactly the case where deleting on
         // failure would destroy work we did not create. When the name is
         // unchanged (a user-specified branch is kept across the retry) the
-        // original probe still holds — the loop above deleted the branch only
-        // if it had created it.
+        // original probe still holds — the loop above only ever *attempted* to
+        // delete a branch it had created, so reusing the answer can leave a
+        // leaked branch standing but can never widen what is eligible for
+        // deletion.
         let retryBranchPreExisted: Bool? = retryBranch == branch
             ? branchPreExisted
             : (try? await git.localBranchExists(repoPath: repoPath, name: retryBranch))
@@ -627,7 +637,8 @@ extension WorktreeLifecycle {
                 logger.warning("Failed to add worktree with retry path and base branch \(baseBranch, privacy: .public): \(String(describing: error), privacy: .public)")
                 await cleanUpFailedWorktreeAdd(
                     repoPath: repoPath, worktreePath: retryPath,
-                    branch: retryBranch, branchPreExisted: retryBranchPreExisted
+                    branch: retryBranch, branchPreExisted: retryBranchPreExisted,
+                    branchNameWasAlreadyTaken: gitRefusedToCreateBranch(error)
                 )
                 if lastKind == .repoLevel {
                     throw WorktreeLifecycleError.createFailed(
@@ -691,32 +702,77 @@ extension WorktreeLifecycle {
         return .repoLevel
     }
 
-    /// Cleans up whatever a single failed `worktreeAdd` attempt left behind.
+    /// True when git's stderr says it *refused to create* the branch because
+    /// the name was already taken ("fatal: a branch named 'x' already exists").
     ///
-    /// Three things, in order: the partially-written directory, any worktree
-    /// registration git recorded before failing, and — only when we positively
-    /// know the branch was absent beforehand and is present now — the branch
-    /// `-b` created. Git can fail *after* creating the branch (a stale
-    /// `.git/config.lock` makes the upstream-config write fail while the branch
-    /// stands), which is how a failed create used to leak a `tbd/<name>` branch
-    /// and then mask the real cause behind "a branch named … already exists" on
-    /// the next attempt.
+    /// The one question `cleanUpFailedWorktreeAdd` cannot answer from its own
+    /// bookkeeping: whether the branch standing there now is one this attempt
+    /// created. Git refusing to create it settles that — it isn't.
     ///
-    /// `branchPreExisted == nil` means the probe itself failed. Not knowing is
-    /// not the same as knowing it's absent, so nothing is deleted.
-    private func cleanUpFailedWorktreeAdd(
+    /// Matched loosely (any branch name, not just ours) on purpose. The two
+    /// ways to be wrong are not symmetric: failing to delete a branch we made
+    /// leaves a visible, recoverable `tbd/<name>`, while deleting one we did
+    /// not destroys work. So an unrecognized phrasing must land on "don't
+    /// delete", which is what a broad match buys.
+    private func gitRefusedToCreateBranch(_ error: Error) -> Bool {
+        guard let gitError = error as? GitError else { return false }
+        return gitError.stderr.lowercased().contains("a branch named")
+    }
+
+    /// Cleans up whatever a single failed `worktreeAdd` attempt left behind:
+    /// the partially-written directory always, and — only when this attempt is
+    /// the one that can have created it — the branch `-b` made. Git can fail
+    /// *after* creating the branch (a stale `.git/config.lock` makes the
+    /// upstream-config write fail while the branch stands), which is how a
+    /// failed create used to leak a `tbd/<name>` branch and then mask the real
+    /// cause behind "a branch named … already exists" on the next attempt.
+    ///
+    /// **Three independent gates stand between a failure and `branch -D`, and
+    /// deleting a branch the user owns is the worst outcome this path has, so
+    /// each one fails toward keeping it.**
+    ///
+    /// 1. `branchNameWasAlreadyTaken == false`. When git says "a branch named
+    ///    … already exists" it is telling us it *refused to create* the branch,
+    ///    which is positive evidence the branch predates this attempt — whoever
+    ///    made it. That is the gate that closes the probe→attempt window:
+    ///    `branchPreExisted` is sampled before the add, so a branch created by
+    ///    anything else in between would otherwise be indistinguishable from
+    ///    one we made, and gate 2 alone would delete it.
+    /// 2. `branchPreExisted == false`. `nil` means the probe itself failed —
+    ///    not knowing is not the same as knowing it's absent.
+    /// 3. The branch is present *now*. Nothing to do otherwise.
+    ///
+    /// Gate 1 is deliberately narrower than the `.nameCollision` classification,
+    /// which also covers an occupied worktree *path*. Those two are not
+    /// interchangeable here: verified against git 2.50, `git worktree add
+    /// <occupied-path> -b X <base>` creates `X`, *then* discovers the path is
+    /// taken and fails — leaving a branch we really did make. Widening gate 1 to
+    /// the whole `.nameCollision` case would reintroduce exactly the leak this
+    /// function exists to stop.
+    ///
+    /// `worktreePrune` runs only once all three gates hold, immediately before
+    /// the delete it exists to serve: git refuses to delete a branch checked out
+    /// in a live worktree, and a stale registration would manufacture that
+    /// refusal (see `GitManager.deleteLocalBranch`). Pruning is repo-wide and
+    /// unconditionally drops any registration whose directory is missing —
+    /// including a legitimate worktree on an unmounted volume — so it stays
+    /// scoped to the one case that needs it rather than firing on every failed
+    /// attempt.
+    func cleanUpFailedWorktreeAdd(
         repoPath: String,
         worktreePath: String,
         branch: String,
-        branchPreExisted: Bool?
+        branchPreExisted: Bool?,
+        branchNameWasAlreadyTaken: Bool
     ) async {
         try? FileManager.default.removeItem(atPath: worktreePath)
-        try? await git.worktreePrune(repoPath: repoPath)
 
+        guard !branchNameWasAlreadyTaken else { return }
         guard branchPreExisted == false else { return }
         guard (try? await git.localBranchExists(repoPath: repoPath, name: branch)) == true else {
             return
         }
+        try? await git.worktreePrune(repoPath: repoPath)
         do {
             try await git.deleteLocalBranch(repoPath: repoPath, name: branch)
             logger.info("Deleted branch \(branch, privacy: .public) left behind by a failed worktree add")
