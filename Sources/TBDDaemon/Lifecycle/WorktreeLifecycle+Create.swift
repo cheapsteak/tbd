@@ -653,6 +653,12 @@ extension WorktreeLifecycle {
     ///
     /// Returns the created terminals as `(id, label)` pairs so phase 3 can
     /// broadcast `.terminalCreated` for each.
+    ///
+    /// **It does not read or write `worktree.pending_prompt`.** Its whole
+    /// involvement with a queued prompt is one notification, after the primary
+    /// terminal row exists, that the pane is up
+    /// (`PendingPromptCoordinator.notePrimaryTerminalExists`); the coordinator
+    /// owns every decision and every write.
     @discardableResult
     func spawnPrimaryTerminals(
         worktree: Worktree, repo: Repo?,
@@ -739,6 +745,13 @@ extension WorktreeLifecycle {
             profile: resolvedProfile?.envOverrides
         )
 
+        // A queued prompt never rides this command line. There is one delivery
+        // path — the coordinator pastes it once the pane is up — so nothing
+        // here reads or writes `worktree.pending_prompt`, and the only writer
+        // that can clear it is the coordinator, after a paste it watched
+        // succeed.
+        let effectivePrompt = initialPrompt
+
         // Create terminal 1: primary agent (or shell if skipped).
         let plannedTerminalID1 = UUID()
         var createdTerminalIDs = [plannedTerminalID1]
@@ -765,7 +778,7 @@ extension WorktreeLifecycle {
                     "Codex launch must be prepared before the Codex spawn branch")
             }
             primaryCommand = CodexSpawnCommandBuilder.build(
-                initialPrompt: initialPrompt,
+                initialPrompt: effectivePrompt,
                 executablePath: codexLaunch.executablePath)
             primaryEnv = [
                 "TBD_WORKTREE_ID": worktreeID.uuidString,
@@ -835,7 +848,7 @@ extension WorktreeLifecycle {
                 // whenever a carryover is present, so this expression also
                 // preserves the pre-existing behavior for plain resumes (never
                 // a prompt) and fresh creates (the caller's prompt).
-                initialPrompt: isResume ? nil : initialPrompt,
+                initialPrompt: isResume ? nil : effectivePrompt,
                 profileSecret: resolvedProfile?.secret,
                 profileKind: resolvedProfile?.kind,
                 profileBaseURL: resolvedProfile?.baseURL,
@@ -904,6 +917,15 @@ extension WorktreeLifecycle {
         var createdTerminals: [(id: UUID, label: String)] = [
             (id: plannedTerminalID1, label: primaryLabel)
         ]
+
+        // The pane a parked prompt was waiting for now exists. This is the
+        // whole of the spawn path's involvement: it passes no prompt, reads no
+        // column and writes none. The coordinator decides whether it may type,
+        // and the readiness ceiling starts here rather than at the park — a
+        // `preSession` hook can run for ten minutes, and a ceiling armed at the
+        // park would expire before the agent existed.
+        await pendingPromptCoordinator?.notePrimaryTerminalExists(
+            worktreeID: worktreeID, terminalID: plannedTerminalID1)
 
         // Create terminal 2: setup hook. Repo-backed worktrees only — scratch
         // spaces (repo == nil) have no repo path/setup hook and get just the

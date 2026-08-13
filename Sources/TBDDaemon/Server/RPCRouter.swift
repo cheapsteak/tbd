@@ -61,6 +61,14 @@ public final class RPCRouter: Sendable {
     /// honest answer rather than a claim. Set post-construction like
     /// `claudeUsagePoller`.
     nonisolated(unsafe) var deliveryVerifier: (any DeliveryVerificationArming)?
+    /// Owner of the prompt parked at worktree creation (design 2026-08-10).
+    /// `worktree.setPendingPrompt` routes to it and `terminal.sessionEvent`
+    /// feeds it the readiness signal. `nil` in mock mode and in tests that do
+    /// not exercise the feature, where the handler refuses and the hook is a
+    /// no-op. Set post-construction like `claudeUsagePoller`, because the
+    /// coordinator has to exist before the `WorktreeLifecycle` snapshot this
+    /// router is built from.
+    nonisolated(unsafe) var pendingPromptCoordinator: PendingPromptCoordinator?
     /// Paces the keys of a `--keys` payload. A `var` so tests can inject a
     /// `TestClock`; production never replaces the default.
     nonisolated(unsafe) var pacedKeySender = PacedKeySender()
@@ -461,6 +469,8 @@ public final class RPCRouter: Sendable {
                 return try await handleWorktreeSetPin(request.paramsData)
             case RPCMethod.worktreeReorderPins:
                 return try await handleWorktreeReorderPins(request.paramsData)
+            case RPCMethod.worktreeSetPendingPrompt:
+                return try await handleWorktreeSetPendingPrompt(request.paramsData)
             case RPCMethod.configGet:
                 return try await handleConfigGet()
             case RPCMethod.configSetAutoArchiveOnMergeDefault:
@@ -505,6 +515,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetHibernateInputVeto(request.paramsData)
             case RPCMethod.configSetDeliveryVerification:
                 return try await handleConfigSetDeliveryVerification(request.paramsData)
+            case RPCMethod.configSetQueuedPrompt:
+                return try await handleConfigSetQueuedPrompt(request.paramsData)
             case RPCMethod.configSetAutoCloseSetup:
                 return try await handleConfigSetAutoCloseSetup(request.paramsData)
             case RPCMethod.configSetAutoTrustWorktrees:
@@ -583,7 +595,8 @@ public final class RPCRouter: Sendable {
             autoTrustWorktrees: config.autoTrustWorktrees,
             panelSurfaceEnabled: config.panelSurfaceEnabled,
             remoteBackendsEnabled: config.remoteBackendsEnabled,
-            remoteBackendsLive: remoteManager != nil))
+            remoteBackendsLive: remoteManager != nil,
+            queuedPromptEnabled: config.queuedPromptEnabled))
     }
 
     // MARK: - PR Status

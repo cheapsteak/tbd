@@ -40,6 +40,13 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var location: String?  // "local" | "remote"; nil reads as local
     var providerName: String?  // set only alongside location == "remote"
     var providerSessionID: String?  // set only alongside location == "remote"
+    // Prompt parked at creation time, delivered when the primary agent turns up
+    // (v71). nil = nothing parked.
+    var pending_prompt: String?
+    // Whether delivery ends with Enter. Carries a SQL default (unlike the
+    // `queued_prompt_enabled` flag) because it is data, not a gate; nil only on
+    // rows the record type wrote explicitly, and resolves to true.
+    var pending_prompt_submit: Bool?
 
     init(from wt: Worktree) {
         self.id = wt.id.uuidString
@@ -81,6 +88,8 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             self.providerName = provider
             self.providerSessionID = sessionID
         }
+        self.pending_prompt = wt.pendingPrompt
+        self.pending_prompt_submit = wt.pendingPromptSubmit
     }
 
     /// Failable decode: skips (returns nil after a logged warning) only when the
@@ -151,7 +160,9 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             foreignHead: foreign_head ?? false,
             pinnedAt: pinnedAt,
             pinSortOrder: pinSortOrder,
-            location: worktreeLocation
+            location: worktreeLocation,
+            pendingPrompt: pending_prompt,
+            pendingPromptSubmit: pending_prompt_submit
         )
     }
 }
@@ -1104,6 +1115,53 @@ public struct WorktreeStore: Sendable {
                            arguments: [json, id.uuidString])
         }
     }
+
+    /// Park a prompt for this worktree's primary agent, replacing whatever was
+    /// parked before — the feature holds one prompt per worktree, not a queue.
+    /// `text: nil` unparks without delivering.
+    public func setPendingPrompt(worktreeID: UUID, text: String?, submit: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE worktree SET pending_prompt = ?, pending_prompt_submit = ? WHERE id = ?",
+                arguments: [text, submit, worktreeID.uuidString]
+            )
+        }
+    }
+
+    /// Clear the parked prompt **only if the column still holds `text` with
+    /// `submit`**. Answers whether it did.
+    ///
+    /// The submit bit is part of the identity, not decoration: re-parking the
+    /// same words with the box unticked is a different prompt — staged in the
+    /// composer rather than sent — and a clear that ignored the bit would
+    /// consume it as though it had already been delivered.
+    ///
+    /// The compare-and-swap is the contract. Delivery reads the text, settles,
+    /// hands it to a pane, and comes back to clear — and both of those suspend,
+    /// so a second park can land in between. An unconditional clear would
+    /// destroy that newer prompt: it would vanish from the recovery store
+    /// having never been delivered, while its own cycle read an empty column
+    /// and returned silently. Clearing only what was actually delivered leaves
+    /// the newcomer where its own cycle can find it.
+    ///
+    /// **`PendingPromptCoordinator.deliverParkedPrompt` is the only caller, and
+    /// the only writer that clears this column after a delivery.** The spawn
+    /// path does not touch it at all.
+    public func clearPendingPrompt(
+        worktreeID: UUID, ifTextIs text: String, submit: Bool
+    ) async throws -> Bool {
+        try await writer.write { db in
+            try db.execute(
+                sql: """
+                    UPDATE worktree SET pending_prompt = NULL \
+                    WHERE id = ? AND pending_prompt = ? AND pending_prompt_submit = ?
+                    """,
+                arguments: [worktreeID.uuidString, text, submit]
+            )
+            return db.changesCount > 0
+        }
+    }
+
 
     /// All persisted PR statuses, keyed by worktree id. Used to hydrate the
     /// in-memory PR cache at daemon startup so icons survive restart.

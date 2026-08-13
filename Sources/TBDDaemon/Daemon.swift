@@ -435,6 +435,19 @@ public final class Daemon: Sendable {
         )
         lifecycle.controlMode = controlModeBridge
 
+        // Queued prompt on worktree creation (design 2026-08-10). Constructed
+        // here — before `lifecycle` is copied by value into the RPC router
+        // below — so the spawn path's hand-off reaches the same actor the
+        // `worktree.setPendingPrompt` handler parks into. Its send seam is
+        // wired after the router exists (`attachPendingPromptCoordinator`,
+        // below). Skipped in mock mode, like every other rail: with no
+        // coordinator the parking RPC refuses, so nothing new is ever parked
+        // and nothing already in the column is ever typed.
+        let pendingPrompts: PendingPromptCoordinator? = mockMode == nil
+            ? PendingPromptCoordinator(db: database, subscriptions: subs)
+            : nil
+        lifecycle.pendingPromptCoordinator = pendingPrompts
+
         // Orphan-GC: constructed here — before `lifecycle` gets copied into
         // the RPC router / auto-archive coordinator below (both take a
         // value-type snapshot at their own init) — so the archive-event
@@ -506,6 +519,12 @@ public final class Daemon: Sendable {
         )
         // Wire the shared input activity tracker to the coordinator
         await rpcRouter.hibernationCoordinator.setInputActivity(inputActivity)
+        // Queued prompt, second half: route the parking RPC and the readiness
+        // and confirmation hooks to the coordinator, and give it the paste
+        // path's send seam.
+        if let pendingPrompts {
+            await rpcRouter.attachPendingPromptCoordinator(pendingPrompts)
+        }
         rpcRouter.controlMode = controlModeBridge
         // The wake path recreates a terminal's tmux server/window when the
         // window is gone (e.g. post-reboot); give the recreated server the

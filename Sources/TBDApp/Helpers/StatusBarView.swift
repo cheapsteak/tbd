@@ -104,6 +104,23 @@ struct StatusBarView: View {
     /// the cap and the bind-order guarantee to `PRBindingPresentation` so the
     /// status bar cannot disagree with the toolbar about which PRs are shown
     /// or in what order.
+    /// Whether the bar carries the selected worktree's first-message entry.
+    ///
+    /// Failures only. A `.pending` message is the pane banner's to announce —
+    /// it sits right above the terminal the operator is watching and says the
+    /// reassuring thing — and this bar is for the case where TBD can see that
+    /// nothing will ever receive the text. The two conditions are complements
+    /// of one enum, so they cannot both be on, and neither is a guess: the app
+    /// says "cannot be delivered" only where it can name why.
+    ///
+    /// The status bar is the right home for that because it is *scoped to the
+    /// selection* and has room for words. The first cut put a glyph on every
+    /// sidebar row: always visible, unlabelled, and lighting up for messages
+    /// that were merely waiting. Alarming and unreadable at once.
+    static func showsParkedPromptEntry(_ readback: ParkedPromptReadback?) -> Bool {
+        readback?.phase.undeliverableReason != nil
+    }
+
     nonisolated static func prChips(
         _ bindings: [PRBinding],
         limit: Int = prChipLimit
@@ -169,6 +186,14 @@ struct StatusBarView: View {
             }
             // Chips render for a SINGLE selection only — `selected` is already
             // nil for a multi-selection, matching the path/branch cluster and
+            // Failures only; a message merely waiting is the pane banner's.
+            // `selected` is nil for a remote worktree, which has no local pane
+            // to have parked a prompt against in the first place.
+            if let selected,
+               Self.showsParkedPromptEntry(
+                   appState.parkedPrompt(for: selected.worktree)) {
+                ParkedPromptStatusItem(worktree: selected.worktree)
+            }
             // the toolbar's PR control.
             if let selected {
                 // Same accessor as the toolbar control and the sidebar
@@ -348,6 +373,43 @@ private struct PRChipOverflowMenu: View {
         .modifier(StatusBarHoverAffordance(isHovering: $isHovering))
         .accessibilityLabel(PRBindingPresentation.overflowChipAccessibilityLabel(
             total: bindings.count, overflow: overflow))
+    }
+}
+
+/// The selected worktree's undeliverable first message, as a status-bar entry
+/// that opens the composer.
+///
+/// Labelled, not a bare glyph: an icon cannot say why nothing will receive the
+/// text, and the reason is the whole content of the notice. It uses
+/// `StatusBarHoverAffordance` rather than wiring `onHover` by hand, so its
+/// cursor push can never lose its matching pop.
+private struct ParkedPromptStatusItem: View {
+    @EnvironmentObject var appState: AppState
+    let worktree: Worktree
+
+    @State private var isHovering = false
+
+    private var tooltip: String {
+        "This worktree's first message cannot be delivered — nothing here will receive it. Click to read, copy or discard it."
+    }
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "exclamationmark.bubble")
+                .font(.system(size: 11, weight: .semibold))
+            Text("First message undelivered")
+                .lineLimit(1)
+                .underline(isHovering)
+        }
+        .foregroundStyle(SuffixRowIndicator.attention.color)
+        .contentShape(Rectangle())
+        .help(tooltip)
+        .modifier(StatusBarHoverAffordance(isHovering: $isHovering))
+        .onTapGesture { appState.revealParkedPrompt(worktree) }
+        .accessibilityElement()
+        .accessibilityLabel("First message cannot be delivered for \(worktree.displayName)")
+        .accessibilityHint(tooltip)
+        .accessibilityAddTraits(.isButton)
     }
 }
 

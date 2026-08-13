@@ -962,6 +962,32 @@ actor DaemonClient {
         )
     }
 
+    /// Persist the queued-prompt soak flag (default OFF). Read fresh at spawn
+    /// time and on every `worktree.setPendingPrompt`, so no daemon restart is
+    /// needed; sending either value is an explicit gesture that survives a
+    /// later change to the shipped default.
+    func setQueuedPrompt(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetQueuedPrompt,
+            params: ConfigSetQueuedPromptParams(enabled: enabled)
+        )
+    }
+
+    /// Park the prompt composed while a worktree was still being created, to be
+    /// delivered to its primary agent whenever that agent turns up. `text: nil`
+    /// unparks. A second call replaces the first — one prompt per worktree, not
+    /// a queue.
+    func setPendingPrompt(
+        worktreeID: UUID, text: String?, submit: Bool
+    ) async throws -> WorktreeSetPendingPromptResult {
+        try await callAsync(
+            method: RPCMethod.worktreeSetPendingPrompt,
+            params: WorktreeSetPendingPromptParams(
+                worktreeID: worktreeID, text: text, submit: submit),
+            resultType: WorktreeSetPendingPromptResult.self
+        )
+    }
+
     /// Persist the worktree auto-trust switch (default ON). Applies to the
     /// next Claude spawn or wake.
     func setAutoTrustWorktrees(enabled: Bool) async throws {

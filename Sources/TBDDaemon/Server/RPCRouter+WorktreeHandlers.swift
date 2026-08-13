@@ -571,4 +571,45 @@ extension RPCRouter {
         try await db.worktrees.reorderPins(worktreeIDs: params.worktreeIDs)
         return .ok()
     }
+
+    /// Wire a queued-prompt coordinator to this router: route
+    /// `worktree.setPendingPrompt` and the readiness hook to it, and give it
+    /// the send seam its delivery needs.
+    ///
+    /// Both halves in one call, because either alone is a silent hole. Without
+    /// the property the parking RPC refuses; without the seam every parked
+    /// prompt reports "this daemon has no send path wired".
+    ///
+    /// The seam reaches the send core with the `<tbd-dispatch/>` envelope
+    /// suppressed — a queued prompt is the operator's own words and must arrive
+    /// byte-identical to what the argv path would have delivered.
+    func attachPendingPromptCoordinator(_ coordinator: PendingPromptCoordinator) async {
+        pendingPromptCoordinator = coordinator
+        await coordinator.setDeliver { [self] terminalID, text, submit in
+            await sendQueuedPromptVerbatim(
+                terminalID: terminalID, text: text, submit: submit)
+        }
+    }
+
+    /// Park the prompt the operator composed while the worktree was still
+    /// being created (design 2026-08-10). A second, independent RPC sent after
+    /// `worktree.create` is already in flight — it never participates in
+    /// creation and never blocks it.
+    ///
+    /// The refusal is a **successful** response carrying `.refused`, not an RPC
+    /// error: "the flag is off" is an answer about which delivery path the
+    /// prompt took, and the caller branches on the result rather than on a
+    /// thrown string. A daemon with no coordinator (mock mode) refuses for the
+    /// same reason it refuses with the flag off — there is nothing that could
+    /// deliver.
+    func handleWorktreeSetPendingPrompt(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(WorktreeSetPendingPromptParams.self, from: paramsData)
+        guard let coordinator = pendingPromptCoordinator else {
+            return try RPCResponse(result: WorktreeSetPendingPromptResult.refused(
+                reason: "this daemon has no queued-prompt coordinator wired"))
+        }
+        let result = await coordinator.park(
+            worktreeID: params.worktreeID, text: params.text, submit: params.submit)
+        return try RPCResponse(result: result)
+    }
 }

@@ -250,6 +250,8 @@ public enum RPCMethod {
     public static let configSetControlMode = "config.setControlMode"
     public static let configSetHibernateInputVeto = "config.setHibernateInputVeto"
     public static let configSetDeliveryVerification = "config.setDeliveryVerification"
+    public static let configSetQueuedPrompt = "config.setQueuedPrompt"
+    public static let worktreeSetPendingPrompt = "worktree.setPendingPrompt"
     public static let configSetAutoCloseSetup = "config.setAutoCloseSetup"
     public static let configSetAutoTrustWorktrees = "config.setAutoTrustWorktrees"
     public static let gcList = "gc.list"
@@ -1955,6 +1957,106 @@ public struct ConfigSetDeliveryVerificationParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setQueuedPrompt` — the queued-prompt soak flag (default
+/// OFF, design 2026-08-10). Read fresh at spawn time and on every
+/// `worktree.setPendingPrompt`, so no daemon restart is required.
+///
+/// Sending either value is an explicit gesture: the backing column is NULL
+/// until this verb writes to it, and a written `false` stays off even after the
+/// shipped default graduates.
+public struct ConfigSetQueuedPromptParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `worktree.setPendingPrompt` — park the text the operator composed
+/// while the worktree was still being created (design 2026-08-10). Sent as a
+/// second, independent RPC after `worktree.create` is already in flight; it
+/// never participates in creation.
+///
+/// `text: nil` unparks without delivering. A second call replaces the first —
+/// this is one prompt per worktree, not a queue.
+public struct WorktreeSetPendingPromptParams: Codable, Sendable, Equatable {
+    public let worktreeID: UUID
+    public let text: String?
+    /// Whether delivery ends with Enter. **Opt-in, defaulting to `false`**:
+    /// staged text costs the operator one keypress, while a turn nobody asked
+    /// for cannot be taken back — and a submitted delivery is no more verifiable
+    /// than an unsubmitted one, so the safer answer is also the honest one. A
+    /// client that omits the key gets staging.
+    public let submit: Bool
+
+    public init(worktreeID: UUID, text: String?, submit: Bool = false) {
+        self.worktreeID = worktreeID
+        self.text = text
+        self.submit = submit
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        worktreeID = try c.decode(UUID.self, forKey: .worktreeID)
+        text = try c.decodeIfPresent(String.self, forKey: .text)
+        submit = try c.decodeIfPresent(Bool.self, forKey: .submit) ?? false
+    }
+}
+
+/// Result of `worktree.setPendingPrompt` — which of the two delivery paths the
+/// prompt was committed to, decided once by whether the primary agent had
+/// already spawned when the prompt arrived.
+///
+/// Encoded as `{"status": …}` plus a `reason` on refusals rather than as a
+/// synthesized enum payload, so a status this build does not recognise decodes
+/// as a refusal naming it instead of throwing.
+public enum WorktreeSetPendingPromptResult: Codable, Sendable, Equatable {
+    /// Written to the column, to be typed into the primary agent once its pane
+    /// comes up. The common case — and the certain one while a `preSession`
+    /// hook is still running.
+    ///
+    /// It promises that the text is parked and that this daemon session holds
+    /// the licence to deliver it, not that delivery will succeed: the readiness
+    /// ceiling starts only when the pane exists, and an outcome that is not a
+    /// successful paste leaves the text in the column with a notification.
+    case parkedForSpawn
+    /// The primary agent is already up, so the prompt is armed against its
+    /// readiness signal and will be pasted verbatim.
+    case awaitingReady
+    /// Nothing was parked. Carries an operator-readable reason — the flag being
+    /// off, a worktree that does not exist, and so on.
+    case refused(reason: String)
+
+    private enum CodingKeys: String, CodingKey { case status, reason }
+    private enum Status: String { case parkedForSpawn, awaitingReady, refused }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .parkedForSpawn:
+            try c.encode(Status.parkedForSpawn.rawValue, forKey: .status)
+        case .awaitingReady:
+            try c.encode(Status.awaitingReady.rawValue, forKey: .status)
+        case .refused(let reason):
+            try c.encode(Status.refused.rawValue, forKey: .status)
+            try c.encode(reason, forKey: .reason)
+        }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let raw = try c.decode(String.self, forKey: .status)
+        switch Status(rawValue: raw) {
+        case .parkedForSpawn: self = .parkedForSpawn
+        case .awaitingReady: self = .awaitingReady
+        case .refused:
+            self = .refused(reason: try c.decodeIfPresent(String.self, forKey: .reason)
+                ?? "refused")
+        case nil:
+            // A newer daemon answered with a path this build has no idea how to
+            // wait on. "Not parked" is the safe reading.
+            self = .refused(reason: "unrecognized pending-prompt status '\(raw)'")
+        }
+    }
+}
+
 /// Params for `config.setAutoCloseSetup` — the auto-close-setup-tab soak
 /// flag (default OFF). Read fresh at spawn time; applies to the next
 /// worktree creation, no daemon restart required.
@@ -2150,6 +2252,13 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// restart-required distinction this field exists for; just don't read
     /// it as "at least one provider is up."
     public let remoteBackendsLive: Bool
+    /// Whether the queued prompt at worktree creation is enabled (design
+    /// 2026-08-10). Default OFF while it soaks. The app gates the whole modal
+    /// on this — with it false, creation behaves exactly as it did before.
+    /// Re-evaluated on every call, and resolved through
+    /// `Config.queuedPromptDefault`, so an install that never touched the
+    /// toggle reports whatever the shipped default currently is.
+    public let queuedPromptEnabled: Bool
 
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
@@ -2160,7 +2269,8 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
                 autoTrustWorktrees: Bool = true,
                 panelSurfaceEnabled: Bool = false,
                 remoteBackendsEnabled: Bool = false,
-                remoteBackendsLive: Bool = false) {
+                remoteBackendsLive: Bool = false,
+                queuedPromptEnabled: Bool = Config.queuedPromptDefault) {
         self.controlModeEnabled = controlModeEnabled
         self.tmuxVersion = tmuxVersion
         self.controlModeSupported = controlModeSupported
@@ -2171,6 +2281,7 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         self.panelSurfaceEnabled = panelSurfaceEnabled
         self.remoteBackendsEnabled = remoteBackendsEnabled
         self.remoteBackendsLive = remoteBackendsLive
+        self.queuedPromptEnabled = queuedPromptEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -2195,6 +2306,11 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         // New fields for the remote-backends flag; absent from older daemons defaults to false (soaking).
         remoteBackendsEnabled = try c.decodeIfPresent(Bool.self, forKey: .remoteBackendsEnabled) ?? false
         remoteBackendsLive = try c.decodeIfPresent(Bool.self, forKey: .remoteBackendsLive) ?? false
+        // New field for the queued-prompt flag; a daemon that does not send it
+        // cannot honor a parked prompt either, so fall through to the shipped
+        // default rather than assuming the feature is live.
+        queuedPromptEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .queuedPromptEnabled) ?? Config.queuedPromptDefault
     }
 }
 

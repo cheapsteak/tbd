@@ -44,8 +44,17 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// Delivery acknowledgement (design §12). Nil/absent means OFF — the
     /// `v69_config_delivery_verification` column default.
     var delivery_verification_enabled: Bool?
+    /// Queued prompt on worktree creation (design 2026-08-10). **Genuinely
+    /// tri-state**: the `v70_config_queued_prompt` column carries no SQL
+    /// default, so `nil` here means "never chose" rather than "off". Resolve it
+    /// through `Config.queuedPromptDefault`, never through `?? false`.
+    var queued_prompt_enabled: Bool?
 
-    func toModel() -> Config {
+    /// - Parameter queuedPromptDefault: the shipped default a NULL
+    ///   `queued_prompt_enabled` resolves to. Defaulted to the real constant;
+    ///   the parameter exists so tests can prove that NULL *follows* a changed
+    ///   default while an explicit `false` does not.
+    func toModel(queuedPromptDefault: Bool = Config.queuedPromptDefault) -> Config {
         Config(
             defaultProfileID: default_profile_id.flatMap(UUID.init(uuidString:)),
             primaryAgentPreference: primary_agent_preference
@@ -83,7 +92,11 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             panelSurfaceEnabled: daemon_panel_surface_enabled ?? false,
             agentPanelControlEnabled: agent_panel_control_enabled ?? false,
             remoteBackendsEnabled: remote_backends_enabled ?? false,
-            deliveryVerificationEnabled: delivery_verification_enabled ?? false
+            deliveryVerificationEnabled: delivery_verification_enabled ?? false,
+            // NOT `?? false`. The column has no SQL default, so NULL really
+            // means "never chose" and must resolve to the shipped default —
+            // that is the whole point of v70_config_queued_prompt.
+            queuedPromptEnabled: queued_prompt_enabled ?? queuedPromptDefault
         )
     }
 }
@@ -311,6 +324,22 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET delivery_verification_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the queued-prompt opt-in (default OFF, soaking).
+    ///
+    /// Writing either value is an explicit gesture that leaves the column
+    /// non-NULL forever after — including `false`, which is the point: an
+    /// operator who turns the feature off keeps it off when the shipped default
+    /// graduates to ON. Read fresh at spawn time and on every
+    /// `worktree.setPendingPrompt`, so no daemon restart is required.
+    public func setQueuedPrompt(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET queued_prompt_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

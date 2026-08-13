@@ -114,6 +114,16 @@ public struct WorktreeLifecycle: Sendable {
     /// signature does not leak the internal bridge type).
     var controlMode: TmuxControlModeBridge?
 
+    /// Owner of the prompt parked at worktree creation (design 2026-08-10).
+    /// `spawnPrimaryTerminals` hands it any parked prompt the command line
+    /// could not carry. `nil` when the daemon did not wire one (mock mode,
+    /// tests that do not exercise the feature); the spawn's argv path works
+    /// without it, and the hand-off simply does not happen.
+    ///
+    /// An actor reference, so every value copy of this struct shares one
+    /// coordinator — the same reason `conflictSweepCache` is one.
+    var pendingPromptCoordinator: PendingPromptCoordinator?
+
     /// The user's default shell (from $SHELL, falls back to /bin/zsh)
     var defaultShell: String {
         ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"

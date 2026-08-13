@@ -213,4 +213,8 @@ enum ActuationRail {
     /// reaps orphaned windows and dead servers. One row per act — each is an
     /// independent decision about a target the sweep has already resolved.
     static let reconcile = "reconcile"
+    /// The paste path of a prompt parked at worktree creation: the coordinator
+    /// typing the operator's own words into the primary agent once its
+    /// `SessionStart` hook has fired.
+    static let queuedPrompt = "queued-prompt"
 }

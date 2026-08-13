@@ -262,6 +262,32 @@ struct ContentView: View {
                 appState.focusTerminalAfterSelectionChange(worktreeID: id)
             }
         }
+        // Presented from here rather than from any one creation path: all
+        // three (Cmd+N, the sidebar `+` profile popover, the existing-branch
+        // picker) funnel through `AppState.createWorktree`, which is what sets
+        // the target. Dismissal nils the binding and parks nothing.
+        // ONE sheet modifier for both prompt surfaces — composing a first
+        // message, and reading back one the agent never received (opened from
+        // the sidebar row's glyph, so it outlives the daemon's notification).
+        // Two `.sheet(item:)`s on the same view would leave which one presents
+        // up to SwiftUI.
+        .sheet(
+            item: Binding(
+                get: {
+                    PromptSheet.presented(
+                        compose: appState.queuedPromptTarget,
+                        readback: appState.parkedPromptReadback)
+                },
+                set: { if $0 == nil { appState.dismissPresentedPromptSheet() } }
+            )
+        ) { sheet in
+            switch sheet {
+            case .compose(let target):
+                QueuedPromptModal(target: target).environmentObject(appState)
+            case .readback(let readback):
+                ParkedPromptReadbackView(readback: readback).environmentObject(appState)
+            }
+        }
         .alert(
             appState.alertIsError ? "Error" : "Success",
             isPresented: Binding(

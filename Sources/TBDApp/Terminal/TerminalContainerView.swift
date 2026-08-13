@@ -218,7 +218,8 @@ struct SingleWorktreeView: View {
                 //   over scheduled-resume: a parked session's "TBD types
                 //   continue at ..." text would be misleading because nothing
                 //   is running to receive it.
-                switch HibernatedBannerModel.banner(for: activeTabTerminal) {
+                let footer = HibernatedBannerModel.banner(for: activeTabTerminal)
+                switch footer {
                 case .scheduledResume(let resumeAt, let terminalID)?:
                     Divider()
                     ScheduledResumeBanner(resumeAt: resumeAt) {
@@ -229,6 +230,17 @@ struct SingleWorktreeView: View {
                     }
                 case .hibernatedOverlay?, nil:
                     EmptyView()
+                }
+
+                // Same slot, same promise as the auto-resume footer: TBD is
+                // going to type something into this pane, and here is what.
+                // Without it the operator watches an idle agent through the
+                // whole wait — which can be a `preSession` hook long — with
+                // nothing saying their message is coming.
+                if QueuedPromptBannerModel.shows(
+                    phase: appState.parkedPrompt(for: worktree)?.phase, footer: footer) {
+                    Divider()
+                    QueuedPromptBanner(worktree: worktree)
                 }
             }
             .sheet(isPresented: $showAccountPicker) {
@@ -463,6 +475,69 @@ private struct ScheduledResumeCancelButton: View {
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
         .help("Cancel the scheduled auto-resume")
+    }
+}
+
+// MARK: - QueuedPromptBanner
+
+/// Pure decision behind the queued-prompt footer, so its precedence is
+/// testable without SwiftUI — the same split `HibernatedBannerModel` uses.
+enum QueuedPromptBannerModel {
+    /// Show only for a `.pending` message, and only when the pane's footer slot
+    /// is otherwise empty.
+    ///
+    /// A parked terminal yields `.hibernatedOverlay` and a rate-limited one
+    /// `.scheduledResume`; in both cases nothing is running to receive a paste,
+    /// so "your message goes in when the agent is ready" would be a promise the
+    /// pane cannot keep. Those footers also speak to a more urgent state, and
+    /// two bars stacked at the bottom edge read as noise.
+    static func shows(phase: ParkedPromptPhase?, footer: HibernatedBannerModel.Banner?) -> Bool {
+        phase == .pending && footer == nil
+    }
+}
+
+/// Slim footer bar for a first message the daemon has not yet had an agent to
+/// deliver to. Sibling of `ScheduledResumeBanner`, and deliberately so: both
+/// say "TBD will type this into this pane", which is exactly the fact an
+/// operator cannot otherwise see.
+///
+/// Informational tone (accent, like `PreSessionSetupBanner`) rather than the
+/// resume banner's orange: nothing is wrong here. The whole bar is the click
+/// target, opening the same composer the status bar does, so editing, Copy,
+/// Discard and the send-immediately bit all live in one place.
+private struct QueuedPromptBanner: View {
+    @EnvironmentObject var appState: AppState
+    let worktree: Worktree
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button {
+            appState.revealParkedPrompt(worktree)
+        } label: {
+            HStack(spacing: 6) {
+                // Static glyph, not a ProgressView: a spinner would force
+                // continuous CoreAnimation commits for the whole wait, for no
+                // information (same rationale as PreSessionSetupBanner).
+                Image(systemName: "paperplane")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 12, height: 12)
+                Text("First message queued — TBD types it into the agent's composer when it is ready. Click to edit.")
+                    .font(.caption)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Spacer()
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.accentColor.opacity(isHovered ? 0.25 : 0.15))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .help("Read, edit or discard the first message queued for this worktree")
+        .accessibilityLabel("First message queued for \(worktree.displayName). Click to edit.")
     }
 }
 

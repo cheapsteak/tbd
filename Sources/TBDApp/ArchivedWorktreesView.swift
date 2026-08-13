@@ -375,6 +375,17 @@ struct ArchivedWorktreesView: View {
                                         Task { await appState.reviveWorktree(id: row.worktree.id) }
                                     }
                                 }
+                                // The status bar covers live worktrees, but an
+                                // archived one is never the selection it reads
+                                // — and archiving does not clear the column, so
+                                // without this the text would be unreachable.
+                                // A named menu item rather than a row glyph:
+                                // this is rare, and it can say what it is.
+                                if appState.parkedPrompt(for: row.worktree) != nil {
+                                    Button("First Message…") {
+                                        appState.revealParkedPrompt(row.worktree)
+                                    }
+                                }
                             }
                         }
                         if hasMore {
@@ -673,6 +684,7 @@ private struct ArchivedRow: Identifiable {
 private struct ArchivedWorktreeRow: View {
     let row: ArchivedRow
     let isSelected: Bool
+    @EnvironmentObject var appState: AppState
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
