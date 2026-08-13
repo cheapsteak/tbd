@@ -655,6 +655,44 @@ same signature is ~180 s). When an assertion failure took far longer than an
 assertion failure should, suspect a swallowed waiter before you believe the
 message.
 
+### The event-driven alternative — `Tests/TestSupport/EventDrivenTestClock.swift`
+
+Everything above describes `TestClock` and stays true for its consumers.
+Alongside it, `EventDrivenTestClock` exists for suites whose arming handshake has
+been **observed** starving under saturation: it signals arming from inside the
+same critical section that registers the sleeper, so `advanceWhenArmed(by:)` —
+its `advanceWhenSuspended(by:)` — parks on a continuation instead of polling
+`checkSuspension()` and its megaYield. The trade to know before choosing it: its
+`advance` does **no** yielding, so it never accidentally runs the resumed task's
+post-sleep code for you. Positive assertions must await the paired
+`FireRecorder.next()`; negative ones read `values` (or `hasSleeper`) and stay
+one-sided as they always were — and a negative of the shape "production must
+arm no timer here" belongs on `watchForSleeper(on:upTo:)` rather than
+`settle()`, because a fixed settle samples once at the end of its window and can
+miss an arming that lands late under exactly the load that makes the assertion
+worth having.
+
+**Re-arming follows from the same no-yielding property, and it is the sharper
+edge.** A task that fires and immediately re-sleeps — any poller loop — cannot
+have re-registered by the time `advance` returns, so after a fire the *next*
+advance must go through `advanceWhenArmed(by:)`. A bare `advance` moves `now`
+past a deadline that is not in the ledger yet; the re-armed sleep is then
+measured from the new `now` and never fires, and the suite desyncs permanently —
+the same hang described above for `TestClock` under load, except deterministic
+rather than probabilistic. It is the first thing to get right when migrating a
+poller suite (`GatedIntervalSleepTests`, `DaywatchRunnerTests`), where every
+advance past the first is a re-arm.
+
+**Count each `FireRecorder.next()` in the
+`.clockDriven` tally too**: it carries its own 45 s hang guard, exactly like a
+`waitForSuspension`, so a test with 2 `advanceWhenArmed` + 2 `next()` has a
+180 s worst case against the 240 s limit. Either clock is a legitimate choice
+for a new clock-driven test. Existing `TestClock` suites migrate on field
+evidence, not wholesale — currently `AppearanceDebounceTests` and
+`SearchQueryDebouncerTests`,
+which reproduced the starvation in a full-suite soak. Design:
+`docs/specs/2026-08-11-event-driven-test-clock-design.md`.
+
 `PollerClock` is **not** this seam and must not be copied as a template — see
 its doc comment. Full rationale:
 `docs/specs/2026-07-24-test-hardening-design.md` §5.
