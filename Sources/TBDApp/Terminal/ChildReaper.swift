@@ -135,6 +135,30 @@ enum ChildReaper {
         }
     }
 
+    /// Test seam: runs `done` once every reap enqueued *before this call*
+    /// has finished. Never used by production code — nothing here waits on a
+    /// reap, deliberately (see `reap`).
+    ///
+    /// Why this exists. `queue` is concurrent and `reap(pid:unless:)` enqueues
+    /// its block **synchronously**, so a barrier submitted after a teardown has
+    /// returned is ordered behind every reap that teardown enqueued. That turns
+    /// "has the reap happened yet?" from a window a test must poll into an
+    /// event it can await — and, unlike polling, it tells the two failures
+    /// apart: once `done` runs, the reap block has *finished*, so a child that
+    /// still exists means the reap did not reap it, not that libdispatch had
+    /// not got round to scheduling it yet. Polling cannot make that distinction
+    /// at all, which is why a polling test can only ever report "still there
+    /// after N tries".
+    ///
+    /// **Caveat: the barrier is process-wide, not per-pid.** It also waits on
+    /// reaps enqueued by any concurrently running test, and each reap parks
+    /// until *its* child exits. That is bounded — every child in these suites
+    /// exits within a second — but it is not free, and a caller that spawned a
+    /// long-lived child elsewhere in the process pays for it here.
+    static func drainPendingReaps(_ done: @escaping @Sendable () -> Void) {
+        queue.async(flags: .barrier, execute: done)
+    }
+
     /// Blocking `waitpid` for `pid`. Returns `waitpid`'s result: the reaped pid,
     /// or `-1` when there was nothing to reap (`ECHILD`).
     ///
