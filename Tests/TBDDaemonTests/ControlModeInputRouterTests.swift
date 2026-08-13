@@ -29,7 +29,9 @@ struct ControlModeInputRouterTests {
     @discardableResult
     private func waitForWrites(_ recorder: LineRecorder, count: Int,
                                sourceLocation: SourceLocation = #_sourceLocation) async throws -> Bool {
-        try await waitFor("\(count) stream writes", sourceLocation: sourceLocation) {
+        try await waitFor("\(count) stream writes",
+                          observed: { "\(recorder.writes.count): \(recorder.writes)" },
+                          sourceLocation: sourceLocation) {
             recorder.writes.count >= count
         }
     }
@@ -43,7 +45,7 @@ struct ControlModeInputRouterTests {
         let header = SidecarInputHeader(worktreeID: worktreeID, paneID: "%0")
         for i in 0..<50 { router.enqueue(header: header, bytes: Data([UInt8(i)])) }
 
-        try await waitForWrites(recorder, count: 50)
+        try #require(await waitForWrites(recorder, count: 50))
         let expected = (0..<50).map { "send-keys -H -t %0 " + String(format: "%02x", UInt8($0)) }
         #expect(recorder.writes == expected)
         router.shutdown()
@@ -62,7 +64,7 @@ struct ControlModeInputRouterTests {
         router.enqueue(header: SidecarInputHeader(worktreeID: worktreeID, paneID: "%0"),
                        bytes: Data([0x42]))
 
-        try await waitForWrites(recorder, count: 1)
+        try #require(await waitForWrites(recorder, count: 1))
         #expect(recorder.writes == ["send-keys -H -t %0 42"])
         router.shutdown()
     }
@@ -77,50 +79,36 @@ struct ControlModeInputRouterTests {
         router.enqueue(header: header, bytes: Data())      // no command
         router.enqueue(header: header, bytes: Data([0x5a]))
 
-        try await waitForWrites(recorder, count: 1)
+        try #require(await waitForWrites(recorder, count: 1))
         #expect(recorder.writes == ["send-keys -H -t %0 5a"])
         router.shutdown()
-    }
-
-    /// Holds a weak ref to the client so the `writeLine` closure (created before
-    /// the client) can feed replies back into it.
-    private final class ClientHolder: @unchecked Sendable {
-        weak var client: TmuxControlCommandClient?
     }
 
     /// A router whose client AUTO-COMPLETES every written command with a success
     /// reply — required because `PasteExecutor` awaits `client.send(...)` (the
     /// keystroke path uses fire-and-forget `sendList`, but paste does not), so
-    /// without a reply feed the consumer would hang on the first paste. Each
-    /// written stream line (a command list is one `\n`-joined write) is answered
-    /// with one `%end` per contained command, preserving FIFO order.
+    /// without a reply feed the consumer would hang on the first paste.
+    ///
+    /// Replies go through the shared `ReplyFeed`: one long-lived consumer hands
+    /// them to the correlator in write order, which is the invariant its
+    /// order-based matching assumes and that production gets from
+    /// `TmuxControlSupervisor`'s single drain loop. Uniform verdicts make the
+    /// difference latent here, but a per-write `Task { … }` is the shape that
+    /// stranded `ControlModeInputHealthTests` under load (#494) — don't
+    /// reintroduce it in either suite.
     private func makeSelfRespondingRouter(chunkSize: Int = 330)
-        -> (ControlModeInputRouter, LineRecorder) {
-        let recorder = LineRecorder()
-        let holder = ClientHolder()
-        let client = TmuxControlCommandClient(
-            writeLine: { line in
-                recorder.record(line)
-                let commandCount = line.split(separator: "\n", omittingEmptySubsequences: false).count
-                Task {
-                    for _ in 0..<commandCount {
-                        await holder.client?.handle(
-                            .commandSucceeded(number: 0, fromClient: true, lines: []))
-                    }
-                }
-            },
-            onFatalError: {})
-        holder.client = client
+        -> (ControlModeInputRouter, LineRecorder, ReplyFeed) {
+        let (client, recorder, feed) = makeRespondingClient()
         let router = ControlModeInputRouter(
             commandProvider: { server in server == "srv" ? client : nil },
             chunkSize: chunkSize)
-        return (router, recorder)
+        return (router, recorder, feed)
     }
 
     @Test("a paste enqueued between two keystrokes writes load/paste-buffer BETWEEN the send-keys")
     func pasteOrderedBetweenKeystrokes() async throws {
         let worktreeID = UUID()
-        let (router, recorder) = makeSelfRespondingRouter()
+        let (router, recorder, feed) = makeSelfRespondingRouter()
         router.register(worktreeID: worktreeID, paneID: "%0", server: "srv")
         let header = SidecarInputHeader(worktreeID: worktreeID, paneID: "%0")
 
@@ -139,30 +127,21 @@ struct ControlModeInputRouterTests {
         #expect(writes[2].hasSuffix("-t %0"))
         #expect(writes[3] == "send-keys -H -t %0 42")
         router.shutdown()
+        await feed.finish()
     }
 
     @Test("a paste failure does not stall the stream: a following keystroke still lands")
     func pasteFailureDoesNotStall() async throws {
-        // Client whose paste-buffer command FAILS (%error, tolerated). The
-        // keystroke after the paste must still be written — deliverPaste logs
-        // the failure and tears nothing down.
-        let recorder = LineRecorder()
-        let holder = ClientHolder()
-        let client = TmuxControlCommandClient(
-            writeLine: { line in
-                recorder.record(line)
-                let isPasteBuffer = line.hasPrefix("paste-buffer")
-                Task {
-                    // paste-buffer → %error (tolerated); everything else → %end.
-                    if isPasteBuffer {
-                        await holder.client?.handle(.commandFailed(number: 0, fromClient: true, lines: ["no pane"]))
-                    } else {
-                        await holder.client?.handle(.commandSucceeded(number: 0, fromClient: true, lines: []))
-                    }
-                }
-            },
-            onFatalError: {})
-        holder.client = client
+        // Client whose paste-buffer command FAILS (%error, tolerated); every
+        // other command succeeds. The keystroke after the paste must still be
+        // written — deliverPaste logs the failure and tears nothing down.
+        //
+        // These are MIXED verdicts, so the ordered feed is load-bearing rather
+        // than latent: a per-write `Task { … }` could hand the `%error` to the
+        // wrong queue entry. Sequential `PasteExecutor` sends happened to keep
+        // that from biting here; the feed makes it structural.
+        let (client, recorder, feed) = makeRespondingClient(
+            shouldFail: { $0.hasPrefix("paste-buffer") })
         let router = ControlModeInputRouter(
             commandProvider: { server in server == "srv" ? client : nil })
 
@@ -178,10 +157,12 @@ struct ControlModeInputRouterTests {
         // LAST write: the failure-cleanup `delete-buffer` and the keystroke are
         // order-independent (buffer GC vs a keypress), so `.last` couples the
         // test to an incidental ordering. Wait for the keystroke itself.
-        try await waitFor("the post-paste keystroke reaches the stream") {
+        try #require(await waitFor("the post-paste keystroke reaches the stream",
+                                   observed: { "\(recorder.writes.count): \(recorder.writes)" }) {
             recorder.writes.contains("send-keys -H -t %0 5a")
-        }
+        })
         router.shutdown()
+        await feed.finish()
     }
 
     @Test("each delivered event records exactly one latency sample")
@@ -196,7 +177,7 @@ struct ControlModeInputRouterTests {
         let header = SidecarInputHeader(worktreeID: worktreeID, paneID: "%0")
         for i in 0..<50 { router.enqueue(header: header, bytes: Data([UInt8(i)])) }
 
-        try await waitForWrites(recorder, count: 50)
+        try #require(await waitForWrites(recorder, count: 50))
         #expect(latency.summarizeAndReset()?.count == 50)
         router.shutdown()
     }
