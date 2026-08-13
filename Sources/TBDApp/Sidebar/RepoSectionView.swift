@@ -337,9 +337,13 @@ struct RepoSectionView: View {
     /// than defaulted so a new call site cannot silently reintroduce the
     /// duplicate.
     ///
-    /// Archiving a remote lane removes its row from `worktrees` (see
-    /// `AppState.visibleWorktrees`), so the session returns to being a plain
-    /// session row — one surface at all times, never zero and never two.
+    /// An adopted lane therefore has exactly one surface, never two. It cannot
+    /// yet have zero either, because there is currently no way to retire an
+    /// adopted row: archiving a remote lane is refused (stopping the provider's
+    /// session is unimplemented), so the row simply persists. When remote
+    /// archive does land, this filter needs no change to stay correct —
+    /// `AppState.visibleWorktrees` drops archived rows from `worktrees`, so the
+    /// session would fall back to rendering as a plain session row.
     nonisolated static func matchedRemoteSessions(
         _ all: [RemoteSessionInfo],
         repoID: UUID,

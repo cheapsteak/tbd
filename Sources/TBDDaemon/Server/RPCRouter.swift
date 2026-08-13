@@ -857,12 +857,23 @@ public final class RPCRouter: Sendable {
     /// caches (`branch.<b>.merge`, `<b>@{push}`) are themselves functions of
     /// `(repo, branch)`: collapsing the path makes that key *more* faithful to
     /// what it stores, not less.
+    ///
+    /// The local arm rejects an empty path, which is the other half of the
+    /// guard `LocalWorktree.init?` carries and which `handlePRRefresh` used to
+    /// get for free from `getLocal`. No daemon-written row has one today — the
+    /// empty-path `.creating` placeholder is the app's optimistic in-memory row
+    /// (`AppState+Worktrees`), never a DB row — so this is defense in depth
+    /// rather than a reachable bug. It is worth the line because the failure it
+    /// prevents is silent: `URL(fileURLWithPath: "")` resolves to the *daemon's
+    /// own* working directory, so an empty path would run `git` and `gh`
+    /// somewhere plausible and cache the wrong branch facts under that row,
+    /// rather than failing loudly the way the synthetic `remote://` URI does.
     static func pollWorkingDirectory(
         _ worktree: Worktree, repoPathByID: [UUID: String]
     ) -> String? {
         switch worktree.location {
         case .local:
-            return worktree.localPath
+            return worktree.localPath.isEmpty ? nil : worktree.localPath
         case .remote:
             return worktree.repoID.flatMap { repoPathByID[$0] }
         }

@@ -81,6 +81,25 @@ struct PRPollRemoteLaneTests {
         #expect(dir == "/repos/acme")
     }
 
+    /// The other half of the guard `handlePRRefresh` used to inherit from
+    /// `getLocal`, which rejected an empty path as well as a remote row
+    /// (`LocalWorktree.init?`). Now that the refresh resolves its directory
+    /// through `pollWorkingDirectory` instead, that arm has to live here.
+    ///
+    /// It matters because the failure is silent rather than loud:
+    /// `URL(fileURLWithPath: "")` is the *daemon's own* working directory, so
+    /// an empty path would run `git` and `gh` somewhere plausible and cache the
+    /// answers under this row — unlike a `remote://` URI, which would fail
+    /// visibly.
+    @Test("a local row with no path yet is not polled at all")
+    func localRowWithEmptyPathIsSkipped() {
+        let repoID = UUID()
+        let pathless = Self.localRow(repoID: repoID, branch: "tbd/local", path: "")
+
+        #expect(RPCRouter.pollWorkingDirectory(
+            pathless, repoPathByID: [repoID: "/repos/acme"]) == nil)
+    }
+
     @Test("a remote row whose repo is unknown is not polled at all")
     func remoteRowWithoutResolvableRepoIsSkipped() {
         let remote = Self.remoteRow(repoID: UUID(), branch: "tbd/lane", sessionID: "s-1")

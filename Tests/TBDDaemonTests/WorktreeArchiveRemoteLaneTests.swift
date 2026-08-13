@@ -149,4 +149,55 @@ struct WorktreeArchiveRemoteLaneTests {
         #expect(written.first?["kind"] as? String == "dispose")
         #expect(written.last?["result"] as? String == "transport-failed")
     }
+
+    // MARK: - worktree.forget, the sibling surface
+
+    /// `forget` is the other verb that resolves its row through `getLocal` and
+    /// so throws for a remote lane. It records ahead of the act like archive
+    /// does, which is what makes the gate necessary rather than cosmetic: the
+    /// unfenced handler wrote a `.worktreeForget` request and a
+    /// transport-failed outcome for an act it structurally cannot perform.
+    @Test("forgetting a remote lane is refused, and writes no actuation row for it")
+    func forgetOnARemoteLaneIsRefusedAndRecordsNothing() async throws {
+        let logPath = try makeLogPath()
+        let db = try TBDDatabase(inMemory: true)
+        let router = makeRouter(db: db, logPath: logPath)
+        let repo = try await makeRepo(in: db)
+        let worktree = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "acme-remote", branch: "acme-branch",
+            provider: "acme-provider", sessionID: "sess-1")
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.worktreeForget,
+            params: WorktreeForgetParams(worktreeID: worktree.id),
+            actor: .app))
+
+        #expect(!response.success)
+        #expect(response.error?.contains("remote lane") == true,
+                "the refusal did not say why: \(response.error ?? "no error")")
+        // The row survives: a refused forget must not half-delete the lane.
+        #expect(try await db.worktrees.get(id: worktree.id) != nil)
+        #expect(try rows(at: logPath).isEmpty)
+    }
+
+    /// The gate reads locality, not "the row exists": an unknown id must keep
+    /// its old behavior, reaching `forgetWorktree` and recording the
+    /// transport-failed outcome.
+    @Test("an unknown id still reaches forget and records transport-failed")
+    func forgetOnAnUnknownWorktreeStillRecordsTransportFailure() async throws {
+        let logPath = try makeLogPath()
+        let db = try TBDDatabase(inMemory: true)
+        let router = makeRouter(db: db, logPath: logPath)
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.worktreeForget,
+            params: WorktreeForgetParams(worktreeID: UUID()),
+            actor: .app))
+
+        #expect(!response.success)
+        let written = try rows(at: logPath)
+        #expect(written.count == 2)
+        #expect(written.first?["kind"] as? String == "dispose")
+        #expect(written.last?["result"] as? String == "transport-failed")
+    }
 }

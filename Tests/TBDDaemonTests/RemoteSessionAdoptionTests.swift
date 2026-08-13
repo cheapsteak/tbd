@@ -370,6 +370,81 @@ struct RemoteSessionAdoptionTests {
         #expect(Set(names).count == 2)
     }
 
+    // MARK: - The pin outlives the repo it names
+
+    /// Nothing clears `remote_session.resolvedRepoID` when a repo is
+    /// unregistered — the column carries no foreign key, unlike
+    /// `worktree.repoID`, which cascades. So a session pinned before the repo
+    /// went away keeps naming a row that no longer exists, and every later poll
+    /// re-attempts adoption against it, because the cascade took the lane's own
+    /// worktree row with it. This is the steady state, not a one-shot.
+    ///
+    /// What this pins is that steady state: no row is resurrected against the
+    /// dangling pin, `apply` does not throw, and the mirror's own pin is left
+    /// exactly as it was. It deliberately does **not** claim to discriminate on
+    /// `adoptOne`'s `db.repos.get` guard — remove that guard and the outcome is
+    /// identical, because `worktree.repoID`'s foreign key rejects the insert
+    /// and `adoptOne`'s catch swallows it. The guard's value is that the
+    /// rejection never happens (no per-poll error, no aborted write), which is
+    /// a cost, not an observable. Both arms are worth holding still.
+    @Test func aPinNamingAnUnregisteredRepoAdoptsNothing() async throws {
+        let repo = try await makeRepo()
+        let m = manager()
+
+        try await m.apply(snapshot: [session("s-1")], provider: "fake")
+        #expect(try await remoteRows().count == 1)
+
+        // The pin survives; the worktree row cascades away with the repo.
+        try await db.repos.remove(id: repo.id)
+        #expect(try await db.remoteSessions.row(provider: "fake", sessionID: "s-1")?
+            .resolvedRepoIDUUID == repo.id)
+        #expect(try await db.worktrees.list().isEmpty)
+
+        // Two more polls: the dangling pin must not resurrect a row, and must
+        // not throw out of `apply` either.
+        try await m.apply(snapshot: [session("s-1")], provider: "fake")
+        try await m.apply(snapshot: [session("s-1")], provider: "fake")
+
+        #expect(try await db.worktrees.list().isEmpty)
+        // The mirror is the provider's, not adoption's: a failed adoption must
+        // not clear or rewrite the pin on its way out.
+        #expect(try await db.remoteSessions.row(provider: "fake", sessionID: "s-1")?
+            .resolvedRepoIDUUID == repo.id)
+    }
+
+    // MARK: - Subscribers hear about a minted row
+
+    /// Adoption mints a row nobody asked for, so the only way a subscribed
+    /// client learns of it is the broadcast. It is the same `.worktreeCreated`
+    /// delta a user-driven create sends, carrying the row's own id and repo.
+    ///
+    /// The unmatched session in the same snapshot is what keeps this honest: a
+    /// broadcast per *sighted* session rather than per *created* row would
+    /// announce a row that does not exist.
+    @Test func adoptionBroadcastsWorktreeCreatedForTheRowItMinted() async throws {
+        let repo = try await makeRepo()
+        let m = manager()
+        let received = DeltaRecorder()
+        subs.addSubscriber { data in
+            received.record(data)
+            return true
+        }
+
+        try await m.apply(
+            snapshot: [session("s-1"), session("unmatched", meta: ["repo": "acme/nope"])],
+            provider: "fake")
+
+        let adopted = try #require(try await remoteRows().first)
+        let created = received.worktreeCreatedDeltas()
+        #expect(created.count == 1)
+        #expect(created.first?.worktreeID == adopted.id)
+        #expect(created.first?.repoID == repo.id)
+
+        // Idempotent adoption means no second announcement for the same row.
+        try await m.apply(snapshot: [session("s-1")], provider: "fake")
+        #expect(received.worktreeCreatedDeltas().count == 1)
+    }
+
     /// The binding lookup adoption tests on every poll must find the row it
     /// created, and must not answer for a different provider's session of the
     /// same name.
@@ -381,5 +456,34 @@ struct RemoteSessionAdoptionTests {
         #expect(try await db.worktrees.findRemote(provider: "fake", sessionID: "s-1")?.id == created.id)
         #expect(try await db.worktrees.findRemote(provider: "other", sessionID: "s-1") == nil)
         #expect(try await db.worktrees.findRemote(provider: "fake", sessionID: "s-2") == nil)
+    }
+}
+
+/// Collects the encoded deltas a `StateSubscriptionManager` broadcast, so a
+/// test can assert on what subscribers were actually told.
+///
+/// A lock-guarded class rather than an actor because `SubscriberCallback` is a
+/// synchronous `@Sendable (Data) -> Bool` and cannot await.
+private final class DeltaRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var payloads: [Data] = []
+
+    func record(_ data: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        payloads.append(data)
+    }
+
+    func worktreeCreatedDeltas() -> [WorktreeDelta] {
+        lock.lock()
+        let snapshot = payloads
+        lock.unlock()
+        return snapshot.compactMap { data in
+            guard let delta = try? JSONDecoder().decode(StateDelta.self, from: data) else {
+                return nil
+            }
+            guard case .worktreeCreated(let payload) = delta else { return nil }
+            return payload
+        }
     }
 }
