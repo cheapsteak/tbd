@@ -302,22 +302,27 @@ final class ReplyFeed: @unchecked Sendable {
     /// End the feed and await the drain task, so no reply delivery outlives the
     /// test that created it.
     ///
-    /// **Awaiting `drain.value` is the load-bearing half.** It is what makes
-    /// "`finish()` returned" mean "every block enqueued before it has been
-    /// handed to the correlator" — the happens-before the callers' post-test
-    /// assertions rest on. Callers reach here with blocks in flight by
-    /// construction: `writeLine` records the stream write and enqueues its reply
-    /// synchronously, so a wait that returns on the WRITE
-    /// (`pasteFailureDoesNotStall` waits for `send-keys … 5a` to be recorded)
-    /// returns before those replies are handled.
+    /// **Awaiting `drain.value` is the load-bearing half, and its guarantee has
+    /// one precondition worth stating exactly.** It makes "`finish()` returned"
+    /// mean "every block ALREADY YIELDED into the stream has been handed to the
+    /// correlator". It can do nothing for a block that has not been yielded yet:
+    /// `continuation.finish()` runs first, and a `yield` onto a finished
+    /// continuation is silently discarded. So the happens-before callers rest on
+    /// is a joint property of this method and `makeRespondingClient`, which
+    /// enqueues each reply BEFORE recording the write that a waiter can observe
+    /// (see its doc comment). Given that order, a caller that reaches here on a
+    /// recorded write — `pasteFailureDoesNotStall` waits for `send-keys … 5a` —
+    /// necessarily has its replies in the buffer, and awaiting the drain is what
+    /// delivers them. Reverse the two statements there and no amount of draining
+    /// here recovers the reply.
     ///
     /// **`cancel()` does not truncate that buffer** — measured, not assumed,
     /// because the opposite is the natural assumption and it is wrong.
     /// `AsyncStream` implements task cancellation as `finish()`, and a finished
     /// stream still yields everything already buffered before `next()` returns
     /// nil; the loop body's only suspension is an actor hop, which ignores
-    /// cancellation. With a deliberate backlog of 2,395–5,312 blocks in flight
-    /// at the call, all 20,000 were still delivered
+    /// cancellation. With a deliberate backlog of all 20,000 blocks in flight
+    /// at the call, every one was still delivered
     /// (`ControlModeTestSupportTests.finishDeliversBufferedReplies`, run against
     /// this exact code). So the reply to a `send(…)`-shaped command — the
     /// PasteExecutor load-buffer / paste-buffer / delete-buffer shape, whose
@@ -337,18 +342,31 @@ final class ReplyFeed: @unchecked Sendable {
 /// One stream write may carry several `\n`-joined commands (`sendList`); each
 /// gets its own reply block, enqueued in command order. Callers must
 /// `await feed.finish()` when done.
+///
+/// **The replies are enqueued BEFORE the write is recorded, and that order is
+/// load-bearing** — it is what `ReplyFeed.finish()`'s happens-before rests on.
+/// Tests routinely wait on the recorded WRITE (`pasteFailureDoesNotStall` polls
+/// `recorder.writes.contains("send-keys -H -t %0 5a")` every 10 ms) and then
+/// tear down. With the recording first, a waiter that observes the write in the
+/// gap between the two statements — one preemption of this executor thread is
+/// enough — can reach `finish()` before the reply is in the buffer, so
+/// `continuation.finish()` lands first and the `yield` that follows is silently
+/// dropped. Enqueuing first makes "the write is visible" imply "the reply is
+/// buffered", which is precisely the premise `await drain.value` needs: it
+/// drains what is already enqueued, and can do nothing for a block that has not
+/// been yielded yet.
 func makeRespondingClient(shouldFail: @escaping @Sendable (String) -> Bool = { _ in false })
     -> (TmuxControlCommandClient, LineRecorder, ReplyFeed) {
     let recorder = LineRecorder()
     let feed = ReplyFeed()
     let client = TmuxControlCommandClient(
         writeLine: { line in
-            recorder.record(line)
             for command in line.split(separator: "\n", omittingEmptySubsequences: false) {
                 feed.enqueue(shouldFail(String(command))
                     ? .commandFailed(number: 0, fromClient: true, lines: ["no pane"])
                     : .commandSucceeded(number: 0, fromClient: true, lines: []))
             }
+            recorder.record(line)
         },
         onFatalError: {})
     feed.attach(client)

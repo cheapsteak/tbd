@@ -63,23 +63,65 @@ struct ControlModeTestSupportTests {
     /// leaves a `withCheckedThrowingContinuation` suspended for the rest of the
     /// run.
     ///
-    /// The count is large enough to guarantee a real backlog at the call
-    /// (measured: 2,395–5,312 blocks still queued), so this is a drain
-    /// assertion rather than a formality.
+    /// **The backlog is built by real commands, not by hand-fed reply blocks.**
+    /// `TmuxControlCommandClient.complete` pops `pending.removeFirst()`, so a
+    /// reply arriving against an EMPTY queue is a protocol violation: it takes
+    /// the teardown branch (`closed = true`, `onFatalError()`, one `logger.error`
+    /// each) and never correlates with anything. Enqueuing 20,000 bare
+    /// `.commandSucceeded` blocks would exercise only that desync path — a drain
+    /// assertion still, but with the correlator's actual job never once
+    /// performed, and 20,000 error-level log entries emitted per run. Writing
+    /// the commands first is what makes the sentence above true: each reply pops
+    /// its own command, in order, and every completion fires with `.success`.
+    ///
+    /// One `sendList` is deliberate rather than 20,000 `send(…)` calls: it
+    /// appends all 20,000 to `pending` and writes them as ONE stream write, and
+    /// `makeRespondingClient`'s `writeLine` splits that write back into 20,000
+    /// ordered replies — so the whole backlog is yielded inside a single actor
+    /// hop that `handle` cannot interleave with. That is what guarantees a real
+    /// backlog at the `finish()` call rather than a hoped-for one, and it shows
+    /// in the measurement: all 20,000 blocks are still queued at the call, on
+    /// every run (3/3 measured), where hand-fed blocks left an
+    /// already-partly-drained 2,395–5,312. Completions are plain closures, so
+    /// nothing here depends on a continuation resuming. The whole test takes
+    /// ~0.2 s.
     @Test("ReplyFeed.finish() delivers every enqueued reply, backlog and all")
     func finishDeliversBufferedReplies() async throws {
         let (client, _, feed) = makeRespondingClient()
         let blocks = 20_000
-        for _ in 0..<blocks {
-            feed.enqueue(.commandSucceeded(number: 0, fromClient: true, lines: []))
-        }
+        let succeeded = SuccessCounter()
+        await client.sendList((0..<blocks).map { index in
+            TmuxCommand(text: "display-message -p drain-\(index)") { result in
+                if case .success = result { succeeded.increment() }
+            }
+        })
 
+        // Measured before the drain gets a turn: this is the backlog the
+        // assertion below is actually about. Zero would make `delivered ==
+        // blocks` true by arithmetic rather than by draining, and the
+        // delete-`await drain.value` mutation would stop reddening.
+        let queuedAtFinish = blocks - feed.delivered
         await feed.finish()
 
+        #expect(queuedAtFinish > 0,
+                "no backlog at the call — this test would pass without draining anything")
         #expect(feed.delivered == blocks,
-                "finish() must not return before the buffer is drained (delivered \(feed.delivered) of \(blocks))")
+                "finish() must not return before the buffer is drained (delivered \(feed.delivered) of \(blocks), backlog at the call \(queuedAtFinish))")
+        // Every reply popped its own pending command and completed it: had they
+        // hit `complete`'s empty-queue teardown branch instead, no completion
+        // would have fired at all.
+        #expect(succeeded.count == blocks,
+                "replies must correlate to commands in order (\(succeeded.count) of \(blocks) completed with success)")
         // The feed holds the client weakly; keeping it alive here is what makes
         // the deliveries above go through a real correlator.
         withExtendedLifetime(client) {}
+    }
+
+    /// Thread-safe tally of command completions that resolved successfully.
+    private final class SuccessCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _count = 0
+        func increment() { lock.lock(); _count += 1; lock.unlock() }
+        var count: Int { lock.lock(); defer { lock.unlock() }; return _count }
     }
 }

@@ -129,20 +129,31 @@ struct ReplayLiveIntegrationMatrixTests {
     /// precisely because a non-zero value there means the overflow was seen and
     /// dropped rather than repaired.
     ///
-    /// **The completion signal is a DELTA against `baseline`, never an absolute
-    /// count — that distinction is the difference between this test proving
-    /// something and passing vacuously.** `repairs` is cumulative on the sink,
-    /// and the phases before this window read the pipe against a full-blast pane
-    /// for up to 30 s; a sink that overflowed and completed a repair in *that*
-    /// window would satisfy an absolute `repairs >= 1` on this gate's very first
-    /// poll. The deliberate no-reader window would then close instantly without
-    /// inducing anything, and phase 3's guard and assertions — cumulative too —
-    /// would be satisfied by that same stale repair, so the whole scenario could
-    /// go green having never exercised an overflow. `repairing` needs no delta:
-    /// `enqueueLocked` is the only thing that sets it, and only on an overflow
-    /// entry, so it cannot be a stale free lunch the way a counter can. It is
-    /// still cleared on completion, which is why the completion delta is checked
-    /// alongside it rather than instead of it.
+    /// **Neither signal means anything unless the window opens on a QUIESCENT
+    /// sink, and that is the difference between this test proving something and
+    /// passing vacuously.** Both are properties of a repair *cycle*, and a cycle
+    /// that was already running when the baseline was taken satisfies both of
+    /// them for free:
+    ///
+    ///  - `repairs` is cumulative, so a repair that completes after the baseline
+    ///    but STARTED before it clears every `repairs > baseline.repairs` delta
+    ///    in this test — this gate's, phase 3's drain guard, and assertion (a).
+    ///  - `repairing` is not a per-poll edge either. `enqueueLocked` sets it on
+    ///    overflow entry (`PaneFanout.swift`) and only `endRepair`/`abortRepair`
+    ///    clear it, so it stays set for the whole cycle. An in-flight repair
+    ///    therefore makes this gate return `nil` on its very FIRST poll.
+    ///
+    /// Both are live risks, not hypotheticals: the phases before this window read
+    /// the pipe against a full-blast pane for up to 30 s, which is exactly the
+    /// shape that overflows. So the window is required to open on a sink that is
+    /// neither repairing nor about to be credited with a repair it did not
+    /// induce. Phase 1 reads until `repairing` is clear before snapshotting the
+    /// baseline — a repair in flight there completes, because phase 1 is still
+    /// reading and reader catch-up is what the repair is waiting for — and this
+    /// gate REFUSES a `repairing` baseline outright rather than measuring against
+    /// a poisoned one. Refusing is deliberate: with `baseline.repairing` set,
+    /// there is no weaker gate left to fall back to, since the in-flight cycle
+    /// satisfies the completion delta too.
     ///
     /// On expiry it RETURNS the error rather than throwing it, and the caller
     /// throws only after tearing the supervisor down. That is not ceremony: on
@@ -164,15 +175,24 @@ struct ReplayLiveIntegrationMatrixTests {
         fanout: PaneFanout, key: PaneKey, baseline: PaneFlowStats,
         within budget: Duration = .seconds(30)
     ) async -> MatrixError? {
-        let deadline = ContinuousClock.now + budget
+        guard !baseline.repairing else {
+            return .overflowWindowOpenedMidRepair(baseline: baseline)
+        }
+        let started = ContinuousClock.now
+        let deadline = started + budget
         while true {
             let stats = fanout.flowStats(key: key)
             if stats?.repairing == true { return nil }
             if let stats, stats.repairs > baseline.repairs { return nil }
             guard ContinuousClock.now < deadline else {
+                // MEASURED elapsed, never `budget`: the loop's own poll slices
+                // overshoot the deadline under load, and reporting the budget
+                // would print "no repair cycle after 30 seconds" for a wait that
+                // actually ran far longer — the fabrication `waitFor`'s
+                // diagnostic and `awaitImageRequest`'s already refuse to print.
                 return .overflowRepairNeverEntered(
                     stats: stats, baseline: baseline, queueCap: PaneFanout.queueCap,
-                    waited: budget)
+                    waited: ContinuousClock.now - started)
             }
             try? await Task.sleep(for: .milliseconds(50))
         }
@@ -699,19 +719,32 @@ struct ReplayLiveIntegrationMatrixTests {
         }
 
         // Phase 1: read concurrently while the attach runs (its replay write
-        // needs the reader), until the attach outcome lands.
+        // needs the reader), until the attach outcome lands AND the sink is
+        // quiescent.
+        //
+        // The quiescence half is what makes the baseline below mean anything.
+        // This pane is a full-blast firehose and phase 1 can run for up to 30 s
+        // against it, so it can itself overflow and enter a repair; a baseline
+        // snapshotted mid-cycle would credit that repair to the deliberate
+        // window (see `overflowRepairEntryFailure`). Waiting for `repairing` to
+        // clear is safe precisely BECAUSE this phase is still reading — reader
+        // catch-up is what the repair cycle parks on, so an in-flight repair
+        // completes here rather than deadlocking.
+        let key = PaneKey(server: server, paneID: paneID)
+        let fanout = supervisor.fanout
         let attachDone = FlagBox()
-        async let phase1 = drain(fd: readFD, deadline: .seconds(30)) { _ in attachDone.get() }
+        async let phase1 = drain(fd: readFD, deadline: .seconds(30)) { _ in
+            attachDone.get() && fanout.flowStats(key: key)?.repairing != true
+        }
         let outcome = try await orchestrator.performAttachReady(server: server, paneID: paneID)
         #expect(outcome == .ready)
         attachDone.set()
         var accumulated = await phase1
 
         // The baseline for everything below. Every "a repair happened" check in
-        // this test is a DELTA against it — see `overflowRepairEntryFailure` for
-        // why an absolute count is a vacuous pass here.
-        let key = PaneKey(server: server, paneID: paneID)
-        let fanout = supervisor.fanout
+        // this test is a DELTA against it, and the gate below additionally
+        // refuses a baseline taken mid-repair — see `overflowRepairEntryFailure`
+        // for why either alone is a vacuous pass here.
         guard let baseline = fanout.flowStats(key: key) else {
             // Stop the supervisor BEFORE unwinding: the pane is still blasting,
             // and the `defer` above closes the read end of the pipe it writes to.
@@ -803,6 +836,10 @@ private enum MatrixError: Error, CustomStringConvertible {
     /// sink itself was gone.
     case overflowRepairNeverEntered(
         stats: PaneFlowStats?, baseline: PaneFlowStats, queueCap: Int, waited: Duration)
+    /// The no-reader window opened on a sink that was ALREADY mid-repair, so
+    /// neither the entry signal nor any `repairs` delta after it can be
+    /// attributed to the window.
+    case overflowWindowOpenedMidRepair(baseline: PaneFlowStats)
 
     var description: String {
         switch self {
@@ -831,6 +868,14 @@ private enum MatrixError: Error, CustomStringConvertible {
                 ? "the queue DID overflow and the sink dropped instead of repairing — production"
                 : "the queue never reached the cap, so the setup never induced an overflow — harness"
             return "no repair cycle after \(waited) of firehose with no reader: \(verdict). \(facts)"
+        case .overflowWindowOpenedMidRepair(let baseline):
+            return "the no-reader window opened on a sink that was ALREADY repairing "
+                + "(repairs=\(baseline.repairs), queuedHighWater=\(baseline.queuedHighWater), "
+                + "overflowEvents=\(baseline.overflowEvents)), so nothing downstream is "
+                + "attributable to the window: the in-flight cycle sets the entry signal and, "
+                + "on completion, satisfies every repairs delta. Phase 1 reads until the sink "
+                + "is quiescent, so reaching here means the pane out-ran the reader in the "
+                + "instant between that wait and this snapshot — harness/load, not production"
         }
     }
 }
