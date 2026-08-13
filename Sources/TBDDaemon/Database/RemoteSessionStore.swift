@@ -262,6 +262,27 @@ public struct RemoteSessionStore: Sendable {
         }
     }
 
+    /// One provider's mirror rows. Adoption reads these straight after a
+    /// snapshot to learn the repo association this store just PINNED, rather
+    /// than resolving `meta["repo"]` a second time — a second resolution could
+    /// disagree with the pin, and the pin is the one the Provider Desk shows.
+    public func rows(provider: String) async throws -> [RemoteSessionRow] {
+        try await writer.read { db in
+            try RemoteSessionRow.filter(Column("provider") == provider).fetchAll(db)
+        }
+    }
+
+    /// The single mirror row for one session, for the events path where a
+    /// whole-provider fetch would be wasted work.
+    public func row(provider: String, sessionID: String) async throws -> RemoteSessionRow? {
+        try await writer.read { db in
+            try RemoteSessionRow
+                .filter(Column("provider") == provider)
+                .filter(Column("sessionID") == sessionID)
+                .fetchOne(db)
+        }
+    }
+
     public func list() async throws -> [RemoteSessionRow] {
         try await writer.read { db in
             try RemoteSessionRow.order(Column("firstSeen").desc).fetchAll(db)

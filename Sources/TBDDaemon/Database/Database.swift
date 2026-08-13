@@ -1277,6 +1277,23 @@ public final class TBDDatabase: Sendable {
                 unique: true)
         }
 
+        // Adoption probes "does a row already exist for this provider
+        // session" once per sighted session on every poll, so the binding
+        // needs an index rather than a scan of the whole worktree table.
+        //
+        // Partial: only remote rows carry a provider binding, so local rows
+        // stay out of the index entirely. NOT unique — a duplicate binding is
+        // a bug adoption's own check prevents, and a UNIQUE index would turn
+        // it into a migration-time failure on any install that already has
+        // one rather than something the code can log and step over.
+        migrator.registerMigration("v72_worktree_provider_session_index") { db in
+            try db.addIndexIfMissing(
+                "idx_worktree_provider_session",
+                on: "worktree",
+                columns: ["providerName", "providerSessionID"],
+                where: "providerName IS NOT NULL")
+        }
+
         return migrator
     }
 }

@@ -11,6 +11,10 @@ private let remoteLogger = Logger(subsystem: "com.tbd.daemon", category: "remote
 public actor RemoteProviderManager {
     private let db: TBDDatabase
     private let subscriptions: StateSubscriptionManager
+    /// Mints the worktree row for a session that resolves to a registered
+    /// repo. Runs after the mirror upsert at both convergence points, so it
+    /// reads the repo association the mirror just pinned.
+    private let adopter: RemoteSessionAdopter
     private let runner: any RemoteProviderInvoking
     private let registryURL: URL
     private let clock: any Clock<Duration>
@@ -51,6 +55,7 @@ public actor RemoteProviderManager {
     ) {
         self.db = db
         self.subscriptions = subscriptions
+        self.adopter = RemoteSessionAdopter(db: db)
         self.runner = runner
         self.registryURL = registryURL
         self.clock = clock
@@ -275,6 +280,13 @@ public actor RemoteProviderManager {
     {
         let outcome = try await db.remoteSessions.applySnapshot(
             provider: provider, sessions: sessions, now: now)
+        // After the mirror, never before: adoption reads the repo association
+        // `applySnapshot` just pinned rather than resolving `meta["repo"]` a
+        // second time. Unconditional on `outcome.changed` — a session can
+        // become adoptable without its payload changing at all, because the
+        // mirror re-attempts resolution on every poll while its pin is null,
+        // and the poll after the user registers the repo is exactly that case.
+        broadcastAdoptions(await adopter.adopt(sessions: sessions, provider: provider))
         lastSuccessfulSnapshotAt[provider] = now
         // A live snapshot supersedes whatever the persisted row would have
         // said, so an earlier unreadable read no longer gates anything.
@@ -307,6 +319,12 @@ public actor RemoteProviderManager {
             )
             return
         }
+        // Same ordering rule as the snapshot path: the mirror pins, then
+        // adoption reads the pin. A session first sighted on the events stream
+        // must not have to wait for the next full poll to get its row.
+        if let created = await adopter.adopt(session: session, provider: provider) {
+            broadcastAdoptions([created])
+        }
         if outcome.changed {
             subscriptions.broadcast(delta: .remoteSessionsChanged)
         }
@@ -317,6 +335,20 @@ public actor RemoteProviderManager {
                         provider: provider, sessionID: session.id, title: session.title,
                         kind: session.agentState.rawValue, reason: session.agentStateReason,
                         exitCode: session.exitCode)))
+        }
+    }
+
+    /// Tell subscribers about rows adoption just minted. Same delta a
+    /// user-driven create broadcasts, so the sidebar needs no adoption-shaped
+    /// case of its own.
+    private func broadcastAdoptions(_ created: [Worktree]) {
+        for worktree in created {
+            subscriptions.broadcast(
+                delta: .worktreeCreated(
+                    WorktreeDelta(
+                        worktreeID: worktree.id, repoID: worktree.repoID,
+                        name: worktree.name, path: worktree.localPath,
+                        status: worktree.status)))
         }
     }
 

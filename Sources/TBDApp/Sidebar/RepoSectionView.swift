@@ -71,10 +71,15 @@ struct RepoSectionView: View {
     }
 
     /// Remote sessions resolved to this repo (`RemoteSessionInfo.resolvedRepoID
-    /// == repo.id`), rendered after every local worktree. See
+    /// == repo.id`) that do NOT already own a worktree row in this section,
+    /// rendered after every local worktree. See
     /// `RepoSectionView.matchedRemoteSessions` for the filter/sort rule.
     var matchedRemoteSessions: [RemoteSessionInfo] {
-        RepoSectionView.matchedRemoteSessions(appState.remoteSessions, repoID: repo.id)
+        RepoSectionView.matchedRemoteSessions(
+            appState.remoteSessions,
+            repoID: repo.id,
+            worktrees: appState.worktrees[repo.id] ?? []
+        )
     }
 
     private var activeWorktreeCount: Int {
@@ -320,8 +325,30 @@ struct RepoSectionView: View {
     /// computed `matchedRemoteSessions` property so it's directly testable
     /// without an `AppState`/view hierarchy. `nonisolated` for the same
     /// reason as `RemoteSectionView`'s pure helpers (see its doc comment).
-    nonisolated static func matchedRemoteSessions(_ all: [RemoteSessionInfo], repoID: UUID) -> [RemoteSessionInfo] {
-        all.filter { $0.resolvedRepoID == repoID && !$0.dismissed }
+    ///
+    /// `worktrees` is the section's own worktree list, and a session that one
+    /// of those rows already stands for is dropped here: a remote lane that
+    /// has been adopted into a `Worktree` row renders as that row, and would
+    /// otherwise appear a second time as a session row under the same repo.
+    /// The join is on the `(provider, sessionID)` pair both sides carry —
+    /// `Worktree.location` for the row, `provider`/`payload.id` for the
+    /// session — never on display name or branch, which adoption seeds once
+    /// and the user is then free to change. The parameter is required rather
+    /// than defaulted so a new call site cannot silently reintroduce the
+    /// duplicate.
+    ///
+    /// Archiving a remote lane removes its row from `worktrees` (see
+    /// `AppState.visibleWorktrees`), so the session returns to being a plain
+    /// session row — one surface at all times, never zero and never two.
+    nonisolated static func matchedRemoteSessions(
+        _ all: [RemoteSessionInfo],
+        repoID: UUID,
+        worktrees: [Worktree]
+    ) -> [RemoteSessionInfo] {
+        let adopted = Set(worktrees.map(\.location).filter { !$0.isLocal })
+        return all
+            .filter { $0.resolvedRepoID == repoID && !$0.dismissed }
+            .filter { !adopted.contains(.remote(provider: $0.provider, sessionID: $0.payload.id)) }
             .sorted(by: RepoSectionView.isOrderedByCreation)
     }
 

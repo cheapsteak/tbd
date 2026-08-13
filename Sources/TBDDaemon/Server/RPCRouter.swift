@@ -611,26 +611,7 @@ public final class RPCRouter: Sendable {
         await mergeTrigger?.beginPollPass()
         // Fetch fresh PR data for all active worktrees before returning the cache.
         let worktrees = Self.pollableWorktrees(try await db.worktrees.list(status: .active))
-        // Each repo's default branch, fetched once per pass rather than per
-        // worktree. It tells a tracked BASE from a rename-push target — see
-        // `PRStatusManager.branchCandidates`, and `headRefMismatchedMatches` for
-        // why a stale value here can only cost a missed heal.
-        let defaultBranchByRepo = Dictionary(
-            uniqueKeysWithValues: (try await db.repos.list()).map { ($0.id, $0.defaultBranch) })
-        var infos: [PRStatusManager.PollWorktree] = []
-        infos.reserveCapacity(worktrees.count)
-        for wt in worktrees {
-            let (upstreamBranch, pushBranch) = await branchFacts(worktreePath: wt.localPath, branch: wt.branch)
-            infos.append((
-                id: wt.id,
-                branch: wt.branch,
-                upstreamBranch: upstreamBranch,
-                defaultBranch: wt.repoID.flatMap { defaultBranchByRepo[$0] },
-                pushBranch: pushBranch,
-                worktreePath: wt.localPath,
-                prNumber: wt.prNumber
-            ))
-        }
+        let infos = await pollEntries(worktrees, repos: try await db.repos.list())
         let poll = await prManager.fetchAll(worktrees: infos)
         // A heal ran: the worktree was positively shown NOT to own this PR (its
         // head is a branch the worktree merely tracks, or the PR is in another
@@ -834,44 +815,133 @@ public final class RPCRouter: Sendable {
     /// as a pure function (rather than inlined `.filter` in `computePRList`)
     /// so it's directly unit-testable without spinning up git/gh machinery.
     ///
-    /// Remote rows are excluded for a second reason: everything downstream is
-    /// keyed on the worktree's path. `branchFacts` runs `git` inside it and
-    /// caches the answer under that path, and `PRStatusManager` runs `gh` there
-    /// — against a directory that does not exist on this machine. Polling a
-    /// remote lane's PR is wanted eventually and needs to key on the BRANCH
-    /// instead; until then, not polling is the only correct behavior.
+    /// Remote rows ARE pollable: a lane carries a PR badge like any other row.
+    /// Everything downstream is keyed on the *branch*, and the directory it runs
+    /// in comes from `pollWorkingDirectory` — the repo's own checkout for a
+    /// remote row — so no caller ever sees the synthetic `remote://` path.
     static func pollableWorktrees(_ worktrees: [Worktree]) -> [Worktree] {
-        worktrees.filter { !$0.isScratch && $0.location.isLocal }
+        worktrees.filter { !$0.isScratch }
+    }
+
+    /// The directory this row's poll runs `git` and `gh` in, or nil when there
+    /// is none and the row must be skipped.
+    ///
+    /// A local row uses its own checkout. A remote row has no checkout on this
+    /// machine, so it uses its repo's — which is correct because everything the
+    /// poll asks is a *repo* fact keyed on a *branch*, never a worktree-local
+    /// one: `git config --get branch.<b>.merge` and `git rev-parse <b>@{push}`
+    /// both read config shared by every worktree of the repo and name the branch
+    /// explicitly rather than reading HEAD, and `gh` uses the directory only to
+    /// learn which GitHub repo it is talking to (auth is host-scoped).
+    ///
+    /// The remote arm cannot return `localPath`, which for a remote row is the
+    /// synthetic `remote://<provider>/<sessionID>` URI from
+    /// `WorktreeLocation.storagePath` and is not a directory at all. That is the
+    /// structural guard: it is unreachable here rather than filtered out
+    /// downstream. A remote row whose repo is unknown (deleted, or a row with no
+    /// `repoID`) yields nil, and its caller skips the row entirely.
+    ///
+    /// **Several rows now resolve to the same string, and that is safe by
+    /// construction rather than by luck.** Every lane of one repo shares its
+    /// checkout, so the path stops being a per-row identifier — but no consumer
+    /// ever used it as one. `PollWorktree.worktreePath` feeds exactly two kinds
+    /// of site: a working directory for a `git`/`gh` subprocess, and a key into
+    /// a *repo-identity* lookup (`PRStatusManager.ownerRepoCache`, and the
+    /// `Set(...map(\.worktreePath))` resolutions and `groupNumberedByRepo`
+    /// grouping built on it). Both answer questions about the repo, so rows that
+    /// share a repo must get the same answer; collapsing them removes duplicate
+    /// `gh repo view` spawns and changes nothing else. Every per-row result —
+    /// the status cache, `lastDirectUpdate`, `headRefVerifiedIDs`, every match
+    /// tuple — is keyed on the worktree `id`, which stays unique. And
+    /// `branchTrackingCache` is keyed on `(path, branch)`, where the facts it
+    /// caches (`branch.<b>.merge`, `<b>@{push}`) are themselves functions of
+    /// `(repo, branch)`: collapsing the path makes that key *more* faithful to
+    /// what it stores, not less.
+    static func pollWorkingDirectory(
+        _ worktree: Worktree, repoPathByID: [UUID: String]
+    ) -> String? {
+        switch worktree.location {
+        case .local:
+            return worktree.localPath
+        case .remote:
+            return worktree.repoID.flatMap { repoPathByID[$0] }
+        }
+    }
+
+    /// Compose one poll pass's input: the branch facts and working directory
+    /// each pollable row is judged on.
+    ///
+    /// Split out of `computePRList` so a test can assert what the poll *is*
+    /// given a set of rows, rather than inferring it from whatever `gh` was
+    /// asked afterwards. `repos` is read once per pass rather than per row:
+    /// `defaultBranch` tells a tracked BASE from a rename-push target (see
+    /// `PRStatusManager.branchCandidates`, and `headRefMismatchedMatches` for
+    /// why a stale value can only cost a missed heal), and `path` is the
+    /// directory a remote row's poll runs in.
+    func pollEntries(
+        _ worktrees: [Worktree], repos: [Repo]
+    ) async -> [PRStatusManager.PollWorktree] {
+        let defaultBranchByRepo = Dictionary(
+            uniqueKeysWithValues: repos.map { ($0.id, $0.defaultBranch) })
+        let pathByRepo = Dictionary(uniqueKeysWithValues: repos.map { ($0.id, $0.path) })
+        var infos: [PRStatusManager.PollWorktree] = []
+        infos.reserveCapacity(worktrees.count)
+        for wt in worktrees {
+            // The one place a row's poll working directory is chosen. A remote
+            // row whose repo is gone resolves to nil and is simply not polled —
+            // there is no directory to run `git` or `gh` in.
+            guard let workingDirectory = Self.pollWorkingDirectory(wt, repoPathByID: pathByRepo) else {
+                continue
+            }
+            let (upstreamBranch, pushBranch) = await branchFacts(
+                worktreePath: workingDirectory, branch: wt.branch)
+            infos.append((
+                id: wt.id,
+                branch: wt.branch,
+                upstreamBranch: upstreamBranch,
+                defaultBranch: wt.repoID.flatMap { defaultBranchByRepo[$0] },
+                pushBranch: pushBranch,
+                worktreePath: workingDirectory,
+                prNumber: wt.prNumber
+            ))
+        }
+        return infos
     }
 
     private func handlePRRefresh(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(PRRefreshParams.self, from: paramsData)
 
-        // Run targeted refresh in the worktree and try the tracked upstream
-        // branch when needed. Local rows only, for the same reason
-        // `pollableWorktrees` excludes remote ones: this runs `git` and `gh`
-        // inside the worktree's path. A remote id gets the same "nothing to
-        // report" answer as an unknown one.
-        guard let wt = try await db.worktrees.getLocal(id: params.worktreeID) else {
+        // Run a targeted refresh for one row and try the tracked upstream branch
+        // when needed. The working directory comes from `pollWorkingDirectory`,
+        // exactly as the poll's does, so a remote row refreshes against its
+        // repo's checkout and its own branch. A row with no working directory —
+        // an unknown id, or a remote row whose repo is gone — gets "nothing to
+        // report".
+        guard let wt = try await db.worktrees.get(id: params.worktreeID) else {
+            return try RPCResponse(result: PRRefreshResult(status: nil))
+        }
+        var repo: Repo?
+        if let repoID = wt.repoID {
+            repo = try await db.repos.get(id: repoID)
+        }
+        guard let workingDirectory = Self.pollWorkingDirectory(
+            wt, repoPathByID: repo.map { [$0.id: $0.path] } ?? [:]) else {
             return try RPCResponse(result: PRRefreshResult(status: nil))
         }
         // Read the branch facts through the SAME cache the poll uses. Reading
         // git directly here would let a user refresh attach a PR that the very
         // next poll — still inside the cache's TTL, still holding the older
         // facts — judges by a different candidate list and clears again.
-        let (upstreamBranch, pushBranch) = await branchFacts(worktreePath: wt.path, branch: wt.branch)
-        var defaultBranch: String?
-        if let repoID = wt.repoID {
-            defaultBranch = try await db.repos.get(id: repoID)?.defaultBranch
-        }
+        let (upstreamBranch, pushBranch) = await branchFacts(
+            worktreePath: workingDirectory, branch: wt.branch)
 
         let status = await prManager.refresh(
             worktreeID: wt.id,
             branch: wt.branch,
             upstreamBranch: upstreamBranch,
-            defaultBranch: defaultBranch,
+            defaultBranch: repo?.defaultBranch,
             pushBranch: pushBranch,
-            repoPath: wt.path,
+            repoPath: workingDirectory,
             prNumber: wt.prNumber
         )
         return try RPCResponse(result: PRRefreshResult(status: status))

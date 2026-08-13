@@ -27,12 +27,13 @@ struct ScratchExclusionTests {
         #expect(!pollable.contains { $0.id == scratch.id })
     }
 
-    /// The same guard, for the other kind of row the poller must not touch:
-    /// everything downstream of `pollableWorktrees` runs `git` and `gh` inside
-    /// the worktree's path and caches branch facts keyed on it, and a remote
-    /// row's path is not a directory on this machine.
-    @Test("pollableWorktrees drops remote rows and keeps local rows")
-    func pollableWorktreesDiscriminatesRemoteFromLocal() {
+    /// Scratch is the ONLY exclusion. A remote row is pollable — it carries a PR
+    /// badge like any other row, and `RPCRouter.pollWorkingDirectory` gives it
+    /// the repo's checkout to run in. That contract and its no-cross-assignment
+    /// consequences live in `PRPollRemoteLaneTests`; this pins that the scratch
+    /// filter was not widened back into a location filter.
+    @Test("pollableWorktrees keeps remote rows alongside local ones")
+    func pollableWorktreesKeepsRemoteRows() {
         let local = Worktree(
             repoID: UUID(), name: "l", displayName: "l", branch: "tbd/l",
             path: "/tmp/local", tmuxServer: "tbd-l")
@@ -43,7 +44,7 @@ struct ScratchExclusionTests {
 
         let pollable = RPCRouter.pollableWorktrees([local, remote])
 
-        #expect(pollable.map(\.id) == [local.id])
+        #expect(pollable.map(\.id) == [local.id, remote.id])
     }
 
     @Test("pr.list never includes a scratch worktree")
