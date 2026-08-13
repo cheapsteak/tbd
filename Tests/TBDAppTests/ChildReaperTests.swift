@@ -15,20 +15,41 @@ import Testing
 /// TBDApp. `ChildReaper` is the guaranteed `waitpid`; a non-blocking (`WNOHANG`)
 /// or event-source implementation fails `reapsAChildThatIsStillRunning` below.
 ///
+/// HOW THESE TESTS WAIT. The background-reap tests await an **event**, not a
+/// window: `ChildReaper.drainPendingReaps` puts a barrier on the reaper's own
+/// concurrent queue, so when it fires every reap already enqueued has *run to
+/// completion*. A child that still exists after that is a reap that did not
+/// reap — a contract failure, not a scheduling delay. The single remaining
+/// bounded poll, `waitUntilZombie`, waits for a child to **exit**, which is not
+/// an in-process event and therefore has nothing to be ordered behind; it is
+/// documented as a hang guard at its definition.
+///
+/// Both waits carry their own bounded hang guard, and that is deliberate:
+/// **neither one can be rescued by the suite `.timeLimit`.** Swift Testing
+/// cannot cancel a thread parked in a synchronous `waitpid`, nor a
+/// `withCheckedContinuation` awaiting a barrier callback that never runs — a
+/// child that ignored its signals would wedge the whole run rather than redden
+/// one test. `drainPendingReaps(within:)` (see `ChildReapDrainSupport.swift`)
+/// and `waitUntilZombie` each convert that into a named failure, and each
+/// disposes of its child on that path so a stuck reap cannot poison the tests
+/// that follow.
+///
 /// WHY AN EXPLICIT `.timeLimit(.minutes(1))` AND NOT `.clockDriven`. Following
 /// the precedent of `SubprocessTimeoutTests`, which states its reason rather
 /// than inheriting the shared trait: `.clockDriven`'s four minutes is sized for
 /// suites that arm a `TestClock` handshake in the ~4500-test parallel pass, and
-/// nothing here is clock-driven — the longest child lives 0.3 s and the polls
-/// below are capped at 5 s of their own. A limit an order of magnitude above
-/// the work is a hang-catcher; four minutes of a shared box is not free.
+/// nothing here is clock-driven. What the limit has to afford is a test that
+/// fails through its own guards and still gets to report: the 30 s barrier hang
+/// guard plus the ~5 s `waitUntilZombie` budget plus the disposal that follows
+/// — 35 s against a sixty-second limit, so the diagnostic lands rather than
+/// being truncated. The honest path meanwhile finishes in under a second (the
+/// longest-lived child in the process is 0.3 s), which is the order-of-magnitude
+/// margin this trait is for. Four minutes of a shared box is not free.
 ///
-/// The limit's known blind spot, stated rather than glossed: Swift Testing
-/// cannot cancel a thread parked in a synchronous `waitpid`, so it would not
-/// rescue a test that waits on a child that never exits. None can — every child
-/// spawned here is `/bin/sleep` with a bounded argument, which always exits, and
-/// the skip-branch test reaps its own deliberately-unreaped child before
-/// returning.
+/// What the limit therefore is, stated rather than glossed: a coarse outer
+/// backstop for the ordinary case where a test is merely slow. The two waits
+/// above are what actually catch a stuck reap, and both are sized to fire —
+/// with their diagnostic — inside this limit rather than be truncated by it.
 @Suite("ChildReaper", .timeLimit(.minutes(1)))
 struct ChildReaperTests {
 
@@ -45,10 +66,37 @@ struct ChildReaperTests {
 
     private struct StillZombie: Error, CustomStringConvertible {
         let pid: pid_t
-        let polls: Int
+        let state: String
         var description: String {
-            "pid \(pid) was still a live-or-zombie process after \(polls) polls "
-                + "(expected ESRCH once ChildReaper reaped it)"
+            "pid \(pid) still existed after ChildReaper's queue drained — observed \(state). "
+                + "The barrier means the reap block already ran to completion, so this is a "
+                + "reap that did not reap, not a reap that has not been scheduled yet."
+        }
+    }
+
+    /// Why the outcome is an enum rather than a thrown error at the point of
+    /// failure: the caller has a child to dispose of before it may fail, so
+    /// `waitUntilZombie` reports and the caller decides when to throw.
+    private enum ZombieWaitOutcome {
+        case becameZombie
+        case budgetExhausted(polls: Int)
+        /// The surrounding task was cancelled — in this suite that means the
+        /// suite `.timeLimit` fired. Named separately because the alternative
+        /// is a lie: a swallowed `CancellationError` makes every remaining
+        /// `Task.sleep` return instantly, the loop burns its whole budget in
+        /// microseconds, and the resulting "never became a zombie after N
+        /// polls" points at production for a harness event.
+        case cancelled(polls: Int)
+
+        func diagnostic(pid: pid_t) -> (any Error)? {
+            switch self {
+            case .becameZombie:
+                return nil
+            case .budgetExhausted(let polls):
+                return NeverExited(pid: pid, polls: polls)
+            case .cancelled(let polls):
+                return WaitCancelled(pid: pid, polls: polls)
+            }
         }
     }
 
@@ -56,8 +104,17 @@ struct ChildReaperTests {
         let pid: pid_t
         let polls: Int
         var description: String {
-            "pid \(pid) never became a reapable zombie after \(polls) polls "
+            "pid \(pid) never became a reapable zombie within \(polls) polls "
                 + "(it exited and something else reaped it, or it never exited)"
+        }
+    }
+
+    private struct WaitCancelled: Error, CustomStringConvertible {
+        let pid: pid_t
+        let polls: Int
+        var description: String {
+            "waiting for pid \(pid) to exit was CANCELLED after \(polls) polls — the suite "
+                + "time limit fired. This says nothing about whether ChildReaper is correct."
         }
     }
 
@@ -89,6 +146,13 @@ struct ChildReaperTests {
         return waitid(P_PID, id_t(pid), &info, WEXITED | WNOWAIT | WNOHANG) == 0 && info.si_pid == pid
     }
 
+    /// Describes what `pid` currently is, for a diagnostic. `WNOWAIT` keeps
+    /// this a probe: it leaves the child in exactly the state it found it.
+    private func describeState(_ pid: pid_t) -> String {
+        if isUnreapedZombie(pid) { return "an unreaped zombie (exited, still waitable)" }
+        return processExists(pid) ? "a live process (never exited)" : "gone"
+    }
+
     /// Runs the blocking reap off the cooperative pool. Parking a concurrency
     /// worker for the child's lifetime would tax every other suite in this
     /// process (Swift Testing runs them all in one).
@@ -100,13 +164,67 @@ struct ChildReaperTests {
         }
     }
 
-    private func waitUntilZombie(_ pid: pid_t) async throws {
-        var polls = 0
-        while !isUnreapedZombie(pid), polls < 50 {
-            polls += 1
-            try await Task.sleep(for: .milliseconds(100))
+    /// Ends and reaps a child this test deliberately left unreaped, given the
+    /// state that was just observed for it.
+    ///
+    /// Two hazards this navigates. A pid that was already reaped must not be
+    /// signalled — it is free and the OS may have recycled it. And a child that
+    /// never exited must be SIGKILLed first, or the `waitpid` parks forever on
+    /// a thread Swift Testing cannot cancel.
+    ///
+    /// **Call only after a `drainPendingReaps` that returned `.drained`.**
+    /// Committing a `waitpid` while one of `ChildReaper`'s own blocks may still
+    /// be parked on the same pid is the two-waiter pid-recycling hazard its doc
+    /// comment forbids; the barrier is what guarantees the reaper is no longer
+    /// a waiter.
+    ///
+    /// The one exception is the stalled-barrier path, where there is no such
+    /// guarantee and disposing anyway is still right: the alternative is
+    /// leaving a live child and an unreaped pid for the rest of the run. The
+    /// `SIGKILL` keeps our own `waitpid` bounded there (an exiting child either
+    /// gets reaped by us or returns `ECHILD` at once), and the residual — both
+    /// waiters returning inside the microseconds it takes to recycle a pid into
+    /// a *new* child of this process — is the coincidence-on-top-of-a-race
+    /// `ChildReaper` already accepts.
+    private func disposeChild(_ pid: pid_t, observedZombie: Bool) async {
+        if observedZombie {
+            _ = await reapOffPool(pid)  // already exited; returns at once
+        } else if processExists(pid) {
+            kill(pid, SIGKILL)
+            _ = await reapOffPool(pid)
         }
-        guard isUnreapedZombie(pid) else { throw NeverExited(pid: pid, polls: polls) }
+    }
+
+    /// A child *exiting* is not an in-process event: no queue drains and no
+    /// barrier can be ordered behind it, so there is nothing to await and
+    /// bounded polling is the honest instrument (assertion-hygiene rule 3).
+    ///
+    /// The budget is a **hang guard, not a timing assertion**. Every child
+    /// waited on here is `/bin/sleep 0`, which exits in milliseconds, so a run
+    /// that consumes any material part of the budget has already found a bug.
+    /// It is deliberately *not* described as a wall-clock cap: `Task.sleep` is
+    /// a floor, not a ceiling, so `pollBudget × pollInterval` (≈5 s) is the
+    /// nominal figure and the real elapsed time is larger under load. The
+    /// suite's `.timeLimit` is the outer bound; this budget only keeps a wedged
+    /// child from consuming all of it.
+    private static let pollBudget = 50
+    private static let pollInterval = Duration.milliseconds(100)
+
+    private func waitUntilZombie(_ pid: pid_t) async -> ZombieWaitOutcome {
+        var polls = 0
+        while !isUnreapedZombie(pid) {
+            if polls >= Self.pollBudget { return .budgetExhausted(polls: polls) }
+            if Task.isCancelled { return .cancelled(polls: polls) }
+            polls += 1
+            do {
+                try await Task.sleep(for: Self.pollInterval)
+            } catch {
+                // Cancellation, propagated rather than swallowed — see
+                // `ZombieWaitOutcome.cancelled`.
+                return .cancelled(polls: polls)
+            }
+        }
+        return .becameZombie
     }
 
     // MARK: - The teardown decision
@@ -180,13 +298,24 @@ struct ChildReaperTests {
         let pid = try spawn("/bin/sleep", ["0"])
         ChildReaper.reap(pid: pid, unless: ChildExitObservation())
 
-        var polls = 0
-        while processExists(pid), polls < 50 {
-            polls += 1
-            try await Task.sleep(for: .milliseconds(100))
+        // The barrier, not a poll: when this returns the reap block has run to
+        // completion, so the assertion below is a contract check with no
+        // scheduling window in it. Bounded, so a reap parked on a child that
+        // never exits reds this test instead of wedging the run.
+        let drain = await drainPendingReaps()
+        if let diagnostic = drain.diagnostic(pid: pid, observedState: { describeState(pid) }) {
+            await disposeChild(pid, observedZombie: isUnreapedZombie(pid))
+            throw diagnostic
         }
-        if processExists(pid) {
-            Issue.record(StillZombie(pid: pid, polls: polls))
+
+        let survived = processExists(pid)
+        if survived {
+            let state = describeState(pid)
+            // Dispose before recording, so a failing run cannot leave the child
+            // behind. Safe to commit our own waitpid: the barrier above already
+            // guarantees ChildReaper is no longer a waiter for this pid.
+            await disposeChild(pid, observedZombie: isUnreapedZombie(pid))
+            Issue.record(StillZombie(pid: pid, state: state))
         }
     }
 
@@ -200,13 +329,30 @@ struct ChildReaperTests {
 
         // Let the child actually exit, so "still waitable" means "nobody
         // reaped it" rather than "it had not exited yet".
-        try await waitUntilZombie(pid)
-        try await Task.sleep(for: .milliseconds(200))
-        #expect(isUnreapedZombie(pid),
-                "an observed child must be left for its real waiter, not reaped here")
+        let outcome = await waitUntilZombie(pid)
 
-        // This test owns the zombie it deliberately kept; don't leak it.
-        _ = await reapOffPool(pid)
+        // `reap` should have early-returned without enqueuing anything, so this
+        // normally fires at once. It is here because a regression that enqueued
+        // the block anyway would otherwise be *racing* the assertion below —
+        // and because it makes this test the sole waiter for the disposal.
+        let drain = await drainPendingReaps()
+
+        let survived = isUnreapedZombie(pid)
+
+        // This test owns the zombie it deliberately kept. Disposed before
+        // anything can throw or fail: a `defer` registered after a throwing
+        // statement never runs at all, which is how a probe escapes to launchd.
+        await disposeChild(pid, observedZombie: survived)
+
+        if let diagnostic = outcome.diagnostic(pid: pid) { throw diagnostic }
+        // Reported after the wait's own outcome (which happened first) and
+        // before the assertion, which a stalled barrier would make unsound:
+        // an enqueued reap could still be pending.
+        if let diagnostic = drain.diagnostic(pid: pid, observedState: { "already disposed" }) {
+            throw diagnostic
+        }
+        #expect(survived,
+                "an observed child must be left for its real waiter, not reaped here")
     }
 
     // MARK: - What is deliberately NOT tested here

@@ -126,10 +126,44 @@ func makeFakeClient() -> (TmuxControlCommandClient, LineRecorder) {
     return (client, recorder)
 }
 
+/// Carries a bounded wait's OBSERVED state on the primary failure line
+/// (assertion-hygiene rule 4: `#expect(cond, "…")` and `Issue.record(String)`
+/// both demote the message to a trailing `↳` line that CI summaries drop; only
+/// `Issue.record(_: some Error)` survives). `observed` is nil when the caller
+/// supplied no reporter — the text then matches the pre-#494 wording exactly.
+struct ControlModeWaitTimeout: Error, CustomStringConvertible {
+    let what: String
+    let observed: String?
+    let deadline: Duration
+
+    var description: String {
+        let seen = observed.map { " — observed \($0)" } ?? ""
+        return "timed out waiting for \(what)\(seen) after polling up to \(deadline)"
+    }
+}
+
 /// Poll every 10 ms until `condition`, recording an Issue at the caller's
 /// source location after `deadline`. A final post-deadline re-check absorbs
 /// sleep slices that overshoot the deadline AFTER the condition became true
 /// (observed live as `timedOut(got: N, want: N)` at loadavg ~40).
+///
+/// `observed` renders what the waiter actually saw at the moment it gave up; it
+/// is evaluated only on the failing path. Supply it for any wait whose
+/// condition is uninformative on its own ("2 health events" says nothing about
+/// how many arrived).
+///
+/// **The diagnostic reports the state that decided the failure, not the state
+/// at report time** (assertion-hygiene rule 4 — the
+/// `fileBytesMismatch(expected: 6150, actual: 6150)` shape). `observed` and
+/// `condition` are two closures over the same growing state, so reading
+/// `observed` *after* the last `condition()` lets an event that lands in the
+/// gap print the self-contradictory `timed out waiting for 2 health events —
+/// observed 2`. The order below closes that: `observed` is captured first, and
+/// the condition is then re-checked once more, so anything that arrived while
+/// the diagnostic was being composed makes this a PASS rather than a
+/// contradictory failure. The counters these waits watch are monotone, so a
+/// condition that is false after the capture was false at the capture too —
+/// the reported state and the verdict are consistent by construction.
 ///
 /// Returns whether the condition was met (false on timeout) so callers that
 /// index into results afterwards can abort via `#require` instead of trapping
@@ -137,6 +171,7 @@ func makeFakeClient() -> (TmuxControlCommandClient, LineRecorder) {
 @discardableResult
 func waitFor(
     _ what: String, deadline: Duration = ciSafeDeadline,
+    observed: (@Sendable () async -> String)? = nil,
     sourceLocation: SourceLocation = #_sourceLocation,
     _ condition: @Sendable () async -> Bool
 ) async throws -> Bool {
@@ -146,6 +181,194 @@ func waitFor(
         try await Task.sleep(for: .milliseconds(10))
     }
     if await condition() { return true }
-    Issue.record("timed out waiting for \(what)", sourceLocation: sourceLocation)
+    // Capture BEFORE deciding to fail, then re-check: see the doc comment.
+    let seen = await observed?()
+    if await condition() { return true }
+    Issue.record(
+        ControlModeWaitTimeout(what: what, observed: seen, deadline: deadline),
+        sourceLocation: sourceLocation)
     return false
+}
+
+// MARK: - Ordered reply feed
+
+/// Thread-safe weak box letting a `writeLine` closure (built before the client
+/// exists) feed reply blocks back into that client.
+final class ClientBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private weak var _client: TmuxControlCommandClient?
+    var client: TmuxControlCommandClient? {
+        get { lock.lock(); defer { lock.unlock() }; return _client }
+        set { lock.lock(); _client = newValue; lock.unlock() }
+    }
+}
+
+/// Monotone count of reply blocks fully handed to the correlator. Held
+/// separately from `ReplyFeed` so the drain task can own it without capturing
+/// (and thus retaining) the feed.
+private final class ReplyDeliveryCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _count = 0
+    func increment() { lock.lock(); _count += 1; lock.unlock() }
+    var count: Int { lock.lock(); defer { lock.unlock() }; return _count }
+}
+
+/// A SINGLE-CONSUMER reply feed for the fake control-mode clients — the harness
+/// half of `TmuxControlCommandClient`'s order-based correlation.
+///
+/// **Why this exists (#494).** The correlator matches reply blocks to commands
+/// **by order**: `complete` pops `pending.removeFirst()`, trusting tmux's
+/// protocol invariant that exactly one reply block arrives per command, in
+/// command order. Production upholds that because `TmuxControlSupervisor.drain`
+/// feeds every event from ONE loop — `for await event in connection.events {
+/// … await client.handle(event) }` — so blocks reach the actor strictly in
+/// stream order.
+///
+/// A fake `writeLine` that spawns a fresh unstructured `Task { await
+/// client.handle(…) }` per write does **not** model that. Those tasks race each
+/// other into the actor; their arrival order is a scheduling artifact that
+/// matches creation order on an idle box and stops doing so under load. Because
+/// `deliverInput` awaits only `sendList` — which returns after the stream
+/// **write**, not the reply — several keystrokes are routinely in flight at
+/// once, so their verdicts could be permuted onto the wrong commands. With
+/// verdicts {fail, ok, ok} arriving as {ok, ok, fail}, the edge-triggered health
+/// tracker fires ONE event instead of two and the waiter burns its full
+/// `ciSafeDeadline`. That manufactured race — not the router — was the flake.
+///
+/// `ReplyFeed` restores the production shape. `enqueue` pushes **synchronously**,
+/// in write order, into an unbounded `AsyncStream`; one long-lived task awaits
+/// `client.handle(...)` for each in turn. Completion order therefore equals
+/// write order by construction, at any load — the same single-consumer shape
+/// `ControlModeInputRouter` itself uses, for the same reason.
+///
+/// It also provides the quiescence signal that replaces "sleep 50 ms and hope":
+/// `waitForDeliveries(n)` is a real happens-before, because `reportDelivery`
+/// runs synchronously inside `client.handle`, so `delivered >= n` means the
+/// first `n` verdicts have already been recorded.
+final class ReplyFeed: @unchecked Sendable {
+    private let box = ClientBox()
+    private let counter = ReplyDeliveryCounter()
+    private let continuation: AsyncStream<TmuxControlEvent>.Continuation
+    private let drain: Task<Void, Never>
+
+    init() {
+        var escaped: AsyncStream<TmuxControlEvent>.Continuation!
+        let stream = AsyncStream<TmuxControlEvent>(bufferingPolicy: .unbounded) { escaped = $0 }
+        self.continuation = escaped
+        // Captures the box and counter, never `self` — so the feed can
+        // deallocate, and its `deinit` can end this loop, without a cycle.
+        let box = self.box
+        let counter = self.counter
+        self.drain = Task {
+            for await event in stream {
+                await box.client?.handle(event)
+                counter.increment()
+            }
+        }
+    }
+
+    /// Backstop teardown: a feed that goes out of scope without `finish()` (an
+    /// early `#require` abort, say) must not leave its drain task running.
+    deinit {
+        continuation.finish()
+        drain.cancel()
+    }
+
+    /// Point the feed at the client whose `writeLine` fills it. Weak, so the
+    /// client (which retains this feed through its `writeLine` closure) is not
+    /// kept alive by it.
+    func attach(_ client: TmuxControlCommandClient) { box.client = client }
+
+    /// Queue one reply block. Synchronous and ordered: the caller's write order
+    /// IS the delivery order.
+    func enqueue(_ event: TmuxControlEvent) { continuation.yield(event) }
+
+    /// Reply blocks fully processed by the correlator so far.
+    var delivered: Int { counter.count }
+
+    /// Wait until at least `count` reply blocks have been fully processed. The
+    /// quiescence signal for "…and nothing further happened" assertions: a
+    /// fixed settle samples once and can only produce false greens.
+    @discardableResult
+    func waitForDeliveries(_ count: Int,
+                           sourceLocation: SourceLocation = #_sourceLocation) async throws -> Bool {
+        try await waitFor("\(count) reply blocks delivered",
+                          observed: { "\(self.delivered)" },
+                          sourceLocation: sourceLocation) {
+            self.delivered >= count
+        }
+    }
+
+    /// End the feed and await the drain task, so no reply delivery outlives the
+    /// test that created it.
+    ///
+    /// **Awaiting `drain.value` is the load-bearing half, and its guarantee has
+    /// one precondition worth stating exactly.** It makes "`finish()` returned"
+    /// mean "every block ALREADY YIELDED into the stream has been handed to the
+    /// correlator". It can do nothing for a block that has not been yielded yet:
+    /// `continuation.finish()` runs first, and a `yield` onto a finished
+    /// continuation is silently discarded. So the happens-before callers rest on
+    /// is a joint property of this method and `makeRespondingClient`, which
+    /// enqueues each reply BEFORE recording the write that a waiter can observe
+    /// (see its doc comment). Given that order, a caller that reaches here on a
+    /// recorded write — `pasteFailureDoesNotStall` waits for `send-keys … 5a` —
+    /// necessarily has its replies in the buffer, and awaiting the drain is what
+    /// delivers them. Reverse the two statements there and no amount of draining
+    /// here recovers the reply.
+    ///
+    /// **`cancel()` does not truncate that buffer** — measured, not assumed,
+    /// because the opposite is the natural assumption and it is wrong.
+    /// `AsyncStream` implements task cancellation as `finish()`, and a finished
+    /// stream still yields everything already buffered before `next()` returns
+    /// nil; the loop body's only suspension is an actor hop, which ignores
+    /// cancellation. With a deliberate backlog of all 20,000 blocks in flight
+    /// at the call, every one was still delivered
+    /// (`ControlModeTestSupportTests.finishDeliversBufferedReplies`, run against
+    /// this exact code). So the reply to a `send(…)`-shaped command — the
+    /// PasteExecutor load-buffer / paste-buffer / delete-buffer shape, whose
+    /// loss would strand a `withCheckedThrowingContinuation` forever — is not at
+    /// risk here. Delete `await drain.value` and it would be.
+    func finish() async {
+        continuation.finish()
+        drain.cancel()
+        await drain.value
+    }
+}
+
+/// A fake correlator client that answers every command it is written with the
+/// verdict `shouldFail(commandText)` chooses — `%error` when true, `%end`
+/// otherwise — through an ORDERED single-consumer `ReplyFeed`.
+///
+/// One stream write may carry several `\n`-joined commands (`sendList`); each
+/// gets its own reply block, enqueued in command order. Callers must
+/// `await feed.finish()` when done.
+///
+/// **The replies are enqueued BEFORE the write is recorded, and that order is
+/// load-bearing** — it is what `ReplyFeed.finish()`'s happens-before rests on.
+/// Tests routinely wait on the recorded WRITE (`pasteFailureDoesNotStall` polls
+/// `recorder.writes.contains("send-keys -H -t %0 5a")` every 10 ms) and then
+/// tear down. With the recording first, a waiter that observes the write in the
+/// gap between the two statements — one preemption of this executor thread is
+/// enough — can reach `finish()` before the reply is in the buffer, so
+/// `continuation.finish()` lands first and the `yield` that follows is silently
+/// dropped. Enqueuing first makes "the write is visible" imply "the reply is
+/// buffered", which is precisely the premise `await drain.value` needs: it
+/// drains what is already enqueued, and can do nothing for a block that has not
+/// been yielded yet.
+func makeRespondingClient(shouldFail: @escaping @Sendable (String) -> Bool = { _ in false })
+    -> (TmuxControlCommandClient, LineRecorder, ReplyFeed) {
+    let recorder = LineRecorder()
+    let feed = ReplyFeed()
+    let client = TmuxControlCommandClient(
+        writeLine: { line in
+            for command in line.split(separator: "\n", omittingEmptySubsequences: false) {
+                feed.enqueue(shouldFail(String(command))
+                    ? .commandFailed(number: 0, fromClient: true, lines: ["no pane"])
+                    : .commandSucceeded(number: 0, fromClient: true, lines: []))
+            }
+            recorder.record(line)
+        },
+        onFatalError: {})
+    feed.attach(client)
+    return (client, recorder, feed)
 }

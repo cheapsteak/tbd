@@ -51,7 +51,8 @@ struct TranscriptImageMetadata: Equatable {
 /// cache below means a scrolled row pays it once.
 ///
 /// `@unchecked Sendable` is justified by the state: `NSCache` is documented
-/// thread-safe, and every other stored property is a `let` of a Sendable type.
+/// thread-safe, every other stored property is a `let` of a Sendable type, and
+/// the one `var` (`onThumbnailRequest`, a test seam) is `@MainActor`-isolated.
 final class TranscriptImageService: @unchecked Sendable {
     static let shared = TranscriptImageService()
 
@@ -107,6 +108,7 @@ final class TranscriptImageService: @unchecked Sendable {
         maxPixelSize: Int,
         completion: @escaping @MainActor (NSImage?) -> Void
     ) {
+        onThumbnailRequest?(path, maxPixelSize)
         guard let stamp = Self.fileStamp(path) else {
             completion(nil)
             return
@@ -128,6 +130,24 @@ final class TranscriptImageService: @unchecked Sendable {
             DispatchQueue.main.async { MainActor.assumeIsolated { completion(image) } }
         }
     }
+
+    /// Test seam: fired on every thumbnail REQUEST, with the requested path and
+    /// `maxPixelSize`, BEFORE the cache is consulted — so it observes the fetch
+    /// itself rather than the entry the fetch eventually lands in.
+    ///
+    /// That distinction is the point. A test that asserts through
+    /// `hasCachedThumbnail` is asserting on `thumbnailCache`, which is an
+    /// `NSCache` under a `countLimit` and an eviction policy of its own: the
+    /// entry may not have landed yet (the decode is asynchronous and its
+    /// scheduling latency is unbounded under load) and, once landed, may be
+    /// evicted by any concurrently running suite that decodes 64 other images.
+    /// The request is synchronous, ordered, and nobody else's to evict.
+    ///
+    /// `@MainActor`-isolated, like `thumbnail(forPath:maxPixelSize:completion:)`
+    /// which fires it, so the seam needs no synchronization of its own and does
+    /// not weaken the class's `@unchecked Sendable` justification. Production
+    /// never sets it.
+    @MainActor var onThumbnailRequest: ((String, Int) -> Void)?
 
     /// Test seam: drops every probe and thumbnail so a test can observe a cold
     /// path. Production never calls it — the caches are self-bounding.

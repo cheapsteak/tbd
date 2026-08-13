@@ -542,18 +542,43 @@ struct TranscriptImageAttachmentTests {
     ///
     /// What is observable headlessly is the FETCH, not the pixels: SwiftUI content
     /// is not captured by `cacheDisplay` or `CALayer.render` in this unbundled test
-    /// process, so the drawn image cannot be read back. The fetch is a sound proxy
-    /// — `load()` requests a thumbnail only when it holds no image, so a request
-    /// for the second attachment can only come from a view that dropped the first.
+    /// process, so the drawn image cannot be read back. The fetch is a sound proxy:
+    /// a view draws only what it fetched, so a request for the second attachment is
+    /// what proves the recycled cell is not still showing the first one's picture.
     ///
     /// Both fixtures are the same pixel size, so `maxPixelSize` is identical for
-    /// both and a cache hit cannot be confused for the wrong file.
+    /// both and a request cannot be confused for the wrong file.
+    ///
+    /// This covers the COMPOSITE — call site plus view. Which of the two mechanisms
+    /// delivered the re-fetch is deliberately not pinned here, and today it is the
+    /// call site's path-keyed segment identity rather than the view's `.onChange`.
+    /// `attachmentChangeRefetchesWhenTheViewIdentityIsStable` below is the one that
+    /// pins the view's own guard; keep both, since either mechanism regressing
+    /// alone leaves a real hazard the other happens to be covering.
+    ///
+    /// It watches `onThumbnailRequest` rather than `hasCachedThumbnail`, and that
+    /// is what makes it deterministic. The cache is the wrong instrument twice
+    /// over: the entry appears only after an asynchronous decode whose scheduling
+    /// latency is unbounded (this file's own fifo probe parks a global-queue
+    /// thread for up to 5 s; daemon suites park more), and `thumbnailCache` is an
+    /// `NSCache` with `countLimit` 64, so once landed the entry can be evicted by
+    /// any concurrent suite that decodes images of its own. The request is
+    /// synchronous with `load()`, so waiting on it measures the view's behavior
+    /// instead of the machine's weather.
     @Test func recycledHostingViewFetchesTheNewAttachmentsThumbnail() async throws {
         let scratch = Scratch()
+        // The fixtures must outlive every wait below: `Scratch.deinit` deletes
+        // the directory, and `load()` never requests a thumbnail for a file whose
+        // header probe comes back `.missing`.
+        defer { withExtendedLifetime(scratch) {} }
         TranscriptImageService.shared.clearCaches()
         let first = try writePNG(scratch, name: "first.png", width: 160, height: 160, color: .red)
         let second = try writePNG(scratch, name: "second.png", width: 160, height: 160, color: .blue)
         let maxPixel = Self.hostedMaxPixelSize(forPath: first)
+
+        let requests = ThumbnailRequestLog()
+        TranscriptImageService.shared.onThumbnailRequest = { requests.record(path: $0, maxPixelSize: $1) }
+        defer { TranscriptImageService.shared.onThumbnailRequest = nil }
 
         let host = NSHostingView(rootView: AnyView(Self.bubble(marker: marker(first))))
         host.frame = NSRect(x: 0, y: 0, width: 420, height: 260)
@@ -561,18 +586,238 @@ struct TranscriptImageAttachmentTests {
             contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = host
 
-        await pump(host) { TranscriptImageService.shared.hasCachedThumbnail(forPath: first, maxPixelSize: maxPixel) }
-        #expect(TranscriptImageService.shared.hasCachedThumbnail(forPath: first, maxPixelSize: maxPixel),
-                "precondition: the hosted view must fetch its own attachment at all")
-        #expect(!TranscriptImageService.shared.hasCachedThumbnail(forPath: second, maxPixelSize: maxPixel),
+        try await awaitRequest(
+            for: first, maxPixelSize: maxPixel, in: requests, drivingLayoutOf: host,
+            what: "precondition: the hosted view must fetch its own attachment at all")
+        #expect(!requests.contains(path: second, maxPixelSize: maxPixel),
                 "precondition: nothing has asked for the second attachment yet")
 
         // Recycle the cell onto a different message carrying a different image.
         host.rootView = AnyView(Self.bubble(marker: marker(second)))
-        await pump(host) { TranscriptImageService.shared.hasCachedThumbnail(forPath: second, maxPixelSize: maxPixel) }
-        #expect(TranscriptImageService.shared.hasCachedThumbnail(forPath: second, maxPixelSize: maxPixel),
-                Comment(rawValue: "the recycled hosting view never fetched the new attachment, so "
-                    + "it is still drawing the previous message's thumbnail"))
+        try await awaitRequest(
+            for: second, maxPixelSize: maxPixel, in: requests, drivingLayoutOf: host,
+            what: "the recycled hosting view never fetched the new attachment, so it is still "
+                + "drawing the previous message's thumbnail")
+    }
+
+    /// The view's OWN staleness guard, isolated from the call site that currently
+    /// masks it.
+    ///
+    /// `recycledHostingViewFetchesTheNewAttachmentsThumbnail` above goes through
+    /// `ChatBubbleView`, whose `ForEach` keys image segments by path
+    /// (`MarkdownSegments.Segment.id` → `"i:<path>"`). Swapping the marker
+    /// therefore changes the segment's identity, SwiftUI discards the old
+    /// `TranscriptImageAttachmentView` along with its `@State`, and the fresh one
+    /// fetches on `onAppear` — with or without `.onChange(of: attachment)`. That
+    /// makes the composite test a real regression test for the composite (the
+    /// picture is never stale end to end) but blind to the view's own guard:
+    /// deleting `.onChange` leaves it passing.
+    ///
+    /// This test removes the mask. The host's root view is one concrete type with
+    /// no `ForEach` and no `.id`, so replacing `rootView` is an in-place UPDATE:
+    /// structural identity is stable, `@State image` survives, and `onAppear` does
+    /// not fire a second time. `.onChange` is then the only thing that can make the
+    /// view re-fetch — which is exactly the invariant its comment claims to own,
+    /// and what would keep the previous message's picture on screen if the call
+    /// site ever stopped keying identity by path.
+    ///
+    /// The first thumbnail is decoded UP FRONT so the cache serves the hosted
+    /// view's request synchronously (the documented cache-hit contract, pinned by
+    /// `thumbnailDecodesOffMainAndIsThenServedFromCache`). That makes `image`
+    /// non-nil at the swap without polling for a decode, so the test exercises the
+    /// stale-picture case rather than the never-loaded one. If a concurrent suite
+    /// evicts that entry first the test still holds — it just proves the weaker
+    /// arm — so eviction can never redden it.
+    @Test func attachmentChangeRefetchesWhenTheViewIdentityIsStable() async throws {
+        let scratch = Scratch()
+        defer { withExtendedLifetime(scratch) {} }
+        TranscriptImageService.shared.clearCaches()
+        let first = try writePNG(scratch, name: "first.png", width: 160, height: 160, color: .red)
+        let second = try writePNG(scratch, name: "second.png", width: 160, height: 160, color: .blue)
+        let maxPixel = Self.hostedMaxPixelSize(forPath: first)
+
+        // Warm `first` before the hook is installed, so the pre-warm decode is not
+        // itself recorded as one of the view's requests.
+        _ = await withCheckedContinuation { continuation in
+            TranscriptImageService.shared.thumbnail(forPath: first, maxPixelSize: maxPixel) {
+                continuation.resume(returning: $0)
+            }
+        }
+
+        let requests = ThumbnailRequestLog()
+        TranscriptImageService.shared.onThumbnailRequest = { requests.record(path: $0, maxPixelSize: $1) }
+        defer { TranscriptImageService.shared.onThumbnailRequest = nil }
+
+        let host = NSHostingView(rootView: StableIdentityAttachmentHost(path: first))
+        host.frame = NSRect(x: 0, y: 0, width: 420, height: 260)
+        let window = NSWindow(
+            contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = host
+
+        try await awaitRequest(
+            for: first, maxPixelSize: maxPixel, in: requests, drivingLayoutOf: host,
+            what: "precondition: the hosted view must fetch its own attachment at all")
+        #expect(!requests.contains(path: second, maxPixelSize: maxPixel),
+                "precondition: nothing has asked for the second attachment yet")
+
+        // Point the SAME view at a different attachment. No identity change, so
+        // `onAppear` cannot save it — only `.onChange(of: attachment)` can.
+        host.rootView = StableIdentityAttachmentHost(path: second)
+        try await awaitRequest(
+            for: second, maxPixelSize: maxPixel, in: requests, drivingLayoutOf: host,
+            what: "the view did not re-fetch when its attachment changed under a stable "
+                + "identity, so it is still drawing the previous attachment's thumbnail")
+    }
+
+    /// One attachment view under a stable structural identity — no `ForEach`, no
+    /// `.id`, one concrete root type — so `NSHostingView.rootView =` updates it in
+    /// place instead of rebuilding it.
+    private struct StableIdentityAttachmentHost: View {
+        let path: String
+        var body: some View {
+            TranscriptImageAttachmentView(attachment: TranscriptImageAttachment(path: path))
+        }
+    }
+
+    /// The harness's own guard, pinned because its failure mode is invisible in
+    /// the suite it protects: a swallowed cancellation makes every subsequent
+    /// `Task.sleep` return instantly, so `awaitRequest` busy-spins
+    /// `layoutSubtreeIfNeeded` plus a cache scan ON THE MAIN ACTOR for the whole
+    /// 30 s budget, starving every other main-isolated test in the process —
+    /// and then blames production ("the view never re-fetched") for a harness
+    /// event. Deterministic: the wait observes the cancellation on its first
+    /// iteration, so this costs milliseconds.
+    @Test func awaitRequestEndsOnCancellationInsteadOfSpinning() async throws {
+        let requests = ThumbnailRequestLog()
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 10, height: 10))
+        let started = ContinuousClock.now
+
+        let waiter = Task { [self] in
+            try await awaitRequest(
+                for: "/nonexistent/never-requested.png", maxPixelSize: 64, in: requests,
+                drivingLayoutOf: view, what: "cancellation probe", within: .seconds(30))
+        }
+        waiter.cancel()
+
+        var thrown: (any Error)?
+        do { try await waiter.value } catch { thrown = error }
+        let elapsed = ContinuousClock.now - started
+
+        #expect(thrown is ThumbnailWaitCancelled,
+                "cancellation must end the wait as itself, not as a never-observed request: \(String(describing: thrown))")
+        #expect(elapsed < .seconds(5),
+                "a cancelled wait must return at once, not spin out its budget (took \(elapsed))")
+    }
+
+    /// Ordered record of every `TranscriptImageService` thumbnail request, in the
+    /// order the views made them.
+    @MainActor
+    private final class ThumbnailRequestLog {
+        private(set) var requests: [(path: String, maxPixelSize: Int)] = []
+
+        func record(path: String, maxPixelSize: Int) {
+            requests.append((path: path, maxPixelSize: maxPixelSize))
+        }
+
+        func contains(path: String, maxPixelSize: Int) -> Bool {
+            requests.contains { $0.path == path && $0.maxPixelSize == maxPixelSize }
+        }
+
+        /// Every request as `<file>@<maxPixelSize>` — file names only, so the
+        /// diagnostic stays readable and never prints a temp path.
+        var summary: String {
+            requests.isEmpty
+                ? "none"
+                : requests.map { "\(($0.path as NSString).lastPathComponent)@\($0.maxPixelSize)" }
+                    .joined(separator: ", ")
+        }
+    }
+
+    /// A bounded wait that ran out with no matching request. Thrown rather than
+    /// `#expect`-ed: only a thrown error puts the observed state on the PRIMARY
+    /// failure line, which is the line CI summaries keep (`Tests/CLAUDE.md`,
+    /// assertion-hygiene rule 4). The bare `#expect` this replaced reported
+    /// `condition(value → false)` and could not distinguish "the view never
+    /// re-fetched" from "the cache entry was evicted underneath us".
+    private struct ThumbnailRequestNotObserved: Error, CustomStringConvertible {
+        let what: String
+        let expected: String
+        let maxPixelSize: Int
+        let observed: String
+        let waited: Duration
+
+        var description: String {
+            "\(what) — no thumbnail request for \(expected) at maxPixelSize=\(maxPixelSize) "
+                + "after polling for \(waited); observed requests: \(observed)"
+        }
+    }
+
+    /// The surrounding task was cancelled while waiting — the suite time limit
+    /// fired, or the run is tearing down. Named separately for the reason
+    /// `ChildReaperTests.ZombieWaitOutcome.cancelled` is: a swallowed
+    /// `CancellationError` makes every subsequent `Task.sleep` return instantly,
+    /// so the loop burns its whole budget in microseconds and reports "the view
+    /// never re-fetched" — production blamed for a harness event. Worse here
+    /// than there, because this suite is `@MainActor`: the busy-spin runs
+    /// `layoutSubtreeIfNeeded` plus a cache scan **on the main actor**, starving
+    /// every other main-isolated test in the process until the deadline.
+    private struct ThumbnailWaitCancelled: Error, CustomStringConvertible {
+        let what: String
+        let expected: String
+        let observed: String
+        let waited: Duration
+
+        var description: String {
+            "\(what) — waiting for a thumbnail request for \(expected) was CANCELLED after "
+                + "\(waited); observed requests: \(observed). This says nothing about whether "
+                + "the view re-fetched."
+        }
+    }
+
+    /// Drives `view`'s layout and yields the main actor until the service has been
+    /// asked for `path` at `maxPixelSize`, or the deadline passes.
+    ///
+    /// It YIELDS rather than spinning a nested `RunLoop.run`: SwiftUI delivers
+    /// `onAppear` / `onChange` through the main queue, and suspending is what lets
+    /// that queue run. A nested run loop could not — this body is itself a block on
+    /// that serial queue, so the delivery would sit there until the body ended and
+    /// then land inside some other test.
+    ///
+    /// The budget is generous because it bounds a hang, not a measurement: what is
+    /// being waited on is a main-queue delivery, not a decode, so a healthy run
+    /// satisfies it in milliseconds and a saturated one still has room.
+    ///
+    /// **Cancellation ends the wait; it is never swallowed** — see
+    /// `ThumbnailWaitCancelled`. And the diagnostics report ELAPSED time, not the
+    /// budget: on the cancelled path those differ by three orders of magnitude,
+    /// and "after polling for 30 seconds" would be a fabrication.
+    private func awaitRequest(
+        for path: String, maxPixelSize: Int, in log: ThumbnailRequestLog,
+        drivingLayoutOf view: NSView, what: String,
+        within budget: Duration = .seconds(30)
+    ) async throws {
+        let started = ContinuousClock.now
+        let deadline = started + budget
+        var elapsed: Duration { ContinuousClock.now - started }
+        func cancelled() -> ThumbnailWaitCancelled {
+            ThumbnailWaitCancelled(
+                what: what, expected: (path as NSString).lastPathComponent,
+                observed: log.summary, waited: elapsed)
+        }
+        while true {
+            view.layoutSubtreeIfNeeded()
+            if log.contains(path: path, maxPixelSize: maxPixelSize) { return }
+            if Task.isCancelled { throw cancelled() }
+            guard ContinuousClock.now < deadline else { break }
+            do {
+                try await Task.sleep(for: .milliseconds(20))
+            } catch {
+                throw cancelled()
+            }
+        }
+        throw ThumbnailRequestNotObserved(
+            what: what, expected: (path as NSString).lastPathComponent,
+            maxPixelSize: maxPixelSize, observed: log.summary, waited: elapsed)
     }
 
     /// The hosted shape the reuse pool actually renders: a chat bubble whose text
@@ -592,24 +837,6 @@ struct TranscriptImageAttachmentTests {
             bodyWidth: TranscriptImageGeometry.maxEdge)
         let scale = NSScreen.main?.backingScaleFactor ?? 2
         return Int((max(display.width, display.height) * scale).rounded(.up))
-    }
-
-    /// Lays out, then yields the main actor until `done` or ~1s has passed.
-    ///
-    /// It YIELDS rather than spinning a nested `RunLoop.run`: the decode's
-    /// completion arrives via `DispatchQueue.main.async`, and suspending is what
-    /// lets the main queue deliver it. A nested run loop could not — this body is
-    /// itself a block on that serial queue, so the completion would sit there
-    /// until the body ended and then land inside some other test.
-    ///
-    /// Bounded on purpose: a decode that never arrives must fail the assertion
-    /// below rather than hang the suite.
-    private func pump(_ view: NSView, until done: () -> Bool) async {
-        for _ in 0..<50 {
-            view.layoutSubtreeIfNeeded()
-            if done() { return }
-            try? await Task.sleep(for: .milliseconds(20))
-        }
     }
 
     /// Every string actually drawn by `view`'s subtree.
