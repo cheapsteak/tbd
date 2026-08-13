@@ -30,8 +30,9 @@ public struct AutoArchiveOnMergeCoordinator: Sendable {
     }
 
     /// Returns `true` ONLY when it actually began archiving the worktree (i.e.
-    /// `beginArchiveWorktree` succeeded). Every early return — not active, not
-    /// effective, active children, or the outer catch — returns `false`. The
+    /// `beginArchiveWorktree` succeeded). Every early return — not active,
+    /// remote, not effective, active children, or the outer catch — returns
+    /// `false`. The
     /// `MergedTransitionDispatcher` keys the archive-supersedes-hibernate
     /// precedence off this Bool: an armed-but-blocked archive returns `false`, so
     /// the worktree survives and its idle sessions are still eligible for merge-park.
@@ -39,6 +40,22 @@ public struct AutoArchiveOnMergeCoordinator: Sendable {
     public func handleMergedTransition(worktreeID: UUID, prNumber: Int) async -> Bool {
         do {
             guard let wt = try await db.worktrees.get(id: worktreeID), wt.status == .active else { return false }
+
+            // A remote lane is not auto-archivable, and is refused here rather
+            // than allowed to fail downstream. Archiving a remote worktree
+            // would mean stopping the provider's session — deliberately
+            // unimplemented, not an oversight — so `beginArchiveWorktree`
+            // resolves through `getLocal` and throws for a remote row. Reaching
+            // it would mean the rail had already written a `.dispose` request
+            // for an act it structurally cannot perform, and rewritten it on
+            // every merged transition observed for that lane. The record may
+            // only claim acts that were attempted, so the gate belongs above
+            // the row, not in the catch below it.
+            guard wt.location.isLocal else {
+                logger.debug("auto-archive skipped (remote lane): \(worktreeID, privacy: .public)")
+                return false
+            }
+
             let config = try await db.config.get()
             let effective = wt.autoArchiveOnMerge ?? config.autoArchiveOnMergeDefault
             guard effective else { return false }

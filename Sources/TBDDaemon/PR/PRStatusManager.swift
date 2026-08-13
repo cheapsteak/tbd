@@ -16,8 +16,14 @@ public actor PRStatusManager {
 
     /// One worktree's poll inputs: its identity, the branch it owns, the branch
     /// it merely tracks (`upstreamBranch`), its repo's default branch, where git
-    /// says it would push (`pushBranch`), its checkout path (which repo it
-    /// belongs to), and the PR number it was created from, if any.
+    /// says it would push (`pushBranch`), the directory `git` and `gh` run in
+    /// (`worktreePath`), and the PR number it was created from, if any.
+    ///
+    /// `worktreePath` is a *repo* handle, not a row identifier. Several entries
+    /// legitimately share one — every remote lane of a repo resolves to that
+    /// repo's own checkout (`RPCRouter.pollWorkingDirectory`) — so nothing here
+    /// may use it to tell two entries apart. `id` is the row key; the path only
+    /// ever answers "which GitHub repo is this, and where can a subprocess run".
     public typealias PollWorktree = (
         id: UUID,
         branch: String,
@@ -34,6 +40,12 @@ public actor PRStatusManager {
     /// open-PR queries don't spawn a `gh repo view` subprocess per call. Keyed by
     /// repoPath; ~15-min TTL (a checkout's owner/name effectively never changes).
     /// Actor-isolated, so no locking — mirrors `RPCRouter.branchTrackingCache`.
+    ///
+    /// The key is a *checkout*, and what it stores is a property of that
+    /// checkout's repo — so poll entries that share a path (every remote lane of
+    /// one repo) sharing an entry is the cache working, not a collision. Entries
+    /// are only ever added and expire on time; nothing prunes by row, so no
+    /// worktree can evict another's.
     private var ownerRepoCache: [String: (value: (owner: String, name: String), expiry: Date)] = [:]
 
     /// Reentrancy guard: a previous poll still running means a new `fetchAll` is skipped
@@ -229,6 +241,8 @@ public actor PRStatusManager {
         // Worktrees may span multiple repos. repoPath is only gh's working
         // directory for the viewer batch (gh auth is host-scoped, so any
         // checkout works); by-number lookups resolve each worktree's own repo.
+        // Any entry's path serves, and every entry has a real directory —
+        // `RPCRouter.pollWorkingDirectory` is where that is guaranteed.
         let repoPath = worktrees[0].worktreePath
 
         // Worktrees created from a PR row carry its number; resolve those

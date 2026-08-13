@@ -1277,6 +1277,35 @@ public final class TBDDatabase: Sendable {
                 unique: true)
         }
 
+        // Adoption probes "does a row already exist for this provider
+        // session" once per sighted session on every poll, so the binding
+        // needs an index rather than a scan of the whole worktree table.
+        //
+        // Partial: only remote rows carry a provider binding, so local rows
+        // stay out of the index entirely.
+        //
+        // NOT unique, and the reason is worth stating precisely, because
+        // adoption's `findRemote` check is NOT what makes a duplicate binding
+        // impossible: it is a check-then-act across two transactions, and
+        // `RemoteProviderManager` is a reentrant actor whose poll and events
+        // paths can both be inside it for one session at once. What actually
+        // forbids the duplicate is `worktree.path`'s pre-existing NOT NULL
+        // UNIQUE constraint — a remote row's path is
+        // `WorktreeLocation.storagePath`, a pure function of
+        // `(provider, sessionID)` — so the losing insert fails on that
+        // constraint and the next poll finds the winner's row. This index is
+        // therefore a performance index only. It is not UNIQUE because that
+        // would turn a pre-existing duplicate into a migration-time failure on
+        // the install that has one, rather than something the code can log and
+        // step over.
+        migrator.registerMigration("v72_worktree_provider_session_index") { db in
+            try db.addIndexIfMissing(
+                "idx_worktree_provider_session",
+                on: "worktree",
+                columns: ["providerName", "providerSessionID"],
+                where: "providerName IS NOT NULL")
+        }
+
         return migrator
     }
 }

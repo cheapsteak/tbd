@@ -211,7 +211,13 @@ public struct WorktreeStore: Sendable {
     /// the call site means no future caller can forget and collide with an
     /// existing remote row on the column's UNIQUE constraint. Prefer
     /// `createRemote` for remote rows, which does not ask for a path at all.
+    ///
+    /// `id` is minted here unless the caller supplies one. Adoption of a
+    /// remote session supplies it, so a row lost after a successful provider
+    /// create can be re-minted with the identity the box already exported as
+    /// `TBD_WORKTREE_ID` (see `RemoteSessionAdopter`).
     public func create(
+        id: UUID = UUID(),
         repoID: UUID,
         name: String,
         displayName: String? = nil,
@@ -239,6 +245,7 @@ public struct WorktreeStore: Sendable {
                 ) ?? 0
             }
             let wt = Worktree(
+                id: id,
                 repoID: repoID,
                 name: name,
                 displayName: displayName ?? name,
@@ -265,6 +272,7 @@ public struct WorktreeStore: Sendable {
     /// live here rather than at every call site so that "what does a remote
     /// row store in the local-only columns" has exactly one answer.
     public func createRemote(
+        id: UUID = UUID(),
         repoID: UUID,
         name: String,
         displayName: String? = nil,
@@ -275,6 +283,7 @@ public struct WorktreeStore: Sendable {
         parentWorktreeID: UUID? = nil
     ) async throws -> Worktree {
         try await create(
+            id: id,
             repoID: repoID,
             name: name,
             displayName: displayName,
@@ -511,6 +520,23 @@ public struct WorktreeStore: Sendable {
     public func get(id: UUID) async throws -> Worktree? {
         try await writer.read { db in
             try WorktreeRecord.fetchOne(db, key: id.uuidString)?.toModel()
+        }
+    }
+
+    /// The row bound to one provider session, or nil when no row has been
+    /// minted for it yet.
+    ///
+    /// This is adoption's idempotence check: a session that already owns a row
+    /// is never adopted again, so the row is created once and never
+    /// re-derived. Backed by `idx_worktree_provider_session` so the check
+    /// costs an index probe per session per poll rather than a table scan.
+    public func findRemote(provider: String, sessionID: String) async throws -> Worktree? {
+        try await writer.read { db in
+            try WorktreeRecord
+                .filter(Column("providerName") == provider)
+                .filter(Column("providerSessionID") == sessionID)
+                .fetchOne(db)?
+                .toModel()
         }
     }
 

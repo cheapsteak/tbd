@@ -198,6 +198,29 @@ extension RPCRouter {
     ) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeArchiveParams.self, from: paramsData)
 
+        // A remote lane is not archivable, and is refused here rather than
+        // allowed to fail downstream. Archiving a remote worktree would mean
+        // stopping the provider's session — deliberately unimplemented, not an
+        // oversight — so `beginArchiveWorktree` resolves its row through
+        // `getLocal` and throws for a remote one. Reaching it would mean this
+        // handler had already written a `.dispose` request for an act it
+        // structurally cannot perform, and the record may only claim acts that
+        // were attempted, so the gate belongs above the row.
+        //
+        // Loud, unlike the auto-archive rail's silent `false`: that is a
+        // background rail, this is a deliberate user gesture, and a gesture
+        // that does nothing deserves an answer saying so. This is a plain DB
+        // read, so it is pre-row validation — the same shape as the
+        // worktree-not-found guards on the sibling handlers. A *missing* row is
+        // deliberately not handled here: that stays `beginArchiveWorktree`'s
+        // throw, recorded as transport-failed, unchanged.
+        if let existing = try await db.worktrees.get(id: params.worktreeID),
+           !existing.location.isLocal {
+            logger.debug("worktree.archive refused (remote lane): \(params.worktreeID, privacy: .public)")
+            return RPCResponse(
+                error: "Cannot archive \(existing.name): it is a remote lane, and archiving one is not supported.")
+        }
+
         // One row per call, naming the worktree and no terminal: the caller
         // asked to archive a worktree, and the per-terminal captures and kills
         // are how `WorktreeLifecycle`'s phase 1 carries that out — sub-steps of
@@ -285,7 +308,24 @@ extension RPCRouter {
 
         // Capture the path before the row is deleted so the result can report
         // the directory we deliberately left on disk.
-        let path = try await db.worktrees.get(id: params.worktreeID)?.localPath
+        let existing = try await db.worktrees.get(id: params.worktreeID)
+        let path = existing?.localPath
+
+        // Same gate, and for the same reason, as `worktree.archive` above.
+        // Forget means "stop tracking this checkout but leave its files
+        // alone", and a remote lane has no checkout here to leave alone:
+        // `forgetWorktree` resolves its row through `getLocal` and throws
+        // `worktreeNotFound` for a remote one. Without this gate the handler
+        // would write a `.worktreeForget` request and then a `.transportFailed`
+        // outcome for an act it structurally cannot perform, and the record may
+        // only claim acts that were attempted — so the gate belongs above the
+        // row, not in the catch below it. A *missing* row stays
+        // `forgetWorktree`'s throw, unchanged.
+        if let existing, !existing.location.isLocal {
+            logger.debug("worktree.forget refused (remote lane): \(params.worktreeID, privacy: .public)")
+            return RPCResponse(
+                error: "Cannot forget \(existing.name): it is a remote lane, and forgetting one is not supported.")
+        }
 
         // Forget kills the same windows archive does, so it records the same
         // shape: one worktree-named row per call, ahead of the first kill.

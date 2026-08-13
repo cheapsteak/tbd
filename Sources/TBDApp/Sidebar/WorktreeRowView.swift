@@ -147,9 +147,30 @@ struct WorktreeRowView: View {
         }
     }
 
+    /// The leading-slot indicator for one row. Pure and `nonisolated` so the
+    /// rule — in particular that a remote row still yields its PR badge when
+    /// it has one — is unit-testable without an `AppState` or a view
+    /// hierarchy, in the same spirit as `creatingSubtitle`.
+    ///
+    /// A `.remote` row is one whose `location` is not `.local`; that is the
+    /// only thing read here, and nothing about this makes a remote row look
+    /// local — `localPath` is never consulted.
+    nonisolated static func leadingIndicator(
+        worktree: Worktree,
+        isPending: Bool,
+        hasPRStatus: Bool
+    ) -> LeadingRowIndicator? {
+        RowStatusIndicator.leading(
+            isPending: isPending,
+            hasPRStatus: hasPRStatus,
+            isRemote: !worktree.location.isLocal
+        )
+    }
+
     @ViewBuilder
     private func leadingIcon() -> some View {
-        switch RowStatusIndicator.leading(
+        switch Self.leadingIndicator(
+            worktree: worktree,
             isPending: isPending && !isEditing,
             hasPRStatus: prPresentation != nil
         ) {
@@ -178,10 +199,21 @@ struct WorktreeRowView: View {
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .frame(width: 12, height: 12)
-        case .remote, nil:
-            // `.remote` never occurs here — local rows never pass
-            // `isRemote: true` — but the switch must stay exhaustive over
-            // `LeadingRowIndicator?`.
+        case .remote:
+            // A worktree row whose session lives on a provider backend rather
+            // than in a checkout on this disk. Same glyph and same tertiary
+            // "whisper" tint as `RemoteSectionView`'s row, deliberately: one
+            // session must not read as two different things depending on
+            // which surface it is shown from. `.remote` is the lowest-priority
+            // leading indicator, so a remote lane with a PR still shows its PR
+            // badge here — the badge is the louder, actionable fact and this
+            // is a quiet statement of where the work is happening.
+            Image(systemName: "globe")
+                .font(.system(size: 10, weight: .regular))
+                .foregroundStyle(Color.secondary.opacity(0.55))
+                .frame(width: 12, height: 12)
+                .help("Remote session")
+        case nil:
             EmptyView()
         }
     }
