@@ -168,9 +168,9 @@ actor PendingPromptCoordinator {
     /// Park `text` for this worktree's primary agent.
     ///
     /// Refuses — parking nothing — when the soak flag is off, the worktree does
-    /// not exist or is archived, or its primary terminal is a plain shell. A
-    /// `nil` or empty `text` unparks instead, which is also a refusal: nothing
-    /// ended up parked.
+    /// not exist or is archived, or its primary terminal is a plain shell or a
+    /// parked (hibernated) agent. A `nil` or empty `text` unparks instead,
+    /// which is also a refusal: nothing ended up parked.
     ///
     /// Every eligibility question is answered **before** the column is written,
     /// so a refusal never has to undo a write it just made.
@@ -236,6 +236,20 @@ actor PendingPromptCoordinator {
                     delivered to it — nothing was parked.
                     """)
             }
+        }
+
+        // A parked agent's pane is a bare shell. Hibernation kills the agent
+        // process and `respawn-window`s the pane to a login shell while the row
+        // keeps `kind == .claude` — so the kind check above says "agent" about a
+        // pane with no composer in it, and the text would be typed at a prompt
+        // (and, with the submit bit set, run as a command line). Waking is the
+        // operator's gesture, so the honest answer now is a refusal, not a
+        // promise to deliver whenever the session happens to come back.
+        if let primary, primary.isParked {
+            return .refused(reason: """
+                this worktree's primary agent is hibernated, so its pane is a bare shell rather \
+                than a composer — nothing was parked. Wake the session, then send the prompt.
+                """)
         }
 
         do {
@@ -538,10 +552,57 @@ actor PendingPromptCoordinator {
         // pty, and there is no event that says the latter — see
         // `pendingPromptSettleDelay`, which carries the measurement.
         try? await clock.sleep(for: Self.pendingPromptSettleDelay)
+
+        // ─── Re-asked immediately before typing, because both can change
+        // under a suspended delivery ───
+        //
+        // This cycle has been suspended twice by now — through a readiness wait
+        // bounded at 120s, and through the settle — and the eligibility answered
+        // at `park` is a fact about a moment that has passed.
+        //
+        // The flag is the operator's kill-switch, and a switch that cannot stop
+        // what is already in flight is not one: turning queued prompts off while
+        // a cycle waits must stop the typing, not merely stop the next park.
+        guard await queuedPromptEnabled() else {
+            await notifyIfCurrent(
+                worktreeID: worktreeID, armID: armID, terminalID: terminalID, reason: """
+                    A prompt parked for this worktree was not delivered: queued prompts were \
+                    switched off while it was waiting. The text is still saved — the prompt icon \
+                    on this worktree's row will copy it, and can deliver it once queued prompts \
+                    are enabled again.
+                    """)
+            return
+        }
+        // And the pane may have hibernated in that window — the agent process
+        // killed and the pane respawned to a bare shell, with the row still
+        // reading `kind == .claude`. Typing here would put the operator's words
+        // at a shell prompt and, with the submit bit set, run them. The row is
+        // the fact; the pane's rendered text is never consulted.
+        guard let terminal = try? await db.terminals.get(id: terminalID) else {
+            await notifyIfCurrent(
+                worktreeID: worktreeID, armID: armID, terminalID: terminalID, reason: """
+                    A prompt parked for this worktree was not delivered: its agent's pane could \
+                    not be found. The text is still saved — the prompt icon on this worktree's \
+                    row will copy it or deliver it now.
+                    """)
+            return
+        }
+        guard !terminal.isParked else {
+            await notifyIfCurrent(
+                worktreeID: worktreeID, armID: armID, terminalID: terminalID, reason: """
+                    A prompt parked for this worktree was not delivered: its agent hibernated \
+                    before the text could be typed, so its pane is a bare shell rather than a \
+                    composer. The text is still saved — wake the session, then use the prompt \
+                    icon on this worktree's row to deliver it.
+                    """)
+            return
+        }
+
         // A park that landed during the settle armed its own cycle and owns the
         // delivery now. Without this check both cycles would type, and the
         // model would read the prompt twice — which is what "Deliver Now"
-        // pressed twice looks like from here.
+        // pressed twice looks like from here. It stays the LAST thing before
+        // the send, so the guards above cannot widen the window it closes.
         guard isCurrent(worktreeID: worktreeID, armID: armID) else { return }
 
         guard await deliver(terminalID, text, submit) else {

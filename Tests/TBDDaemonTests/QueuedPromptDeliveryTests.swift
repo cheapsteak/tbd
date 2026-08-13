@@ -208,6 +208,28 @@ struct QueuedPromptDeliveryTests {
         ) { fixture.pastes.pastes.count >= count }
     }
 
+    /// The refusal form: drive the settle until the delivery has spoken to the
+    /// operator instead of typing.
+    ///
+    /// A delivery that refuses at the guard immediately before the send makes
+    /// no send to wait on, so "the seam was called" cannot be the stop
+    /// condition — its notification is the observable, and the same loop that
+    /// converges the settle converges this.
+    private func advanceUntilNotified(
+        _ clock: TestClock<Duration>, _ fixture: SpawnFixture,
+        within seconds: Double = 20,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) async {
+        await advancePastSettle(
+            clock, until: "the delivery notified instead of typing", within: seconds,
+            sourceLocation: sourceLocation
+        ) {
+            let notices = try? await fixture.db.notifications.unread(
+                worktreeID: fixture.worktree.id)
+            return !(notices ?? []).isEmpty
+        }
+    }
+
     /// Bounded poll on a condition the coordinator answers.
     private func waitUntil(
         _ description: String,
@@ -915,6 +937,146 @@ struct QueuedPromptDeliveryTests {
         }
         #expect(reason.contains("not an agent"))
         #expect(try await pendingPrompt(fixture.db, fixture.worktree.id) == nil)
+    }
+
+    /// Park a real hibernated row — written through `TerminalStore`'s own park
+    /// choke point, not hand-set fields — and check what it actually looks like
+    /// before parking against it. A hibernated agent keeps `kind == .claude`
+    /// while its pane holds a bare shell, and the park stamps
+    /// `activityState = .idle`, so the row reads as *announced*: every signal
+    /// the coordinator had said "agent, ready" about a pane that would have run
+    /// the operator's words as a command line.
+    @Test("undeliverable: parking against a hibernated primary is refused")
+    func parkingOnAHibernatedPrimaryIsRefused() async throws {
+        let fixture = try await makeSpawnFixture()
+        try await fixture.db.config.setQueuedPrompt(true)
+        let terminal = try await fixture.db.terminals.create(
+            worktreeID: fixture.worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            kind: .claude)
+        try await fixture.db.terminals.setHibernated(
+            id: terminal.id, sessionID: UUID().uuidString, reason: .auto)
+
+        let parked = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(parked.isParked)
+        #expect(parked.kind == .claude, "hibernation does not change the row's kind")
+        #expect(
+            PendingPromptCoordinator.hasAnnouncedItself(parked),
+            "a parked session reads as announced — which is why the kind check alone was not enough")
+
+        let result = await fixture.coordinator.park(
+            worktreeID: fixture.worktree.id, text: "into a bare shell", submit: true)
+
+        guard case .refused(let reason) = result else {
+            Issue.record("expected a refusal, got \(result)")
+            return
+        }
+        #expect(reason.contains("hibernated"))
+        #expect(try await pendingPrompt(fixture.db, fixture.worktree.id) == nil)
+        #expect(fixture.sends.calls.isEmpty)
+    }
+
+    /// The window this feature opened: the prompt was eligible when it was
+    /// parked, and the pane hibernated while the daemon waited for its agent to
+    /// announce itself. Nothing is typed, the text stays put, and the operator
+    /// is told.
+    @Test("undeliverable: a primary that hibernates during the readiness wait is not typed into")
+    func hibernationDuringTheReadinessWaitIsUndeliverable() async throws {
+        let clock = TestClock()
+        let fixture = try await makeSpawnFixture(clock: clock)
+        try await fixture.db.config.setQueuedPrompt(true)
+        // Not announced yet, so the cycle parks on the readiness wait.
+        let terminal = try await fixture.db.terminals.create(
+            worktreeID: fixture.worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            kind: .claude)
+
+        let result = await fixture.coordinator.park(
+            worktreeID: fixture.worktree.id, text: "hibernated mid-wait", submit: true)
+        #expect(result == .awaitingReady, "the prompt was eligible when it was parked")
+
+        // The idle sweep parks the session while the wait is still open; the
+        // agent's `SessionStart` then reaches the daemon behind it.
+        try await fixture.db.terminals.setHibernated(
+            id: terminal.id, sessionID: UUID().uuidString, reason: .auto)
+        await fixture.coordinator.noteSessionReady(
+            worktreeID: fixture.worktree.id, terminalID: terminal.id)
+
+        await advanceUntilNotified(clock, fixture)
+        await awaitDeliveries(fixture.coordinator)
+
+        #expect(fixture.sends.calls.isEmpty, "no byte may reach a bare shell")
+        #expect(try await pendingPrompt(fixture.db, fixture.worktree.id) == "hibernated mid-wait")
+        let notices = try await fixture.db.notifications.unread(
+            worktreeID: fixture.worktree.id)
+        #expect(notices.count == 1)
+        #expect(notices.first?.message?.contains("hibernated") == true)
+    }
+
+    /// The same window, one step later: readiness had already arrived and the
+    /// cycle was asleep in the settle when the session was parked. The check
+    /// therefore has to sit after the settle, immediately before the send —
+    /// anything answered earlier is a fact about a moment that has passed.
+    @Test("undeliverable: a primary that hibernates during the settle is not typed into")
+    func hibernationDuringTheSettleIsUndeliverable() async throws {
+        let clock = TestClock()
+        let fixture = try await makeSpawnFixture(clock: clock)
+        try await fixture.db.config.setQueuedPrompt(true)
+        let terminal = try await fixture.db.terminals.create(
+            worktreeID: fixture.worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            kind: .claude)
+        try await fixture.db.terminals.updateSession(
+            id: terminal.id, sessionID: UUID().uuidString,
+            transcriptPath: "/tmp/acme/transcript.jsonl")
+
+        let result = await fixture.coordinator.park(
+            worktreeID: fixture.worktree.id, text: "hibernated mid-settle", submit: true)
+        #expect(result == .awaitingReady)
+
+        // Nothing has advanced this clock, so the cycle cannot be past the
+        // settle — the park lands underneath a suspended delivery.
+        try await fixture.db.terminals.setHibernated(
+            id: terminal.id, sessionID: UUID().uuidString, reason: .auto)
+
+        await advanceUntilNotified(clock, fixture)
+        await awaitDeliveries(fixture.coordinator)
+
+        #expect(fixture.sends.calls.isEmpty)
+        #expect(try await pendingPrompt(fixture.db, fixture.worktree.id) == "hibernated mid-settle")
+        let notices = try await fixture.db.notifications.unread(
+            worktreeID: fixture.worktree.id)
+        #expect(notices.count == 1)
+        #expect(notices.first?.message?.contains("hibernated") == true)
+    }
+
+    /// The flag is a kill-switch, which means it has to stop a delivery that is
+    /// already armed. Read only at `park` it would gate the next prompt while
+    /// the one in flight typed anyway, up to two minutes later.
+    @Test("the flag stops a delivery that was already armed when it was switched off")
+    func disablingTheFlagMidFlightStopsTheDelivery() async throws {
+        let clock = TestClock()
+        let fixture = try await makeSpawnFixture(clock: clock)
+        try await fixture.db.config.setQueuedPrompt(true)
+        let terminal = try await fixture.db.terminals.create(
+            worktreeID: fixture.worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            kind: .claude)
+        try await fixture.db.terminals.updateSession(
+            id: terminal.id, sessionID: UUID().uuidString,
+            transcriptPath: "/tmp/acme/transcript.jsonl")
+
+        let result = await fixture.coordinator.park(
+            worktreeID: fixture.worktree.id, text: "stop this one too", submit: true)
+        #expect(result == .awaitingReady)
+
+        try await fixture.db.config.setQueuedPrompt(false)
+
+        await advanceUntilNotified(clock, fixture)
+        await awaitDeliveries(fixture.coordinator)
+
+        #expect(fixture.sends.calls.isEmpty)
+        #expect(try await pendingPrompt(fixture.db, fixture.worktree.id) == "stop this one too")
+        let notices = try await fixture.db.notifications.unread(
+            worktreeID: fixture.worktree.id)
+        #expect(notices.count == 1)
+        #expect(notices.first?.message?.contains("switched off") == true)
     }
 
     @Test("undeliverable: the readiness wait is bounded on the injected clock")
