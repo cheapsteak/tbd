@@ -152,6 +152,19 @@ struct ControlModeWaitTimeout: Error, CustomStringConvertible {
 /// condition is uninformative on its own ("2 health events" says nothing about
 /// how many arrived).
 ///
+/// **The diagnostic reports the state that decided the failure, not the state
+/// at report time** (assertion-hygiene rule 4 — the
+/// `fileBytesMismatch(expected: 6150, actual: 6150)` shape). `observed` and
+/// `condition` are two closures over the same growing state, so reading
+/// `observed` *after* the last `condition()` lets an event that lands in the
+/// gap print the self-contradictory `timed out waiting for 2 health events —
+/// observed 2`. The order below closes that: `observed` is captured first, and
+/// the condition is then re-checked once more, so anything that arrived while
+/// the diagnostic was being composed makes this a PASS rather than a
+/// contradictory failure. The counters these waits watch are monotone, so a
+/// condition that is false after the capture was false at the capture too —
+/// the reported state and the verdict are consistent by construction.
+///
 /// Returns whether the condition was met (false on timeout) so callers that
 /// index into results afterwards can abort via `#require` instead of trapping
 /// out of range; count/equality-checking callers may ignore the result.
@@ -168,8 +181,11 @@ func waitFor(
         try await Task.sleep(for: .milliseconds(10))
     }
     if await condition() { return true }
+    // Capture BEFORE deciding to fail, then re-check: see the doc comment.
+    let seen = await observed?()
+    if await condition() { return true }
     Issue.record(
-        ControlModeWaitTimeout(what: what, observed: await observed?(), deadline: deadline),
+        ControlModeWaitTimeout(what: what, observed: seen, deadline: deadline),
         sourceLocation: sourceLocation)
     return false
 }
@@ -285,6 +301,28 @@ final class ReplyFeed: @unchecked Sendable {
 
     /// End the feed and await the drain task, so no reply delivery outlives the
     /// test that created it.
+    ///
+    /// **Awaiting `drain.value` is the load-bearing half.** It is what makes
+    /// "`finish()` returned" mean "every block enqueued before it has been
+    /// handed to the correlator" — the happens-before the callers' post-test
+    /// assertions rest on. Callers reach here with blocks in flight by
+    /// construction: `writeLine` records the stream write and enqueues its reply
+    /// synchronously, so a wait that returns on the WRITE
+    /// (`pasteFailureDoesNotStall` waits for `send-keys … 5a` to be recorded)
+    /// returns before those replies are handled.
+    ///
+    /// **`cancel()` does not truncate that buffer** — measured, not assumed,
+    /// because the opposite is the natural assumption and it is wrong.
+    /// `AsyncStream` implements task cancellation as `finish()`, and a finished
+    /// stream still yields everything already buffered before `next()` returns
+    /// nil; the loop body's only suspension is an actor hop, which ignores
+    /// cancellation. With a deliberate backlog of 2,395–5,312 blocks in flight
+    /// at the call, all 20,000 were still delivered
+    /// (`ControlModeTestSupportTests.finishDeliversBufferedReplies`, run against
+    /// this exact code). So the reply to a `send(…)`-shaped command — the
+    /// PasteExecutor load-buffer / paste-buffer / delete-buffer shape, whose
+    /// loss would strand a `withCheckedThrowingContinuation` forever — is not at
+    /// risk here. Delete `await drain.value` and it would be.
     func finish() async {
         continuation.finish()
         drain.cancel()

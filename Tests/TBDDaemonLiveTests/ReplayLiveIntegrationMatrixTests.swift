@@ -129,6 +129,21 @@ struct ReplayLiveIntegrationMatrixTests {
     /// precisely because a non-zero value there means the overflow was seen and
     /// dropped rather than repaired.
     ///
+    /// **The completion signal is a DELTA against `baseline`, never an absolute
+    /// count — that distinction is the difference between this test proving
+    /// something and passing vacuously.** `repairs` is cumulative on the sink,
+    /// and the phases before this window read the pipe against a full-blast pane
+    /// for up to 30 s; a sink that overflowed and completed a repair in *that*
+    /// window would satisfy an absolute `repairs >= 1` on this gate's very first
+    /// poll. The deliberate no-reader window would then close instantly without
+    /// inducing anything, and phase 3's guard and assertions — cumulative too —
+    /// would be satisfied by that same stale repair, so the whole scenario could
+    /// go green having never exercised an overflow. `repairing` needs no delta:
+    /// `enqueueLocked` is the only thing that sets it, and only on an overflow
+    /// entry, so it cannot be a stale free lunch the way a counter can. It is
+    /// still cleared on completion, which is why the completion delta is checked
+    /// alongside it rather than instead of it.
+    ///
     /// On expiry it RETURNS the error rather than throwing it, and the caller
     /// throws only after tearing the supervisor down. That is not ceremony: on
     /// expiry the pane is still blasting into the vended pipe, so unwinding
@@ -146,15 +161,18 @@ struct ReplayLiveIntegrationMatrixTests {
     /// repair started" (a production problem), which the previous fixed sleep
     /// collapsed into a misleading `(stats.repairs → 0) >= 1`.
     private func overflowRepairEntryFailure(
-        fanout: PaneFanout, key: PaneKey, within budget: Duration = .seconds(30)
+        fanout: PaneFanout, key: PaneKey, baseline: PaneFlowStats,
+        within budget: Duration = .seconds(30)
     ) async -> MatrixError? {
         let deadline = ContinuousClock.now + budget
         while true {
             let stats = fanout.flowStats(key: key)
-            if stats?.repairing == true || (stats?.repairs ?? 0) >= 1 { return nil }
+            if stats?.repairing == true { return nil }
+            if let stats, stats.repairs > baseline.repairs { return nil }
             guard ContinuousClock.now < deadline else {
                 return .overflowRepairNeverEntered(
-                    stats: stats, queueCap: PaneFanout.queueCap, waited: budget)
+                    stats: stats, baseline: baseline, queueCap: PaneFanout.queueCap,
+                    waited: budget)
             }
             try? await Task.sleep(for: .milliseconds(50))
         }
@@ -689,6 +707,18 @@ struct ReplayLiveIntegrationMatrixTests {
         attachDone.set()
         var accumulated = await phase1
 
+        // The baseline for everything below. Every "a repair happened" check in
+        // this test is a DELTA against it — see `overflowRepairEntryFailure` for
+        // why an absolute count is a vacuous pass here.
+        let key = PaneKey(server: server, paneID: paneID)
+        let fanout = supervisor.fanout
+        guard let baseline = fanout.flowStats(key: key) else {
+            // Stop the supervisor BEFORE unwinding: the pane is still blasting,
+            // and the `defer` above closes the read end of the pipe it writes to.
+            await supervisor.stopAll()
+            throw MatrixError.sinkVanished("before the overflow window opened")
+        }
+
         // Phase 2: deliberately do NOT read — the overflow window. The repair
         // fires, pauses the pane, and parks in its reader-catch-up wait until
         // phase 3 starts reading.
@@ -704,20 +734,22 @@ struct ReplayLiveIntegrationMatrixTests {
         // `stats.repairs >= 1` as though production had failed to repair. Waiting
         // for the stall itself makes the setup's postcondition true by
         // construction, so every assertion downstream is about the repair.
-        let key = PaneKey(server: server, paneID: paneID)
-        let fanout = supervisor.fanout
-        if let failure = await overflowRepairEntryFailure(fanout: fanout, key: key) {
+        if let failure = await overflowRepairEntryFailure(
+            fanout: fanout, key: key, baseline: baseline) {
             // Stop the supervisor BEFORE unwinding: the pane is still blasting,
             // and the `defer` above closes the read end of the pipe it writes to.
             await supervisor.stopAll()
             throw failure
         }
 
-        // Phase 3: read continuously until at least one repair completed and
-        // the healed stream carries enough post-repair tokens to judge.
+        // Phase 3: read continuously until a repair completed AFTER the window
+        // opened and the healed stream carries enough post-repair tokens to
+        // judge. The delta is the same guard as the entry gate's, for the same
+        // reason: `>= 1` here would be satisfied by a pre-window repair.
         let phase1Prefix = accumulated
         accumulated += await drain(fd: readFD, deadline: .seconds(45)) { [self] data in
-            guard (fanout.flowStats(key: key)?.repairs ?? 0) >= 1 else { return false }
+            guard let stats = fanout.flowStats(key: key),
+                  stats.repairs > baseline.repairs else { return false }
             let text = String(decoding: phase1Prefix + data, as: UTF8.self)
             guard let last = text.range(of: ReplayWriter.resetPrelude, options: .backwards)
             else { return false }
@@ -725,15 +757,27 @@ struct ReplayLiveIntegrationMatrixTests {
             return tokens(in: healed, label: "SEQ").count >= 30
         }
         let text = String(decoding: accumulated, as: UTF8.self)
+        let observed = fanout.flowStats(key: key)
+        // Stop the supervisor BEFORE the assertions, not after: the pane is
+        // still blasting, and a `try #require` that fails below would unwind
+        // past the `defer` that closes the read end of the pipe it writes to —
+        // the next fanout write then raises SIGPIPE and kills the whole test
+        // process (measured: `Exited with unexpected signal code 13`, with no
+        // diagnostic at all). The counters are snapshotted above so tearing the
+        // supervisor down first costs nothing.
+        await supervisor.stopAll()
 
-        // (a) At least one repair completed — both in the counters and as a
-        // second reset prelude in the byte stream (attach replay + repair
-        // replay each begin with one).
-        let stats = try #require(fanout.flowStats(key: key), "sink vanished mid-test")
-        #expect(stats.repairs >= 1, "the overflow never triggered a completed repair")
+        // (a) A repair completed DURING the overflow window — both in the
+        // counters and as one more reset prelude in the byte stream than the
+        // window opened with (the attach replay contributed the first).
+        let stats = try #require(observed, "sink vanished mid-test")
+        #expect(stats.repairs > baseline.repairs,
+                "the overflow window never triggered a completed repair (repairs \(stats.repairs), baseline \(baseline.repairs))")
         let preludeCount = text.components(separatedBy: ReplayWriter.resetPrelude).count - 1
-        #expect(preludeCount >= 2,
-                "expected the repair's reset prelude in the stream (found \(preludeCount))")
+        let baselinePreludes = String(decoding: phase1Prefix, as: UTF8.self)
+            .components(separatedBy: ReplayWriter.resetPrelude).count - 1
+        #expect(preludeCount > baselinePreludes,
+                "expected the repair's reset prelude in the stream (found \(preludeCount), of which \(baselinePreludes) were already present when the window opened)")
 
         // (b) The heal proof: after the LAST reset prelude — the final repair
         // replay — SEQ tokens are gapless and monotonic through the end of
@@ -745,18 +789,20 @@ struct ReplayLiveIntegrationMatrixTests {
         let violations = sequenceViolations(healed).joined(separator: "; ")
         #expect(violations.isEmpty,
                 "LOSS/DUP after the repair replay — the overflow hole was not healed: \(violations)")
-
-        await supervisor.stopAll()
     }
 }
 
 private enum MatrixError: Error, CustomStringConvertible {
     case clientNeverReady
     case pollDeadline(String)
+    /// The pane's sink was gone when the test needed to read its counters.
+    case sinkVanished(String)
     /// The overflow window closed without the sink entering the repair cycle.
-    /// Carries the counters observed at the deadline — `nil` stats mean the sink
-    /// itself was gone.
-    case overflowRepairNeverEntered(stats: PaneFlowStats?, queueCap: Int, waited: Duration)
+    /// Carries the counters observed at the deadline AND the baseline the window
+    /// opened with, since every verdict here is a delta — `nil` stats mean the
+    /// sink itself was gone.
+    case overflowRepairNeverEntered(
+        stats: PaneFlowStats?, baseline: PaneFlowStats, queueCap: Int, waited: Duration)
 
     var description: String {
         switch self {
@@ -764,16 +810,24 @@ private enum MatrixError: Error, CustomStringConvertible {
             return "the tmux control-mode command client never became ready"
         case .pollDeadline(let what):
             return "timed out polling for: \(what)"
-        case .overflowRepairNeverEntered(let stats, let queueCap, let waited):
+        case .sinkVanished(let when):
+            return "the pane's fanout sink was gone \(when) (detached or superseded), "
+                + "so nothing was routing"
+        case .overflowRepairNeverEntered(let stats, let baseline, let queueCap, let waited):
             guard let stats else {
                 return "no repair cycle after \(waited) of firehose with no reader — "
                     + "the sink had vanished (detached or superseded), so nothing was routing"
             }
+            // Every counter is shown against the value the window opened with:
+            // the question this error answers is what happened DURING the
+            // window, and the absolute totals include everything before it.
             let facts = "queuedHighWater=\(stats.queuedHighWater) of queueCap=\(queueCap), "
-                + "queuedBytes=\(stats.queuedBytes), overflowEvents=\(stats.overflowEvents), "
-                + "droppedBytes=\(stats.droppedBytes), repairing=\(stats.repairing), "
-                + "repairs=\(stats.repairs)"
-            let verdict = stats.overflowEvents > 0
+                + "queuedBytes=\(stats.queuedBytes), "
+                + "overflowEvents=\(stats.overflowEvents) (baseline \(baseline.overflowEvents)), "
+                + "droppedBytes=\(stats.droppedBytes) (baseline \(baseline.droppedBytes)), "
+                + "repairing=\(stats.repairing), "
+                + "repairs=\(stats.repairs) (baseline \(baseline.repairs))"
+            let verdict = stats.overflowEvents > baseline.overflowEvents
                 ? "the queue DID overflow and the sink dropped instead of repairing — production"
                 : "the queue never reached the cap, so the setup never induced an overflow — harness"
             return "no repair cycle after \(waited) of firehose with no reader: \(verdict). \(facts)"

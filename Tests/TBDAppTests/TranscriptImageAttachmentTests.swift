@@ -679,6 +679,36 @@ struct TranscriptImageAttachmentTests {
         }
     }
 
+    /// The harness's own guard, pinned because its failure mode is invisible in
+    /// the suite it protects: a swallowed cancellation makes every subsequent
+    /// `Task.sleep` return instantly, so `awaitRequest` busy-spins
+    /// `layoutSubtreeIfNeeded` plus a cache scan ON THE MAIN ACTOR for the whole
+    /// 30 s budget, starving every other main-isolated test in the process —
+    /// and then blames production ("the view never re-fetched") for a harness
+    /// event. Deterministic: the wait observes the cancellation on its first
+    /// iteration, so this costs milliseconds.
+    @Test func awaitRequestEndsOnCancellationInsteadOfSpinning() async throws {
+        let requests = ThumbnailRequestLog()
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 10, height: 10))
+        let started = ContinuousClock.now
+
+        let waiter = Task { [self] in
+            try await awaitRequest(
+                for: "/nonexistent/never-requested.png", maxPixelSize: 64, in: requests,
+                drivingLayoutOf: view, what: "cancellation probe", within: .seconds(30))
+        }
+        waiter.cancel()
+
+        var thrown: (any Error)?
+        do { try await waiter.value } catch { thrown = error }
+        let elapsed = ContinuousClock.now - started
+
+        #expect(thrown is ThumbnailWaitCancelled,
+                "cancellation must end the wait as itself, not as a never-observed request: \(String(describing: thrown))")
+        #expect(elapsed < .seconds(5),
+                "a cancelled wait must return at once, not spin out its budget (took \(elapsed))")
+    }
+
     /// Ordered record of every `TranscriptImageService` thumbnail request, in the
     /// order the views made them.
     @MainActor
@@ -718,7 +748,29 @@ struct TranscriptImageAttachmentTests {
 
         var description: String {
             "\(what) — no thumbnail request for \(expected) at maxPixelSize=\(maxPixelSize) "
-                + "after polling up to \(waited); observed requests: \(observed)"
+                + "after polling for \(waited); observed requests: \(observed)"
+        }
+    }
+
+    /// The surrounding task was cancelled while waiting — the suite time limit
+    /// fired, or the run is tearing down. Named separately for the reason
+    /// `ChildReaperTests.ZombieWaitOutcome.cancelled` is: a swallowed
+    /// `CancellationError` makes every subsequent `Task.sleep` return instantly,
+    /// so the loop burns its whole budget in microseconds and reports "the view
+    /// never re-fetched" — production blamed for a harness event. Worse here
+    /// than there, because this suite is `@MainActor`: the busy-spin runs
+    /// `layoutSubtreeIfNeeded` plus a cache scan **on the main actor**, starving
+    /// every other main-isolated test in the process until the deadline.
+    private struct ThumbnailWaitCancelled: Error, CustomStringConvertible {
+        let what: String
+        let expected: String
+        let observed: String
+        let waited: Duration
+
+        var description: String {
+            "\(what) — waiting for a thumbnail request for \(expected) was CANCELLED after "
+                + "\(waited); observed requests: \(observed). This says nothing about whether "
+                + "the view re-fetched."
         }
     }
 
@@ -734,21 +786,38 @@ struct TranscriptImageAttachmentTests {
     /// The budget is generous because it bounds a hang, not a measurement: what is
     /// being waited on is a main-queue delivery, not a decode, so a healthy run
     /// satisfies it in milliseconds and a saturated one still has room.
+    ///
+    /// **Cancellation ends the wait; it is never swallowed** — see
+    /// `ThumbnailWaitCancelled`. And the diagnostics report ELAPSED time, not the
+    /// budget: on the cancelled path those differ by three orders of magnitude,
+    /// and "after polling for 30 seconds" would be a fabrication.
     private func awaitRequest(
         for path: String, maxPixelSize: Int, in log: ThumbnailRequestLog,
         drivingLayoutOf view: NSView, what: String,
         within budget: Duration = .seconds(30)
     ) async throws {
-        let deadline = ContinuousClock.now + budget
+        let started = ContinuousClock.now
+        let deadline = started + budget
+        var elapsed: Duration { ContinuousClock.now - started }
+        func cancelled() -> ThumbnailWaitCancelled {
+            ThumbnailWaitCancelled(
+                what: what, expected: (path as NSString).lastPathComponent,
+                observed: log.summary, waited: elapsed)
+        }
         while true {
             view.layoutSubtreeIfNeeded()
             if log.contains(path: path, maxPixelSize: maxPixelSize) { return }
+            if Task.isCancelled { throw cancelled() }
             guard ContinuousClock.now < deadline else { break }
-            try? await Task.sleep(for: .milliseconds(20))
+            do {
+                try await Task.sleep(for: .milliseconds(20))
+            } catch {
+                throw cancelled()
+            }
         }
         throw ThumbnailRequestNotObserved(
             what: what, expected: (path as NSString).lastPathComponent,
-            maxPixelSize: maxPixelSize, observed: log.summary, waited: budget)
+            maxPixelSize: maxPixelSize, observed: log.summary, waited: elapsed)
     }
 
     /// The hosted shape the reuse pool actually renders: a chat bubble whose text

@@ -24,23 +24,32 @@ import Testing
 /// an in-process event and therefore has nothing to be ordered behind; it is
 /// documented as a hang guard at its definition.
 ///
+/// Both waits carry their own bounded hang guard, and that is deliberate:
+/// **neither one can be rescued by the suite `.timeLimit`.** Swift Testing
+/// cannot cancel a thread parked in a synchronous `waitpid`, nor a
+/// `withCheckedContinuation` awaiting a barrier callback that never runs — a
+/// child that ignored its signals would wedge the whole run rather than redden
+/// one test. `drainPendingReaps(within:)` (see `ChildReapDrainSupport.swift`)
+/// and `waitUntilZombie` each convert that into a named failure, and each
+/// disposes of its child on that path so a stuck reap cannot poison the tests
+/// that follow.
+///
 /// WHY AN EXPLICIT `.timeLimit(.minutes(1))` AND NOT `.clockDriven`. Following
 /// the precedent of `SubprocessTimeoutTests`, which states its reason rather
 /// than inheriting the shared trait: `.clockDriven`'s four minutes is sized for
 /// suites that arm a `TestClock` handshake in the ~4500-test parallel pass, and
-/// nothing here is clock-driven. What the limit has to afford is the barrier
-/// wait, whose worst case is the longest-lived child in the process (0.3 s
-/// here) plus scheduling, and one `waitUntilZombie` hang-guard budget. Both are
-/// seconds against a sixty-second limit — a hang-catcher an order of magnitude
-/// above the work, which is what this trait is for. Four minutes of a shared
-/// box is not free.
+/// nothing here is clock-driven. What the limit has to afford is a test that
+/// fails through its own guards and still gets to report: the 30 s barrier hang
+/// guard plus the ~5 s `waitUntilZombie` budget plus the disposal that follows
+/// — 35 s against a sixty-second limit, so the diagnostic lands rather than
+/// being truncated. The honest path meanwhile finishes in under a second (the
+/// longest-lived child in the process is 0.3 s), which is the order-of-magnitude
+/// margin this trait is for. Four minutes of a shared box is not free.
 ///
-/// The limit's known blind spot, stated rather than glossed: Swift Testing
-/// cannot cancel a thread parked in a synchronous `waitpid`, so it would not
-/// rescue a test that waits on a child that never exits. None can — every child
-/// spawned here is `/bin/sleep` with a bounded argument, which always exits, and
-/// the skip-branch test disposes of its own deliberately-unreaped child before
-/// it asserts anything.
+/// What the limit therefore is, stated rather than glossed: a coarse outer
+/// backstop for the ordinary case where a test is merely slow. The two waits
+/// above are what actually catch a stuck reap, and both are sized to fire —
+/// with their diagnostic — inside this limit rather than be truncated by it.
 @Suite("ChildReaper", .timeLimit(.minutes(1)))
 struct ChildReaperTests {
 
@@ -155,15 +164,6 @@ struct ChildReaperTests {
         }
     }
 
-    /// Suspends until every reap `ChildReaper` had already enqueued has run to
-    /// completion. See `ChildReaper.drainPendingReaps` for what the barrier
-    /// does and does not cover — notably that it is process-wide.
-    private func drainPendingReaps() async {
-        await withCheckedContinuation { continuation in
-            ChildReaper.drainPendingReaps { continuation.resume() }
-        }
-    }
-
     /// Ends and reaps a child this test deliberately left unreaped, given the
     /// state that was just observed for it.
     ///
@@ -172,10 +172,20 @@ struct ChildReaperTests {
     /// never exited must be SIGKILLed first, or the `waitpid` parks forever on
     /// a thread Swift Testing cannot cancel.
     ///
-    /// **Call only after `drainPendingReaps()`.** Committing a `waitpid` while
-    /// one of `ChildReaper`'s own blocks may still be parked on the same pid is
-    /// the two-waiter pid-recycling hazard its doc comment forbids; the barrier
-    /// is what guarantees the reaper is no longer a waiter.
+    /// **Call only after a `drainPendingReaps` that returned `.drained`.**
+    /// Committing a `waitpid` while one of `ChildReaper`'s own blocks may still
+    /// be parked on the same pid is the two-waiter pid-recycling hazard its doc
+    /// comment forbids; the barrier is what guarantees the reaper is no longer
+    /// a waiter.
+    ///
+    /// The one exception is the stalled-barrier path, where there is no such
+    /// guarantee and disposing anyway is still right: the alternative is
+    /// leaving a live child and an unreaped pid for the rest of the run. The
+    /// `SIGKILL` keeps our own `waitpid` bounded there (an exiting child either
+    /// gets reaped by us or returns `ECHILD` at once), and the residual — both
+    /// waiters returning inside the microseconds it takes to recycle a pid into
+    /// a *new* child of this process — is the coincidence-on-top-of-a-race
+    /// `ChildReaper` already accepts.
     private func disposeChild(_ pid: pid_t, observedZombie: Bool) async {
         if observedZombie {
             _ = await reapOffPool(pid)  // already exited; returns at once
@@ -290,8 +300,13 @@ struct ChildReaperTests {
 
         // The barrier, not a poll: when this returns the reap block has run to
         // completion, so the assertion below is a contract check with no
-        // scheduling window in it.
-        await drainPendingReaps()
+        // scheduling window in it. Bounded, so a reap parked on a child that
+        // never exits reds this test instead of wedging the run.
+        let drain = await drainPendingReaps()
+        if let diagnostic = drain.diagnostic(pid: pid, observedState: { describeState(pid) }) {
+            await disposeChild(pid, observedZombie: isUnreapedZombie(pid))
+            throw diagnostic
+        }
 
         let survived = processExists(pid)
         if survived {
@@ -320,7 +335,7 @@ struct ChildReaperTests {
         // normally fires at once. It is here because a regression that enqueued
         // the block anyway would otherwise be *racing* the assertion below —
         // and because it makes this test the sole waiter for the disposal.
-        await drainPendingReaps()
+        let drain = await drainPendingReaps()
 
         let survived = isUnreapedZombie(pid)
 
@@ -330,6 +345,12 @@ struct ChildReaperTests {
         await disposeChild(pid, observedZombie: survived)
 
         if let diagnostic = outcome.diagnostic(pid: pid) { throw diagnostic }
+        // Reported after the wait's own outcome (which happened first) and
+        // before the assertion, which a stalled barrier would make unsound:
+        // an enqueued reap could still be pending.
+        if let diagnostic = drain.diagnostic(pid: pid, observedState: { "already disposed" }) {
+            throw diagnostic
+        }
         #expect(survived,
                 "an observed child must be left for its real waiter, not reaped here")
     }

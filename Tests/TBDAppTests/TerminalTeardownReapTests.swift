@@ -51,11 +51,23 @@ import Testing
 /// The barrier's own cost is bounded by the longest-lived child in the
 /// process — see `ChildReaper.drainPendingReaps` for the process-wide caveat.
 ///
-/// **Why `.timeLimit(.minutes(1))`.** A hang-catcher for the one thing the
-/// barrier cannot bound: a reap parked on a child that never exits. Nothing
-/// here waits on wall time otherwise, and the honest path completes in
-/// well under a second, so a minute is the order-of-magnitude margin such a
-/// guard wants without spending four minutes of a shared box.
+/// **The barrier wait is itself bounded, and by its own guard rather than by
+/// the suite limit.** It is ordered behind `waitpid` calls `ChildReaper`
+/// documents as unbounded, and neither a parked `waitpid` nor a
+/// `withCheckedContinuation` awaiting a callback that never runs can be
+/// cancelled by Swift Testing — so an unguarded wait would wedge the run
+/// instead of reddening one test, and (a barrier on a concurrent queue blocking
+/// everything submitted after it) would take the sibling tests down with it.
+/// `drainPendingReaps(within:)` in `ChildReapDrainSupport.swift` races the
+/// barrier against a 30 s guard, reports a stuck reap with its observed state,
+/// and each call site SIGKILLs and reaps its own child on that path.
+///
+/// **Why `.timeLimit(.minutes(1))`.** A coarse outer backstop for the ordinary
+/// case of a merely slow test — not the guard that catches a stuck reap, which
+/// it cannot do (above). Nothing here waits on wall time otherwise, and the
+/// honest path completes in well under a second, so a minute leaves the 30 s
+/// hang guard room to fire with its diagnostic rather than be truncated, and
+/// still spends less than four minutes of a shared box.
 ///
 /// **Probe children are disposed of before anything can fail.** Assertions run
 /// last, after every child this suite spawned has been ended and reaped,
@@ -108,22 +120,18 @@ struct TerminalTeardownReapTests {
         return processExists(pid) ? "a live process (never exited)" : "gone"
     }
 
-    /// Suspends until every reap `ChildReaper` had already enqueued has run to
-    /// completion. Suspending (rather than blocking) also keeps the main queue
-    /// draining — see the suite comment.
-    private func drainPendingReaps() async {
-        await withCheckedContinuation { continuation in
-            ChildReaper.drainPendingReaps { continuation.resume() }
-        }
-    }
-
     /// Ends and reaps a child that outlived teardown, given the state that was
     /// just observed for it. Only ever called on a failure path: on success the
     /// pid is already freed and signalling it could reach a recycled process.
     ///
-    /// **Call only after `drainPendingReaps()`** — committing a `waitpid` while
-    /// one of `ChildReaper`'s blocks may still be parked on the same pid is the
-    /// two-waiter recycling hazard `ChildReaper`'s doc comment forbids.
+    /// **Call only after a `drainPendingReaps` that returned `.drained`** —
+    /// committing a `waitpid` while one of `ChildReaper`'s blocks may still be
+    /// parked on the same pid is the two-waiter recycling hazard
+    /// `ChildReaper`'s doc comment forbids. The stalled-barrier path is the one
+    /// exception and is disposed of anyway: the `SIGKILL` keeps this `waitpid`
+    /// bounded (an exiting child is either reaped here or returns `ECHILD` at
+    /// once), and leaving a live `sleep` plus an unreaped pid behind for the
+    /// rest of the run is the worse outcome.
     private func disposeSurvivor(_ pid: pid_t) {
         guard pid > 0 else { return }
         kill(pid, SIGKILL)
@@ -183,8 +191,30 @@ struct TerminalTeardownReapTests {
         }
         try #require(pid > 0, "forkpty must have produced a child pid")
 
-        await drainPendingReaps()
+        try await requireDrainedAndReaped(pid)
+    }
+
+    /// Awaits the barrier, then asserts the child is gone. A barrier that did
+    /// not fire is its own named failure — reported instead of the reap
+    /// assertion, which it would make unsound: with a reap still parked, "the
+    /// child is gone" has not been decided yet either way.
+    private func requireDrainedAndReaped(_ pid: pid_t) async throws {
+        try requireDrained(await drainPendingReaps(), teardownChild: pid)
         try requireReaped(pid)
+    }
+
+    /// Throws when the barrier did not fire, disposing of the teardown child
+    /// first. Reported ahead of every other assertion in the test, because with
+    /// a reap still parked "the child is gone" has not been decided either way
+    /// — and a stalled barrier is a harness fact, not a verdict on `cleanup()`.
+    private func requireDrained(_ drain: ReapDrainOutcome, teardownChild pid: pid_t) throws {
+        guard let diagnostic = drain.diagnostic(pid: pid, observedState: { describeState(pid) })
+        else { return }
+        // End our own child even though the barrier is wedged: whatever is
+        // stuck may never reap it, and a live `sleep` plus an unreaped pid
+        // would outlive this test. See `disposeSurvivor`.
+        if processExists(pid) { disposeSurvivor(pid) }
+        throw diagnostic
     }
 
     /// Asserts the child is gone, disposing of it first if it is not. Disposal
@@ -230,8 +260,7 @@ struct TerminalTeardownReapTests {
         }
         try #require(pid > 0, "forkpty must have produced a child pid")
 
-        await drainPendingReaps()
-        try requireReaped(pid)
+        try await requireDrainedAndReaped(pid)
     }
 
     // MARK: - cleanup() is one-shot
@@ -270,9 +299,10 @@ struct TerminalTeardownReapTests {
         // Observe, then dispose, then assert — in that order, with nothing that
         // can throw in between. See the suite comment: a `defer` registered
         // after a throwing `#require` never runs, and the probe is a `sleep 120`.
-        await drainPendingReaps()
+        let drain = await drainPendingReaps()
         let probeAlive = processExists(run.probe)
         disposeProbe(pid: run.probe) { coordinator.localProcess = nil }
+        try requireDrained(drain, teardownChild: run.first)
 
         try #require(run.first > 0 && run.probe > 0, "forkpty must have produced both pids")
         #expect(run.stillHeld,
@@ -299,9 +329,10 @@ struct TerminalTeardownReapTests {
             return OneShotRun(first: first, probe: probe, stillHeld: coordinator.localProcess != nil)
         }
         // Observe, then dispose, then assert — see the sibling test above.
-        await drainPendingReaps()
+        let drain = await drainPendingReaps()
         let probeAlive = processExists(run.probe)
         disposeProbe(pid: run.probe) { coordinator.localProcess = nil }
+        try requireDrained(drain, teardownChild: run.first)
 
         try #require(run.first > 0 && run.probe > 0, "forkpty must have produced both pids")
         // Sharper here than on the panel path: without the guard this second
