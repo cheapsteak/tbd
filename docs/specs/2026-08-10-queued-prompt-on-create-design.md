@@ -35,7 +35,8 @@ Settings toggle drives the RPC, following `control_mode_enabled`
 One flag, daemon-side, rather than a UserDefaults twin: the behavior that needs
 gating is the daemon typing into a session, not the modal drawing itself. With
 the flag off, the app does not open the modal, `worktree.setPendingPrompt` is
-refused, and the spawn path ignores the column.
+refused, the spawn path ignores the column, and a delivery already armed when
+the flag went off stops before it types (see "Undeliverable prompts").
 
 ### Unset is a third state
 
@@ -361,22 +362,51 @@ arming and notices by the generation tokens.
 
 ### Undeliverable prompts
 
-Five causes, and all five leave the text in the column and notify: the paste
-threw, the pane is dead or missing, the resolved primary terminal is a plain
-shell, the worktree is archived, or the readiness ceiling expired.
+Seven causes, and every one of them leaves the text in the column and notifies:
+the paste threw, the pane is dead or missing, the resolved primary terminal is a
+plain shell, that primary is a **hibernated** agent, the worktree is archived,
+the readiness ceiling expired, or the flag was switched off while the delivery
+waited.
 
-Two of them are answered at `park` rather than at delivery, because the app must
-never promise something the daemon will refuse. An **archived** worktree has no
+Three are answered at `park` rather than at delivery, because the app must never
+promise something the daemon will refuse. An **archived** worktree has no
 terminal rows — archive deletes them — so it looks exactly like a worktree still
 being created, and the honest answer for the two is opposite; parking there
 would leave text nothing will ever read. A worktree whose terminals already
 exist and whose primary is a **shell** has had its spawn, and nothing is coming.
-Both are refused, with the reason, and nothing is parked.
+A **hibernated** primary is a pane with no composer in it. All three are
+refused, with the reason, and nothing is parked.
 
-**Copy works on every one of those paths; Deliver-now does not.** Where the app
-can see for itself that no delivery is possible, the button is disabled with the
-reason in the sheet, because a button that always fails is worse than no button.
-The daemon refuses the same two cases at `park`, so the two surfaces agree.
+**A hibernated primary is asked about twice — at `park` and again immediately
+before the paste — and the second time is the one that matters.** Hibernation
+kills the agent process and respawns the pane to a bare shell while the row
+keeps `kind == .claude` and reads as having announced itself (parking stamps
+`activityState = .idle`), so every signal the delivery consults says "agent,
+ready" about a shell prompt. Typing there stages the operator's words at a
+command line, and with "send immediately" ticked runs them. The kind check
+cannot see it and the pane consultation cannot either — it distinguishes
+missing, dead and live, and a hibernated pane is live. Only the row's parked
+timestamp answers, which is also the answer that needs no screen text.
+
+The second ask is not belt-and-braces: a delivery is suspended through a
+readiness wait bounded at 120s and then through the settle, and the idle sweep
+parks sessions on its own schedule. The window between "eligible" and "typing"
+is precisely the window this feature opened, so eligibility is re-read at the
+end of it rather than inherited from the start. Waking is the operator's
+gesture, so the text waits for it.
+
+**The flag stops a delivery that is already armed.** It is read again in that
+same guard, immediately before the send: a kill-switch that only gates the next
+park would leave an armed cycle typing up to two minutes after the operator
+turned the feature off.
+
+**Copy works on every one of those paths.** Deliver-now is disabled, with the
+reason in the sheet, for the two causes the app can see in its own state — an
+archived worktree and a shell primary — because a button that always fails is
+worse than no button. It stays enabled for a hibernated primary, which the app
+does not model: the daemon refuses that park and the refusal reaches the sheet
+as the reason nothing was sent, which is the correct outcome by the weaker
+route. Nothing is delivered on a refusal either way.
 
 Nothing is retried indefinitely. A prompt that fires hours later, unattended,
 into a session whose context has moved on is worse than one that waits to be
@@ -447,6 +477,19 @@ Paste-once semantics:
 Retention on every undeliverable cause: a failed paste, a shell primary, a
 missing send path, an archived worktree, an expired readiness ceiling. Each
 notifies, and each leaves the text in the column.
+
+The two facts re-read immediately before the paste, each asserted from the state
+it is meant to catch — a change that landed *after* the prompt was eligible:
+
+- **A hibernated primary**, three ways. Parking against one is refused; a
+  session parked during the readiness wait is not typed into; and neither is one
+  parked during the settle. The fixture hibernates through the store's own park
+  routine rather than setting a field, and checks what that row actually looks
+  like — still `kind == .claude`, and already reading as announced — because a
+  fixture that hand-builds a friendlier row would test the assumption instead of
+  the bug.
+- **The flag switched off mid-flight.** A cycle armed while the flag was on, and
+  disabled before the settle expires, types nothing.
 
 The settle, in virtual time, both halves: one tick short of it nothing has been
 typed, and the paste follows the tick that clears it. Only the pair
