@@ -247,6 +247,23 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         guard case let .remote(provider, sessionID) = location else { return nil }
         return (provider, sessionID)
     }
+    /// Text the operator composed at creation time and parked for the primary
+    /// agent, `nil` when nothing is parked
+    /// (`docs/specs/2026-08-10-queued-prompt-on-create-design.md`). Durable, so
+    /// it survives the `preSession` window it exists to fill, a daemon restart,
+    /// and a failed delivery — it is cleared on confirmed delivery and on
+    /// nothing else, which makes the column the recovery store too.
+    ///
+    /// Not a queue: parking a second prompt replaces the first.
+    public var pendingPrompt: String?
+
+    /// Whether delivering `pendingPrompt` ends with Enter. `nil` on rows
+    /// written before v74 and on rows that never parked anything; consumers
+    /// resolve it to `true`, the shipped behavior the modal's checkbox
+    /// expresses. Unlike `Config.queuedPromptEnabled` this is data rather than
+    /// a feature gate — there is no third state to preserve, so its column
+    /// carries an ordinary SQL default.
+    public var pendingPromptSubmit: Bool?
 
     /// A scratch space is a repo-less worktree. Derived — no separate column.
     public var isScratch: Bool { repoID == nil }
@@ -281,7 +298,9 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
                 foreignHead: Bool = false,
                 pinnedAt: Date? = nil,
                 pinSortOrder: Int? = nil,
-                location: WorktreeLocation = .local) {
+                location: WorktreeLocation = .local,
+                pendingPrompt: String? = nil,
+                pendingPromptSubmit: Bool? = nil) {
         self.id = id
         self.repoID = repoID
         self.name = name
@@ -307,6 +326,8 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         self.pinnedAt = pinnedAt
         self.pinSortOrder = pinSortOrder
         self.location = location
+        self.pendingPrompt = pendingPrompt
+        self.pendingPromptSubmit = pendingPromptSubmit
     }
 
     enum CodingKeys: String, CodingKey {
@@ -316,7 +337,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         case liveClaudeSessionCount, parentWorktreeID, autoArchiveOnMerge
         case autoHibernateOnMerge
         case promotedToRepoID, prStatus, prNumber, foreignHead, pinnedAt, pinSortOrder
-        case locationKind, providerName, providerSessionID
+        case locationKind, providerName, providerSessionID, pendingPrompt, pendingPromptSubmit
     }
 
     public init(from decoder: Decoder) throws {
@@ -359,6 +380,10 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         } else {
             location = .local
         }
+        // Absent in JSON written before v74 — nothing was ever parked, and
+        // `nil` submit resolves to the shipped `true`.
+        pendingPrompt = try c.decodeIfPresent(String.self, forKey: .pendingPrompt)
+        pendingPromptSubmit = try c.decodeIfPresent(Bool.self, forKey: .pendingPromptSubmit)
     }
 
     /// Hand-written because `location` is an enum with an associated value that
@@ -400,6 +425,8 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
             try c.encode(provider, forKey: .providerName)
             try c.encode(sessionID, forKey: .providerSessionID)
         }
+        try c.encodeIfPresent(pendingPrompt, forKey: .pendingPrompt)
+        try c.encodeIfPresent(pendingPromptSubmit, forKey: .pendingPromptSubmit)
     }
 }
 
@@ -1035,6 +1062,18 @@ public struct Config: Codable, Sendable, Equatable {
     /// there. (Whether a target receives the envelope at all is a property of
     /// the target, not of this flag: shells do not.)
     public var deliveryVerificationEnabled: Bool
+    /// Soak flag for the queued prompt taken at worktree creation
+    /// (`docs/specs/2026-08-10-queued-prompt-on-create-design.md`). What it
+    /// gates is the daemon typing into a session — with it off the app does not
+    /// open the modal, `worktree.setPendingPrompt` is refused, and the spawn
+    /// path ignores the column.
+    ///
+    /// **Resolved, not stored.** The backing column carries no SQL default and
+    /// is genuinely NULL until somebody touches the toggle, so this property is
+    /// `queued_prompt_enabled ?? Config.queuedPromptDefault`. NULL means "never
+    /// chose" and follows the shipped default wherever it goes; `0`/`1` is an
+    /// explicit gesture and is honored forever.
+    public var queuedPromptEnabled: Bool
 
     /// Default idle-timeout for auto-hibernation, in minutes.
     public static let defaultHibernateIdleMinutes = 30
@@ -1050,6 +1089,11 @@ public struct Config: Codable, Sendable, Equatable {
     public static let defaultGCGraceSeconds = 3600
     /// Default retention window for reap snapshots.
     public static let defaultGCSnapshotRetentionDays = 30
+    /// The shipped default for `queuedPromptEnabled`, and the single place it
+    /// lives. Every row that never touched the toggle is NULL, so graduating
+    /// the feature is a change to this constant — no forcing `UPDATE`
+    /// migration, and an explicit opt-out is left alone.
+    public static let queuedPromptDefault = false
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -1075,7 +1119,8 @@ public struct Config: Codable, Sendable, Equatable {
                 panelSurfaceEnabled: Bool = false,
                 agentPanelControlEnabled: Bool = false,
                 remoteBackendsEnabled: Bool = false,
-                deliveryVerificationEnabled: Bool = false) {
+                deliveryVerificationEnabled: Bool = false,
+                queuedPromptEnabled: Bool = Config.queuedPromptDefault) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
         self.envSettingOverrides = envSettingOverrides
@@ -1101,6 +1146,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.agentPanelControlEnabled = agentPanelControlEnabled
         self.remoteBackendsEnabled = remoteBackendsEnabled
         self.deliveryVerificationEnabled = deliveryVerificationEnabled
+        self.queuedPromptEnabled = queuedPromptEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -1154,6 +1200,11 @@ public struct Config: Codable, Sendable, Equatable {
         // the v69 column default — the soak has to be opted into.
         deliveryVerificationEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .deliveryVerificationEnabled) ?? false
+        // Absent (older daemon / older persisted JSON) means the sender knew
+        // nothing about the flag, which is the same situation as a NULL column:
+        // fall through to the shipped default rather than hardcoding `false`.
+        queuedPromptEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .queuedPromptEnabled) ?? Config.queuedPromptDefault
     }
 }
 

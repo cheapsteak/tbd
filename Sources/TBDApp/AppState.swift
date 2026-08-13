@@ -1163,6 +1163,91 @@ final class AppState: ObservableObject {
     /// same reason as `controlModeSetter`.
     lazy var autoTrustWorktreesSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setAutoTrustWorktrees(enabled: enabled) }
+    /// How `setQueuedPromptEnabled` persists the queued-prompt soak flag —
+    /// injectable for the same reason as `controlModeSetter`.
+    lazy var queuedPromptFlagSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setQueuedPrompt(enabled: enabled) }
+    /// The worktree a queued prompt is being composed for, driving
+    /// `ContentView`'s `.sheet(item:)`. Non-nil only while the modal is up, and
+    /// only ever set when the daemon reports `queuedPromptEnabled`
+    /// (design 2026-08-10). Setting it to nil is what Escape does — and parks
+    /// nothing.
+    ///
+    /// Never assigned directly by a creation path: `presentQueuedPrompt` owns
+    /// it, so a second Cmd+N cannot replace a modal the operator is typing in.
+    /// The observer is on the *property* rather than on a dismissal method
+    /// because `.sheet(item:)` writes the nil itself when the sheet closes —
+    /// submit, Cancel and Escape all arrive that way and none of them can be
+    /// asked to call something first.
+    @Published var queuedPromptTarget: QueuedPromptTarget? {
+        didSet {
+            if queuedPromptTarget == nil { advanceQueuedPromptBacklog() }
+        }
+    }
+    /// Creation targets waiting for the presented modal to close, oldest first.
+    ///
+    /// Two rapid Cmd+N presses create two worktrees, and each deserves its own
+    /// first message. Replacing `queuedPromptTarget` in place would orphan the
+    /// first — `.sheet(item:)` swapping a live item is unreliable on macOS, so
+    /// the operator can be left typing into a modal bound to the *previous*
+    /// target. They queue instead.
+    var queuedPromptBacklog: [QueuedPromptTarget] = []
+    /// The parked prompt being read back, sharing `ContentView`'s single
+    /// prompt `.sheet(item:)` with the compose modal. A prompt that could not
+    /// be delivered stays in the `worktree.pending_prompt` column; this is how
+    /// the operator gets it back (design 2026-08-10, "Undeliverable prompts").
+    ///
+    /// Closing it frees the shared sheet slot, so a creation that queued behind
+    /// it can open — the same observer `queuedPromptTarget` carries, for the
+    /// same reason.
+    @Published var parkedPromptReadback: ParkedPromptReadback? {
+        didSet {
+            if parkedPromptReadback == nil { advanceQueuedPromptBacklog() }
+        }
+    }
+    /// True while a Deliver-now RPC is outstanding, disabling the button.
+    /// Parking is not idempotent from the agent's point of view — a second
+    /// click parks the same text again, and the daemon delivers what it is
+    /// told, so the operator's message arrives twice.
+    @Published var parkedPromptDeliveryInFlight = false
+    /// How the read-back's Copy button reaches the pasteboard. Injectable so
+    /// tests never write to the developer's real pasteboard.
+    lazy var pasteboardWriter: @MainActor (String) -> Void = { text in
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+    /// How `createWorktree` dispatches `worktree.create` — injectable for the
+    /// same reason as `daemonCapabilitiesFetcher` (`DaemonClient` is concrete,
+    /// no protocol), so the queued-prompt tests can pin the RPC ordering
+    /// without a live daemon.
+    lazy var worktreeCreator: @MainActor (WorktreeCreateRequest) async throws -> Worktree =
+        { [daemonClient] request in
+            try await daemonClient.createWorktree(
+                repoID: request.repoID,
+                branch: request.branch,
+                displayName: request.displayName,
+                cols: request.cols,
+                rows: request.rows,
+                parentWorktreeID: request.parentWorktreeID,
+                useExistingBranch: request.useExistingBranch,
+                profileID: request.profileID,
+                model: request.model,
+                primaryAgentPreference: request.primaryAgentPreference,
+                prNumber: request.prNumber,
+                checkoutPRHead: request.checkoutPRHead
+            )
+        }
+    /// How `submitQueuedPrompt` parks the composed text — injectable for the
+    /// same reason as `worktreeCreator`.
+    /// A `nil` text unparks — the daemon clears the column and disarms any
+    /// wait — which is how the composer's Discard reaches the store without a
+    /// verb of its own.
+    lazy var pendingPromptSetter:
+        @MainActor (UUID, String?, Bool) async throws -> WorktreeSetPendingPromptResult =
+            { [daemonClient] worktreeID, text, submit in
+                try await daemonClient.setPendingPrompt(
+                    worktreeID: worktreeID, text: text, submit: submit)
+            }
     /// Asks the user to confirm closing a note tab whose note has content —
     /// closing a note tab hard-deletes the note row (`closeTab` →
     /// `deleteNote`). Injectable so tests can exercise both branches without

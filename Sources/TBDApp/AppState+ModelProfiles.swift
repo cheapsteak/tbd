@@ -304,6 +304,20 @@ extension AppState {
         }
     }
 
+    /// Persist the queued-prompt soak flag, then re-fetch capabilities so the
+    /// Settings toggle reflects the daemon's persisted state. Applies to the
+    /// next worktree creation — the app gates the whole modal on the
+    /// capability, so with it off creation behaves exactly as it did before.
+    func setQueuedPromptEnabled(_ enabled: Bool) async {
+        do {
+            try await queuedPromptFlagSetter(enabled)
+            await refreshDaemonCapabilities()
+        } catch {
+            logger.error("Failed to set queued prompt: \(error, privacy: .public)")
+            showAlert("Failed to set queued prompt: \(error.localizedDescription)", isError: true)
+        }
+    }
+
     /// Persist the worktree auto-trust switch, then re-fetch capabilities so
     /// the Settings toggle reflects the daemon's persisted state. Applies to
     /// the next Claude spawn or wake; never un-trusts an already-seeded path.

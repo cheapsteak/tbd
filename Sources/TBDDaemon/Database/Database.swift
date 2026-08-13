@@ -1306,6 +1306,51 @@ public final class TBDDatabase: Sendable {
                 where: "providerName IS NOT NULL")
         }
 
+        // Numbered v73/v74 because main took v70, v71 and v72 while this
+        // branch was open. Renumbering is safe only because both bodies go
+        // through the idempotent helpers: a machine that already applied them
+        // under the old ids re-runs the bodies, finds every column present,
+        // and logs a no-op instead of throwing.
+        //
+        // Soak flag for the queued prompt taken at worktree creation
+        // (`docs/specs/2026-08-10-queued-prompt-on-create-design.md`). Default
+        // OFF: the feature has the daemon type into a live session on no user
+        // gesture beyond the original submit.
+        //
+        // **The missing `defaults:` argument is deliberate — do not add one.**
+        // Every boolean flag before this one passes `defaults: false`. SQLite
+        // stores that in the schema and hands it back for every row written
+        // before the column existed, and the `config` singleton row is seeded
+        // by v1, so a fresh install and a years-old one both read `0` —
+        // indistinguishable from a deliberate opt-out. Omitting the default
+        // leaves the column genuinely NULL, which is a third state: "never
+        // chose". `ConfigRecord.toModel()` resolves NULL to
+        // `Config.queuedPromptDefault`, so graduation is a change to that one
+        // constant and needs no forcing `UPDATE` migration, while an explicit
+        // `false` survives it untouched.
+        //
+        // `QueuedPromptSchemaTests.queuedPromptEnabledIsNullBeforeAnyGesture`
+        // is the guard on this; it goes red the moment a default reappears.
+        migrator.registerMigration("v73_config_queued_prompt") { db in
+            try db.addColumnIfMissing(
+                table: "config", column: "queued_prompt_enabled", type: .boolean)
+        }
+
+        // The parked prompt itself. `pending_prompt_submit` DOES carry a SQL
+        // default, and it is unreachable by construction: it is data rather
+        // than a feature gate, and `setPendingPrompt` — the only writer — always
+        // names both columns, so the default can only ever describe a row that
+        // has nothing parked and therefore no submit choice to remember.
+        // Delivery resolves an absent value to "do not press Enter", which is
+        // the shipped behavior; see `PendingPromptCoordinator`.
+        migrator.registerMigration("v74_worktree_pending_prompt") { db in
+            try db.addColumnIfMissing(
+                table: "worktree", column: "pending_prompt", type: .text)
+            try db.addColumnIfMissing(
+                table: "worktree", column: "pending_prompt_submit",
+                type: .boolean, defaults: true)
+        }
+
         return migrator
     }
 }

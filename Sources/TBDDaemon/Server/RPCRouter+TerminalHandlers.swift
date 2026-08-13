@@ -1877,6 +1877,28 @@ extension RPCRouter {
         )
     }
 
+    /// Whether a text payload rides behind the `<tbd-dispatch/>` envelope.
+    ///
+    /// **Daemon-internal, and deliberately not a field on
+    /// `TerminalSendParams`.** The envelope's whole value is that an agent
+    /// reading one knows the message came from a dispatch rather than from the
+    /// person at the keyboard; an envelope any caller could omit over RPC would
+    /// hand every caller the ability to type as a human, which is precisely the
+    /// property the envelope exists to provide. So suppression is reachable
+    /// only from inside this file's own send core, by daemon rails that are
+    /// relaying the operator's own words verbatim — and the act is still
+    /// written to the actuation log either way, so the record of who typed what
+    /// stays complete.
+    enum DispatchEnvelopeDisposition {
+        /// The default and the only disposition any RPC can ask for.
+        case attached
+        /// Deliver the caller's bytes with nothing prepended. Reserved for the
+        /// queued prompt taken at worktree creation, whose text must reach the
+        /// model byte-identical to what the argv path would have delivered
+        /// (design 2026-08-10, "The paste path delivers verbatim").
+        case suppressed
+    }
+
     func handleTerminalSend(
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
@@ -1890,8 +1912,42 @@ extension RPCRouter {
         }
     }
 
+    /// Paste the operator's own words into an agent with no `<tbd-dispatch/>`
+    /// envelope — the queued-prompt paste path, and the only caller of
+    /// `.suppressed`.
+    ///
+    /// Reuses the send core rather than reaching for tmux directly, so the pane
+    /// consultation, the per-terminal serializer lane and the actuation row all
+    /// apply unchanged. Answers whether the bytes reached the pane.
+    ///
+    /// It does **not** buy the pending-input hibernate veto:
+    /// `InputActivityTracker.recordInput` has one caller — the app's own
+    /// keystroke stream (`Daemon.swift`) — and nothing in the tmux paste path
+    /// touches it. So an unsubmitted queued prompt staged in a composer is
+    /// invisible to the idle sweep, exactly like any other daemon-side paste.
+    func sendQueuedPromptVerbatim(
+        terminalID: UUID, text: String, submit: Bool
+    ) async -> Bool {
+        let params = TerminalSendParams(terminalID: terminalID, text: text, submit: submit)
+        do {
+            let response = try await terminalSendSerializer.run(terminalID: terminalID) {
+                try await self.performTerminalSend(
+                    params, actor: .daemon(rail: ActuationRail.queuedPrompt),
+                    envelope: .suppressed)
+            }
+            return response.success
+        } catch {
+            logger.warning("""
+                queued prompt: send to terminal \(terminalID.uuidString, privacy: .public) failed: \
+                \(error, privacy: .public)
+                """)
+            return false
+        }
+    }
+
     private func performTerminalSend(
-        _ params: TerminalSendParams, actor: ActuationActor?
+        _ params: TerminalSendParams, actor: ActuationActor?,
+        envelope: DispatchEnvelopeDisposition = .attached
     ) async throws -> RPCResponse {
         // ─── The first of two refusal lines, and the reason they differ ───
         //
@@ -2061,7 +2117,13 @@ extension RPCRouter {
                     // receiving agent and its transcript JSONL; a shell target
                     // satisfies none of them, so prefixing one would be framing
                     // nobody reads, delivered as a syntax error.
-                    let composed = Self.carriesDispatchEnvelope(terminal)
+                    //
+                    // ...and `envelope` is the one axis that can withhold it
+                    // from an agent: a daemon rail relaying the operator's own
+                    // words must deliver them byte-identically. It is not
+                    // reachable from `TerminalSendParams` — see
+                    // `DispatchEnvelopeDisposition`.
+                    let composed = envelope == .attached && Self.carriesDispatchEnvelope(terminal)
                         ? Self.dispatchEnvelope(
                             id: actuationID, from: (actor ?? .anonymous).dispatchLabel
                         ) + "\n" + text
@@ -2704,6 +2766,12 @@ extension RPCRouter {
 
         let source = params.source ?? "unknown"
         logger.info("sessionEvent: terminal \(terminal.id.uuidString, privacy: .public) -> session \(params.sessionID, privacy: .public) (source=\(source, privacy: .public))")
+
+        // The readiness signal for a parked prompt on the paste path. This
+        // hook is the machine fact that the agent is up — never the pane's
+        // rendered text, which this repo forbids reading for state.
+        await pendingPromptCoordinator?.noteSessionReady(
+            worktreeID: terminal.worktreeID, terminalID: terminal.id)
 
         subscriptions.broadcast(delta: .terminalSessionUpdated(TerminalSessionDelta(
             terminalID: terminal.id,

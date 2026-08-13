@@ -244,6 +244,7 @@ struct GeneralSettingsTab: View {
                 controlModeToggle
                 hibernateInputVetoToggle
                 autoCloseSetupToggle
+                queuedPromptToggle
             }
         }
         .formStyle(.grouped)
@@ -273,6 +274,19 @@ struct GeneralSettingsTab: View {
             .font(.caption)
             .foregroundStyle(.secondary)
         }
+    }
+
+    /// Ask for a first message when creating a worktree. Reads the persisted
+    /// flag from `daemon.capabilities` and writes via `config.setQueuedPrompt`.
+    /// Off by default (soaking).
+    @ViewBuilder
+    private var queuedPromptToggle: some View {
+        let capabilities = appState.daemonCapabilities
+        Toggle("Ask for a first message when creating a worktree", isOn: Binding(
+            get: { capabilities?.queuedPromptEnabled ?? false },
+            set: { newValue in Task { await appState.setQueuedPromptEnabled(newValue) } }
+        ))
+        .help("Opens a prompt sheet right after creation starts, and hands the text to the agent whenever it comes up — so you don't wait out a preSession hook before saying what you want. While it's on, the inline rename field no longer opens on create. Off by default (soaking).")
     }
 
     /// Pending-input veto for auto-hibernate. Reads the persisted flag from

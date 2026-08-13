@@ -123,6 +123,21 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the queued-prompt soak flag (design 2026-08-10). Read fresh at
+    /// spawn time and on every `worktree.setPendingPrompt`, so it applies to
+    /// the next worktree creation immediately — no daemon restart.
+    ///
+    /// Either value is an explicit gesture that takes the backing column out of
+    /// its NULL "never chose" state for good, which is deliberate: an operator
+    /// who turns the feature off stays off when the shipped default graduates.
+    func handleConfigSetQueuedPrompt(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConfigSetQueuedPromptParams.self, from: paramsData)
+        try await db.config.setQueuedPrompt(params.enabled)
+        // Broadcast so the app reloads daemon capabilities.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the auto-close-setup-tab soak flag. Read fresh at spawn time,
     /// so it applies to the next worktree creation immediately — already-open
     /// setup tabs are unaffected.

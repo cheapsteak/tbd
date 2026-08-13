@@ -5,6 +5,24 @@ import os
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "AppState+Worktrees")
 
+/// The arguments `createWorktree` hands to `worktree.create`. A struct rather
+/// than a twelve-parameter closure signature, so the injection seam behind
+/// `AppState.worktreeCreator` stays readable and tests can assert what was sent.
+struct WorktreeCreateRequest: Sendable {
+    let repoID: UUID
+    let branch: String?
+    let displayName: String?
+    let cols: Int?
+    let rows: Int?
+    let parentWorktreeID: UUID?
+    let useExistingBranch: Bool
+    let profileID: UUID?
+    let model: String?
+    let primaryAgentPreference: PrimaryAgentPreference?
+    let prNumber: Int?
+    let checkoutPRHead: Bool?
+}
+
 extension AppState {
     // MARK: - Worktree Actions
 
@@ -49,10 +67,28 @@ extension AppState {
         pendingWorktreeIDs.insert(placeholder.id)
         worktrees[repoID, default: []].append(placeholder)
         selectedWorktreeIDs = [placeholder.id]
-        editingWorktreeID = placeholder.id
+        // With the queued prompt live, the modal owns focus and rename-on-create
+        // stands down: the two cannot both have it, and the prompt is why the
+        // modal exists. Renaming stays available from the sidebar. With the
+        // capability off this is exactly today's behavior.
+        let promptTarget: QueuedPromptTarget? = daemonCapabilities?.queuedPromptEnabled == true
+            ? QueuedPromptTarget(
+                placeholderID: placeholder.id,
+                repoID: repoID,
+                worktreeName: placeholder.displayName)
+            : nil
+        if promptTarget == nil {
+            editingWorktreeID = placeholder.id
+        }
 
         Task {
             defer { pendingWorktreeIDs.remove(placeholder.id) }
+            // Every exit from this Task that did NOT reach `.created` is a
+            // failure from the modal's point of view — a thrown RPC error, or
+            // a row that vanished mid-create. `resolve` is idempotent, so a
+            // success already reported wins and this is a no-op; without it a
+            // submitted prompt would wait forever on an ID that never comes.
+            defer { promptTarget?.resolve(.failed) }
             do {
                 let size = mainAreaTerminalSize()
                 // Let the daemon generate `name` and default `displayName` to it
@@ -64,7 +100,7 @@ extension AppState {
                 // optimistic placeholder still uses placeholderName for immediate UI,
                 // and replaceCreationPlaceholder's rename inference (comparing local
                 // state) is unaffected. A cosmetic slug-flip at swap is acceptable.
-                let wt = try await daemonClient.createWorktree(
+                let wt = try await worktreeCreator(WorktreeCreateRequest(
                     repoID: repoID,
                     branch: existingBranch?.name,
                     displayName: displayName,
@@ -76,7 +112,19 @@ extension AppState {
                     primaryAgentPreference: primaryAgentPreference,
                     prNumber: prNumber,
                     checkoutPRHead: checkoutPRHead
-                )
+                ))
+                // Hand the modal the daemon's ID. Until this lands the modal
+                // has nothing to park against, which is what makes "the
+                // parking RPC cannot precede the create RPC" a property of the
+                // code rather than of the timing.
+                //
+                // It happens before the swap, and unconditionally: the daemon
+                // row exists from here on, whatever the local list looks like.
+                // Resolving it inside the `if let swap` below told the operator
+                // "worktree creation failed" for a worktree that had in fact
+                // been created, and threw their typed prompt away with the row
+                // still there to receive it.
+                promptTarget?.resolve(.created(wt.id))
                 // Replace the placeholder with the real worktree, carrying
                 // over any rename the user typed while creation was in
                 // flight. A nil result means neither the placeholder nor a
@@ -90,7 +138,9 @@ extension AppState {
                     with: wt
                 ) {
                     selectedWorktreeIDs = [wt.id]
-                    editingWorktreeID = wt.id
+                    if promptTarget == nil {
+                        editingWorktreeID = wt.id
+                    }
                     // Persist the carried rename now that a daemon-known row
                     // exists (the placeholder's id never reached the daemon,
                     // so renameWorktree's placeholder branch could only apply
@@ -112,6 +162,252 @@ extension AppState {
                 logger.error("Failed to create worktree: \(error)")
                 handleConnectionError(error)
             }
+        }
+
+        // Present the modal only now, with the creation Task already launched
+        // and owning every await the RPC needs. Nothing above this line waits
+        // on the operator, and nothing below can be reached by the creation
+        // path — that is the whole "creation is not slowed" claim.
+        if let promptTarget {
+            presentQueuedPrompt(promptTarget)
+        }
+    }
+
+    /// Whether the shared prompt-sheet slot is empty — nothing composing and
+    /// nothing being read back. The one condition every writer to that slot
+    /// checks, so "at most one prompt sheet, and it is never swapped for
+    /// another" holds no matter which surface asks.
+    var promptSheetSlotIsFree: Bool {
+        queuedPromptTarget == nil && parkedPromptReadback == nil
+    }
+
+    /// Show `target`'s modal, or queue it behind whatever prompt sheet is up.
+    ///
+    /// Two Cmd+N presses in quick succession create two worktrees, and each
+    /// deserves its own first message. Assigning `queuedPromptTarget` directly
+    /// would orphan the first: `.sheet(item:)` handed a replacement item is
+    /// unreliable on macOS — the presented sheet can keep the old target while
+    /// state names the new one, so the operator types a message for the second
+    /// worktree and it is parked against the first. Queuing sidesteps the swap
+    /// entirely; the second modal opens when the first closes.
+    ///
+    /// A read-back holds the slot on exactly the same terms. Menu-bar commands
+    /// still fire while a sheet is on screen, so Cmd+N over an open read-back
+    /// would otherwise flip the presented item from the read-back to the new
+    /// target without passing through nil — the same swap, entered by the other
+    /// door.
+    func presentQueuedPrompt(_ target: QueuedPromptTarget) {
+        guard promptSheetSlotIsFree else {
+            queuedPromptBacklog.append(target)
+            return
+        }
+        queuedPromptTarget = target
+    }
+
+    /// Open the next queued modal, if the slot is free and any are waiting.
+    /// Called when either sheet goes nil — submit, Cancel, Escape and Close all
+    /// funnel through that.
+    ///
+    /// The next sheet is presented on a later main-actor turn rather than
+    /// inline: AppKit is still tearing the closing sheet down, and presenting
+    /// into that teardown is the very unreliability this queue exists to avoid.
+    /// The turn is also a window in which the slot can be taken — the sidebar
+    /// is clickable the moment a sheet closes — so the deferred half re-checks
+    /// and puts the target back at the head of the queue rather than presenting
+    /// over whatever arrived.
+    func advanceQueuedPromptBacklog() {
+        guard promptSheetSlotIsFree, !queuedPromptBacklog.isEmpty else { return }
+        let next = queuedPromptBacklog.removeFirst()
+        Task { @MainActor in
+            guard promptSheetSlotIsFree else {
+                queuedPromptBacklog.insert(next, at: 0)
+                return
+            }
+            queuedPromptTarget = next
+        }
+    }
+
+    /// Park the prompt the operator composed in `QueuedPromptModal`.
+    ///
+    /// Fire-and-forget, and deliberately a second RPC rather than a parameter
+    /// on `worktree.create`: it may be sent long after creation finished, and
+    /// creation must never wait for it. Blank text parks nothing — that is the
+    /// same outcome as dismissing the sheet.
+    func submitQueuedPrompt(_ target: QueuedPromptTarget, text: String, submit: Bool) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        Task {
+            switch await target.awaitResolution() {
+            case .failed:
+                // There is no row to park against. Say so rather than dropping
+                // the prompt silently; the text is still on screen behind the
+                // alert only if the sheet is up, so name what happened.
+                logger.error("Queued prompt not sent: worktree creation failed")
+                showAlert("Worktree creation failed — your first message was not sent.", isError: true)
+            case .created(let worktreeID):
+                do {
+                    let result = try await pendingPromptSetter(worktreeID, trimmed, submit)
+                    if case .refused(let reason) = result {
+                        showAlert("First message was not queued: \(reason)", isError: true)
+                    }
+                } catch {
+                    logger.error("Failed to queue prompt: \(error, privacy: .public)")
+                    showAlert("Failed to queue your first message: \(error.localizedDescription)", isError: true)
+                }
+            }
+        }
+    }
+
+    /// Close whichever prompt sheet is on screen — the write half of the single
+    /// `.sheet(item:)` both surfaces share. Clears exactly the presented one,
+    /// so closing a compose modal cannot silently discard a read-back (and the
+    /// compose observer still advances the creation backlog).
+    func dismissPresentedPromptSheet() {
+        if queuedPromptTarget != nil {
+            queuedPromptTarget = nil
+        } else {
+            parkedPromptReadback = nil
+        }
+    }
+
+    // MARK: - Reading a parked prompt back
+
+    /// Open the read-back for the prompt still sitting in this worktree's
+    /// `pending_prompt` column.
+    ///
+    /// The column is the recovery store, and `ParkedPromptReadback(worktree:)`
+    /// is the one rule for reading it — the same rule every glyph's visibility
+    /// uses.
+    ///
+    /// Takes the row's own `Worktree` rather than an ID: an archived row is not
+    /// in `findWorktree`'s lists, and archived rows are precisely where retained
+    /// text is most at risk of becoming unreachable. The value the glyph was
+    /// drawn from is the value to read back.
+    func revealParkedPrompt(_ worktree: Worktree) {
+        // A compose modal owns the slot; opening over it would swap the
+        // presented sheet non-nil→non-nil. Unreachable by pointer (the modal
+        // covers the row), enforced anyway so `PromptSheet`'s precedence stays
+        // a tiebreak rather than a mechanism.
+        guard queuedPromptTarget == nil else { return }
+        guard let readback = parkedPrompt(for: worktree) else {
+            // Delivered (or unparked) between the click and the read. Say so
+            // rather than opening an empty sheet.
+            showTransientToast("That first message has already been delivered.", style: .notice)
+            return
+        }
+        parkedPromptReadback = readback
+    }
+
+    /// Put the message on the pasteboard. The recovery path that works even
+    /// when nothing can be delivered — an archived worktree, a shell primary,
+    /// a daemon that is gone.
+    ///
+    /// Copies what is ON SCREEN, edits included: the text the operator is
+    /// looking at is the text they mean. Defaults to the parked text for
+    /// callers with no composer.
+    func copyParkedPrompt(_ readback: ParkedPromptReadback, text: String? = nil) {
+        pasteboardWriter(text ?? readback.text)
+        showTransientToast("First message copied.", style: .success)
+    }
+
+    /// This worktree's parked first message, phase included — the one lookup
+    /// every surface uses, so the pane banner, the status-bar entry and the
+    /// composer are always describing the same state of the same text.
+    func parkedPrompt(for worktree: Worktree) -> ParkedPromptReadback? {
+        ParkedPromptReadback(worktree: worktree, terminals: terminals[worktree.id] ?? [])
+    }
+
+    /// Why this prompt cannot be delivered, if the app can see a reason. Read
+    /// off the snapshot's own phase, so the sheet's copy, the disabled button
+    /// and the guard in `deliverParkedPromptNow` cannot disagree.
+    func parkedPromptUndeliverableReason(
+        _ readback: ParkedPromptReadback
+    ) -> ParkedPromptUndeliverable? {
+        readback.phase.undeliverableReason
+    }
+
+    /// Park `text` — which may be an edit of what was parked before — and
+    /// re-arm delivery.
+    ///
+    /// `worktree.setPendingPrompt` is not merely a column write: the daemon's
+    /// `PendingPromptCoordinator.park` re-enters the worktree into this
+    /// session's armed set, disarms any stale wait, and either arms a paste
+    /// against the live primary agent (`.awaitingReady`) or leaves it for the
+    /// next spawn to carry on its argv (`.parkedForSpawn`). That is why
+    /// Deliver-now needs no RPC of its own — and why the two outcomes are
+    /// reported differently: one is happening now, the other is a promise.
+    ///
+    /// The text and the submit bit come from the composer, not from `readback`:
+    /// the wait is exactly when an operator changes their mind about what to
+    /// say, and the send-immediately bit is a per-message choice rather than a
+    /// property of the parked text.
+    func deliverParkedPromptNow(
+        _ readback: ParkedPromptReadback, text: String, submit: Bool
+    ) async {
+        // Empty text is the UNPARK signal, not a delivery: sending it here
+        // would silently destroy the very message this surface exists to
+        // protect. Discard is a deliberate act with its own button.
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        // An archived worktree and a shell primary are both undeliverable, and
+        // a park answer alone cannot always say which: reporting one as
+        // success would close the sheet, send the operator round the same loop,
+        // and steer them away from Copy — the thing that does work.
+        if let undeliverable = parkedPromptUndeliverableReason(readback) {
+            showAlert(undeliverable.message, isError: true)
+            return
+        }
+        // A second click while the first call is outstanding parks the same
+        // text twice, and the daemon delivers what it is told.
+        guard !parkedPromptDeliveryInFlight else { return }
+        parkedPromptDeliveryInFlight = true
+        defer { parkedPromptDeliveryInFlight = false }
+        do {
+            let result = try await pendingPromptSetter(readback.id, trimmed, submit)
+            switch result {
+            case .refused(let reason):
+                showAlert("Couldn't deliver the first message: \(reason)", isError: true)
+            case .awaitingReady:
+                parkedPromptReadback = nil
+                showTransientToast("Delivering the first message to the agent.", style: .notice)
+            case .parkedForSpawn:
+                parkedPromptReadback = nil
+                showTransientToast(
+                    "First message re-queued — it goes in when the agent starts.", style: .notice)
+            }
+        } catch {
+            logger.error("Failed to deliver parked prompt: \(error, privacy: .public)")
+            showAlert(
+                "Couldn't deliver the first message: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Throw the parked text away, clearing the column.
+    ///
+    /// The wait before delivery can be long — a `preSession` hook runs for
+    /// minutes — and a message written at creation is not always one still
+    /// worth sending by the time an agent exists to read it. Without Discard
+    /// the only ways out are to send something unwanted or to leave a notice
+    /// standing.
+    ///
+    /// Unparking is `setPendingPrompt` with no text — the daemon clears the
+    /// column and disarms any pending wait — so this needs no verb of its own.
+    func discardParkedPrompt(_ readback: ParkedPromptReadback) async {
+        guard !parkedPromptDeliveryInFlight else { return }
+        parkedPromptDeliveryInFlight = true
+        defer { parkedPromptDeliveryInFlight = false }
+        do {
+            let result = try await pendingPromptSetter(readback.id, nil, readback.submit)
+            if let refusal = ParkedPromptReadback.discardRefusal(result) {
+                showAlert("Couldn't discard the first message: \(refusal)", isError: true)
+                return
+            }
+            parkedPromptReadback = nil
+            showTransientToast("First message discarded.", style: .success)
+        } catch {
+            logger.error("Failed to discard parked prompt: \(error, privacy: .public)")
+            showAlert(
+                "Couldn't discard the first message: \(error.localizedDescription)", isError: true)
         }
     }
 
