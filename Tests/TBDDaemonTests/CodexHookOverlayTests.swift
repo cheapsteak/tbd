@@ -5,6 +5,75 @@ import TBDShared
 
 @Suite struct CodexHookOverlayTests {
 
+    private func runStopHook(goalStatus: String) throws -> [String] {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-codex-stop-hook-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let logPath = directory.appendingPathComponent("tbd-invocations.log")
+        let tbdPath = directory.appendingPathComponent("tbd")
+        try """
+        #!/bin/sh
+        printf '%s\\n' "$*" >> "$TBD_HOOK_TEST_LOG"
+        """.write(to: tbdPath, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: tbdPath.path
+        )
+
+        let jqPath = directory.appendingPathComponent("jq")
+        try """
+        #!/bin/sh
+        case "$*" in
+          *session_id*) printf '%s\\n' 'a1b2c3d4-e5f6-4789-abcd-0123456789ab' ;;
+          *) printf '%s\\n' 'done' ;;
+        esac
+        """.write(to: jqPath, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: jqPath.path
+        )
+
+        let databaseProcess = Process()
+        databaseProcess.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        databaseProcess.arguments = [
+            directory.appendingPathComponent("goals_1.sqlite").path,
+            """
+            CREATE TABLE thread_goals (thread_id TEXT PRIMARY KEY, status TEXT NOT NULL);
+            INSERT INTO thread_goals VALUES ('a1b2c3d4-e5f6-4789-abcd-0123456789ab', '\(goalStatus)');
+            """
+        ]
+        databaseProcess.standardOutput = Pipe()
+        databaseProcess.standardError = Pipe()
+        try databaseProcess.run()
+        databaseProcess.waitUntilExit()
+        #expect(databaseProcess.terminationStatus == 0)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", CodexHookOverlay.stopCommand]
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = "\(directory.path):/usr/bin:/bin"
+        environment["CODEX_HOME"] = directory.path
+        environment["TBD_HOOK_TEST_LOG"] = logPath.path
+        process.environment = environment
+
+        let input = Pipe()
+        process.standardInput = input
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try process.run()
+        let payload = #"{"session_id":"a1b2c3d4-e5f6-4789-abcd-0123456789ab","hook_event_name":"Stop","last_assistant_message":"done"}"#
+        input.fileHandleForWriting.write(Data(payload.utf8))
+        try input.fileHandleForWriting.close()
+        process.waitUntilExit()
+        #expect(process.terminationStatus == 0)
+
+        let log = (try? String(contentsOf: logPath, encoding: .utf8)) ?? ""
+        return log.split(separator: "\n").map(String.init)
+    }
+
     @Test func generateBodyHasExpectedShape() throws {
         let data = try CodexHookOverlay.generateBody()
         let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -61,6 +130,26 @@ import TBDShared
         #expect(stopCommand?.contains("printf '%s\\n' \"$RENAME_RESULT\"") == true)
         #expect(stopCommand?.contains("tbd notify --type response_complete") == true)
         #expect(stopCommand?.contains("tbd terminal-activity idle") == true)
+    }
+
+    @Test func stopHookKeepsWorkingWhileCodexGoalIsActive() throws {
+        let invocations = try runStopHook(goalStatus: "active")
+
+        #expect(invocations.contains { $0.hasPrefix("notify --type response_complete") })
+        #expect(!invocations.contains("terminal-activity idle"))
+    }
+
+    @Test func stopHookPublishesIdleWhenCodexGoalIsComplete() throws {
+        let invocations = try runStopHook(goalStatus: "complete")
+
+        #expect(invocations.contains { $0.hasPrefix("notify --type response_complete") })
+        #expect(invocations.contains("terminal-activity idle"))
+    }
+
+    @Test func stopHookPublishesIdleWhenCodexGoalIsBlocked() throws {
+        let invocations = try runStopHook(goalStatus: "blocked")
+
+        #expect(invocations.contains("terminal-activity idle"))
     }
 
     @Test func roundtripsAsValidJSON() throws {

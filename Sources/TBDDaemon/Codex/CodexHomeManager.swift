@@ -59,7 +59,7 @@ enum CodexHookOverlay {
         #"tbd session-event 2>/dev/null || true; tbd terminal-activity idle 2>/dev/null || true"#
 
     static let responseCompleteCommand =
-        #"MSG=$(printf '%s' "$PAYLOAD" | jq -r '.last_assistant_message // empty' 2>/dev/null); tbd notify --type response_complete --message "$MSG" 2>/dev/null || true; tbd terminal-activity idle 2>/dev/null || true"#
+        #"MSG=$(printf '%s' "$PAYLOAD" | jq -r '.last_assistant_message // empty' 2>/dev/null); tbd notify --type response_complete --message "$MSG" 2>/dev/null || true; SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // empty' 2>/dev/null); SESSION_ID_SQL=$(printf '%s' "$SESSION_ID" | sed "s/'/''/g"); GOAL_STATUS=$(sqlite3 -readonly "$CODEX_HOME/goals_1.sqlite" "SELECT status FROM thread_goals WHERE thread_id = '$SESSION_ID_SQL' LIMIT 1;" 2>/dev/null); [ "$GOAL_STATUS" = active ] || tbd terminal-activity idle 2>/dev/null || true"#
 
     static let stopRenameCheckCommand =
         #"tbd hooks stop-rename-check 2>/dev/null || true"#
