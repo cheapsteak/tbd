@@ -117,6 +117,49 @@ struct ReplayLiveIntegrationMatrixTests {
         throw MatrixError.clientNeverReady
     }
 
+    /// Wait — WITHOUT reading the pane's pipe — until its sink has provably
+    /// overflowed and entered the M3 repair cycle.
+    ///
+    /// `repairing` is the entry signal and `repairs` the completion signal; both
+    /// are accepted so a repair that somehow completed between two polls does not
+    /// look like one that never started. Note that `overflowEvents` is NOT an
+    /// entry signal: `enqueueLocked` increments it only on the fenced /
+    /// already-repairing DROP branch, so on the steady-state path the counter
+    /// stays at zero while the repair runs. It is reported in the diagnostic
+    /// precisely because a non-zero value there means the overflow was seen and
+    /// dropped rather than repaired.
+    ///
+    /// On expiry it RETURNS the error rather than throwing it, and the caller
+    /// throws only after tearing the supervisor down. That is not ceremony: on
+    /// expiry the pane is still blasting into the vended pipe, so unwinding
+    /// straight past the test's `defer { Darwin.close(readFD) }` makes the next
+    /// fanout write raise SIGPIPE and kill the whole test process. Measured — an
+    /// early throw reported `error: Exited with unexpected signal code 13` and no
+    /// diagnostic at all. An error is only worth composing if it survives to be
+    /// read.
+    ///
+    /// It is an error rather than an `#expect` for the other half of the same
+    /// reason: only a thrown error puts the observed counters on the primary
+    /// failure line CI summaries keep (`Tests/CLAUDE.md`, assertion-hygiene rule
+    /// 4). The message separates "the firehose never filled the queue" (a harness
+    /// problem — the test's own setup did not hold) from "it overflowed and no
+    /// repair started" (a production problem), which the previous fixed sleep
+    /// collapsed into a misleading `(stats.repairs → 0) >= 1`.
+    private func overflowRepairEntryFailure(
+        fanout: PaneFanout, key: PaneKey, within budget: Duration = .seconds(30)
+    ) async -> MatrixError? {
+        let deadline = ContinuousClock.now + budget
+        while true {
+            let stats = fanout.flowStats(key: key)
+            if stats?.repairing == true || (stats?.repairs ?? 0) >= 1 { return nil }
+            guard ContinuousClock.now < deadline else {
+                return .overflowRepairNeverEntered(
+                    stats: stats, queueCap: PaneFanout.queueCap, waited: budget)
+            }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
     // MARK: - Vended-fd reading
 
     private func makeNonblocking(_ fd: Int32) {
@@ -646,15 +689,32 @@ struct ReplayLiveIntegrationMatrixTests {
         attachDone.set()
         var accumulated = await phase1
 
-        // Phase 2: deliberately do NOT read for ~2 s — the overflow window.
-        // The repair fires, pauses the pane, and parks in its reader-catch-up
-        // wait until phase 3 starts reading.
-        try await Task.sleep(for: .seconds(2))
+        // Phase 2: deliberately do NOT read — the overflow window. The repair
+        // fires, pauses the pane, and parks in its reader-catch-up wait until
+        // phase 3 starts reading.
+        //
+        // The end of this window is an OBSERVED event, not a wall-clock guess.
+        // Overflow is a byte threshold the test does not itself produce: the
+        // queue only grows once the ~64 KB pipe fills and `route()` starts
+        // taking EAGAIN, so ~192 KB has to arrive from the pane before
+        // `enqueueLocked` crosses `PaneFanout.queueCap`. A fixed sleep makes
+        // that a race against an external producer — this pane emits 700 KB–1 MB
+        // per 2 s on an idle box, but a run that dragged 28x slower delivered
+        // ~25–39 KB in the same window, never overflowed, and reddened
+        // `stats.repairs >= 1` as though production had failed to repair. Waiting
+        // for the stall itself makes the setup's postcondition true by
+        // construction, so every assertion downstream is about the repair.
+        let key = PaneKey(server: server, paneID: paneID)
+        let fanout = supervisor.fanout
+        if let failure = await overflowRepairEntryFailure(fanout: fanout, key: key) {
+            // Stop the supervisor BEFORE unwinding: the pane is still blasting,
+            // and the `defer` above closes the read end of the pipe it writes to.
+            await supervisor.stopAll()
+            throw failure
+        }
 
         // Phase 3: read continuously until at least one repair completed and
         // the healed stream carries enough post-repair tokens to judge.
-        let key = PaneKey(server: server, paneID: paneID)
-        let fanout = supervisor.fanout
         let phase1Prefix = accumulated
         accumulated += await drain(fd: readFD, deadline: .seconds(45)) { [self] data in
             guard (fanout.flowStats(key: key)?.repairs ?? 0) >= 1 else { return false }
@@ -690,7 +750,33 @@ struct ReplayLiveIntegrationMatrixTests {
     }
 }
 
-private enum MatrixError: Error {
+private enum MatrixError: Error, CustomStringConvertible {
     case clientNeverReady
     case pollDeadline(String)
+    /// The overflow window closed without the sink entering the repair cycle.
+    /// Carries the counters observed at the deadline — `nil` stats mean the sink
+    /// itself was gone.
+    case overflowRepairNeverEntered(stats: PaneFlowStats?, queueCap: Int, waited: Duration)
+
+    var description: String {
+        switch self {
+        case .clientNeverReady:
+            return "the tmux control-mode command client never became ready"
+        case .pollDeadline(let what):
+            return "timed out polling for: \(what)"
+        case .overflowRepairNeverEntered(let stats, let queueCap, let waited):
+            guard let stats else {
+                return "no repair cycle after \(waited) of firehose with no reader — "
+                    + "the sink had vanished (detached or superseded), so nothing was routing"
+            }
+            let facts = "queuedHighWater=\(stats.queuedHighWater) of queueCap=\(queueCap), "
+                + "queuedBytes=\(stats.queuedBytes), overflowEvents=\(stats.overflowEvents), "
+                + "droppedBytes=\(stats.droppedBytes), repairing=\(stats.repairing), "
+                + "repairs=\(stats.repairs)"
+            let verdict = stats.overflowEvents > 0
+                ? "the queue DID overflow and the sink dropped instead of repairing — production"
+                : "the queue never reached the cap, so the setup never induced an overflow — harness"
+            return "no repair cycle after \(waited) of firehose with no reader: \(verdict). \(facts)"
+        }
+    }
 }
