@@ -58,6 +58,8 @@ enum CodexHookOverlay {
     static let sessionStartCommand =
         #"tbd session-event 2>/dev/null || true; tbd terminal-activity idle 2>/dev/null || true"#
 
+    // Only an active goal can cross a Stop hook into autonomous continuation.
+    // Paused and limited goals have stopped the current run, so they publish idle.
     static let responseCompleteCommand =
         #"MSG=$(printf '%s' "$PAYLOAD" | jq -r '.last_assistant_message // empty' 2>/dev/null); tbd notify --type response_complete --message "$MSG" 2>/dev/null || true; SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // empty' 2>/dev/null); SESSION_ID_SQL=$(printf '%s' "$SESSION_ID" | sed "s/'/''/g"); GOAL_STATUS=$(sqlite3 -readonly "$CODEX_HOME/goals_1.sqlite" "SELECT status FROM thread_goals WHERE thread_id = '$SESSION_ID_SQL' ORDER BY updated_at_ms DESC, created_at_ms DESC, rowid DESC LIMIT 1;" 2>/dev/null); [ "$GOAL_STATUS" = active ] || tbd terminal-activity idle 2>/dev/null || true"#
 

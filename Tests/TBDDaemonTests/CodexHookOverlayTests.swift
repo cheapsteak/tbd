@@ -10,7 +10,8 @@ import TBDShared
         sessionID: String = "a1b2c3d4-e5f6-4789-abcd-0123456789ab",
         priorGoalStatus: String? = nil,
         assistantMessage: String = "done",
-        goalTimestampsTie: Bool = false
+        goalTimestampsTie: Bool = false,
+        createdAtBreaksUpdateTie: Bool = false
     ) throws -> [String] {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-codex-stop-hook-\(UUID().uuidString)", isDirectory: true)
@@ -37,6 +38,8 @@ import TBDShared
         // relaxes that constraint to exercise a possible future schema shape.
         let threadIDConstraint = priorGoalStatus == nil ? "PRIMARY KEY NOT NULL" : "NOT NULL"
         let currentTimestamp = goalTimestampsTie ? 1 : 2
+        let currentCreatedAt = createdAtBreaksUpdateTie ? 2 : currentTimestamp
+        let currentUpdatedAt = createdAtBreaksUpdateTie ? 1 : currentTimestamp
         let priorGoalInsert = priorGoalStatus.map { status in
             """
             INSERT INTO thread_goals (
@@ -46,6 +49,17 @@ import TBDShared
             );
             """
         } ?? ""
+        let currentGoalInsert = """
+            INSERT INTO thread_goals (
+                thread_id, goal_id, objective, status, created_at_ms, updated_at_ms
+            ) VALUES (
+                '\(sessionID)', 'goal-id', 'Test objective', '\(goalStatus)',
+                \(currentCreatedAt), \(currentUpdatedAt)
+            );
+            """
+        let goalInserts = createdAtBreaksUpdateTie
+            ? "\(currentGoalInsert)\n\(priorGoalInsert)"
+            : "\(priorGoalInsert)\n\(currentGoalInsert)"
         databaseProcess.arguments = [
             directory.appendingPathComponent("goals_1.sqlite").path,
             """
@@ -62,13 +76,7 @@ import TBDShared
                 created_at_ms INTEGER NOT NULL,
                 updated_at_ms INTEGER NOT NULL
             );
-            \(priorGoalInsert)
-            INSERT INTO thread_goals (
-                thread_id, goal_id, objective, status, created_at_ms, updated_at_ms
-            ) VALUES (
-                '\(sessionID)', 'goal-id', 'Test objective', '\(goalStatus)',
-                \(currentTimestamp), \(currentTimestamp)
-            );
+            \(goalInserts)
             """
         ]
         databaseProcess.standardOutput = Pipe()
@@ -81,7 +89,14 @@ import TBDShared
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
         process.arguments = ["-c", CodexHookOverlay.stopCommand]
         var environment = ProcessInfo.processInfo.environment
-        environment["PATH"] = "\(directory.path):/usr/bin:/bin"
+        let inheritedPath = environment["PATH"] ?? ""
+        environment["PATH"] = ([
+            directory.path,
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+        ] + inheritedPath.split(separator: ":").map(String.init)).joined(separator: ":")
         environment["CODEX_HOME"] = directory.path
         environment["TBD_HOOK_TEST_LOG"] = logPath.path
         process.environment = environment
@@ -224,6 +239,16 @@ import TBDShared
         #expect(invocations.contains("terminal-activity idle"))
     }
 
+    @Test func stopHookUsesCreatedAtWhenUpdatedTimesTieBeforeInsertionOrder() throws {
+        let invocations = try runStopHook(
+            goalStatus: "active",
+            priorGoalStatus: "complete",
+            createdAtBreaksUpdateTie: true
+        )
+
+        #expect(!invocations.contains("terminal-activity idle"))
+    }
+
     @Test func stopHookPublishesIdleWhenCodexGoalIsComplete() throws {
         let invocations = try runStopHook(goalStatus: "complete")
 
@@ -233,6 +258,13 @@ import TBDShared
 
     @Test func stopHookPublishesIdleWhenCodexGoalIsBlocked() throws {
         let invocations = try runStopHook(goalStatus: "blocked")
+
+        #expect(invocations.contains("terminal-activity idle"))
+    }
+
+    @Test(arguments: ["paused", "usage_limited", "budget_limited"])
+    func stopHookPublishesIdleWhenCodexGoalCannotContinue(status: String) throws {
+        let invocations = try runStopHook(goalStatus: status)
 
         #expect(invocations.contains("terminal-activity idle"))
     }
