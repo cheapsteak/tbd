@@ -115,7 +115,7 @@ actor TmuxServerResourceCoordinator {
 /// found. The Watch Desk reads this verdict to decide whether to spawn an agent
 /// and whether to revoke a running judge's lease — both acts that may follow
 /// only from evidence.
-public enum WindowExistence: Sendable, Equatable {
+public enum TmuxTargetExistence: Sendable, Equatable {
     /// tmux resolved the window id.
     case exists
     /// PROOF the window is gone: tmux looked and said it could not find it.
@@ -161,7 +161,11 @@ public struct TmuxManager: Sendable {
     /// precedence over `dryRunWindowIsDead`. Only this seam can express the third
     /// answer — `.unverifiable` — which the Bool hook cannot say and which is
     /// exactly the case the desk must not act on.
-    public let dryRunWindowExistence: (@Sendable (String, String) -> WindowExistence?)?
+    public let dryRunWindowExistence: (@Sendable (String, String) -> TmuxTargetExistence?)?
+    /// Optional test hook consulted by `serverExistence` in dryRun mode. Without
+    /// it dryRun reports every server as up, which cannot express the
+    /// unreachable-server case the stale-server self-heal must refuse to act on.
+    public let dryRunServerExistence: (@Sendable (String) -> TmuxTargetExistence?)?
     /// Optional test hook consulted by `capturePaneOutput` and
     /// `capturePaneWithAnsi` in dryRun mode:
     /// (server, paneID) → pane text. Without it, dryRun captures return "",
@@ -263,7 +267,7 @@ public struct TmuxManager: Sendable {
         }
     }
 
-    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunWindowExistence: (@Sendable (String, String) -> WindowExistence?)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunListSessions: (@Sendable (String) -> [TmuxSessionInfo])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunCreateWindowError: (@Sendable (String) -> Error?)? = nil, dryRunRespawnWindowError: (@Sendable (String) -> Error?)? = nil, dryRunKillWindowError: (@Sendable (String, String) -> Error?)? = nil, dryRunPaneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil, dryRunSessionSpared: (@Sendable (String, String) -> Bool)? = nil, dryRunPaneWindowID: (@Sendable (String, String) -> String?)? = nil, dryRunPasteBytes: (@Sendable (String, String, Data) -> Void)? = nil, realModeWindowExistsOverride: (@Sendable (String, String) -> Bool?)? = nil, realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout) {
+    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunWindowExistence: (@Sendable (String, String) -> TmuxTargetExistence?)? = nil, dryRunServerExistence: (@Sendable (String) -> TmuxTargetExistence?)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunListSessions: (@Sendable (String) -> [TmuxSessionInfo])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunCreateWindowError: (@Sendable (String) -> Error?)? = nil, dryRunRespawnWindowError: (@Sendable (String) -> Error?)? = nil, dryRunKillWindowError: (@Sendable (String, String) -> Error?)? = nil, dryRunPaneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil, dryRunSessionSpared: (@Sendable (String, String) -> Bool)? = nil, dryRunPaneWindowID: (@Sendable (String, String) -> String?)? = nil, dryRunPasteBytes: (@Sendable (String, String, Data) -> Void)? = nil, realModeWindowExistsOverride: (@Sendable (String, String) -> Bool?)? = nil, realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout) {
         self.dryRun = dryRun
         self.subprocessTimeout = subprocessTimeout
         self.counter = Counter()
@@ -271,6 +275,7 @@ public struct TmuxManager: Sendable {
         self.dryRunRecorder = dryRunRecorder
         self.dryRunWindowIsDead = dryRunWindowIsDead
         self.dryRunWindowExistence = dryRunWindowExistence
+        self.dryRunServerExistence = dryRunServerExistence
         self.dryRunListWindows = dryRunListWindows
         self.dryRunListSessions = dryRunListSessions
         self.dryRunCapturePane = dryRunCapturePane
@@ -929,7 +934,7 @@ public struct TmuxManager: Sendable {
     /// without a tmux server — the branch that licenses spawning an agent and
     /// revoking a judge's lease is the last one that should be covered only by
     /// dry-run fixtures that never reach it.
-    static func classifyWindowExistence(status: Int32, output: String) -> WindowExistence {
+    static func classifyWindowExistence(status: Int32, output: String) -> TmuxTargetExistence {
         // Narrow by construction: only tmux saying it looked and found nothing is
         // an answer. `error connecting to <socket>`, a lost or version-mismatched
         // server, a usage error — all of those are the query failing, and reading
@@ -1573,7 +1578,7 @@ public struct TmuxManager: Sendable {
     /// reason. This is the desk's first of three consultations, and a caller that
     /// reacts to absence by spawning an agent or revoking a lease must be able to
     /// tell tmux's answer from tmux's silence.
-    public func windowExistence(server: String, windowID: String) async -> WindowExistence {
+    public func windowExistence(server: String, windowID: String) async -> TmuxTargetExistence {
         if dryRun {
             if let answer = dryRunWindowExistence?(server, windowID) { return answer }
             return (dryRunWindowIsDead?(windowID) ?? false) ? .gone : .exists
@@ -1611,14 +1616,43 @@ public struct TmuxManager: Sendable {
 
     /// Check whether a tmux server is running by querying list-sessions.
     public func serverExists(server: String) async -> Bool {
-        if dryRun { return true }
+        await serverExistence(server: server) == .exists
+    }
+
+    /// Whether a tmux server is running, keeping "there is no server on this
+    /// socket" apart from "I could not find out" — the same split
+    /// `windowExistence` makes, for callers whose negative branch mutates state.
+    public func serverExistence(server: String) async -> TmuxTargetExistence {
+        if dryRun { return dryRunServerExistence?(server) ?? .exists }
+        let args = ["-L", server, "list-sessions"]
         do {
-            let args = ["-L", server, "list-sessions"]
             _ = try await runTmux(args)
-            return true
+            return .exists
+        } catch TmuxError.commandFailed(_, let status, let output) {
+            return Self.classifyServerExistence(status: status, output: output)
         } catch {
-            return false
+            return .unverifiable(error: String(describing: error))
         }
+    }
+
+    /// Classify a failed `list-sessions`.
+    ///
+    /// A server's absence reads differently from a window's: tmux does not say
+    /// `can't find` when nothing is listening, it says `no server running on
+    /// <socket>`, or the connect itself fails because the socket file is not
+    /// there. Those two are proof. A protocol-version mismatch, a permission
+    /// error, a connection refused by a server mid-restart — those are a server
+    /// we could not reach, and reading them as "no server" is what lets a
+    /// destructive sweep act on a transient fault.
+    static func classifyServerExistence(status: Int32, output: String) -> TmuxTargetExistence {
+        let lowered = output.lowercased()
+        if lowered.contains("no server running")
+            || lowered.contains("no such file or directory") {
+            return .gone
+        }
+        return .unverifiable(
+            error: "tmux list-sessions exited \(status): "
+                + output.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     // MARK: - Private

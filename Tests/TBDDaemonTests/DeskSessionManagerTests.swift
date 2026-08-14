@@ -54,7 +54,7 @@ private final class DeadWindows: @unchecked Sendable {
         return dead.contains(windowID)
     }
 
-    func existence(_ windowID: String) -> WindowExistence {
+    func existence(_ windowID: String) -> TmuxTargetExistence {
         lock.lock(); defer { lock.unlock() }
         if unverifiable.contains(windowID) {
             return .unverifiable(error: "tmux list-panes exited 1: error connecting to socket")
@@ -1736,6 +1736,46 @@ extension TBDHomeSerialized {
             #expect(
                 errors.first?.message?.contains("could not start an agent") == true,
                 "the notification must name what stopped: \(errors.first?.message ?? "nil")")
+        }
+
+        /// `resetRecoveryBudget` has three callers, and a delivered nudge is only
+        /// one of them. The other two are worth pinning because the tempting
+        /// place to put a reset — inside the spawn — is exactly where it must not
+        /// go, and these two sit close enough to that mistake to be mistaken for
+        /// it.
+        ///
+        /// Closing the desk and building a new one is one path through both
+        /// remaining resets — `closeDeskSession` clears the budget and the
+        /// fresh-create site clears it again — and the two cannot be told apart
+        /// from outside, because a closed desk is archived and the next `ensure`
+        /// always builds a new one. So this pins what is actually observable and
+        /// what actually matters: a budget spent by one desk's abandoned
+        /// replacements is not charged to its successor.
+        @Test("a desk built after a close starts with a full recovery budget")
+        func testFreshDeskStartsWithFullRecoveryBudget() async throws {
+            let f = try makeDeskFixture(tag: "staff-budget-fresh")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            for _ in 1...3 { _ = try await killAllAndTick(f, desk: desk.id) }
+            let capped = try await killAllAndTick(f, desk: desk.id)
+            #expect(
+                capped == (try await f.db.terminals.list(worktreeID: desk.id).count),
+                "the first desk must be at its cap for this test to mean anything")
+
+            await f.manager.closeDeskSession()
+            let fresh = try await f.manager.ensureDeskSession(mode: .daywatch)
+            #expect(fresh.id != desk.id)
+
+            // Three full attempts again, on the new desk.
+            var count = try await f.db.terminals.list(worktreeID: fresh.id).count
+            for attempt in 1...3 {
+                let after = try await killAllAndTick(f, desk: fresh.id)
+                #expect(
+                    after == count + 1,
+                    "attempt \(attempt) on a fresh desk must not be charged to the old one")
+                count = after
+            }
         }
 
         /// The desk asks tmux three read-only questions, and until now only one of

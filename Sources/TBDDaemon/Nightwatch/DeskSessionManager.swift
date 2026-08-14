@@ -134,16 +134,21 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// shift accumulates one per tick — the bug this rail was built to end. Three
     /// bounds the wreckage at three abandoned sessions and then says so out loud.
     ///
-    /// **Status: a compiled theory, and knowingly so.** By the battery in
-    /// `docs/theory-placement.md` this is a count-shaped constant two reasonable
-    /// projects could set differently, which puts it in the contested tier where
-    /// what matters is who chose it and how cheaply they can change their mind.
-    /// Nobody has chosen it yet: the reasoning above is the rationale for a
-    /// number, not a record of a human's decision on it, and no committed spec
-    /// covers it. It is written down here rather than left implicit so the
-    /// decision is visible to whoever makes it. That the bound must exist is not
-    /// in question — its absence is the incident this rail was built for — only
-    /// where the number should live.
+    /// **Status: a compiled theory, held deliberately.** By the battery in
+    /// `docs/theory-placement.md` a count-shaped constant two reasonable projects
+    /// could set differently sits in the contested tier, where what matters is
+    /// who chose it and how cheaply they can change their mind. The repo owner
+    /// reviewed this constant during review of the PR that introduced it and
+    /// directed that it stay at three, with the rationale above written down and
+    /// the exhaustion behaviour pinned by tests. That is the choice; this comment
+    /// is its record.
+    ///
+    /// What remains open is placement, not the number: whether the threshold
+    /// eventually belongs in the redesign's user-land path rather than here. It
+    /// cannot move there as things stand — the bound guards a spawn the daemon
+    /// makes on its own tick, and a sweep-program cannot refuse a spawn it never
+    /// sees — so relocating it means relocating the rail, which is the
+    /// fleet-supervision redesign's business rather than this constant's.
     private static let maxConsecutiveRecoverySpawnsWithoutNudge = 3
 
     // MARK: - Init
