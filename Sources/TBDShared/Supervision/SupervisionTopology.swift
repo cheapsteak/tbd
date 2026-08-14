@@ -68,6 +68,22 @@ public struct SupervisionProject: Sendable, Equatable, Identifiable {
 
     public var id: String { name }
 
+    /// Whether this project can have a directory of its own under
+    /// `~/tbd/supervision/projects/` — where its playbook, journal, proposals,
+    /// and programs would live.
+    ///
+    /// False only for a name that is not one path component. Resolution keeps
+    /// such a project whole: it has its mark, its mode, and its line in the
+    /// readout, and only the directory is unavailable until the repo is
+    /// renamed. Refusing to resolve it would take the whole fleet's coverage
+    /// offline over one repo's display name, in a file the operator never
+    /// edited.
+    ///
+    /// This is a function of the name and nothing else, so a declared project
+    /// and a singleton with the same name answer identically: a validity
+    /// condition, not a declared-ness flag.
+    public var hasUsableDirectory: Bool { SupervisionFile.isSafeProjectName(name) }
+
     public init(name: String, repos: [UUID], policy: SupervisionPolicySource,
                 sweep: SupervisionSweepSelection?, mark: Bool,
                 declaredModes: [String], activeMode: String,
@@ -189,6 +205,17 @@ public enum SupervisionTopology {
                 sweep: nil, file: file))
         }
         return projects.sorted { $0.name < $1.name }
+    }
+
+    /// The resolved projects that cannot have a directory of their own, by
+    /// name, sorted. What the daemon reports as
+    /// `SupervisionWarningCode.unusableProjectName`: the projects are supervised
+    /// like any other, but nothing can be written beside them until the repo is
+    /// renamed.
+    public static func projectsWithoutUsableDirectory(
+        in projects: [SupervisionProject]
+    ) -> [String] {
+        projects.filter { !$0.hasUsableDirectory }.map(\.name).sorted()
     }
 
     private static func project(

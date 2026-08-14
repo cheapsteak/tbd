@@ -2082,6 +2082,12 @@ public enum SupervisionWarningCode: String, Codable, Sendable {
     /// on but nothing is being supervised. The loud case: the CLI says so in
     /// words a human reads, and this code is the same fact for a program.
     case noProjectsOn
+    /// One or more projects have a name that cannot be a directory, so nothing
+    /// can be written beside them — no playbook, journal, proposals, or
+    /// programs (`SupervisionTopology.projectsWithoutUsableDirectory(in:)`).
+    /// Supervision covers them regardless; the fix is renaming the repo, and
+    /// the message names which ones.
+    case unusableProjectName
 }
 
 /// One warning on the status readout: a stable code, and the sentence a human

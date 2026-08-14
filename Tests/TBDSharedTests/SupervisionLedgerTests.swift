@@ -210,6 +210,14 @@ import Foundation
         #expect(warning?["code"] as? String == "noProjectsOn")
     }
 
+    @Test func warningCodesAreTheDocumentedStrings() throws {
+        #expect(SupervisionWarningCode.noProjectsOn.rawValue == "noProjectsOn")
+        #expect(SupervisionWarningCode.unusableProjectName.rawValue == "unusableProjectName")
+        let decoded = try JSONDecoder().decode(
+            SupervisionWarningCode.self, from: Data("\"unusableProjectName\"".utf8))
+        #expect(decoded == .unusableProjectName)
+    }
+
     @Test func everyResultDTOCarriesASchemaVersion() throws {
         let payloads: [any Encodable] = [
             SupervisionStatus(brake: .engaged, effectivelySupervising: false,

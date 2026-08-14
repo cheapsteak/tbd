@@ -144,6 +144,70 @@ private func generatedRepos(count: Int, using generator: inout SplitMix64) -> [S
         #expect(thrown?.description.contains("acme-web") == true)
     }
 
+    /// A repo displayed as `acme/web` is a project whose name cannot be a
+    /// directory. It is still supervised — mark, mode, policy, supervisor all
+    /// intact — because the name never came from `supervision.json` and taking
+    /// the fleet's coverage offline over one repo's display name would be the
+    /// wrong trade. What it loses is only the directory.
+    @Test func aSingletonWithAnUnusableNameStillResolves() throws {
+        let awkward = [SupervisionRepo(id: repoA, name: "acme/web"),
+                       SupervisionRepo(id: repoB, name: "acme-api")]
+        let file = SupervisionFile(
+            supervised: ["acme/web"], modes: ["acme/web": .bare("autonomous")])
+        let projects = try SupervisionTopology.resolve(file: file, repos: awkward)
+
+        let escaping = try #require(projects.first { $0.name == "acme/web" })
+        #expect(escaping.mark)
+        #expect(escaping.activeMode == "autonomous")
+        #expect(escaping.repos == [repoA])
+        #expect(escaping.policy == .repo(repoA))
+        #expect(escaping.supervisor == .hostedDesk)
+        // …and the one thing it cannot have.
+        #expect(!escaping.hasUsableDirectory)
+        #expect(projects.first { $0.name == "acme-api" }?.hasUsableDirectory == true)
+        #expect(SupervisionTopology.projectsWithoutUsableDirectory(in: projects) == ["acme/web"])
+    }
+
+    /// The other half of the same fact, kept in its own test so that breaking
+    /// the path helper and breaking the usability condition redden different
+    /// tests instead of the same one.
+    @Test func anUnusableProjectNameYieldsNoDirectoryPath() {
+        #expect(TBDConstants.supervisionProjectDir(
+            project: "acme/web", environment: ["TBD_HOME": "/tmp/tbd-unusable"]) == nil)
+    }
+
+    /// One repo's display name never takes the rest of the fleet's coverage
+    /// offline — the same trade that keeps a phantom member rather than
+    /// failing resolution.
+    @Test func anUnusableNameLeavesTheRestOfTheFleetResolved() throws {
+        let awkward = [SupervisionRepo(id: repoA, name: "acme/web"),
+                       SupervisionRepo(id: repoB, name: "acme-api"),
+                       SupervisionRepo(id: repoC, name: "tbd")]
+        let projects = try SupervisionTopology.resolve(file: SupervisionFile(), repos: awkward)
+        #expect(projects.count == 3)
+        #expect(Set(projects.map(\.name)) == ["acme/web", "acme-api", "tbd"])
+        #expect(Set(projects.flatMap(\.repos)) == Set(awkward.map(\.id)))
+    }
+
+    /// Directory usability is a function of the name alone, so it cannot become
+    /// a declared-ness flag by another route: the same name answers the same
+    /// whether the project was declared or fell out of the collapse.
+    @Test func directoryUsabilityDoesNotDistinguishDeclaredFromSingleton() throws {
+        let repos = [SupervisionRepo(id: repoA, name: "acme-web")]
+        let implicit = try SupervisionTopology.resolve(file: SupervisionFile(), repos: repos)
+        let declared = try SupervisionTopology.resolve(
+            file: SupervisionFile(projects: [
+                "acme-web": .init(repos: [repoA], policy: .repo(repoA)),
+            ]), repos: repos)
+        #expect(implicit == declared)
+        #expect(implicit.map(\.hasUsableDirectory) == declared.map(\.hasUsableDirectory))
+    }
+
+    @Test func aFleetOfUsableNamesReportsNothing() throws {
+        let projects = try SupervisionTopology.resolve(file: SupervisionFile(), repos: repos)
+        #expect(SupervisionTopology.projectsWithoutUsableDirectory(in: projects).isEmpty)
+    }
+
     @Test func aRejectedFileServesNoPartialResolution() {
         let file = SupervisionFile(projects: [
             "acme-checkout": .init(repos: [repoA], policy: .repo(repoA)),

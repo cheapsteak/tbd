@@ -488,14 +488,18 @@ public struct SupervisionFile: Codable, Sendable, Equatable {
         }
     }
 
-    /// A declared project name has to be one safe path component: it names a
-    /// directory under `~/tbd/supervision/projects/` holding the project's
-    /// playbook, journal, and programs.
+    /// Whether a project name can be one path component — the name of the
+    /// directory under `~/tbd/supervision/projects/` that holds the project's
+    /// playbook, journal, proposals, and programs.
+    ///
+    /// Deliberately a path-safety test and nothing more. A singleton project is
+    /// named by its repo's display name, so anything this rejects is a repo an
+    /// operator cannot give a supervision directory; an over-tight rule would
+    /// start refusing ordinary names for taste. Spaces, dots inside the name,
+    /// leading dots, and non-ASCII are all fine.
     public static func isSafeProjectName(_ name: String) -> Bool {
         guard !name.isEmpty, name != ".", name != ".." else { return false }
-        guard !name.contains("/"), !name.contains("\0") else { return false }
-        guard !name.hasPrefix(" "), !name.hasSuffix(" ") else { return false }
-        return true
+        return !name.contains("/") && !name.contains("\0")
     }
 }
 

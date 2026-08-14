@@ -25,8 +25,41 @@ import Foundation
     }
 
     @Test func projectDirIsNamedByTheProject() {
-        #expect(TBDConstants.supervisionProjectDir(project: "acme-checkout", environment: env).path
+        #expect(TBDConstants.supervisionProjectDir(project: "acme-checkout", environment: env)?.path
             == "/tmp/tbd-supervision-paths/supervision/projects/acme-checkout")
+    }
+
+    /// A singleton project is named by its repo's display name, which nothing
+    /// in TBD constrains. The helper must be incapable of composing a path out
+    /// of one that traverses.
+    @Test(arguments: ["acme/web", "..", ".", "", "../../etc", "acme/../../etc"])
+    func projectDirRefusesANameThatIsNotOnePathComponent(_ name: String) {
+        #expect(TBDConstants.supervisionProjectDir(project: name, environment: env) == nil)
+    }
+
+    @Test(arguments: ["acme.web", "acme..web", ".hidden", "acme web", " acme ",
+                      "café-ünïcode", "acme-web."])
+    func projectDirAcceptsUnusualButSafeNames(_ name: String) {
+        let url = TBDConstants.supervisionProjectDir(project: name, environment: env)
+        #expect(url?.deletingLastPathComponent().path
+            == "/tmp/tbd-supervision-paths/supervision/projects")
+        #expect(url?.lastPathComponent == name)
+    }
+
+    /// The guarantee stated as a property rather than as a list of bad inputs:
+    /// whatever the name, the composed path never leaves the projects
+    /// directory.
+    @Test func aComposedProjectDirNeverEscapesTheSupervisionDirectory() {
+        let names = ["acme/web", "..", ".", "", "acme-checkout", " acme ", "acme..web",
+                     "../..", "a/b/c", "\u{0}bad", "café"]
+        let root = TBDConstants.supervisionDir(environment: env)
+            .appendingPathComponent("projects").standardizedFileURL.path
+        for name in names {
+            guard let url = TBDConstants.supervisionProjectDir(project: name, environment: env)
+            else { continue }
+            #expect(url.standardizedFileURL.path.hasPrefix(root + "/"))
+            #expect(url.standardizedFileURL.deletingLastPathComponent().path == root)
+        }
     }
 
     @Test func pathsFallBackToHomeTbdWithoutTBDHome() {
@@ -260,12 +293,24 @@ import Foundation
         }
     }
 
-    @Test(arguments: ["", ".", "..", "acme/checkout", " acme"])
-    func anUnusableProjectNameIsRejected(_ name: String) {
+    /// A declared name came from the file, so refusing it refuses the
+    /// operator's own edit — the loud rejection is right here.
+    @Test(arguments: ["", ".", "..", "acme/checkout"])
+    func anUnusableDeclaredProjectNameIsRejected(_ name: String) {
         let file = SupervisionFile(projects: [name: .init(repos: [repoA], policy: .operator)])
         #expect(throws: SupervisionFileError.invalidProjectName(project: name)) {
             try file.validate()
         }
+    }
+
+    /// The guard is path safety, not taste: an over-tight rule would start
+    /// refusing ordinary repo names, since a singleton's name is a repo's
+    /// display name.
+    @Test(arguments: [" acme ", "acme.web", "acme..web", ".hidden", "acme web", "café-ünïcode"])
+    func anUnusualButSafeProjectNameIsAccepted(_ name: String) throws {
+        let file = SupervisionFile(projects: [name: .init(repos: [repoA], policy: .operator)])
+        try file.validate()
+        #expect(SupervisionFile.isSafeProjectName(name))
     }
 
     @Test func aSelectionOutsideTheDeclaredListIsRejected() {
