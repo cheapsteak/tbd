@@ -142,9 +142,6 @@ struct QueuedPromptDeliveryTests {
             if finished.happened { return }
             try? await Task.sleep(for: .milliseconds(5))
         }
-        // The polling task may resume after the deadline even though this
-        // monotone completion became true while it was starved.
-        if finished.happened { return }
         waiter.cancel()
         Issue.record(
             """
@@ -248,9 +245,6 @@ struct QueuedPromptDeliveryTests {
             if await condition() { return }
             try? await Task.sleep(for: .milliseconds(5))
         }
-        // A post-deadline read is authoritative when scheduling overshoots the
-        // bound after this monotone condition has already become true.
-        if await condition() { return }
         Issue.record(
             "timed out after \(seconds)s waiting until \(description)",
             sourceLocation: sourceLocation)
