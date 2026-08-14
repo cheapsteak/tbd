@@ -260,14 +260,14 @@ public struct GitManager: Sendable {
     }
 
     /// True if `refs/heads/<name>` exists locally. Used to pick a
-    /// non-clobbering local branch name before force-fetching a pull ref.
+    /// non-clobbering local branch name before fetching a pull ref into it.
     ///
     /// Fails closed, unlike the read-only `refExists`: this result gates
-    /// whether `fetchPullRequestHead`'s `+refs/pull/<n>/head:refs/heads/<name>`
-    /// force-refspec is safe to run against `name`. Only the benign "ref
-    /// missing" case (`show-ref --quiet` exits 1) is treated as absent — any
-    /// other failure (timeout, spawn failure, other exit codes) is rethrown so
-    /// a bad answer here can't let the force-fetch silently clobber a branch.
+    /// whether `fetchPullRequestHead`'s `refs/pull/<n>/head:refs/heads/<name>`
+    /// refspec is safe to run against `name`. Only the benign "ref missing"
+    /// case (`show-ref --quiet` exits 1) is treated as absent — any other
+    /// failure (timeout, spawn failure, other exit codes) is rethrown so a bad
+    /// answer here can't let the fetch move a branch it should have left alone.
     public func localBranchExists(repoPath: String, name: String) async throws -> Bool {
         do {
             _ = try await run(arguments: ["show-ref", "--verify", "--quiet", "refs/heads/\(name)"], at: repoPath)
@@ -278,12 +278,31 @@ public struct GitManager: Sendable {
     }
 
     /// Fetches a PR head (same-repo or fork — `refs/pull/<n>/head` exists for
-    /// both) into a local branch. The `+` force-updates, so callers MUST pass a
-    /// branch name verified free via `localBranchExists` / uniquification, or an
-    /// unrelated same-named branch is silently rewritten.
+    /// both) into a local branch.
+    ///
+    /// The refspec is deliberately **not** forced. Git therefore refuses to
+    /// rewrite an existing `refs/heads/<localBranch>` whose tip the pull head
+    /// does not contain: it exits 1 with `! [rejected] refs/pull/<n>/head ->
+    /// <localBranch> (non-fast-forward)` and leaves the branch where it stood.
+    /// A name that became taken after the caller's `localBranchExists` probe
+    /// then costs an attempt instead of a user's commits, and the failure
+    /// carries git's own word that this attempt did not create the branch —
+    /// which is what `WorktreeLifecycle.gitRefusedToCreateBranch` reads to keep
+    /// cleanup from deleting it.
+    ///
+    /// Two residuals, both verified against git 2.50, and both reasons callers
+    /// still pass a name verified free via `localBranchExists` /
+    /// uniquification rather than leaning on git to refuse:
+    ///
+    /// - A colliding branch the pull head *does* contain fast-forwards rather
+    ///   than being refused. No commits are lost (the old tip stays reachable
+    ///   from the new one), but the ref moves.
+    /// - A colliding branch checked out in another worktree fails differently,
+    ///   exit 128 with `fatal: refusing to fetch into branch '<ref>' checked
+    ///   out at '<path>'`, whether or not the update would fast-forward.
     public func fetchPullRequestHead(repoPath: String, number: Int, localBranch: String) async throws {
         _ = try await run(
-            arguments: ["fetch", "origin", "+refs/pull/\(number)/head:refs/heads/\(localBranch)"],
+            arguments: ["fetch", "origin", "refs/pull/\(number)/head:refs/heads/\(localBranch)"],
             at: repoPath
         )
     }

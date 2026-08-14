@@ -194,11 +194,13 @@ extension WorktreeLifecycle {
 
     /// Returns `base`, or `base-2`, `base-3`, … — the first name for which no
     /// local `refs/heads/<name>` exists. Mirrors `uniqueFolderName`'s loop but
-    /// probes git refs instead of paths: the PR-head fetch uses a `+` force
-    /// refspec, so a colliding name would silently rewrite an unrelated branch;
-    /// this picks a free name first. Caps at -1000; if every candidate through
-    /// `base-1000` is taken it THROWS rather than returning the taken `base` —
-    /// returning it would let the force refspec clobber that existing branch.
+    /// probes git refs instead of paths: the PR-head fetch writes
+    /// `refs/heads/<name>` directly, so aiming it at a colliding name either
+    /// fails the create outright or — when the pull head contains that branch —
+    /// fast-forwards someone else's ref; this picks a free name first. Caps at
+    /// -1000; if every candidate through `base-1000` is taken it THROWS rather
+    /// than returning the taken `base`, which would aim the fetch at a branch
+    /// this attempt does not own.
     private func uniqueLocalBranchName(repoPath: String, base: String) async throws -> String {
         if try await git.localBranchExists(repoPath: repoPath, name: base) == false {
             return base
@@ -210,7 +212,7 @@ extension WorktreeLifecycle {
             }
         }
         throw WorktreeLifecycleError.createFailed(
-            "no free local branch name for '\(base)' after 1000 attempts; refusing to reuse it (the force-fetch refspec would clobber the existing branch)")
+            "no free local branch name for '\(base)' after 1000 attempts; refusing to reuse it (the pull-head fetch would write over the existing branch)")
     }
 
     /// Phase 2: Async. Performs git fetch, git worktree add, tmux setup,
@@ -300,9 +302,7 @@ extension WorktreeLifecycle {
                     if checkoutPRHead, let prNumber = worktree.prNumber {
                         // Fork-PR checkout: the PR head has no local ref, so
                         // fetch refs/pull/<n>/head into a collision-free local
-                        // branch (the `+` refspec force-updates, so reusing an
-                        // existing ref name would silently rewrite an unrelated
-                        // branch), then check it out via the plain
+                        // branch, then check it out via the plain
                         // existing-branch path. No fork remote is ever added.
                         //
                         // Decorated same-repo rows (prNumber set, checkoutPRHead
@@ -315,28 +315,22 @@ extension WorktreeLifecycle {
                         // Re-probe the chosen name immediately before the fetch,
                         // and keep the tri-state, for the same reason the other
                         // legs do: cleanup must be able to tell a branch this
-                        // attempt made from one that was already standing.
-                        //
-                        // This leg needs its own probe more than they do, and
-                        // gets less out of it. A `+` refspec force-updates, so
-                        // the fetch never refuses on a collision — git can never
-                        // say "a branch named … already exists" here, and
-                        // `cleanUpFailedWorktreeAdd`'s gate 1, the one that
-                        // closes the probe→attempt window on every other leg, is
-                        // therefore dead on this one. The probe is the only gate
-                        // left.
-                        //
-                        // What it buys, stated exactly: it **narrows** the
-                        // window to the gap between this call and the fetch's
-                        // ref write rather than closing it — a branch an
-                        // external actor creates inside that gap is still
-                        // indistinguishable from one the fetch made, and no
-                        // probe can fix that while the refspec is forced. What
-                        // it does close is the two states we can observe: a
-                        // branch already standing under this name (`true`) and a
-                        // probe that did not answer (`nil`) both block the
-                        // delete. Measuring also keeps the answer honest if
+                        // attempt made from one that was already standing. It
+                        // closes the two states we can observe — a branch
+                        // already standing under this name (`true`) and a probe
+                        // that did not answer (`nil`) both block the delete —
+                        // and keeps the answer honest if
                         // `uniqueLocalBranchName`'s contract ever loosens.
+                        //
+                        // The probe→fetch window is not its job to close, and it
+                        // cannot: a branch an external actor creates inside that
+                        // gap is invisible to a probe taken before it. That is
+                        // gate 1's job on every leg, and it works here because
+                        // `fetchPullRequestHead`'s refspec is unforced — git
+                        // rejects the update instead of rewriting the branch,
+                        // and `gitRefusedToCreateBranch` reads the rejection.
+                        // The residual is a collision the pull head *contains*,
+                        // which fast-forwards silently; see that method.
                         createdBranchPreExisted = try? await git.localBranchExists(
                             repoPath: repo.path, name: localBranch
                         )
@@ -833,25 +827,40 @@ extension WorktreeLifecycle {
         return .repoLevel
     }
 
-    /// True when git's stderr says it *refused to create* the branch because
-    /// the name was already taken ("fatal: a branch named 'x' already exists").
+    /// True when git's stderr says it *refused to write the ref* because the
+    /// name was already taken. Three phrasings mean it, all verified against
+    /// git 2.50 — the first from `worktree add -b`, the other two from the
+    /// fork-PR leg's `fetch refs/pull/<n>/head:refs/heads/<name>`:
+    ///
+    /// - `fatal: a branch named 'x' already exists`
+    /// - ` ! [rejected]  refs/pull/7/head -> x  (non-fast-forward)` — a fetch
+    ///   only ever rejects a destination ref that already exists, so the line
+    ///   says the same thing the `fatal:` one does.
+    /// - `fatal: refusing to fetch into branch 'refs/heads/x' checked out at
+    ///   '<path>'` — a ref cannot be checked out unless it exists.
     ///
     /// The one question `cleanUpFailedWorktreeAdd` cannot answer from its own
     /// bookkeeping: whether the branch standing there now is one this attempt
-    /// created. Git refusing to create it settles that — it isn't.
+    /// created. Git refusing to write it settles that — it isn't.
     ///
-    /// Matched loosely (any branch name, not just ours) on purpose. The two
-    /// ways to be wrong are not symmetric: failing to delete a branch we made
-    /// leaves a visible, recoverable `tbd/<name>`, while deleting one we did
-    /// not destroys work. So an unrecognized phrasing must land on "don't
-    /// delete", which is what a broad match buys.
+    /// Matched loosely (any branch name, not just ours) on purpose, and the
+    /// direction of that looseness is what makes widening it safe: every extra
+    /// match returns `true`, and `true` is the answer that *keeps* the branch.
+    /// The two ways to be wrong are not symmetric — failing to delete a branch
+    /// we made leaves a visible, recoverable `tbd/<name>`, while deleting one
+    /// we did not destroys work. So an unrecognized phrasing must land on
+    /// "don't delete", which is what a broad match buys. A gate that instead
+    /// *authorized* deletion would have to be narrow.
     ///
     /// Not `private`: the revive path's archived-SHA recreate (`-b <branch>
     /// <sha>` in `WorktreeLifecycle+Archive`) is the fourth `-b` call site and
     /// feeds the same gate to the same cleanup.
     func gitRefusedToCreateBranch(_ error: Error) -> Bool {
         guard let gitError = error as? GitError else { return false }
-        return gitError.stderr.lowercased().contains("a branch named")
+        let stderr = gitError.stderr.lowercased()
+        return stderr.contains("a branch named")
+            || stderr.contains("[rejected]")
+            || stderr.contains("refusing to fetch into branch")
     }
 
     /// True when git's stderr says the *branch name* is what is taken, as
@@ -891,9 +900,11 @@ extension WorktreeLifecycle {
     /// each one fails toward keeping it.**
     ///
     /// 1. `branchNameWasAlreadyTaken == false`. When git says "a branch named
-    ///    … already exists" it is telling us it *refused to create* the branch,
-    ///    which is positive evidence the branch predates this attempt — whoever
-    ///    made it. That is the gate that closes the probe→attempt window:
+    ///    … already exists" — or rejects the fork-PR leg's fetch, the same
+    ///    statement in that leg's vocabulary — it is telling us it *refused to
+    ///    write* the ref, which is positive evidence the branch predates this
+    ///    attempt, whoever made it. That is the gate that closes the
+    ///    probe→attempt window:
     ///    `branchPreExisted` is sampled before the add, so a branch created by
     ///    anything else in between would otherwise be indistinguishable from
     ///    one we made, and gate 2 alone would delete it.

@@ -611,7 +611,7 @@ import Testing
     }
 
     /// The fork-PR leg creates a fresh local branch of its own (the fetch's
-    /// `+refs/pull/<n>/head:refs/heads/<name>` refspec), so a failure in the
+    /// `refs/pull/<n>/head:refs/heads/<name>` refspec), so a failure in the
     /// checkout that follows leaks it just the same. The name comes from
     /// `uniqueLocalBranchName`, so it is never one the caller brought.
     @Test func failedPullRequestCheckoutLeavesNoBranchBehind() async throws {
@@ -645,9 +645,9 @@ import Testing
     }
 
     /// The same leg's pre-existence answer must be a *measurement of the name it
-    /// is about to force-fetch into*, not an inherited claim about some other
-    /// name. `uniqueLocalBranchName` hands back `pr-7-2` here because `pr-7` is
-    /// taken, and the probe that gates the delete has to follow it: aimed at
+    /// is about to fetch into*, not an inherited claim about some other name.
+    /// `uniqueLocalBranchName` hands back `pr-7-2` here because `pr-7` is taken,
+    /// and the probe that gates the delete has to follow it: aimed at
     /// `worktree.branch` instead it answers `true`, blocks the delete, and leaks
     /// the branch the fetch really did create.
     ///
@@ -657,10 +657,10 @@ import Testing
     /// `createdBranchPreExisted = true`, each leak `pr-7-2`.
     ///
     /// The caller's `pr-7` standing untouched afterwards is the other half. The
-    /// force refspec rewrote nothing here because the uniquifier steered around
-    /// it, and the cleanup deleted nothing of the caller's because the probe it
-    /// ran was about `pr-7-2`.
-    @Test func pullRequestLegProbesTheBranchItForceFetchesInto() async throws {
+    /// fetch never aimed at it because the uniquifier steered around it, and the
+    /// cleanup deleted nothing of the caller's because the probe it ran was
+    /// about `pr-7-2`.
+    @Test func pullRequestLegProbesTheBranchItFetchesInto() async throws {
         let (parentDir, hostDir, repoDir) = try await makeClonedTestRepo(
             pullRequestHeads: [7]
         )
@@ -701,12 +701,11 @@ import Testing
     /// fetch's ref write, and `nil` needs the probe to fail in that same gap
     /// after `uniqueLocalBranchName`'s identical probe had just succeeded.
     ///
-    /// `branchNameWasAlreadyTaken` is pinned `false` in all three cases because
-    /// that is the only value this leg can produce: its `+refs/pull/<n>/head`
-    /// refspec force-updates, so git never refuses on a collision and never says
-    /// "a branch named … already exists". The probe is the whole gate here, so
-    /// all three arms are asserted — `false` must still delete, or the gate
-    /// would just be a synonym for "never clean up".
+    /// `branchNameWasAlreadyTaken` is pinned `false` in all three cases so the
+    /// probe is the only thing under test; the other gate has its own coverage
+    /// in `aRefusedPullRequestFetchKeepsTheBranchItDidNotCreate`. All three arms
+    /// are asserted — `false` must still delete, or the gate would just be a
+    /// synonym for "never clean up".
     ///
     /// Asserts preserved cleanup behavior, so it is mutation-checked: dropping
     /// the `branchPreExisted == false` guard in `cleanUpFailedWorktreeAdd`
@@ -741,6 +740,139 @@ import Testing
                 "cleanup deleted a branch whose pre-existence was unknown: \(branches)")
         #expect(!branches.contains("fetched-by-this-attempt"),
                 "cleanup left behind the branch the fetch created: \(branches)")
+    }
+
+    /// Runs `body`, expecting it to fail with a `GitError`, and hands back
+    /// git's own error. Real stderr is the point: these tests exist to pin what
+    /// `gitRefusedToCreateBranch` reads, and a hand-written string would pin
+    /// only the test author's memory of it.
+    private func gitErrorFrom(
+        _ what: String, _ body: () async throws -> Void
+    ) async throws -> GitError {
+        do {
+            try await body()
+        } catch let error as GitError {
+            return error
+        }
+        Issue.record("\(what) was expected to fail with a GitError and did not")
+        throw CancellationError()
+    }
+
+    /// Gate 1 on the fork-PR leg, which is the whole reason the fetch refspec is
+    /// unforced. A branch that appears in the window between the probe and the
+    /// fetch's ref write is invisible to the probe — `branchPreExisted` is
+    /// `false`, the arm that authorizes deletion — so git's refusal is the only
+    /// thing standing between that branch and `branch -D`.
+    ///
+    /// Red against a `+`-forced refspec twice over: the fetch succeeds, so there
+    /// is no refusal to read, and the branch is already rewritten by the time
+    /// cleanup runs.
+    @Test func aRefusedPullRequestFetchKeepsTheBranchItDidNotCreate() async throws {
+        let (parentDir, _, repoDir) = try await makeClonedTestRepo(pullRequestHeads: [7])
+        defer { try? FileManager.default.removeItem(at: parentDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        let git = GitManager()
+
+        // Someone else's branch, carrying a commit the pull head does not have,
+        // standing under the name this attempt is about to fetch into.
+        try await shell(
+            "git checkout -q -b raced && git commit --allow-empty -m 'their work'"
+            + " && git checkout -q main",
+            at: repoDir
+        )
+        let originalSHA = try await git.headSHA(repoPath: repoDir.path, ref: "refs/heads/raced")
+
+        let refusal = try await gitErrorFrom("the pull-head fetch into an occupied branch name") {
+            try await git.fetchPullRequestHead(repoPath: repoDir.path, number: 7, localBranch: "raced")
+        }
+        #expect(lifecycle.gitRefusedToCreateBranch(refusal),
+                "git's refusal was not recognized as one: \(refusal.stderr)")
+
+        await lifecycle.cleanUpFailedWorktreeAdd(
+            repoPath: repoDir.path,
+            worktreePath: parentDir.appendingPathComponent("never-created").path,
+            branch: "raced",
+            branchPreExisted: false,
+            branchNameWasAlreadyTaken: lifecycle.gitRefusedToCreateBranch(refusal)
+        )
+
+        let branches = try await localBranches(repoDir)
+        #expect(branches.contains("raced"),
+                "cleanup deleted a branch git had refused to write: \(branches)")
+        let afterSHA = try await git.headSHA(repoPath: repoDir.path, ref: "refs/heads/raced")
+        #expect(afterSHA == originalSHA,
+                "the refused fetch still moved the branch: \(originalSHA) -> \(afterSHA)")
+    }
+
+    /// Every arm of that gate, against stderr git actually produced. Three
+    /// phrasings must read as "this attempt did not write the ref", and a
+    /// failure about the *path* must not — that one leaves a branch `-b` really
+    /// did create, and answering `true` there would resurrect the leak
+    /// `cleanUpFailedWorktreeAdd` exists to stop.
+    @Test func everyPhrasingOfGitsRefusalToWriteABranchIsRecognized() async throws {
+        let (parentDir, _, repoDir) = try await makeClonedTestRepo(pullRequestHeads: [7])
+        defer { try? FileManager.default.removeItem(at: parentDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        let git = GitManager()
+        let scratch = parentDir.appendingPathComponent("scratch")
+
+        // 1. `worktree add -b <taken>` — "fatal: a branch named 'x' already exists".
+        try await shell("git branch taken-branch", at: repoDir)
+        let nameTaken = try await gitErrorFrom("worktree add -b onto a taken branch name") {
+            try await git.worktreeAdd(
+                repoPath: repoDir.path, worktreePath: scratch.appendingPathComponent("a").path,
+                branch: "taken-branch", baseBranch: "main"
+            )
+        }
+        #expect(lifecycle.gitRefusedToCreateBranch(nameTaken), "unrecognized: \(nameTaken.stderr)")
+
+        // 2. The fetch's refspec rejection — "! [rejected] … (non-fast-forward)".
+        try await shell(
+            "git checkout -q -b divergent && git commit --allow-empty -m 'theirs'"
+            + " && git checkout -q main",
+            at: repoDir
+        )
+        let rejected = try await gitErrorFrom("the pull-head fetch into a divergent branch") {
+            try await git.fetchPullRequestHead(
+                repoPath: repoDir.path, number: 7, localBranch: "divergent"
+            )
+        }
+        #expect(lifecycle.gitRefusedToCreateBranch(rejected), "unrecognized: \(rejected.stderr)")
+
+        // 3. The fetch refusing a branch checked out elsewhere — a different
+        //    exit code and a different sentence, and (verified against git
+        //    2.50) raised whether or not the update would fast-forward.
+        try await shell(
+            "git worktree add -b checked-out-elsewhere '\(scratch.appendingPathComponent("b").path)' main",
+            at: repoDir
+        )
+        let checkedOut = try await gitErrorFrom("the pull-head fetch into a checked-out branch") {
+            try await git.fetchPullRequestHead(
+                repoPath: repoDir.path, number: 7, localBranch: "checked-out-elsewhere"
+            )
+        }
+        #expect(lifecycle.gitRefusedToCreateBranch(checkedOut), "unrecognized: \(checkedOut.stderr)")
+
+        // 4. The negative arm: an occupied *path*, where git creates the branch
+        //    and then fails. Recognizing this one would leak `made-by-us`.
+        let occupied = scratch.appendingPathComponent("c").path
+        try occupy(occupied)
+        let pathTaken = try await gitErrorFrom("worktree add onto an occupied path") {
+            try await git.worktreeAdd(
+                repoPath: repoDir.path, worktreePath: occupied,
+                branch: "made-by-us", baseBranch: "main"
+            )
+        }
+        #expect(!lifecycle.gitRefusedToCreateBranch(pathTaken),
+                "a failure about the path was read as a refusal to write the branch: \(pathTaken.stderr)")
+
+        // And the non-git arm: anything that isn't a `GitError` says nothing
+        // about who wrote the ref, so it cannot license a delete either.
+        #expect(!lifecycle.gitRefusedToCreateBranch(CancellationError()))
     }
 
     /// The third leg of the same `catch` creates NOTHING — it checks out a

@@ -6,8 +6,8 @@ import Testing
 
 /// Task 2: PR-head checkout. Covers the GitManager primitive
 /// (`fetchPullRequestHead` / `localBranchExists`) plus the lifecycle PR-create
-/// dispatch, including the collision-safety guard that the `+` force refspec
-/// must never clobber an unrelated pre-existing local branch of the same name.
+/// dispatch, including the collision-safety guard that a pull-head fetch must
+/// never rewrite an unrelated pre-existing local branch of the same name.
 @Suite struct WorktreePRCheckoutTests {
 
     /// Builds a bare "origin" carrying `refs/pull/<number>/head` at a commit
@@ -42,7 +42,7 @@ import Testing
         return (cloneTempDir, cloneRepoDir, prSHA)
     }
 
-    /// `localBranchExists` gates the force-refspec in `fetchPullRequestHead`,
+    /// `localBranchExists` gates which name `fetchPullRequestHead` writes,
     /// so it must fail CLOSED: only the benign "ref missing" exit-1 case may
     /// return `false`. A non-exit-1 failure (here: `show-ref` run inside a
     /// plain, non-git directory exits 128 with "fatal: not a git repository")
@@ -74,6 +74,72 @@ import Testing
         #expect(existsAfter == true)
         let sha = try await git.headSHA(repoPath: cloneRepoDir.path, ref: "refs/heads/pr-7")
         #expect(sha == prSHA)
+    }
+
+    /// The refspec is unforced, so a local branch already standing under the
+    /// destination name and carrying commits the pull head does not contain is
+    /// REFUSED — it keeps its own tip, and the create fails instead.
+    ///
+    /// `uniqueLocalBranchName` normally steers around that name; this is the
+    /// backstop for the window between that probe and the fetch's ref write,
+    /// which no probe can close. Red against the `+`-forced refspec, which
+    /// succeeds and moves the branch to the pull head.
+    @Test func fetchPullRequestHeadRefusesToRewriteADivergentBranch() async throws {
+        let (tempDir, cloneRepoDir, prSHA) = try await makePRFixture(number: 7)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // A branch under the name the fetch aims at, carrying a commit the pull
+        // head does not contain — the shape a forced refspec silently ate.
+        try await shell(
+            "git checkout -q -b pr-7 && git commit --allow-empty -m 'only this branch has it'"
+            + " && git checkout -q main",
+            at: cloneRepoDir
+        )
+        let git = GitManager()
+        let originalSHA = try await git.headSHA(repoPath: cloneRepoDir.path, ref: "refs/heads/pr-7")
+        #expect(originalSHA != prSHA)
+
+        var refusal: GitError?
+        do {
+            try await git.fetchPullRequestHead(repoPath: cloneRepoDir.path, number: 7, localBranch: "pr-7")
+        } catch let error as GitError {
+            refusal = error
+        }
+        let error = try #require(
+            refusal, "the fetch did not refuse; it wrote over a branch it did not create"
+        )
+        // The wording `gitRefusedToCreateBranch` reads to keep cleanup off this
+        // branch — pinned here because that gate depends on it.
+        #expect(error.stderr.contains("[rejected]"),
+                "git's refusal did not name a rejected ref update: \(error.stderr)")
+
+        let afterSHA = try await git.headSHA(repoPath: cloneRepoDir.path, ref: "refs/heads/pr-7")
+        #expect(afterSHA == originalSHA,
+                "the refused fetch still moved the branch: \(originalSHA) -> \(afterSHA)")
+    }
+
+    /// The residual the unforced refspec does NOT cover, pinned so nobody reads
+    /// the test above as "collisions are impossible now": a colliding branch the
+    /// pull head already *contains* fast-forwards rather than being refused. No
+    /// commits are lost — the old tip stays reachable from the new one — but the
+    /// ref moves, which is why `uniqueLocalBranchName` still runs first.
+    ///
+    /// Characterization, not a fix: it behaves the same either side of dropping
+    /// the `+`.
+    @Test func aBranchThePullHeadAlreadyContainsStillFastForwards() async throws {
+        let (tempDir, cloneRepoDir, prSHA) = try await makePRFixture(number: 7)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // `main` is an ancestor of the pull head in this fixture.
+        try await shell("git branch pr-7 main", at: cloneRepoDir)
+        let git = GitManager()
+        let originalSHA = try await git.headSHA(repoPath: cloneRepoDir.path, ref: "refs/heads/pr-7")
+        #expect(originalSHA != prSHA)
+
+        try await git.fetchPullRequestHead(repoPath: cloneRepoDir.path, number: 7, localBranch: "pr-7")
+
+        let afterSHA = try await git.headSHA(repoPath: cloneRepoDir.path, ref: "refs/heads/pr-7")
+        #expect(afterSHA == prSHA)
     }
 
     @Test func createFromPRChecksOutPullHeadAndStampsNumber() async throws {
@@ -111,8 +177,8 @@ import Testing
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         // Pre-existing, unrelated local branch sharing the PR head name. The
-        // `+refs/pull/7/head:refs/heads/feature-x` refspec would force-rewrite
-        // it — the lifecycle must uniquify the local branch name first.
+        // `refs/pull/7/head:refs/heads/feature-x` refspec would write over it —
+        // the lifecycle must uniquify the local branch name first.
         try await shell("git branch feature-x", at: cloneRepoDir)
         let originalSHA = try await GitManager().headSHA(repoPath: cloneRepoDir.path, ref: "refs/heads/feature-x")
         #expect(originalSHA != prSHA)
@@ -134,7 +200,7 @@ import Testing
         let head = try await GitManager().headSHA(worktreePath: wt.localPath)
         #expect(head == prSHA)
 
-        // ...and the original branch is untouched by the force refspec.
+        // ...and the original branch is untouched by the fetch.
         let afterSHA = try await GitManager().headSHA(repoPath: cloneRepoDir.path, ref: "refs/heads/feature-x")
         #expect(afterSHA == originalSHA)
     }
