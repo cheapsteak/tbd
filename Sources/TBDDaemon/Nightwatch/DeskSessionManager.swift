@@ -108,16 +108,31 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// `spawnRecoveryTerminalIfWarranted`.
     private var lastRecoveryTerminalID: UUID?
 
-    /// Replacements spawned since a nudge last reached a pane. Reset by a
-    /// delivered nudge and by closing the desk; bounded by
+    /// Replacements spawned since a nudge last reached a pane. Bounded by
     /// `maxConsecutiveRecoverySpawnsWithoutNudge` so a launch that dies on every
-    /// attempt cannot spawn forever.
+    /// attempt cannot spawn forever. Cleared only by `resetRecoveryBudget` — a
+    /// delivered nudge, a desk built fresh, or a desk closed.
     private var consecutiveRecoverySpawnsWithoutNudge = 0
 
     /// Deduplicates the give-up notification so the user is told once per
     /// incident rather than every tick. Cleared whenever the counter it guards is.
     private var notifiedRecoveryExhaustion = false
 
+    /// Three, because the two failure modes it sits between are asymmetric and
+    /// both real.
+    ///
+    /// One attempt is too few. A launch can fail for reasons that pass on their
+    /// own — a machine too loaded to start an agent, a tmux server mid-restart, a
+    /// profile being re-authenticated — and a cap of one would let a single
+    /// unlucky minute silence the desk until a human toggled the mode. Three
+    /// leaves two retries after the first failure, spread across roughly
+    /// forty-five minutes at the desk's fifteen-minute tick.
+    ///
+    /// Many attempts are too many, and the cost is not the retry but the debris:
+    /// every attempt that half-succeeds leaves a real tmux window and a real
+    /// agent process behind, and nothing reaps them. Unbounded, an overnight
+    /// shift accumulates one per tick — the bug this rail was built to end. Three
+    /// bounds the wreckage at three abandoned sessions and then says so out loud.
     private static let maxConsecutiveRecoverySpawnsWithoutNudge = 3
 
     // MARK: - Init
@@ -239,7 +254,10 @@ public actor DeskSessionManager: DeskSessionManaging {
             throw error
         }
 
-        // Spawn the configured primary agent for nightwatch operations.
+        // Spawn the configured primary agent for nightwatch operations. A desk
+        // built from scratch carries nothing forward from the last one, so any
+        // in-flight replacement incident ends here.
+        resetRecoveryBudget()
         do {
             _ = try await spawnDeskTerminal(worktree: wt, mode: mode)
         } catch {
@@ -657,6 +675,19 @@ public actor DeskSessionManager: DeskSessionManaging {
             .max(by: { ($0.createdAt, $0.id.uuidString) < ($1.createdAt, $1.id.uuidString) })?.id
     }
 
+    /// Clear the replacement budget and everything keyed to the same incident.
+    ///
+    /// Deliberately not called from `spawnDeskTerminal`: that is the function the
+    /// recovery rail calls to make an attempt, so clearing here would undo the
+    /// attempt it is about to count. The three callers are the three things that
+    /// genuinely end an incident — a nudge that reached a pane, a desk built from
+    /// scratch, and a desk closed.
+    private func resetRecoveryBudget() {
+        consecutiveRecoverySpawnsWithoutNudge = 0
+        notifiedRecoveryExhaustion = false
+        lastRecoveryTerminalID = nil
+    }
+
     /// Tell the user once that the desk has stopped trying to staff itself.
     /// Deduplicated on the same counter that stopped it, so a desk that recovers
     /// and fails again later is a new incident and notifies again.
@@ -1028,12 +1059,10 @@ public actor DeskSessionManager: DeskSessionManaging {
             lastNudgedMode = mode
 
             // A nudge landed, so the desk is staffed by something that took it:
-            // the replacement budget and its give-up notice both reset here, and
-            // only here. Any earlier reset (at spawn, say) would count a launch
-            // that never came up as a success.
-            consecutiveRecoverySpawnsWithoutNudge = 0
-            notifiedRecoveryExhaustion = false
-            lastRecoveryTerminalID = nil
+            // the replacement budget and its give-up notice reset here. A reset at
+            // spawn time instead would count a launch that never came up as a
+            // success — which is exactly how the backstop was first defeated.
+            resetRecoveryBudget()
 
             logger.debug("Nudged Watch Desk session: act=\(act, privacy: .public)")
         } catch {
@@ -1129,6 +1158,9 @@ public actor DeskSessionManager: DeskSessionManaging {
         }
 
         deskWorktreeID = nil
+        // The desk this budget was counting against no longer exists; the next
+        // one starts its own incident.
+        resetRecoveryBudget()
     }
 
     public func releaseJudgeLease(worktreeID: UUID) async {
@@ -1231,18 +1263,19 @@ public actor DeskSessionManager: DeskSessionManaging {
         // the actor, and this is the one chokepoint both spawn paths — fresh
         // create and crash recovery — pass through.
         //
-        // Recovery state resets too: a successful spawn clears the incident,
-        // so the new session's first tick should not be rate-limited by the
-        // dead session's consecutive failures.
-        //
         // Reset unconditionally, before the spawn can throw: over-signalling
         // costs one extra file Read, under-signalling costs a judge running an
         // unattended shift on instructions it never opened.
+        //
+        // The recovery budget deliberately does NOT reset here. This function is
+        // what `spawnRecoveryTerminalIfWarranted` calls to make its attempt, so a
+        // reset on this line would run before that caller's increment and pin
+        // `consecutiveRecoverySpawnsWithoutNudge` at 1 for every attempt — the
+        // backstop would never reach its cap. The budget belongs to the incident,
+        // not to the spawn: only a delivered nudge, a fresh desk, or a desk close
+        // clears it. See `resetRecoveryBudget`.
         lastNudgedMode = nil
         lastNudgeTime = nil
-        lastRecoveryTerminalID = nil
-        consecutiveRecoverySpawnsWithoutNudge = 0
-        notifiedRecoveryExhaustion = false
 
         // Lay the instructions down before the session exists, so a judge that
         // reads them on its own initiative — before its first tick ever fires —
