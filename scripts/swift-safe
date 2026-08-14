@@ -5,6 +5,13 @@ Every TBD worktree shares the same default lock under ``~/tbd/runtime``.  This
 prevents otherwise-independent Claude sessions from each starting a full
 Swift compiler swarm on the same laptop.  The file may remain on disk: flock
 ownership is kernel-managed and is released when this process exits.
+
+Waiting is reported on stderr, never stdout, so a caller parsing SwiftPM's
+output sees nothing from this wrapper.  The holder writes ``pid``/``cwd``/
+``command`` into the lock file after acquiring, and a waiter reads it back to
+say who it is queued behind; a heartbeat then repeats the wait's elapsed time
+so a human can tell a queued build from a hung one and an automated caller's
+stall watchdog sees liveness.
 """
 
 from __future__ import annotations
@@ -20,6 +27,14 @@ import time
 DEFAULT_JOBS = 2
 MAX_JOBS = 4
 DEFAULT_TIMEOUT_SECONDS = 1_800.0
+# Agent harnesses kill a session that emits nothing for 600s, and a queued
+# build used to be silent for the full 30-minute timeout.  One line a minute
+# clears that watchdog by 10x while costing at most 30 lines across the whole
+# timeout, and a typical wait (one sibling build, 1-3 minutes) prints 1-3.
+DEFAULT_HEARTBEAT_SECONDS = 60.0
+# Fields the holder records; anything else in the file is ignored.
+HOLDER_FIELDS = ("pid", "cwd", "command")
+MAX_REPORTED_COMMAND_CHARACTERS = 120
 COMPILE_SUBCOMMANDS = {"build", "run", "test"}
 SUPPORTED_SUBCOMMANDS = COMPILE_SUBCOMMANDS
 RUN_OPTIONS_WITH_VALUES = {
@@ -168,25 +183,109 @@ def _lock_path() -> Path:
     return tbd_home / "runtime" / "swift-build.lock"
 
 
-def _acquire(lock_file, timeout_seconds: float) -> None:
-    deadline = time.monotonic() + timeout_seconds
+def _report(message: str) -> None:
+    """Waiting is diagnostics: stderr only, so stdout stays SwiftPM's alone."""
+    print(message, file=sys.stderr, flush=True)
+
+
+def _holder_fields(lock_path: Path) -> dict[str, str]:
+    """Best-effort read of what the current holder recorded, or ``{}``.
+
+    The holder truncates and rewrites this file after it acquires, so a waiter
+    can catch it empty or half-written.  Only newline-terminated lines are
+    parsed — a trailing fragment such as ``pid=12`` mid-write would otherwise
+    read as a plausible but wrong pid.
+    """
+    try:
+        text = lock_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    fields: dict[str, str] = {}
+    for line in text.split("\n")[:-1]:
+        key, separator, value = line.partition("=")
+        if separator and key in HOLDER_FIELDS and value:
+            fields[key] = value
+    return fields
+
+
+def _process_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _holder_description(lock_path: Path) -> str:
+    """Describe the lock holder without ever claiming one we cannot see."""
+    fields = _holder_fields(lock_path)
+    try:
+        pid = int(fields["pid"])
+    except (KeyError, ValueError):
+        return "holder has not recorded its identity yet"
+    if not _process_is_alive(pid):
+        return (
+            f"the lock file names pid {pid}, which is no longer running; "
+            "the current holder is unidentified"
+        )
+
+    parts = [f"pid {pid}"]
+    # The directory basename identifies the worktree; the full path is noise.
+    worktree = Path(fields["cwd"]).name if fields.get("cwd") else ""
+    if worktree:
+        parts.insert(0, f"worktree {worktree}")
+    description = f"held by {', '.join(parts)}"
+    command = fields.get("command")
+    if command:
+        if len(command) > MAX_REPORTED_COMMAND_CHARACTERS:
+            command = command[:MAX_REPORTED_COMMAND_CHARACTERS] + "..."
+        description += f" running: {command}"
+    return description
+
+
+def _acquire(
+    lock_file,
+    lock_path: Path,
+    timeout_seconds: float,
+    heartbeat_seconds: float,
+    *,
+    monotonic=time.monotonic,
+    sleep=time.sleep,
+    report=_report,
+) -> None:
+    start = monotonic()
+    deadline = start + timeout_seconds
     announced = False
+    next_heartbeat = 0.0
     while True:
         try:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             return
         except BlockingIOError:
+            now = monotonic()
             if not announced:
-                print(
+                report(
                     "swift-safe: another TBD worktree is compiling; waiting for "
-                    "the shared build slot",
-                    file=sys.stderr,
-                    flush=True,
+                    f"the shared build slot ({_holder_description(lock_path)})"
                 )
                 announced = True
-            if time.monotonic() >= deadline:
+                next_heartbeat = now + heartbeat_seconds
+            elif now >= next_heartbeat:
+                report(
+                    f"swift-safe: still waiting for the shared build slot after "
+                    f"{now - start:.0f}s of {timeout_seconds:g}s "
+                    f"({_holder_description(lock_path)})"
+                )
+                next_heartbeat = now + heartbeat_seconds
+            if now >= deadline:
                 raise TimeoutError
-            time.sleep(min(0.25, max(0.01, deadline - time.monotonic())))
+            sleep(min(0.25, max(0.01, deadline - now)))
 
 
 def main(arguments: list[str]) -> int:
@@ -210,13 +309,28 @@ def main(arguments: list[str]) -> int:
     timeout = _positive_number(
         "TBD_SWIFT_LOCK_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS
     )
+    heartbeat = _positive_number(
+        "TBD_SWIFT_HEARTBEAT_SECONDS", DEFAULT_HEARTBEAT_SECONDS
+    )
+
+    if subcommand == "run":
+        # `run` execs SwiftPM, which stays alive for as long as the program
+        # does, so the slot covers the program's whole lifetime rather than
+        # its compile. Say so rather than letting a machine wedge silently.
+        _report(
+            "swift-safe: `run` holds the machine-global build slot until the "
+            "program exits, not just until it finishes compiling; every other "
+            "TBD worktree waits meanwhile. Prefer `scripts/swift-safe build "
+            "--product <name>` and then executing .build/debug/<name>."
+        )
 
     with path.open("a+", encoding="utf-8") as lock_file:
         try:
-            _acquire(lock_file, timeout)
+            _acquire(lock_file, path, timeout, heartbeat)
         except TimeoutError:
             print(
-                f"swift-safe: timed out after {timeout:g}s waiting for {path}",
+                f"swift-safe: timed out after {timeout:g}s waiting for {path} "
+                f"({_holder_description(path)})",
                 file=sys.stderr,
             )
             return 75
