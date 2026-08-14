@@ -133,6 +133,17 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// agent process behind, and nothing reaps them. Unbounded, an overnight
     /// shift accumulates one per tick — the bug this rail was built to end. Three
     /// bounds the wreckage at three abandoned sessions and then says so out loud.
+    ///
+    /// **Status: a compiled theory, and knowingly so.** By the battery in
+    /// `docs/theory-placement.md` this is a count-shaped constant two reasonable
+    /// projects could set differently, which puts it in the contested tier where
+    /// what matters is who chose it and how cheaply they can change their mind.
+    /// Nobody has chosen it yet: the reasoning above is the rationale for a
+    /// number, not a record of a human's decision on it, and no committed spec
+    /// covers it. It is written down here rather than left implicit so the
+    /// decision is visible to whoever makes it. That the bound must exist is not
+    /// in question — its absence is the incident this rail was built for — only
+    /// where the number should live.
     private static let maxConsecutiveRecoverySpawnsWithoutNudge = 3
 
     // MARK: - Init
