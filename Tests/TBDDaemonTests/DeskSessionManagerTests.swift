@@ -1526,6 +1526,113 @@ extension TBDHomeSerialized {
                 "a replacement that dies must itself be replaced")
         }
 
+        /// Kill every terminal the desk currently has — proven gone, both the way
+        /// `windowExists` sees it and the way the identity consultation does — then
+        /// drive one tick. Returns how many terminal rows exist afterwards, which is
+        /// the only externally visible evidence of whether a replacement was spawned.
+        private func killAllAndTick(
+            _ f: (db: TBDDatabase, manager: DeskSessionManager, recorder: DeskTmuxRecorder,
+                  dead: DeadWindows, commands: PaneCommands, identities: PaneIdentities,
+                  spawnFailures: SpawnFailureSwitch, home: URL, priorTBDHome: String?),
+            desk: UUID
+        ) async throws -> Int {
+            for terminal in try await f.db.terminals.list(worktreeID: desk) {
+                f.identities.set(.missing, for: terminal.tmuxPaneID)
+                f.dead.markDead(terminal.tmuxWindowID)
+            }
+            _ = try await f.manager.ensureDeskSession(mode: .daywatch)
+            return try await f.db.terminals.list(worktreeID: desk).count
+        }
+
+        /// The backstop has to actually count, and it did not.
+        ///
+        /// `spawnDeskTerminal` cleared the recovery budget itself, and
+        /// `spawnRecoveryTerminalIfWarranted` calls that very function to make its
+        /// attempt — so on every attempt the clear ran first and the increment second,
+        /// pinning `consecutiveRecoverySpawnsWithoutNudge` at 1 forever. The cap was
+        /// unreachable, the give-up notification could never fire, and a desk whose
+        /// launches all died went back to spawning one abandoned agent per tick: the
+        /// precise unbounded behaviour this rail exists to end.
+        ///
+        /// Nothing about that is visible from a single attempt, which is why this
+        /// walks four. Each tick kills every terminal on the desk before running, so no
+        /// nudge ever lands and nothing legitimately clears the budget. Three
+        /// replacements must happen, the third must be the last, and the desk must say
+        /// so out loud — a Watch Desk that has quietly given up looks exactly like one
+        /// that is fine.
+        @Test("the recovery budget accumulates, stops at the third spawn, and notifies")
+        func testRecoveryBudgetAccumulatesAndCapsAtThree() async throws {
+            let f = try makeDeskFixture(tag: "staff-budget")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            var count = try await f.db.terminals.list(worktreeID: desk.id).count
+
+            // maxConsecutiveRecoverySpawnsWithoutNudge attempts, each licensed by a
+            // fresh death. Before the fix the counter never left 1, so this loop passed
+            // and the one below it did not.
+            for attempt in 1...3 {
+                let after = try await killAllAndTick(f, desk: desk.id)
+                #expect(
+                    after == count + 1,
+                    "attempt \(attempt) of 3 must still spawn a replacement")
+                count = after
+            }
+
+            #expect(
+                try await f.db.notifications.unread(worktreeID: desk.id)
+                    .filter({ $0.type == .error }).isEmpty,
+                "the desk must not give up while attempts remain")
+
+            // The budget is spent. Further deaths buy nothing, however many arrive.
+            for tick in 0..<2 {
+                let after = try await killAllAndTick(f, desk: desk.id)
+                #expect(
+                    after == count,
+                    "tick \(tick) past the cap must not spawn a fourth agent")
+            }
+
+            let errors = try await f.db.notifications.unread(worktreeID: desk.id)
+                .filter { $0.type == .error }
+            #expect(
+                errors.count == 1,
+                "exhaustion must be announced exactly once per incident, not per tick")
+            #expect(
+                errors.first?.message?.contains("could not start an agent") == true,
+                "the notification must name what stopped: \(errors.first?.message ?? "nil")")
+        }
+
+        /// The other side of the counter: it is a budget for one incident, not a
+        /// lifetime quota. A nudge that reaches a pane is the proof the desk is staffed
+        /// by something that took it, and it must hand the attempts back — otherwise a
+        /// desk that had a bad hour in the evening would refuse to restaff itself for
+        /// the rest of the night.
+        @Test("a delivered nudge hands the recovery budget back")
+        func testDeliveredNudgeClearsRecoveryBudget() async throws {
+            let f = try makeDeskFixture(tag: "staff-budget-reset")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+
+            // Spend the whole budget, leaving the third replacement alive.
+            var count = try await f.db.terminals.list(worktreeID: desk.id).count
+            for _ in 1...3 {
+                count = try await killAllAndTick(f, desk: desk.id)
+            }
+
+            let pastesBefore = f.recorder.pastedPanes.count
+            await f.manager.nudgeDeskSession(worktreeID: desk.id, act: false)
+            #expect(
+                f.recorder.pastedPanes.count == pastesBefore + 1,
+                "the live replacement must have taken a nudge for this test to mean anything")
+
+            // Same fourth death as the test above, which there bought nothing.
+            let after = try await killAllAndTick(f, desk: desk.id)
+            #expect(
+                after == count + 1,
+                "a delivered nudge must restore the desk's ability to restaff itself")
+        }
+
         /// The incident, end to end, in the order it was observed in the field: one tick
         /// spawns a replacement desk AND invalidates the live incumbent, ~30 seconds
         /// apart, while that incumbent's lease is renewing on its own timer and has never
