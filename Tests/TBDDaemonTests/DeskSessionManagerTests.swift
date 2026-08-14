@@ -33,15 +33,33 @@ private final class DeskTmuxRecorder: @unchecked Sendable {
 private final class DeadWindows: @unchecked Sendable {
     private let lock = NSLock()
     private var dead: Set<String> = []
+    private var unverifiable: Set<String> = []
 
     func markDead(_ windowID: String) {
         lock.lock(); defer { lock.unlock() }
         dead.insert(windowID)
     }
 
+    /// Make the window consultation itself fail — a tmux that could not be
+    /// asked, as distinct from a tmux that looked and found nothing. Only the
+    /// tri-state `dryRunWindowExistence` seam can express this; the older
+    /// Bool hook collapses it into "dead", which is the bug.
+    func markUnverifiable(_ windowID: String) {
+        lock.lock(); defer { lock.unlock() }
+        unverifiable.insert(windowID)
+    }
+
     func isDead(_ windowID: String) -> Bool {
         lock.lock(); defer { lock.unlock() }
         return dead.contains(windowID)
+    }
+
+    func existence(_ windowID: String) -> WindowExistence {
+        lock.lock(); defer { lock.unlock() }
+        if unverifiable.contains(windowID) {
+            return .unverifiable(error: "tmux list-panes exited 1: error connecting to socket")
+        }
+        return dead.contains(windowID) ? .gone : .exists
     }
 }
 
@@ -910,6 +928,7 @@ extension TBDHomeSerialized {
                     dryRun: true,
                     dryRunRecorder: { recorder.record($0) },
                     dryRunWindowIsDead: { dead.isDead($0) },
+                    dryRunWindowExistence: { _, windowID in dead.existence(windowID) },
                     dryRunPaneCurrentCommand: { _, paneID in commands.command(for: paneID) },
                     dryRunPaneSendTarget: { _, paneID in try identities.answer(for: paneID) }
                 ),
@@ -1360,7 +1379,7 @@ extension TBDHomeSerialized {
         /// This test drives the exact failure mode: a live pane that the identity
         /// consultation cannot reach (wedged tmux, timeout, etc). The staffing check
         /// must treat "cannot tell" as "staffed for now" and skip the spawn.
-        /// Multiple ticks are simulated via `now` advance to pass the rate limit.
+        /// Multiple ticks are simulated by advancing `now` between calls.
         @Test("unverifiable terminal does not trigger spawn — staffing check treats 'cannot tell' as staffed")
         func testUnavailableIdentityConsultationIsNotSpawned() async throws {
             let f = try makeDeskFixture(tag: "staff-unverifiable")
@@ -1400,7 +1419,10 @@ extension TBDHomeSerialized {
             // says "cannot tell if it's alive or not, assume staffed" and skips spawn.
             let terminalCountsBefore = try await f.db.terminals.list(worktreeID: desk.id).count
             for iteration in 0..<3 {
-                // Advance the clock past the 2-minute recovery rate limit.
+                // Advance the clock between ticks. Nothing here is gated on a
+                // clock — the desk's gating is evidence-based, which is this
+                // PR's whole point — so this only makes each iteration a
+                // distinct tick rather than a repeated instant.
                 clock.advance(by: 2 * 60 + 1)
 
                 // Call ensure, which checks staffing and may spawn if genuinely unstaffed.
@@ -1600,6 +1622,84 @@ extension TBDHomeSerialized {
             #expect(
                 errors.first?.message?.contains("could not start an agent") == true,
                 "the notification must name what stopped: \(errors.first?.message ?? "nil")")
+        }
+
+        /// The desk asks tmux three read-only questions, and until now only one of
+        /// them could say "I could not look". `windowExists` answered a plain
+        /// `Bool` and swallowed every error into `false`, so a wedged or
+        /// unreachable server — the exact production fault — was indistinguishable
+        /// from a window tmux had looked for and not found. `verdict` then read
+        /// that `false` as `.absent`, which is the verdict that licenses both
+        /// spawning a replacement and revoking a running judge's lease.
+        ///
+        /// So this reproduces the incident through the window consultation
+        /// instead of the identity one, and holds the same invariants: no spawn,
+        /// no demotion, no paste into a pane nobody could look at.
+        @Test("an unanswerable window consultation spawns nothing and revokes nothing")
+        func testUnverifiableWindowNeitherSpawnsNorRevokes() async throws {
+            let f = try makeDeskFixture(tag: "staff-window-unverifiable")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            let incumbent = try #require(
+                try await f.db.terminals.list(worktreeID: desk.id)
+                    .first(where: { $0.label == TerminalLabel.claudeCode }))
+            var lease = try await f.db.watchDeskLeases.acquire(
+                worktreeID: desk.id, terminalID: incumbent.id, now: Date())
+
+            // The pane answers for itself and runs an agent; it is the WINDOW
+            // query that cannot be run.
+            f.dead.markUnverifiable(incumbent.tmuxWindowID)
+
+            let terminalsBefore = try await f.db.terminals.list(worktreeID: desk.id).count
+            let pastesBefore = f.recorder.pastedPanes.count
+            for tick in 0..<3 {
+                lease = try await f.db.watchDeskLeases.renew(
+                    worktreeID: desk.id, terminalID: lease.terminalID,
+                    token: lease.token, generation: lease.generation, now: Date())
+
+                _ = try await f.manager.ensureDeskSession(mode: .daywatch)
+                await f.manager.maintainJudgeLease(worktreeID: desk.id)
+                await f.manager.nudgeDeskSession(worktreeID: desk.id, act: false)
+
+                #expect(
+                    try await f.db.terminals.list(worktreeID: desk.id).count == terminalsBefore,
+                    "tick \(tick): a window nobody could consult must not license a spawn")
+
+                let current = try #require(try await f.db.watchDeskLeases.status(worktreeID: desk.id))
+                #expect(current.terminalID == lease.terminalID, "tick \(tick): owner changed")
+                #expect(current.generation == lease.generation, "tick \(tick): generation changed")
+                #expect(
+                    current.isValid(at: Date()),
+                    "tick \(tick): a lease was revoked on a consultation nobody could run")
+            }
+
+            #expect(
+                f.recorder.pastedPanes.count == pastesBefore,
+                "a pane whose window could not be consulted must not be pasted into")
+        }
+
+        /// The other half of the same rule, so refusing to act on absence of
+        /// evidence did not become refusing to act on evidence: when tmux
+        /// positively answers that the window is gone, the desk still restaffs.
+        @Test("a window tmux proves is gone still licenses a replacement")
+        func testProvenGoneWindowStillSpawns() async throws {
+            let f = try makeDeskFixture(tag: "staff-window-gone")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            let original = try #require(
+                try await f.db.terminals.list(worktreeID: desk.id)
+                    .first(where: { $0.label == TerminalLabel.claudeCode }))
+
+            f.identities.set(.missing, for: original.tmuxPaneID)
+            f.dead.markDead(original.tmuxWindowID)
+
+            let before = try await f.db.terminals.list(worktreeID: desk.id).count
+            _ = try await f.manager.ensureDeskSession(mode: .daywatch)
+            #expect(
+                try await f.db.terminals.list(worktreeID: desk.id).count == before + 1,
+                "a proven-gone window must still be restaffed")
         }
 
         /// The other side of the counter: it is a budget for one incident, not a

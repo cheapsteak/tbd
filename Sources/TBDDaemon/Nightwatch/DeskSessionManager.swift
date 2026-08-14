@@ -276,49 +276,6 @@ public actor DeskSessionManager: DeskSessionManaging {
         return wt
     }
 
-    /// Resolve the Watch Desk's *live* configured agent terminal, newest first.
-    ///
-    /// `TerminalStore.list` orders by `createdAt` ascending, so the previous
-    /// `terminals.first(where:)` deterministically returned the OLDEST row —
-    /// not a race, a guarantee. Desk terminal rows outlive their
-    /// panes: a session that dies, or was killed out-of-band by an older
-    /// Nightwatch handoff that bypassed TBD's terminal-close path,
-    /// leaves its row behind forever. The oldest row is therefore the one *most* likely
-    /// to be dead, and every handoff inserted another corpse ahead of the live desk.
-    ///
-    /// Observed in production: one desk carried three `Claude Code` rows, the nudge aimed
-    /// at the first, and the judge prompt was discarded every fifteen minutes for hours
-    /// while ticks kept correctly reporting queued judgment.
-    ///
-    /// Two guards make that impossible. Prefer the NEWEST row, and confirm its tmux window
-    /// still exists before sending. The liveness check is not redundant belt-and-braces:
-    /// tmux recycles pane IDs per server — both dead rows in the incident above had been
-    /// assigned `%1` — so a stale row can start resolving to a *live pane owned by an
-    /// unrelated session*, which would then receive a pasted judge prompt plus Enter. That
-    /// is issue #384, and picking the newest row alone would not prevent it.
-    ///
-    /// Neither guard is sufficient on its own, and neither proves *ownership*.
-    /// `windowExists` proves a window id resolves to SOME window;
-    /// `paneCurrentCommand` proves an agent of the right kind is in the
-    /// foreground of SOME pane. A recycled pane id running a stranger's Claude
-    /// satisfies both. So each surviving candidate is asked who it is
-    /// (`paneSendTarget`) and dropped when it answers with a different terminal
-    /// — see `paneIdentityPermitsSend`.
-    ///
-    /// Hibernated/suspended rows are excluded even if their tmux window still
-    /// exists: their pane contains a shell, not an agent, and pasting a judge
-    /// prompt there would execute it as shell input.
-    ///
-    /// - Returns: The newest matching agent terminal whose tmux window is still alive, or nil.
-    private func liveAgentTerminals(
-        worktreeID: UUID,
-        server: String,
-        kind: TerminalKind
-    ) async throws -> [Terminal] {
-        try await classifyAgentTerminals(
-            worktreeID: worktreeID, server: server, kind: kind).live
-    }
-
     /// What the desk's consultations proved about one candidate row.
     ///
     /// Two questions run over the same evidence and must not share an answer:
@@ -392,6 +349,41 @@ public actor DeskSessionManager: DeskSessionManaging {
         }
     }
 
+    /// Classify every candidate row of one kind — the desk's *live* agents,
+    /// newest first, plus what was proven about everyone else.
+    ///
+    /// `TerminalStore.list` orders by `createdAt` ascending, so the previous
+    /// `terminals.first(where:)` deterministically returned the OLDEST row —
+    /// not a race, a guarantee. Desk terminal rows outlive their
+    /// panes: a session that dies, or was killed out-of-band by an older
+    /// Nightwatch handoff that bypassed TBD's terminal-close path,
+    /// leaves its row behind forever. The oldest row is therefore the one *most* likely
+    /// to be dead, and every handoff inserted another corpse ahead of the live desk.
+    ///
+    /// Observed in production: one desk carried three `Claude Code` rows, the nudge aimed
+    /// at the first, and the judge prompt was discarded every fifteen minutes for hours
+    /// while ticks kept correctly reporting queued judgment.
+    ///
+    /// Two guards make that impossible. Prefer the NEWEST row, and confirm its tmux window
+    /// still exists before sending. The liveness check is not redundant belt-and-braces:
+    /// tmux recycles pane IDs per server — both dead rows in the incident above had been
+    /// assigned `%1` — so a stale row can start resolving to a *live pane owned by an
+    /// unrelated session*, which would then receive a pasted judge prompt plus Enter. That
+    /// is issue #384, and picking the newest row alone would not prevent it.
+    ///
+    /// Neither guard is sufficient on its own, and neither proves *ownership*.
+    /// `windowExists` proves a window id resolves to SOME window;
+    /// `paneCurrentCommand` proves an agent of the right kind is in the
+    /// foreground of SOME pane. A recycled pane id running a stranger's Claude
+    /// satisfies both. So each surviving candidate is asked who it is
+    /// (`paneSendTarget`) and dropped when it answers with a different terminal
+    /// — see `paneIdentityPermitsSend`.
+    ///
+    /// Hibernated/suspended rows are excluded even if their tmux window still
+    /// exists: their pane contains a shell, not an agent, and pasting a judge
+    /// prompt there would execute it as shell input.
+    ///
+    /// - Returns: The newest matching agent terminal whose tmux window is still alive, or nil.
     private func classifyAgentTerminals(
         worktreeID: UUID,
         server: String,
@@ -420,9 +412,10 @@ public actor DeskSessionManager: DeskSessionManaging {
     ///
     /// The identity question runs first because it is the only consultation that
     /// distinguishes "tmux looked and the pane is gone" from "tmux could not be
-    /// asked" — the distinction both callers hang on. `windowExists` and the
-    /// foreground-command check still gate `.live` exactly as before, so nothing
-    /// reaches a paste that would not have reached one previously.
+    /// asked" — the distinction both callers hang on. The window and
+    /// foreground-command checks still gate `.live` exactly as before, so nothing
+    /// reaches a paste that would not have reached one previously; all three now
+    /// answer that distinction rather than only the first.
     private func verdict(
         server: String,
         terminal: Terminal,
@@ -431,12 +424,26 @@ public actor DeskSessionManager: DeskSessionManaging {
         let identity = await paneIdentityVerdict(server: server, terminal: terminal)
         guard identity == .live else { return identity }
 
-        guard await tmux.windowExists(server: server, windowID: terminal.tmuxWindowID) else {
+        switch await tmux.windowExistence(server: server, windowID: terminal.tmuxWindowID) {
+        case .exists:
+            break
+        case .gone:
             logger.notice("""
                 Skipping stale Watch Desk terminal \(terminal.id, privacy: .public): \
                 window \(terminal.tmuxWindowID, privacy: .public) no longer exists
                 """)
             return .absent
+        case .unverifiable(let error):
+            // The same rule as the other two consultations. `windowExists` — the
+            // Bool this used to call — folds a wedged or unreachable server into
+            // "the window is gone", which is the exact collapse that licenses a
+            // spawn beside a healthy judge.
+            logger.notice("""
+                Skipping Watch Desk terminal \(terminal.id, privacy: .public): could not determine \
+                whether window \(terminal.tmuxWindowID, privacy: .public) still exists: \
+                \(error, privacy: .public)
+                """)
+            return .unknown
         }
 
         if tmux.verifiesPaneCurrentCommand {
@@ -559,15 +566,6 @@ public actor DeskSessionManager: DeskSessionManaging {
         }
     }
 
-    private func liveAgentTerminal(
-        worktreeID: UUID,
-        server: String,
-        kind: TerminalKind
-    ) async throws -> Terminal? {
-        try await liveAgentTerminals(
-            worktreeID: worktreeID, server: server, kind: kind).first
-    }
-
     /// Everything the desk knows about who is sitting at it, across both
     /// supported agent kinds.
     ///
@@ -633,8 +631,22 @@ public actor DeskSessionManager: DeskSessionManaging {
         guard !staffing.isStaffed else { return }
 
         if let previous = lastRecoveryTerminalID {
-            let rowStillExists = (try? await db.terminals.get(id: previous)) != nil
-            if rowStillExists && !staffing.provenAbsent(previous) {
+            let previousRow: Terminal?
+            do {
+                previousRow = try await db.terminals.get(id: previous)
+            } catch {
+                // "The table could not be read" is not "the row is gone". A
+                // `try?` here would let a database error license the spawn this
+                // gate exists to withhold — the same absence-as-evidence mistake
+                // the tmux consultations make when they collapse.
+                logger.notice("""
+                    Not spawning another Watch Desk agent: the terminal table could not be read, \
+                    so the previous recovery terminal \(previous, privacy: .public) has not been \
+                    accounted for: \(error.localizedDescription, privacy: .public)
+                    """)
+                return
+            }
+            if previousRow != nil && !staffing.provenAbsent(previous) {
                 logger.notice("""
                     Not spawning another Watch Desk agent: the previous recovery terminal \
                     \(previous, privacy: .public) has not been proven gone
@@ -759,8 +771,23 @@ public actor DeskSessionManager: DeskSessionManaging {
             // timer — and then, finding no judge, spawns a replacement beside
             // it. That pair is one bug, and this guard and the staffing proof
             // are its two halves.
-            let ownerRowExists = (try? await db.terminals.get(id: lease.terminalID)) != nil
-            guard !ownerRowExists || staffing.provenAbsent(lease.terminalID) else {
+            //
+            // A database error is not proof either: `try?` here would turn an
+            // unreadable terminal table into "the owner's row is gone" and revoke
+            // on it.
+            let ownerRow: Terminal?
+            do {
+                ownerRow = try await db.terminals.get(id: lease.terminalID)
+            } catch {
+                logger.notice("""
+                    Keeping Watch Desk judge lease generation \(lease.generation, privacy: .public): \
+                    the terminal table could not be read, which is not proof that owner \
+                    \(lease.terminalID, privacy: .public) is gone: \
+                    \(error.localizedDescription, privacy: .public)
+                    """)
+                return nil
+            }
+            guard ownerRow == nil || staffing.provenAbsent(lease.terminalID) else {
                 logger.notice("""
                     Keeping Watch Desk judge lease generation \(lease.generation, privacy: .public): \
                     owner \(lease.terminalID, privacy: .public) could not be consulted this tick, \

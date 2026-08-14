@@ -317,6 +317,46 @@ struct PaneSendTargetQueryTests {
             paneOption: "", startCommand: "export TBD_TERMINAL_ID='\(Self.plantedID)") == nil)
     }
 
+    // MARK: - Window existence
+
+    /// `windowExists` used to answer a plain Bool and fold every tmux failure
+    /// into `false`, so "the window is gone" and "tmux could not be asked" were
+    /// the same answer — and the Watch Desk read that answer as license to spawn
+    /// an agent and revoke a running judge's lease. This is the branch that
+    /// decides between them, unit-tested here because the desk's own fixtures run
+    /// in dry-run mode and never reach a real tmux error at all.
+    @Test("only tmux's own can't-find text proves a window gone")
+    func windowGoneOnlyWhenTmuxLooked() {
+        #expect(
+            TmuxManager.classifyWindowExistence(status: 1, output: "can't find window @7")
+                == .gone)
+        #expect(
+            TmuxManager.classifyWindowExistence(status: 1, output: "can't find session: tbd-x")
+                == .gone)
+    }
+
+    /// Everything else with a non-zero exit is the query failing. Each of these
+    /// is a tmux that was never in a position to say anything about the window,
+    /// and reading any of them as absence is the field incident.
+    @Test("an unreachable or broken tmux is unverifiable, never gone")
+    func windowUnverifiableOnEveryOtherFailure() {
+        for output in [
+            "error connecting to /tmp/tmux-501/tbd (No such file or directory)",
+            "protocol version mismatch (client 8, server 7)",
+            "lost server",
+            "",
+        ] {
+            let verdict = TmuxManager.classifyWindowExistence(status: 1, output: output)
+            #expect(verdict != .gone, "\(output.isEmpty ? "<empty>" : output) must not prove absence")
+            guard case .unverifiable(let error) = verdict else {
+                Issue.record("expected .unverifiable for \(output.isEmpty ? "<empty>" : output)")
+                continue
+            }
+            // A rail that refuses to act should be able to say why it could not look.
+            #expect(error.contains("exited 1"), "the verdict must carry tmux's status: \(error)")
+        }
+    }
+
     /// The pane-option path never reaches the start-command parser, so no
     /// amount of user text in the command can influence a stamped pane.
     @Test("the stamped pane option is unaffected by decoys in the start command")
