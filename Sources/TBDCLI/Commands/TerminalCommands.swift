@@ -89,7 +89,17 @@ struct TerminalList: AsyncParsableCommand {
         )
 
         if json {
-            printJSON(terminals)
+            // A bare top-level array, unversioned by design — it has nowhere
+            // additive to put a `schemaVersion`. Its `profileID` field is a
+            // documented contract surface (docs/capacity-facts.md), so an
+            // encoding failure must not read as "no terminals": name it on
+            // stderr and exit nonzero instead of printing nothing at exit 0.
+            guard let output = jsonString(terminals) else {
+                FileHandle.standardError.write(Data(
+                    "Error: could not encode the terminal list as JSON\n".utf8))
+                throw ExitCode.failure
+            }
+            print(output)
         } else {
             if terminals.isEmpty {
                 print("No terminals found.")

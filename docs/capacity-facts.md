@@ -22,11 +22,15 @@ stable. That is what this document states.
   to refresh usage for stale logged-in OAuth profiles first. Fresh profiles
   and rate-limited ones are skipped, so `--refresh` is not a way to force a
   fetch; it is a way to say "don't hand me numbers that aged out while I
-  slept." A refresh failure does not fail the command: the refusal is noted on
-  stderr, the listing still prints on stdout from persisted snapshots, and the
-  exit code stays 0 — each snapshot's own `fetchedAt` and `statusKind` say how
-  old its numbers are. A caller that needs fresh-or-nothing must decide that
-  from those fields, not from the exit code.
+  slept." A refresh failure does not fail the command **when the daemon
+  answered the refresh attempt** — it refused, or its answer was unreadable:
+  the cause is noted on stderr, the listing still prints on stdout from
+  persisted snapshots, and the exit code stays 0. Each snapshot's own
+  `fetchedAt` and `statusKind` then say how old its numbers are, so a caller
+  that needs fresh-or-nothing must decide that from those fields rather than
+  from the exit code. An **unreachable** daemon is not tolerated: `--refresh`
+  fails the command like any other invocation would, nonzero and with no
+  listing, rather than promising one it cannot produce.
 - **`tbd terminal list --json <worktree>`** – per-terminal rows, of which only
   `profileID` participates in this contract: it is the join from a running
   session to the profile whose capacity governs it.
@@ -203,10 +207,10 @@ Each element of `buckets` is one rate-limit window as the usage API names it:
 
 ## The terminal join
 
-`tbd terminal list --json <worktree>` emits a bare array of terminal rows. The
-field that matters here:
-
-The field has three states, not two — the join can fail as well as be absent:
+`tbd terminal list --json <worktree>` emits a bare array of terminal rows. One
+field on each row participates in this contract: **`profileID`**, the join from
+a session to the profile whose capacity governs it. It has three states, not
+two — the join can fail as well as be absent:
 
 - **`profileID` PRESENT and it joins** – the UUID of the profile this session
   is actually running under. It is the **already-resolved** answer: the daemon
@@ -219,13 +223,17 @@ The field has three states, not two — the join can fail as well as be absent:
   differently.) Join it to `profiles[].profile.id` for that session's capacity
   facts.
 - **`profileID` PRESENT but it joins to nothing** – the pin is dangling: no
-  entry in `profiles[]` carries that id. An operator can delete a profile a
-  parked session was pinned to and then wake it through the explicit
-  fallback that overrides the refusal, which resumes the session on the
-  machine's ambient credentials while the row keeps its original stamp. Read
-  this exactly like the absent case — no capacity facts exist for this
-  terminal — and never as an error or a corrupt payload. It is a normal state
-  with a normal cause.
+  entry in `profiles[]` carries that id. Deleting a profile does exactly this,
+  immediately, to every terminal row that references it — awake, parked, or
+  closed. Nothing rewrites those stamps, deliberately: the stamp records which
+  account a session was started under, and an already-running process keeps
+  using the credentials it was handed, so overwriting the record would
+  misreport what that process is doing. (A parked session pinned to a deleted
+  profile ordinarily refuses to wake at all; the explicit fallback that
+  overrides the refusal resumes it on ambient credentials, still under the old
+  stamp.) Read a dangling pin exactly like the absent case — no capacity facts
+  exist for this terminal — and never as an error or a corrupt payload. It is a
+  normal state with a normal cause.
 - **`profileID` ABSENT** – the honest reading is again **"no capacity facts
   exist for this terminal."** Either it is not a Claude session at all (shell
   and codex kinds carry no profile), or resolution produced nothing at spawn —

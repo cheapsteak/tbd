@@ -120,6 +120,12 @@ func profileListJSONOutput(_ result: ModelProfileListResult) -> String? {
 /// `--refresh` fails fast exactly as a plain `profile list` would — promising
 /// "listing persisted snapshots" on stderr and then exiting nonzero with empty
 /// stdout would be a lie told one line before it was broken.
+///
+/// One residual imprecision: a truncated response frame also surfaces as a
+/// `DecodingError`, so it is read here as "answered unintelligibly" rather than
+/// as a dead connection. The listing a line later then fails loudly on its own,
+/// which is the same outcome, so telling the two apart would buy nothing for
+/// the cost of reworking `SocketClient`'s error surface.
 func refreshFailureNote(for error: Error) -> String? {
     let detail: String
     switch error {
