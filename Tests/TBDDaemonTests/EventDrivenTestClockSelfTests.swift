@@ -180,6 +180,104 @@ struct EventDrivenTestClockSelfTests {
         _ = await sleeper.value
     }
 
+    // MARK: Strict arming
+
+    /// The strict pair's healthy path must be indistinguishable from the soft
+    /// pair's: a registration releases the wait, whether the waiter parked first
+    /// or the sleeper was already there.
+    @Test("requireSleeperArmed returns for a sleeper that registers after it parks")
+    func requireArmedReturnsOnRegistration() async throws {
+        let clock = EventDrivenTestClock()
+        let recorder = FireRecorder<String>()
+
+        async let armed: Void = clock.requireSleeperArmed()
+        await Self.waitUntil("an arming waiter is parked") { clock.hasParkedArmingWaiter }
+
+        let sleeper = Task { [clock] in
+            try? await clock.sleep(for: .seconds(1))
+            recorder.record("woke")
+        }
+        try await armed
+        #expect(clock.hasSleeper)
+
+        // And the fast path, on a clock that already has one: a 50 ms guard
+        // would fire if this parked instead of returning at once.
+        try await clock.requireSleeperArmed(timeout: .milliseconds(50))
+
+        try await clock.requireAdvanceWhenArmed(by: .seconds(1))
+        #expect(await recorder.next() == "woke")
+        _ = await sleeper.value
+    }
+
+    /// The whole reason the strict pair exists: a chain must **stop** at the
+    /// first missed arming rather than record and walk on. Two claims here, and
+    /// the second is the one that keeps a chain sound — nothing advanced.
+    @Test("requireAdvanceWhenArmed throws the named diagnostic and advances nothing")
+    func requireAdvanceThrowsWithoutAdvancing() async {
+        let clock = EventDrivenTestClock()
+        var thrown: (any Error)?
+        do {
+            // 50 ms rather than the 45 s default, so the proof is cheap.
+            try await clock.requireAdvanceWhenArmed(by: .seconds(1), timeout: .milliseconds(50))
+        } catch {
+            thrown = error
+        }
+
+        let text = thrown.map { String(describing: $0) } ?? "nothing was thrown"
+        #expect(text.contains("no task suspended on the clock within"),
+                "a missed arming must throw the NoSleeperArmed diagnostic — got: \(text)")
+        #expect(text.contains("EventDrivenTestClockSelfTests.swift"),
+                "the thrown diagnostic must name the step that gave up — got: \(text)")
+        #expect(clock.now.offset == .zero,
+                "throwing before the advance is what stops the ledger and now from desyncing")
+    }
+
+    /// Same diagnostic, two delivery mechanisms — so a reader sees identical
+    /// text whether it arrived as a recorded issue or as a thrown error.
+    @Test("the strict and soft waits report the same diagnostic")
+    func strictAndSoftShareOneDiagnostic() async {
+        let clock = EventDrivenTestClock()
+        let recorded = Latch()
+        await withKnownIssue("nothing ever arms, so the soft wait must record") {
+            await clock.sleeperArmed(timeout: .milliseconds(50))
+        } matching: { issue in
+            let text = issue.error.map { String(describing: $0) } ?? ""
+            if text.contains("no task suspended on the clock within") { recorded.latch() }
+            return true
+        }
+        #expect(recorded.isLatched)
+
+        var thrownText = ""
+        do {
+            try await clock.requireSleeperArmed(timeout: .milliseconds(50))
+        } catch {
+            thrownText = String(describing: error)
+        }
+        #expect(thrownText.contains("no task suspended on the clock within"))
+    }
+
+    /// Cancellation is not expiry, and the strict pair keeps that treatment:
+    /// the wait ends, but it neither throws nor records, because the failure
+    /// belongs to whatever cancelled the test.
+    @Test("a cancelled requireSleeperArmed ends without a diagnostic")
+    func requireArmedIsSilentOnCancellation() async {
+        let clock = EventDrivenTestClock()
+        let waiter = Task { [clock] () -> String in
+            do {
+                // Long enough that expiry cannot be what ends this wait.
+                try await clock.requireSleeperArmed(timeout: .seconds(120))
+                return "returned"
+            } catch {
+                return "threw: \(error)"
+            }
+        }
+        await Self.waitUntil("an arming waiter is parked") { clock.hasParkedArmingWaiter }
+
+        waiter.cancel()
+        #expect(await waiter.value == "returned",
+                "attribution belongs to whatever cancelled the test, not to this call site")
+    }
+
     // MARK: Cancellation
 
     /// Pre-cancellation must be invisible to the clock: no ledger entry, and no

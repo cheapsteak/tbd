@@ -51,6 +51,14 @@ import Testing
 ///   ``FireRecorder/next(timeout:sourceLocation:)`` for any *positive*
 ///   assertion about what a resumed task did. See `advance(to:)`.
 ///
+/// Each wait comes in two forms, split like Swift Testing's `#expect` /
+/// `#require`: ``sleeperArmed(timeout:sourceLocation:)`` and
+/// ``advanceWhenArmed(by:sourceLocation:)`` record a miss and continue, while
+/// ``requireSleeperArmed(timeout:sourceLocation:)`` and
+/// ``requireAdvanceWhenArmed(by:sourceLocation:)`` throw. Prefer the strict pair
+/// in anything shaped like a chain — a poller test, where every step's
+/// correctness depends on the previous one having landed.
+///
 /// The correctness property worth stating explicitly, because it is why this is
 /// a clock rather than a wrapper around `TestClock`: the arming signal is
 /// emitted **after** the suspension has been appended to the ledger, under the
@@ -304,9 +312,61 @@ public final class EventDrivenTestClock: Clock, @unchecked Sendable {
     /// sites stay free of `try` noise. That is safe only because it returns
     /// nothing — see `Tests/CLAUDE.md` on non-throwing waiters that *do* return
     /// a value.
+    ///
+    /// **This is the legacy shape.** It suits a single-shot test, where the next
+    /// statement is an assertion that fails informatively on its own. A *chain*
+    /// of waits — any poller test — wants
+    /// ``requireSleeperArmed(timeout:sourceLocation:)`` instead, because
+    /// record-and-continue there advances virtual time with nothing registered
+    /// and desyncs every later step. Kept, unchanged, for its settled callers.
     public func sleeperArmed(timeout: Swift.Duration = .seconds(45),
                              sourceLocation: SourceLocation = #_sourceLocation) async {
-        if hasSleeper { return }
+        guard await armingTimedOut(timeout: timeout), !Task.isCancelled else { return }
+        Issue.record(
+            NoSleeperArmed(timeout: timeout, virtualNow: now),
+            sourceLocation: sourceLocation
+        )
+    }
+
+    /// The **strict** twin of ``sleeperArmed(timeout:sourceLocation:)``:
+    /// identical wait, but a miss throws instead of being recorded.
+    ///
+    /// Mirrors Swift Testing's `#expect` / `#require` split, and exists for the
+    /// same reason `#require` does — *the next step depends on this one having
+    /// landed*. In a poller test each `arm → advance → re-arm` step is only
+    /// sound if the previous one succeeded: a recorded-and-continued miss lets
+    /// ``advance(by:)`` move virtual time with no sleeper in the ledger, the
+    /// sleep that registers afterwards is measured from the new `now` and never
+    /// fires, and the test hangs somewhere later with no attribution. Throwing
+    /// ends the test at the first missed arming, so the worst case of a failing
+    /// chain is one hang guard rather than one per step.
+    ///
+    /// - Throws: the same `NoSleeperArmed` value the non-throwing twin records —
+    ///   one diagnostic, two delivery mechanisms, so a reader sees identical
+    ///   text whichever way it arrived.
+    /// - Parameters:
+    ///   - timeout: hang guard only, exactly as in the non-throwing twin.
+    ///     **On task cancellation this returns without throwing and without a
+    ///     diagnostic**: the failure belongs to whatever cancelled the test.
+    ///   - sourceLocation: carried *into the error*, not into an
+    ///     `Issue.record`. A thrown error is attributed to the test function, so
+    ///     in a chain of these the message is the only thing that can say which
+    ///     step gave up.
+    public func requireSleeperArmed(timeout: Swift.Duration = .seconds(45),
+                                    sourceLocation: SourceLocation = #_sourceLocation) async throws {
+        guard await armingTimedOut(timeout: timeout), !Task.isCancelled else { return }
+        throw NoSleeperArmed(timeout: timeout, virtualNow: now, sourceLocation: sourceLocation)
+    }
+
+    /// The wait both arming helpers share, so the soft and strict forms cannot
+    /// drift apart: they differ only in how the verdict is delivered.
+    ///
+    /// - Returns: `true` if the hang guard gave up before any sleeper
+    ///   registered. A `true` under cancellation is not evidence of anything —
+    ///   see the note at the bottom of this method — so both callers check
+    ///   `Task.isCancelled` before reporting.
+    private func armingTimedOut(timeout: Swift.Duration) async -> Bool {
+        if hasSleeper { return false }
 
         let waiterID = UUID()
         let timedOut = await withTaskGroup(of: ArmingRace.self, returning: Bool.self) { group in
@@ -379,22 +439,20 @@ public final class EventDrivenTestClock: Clock, @unchecked Sendable {
         // call leaves an entry behind for the next one to trip over.
         lock.withLock { _ = expiredArmingWaiters.remove(waiterID) }
 
-        // Cancellation is not expiry. A cancelled enclosing task — `.clockDriven`'s
-        // time limit firing, a sibling's `cancelAll()` — cancels the hang guard's
-        // sleep, so the waiter is released early and `timedOut` says `true` for a
-        // timer that may well have been about to arm. Reporting that would put a
-        // fabricated "within 45 s" on an innocent call site and hide the real
-        // cause, so the diagnostic is suppressed and the attribution left to
-        // whatever did the cancelling. The check belongs *here* rather than in
-        // the guard child: cancellation is monotonic, so the enclosing task's
-        // flag is unambiguous, while the child cannot distinguish its parent's
-        // cancellation from the group's own `cancelAll()` on the healthy path.
-        if timedOut && !Task.isCancelled {
-            Issue.record(
-                NoSleeperArmed(timeout: timeout, virtualNow: now),
-                sourceLocation: sourceLocation
-            )
-        }
+        // Cancellation is not expiry, which is why this returns the raw verdict
+        // and leaves the `Task.isCancelled` check to the two callers. A
+        // cancelled enclosing task — `.clockDriven`'s time limit firing, a
+        // sibling's `cancelAll()` — cancels the hang guard's sleep, so the
+        // waiter is released early and `true` comes back for a timer that may
+        // well have been about to arm. Reporting that would put a fabricated
+        // "within 45 s" on an innocent call site and hide the real cause, so
+        // both callers suppress it and leave attribution to whatever did the
+        // cancelling. The check belongs in the *caller* rather than in the
+        // guard child for the same reason it always did: cancellation is
+        // monotonic, so the enclosing task's flag is unambiguous, while the
+        // child cannot distinguish its parent's cancellation from the group's
+        // own `cancelAll()` on the healthy path.
+        return timedOut
     }
 
     /// ``sleeperArmed(timeout:sourceLocation:)`` followed by
@@ -408,6 +466,33 @@ public final class EventDrivenTestClock: Clock, @unchecked Sendable {
     public func advanceWhenArmed(by duration: Swift.Duration,
                                  sourceLocation: SourceLocation = #_sourceLocation) async {
         await sleeperArmed(sourceLocation: sourceLocation)
+        await advance(by: duration)
+    }
+
+    /// ``requireSleeperArmed(timeout:sourceLocation:)`` followed by
+    /// ``advance(by:)`` — the strict form of
+    /// ``advanceWhenArmed(by:sourceLocation:)``, and the one a poller test
+    /// wants for every advance in its chain.
+    ///
+    /// The ordering is the whole point: **nothing is advanced unless a sleeper
+    /// is registered**. A missed arming throws here, before virtual time moves,
+    /// so the ledger and `now` cannot desync and every later step of the chain
+    /// is skipped rather than run against a broken clock.
+    ///
+    /// Same convention as its predecessor: **put the advance next to the
+    /// assertion it unblocks**, and for a positive assertion follow it with
+    /// `await recorder.next()` — advancing still promises only that due
+    /// continuations were resumed, never that the resumed task has run.
+    ///
+    /// `timeout` is the same hang guard, exposed here (where
+    /// ``advanceWhenArmed(by:sourceLocation:)`` does not expose it) for one
+    /// reason: the guard has to be drivable in a self-test, and a proof that
+    /// costs the full 45 s default is a proof nobody keeps. Every production
+    /// call site takes the default.
+    public func requireAdvanceWhenArmed(by duration: Swift.Duration,
+                                        timeout: Swift.Duration = .seconds(45),
+                                        sourceLocation: SourceLocation = #_sourceLocation) async throws {
+        try await requireSleeperArmed(timeout: timeout, sourceLocation: sourceLocation)
         await advance(by: duration)
     }
 
@@ -493,13 +578,20 @@ public final class EventDrivenTestClock: Clock, @unchecked Sendable {
 private struct NoSleeperArmed: Error, CustomStringConvertible {
     let timeout: Swift.Duration
     let virtualNow: EventDrivenTestClock.Instant
+    /// Where the wait was issued, on the **throwing** path only. The recording
+    /// path passes nothing because `Issue.record` already lands the diagnostic
+    /// on the caller's line; a thrown error is attributed to the test function
+    /// instead, so in a chain of these waits the message is the only thing that
+    /// can say which step gave up.
+    var sourceLocation: SourceLocation?
 
     var description: String {
-        """
+        let site = sourceLocation.map { "\nThe wait that gave up: \($0.fileID):\($0.line)." } ?? ""
+        return """
         EventDrivenTestClock: no task suspended on the clock within \(timeout) — observed \
         zero registered sleepers, virtual now = \(virtualNow.offset). The code under test \
         never reached its sleep: did you start the task, cancel it first, or advance past \
-        the point where it would have armed?
+        the point where it would have armed?\(site)
         """
     }
 }
