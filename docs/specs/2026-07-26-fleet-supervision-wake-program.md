@@ -76,7 +76,8 @@ daemon — and outside the desk — entirely.**
   public, documented, stable surface: parked state and `hibernateReason` in
   the listings; the supervision
   switch readable (`tbd supervise status --json`); per-profile
-  usage facts readable (P1-1 — the one surface that does not exist yet); and
+  usage facts readable (P1-1 — `tbd profile list --json`, contract in
+  [`../capacity-facts.md`](../capacity-facts.md)); and
   `tbd terminal wake --prompt` with its existing race-safety — an
   already-awake session reports `woken:false` and receives nothing, the one
   property that must hold no matter who calls, and it already does. The

@@ -88,6 +88,68 @@ func usageAgeMarker(fetchedAt: Date?, now: Date = Date()) -> String? {
     return "(updated \(hours / 24)d ago)"
 }
 
+/// The exact JSON text `tbd profile list --json` prints: the RPC result inside
+/// the versioned envelope this CLI's contract promises
+/// (`docs/capacity-facts.md`). The wrapping decision and the contract version
+/// live here, in one place, so the command body is a bare print of this and
+/// tests can assert against the real composed bytes.
+func profileListJSONOutput(_ result: ModelProfileListResult) -> String? {
+    jsonString(VersionedJSONEnvelope(
+        schemaVersion: profileListSchemaVersion,
+        payload: result
+    ))
+}
+
+/// Whether a failed usage-refresh may be tolerated, and if so the one-line
+/// note `tbd profile list --refresh` writes to stderr before listing anyway.
+/// Ends in a newline; callers write it verbatim.
+///
+/// The dividing line is **whether the daemon answered the refresh attempt**,
+/// because that is what predicts the list call a line later:
+///
+/// - **It answered and refused** (`CLIError.rpcError`) — its OAuth usage poller
+///   is not constructed yet during the startup window, or it is a mock daemon.
+/// - **It answered unintelligibly** (`DecodingError`) — the response arrived but
+///   the refresh result's shape did not match, as under daemon/CLI version
+///   skew. The refresh outcome is unreadable; the listing may still decode.
+///
+/// Both still produce a listing, but the note must not promise what is in it.
+/// The refusal case in particular arrives when the daemon has no usage poller,
+/// and the listing draws its snapshots from that same poller — so every profile
+/// comes back with `usageSnapshot` absent, which is the "tracked, not yet
+/// fetched" state, not stale numbers. The note therefore points at the absence
+/// rather than at staleness fields that will not be there.
+///
+/// Anything else means the daemon is unreachable. Returning nil rethrows it, so
+/// `--refresh` fails fast exactly as a plain `profile list` would — promising a
+/// listing on stderr and then exiting nonzero with empty stdout would be a lie
+/// told one line before it was broken.
+///
+/// One residual imprecision: a truncated response frame also surfaces as a
+/// `DecodingError`, so it is read here as "answered unintelligibly" rather than
+/// as a dead connection. The listing a line later then fails loudly on its own,
+/// which is the same outcome, so telling the two apart would buy nothing for
+/// the cost of reworking `SocketClient`'s error surface.
+func refreshFailureNote(for error: Error) -> String? {
+    let detail: String
+    switch error {
+    // Bind the associated value rather than rendering the error: CLIError's
+    // `description` prefixes "Error: ", which would stack a second prefix onto
+    // a note that already says "warning:".
+    case CLIError.rpcError(let message):
+        detail = message
+    // DecodingError's own description is long and multi-line; the note is one
+    // line by contract, and the cause is the same whichever key mismatched.
+    case is DecodingError:
+        detail = "daemon answered with an unreadable refresh result (version skew?)"
+    default:
+        return nil
+    }
+    return "warning: usage refresh failed (\(detail)); listing anyway, possibly "
+        + "without usage snapshots — an absent usageSnapshot means none fetched "
+        + "yet, not stale numbers\n"
+}
+
 /// Resolve a user-supplied profile reference against the daemon's profile
 /// list. Accepts an exact name, a unique case-insensitive name, or a profile
 /// UUID (escape hatch for scripting). Throws a `CLIError` with actionable
@@ -195,11 +257,28 @@ struct ProfileList: AsyncParsableCommand {
         let client = SocketClient()
 
         if refresh {
-            _ = try client.call(
-                method: RPCMethod.modelProfileUsageRefresh,
-                params: ModelProfileUsageRefreshParams(id: nil),
-                resultType: ModelProfileUsageRefreshResult.self
-            )
+            // A refresh is an optimization, never a precondition: the listing
+            // is served from persisted snapshots either way, and each snapshot
+            // carries its own provenance (`fetchedAt`, `statusKind`), so a
+            // consumer can already see that its numbers aged. Failing the whole
+            // command would hand a scripted caller nothing at all — worse than
+            // slightly stale facts. The refusal goes to stderr so stdout stays
+            // parseable. Contract: docs/capacity-facts.md.
+            //
+            // Tolerance stops at a refusal the daemon actually sent: an
+            // unreachable daemon rethrows here, because the list call below
+            // would fail anyway and stderr must not promise a listing that
+            // never arrives. `refreshFailureNote(for:)` draws that line.
+            do {
+                _ = try client.call(
+                    method: RPCMethod.modelProfileUsageRefresh,
+                    params: ModelProfileUsageRefreshParams(id: nil),
+                    resultType: ModelProfileUsageRefreshResult.self
+                )
+            } catch {
+                guard let note = refreshFailureNote(for: error) else { throw error }
+                FileHandle.standardError.write(Data(note.utf8))
+            }
         }
 
         let result = try client.call(
@@ -208,7 +287,22 @@ struct ProfileList: AsyncParsableCommand {
         )
 
         if json {
-            printJSON(result)
+            // Versioned contract surface — composed by profileListJSONOutput,
+            // printed verbatim. See docs/capacity-facts.md.
+            //
+            // A nil here means the envelope did not encode. Printing nothing
+            // and exiting 0 would tell a scripted consumer "zero profiles",
+            // which is a different fact entirely; fail loudly instead. The
+            // diagnostic is written here rather than carried on a thrown
+            // CLIError because that type's `description` adds its own "Error: "
+            // prefix, which ArgumentParser would then print a second time.
+            guard let output = profileListJSONOutput(result) else {
+                FileHandle.standardError.write(Data(
+                    ("Error: could not encode the profile list as JSON "
+                        + "(schemaVersion \(profileListSchemaVersion))\n").utf8))
+                throw ExitCode.failure
+            }
+            print(output)
             return
         }
         if result.profiles.isEmpty {
