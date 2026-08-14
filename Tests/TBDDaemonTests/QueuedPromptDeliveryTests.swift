@@ -92,10 +92,6 @@ struct QueuedPromptDeliveryTests {
     private final class FirstTime: @unchecked Sendable {
         private let lock = NSLock()
         private var seen = false
-        var happened: Bool {
-            lock.lock(); defer { lock.unlock() }
-            return seen
-        }
         func claim() -> Bool {
             lock.lock(); defer { lock.unlock() }
             if seen { return false }
@@ -123,26 +119,23 @@ struct QueuedPromptDeliveryTests {
         }
     }
 
-    /// Bounded stand-in for `awaitPendingDeliveries()`. A cycle whose
-    /// continuation was orphaned never retires, and the plain await would then
-    /// hang the whole run rather than attribute the defect; this records a
-    /// named failure instead. Tier-2 bounded polling, per `Tests/CLAUDE.md`.
+    /// Bounded stand-in for `awaitPendingDeliveries()`. Poll the coordinator's
+    /// actual in-flight state so a separate wrapper task cannot itself be
+    /// starved after the deliveries finish. A cycle whose continuation was
+    /// orphaned never retires, and the plain await would then hang the whole
+    /// run rather than attribute the defect; this records a named failure
+    /// instead. Tier-2 bounded polling, per `Tests/CLAUDE.md`.
     private func awaitDeliveries(
         _ coordinator: PendingPromptCoordinator,
         within seconds: Double = 20,
         sourceLocation: SourceLocation = #_sourceLocation
     ) async {
-        // Deliberately NOT a task group: the wait it is bounding can be
-        // permanently suspended, and a group awaits every child before it
-        // returns — so the "bound" would be the hang it was meant to report.
-        let finished = FirstTime()
-        let waiter = Task { await coordinator.awaitPendingDeliveries(); _ = finished.claim() }
         let deadline = Date().addingTimeInterval(seconds)
         while Date() < deadline {
-            if finished.happened { return }
+            if await coordinator.inFlightCycleCount == 0 { return }
             try? await Task.sleep(for: .milliseconds(5))
         }
-        waiter.cancel()
+        if await coordinator.inFlightCycleCount == 0 { return }
         Issue.record(
             """
             a delivery cycle never retired within \(seconds)s — a superseded cycle's \
@@ -177,6 +170,9 @@ struct QueuedPromptDeliveryTests {
             await clock.advance(by: PendingPromptCoordinator.pendingPromptSettleDelay)
             try? await Task.sleep(for: .milliseconds(2))
         }
+        // The wall deadline bounds a missing condition; it must not veto a
+        // monotone success that completed while this polling task was starved.
+        if await condition() { return }
         Issue.record(
             "timed out after \(seconds)s waiting until \(description)",
             sourceLocation: sourceLocation)
@@ -242,6 +238,7 @@ struct QueuedPromptDeliveryTests {
             if await condition() { return }
             try? await Task.sleep(for: .milliseconds(5))
         }
+        if await condition() { return }
         Issue.record(
             "timed out after \(seconds)s waiting until \(description)",
             sourceLocation: sourceLocation)
@@ -414,6 +411,25 @@ struct QueuedPromptDeliveryTests {
         Fix the flake in acme's src/parser.swift.
         It's the "quoted" branch that reds.
         """
+
+    // MARK: - Polling infrastructure
+
+    @Test("the settle poll rechecks completion after the wall deadline")
+    func settlePollRechecksAfterDeadline() async {
+        await advancePastSettle(TestClock<Duration>(), within: 0) { true }
+    }
+
+    @Test("the delivery poll rechecks completion after the wall deadline")
+    func deliveryPollRechecksAfterDeadline() async throws {
+        let coordinator = PendingPromptCoordinator(db: try TBDDatabase(inMemory: true))
+
+        await awaitDeliveries(coordinator, within: 0)
+    }
+
+    @Test("the condition poll rechecks completion after the wall deadline")
+    func conditionPollRechecksAfterDeadline() async {
+        await waitUntil("an already-complete condition", within: 0) { true }
+    }
 
     // MARK: - Flag OFF
 
