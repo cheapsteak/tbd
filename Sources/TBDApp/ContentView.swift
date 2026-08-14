@@ -2,11 +2,16 @@ import AppKit
 import SwiftUI
 import TBDShared
 
+private enum FilePanelStorageKey {
+    static let isVisible = "filePanel.isVisible"
+    static let width = "filePanel.width"
+}
+
 struct ContentView: View {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
-    @AppStorage("filePanel.isVisible") private var showFilePanel = true
-    @AppStorage("filePanel.width") private var filePanelWidth: Double = 280
+    @AppStorage(FilePanelStorageKey.isVisible) private var showFilePanel = true
+    @AppStorage(FilePanelStorageKey.width) private var filePanelWidth: Double = 280
     @AppStorage(AppState.nightwatchExperimentalKey) private var nightwatchExperimental: Bool = false
     // Part of the PR split button's .id key: the baked (non-template) icon
     // colors depend on the appearance, and the materialized-once toolbar item
@@ -56,7 +61,7 @@ struct ContentView: View {
                 SidebarView()
                     .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 400)
             } detail: {
-                DetailSectionHostPager(showFilePanel: $showFilePanel, filePanelWidth: $filePanelWidth)
+                DetailSectionHostPager()
             }
             .toolbar(removing: .sidebarToggle)
             .toolbar {
@@ -518,7 +523,7 @@ struct ContentView: View {
 /// the `tv.window != nil` guards in `TerminalPanelView`).
 ///
 /// Each tab's content is a small internally-reactive wrapper — it reads
-/// `@EnvironmentObject`/`@Binding` state itself rather than being handed a
+/// `@EnvironmentObject`/`@AppStorage` state itself rather than being handed a
 /// fresh value on every `updateNSViewController` — so its
 /// `NSHostingController` is created exactly once and its `rootView` is
 /// never reassigned: the same "stable identity, reactive interior" shape
@@ -530,9 +535,6 @@ struct DetailSectionHostPager: NSViewControllerRepresentable {
         case providerDesk
         case other
     }
-
-    @Binding var showFilePanel: Bool
-    @Binding var filePanelWidth: Double
 
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var appearance: AppearanceSettings
@@ -576,7 +578,7 @@ struct DetailSectionHostPager: NSViewControllerRepresentable {
 
         if !currentIDs.contains(Self.otherTabID) {
             let host = NSHostingController(
-                rootView: OtherSectionContent(showFilePanel: $showFilePanel, filePanelWidth: $filePanelWidth)
+                rootView: OtherSectionContent()
                     .environmentObject(appState)
                     .environmentObject(overlayCoordinator)
             )
@@ -666,8 +668,8 @@ private struct ProviderDeskHostSlot: View {
 /// remote-session branch (now `RemoteSessionHostSlot`'s job) — same
 /// conditions, same order, same views.
 private struct OtherSectionContent: View {
-    @Binding var showFilePanel: Bool
-    @Binding var filePanelWidth: Double
+    @AppStorage(FilePanelStorageKey.isVisible) private var showFilePanel = true
+    @AppStorage(FilePanelStorageKey.width) private var filePanelWidth: Double = 280
 
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
@@ -768,11 +770,10 @@ private struct OtherSectionContent: View {
 /// + the optional file panel, the overlay coordinator's transcript overlay,
 /// and the window-wide click-outside catcher.
 ///
-/// `showFilePanel`/`filePanelWidth` stay `@Binding` (not independent
-/// `@AppStorage` re-declarations of the same keys) — `ContentView`'s
-/// toolbar toggle button needs the SAME state, and threading one `Binding`
-/// through (via `DetailSectionHostPager` → `OtherSectionContent`) avoids two
-/// literal copies of the UserDefaults key strings ever drifting apart.
+/// `showFilePanel`/`filePanelWidth` stay `@Binding`: the stable
+/// `OtherSectionContent` host owns the corresponding `@AppStorage` values and
+/// passes live bindings into this branch. `ContentView` independently observes
+/// the same centralized visibility key for its toolbar action.
 /// `contentAreaHeight` moves in as this view's own `@State` instead: nothing
 /// outside this branch ever read it in `ContentView`.
 private struct WorktreeDetailAreaView: View {
