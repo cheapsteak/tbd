@@ -7,7 +7,8 @@ import TBDShared
 
     private func runStopHook(
         goalStatus: String,
-        sessionID: String = "a1b2c3d4-e5f6-4789-abcd-0123456789ab"
+        sessionID: String = "a1b2c3d4-e5f6-4789-abcd-0123456789ab",
+        priorGoalStatus: String? = nil
     ) throws -> [String] {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-codex-stop-hook-\(UUID().uuidString)", isDirectory: true)
@@ -27,11 +28,23 @@ import TBDShared
 
         let databaseProcess = Process()
         databaseProcess.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        // Codex 0.147 keys this table by thread_id. Only the history test
+        // relaxes that constraint to exercise a possible future schema shape.
+        let threadIDConstraint = priorGoalStatus == nil ? "PRIMARY KEY NOT NULL" : "NOT NULL"
+        let priorGoalInsert = priorGoalStatus.map { status in
+            """
+            INSERT INTO thread_goals (
+                thread_id, goal_id, objective, status, created_at_ms, updated_at_ms
+            ) VALUES (
+                '\(sessionID)', 'prior-goal-id', 'Prior objective', '\(status)', 1, 1
+            );
+            """
+        } ?? ""
         databaseProcess.arguments = [
             directory.appendingPathComponent("goals_1.sqlite").path,
             """
             CREATE TABLE thread_goals (
-                thread_id TEXT PRIMARY KEY NOT NULL,
+                thread_id TEXT \(threadIDConstraint),
                 goal_id TEXT NOT NULL,
                 objective TEXT NOT NULL,
                 status TEXT NOT NULL CHECK(status IN (
@@ -43,10 +56,11 @@ import TBDShared
                 created_at_ms INTEGER NOT NULL,
                 updated_at_ms INTEGER NOT NULL
             );
+            \(priorGoalInsert)
             INSERT INTO thread_goals (
                 thread_id, goal_id, objective, status, created_at_ms, updated_at_ms
             ) VALUES (
-                '\(sessionID)', 'goal-id', 'Test objective', '\(goalStatus)', 1, 1
+                '\(sessionID)', 'goal-id', 'Test objective', '\(goalStatus)', 2, 2
             );
             """
         ]
@@ -151,6 +165,15 @@ import TBDShared
         let invocations = try runStopHook(
             goalStatus: "active",
             sessionID: "b2c3d4e5-f607-489a-bcde-1234567890ab"
+        )
+
+        #expect(!invocations.contains("terminal-activity idle"))
+    }
+
+    @Test func stopHookUsesMostRecentlyUpdatedGoalStateIfSchemaAllowsHistory() throws {
+        let invocations = try runStopHook(
+            goalStatus: "active",
+            priorGoalStatus: "complete"
         )
 
         #expect(!invocations.contains("terminal-activity idle"))
