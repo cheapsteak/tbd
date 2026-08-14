@@ -142,6 +142,9 @@ struct QueuedPromptDeliveryTests {
             if finished.happened { return }
             try? await Task.sleep(for: .milliseconds(5))
         }
+        // The polling task may resume after the deadline even though this
+        // monotone completion became true while it was starved.
+        if finished.happened { return }
         waiter.cancel()
         Issue.record(
             """
@@ -177,6 +180,9 @@ struct QueuedPromptDeliveryTests {
             await clock.advance(by: PendingPromptCoordinator.pendingPromptSettleDelay)
             try? await Task.sleep(for: .milliseconds(2))
         }
+        // The wall deadline bounds a missing condition; it must not veto a
+        // monotone success that completed while this polling task was starved.
+        if await condition() { return }
         Issue.record(
             "timed out after \(seconds)s waiting until \(description)",
             sourceLocation: sourceLocation)
@@ -242,6 +248,9 @@ struct QueuedPromptDeliveryTests {
             if await condition() { return }
             try? await Task.sleep(for: .milliseconds(5))
         }
+        // A post-deadline read is authoritative when scheduling overshoots the
+        // bound after this monotone condition has already become true.
+        if await condition() { return }
         Issue.record(
             "timed out after \(seconds)s waiting until \(description)",
             sourceLocation: sourceLocation)
@@ -414,6 +423,13 @@ struct QueuedPromptDeliveryTests {
         Fix the flake in acme's src/parser.swift.
         It's the "quoted" branch that reds.
         """
+
+    // MARK: - Polling infrastructure
+
+    @Test("the settle poll rechecks completion after the wall deadline")
+    func settlePollRechecksAfterDeadline() async {
+        await advancePastSettle(TestClock<Duration>(), within: 0) { true }
+    }
 
     // MARK: - Flag OFF
 
