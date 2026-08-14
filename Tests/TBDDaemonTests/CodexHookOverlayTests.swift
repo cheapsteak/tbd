@@ -39,13 +39,15 @@ import TBDShared
         let threadIDConstraint = priorGoalStatus == nil ? "PRIMARY KEY NOT NULL" : "NOT NULL"
         let currentTimestamp = goalTimestampsTie ? 1 : 2
         let currentCreatedAt = createdAtBreaksUpdateTie ? 2 : currentTimestamp
-        let currentUpdatedAt = createdAtBreaksUpdateTie ? 1 : currentTimestamp
+        let currentUpdatedAt = createdAtBreaksUpdateTie ? 3 : currentTimestamp
+        let priorUpdatedAt = createdAtBreaksUpdateTie ? 3 : 1
         let priorGoalInsert = priorGoalStatus.map { status in
             """
             INSERT INTO thread_goals (
                 thread_id, goal_id, objective, status, created_at_ms, updated_at_ms
             ) VALUES (
-                '\(sessionID)', 'prior-goal-id', 'Prior objective', '\(status)', 1, 1
+                '\(sessionID)', 'prior-goal-id', 'Prior objective', '\(status)',
+                1, \(priorUpdatedAt)
             );
             """
         } ?? ""
