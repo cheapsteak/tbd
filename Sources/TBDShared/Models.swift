@@ -1166,6 +1166,20 @@ public struct Config: Codable, Sendable, Equatable {
     /// chose" and follows the shipped default wherever it goes; `0`/`1` is an
     /// explicit gesture and is honored forever.
     public var queuedPromptEnabled: Bool
+    /// The fleet brake for supervision
+    /// (`docs/specs/2026-07-26-fleet-supervision-design.md` §3, §8): one bit,
+    /// fleet-wide, ANDed over every project's mark and writing none of them.
+    /// Released (`true`) means TBD may act where a mark stands; engaged
+    /// (`false`, the shipped state) means TBD's authority is paused everywhere,
+    /// with the marks left exactly as they were.
+    ///
+    /// **Resolved, not stored**, like `queuedPromptEnabled`: the backing column
+    /// carries no SQL default and stays NULL until somebody touches the toggle,
+    /// so this property is
+    /// `supervision_enabled ?? Config.supervisionEnabledDefault`. NULL means
+    /// "never chose" and follows the shipped default wherever it goes; `0`/`1`
+    /// is an explicit gesture and is honored forever.
+    public var supervisionEnabled: Bool
 
     /// Default idle-timeout for auto-hibernation, in minutes.
     public static let defaultHibernateIdleMinutes = 30
@@ -1186,6 +1200,11 @@ public struct Config: Codable, Sendable, Equatable {
     /// the feature is a change to this constant — no forcing `UPDATE`
     /// migration, and an explicit opt-out is left alone.
     public static let queuedPromptDefault = false
+    /// The shipped default for `supervisionEnabled`, and the single place it
+    /// lives. Supervision ships with the brake engaged; graduating it is a
+    /// change to this constant — no forcing `UPDATE` migration, and an explicit
+    /// opt-out is left alone.
+    public static let supervisionEnabledDefault = false
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -1212,7 +1231,8 @@ public struct Config: Codable, Sendable, Equatable {
                 agentPanelControlEnabled: Bool = false,
                 remoteBackendsEnabled: Bool = false,
                 deliveryVerificationEnabled: Bool = false,
-                queuedPromptEnabled: Bool = Config.queuedPromptDefault) {
+                queuedPromptEnabled: Bool = Config.queuedPromptDefault,
+                supervisionEnabled: Bool = Config.supervisionEnabledDefault) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
         self.envSettingOverrides = envSettingOverrides
@@ -1239,6 +1259,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.remoteBackendsEnabled = remoteBackendsEnabled
         self.deliveryVerificationEnabled = deliveryVerificationEnabled
         self.queuedPromptEnabled = queuedPromptEnabled
+        self.supervisionEnabled = supervisionEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -1297,6 +1318,11 @@ public struct Config: Codable, Sendable, Equatable {
         // fall through to the shipped default rather than hardcoding `false`.
         queuedPromptEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .queuedPromptEnabled) ?? Config.queuedPromptDefault
+        // Same tri-state as above: absent means the sender knew nothing about
+        // the flag, which is the NULL column's situation — follow the shipped
+        // default rather than hardcoding `false` here as well.
+        supervisionEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .supervisionEnabled) ?? Config.supervisionEnabledDefault
     }
 }
 
