@@ -26,14 +26,16 @@ enum AccessibilityWindowGeometryGuard {
 
         installSetter(
             selectorName: "accessibilitySetPositionAttribute:",
-            geometryName: "position"
+            geometryName: "position",
+            expectedObjCType: String(cString: NSValue(point: .zero).objCType)
         ) { value in
             let point = value.pointValue
             return point.x.isFinite && point.y.isFinite
         }
         installSetter(
             selectorName: "accessibilitySetSizeAttribute:",
-            geometryName: "size"
+            geometryName: "size",
+            expectedObjCType: String(cString: NSValue(size: .zero).objCType)
         ) { value in
             let size = value.sizeValue
             return size.width.isFinite && size.height.isFinite
@@ -43,6 +45,7 @@ enum AccessibilityWindowGeometryGuard {
     private static func installSetter(
         selectorName: String,
         geometryName: String,
+        expectedObjCType: String,
         isValid: @escaping (NSValue) -> Bool
     ) {
         let selector = NSSelectorFromString(selectorName)
@@ -59,14 +62,18 @@ enum AccessibilityWindowGeometryGuard {
             to: AccessibilityGeometrySetter.self
         )
         let replacement: @convention(block) (AnyObject, AnyObject) -> Void = { window, rawValue in
-            guard let value = rawValue as? NSValue, !isValid(value) else {
+            guard let value = rawValue as? NSValue else {
                 originalSetter(window, selector, rawValue)
                 return
             }
+            guard String(cString: value.objCType) == expectedObjCType, isValid(value) else {
+                accessibilityGeometryLogger.fault(
+                    "Rejected invalid Accessibility window \(geometryName, privacy: .public) value=\(value.description, privacy: .public) class=\(String(describing: type(of: window)), privacy: .public)"
+                )
+                return
+            }
 
-            accessibilityGeometryLogger.fault(
-                "Rejected non-finite Accessibility window \(geometryName, privacy: .public) value=\(value.description, privacy: .public) class=\(String(describing: type(of: window)), privacy: .public)"
-            )
+            originalSetter(window, selector, rawValue)
         }
         method_setImplementation(method, imp_implementationWithBlock(replacement))
     }

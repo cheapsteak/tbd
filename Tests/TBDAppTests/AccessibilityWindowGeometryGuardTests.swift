@@ -34,6 +34,21 @@ struct AccessibilityWindowGeometryGuardTests {
         #expect(window.frame.origin == NSPoint(x: 40, y: 50))
     }
 
+    @Test("rejects a type-mismatched Accessibility position")
+    func rejectsMismatchedPositionValueType() {
+        AccessibilityWindowGeometryGuard.install()
+        let window = makeWindow()
+        let originalFrame = window.frame
+
+        setAccessibilityValue(
+            NSValue(rect: NSRect(x: 1, y: 2, width: 3, height: 4)),
+            selectorName: "accessibilitySetPositionAttribute:",
+            on: window
+        )
+
+        #expect(window.frame == originalFrame)
+    }
+
     @Test("rejects a non-finite Accessibility size")
     func rejectsNonFiniteSize() {
         AccessibilityWindowGeometryGuard.install()
@@ -63,6 +78,21 @@ struct AccessibilityWindowGeometryGuardTests {
 
         #expect(window.frame.size != originalSize)
         #expect(window.frame.width == 420)
+    }
+
+    @Test("rejects a type-mismatched Accessibility size")
+    func rejectsMismatchedSizeValueType() {
+        AccessibilityWindowGeometryGuard.install()
+        let window = makeWindow()
+        let originalFrame = window.frame
+
+        setAccessibilityValue(
+            NSValue(rect: NSRect(x: 1, y: 2, width: 3, height: 4)),
+            selectorName: "accessibilitySetSizeAttribute:",
+            on: window
+        )
+
+        #expect(window.frame == originalFrame)
     }
 
     private func makeWindow() -> NSWindow {
