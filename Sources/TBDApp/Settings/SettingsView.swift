@@ -245,6 +245,7 @@ struct GeneralSettingsTab: View {
                 hibernateInputVetoToggle
                 autoCloseSetupToggle
                 queuedPromptToggle
+                supervisionBrakeToggle
             }
         }
         .formStyle(.grouped)
@@ -287,6 +288,22 @@ struct GeneralSettingsTab: View {
             set: { newValue in Task { await appState.setQueuedPromptEnabled(newValue) } }
         ))
         .help("Opens a prompt sheet right after creation starts, and hands the text to the agent whenever it comes up — so you don't wait out a preSession hook before saying what you want. While it's on, the inline rename field no longer opens on create. Off by default (soaking).")
+    }
+
+    /// Supervision's fleet-wide brake (design 2026-07-26 §3, §7). Reads/writes
+    /// straight from `Config` via `loadSupervisionConfig()`/`getConfig()`, not
+    /// `daemon.capabilities` — the one soak flag here that isn't mirrored
+    /// there yet. Off by default, and releasing it does nothing visible on
+    /// its own: nothing in the daemon acts on this column yet, since the rest
+    /// of supervision (which projects are on, what conduct they run) is
+    /// shipping in the same series of changes as this switch.
+    @ViewBuilder
+    private var supervisionBrakeToggle: some View {
+        Toggle("Supervision fleet brake", isOn: Binding(
+            get: { appState.supervisionEnabled },
+            set: { newValue in Task { await appState.setSupervisionEnabled(newValue) } }
+        ))
+        .help("The fleet-wide switch for supervision: released, TBD's autonomous processes may act on sessions it supervises; braked, they may not. Off by default. Releasing it has no visible effect by itself yet — the rest of supervision (turning projects on, choosing their conduct) is shipping in the same series of changes, and nothing acts on this column until that lands.")
     }
 
     /// Pending-input veto for auto-hibernate. Reads the persisted flag from

@@ -49,12 +49,26 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// default, so `nil` here means "never chose" rather than "off". Resolve it
     /// through `Config.queuedPromptDefault`, never through `?? false`.
     var queued_prompt_enabled: Bool?
+    /// The fleet supervision brake (design 2026-07-26 §3, §7). **Genuinely
+    /// tri-state**, same shape as `queued_prompt_enabled`: the
+    /// `v75_config_supervision_enabled` column carries no SQL default, so
+    /// `nil` here means "never chose" rather than "off". Resolve it through
+    /// `Config.supervisionEnabledDefault`, never through `?? false`.
+    var supervision_enabled: Bool?
 
     /// - Parameter queuedPromptDefault: the shipped default a NULL
     ///   `queued_prompt_enabled` resolves to. Defaulted to the real constant;
     ///   the parameter exists so tests can prove that NULL *follows* a changed
     ///   default while an explicit `false` does not.
-    func toModel(queuedPromptDefault: Bool = Config.queuedPromptDefault) -> Config {
+    /// - Parameter supervisionEnabledDefault: same shape, for
+    ///   `supervision_enabled` — the parameter exists so tests can prove the
+    ///   same NULL-follows/explicit-sticks property for the fleet brake
+    ///   without waiting for the real `Config.supervisionEnabledDefault`
+    ///   constant to change.
+    func toModel(
+        queuedPromptDefault: Bool = Config.queuedPromptDefault,
+        supervisionEnabledDefault: Bool = Config.supervisionEnabledDefault
+    ) -> Config {
         Config(
             defaultProfileID: default_profile_id.flatMap(UUID.init(uuidString:)),
             primaryAgentPreference: primary_agent_preference
@@ -96,7 +110,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             // NOT `?? false`. The column has no SQL default, so NULL really
             // means "never chose" and must resolve to the shipped default —
             // that is the whole point of v70_config_queued_prompt.
-            queuedPromptEnabled: queued_prompt_enabled ?? queuedPromptDefault
+            queuedPromptEnabled: queued_prompt_enabled ?? queuedPromptDefault,
+            // Same reasoning, for the fleet supervision brake — NOT `?? false`.
+            supervisionEnabled: supervision_enabled ?? supervisionEnabledDefault
         )
     }
 }
@@ -340,6 +356,23 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET queued_prompt_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the fleet supervision brake (design 2026-07-26 §3, §7). Off is
+    /// the shipped default; releasing it hands TBD's autonomous processes the
+    /// authority to act, but nothing in the daemon reads this column to
+    /// actually act yet — the rest of the supervision subsystem lands in the
+    /// same series of changes. Writing either value is an explicit gesture
+    /// that leaves the column non-NULL forever after — including `false`,
+    /// which is the point: an operator who pulls the brake stays braked when
+    /// the shipped default eventually graduates.
+    public func setSupervisionEnabled(enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET supervision_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

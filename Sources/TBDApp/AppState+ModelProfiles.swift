@@ -205,6 +205,32 @@ extension AppState {
         }
     }
 
+    /// Load the supervision fleet brake from the daemon `Config`. Called on
+    /// launch and whenever a config-change delta arrives — same two call
+    /// sites as `loadHibernationConfig()`, kept as its own function rather
+    /// than folded into that one so this feature's wiring stays legible on
+    /// its own diff. Silent on failure — the toggle just shows a stale value
+    /// until the next successful load.
+    func loadSupervisionConfig() async {
+        guard let config = await fetchConfig() else { return }
+        if config.supervisionEnabled != supervisionEnabled {
+            supervisionEnabled = config.supervisionEnabled
+        }
+    }
+
+    /// Persist the supervision fleet brake (design 2026-07-26 §3, §7). Shipped
+    /// OFF; for now inert, since the rest of the supervision subsystem is
+    /// landing in the same series of changes.
+    func setSupervisionEnabled(_ enabled: Bool) async {
+        do {
+            try await daemonClient.setSupervisionEnabled(enabled)
+            supervisionEnabled = enabled
+        } catch {
+            logger.error("Failed to set supervisionEnabled: \(error, privacy: .public)")
+            showAlert("Failed to update supervision setting: \(error.localizedDescription)", isError: true)
+        }
+    }
+
     /// Set the global session-limit auto-resume gate. Turning it OFF also
     /// cancels all pending scheduled resumes daemon-side.
     func setAutoResumeOnLimitReset(_ enabled: Bool) async {

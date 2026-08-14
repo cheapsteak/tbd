@@ -739,6 +739,11 @@ final class AppState: ObservableObject {
     @Published var autoHibernateEnabled: Bool = false
     /// Auto-hibernate idle timeout in minutes. Loaded from `Config`.
     @Published var hibernateIdleMinutes: Int = Config.defaultHibernateIdleMinutes
+    /// The supervision fleet brake (design 2026-07-26 §3, §7) — supervision's
+    /// fleet-wide on/off switch. Shipped OFF; for now inert, since the rest
+    /// of the supervision subsystem is landing in the same series of
+    /// changes. Loaded from the daemon `Config` via `loadSupervisionConfig()`.
+    @Published var supervisionEnabled: Bool = false
     /// Daemon-persisted gate for session-limit auto-resume (default OFF).
     /// Daemon-side (not @AppStorage) because the daemon must act while the
     /// app is closed.
@@ -1914,6 +1919,7 @@ final class AppState: ObservableObject {
             Task { [weak self] in
                 await self?.loadModelProfiles()
                 await self?.loadHibernationConfig()
+                await self?.loadSupervisionConfig()
                 // The daemon reuses this delta for config changes including
                 // the control-mode toggle (handleConfigSetControlMode), so
                 // refresh capabilities too — a toggle from ANOTHER client
@@ -2393,6 +2399,7 @@ final class AppState: ObservableObject {
             }
             await loadModelProfiles()
             await loadHibernationConfig()
+            await loadSupervisionConfig()
             await refreshRemote()
             startSubscription()
             await refreshPRStatuses()

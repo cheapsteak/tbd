@@ -172,6 +172,22 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the fleet supervision brake (design 2026-07-26 §3, §7) — the
+    /// fleet-wide on/off switch for supervision. Shipped OFF and, for now,
+    /// inert: nothing in the daemon reads this column to gate an actuation
+    /// yet, because the rest of the supervision subsystem (per-project marks,
+    /// playbooks, the sweep, actuation preconditions) is landing in the same
+    /// series of changes. This handler exists so the switch itself — settable
+    /// from app and CLI, broadcast on change, surviving restart — is in place
+    /// before anything depends on it.
+    func handleConfigSetSupervisionEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConfigSetSupervisionEnabledParams.self, from: paramsData)
+        try await db.config.setSupervisionEnabled(enabled: params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the remote-backends master switch. Takes effect for polling
     /// on the NEXT daemon start — the manager is constructed at boot only
     /// when the flag was already on (see `Daemon.swift`), so flipping this
