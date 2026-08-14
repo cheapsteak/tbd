@@ -312,12 +312,35 @@ extension WorktreeLifecycle {
                         let localBranch = try await uniqueLocalBranchName(
                             repoPath: repo.path, base: worktree.branch
                         )
-                        // `uniqueLocalBranchName` returns only a name whose
-                        // `refs/heads/<name>` does not exist — it throws rather
-                        // than hand back a taken one — so the fetch below is the
-                        // only thing that can have created it.
+                        // Re-probe the chosen name immediately before the fetch,
+                        // and keep the tri-state, for the same reason the other
+                        // legs do: cleanup must be able to tell a branch this
+                        // attempt made from one that was already standing.
+                        //
+                        // This leg needs its own probe more than they do, and
+                        // gets less out of it. A `+` refspec force-updates, so
+                        // the fetch never refuses on a collision — git can never
+                        // say "a branch named … already exists" here, and
+                        // `cleanUpFailedWorktreeAdd`'s gate 1, the one that
+                        // closes the probe→attempt window on every other leg, is
+                        // therefore dead on this one. The probe is the only gate
+                        // left.
+                        //
+                        // What it buys, stated exactly: it **narrows** the
+                        // window to the gap between this call and the fetch's
+                        // ref write rather than closing it — a branch an
+                        // external actor creates inside that gap is still
+                        // indistinguishable from one the fetch made, and no
+                        // probe can fix that while the refspec is forced. What
+                        // it does close is the two states we can observe: a
+                        // branch already standing under this name (`true`) and a
+                        // probe that did not answer (`nil`) both block the
+                        // delete. Measuring also keeps the answer honest if
+                        // `uniqueLocalBranchName`'s contract ever loosens.
+                        createdBranchPreExisted = try? await git.localBranchExists(
+                            repoPath: repo.path, name: localBranch
+                        )
                         branchCreatedByThisAttempt = localBranch
-                        createdBranchPreExisted = false
                         try await git.fetchPullRequestHead(
                             repoPath: repo.path, number: prNumber, localBranch: localBranch
                         )

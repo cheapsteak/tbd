@@ -644,6 +644,105 @@ import Testing
                 "the PR-head checkout leaked the branch it fetched: \(branches)")
     }
 
+    /// The same leg's pre-existence answer must be a *measurement of the name it
+    /// is about to force-fetch into*, not an inherited claim about some other
+    /// name. `uniqueLocalBranchName` hands back `pr-7-2` here because `pr-7` is
+    /// taken, and the probe that gates the delete has to follow it: aimed at
+    /// `worktree.branch` instead it answers `true`, blocks the delete, and leaks
+    /// the branch the fetch really did create.
+    ///
+    /// Asserts preserved behavior — the unfixed tree hardcodes `false`, which
+    /// cleans up here too — so it is mutation-checked twice: probing
+    /// `worktree.branch` rather than `localBranch`, and hardcoding
+    /// `createdBranchPreExisted = true`, each leak `pr-7-2`.
+    ///
+    /// The caller's `pr-7` standing untouched afterwards is the other half. The
+    /// force refspec rewrote nothing here because the uniquifier steered around
+    /// it, and the cleanup deleted nothing of the caller's because the probe it
+    /// ran was about `pr-7-2`.
+    @Test func pullRequestLegProbesTheBranchItForceFetchesInto() async throws {
+        let (parentDir, hostDir, repoDir) = try await makeClonedTestRepo(
+            pullRequestHeads: [7]
+        )
+        defer { try? FileManager.default.removeItem(at: parentDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        let repo = try await makeTestRepo(db: db, tempDir: hostDir, repoDir: repoDir)
+
+        // The caller's own `pr-7`, which pushes the fetch onto `pr-7-2`.
+        try await shell("git branch pr-7", at: repoDir)
+
+        let pending = try await lifecycle.beginCreateWorktree(
+            repoID: repo.id, branch: "pr-7", skipClaude: true,
+            useExistingBranch: true, prNumber: 7
+        )
+        // Fail the checkout that follows the fetch, so cleanup runs with the
+        // fetched branch already created.
+        try occupy(pending.localPath)
+
+        await #expect(throws: WorktreeLifecycleError.self) {
+            _ = try await lifecycle.completeCreateWorktree(
+                worktreeID: pending.id, skipClaude: true,
+                existingBranchRef: "pr-7", checkoutPRHead: true
+            )
+        }
+
+        let branches = try await localBranches(repoDir)
+        #expect(!branches.contains("pr-7-2"),
+                "the uniquified branch this attempt fetched was not cleaned up: \(branches)")
+        #expect(branches.contains("pr-7"),
+                "cleanup deleted the branch the caller brought: \(branches)")
+    }
+
+    /// The two arms of that tri-state which *block* the delete, driven at the
+    /// cleanup boundary because neither is reachable end to end on this leg:
+    /// `true` needs a branch to appear inside the gap between the probe and the
+    /// fetch's ref write, and `nil` needs the probe to fail in that same gap
+    /// after `uniqueLocalBranchName`'s identical probe had just succeeded.
+    ///
+    /// `branchNameWasAlreadyTaken` is pinned `false` in all three cases because
+    /// that is the only value this leg can produce: its `+refs/pull/<n>/head`
+    /// refspec force-updates, so git never refuses on a collision and never says
+    /// "a branch named … already exists". The probe is the whole gate here, so
+    /// all three arms are asserted — `false` must still delete, or the gate
+    /// would just be a synonym for "never clean up".
+    ///
+    /// Asserts preserved cleanup behavior, so it is mutation-checked: dropping
+    /// the `branchPreExisted == false` guard in `cleanUpFailedWorktreeAdd`
+    /// deletes both branches this test expects to survive.
+    @Test func aPullRequestBranchTheFetchDidNotCreateIsNeverDeleted() async throws {
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        try await shell("git branch already-standing", at: repoDir)
+        try await shell("git branch probe-did-not-answer", at: repoDir)
+        try await shell("git branch fetched-by-this-attempt", at: repoDir)
+
+        let neverCreated = tempDir.appendingPathComponent("never-created").path
+        for (branch, preExisted) in [
+            ("already-standing", true), ("probe-did-not-answer", nil), ("fetched-by-this-attempt", false),
+        ] as [(String, Bool?)] {
+            await lifecycle.cleanUpFailedWorktreeAdd(
+                repoPath: repoDir.path,
+                worktreePath: neverCreated,
+                branch: branch,
+                branchPreExisted: preExisted,
+                branchNameWasAlreadyTaken: false
+            )
+        }
+
+        let branches = try await localBranches(repoDir)
+        #expect(branches.contains("already-standing"),
+                "cleanup deleted a branch that was standing before the fetch: \(branches)")
+        #expect(branches.contains("probe-did-not-answer"),
+                "cleanup deleted a branch whose pre-existence was unknown: \(branches)")
+        #expect(!branches.contains("fetched-by-this-attempt"),
+                "cleanup left behind the branch the fetch created: \(branches)")
+    }
+
     /// The third leg of the same `catch` creates NOTHING — it checks out a
     /// branch the caller owns — so it must delete nothing. The hard constraint
     /// of this fix, and the one whose failure destroys a user's work.
