@@ -3101,6 +3101,12 @@ extension RPCRouter {
                 dead (its process has exited) — nothing was sent; recreate the terminal's \
                 window first
                 """)
+        case .unverifiable(let error):
+            return PaneSendRefusal(outcome: .transportFailed, message: """
+                could not verify tmux pane \(terminal.tmuxPaneID) for terminal \
+                \(terminal.id.uuidString) on server \(server) (tmux unreachable: \(error)) — \
+                nothing was sent
+                """)
         case .live(let paneTerminalID):
             guard let paneTerminalID else {
                 // Absence is not disagreement. A pane spawned before TBD stamped

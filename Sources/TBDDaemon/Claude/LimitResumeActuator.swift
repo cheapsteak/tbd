@@ -426,6 +426,12 @@ public struct LimitResumeActuator: LimitResumeActuating {
                 \(terminal.id.uuidString, privacy: .public) is dead — cancelling
                 """)
             return .notEligible(.terminalGone)
+        case .unverifiable(let error):
+            logger.warning("""
+                actuate: pane \(terminal.tmuxPaneID, privacy: .public) could not be verified \
+                (tmux unreachable: \(error, privacy: .public)) — failing closed
+                """)
+            return .notEligible(.failed("could not verify the target pane: \(error)"))
         case .live(let paneTerminalID):
             guard let paneTerminalID else {
                 // Absence is not disagreement: a pane spawned before TBD

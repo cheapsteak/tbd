@@ -19,6 +19,21 @@ public enum PaneSendTarget: Sendable, Equatable {
     /// answered with, or `nil` when the pane carries no identity to compare —
     /// a pane spawned before TBD stamped one, or by something outside TBD.
     case live(terminalID: String?)
+    /// The consultation could not be answered at all: tmux failed for a reason
+    /// that says nothing about this pane — no server on that socket, a lost or
+    /// mismatched server, a tmux that would not run.
+    ///
+    /// Distinct from `.missing`, and the distinction is the whole point. Both
+    /// fail a send closed, so no caller that types into panes changes
+    /// behaviour. But `.missing` is *evidence the pane is gone* and
+    /// `.unverifiable` is *the absence of evidence*, and a caller that reacts to
+    /// absence by CREATING something — respawning an agent, say — must never
+    /// act on the second. Collapsing the two is how one unanswerable query
+    /// becomes a new terminal on every tick, forever.
+    ///
+    /// Carries tmux's own exit status and output, because a rail that refuses
+    /// to act should be able to say why it could not look.
+    case unverifiable(error: String)
 }
 
 /// One session on a tmux server, with everything reconcile needs to date its
@@ -864,6 +879,25 @@ public struct TmuxManager: Sendable {
         return (.missing, nil)
     }
 
+    /// Whether tmux's own failure text says it resolved the target and found
+    /// nothing — the one non-zero exit that is an answer rather than a failure.
+    ///
+    /// tmux prints `can't find pane: %N` (and the window/session variants when
+    /// the pane's container is what vanished) and exits 1. Every other non-zero
+    /// exit reports a tmux that could not be consulted, and is deliberately NOT
+    /// matched here: this predicate exists to keep "gone" narrow, because it is
+    /// the branch that lets callers act on absence.
+    ///
+    /// Matching tmux's error text is not screen-scraping: this is a CLI tool's
+    /// documented stderr on its own failure path, read from a subprocess we ran,
+    /// not state inferred from a rendered TUI. It is also fail-safe by
+    /// construction — if tmux ever rewords these messages, an absent pane
+    /// degrades to `.unverifiable`, which every caller already handles by doing
+    /// nothing rather than by acting.
+    static func reportsTargetNotFound(_ output: String) -> Bool {
+        output.lowercased().contains("can't find")
+    }
+
     /// The exact assignment shape `newWindowCommand` and `respawnWindowCommand`
     /// emit for one entry of the `env` map. Both build the prefix from the one
     /// shared `envExportPrefixed`, so a pane spawned either way — including the
@@ -1308,8 +1342,22 @@ public struct TmuxManager: Sendable {
         let args = Self.paneSendTargetQuery(server: server, paneID: paneID)
         do {
             return Self.parsePaneSendProbe(try await runTmux(args), paneID: paneID)
-        } catch TmuxError.commandFailed {
-            return (.missing, nil)
+        } catch TmuxError.commandFailed(_, let status, let output) {
+            // A non-zero exit is an ANSWER only when tmux says it looked and found
+            // nothing: `can't find pane: %N` (also `can't find window`/`session`
+            // when the pane's window or session is what vanished). Everything else
+            // with a non-zero status — `error connecting to <socket>`, a lost or
+            // version-mismatched server, a tmux that would not run at all — is the
+            // query failing, not the pane being gone, and is reported as such so
+            // callers can tell "it is not there" from "I could not look".
+            //
+            // `timedOut` deliberately still propagates: the wake path catches it to
+            // leave a row hibernated for retry (see `TmuxError.timedOut`), and
+            // swallowing it here would silently retarget that behaviour.
+            if Self.reportsTargetNotFound(output) { return (.missing, nil) }
+            return (.unverifiable(
+                error: "tmux list-panes exited \(status): "
+                    + output.trimmingCharacters(in: .whitespacesAndNewlines)), nil)
         }
     }
 
