@@ -822,7 +822,11 @@ extension WorktreeLifecycle {
     /// leaves a visible, recoverable `tbd/<name>`, while deleting one we did
     /// not destroys work. So an unrecognized phrasing must land on "don't
     /// delete", which is what a broad match buys.
-    private func gitRefusedToCreateBranch(_ error: Error) -> Bool {
+    ///
+    /// Not `private`: the revive path's archived-SHA recreate (`-b <branch>
+    /// <sha>` in `WorktreeLifecycle+Archive`) is the fourth `-b` call site and
+    /// feeds the same gate to the same cleanup.
+    func gitRefusedToCreateBranch(_ error: Error) -> Bool {
         guard let gitError = error as? GitError else { return false }
         return gitError.stderr.lowercased().contains("a branch named")
     }
