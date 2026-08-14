@@ -107,6 +107,25 @@ actor TmuxServerResourceCoordinator {
     }
 }
 
+/// What a `list-panes -t <window>` consultation proved about a window id.
+///
+/// The same three-way split as `PaneSendTarget`, and it exists for the same
+/// reason: `windowExists` used to answer a plain Bool, so a tmux that could not
+/// be reached was indistinguishable from a window tmux had looked for and not
+/// found. The Watch Desk reads this verdict to decide whether to spawn an agent
+/// and whether to revoke a running judge's lease — both acts that may follow
+/// only from evidence.
+public enum WindowExistence: Sendable, Equatable {
+    /// tmux resolved the window id.
+    case exists
+    /// PROOF the window is gone: tmux looked and said it could not find it.
+    case gone
+    /// The consultation could not be answered — no server on that socket, a
+    /// wedged server that tripped the subprocess timeout, a tmux that would not
+    /// run. Proof of nothing. Carries tmux's own status and output.
+    case unverifiable(error: String)
+}
+
 public struct TmuxManager: Sendable {
     /// Hard ceiling on any single tmux subprocess. tmux control operations
     /// (respawn-window, new-session, kill-window, capture-pane, …) normally
@@ -138,6 +157,11 @@ public struct TmuxManager: Sendable {
     /// Without it, dryRun reports every window as alive, which makes paths
     /// like the pre-session `.paneKilled` short-circuit untestable.
     public let dryRunWindowIsDead: (@Sendable (String) -> Bool)?
+    /// Optional test hook consulted by `windowExistence` in dryRun mode, taking
+    /// precedence over `dryRunWindowIsDead`. Only this seam can express the third
+    /// answer — `.unverifiable` — which the Bool hook cannot say and which is
+    /// exactly the case the desk must not act on.
+    public let dryRunWindowExistence: (@Sendable (String, String) -> WindowExistence?)?
     /// Optional test hook consulted by `capturePaneOutput` and
     /// `capturePaneWithAnsi` in dryRun mode:
     /// (server, paneID) → pane text. Without it, dryRun captures return "",
@@ -239,13 +263,14 @@ public struct TmuxManager: Sendable {
         }
     }
 
-    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunListSessions: (@Sendable (String) -> [TmuxSessionInfo])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunCreateWindowError: (@Sendable (String) -> Error?)? = nil, dryRunRespawnWindowError: (@Sendable (String) -> Error?)? = nil, dryRunKillWindowError: (@Sendable (String, String) -> Error?)? = nil, dryRunPaneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil, dryRunSessionSpared: (@Sendable (String, String) -> Bool)? = nil, dryRunPaneWindowID: (@Sendable (String, String) -> String?)? = nil, dryRunPasteBytes: (@Sendable (String, String, Data) -> Void)? = nil, realModeWindowExistsOverride: (@Sendable (String, String) -> Bool?)? = nil, realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout) {
+    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunWindowExistence: (@Sendable (String, String) -> WindowExistence?)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunListSessions: (@Sendable (String) -> [TmuxSessionInfo])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunCreateWindowError: (@Sendable (String) -> Error?)? = nil, dryRunRespawnWindowError: (@Sendable (String) -> Error?)? = nil, dryRunKillWindowError: (@Sendable (String, String) -> Error?)? = nil, dryRunPaneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil, dryRunSessionSpared: (@Sendable (String, String) -> Bool)? = nil, dryRunPaneWindowID: (@Sendable (String, String) -> String?)? = nil, dryRunPasteBytes: (@Sendable (String, String, Data) -> Void)? = nil, realModeWindowExistsOverride: (@Sendable (String, String) -> Bool?)? = nil, realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout) {
         self.dryRun = dryRun
         self.subprocessTimeout = subprocessTimeout
         self.counter = Counter()
         self.resourceCoordinator = TmuxServerResourceCoordinator()
         self.dryRunRecorder = dryRunRecorder
         self.dryRunWindowIsDead = dryRunWindowIsDead
+        self.dryRunWindowExistence = dryRunWindowExistence
         self.dryRunListWindows = dryRunListWindows
         self.dryRunListSessions = dryRunListSessions
         self.dryRunCapturePane = dryRunCapturePane
@@ -898,6 +923,24 @@ public struct TmuxManager: Sendable {
         output.lowercased().contains("can't find")
     }
 
+    /// Classify a failed `list-panes -t <window>` on the same rule
+    /// `paneSendTarget` uses. Split out from `windowExistence` so the branch that
+    /// decides whether a window is *proven* gone is reachable from a unit test
+    /// without a tmux server — the branch that licenses spawning an agent and
+    /// revoking a judge's lease is the last one that should be covered only by
+    /// dry-run fixtures that never reach it.
+    static func classifyWindowExistence(status: Int32, output: String) -> WindowExistence {
+        // Narrow by construction: only tmux saying it looked and found nothing is
+        // an answer. `error connecting to <socket>`, a lost or version-mismatched
+        // server, a usage error — all of those are the query failing, and reading
+        // them as an empty window is what turned one wedged tmux into an
+        // abandoned agent per tick.
+        if reportsTargetNotFound(output) { return .gone }
+        return .unverifiable(
+            error: "tmux list-panes exited \(status): "
+                + output.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
     /// The exact assignment shape `newWindowCommand` and `respawnWindowCommand`
     /// emit for one entry of the `env` map. Both build the prefix from the one
     /// shared `envExportPrefixed`, so a pane spawned either way — including the
@@ -1525,19 +1568,45 @@ public struct TmuxManager: Sendable {
         try await runTmux(args)
     }
 
-    /// Check whether a tmux window exists by querying list-panes.
-    public func windowExists(server: String, windowID: String) async -> Bool {
-        if dryRun { return !(dryRunWindowIsDead?(windowID) ?? false) }
+    /// Ask tmux whether a window id still resolves, keeping "gone" and "could
+    /// not look" apart — the same rule `paneSendTarget` follows, for the same
+    /// reason. This is the desk's first of three consultations, and a caller that
+    /// reacts to absence by spawning an agent or revoking a lease must be able to
+    /// tell tmux's answer from tmux's silence.
+    public func windowExistence(server: String, windowID: String) async -> WindowExistence {
+        if dryRun {
+            if let answer = dryRunWindowExistence?(server, windowID) { return answer }
+            return (dryRunWindowIsDead?(windowID) ?? false) ? .gone : .exists
+        }
         if let override = realModeWindowExistsOverride?(server, windowID) {
-            return override
+            return override ? .exists : .gone
         }
+        let args = ["-L", server, "list-panes", "-t", windowID]
         do {
-            let args = ["-L", server, "list-panes", "-t", windowID]
             _ = try await runTmux(args)
-            return true
+            return .exists
+        } catch TmuxError.commandFailed(_, let status, let output) {
+            return Self.classifyWindowExistence(status: status, output: output)
         } catch {
-            return false
+            // Including `TmuxError.timedOut`: a wedged server that never answered
+            // is the purest case of "I could not look". This method is
+            // non-throwing by signature, so the timeout is reported rather than
+            // propagated, and the desk treats it as proof of nothing.
+            return .unverifiable(error: String(describing: error))
         }
+    }
+
+    /// Check whether a tmux window exists by querying list-panes.
+    ///
+    /// Collapses `.unverifiable` into `false`, which is what this method has
+    /// always done and what its Bool-shaped callers already assume: they use it
+    /// to decide whether to bother with a window, and skipping one they could not
+    /// consult is harmless. Callers that act *because* a window is gone — the
+    /// Watch Desk's spawn and lease-revocation rails — must use
+    /// `windowExistence` instead, so absence of evidence cannot license a
+    /// creating or destroying act.
+    public func windowExists(server: String, windowID: String) async -> Bool {
+        await windowExistence(server: server, windowID: windowID) == .exists
     }
 
     /// Check whether a tmux server is running by querying list-sessions.
