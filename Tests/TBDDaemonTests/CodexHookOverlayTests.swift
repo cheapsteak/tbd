@@ -5,6 +5,121 @@ import TBDShared
 
 @Suite struct CodexHookOverlayTests {
 
+    private func runStopHook(
+        goalStatus: String,
+        sessionID: String = "a1b2c3d4-e5f6-4789-abcd-0123456789ab",
+        priorGoalStatus: String? = nil,
+        assistantMessage: String = "done",
+        goalTimestampsTie: Bool = false,
+        createdAtBreaksUpdateTie: Bool = false
+    ) throws -> [String] {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-codex-stop-hook-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let logPath = directory.appendingPathComponent("tbd-invocations.log")
+        let tbdPath = directory.appendingPathComponent("tbd")
+        try """
+        #!/bin/sh
+        printf '%s\\n' "$*" >> "$TBD_HOOK_TEST_LOG"
+        if [ "$1" = notify ]; then
+          printf 'notify-message=%s\\n' "$5" >> "$TBD_HOOK_TEST_LOG"
+        fi
+        """.write(to: tbdPath, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: tbdPath.path
+        )
+
+        let databaseProcess = Process()
+        databaseProcess.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        // Codex 0.147 keys this table by thread_id. Only the history test
+        // relaxes that constraint to exercise a possible future schema shape.
+        let threadIDConstraint = priorGoalStatus == nil ? "PRIMARY KEY NOT NULL" : "NOT NULL"
+        let currentTimestamp = goalTimestampsTie ? 1 : 2
+        let currentCreatedAt = createdAtBreaksUpdateTie ? 2 : currentTimestamp
+        let currentUpdatedAt = createdAtBreaksUpdateTie ? 3 : currentTimestamp
+        let priorUpdatedAt = createdAtBreaksUpdateTie ? 3 : 1
+        let priorGoalInsert = priorGoalStatus.map { status in
+            """
+            INSERT INTO thread_goals (
+                thread_id, goal_id, objective, status, created_at_ms, updated_at_ms
+            ) VALUES (
+                '\(sessionID)', 'prior-goal-id', 'Prior objective', '\(status)',
+                1, \(priorUpdatedAt)
+            );
+            """
+        } ?? ""
+        let currentGoalInsert = """
+            INSERT INTO thread_goals (
+                thread_id, goal_id, objective, status, created_at_ms, updated_at_ms
+            ) VALUES (
+                '\(sessionID)', 'goal-id', 'Test objective', '\(goalStatus)',
+                \(currentCreatedAt), \(currentUpdatedAt)
+            );
+            """
+        let goalInserts = createdAtBreaksUpdateTie
+            ? "\(currentGoalInsert)\n\(priorGoalInsert)"
+            : "\(priorGoalInsert)\n\(currentGoalInsert)"
+        databaseProcess.arguments = [
+            directory.appendingPathComponent("goals_1.sqlite").path,
+            """
+            CREATE TABLE thread_goals (
+                thread_id TEXT \(threadIDConstraint),
+                goal_id TEXT NOT NULL,
+                objective TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN (
+                    'active', 'paused', 'blocked', 'usage_limited', 'budget_limited', 'complete'
+                )),
+                token_budget INTEGER,
+                tokens_used INTEGER NOT NULL DEFAULT 0,
+                time_used_seconds INTEGER NOT NULL DEFAULT 0,
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            );
+            \(goalInserts)
+            """
+        ]
+        databaseProcess.standardOutput = Pipe()
+        databaseProcess.standardError = Pipe()
+        try databaseProcess.run()
+        databaseProcess.waitUntilExit()
+        #expect(databaseProcess.terminationStatus == 0)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", CodexHookOverlay.stopCommand]
+        var environment = ProcessInfo.processInfo.environment
+        let inheritedPath = environment["PATH"] ?? ""
+        environment["PATH"] = ([
+            directory.path,
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+        ] + inheritedPath.split(separator: ":").map(String.init)).joined(separator: ":")
+        environment["CODEX_HOME"] = directory.path
+        environment["TBD_HOOK_TEST_LOG"] = logPath.path
+        process.environment = environment
+
+        let input = Pipe()
+        process.standardInput = input
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try process.run()
+        let payload = """
+        {"session_id":"\(sessionID)","hook_event_name":"Stop","last_assistant_message":"\(assistantMessage)"}
+        """
+        input.fileHandleForWriting.write(Data(payload.utf8))
+        try input.fileHandleForWriting.close()
+        process.waitUntilExit()
+        #expect(process.terminationStatus == 0)
+
+        let log = (try? String(contentsOf: logPath, encoding: .utf8)) ?? ""
+        return log.split(separator: "\n").map(String.init)
+    }
+
     @Test func generateBodyHasExpectedShape() throws {
         let data = try CodexHookOverlay.generateBody()
         let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -61,6 +176,99 @@ import TBDShared
         #expect(stopCommand?.contains("printf '%s\\n' \"$RENAME_RESULT\"") == true)
         #expect(stopCommand?.contains("tbd notify --type response_complete") == true)
         #expect(stopCommand?.contains("tbd terminal-activity idle") == true)
+    }
+
+    @Test func stopHookKeepsWorkingWhileCodexGoalIsActive() throws {
+        let invocations = try runStopHook(goalStatus: "active")
+
+        #expect(invocations.contains { $0.hasPrefix("notify --type response_complete") })
+        #expect(!invocations.contains("terminal-activity idle"))
+    }
+
+    @Test func stopHookReadsSessionIDFromPayloadJSON() throws {
+        let invocations = try runStopHook(
+            goalStatus: "active",
+            sessionID: "b2c3d4e5-f607-489a-bcde-1234567890ab"
+        )
+
+        #expect(!invocations.contains("terminal-activity idle"))
+    }
+
+    @Test func stopHookReadsAssistantMessageFromPayloadJSON() throws {
+        let invocations = try runStopHook(
+            goalStatus: "complete",
+            assistantMessage: "goal work finished"
+        )
+
+        #expect(invocations.contains("notify-message=goal work finished"))
+    }
+
+    @Test func stopHookUsesMostRecentlyUpdatedGoalStateIfSchemaAllowsHistory() throws {
+        let invocations = try runStopHook(
+            goalStatus: "active",
+            priorGoalStatus: "complete"
+        )
+
+        #expect(!invocations.contains("terminal-activity idle"))
+    }
+
+    @Test func stopHookIgnoresStaleActiveGoalIfLatestStateIsComplete() throws {
+        let invocations = try runStopHook(
+            goalStatus: "complete",
+            priorGoalStatus: "active"
+        )
+
+        #expect(invocations.contains("terminal-activity idle"))
+    }
+
+    @Test func stopHookUsesLatestActiveStateWhenGoalTimestampsTie() throws {
+        let invocations = try runStopHook(
+            goalStatus: "active",
+            priorGoalStatus: "complete",
+            goalTimestampsTie: true
+        )
+
+        #expect(!invocations.contains("terminal-activity idle"))
+    }
+
+    @Test func stopHookUsesLatestCompleteStateWhenGoalTimestampsTie() throws {
+        let invocations = try runStopHook(
+            goalStatus: "complete",
+            priorGoalStatus: "active",
+            goalTimestampsTie: true
+        )
+
+        #expect(invocations.contains("terminal-activity idle"))
+    }
+
+    @Test func stopHookUsesCreatedAtWhenUpdatedTimesTieBeforeInsertionOrder() throws {
+        let invocations = try runStopHook(
+            goalStatus: "active",
+            priorGoalStatus: "complete",
+            createdAtBreaksUpdateTie: true
+        )
+
+        #expect(!invocations.contains("terminal-activity idle"))
+    }
+
+    @Test func stopHookPublishesIdleWhenCodexGoalIsComplete() throws {
+        let invocations = try runStopHook(goalStatus: "complete")
+
+        #expect(invocations.contains { $0.hasPrefix("notify --type response_complete") })
+        #expect(invocations.contains("terminal-activity idle"))
+    }
+
+    @Test func stopHookPublishesIdleWhenCodexGoalIsBlocked() throws {
+        let invocations = try runStopHook(goalStatus: "blocked")
+
+        #expect(invocations.contains("terminal-activity idle"))
+    }
+
+    @Test(arguments: ["paused", "usage_limited", "budget_limited"])
+    func stopHookPublishesIdleWhenCodexGoalCannotContinue(status: String) throws {
+        let invocations = try runStopHook(goalStatus: status)
+
+        #expect(invocations.contains("terminal-activity idle"))
     }
 
     @Test func roundtripsAsValidJSON() throws {
