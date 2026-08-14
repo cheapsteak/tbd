@@ -55,6 +55,17 @@ struct EventDrivenTestClockSelfTests {
         var isLatched: Bool { lock.withLock { latched } }
     }
 
+    /// The same idea one step further: the matcher hands the *text* out, not
+    /// just the fact that something matched. A test that compares two
+    /// diagnostics has to hold both of them.
+    private final class Captured: @unchecked Sendable {
+        private let lock = NSLock()
+        private var text = ""
+
+        func set(_ value: String) { lock.withLock { text = value } }
+        var value: String { lock.withLock { text } }
+    }
+
     private struct HandshakeTimeout: Error, CustomStringConvertible {
         let what: String
         let timeout: Swift.Duration
@@ -232,28 +243,70 @@ struct EventDrivenTestClockSelfTests {
                 "throwing before the advance is what stops the ledger and now from desyncing")
     }
 
-    /// Same diagnostic, two delivery mechanisms — so a reader sees identical
-    /// text whether it arrived as a recorded issue or as a thrown error.
-    @Test("the strict and soft waits report the same diagnostic")
+    /// One diagnostic, two deliveries — and the difference between them is
+    /// exactly one line, deliberately.
+    ///
+    /// The two texts are **not** identical, so a test that asserted they were
+    /// would be asserting something false, and one that compared a substring
+    /// both happen to contain would pass through any divergence in the rest of
+    /// the message — which is the only thing it could usefully catch. What is
+    /// actually true is prefix-plus-known-suffix: the strict form appends the
+    /// call site, because `Issue.record` already attributes the soft form to the
+    /// caller's line while a thrown error is attributed to the test function.
+    /// Asserting that shape catches a core that drifted *and* a suffix that
+    /// changed.
+    @Test("the strict diagnostic is the soft one verbatim, plus a call-site line")
     func strictAndSoftShareOneDiagnostic() async {
         let clock = EventDrivenTestClock()
-        let recorded = Latch()
+        let recorded = Captured()
         await withKnownIssue("nothing ever arms, so the soft wait must record") {
             await clock.sleeperArmed(timeout: .milliseconds(50))
         } matching: { issue in
-            let text = issue.error.map { String(describing: $0) } ?? ""
-            if text.contains("no task suspended on the clock within") { recorded.latch() }
+            recorded.set(issue.error.map { String(describing: $0) } ?? "")
             return true
         }
-        #expect(recorded.isLatched)
+        let softText = recorded.value
+        #expect(softText.contains("no task suspended on the clock within"),
+                "the soft wait must record the NoSleeperArmed diagnostic — got: \(softText)")
 
+        // Same clock, same timeout, same virtual now: every field the two texts
+        // interpolate is identical, so any difference between them is shape.
         var thrownText = ""
+        let callLine = #line + 2
         do {
             try await clock.requireSleeperArmed(timeout: .milliseconds(50))
         } catch {
             thrownText = String(describing: error)
         }
-        #expect(thrownText.contains("no task suspended on the clock within"))
+
+        #expect(thrownText.hasPrefix(softText),
+                """
+                the strict diagnostic must open with the recorded one verbatim — \
+                recorded: \(softText) / thrown: \(thrownText)
+                """)
+        let addition = String(thrownText.dropFirst(softText.count))
+        #expect(addition == "\nThe wait that gave up: \(#fileID):\(callLine).",
+                "the strict form must add the call site and nothing else — added: \(addition)")
+    }
+
+    /// The strict advance's stated invariant — *nothing is advanced unless a
+    /// sleeper is registered* — has a second way out that is easy to miss: the
+    /// wait ends silently on cancellation, with nothing armed and nothing
+    /// thrown. Advancing there would move virtual time against an empty ledger,
+    /// so it does not.
+    @Test("a cancelled requireAdvanceWhenArmed advances nothing")
+    func requireAdvanceIsInertOnCancellation() async {
+        let clock = EventDrivenTestClock()
+        let waiter = Task { [clock] in
+            // Long enough that expiry cannot be what ends this wait.
+            try? await clock.requireAdvanceWhenArmed(by: .seconds(5), timeout: .seconds(120))
+        }
+        await Self.waitUntil("an arming waiter is parked") { clock.hasParkedArmingWaiter }
+
+        waiter.cancel()
+        _ = await waiter.value
+        #expect(clock.now.offset == .zero,
+                "a wait ended by cancellation must leave virtual time where it found it")
     }
 
     /// Cancellation is not expiry, and the strict pair keeps that treatment:

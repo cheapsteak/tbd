@@ -249,13 +249,27 @@ are worth knowing before someone reaches for a raise.**
 guard. Grepping only for the literal `waitForSuspension(` undercounts every
 chain below, which is exactly the miscount a PR #547 reviewer made.
 
-On that basis: the two five-guard poller chains — 225 s of the 240 s ceiling —
-are `GatedIntervalSleepTests.returnsAfterExpectedPollCount` and
-`DaywatchRunnerLoopTests.testSubsequentTicksAtInterval`. Both are on
-`EventDrivenTestClock`'s **strict** waits, so five chained guards on paper are
-one in practice: a missed arming throws before anything advances and the rest of
-the chain never runs (see "The event-driven alternative" below). Suites on the
-predecessor helpers pay the full tally. And counting `waitFor` at 90 s plus
+On that basis, the deepest chains in the tree are the poller tests, and their
+paper tallies do not all fit under the ceiling:
+
+- `GatedIntervalSleepTests.returnsAfterExpectedPollCount` — 3
+  `requireAdvanceWhenArmed` + 2 `requireSleeperArmed` + 1 `FireRecorder.next()`
+  = **6** guards, 270 s, i.e. **over** the 240 s limit.
+- `GatedIntervalSleepTests.boundaryIsExact` (3 + 1 + 1) and
+  `DaywatchRunnerLoopTests.testSubsequentTicksAtInterval` (2 + 3) — **5**
+  guards, 225 s.
+
+Paper is the operative word, and the arithmetic that matters is different:
+**at most one guard can elapse in any single run of these.** All three chains
+are on `EventDrivenTestClock`'s **strict** waits, where a missed arming throws
+before anything advances, so the chain stops at the first bad step and nothing
+after it runs. The one non-throwing guard in each chain — `FireRecorder.next()`,
+which records and continues — sits *last*, with no wait behind it to inherit the
+run. So the real worst case is one 45 s guard, and 270 s describes a run that
+cannot happen. That is a property of these chains' *shape*, not of strictness
+alone: put a `next()` mid-chain and its 45 s becomes payable on top of whatever
+follows. Suites on the predecessor helpers have no such property at all and pay
+the full tally. And counting `waitFor` at 90 s plus
 each clock wait at 45 s, **9 of the 13** `PaneRepairCoordinatorTests` have a
 worst case above 240 s — not just the 6-deep chain (540 s) usually cited. Every one of those is still consistent with
 the invariant, because only an already-failing test walks a full chain of
@@ -719,13 +733,18 @@ a weaker negative.
 **Count each `FireRecorder.next()` in the
 `.clockDriven` tally too**: it carries its own 45 s hang guard, exactly like a
 `waitForSuspension`, so a test with 2 `advanceWhenArmed` + 2 `next()` has a
-180 s worst case against the 240 s limit. Either clock is a legitimate choice
-for a new clock-driven test. Existing `TestClock` suites migrate on field
-evidence, not wholesale — currently `AppearanceDebounceTests` and
-`SearchQueryDebouncerTests`,
+180 s worst case against the 240 s limit. And `next()` is **non-throwing** — it
+records and returns `nil` — so it does not stop a chain the way a strict arming
+wait does: a `next()` that times out mid-chain leaves every guard after it
+payable in the same run. Put it last, which is what makes the poller chains
+above cost one guard in practice rather than their paper tally. Either clock is
+a legitimate choice for a new clock-driven test. Existing `TestClock` suites
+migrate on field evidence, not wholesale — currently `AppearanceDebounceTests`
+and `SearchQueryDebouncerTests`,
 which reproduced the starvation in a full-suite soak, plus the two poller suites
-`GatedIntervalSleepTests` and `DaywatchRunnerLoopTests`, whose five-guard chains
-sat one scheduling excursion from the 240 s limit. Design:
+`GatedIntervalSleepTests` and `DaywatchRunnerLoopTests`, whose chains on the
+predecessor helpers each paid five wall-clock guards — 225 s of the 240 s
+ceiling, one scheduling excursion from tripping it. Design:
 `docs/specs/2026-08-11-event-driven-test-clock-design.md`.
 
 `PollerClock` is **not** this seam and must not be copied as a template — see

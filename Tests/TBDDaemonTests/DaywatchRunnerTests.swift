@@ -369,8 +369,11 @@ struct DaywatchRunnerSingleTickTests {
 /// Its `advance` does no yielding of any kind, which is the property to keep in
 /// mind when reading the assertions below: a *positive* fact about a resumed
 /// task is claimed only after an event that happens-after it (the loop's
-/// re-park), and the one *negative* count read pays an explicit `settle()`
-/// where the predecessor leaned on `TestClock.advance`'s incidental megaYield.
+/// re-park), and both *negative* count reads — "no tick a millisecond early"
+/// and "no ticks after `apply(.off)`" — pay an explicit `settle()` where the
+/// predecessor leaned on `TestClock.advance`'s incidental megaYield. The one
+/// negative that pays none is `hasSleeper == false`, which needs no scheduling
+/// turn to become true and justifies itself where it stands.
 @Suite("DaywatchRunner loop", .clockDriven)
 struct DaywatchRunnerLoopTests {
 

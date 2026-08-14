@@ -341,9 +341,14 @@ public final class EventDrivenTestClock: Clock, @unchecked Sendable {
     /// ends the test at the first missed arming, so the worst case of a failing
     /// chain is one hang guard rather than one per step.
     ///
-    /// - Throws: the same `NoSleeperArmed` value the non-throwing twin records —
-    ///   one diagnostic, two delivery mechanisms, so a reader sees identical
-    ///   text whichever way it arrived.
+    /// - Throws: the same `NoSleeperArmed` value the non-throwing twin records,
+    ///   carrying the same core text — what arms, what virtual time said, what
+    ///   to suspect — plus one line the recording path has no use for: *"The
+    ///   wait that gave up: file:line."* A recorded issue is already attributed
+    ///   to the caller's line by `Issue.record`; a thrown error is attributed to
+    ///   the test function, so in a chain the message is the only thing that can
+    ///   name the step. One diagnostic, two deliveries, and the strict form
+    ///   spends an extra line to say where.
     /// - Parameters:
     ///   - timeout: hang guard only, exactly as in the non-throwing twin.
     ///     **On task cancellation this returns without throwing and without a
@@ -479,6 +484,14 @@ public final class EventDrivenTestClock: Clock, @unchecked Sendable {
     /// so the ledger and `now` cannot desync and every later step of the chain
     /// is skipped rather than run against a broken clock.
     ///
+    /// That invariant has one other way to be reached, and it is closed rather
+    /// than excepted: the wait also ends *silently* on cancellation, with
+    /// nothing armed and nothing thrown (attribution belongs to whatever
+    /// cancelled the test). Advancing there would move virtual time against an
+    /// empty ledger — harmless in the moment, since the test is being torn down,
+    /// but it is the exact shape this method exists to make impossible. So a
+    /// cancelled wait advances nothing and returns.
+    ///
     /// Same convention as its predecessor: **put the advance next to the
     /// assertion it unblocks**, and for a positive assertion follow it with
     /// `await recorder.next()` — advancing still promises only that due
@@ -493,6 +506,10 @@ public final class EventDrivenTestClock: Clock, @unchecked Sendable {
                                         timeout: Swift.Duration = .seconds(45),
                                         sourceLocation: SourceLocation = #_sourceLocation) async throws {
         try await requireSleeperArmed(timeout: timeout, sourceLocation: sourceLocation)
+        // Returning without throwing has two causes, and only one of them means
+        // a sleeper is registered: the other is cancellation, which ends the
+        // wait silently. See the doc above — the invariant is kept in both.
+        guard !Task.isCancelled else { return }
         await advance(by: duration)
     }
 
@@ -522,15 +539,20 @@ public final class EventDrivenTestClock: Clock, @unchecked Sendable {
     /// **Re-arming has the same consequence, and it bites harder.** A task that
     /// fires and immediately sleeps again — a poller loop — cannot possibly have
     /// re-registered by the time `advance` returns, because `advance` never
-    /// yields it the chance. So after a fire, the **next** advance must go
-    /// through ``advanceWhenArmed(by:sourceLocation:)``: a bare `advance` moves
-    /// `now` past a deadline that is not in the ledger yet, and the sleep that
-    /// registers afterwards is measured from the new `now` and never fires —
-    /// permanent desync, the hang `Tests/CLAUDE.md` documents for `TestClock`
-    /// under load, except here it is deterministic rather than probabilistic.
-    /// This is the rule to carry into any future poller-suite migration
-    /// (`GatedIntervalSleepTests`, `DaywatchRunnerTests`), where every advance
-    /// after the first is a re-arm.
+    /// yields it the chance. So after a fire, the **next** advance must wait for
+    /// the re-arm — and in a poller chain that means
+    /// ``requireAdvanceWhenArmed(by:timeout:sourceLocation:)``, the strict form:
+    /// a bare `advance` moves `now` past a deadline that is not in the ledger
+    /// yet, and the sleep that registers afterwards is measured from the new
+    /// `now` and never fires — permanent desync, the hang `Tests/CLAUDE.md`
+    /// documents for `TestClock` under load, except here it is deterministic
+    /// rather than probabilistic. The soft
+    /// ``advanceWhenArmed(by:sourceLocation:)`` is not the tool for that
+    /// position: it records a missed re-arm and advances anyway, which is the
+    /// desync itself. This is the rule the poller suites on this clock
+    /// (`GatedIntervalSleepTests`, `DaywatchRunnerLoopTests`) are built around,
+    /// where every advance after the first is a re-arm, and the one to carry
+    /// into any suite that joins them.
     ///
     /// A deadline in the past is a no-op: virtual time never moves backwards.
     public func advance(to deadline: Instant) async {

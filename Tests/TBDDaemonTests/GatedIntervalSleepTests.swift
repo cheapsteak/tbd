@@ -114,7 +114,13 @@ struct GatedIntervalSleepTests {
         // the assertions above instead of wedging on `await waiter.value`.
         waiter.cancel()
         await waiter.value
-        #expect(await probe.didReturn)
+
+        // The join moved nothing, and that is the claim. A loop still parked
+        // when `cancel()` arrived pays one extra `interval()` evaluation on its
+        // way out — `sleepThroughGatedInterval` documents that cost — so an
+        // unmoved count is what distinguishes "the wait ended on its own gate"
+        // from "the join unwedged it".
+        #expect(await probe.callCount == 3)
     }
 
     @Test("one tick short of the threshold has not returned; the next tick returns")
@@ -152,9 +158,11 @@ struct GatedIntervalSleepTests {
         try await clock.requireAdvanceWhenArmed(by: Self.tick)
         #expect(await returned.next() == 3)
 
+        // Same join, same claim as `returnsAfterExpectedPollCount`: a loop the
+        // cancellation had to unwedge would show a fourth evaluation here.
         waiter.cancel()
         await waiter.value
-        #expect(await probe.didReturn)
+        #expect(await probe.callCount == 3)
     }
 
     @Test("an interval shortened mid-wait shortens the wait")
@@ -192,8 +200,11 @@ struct GatedIntervalSleepTests {
             "expected the shortened gate to end the wait after 2 evaluations"
         )
 
+        // As above: the shortened gate, not the cancellation, is what ended the
+        // wait — a loop still parked would evaluate the interval a third time
+        // on its way out of `cancel()`.
         waiter.cancel()
         await waiter.value
-        #expect(await probe.didReturn)
+        #expect(await probe.callCount == 2)
     }
 }

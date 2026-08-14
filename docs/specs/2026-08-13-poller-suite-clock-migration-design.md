@@ -3,12 +3,13 @@
 ## What this is for
 
 Two clock-driven suites test **poller loops** — code that wakes on an interval, does
-work, and immediately sleeps again. `GatedIntervalSleepTests.returnsAfterExpectedPollCount`
-and `DaywatchRunnerTests.testSubsequentTicksAtInterval` each spend five wall-clock
-handshake guards, 225 seconds against the 240-second `.clockDriven` limit. Neither
-test is failing today. Both are one scheduling excursion away from tripping that
-limit, and a tripped time limit reports "wedged" with no attribution rather than a
-named failure.
+work, and immediately sleeps again. On `TestClock`'s non-throwing helpers,
+`GatedIntervalSleepTests.returnsAfterExpectedPollCount` and
+`DaywatchRunnerLoopTests.testSubsequentTicksAtInterval` each spend five wall-clock
+handshake guards, 225 seconds against the 240-second `.clockDriven` limit, and every
+one of those guards is payable in a single run. Neither test is failing today. Both
+are one scheduling excursion away from tripping that limit, and a tripped time limit
+reports "wedged" with no attribution rather than a named failure.
 
 `EventDrivenTestClock` (`docs/specs/2026-08-11-event-driven-test-clock-design.md`)
 removed the polled arming handshake for the debounce suites. This applies it to the
@@ -43,8 +44,12 @@ split — soft asks, strict requires:
 
 - **`requireSleeperArmed(timeout:sourceLocation:) async throws`** — the throwing twin
   of `sleeperArmed`. Identical wait; on timeout it throws instead of recording.
-- **`requireAdvanceWhenArmed(by:sourceLocation:) async throws`** — `requireSleeperArmed`
-  followed by `advance(by:)`.
+- **`requireAdvanceWhenArmed(by:timeout:sourceLocation:) async throws`** —
+  `requireSleeperArmed` followed by `advance(by:)`. The hang guard is defaulted to the
+  same 45 seconds, so every production call site passes `by:` alone; it is exposed here
+  (where the soft `advanceWhenArmed` does not expose it) because the clock's self-tests
+  have to drive the guard to its diagnostic, and a proof that costs 45 seconds is a
+  proof nobody keeps.
 
 Both throw the existing `NoSleeperArmed` value that the non-throwing pair records, so
 one diagnostic serves both delivery mechanisms and a reader sees the same message
@@ -63,7 +68,7 @@ Both suites already follow the poller idiom by hand: `advanceWhenSuspended(by:)`
 followed by an explicit `waitForSuspension()` to catch the re-park. That maps directly
 onto `requireAdvanceWhenArmed(by:)` followed by `requireSleeperArmed()`.
 
-`DaywatchRunnerTests` additionally uses a plain `advance(by:)` for its
+`DaywatchRunnerLoopTests` additionally uses a plain `advance(by:)` for its
 "one millisecond short of the interval" step, which is sound only because a sleeper is
 already registered at that point. That property must survive the migration: the step
 stays a plain `advance`, and the arming it depends on is established by the preceding
@@ -78,10 +83,14 @@ strict wait.
 mechanical port would read the flag before the resumed task has run: it would pass for
 the wrong reason, or fail spuriously under load.
 
-The replacement is not a weaker negative. The test already holds the positive fact —
-the probe records `markReturned()`, and the waiter task can be joined. Asserting on
-that is stronger than any clock-state inference and removes the timing dependency
-entirely.
+The replacement is not a weaker negative. The test already holds the positive fact:
+the loop's return records the interval-evaluation count into a `FireRecorder`, so
+"the wait ended" and "after exactly three polls" become one awaited value rather than
+two reads that could disagree. Awaiting that is stronger than any clock-state
+inference and removes the timing dependency entirely. The join that follows carries a
+claim of its own — a loop still parked when `cancel()` arrives pays one extra
+`interval()` evaluation on its way out, so an unmoved count after the join is what
+distinguishes a wait that ended on its own gate from one the join unwedged.
 
 This is the migration's actual goal. The clock swap is the mechanism; replacing
 clock-state inference with the observable the test already has is the point, and it is
