@@ -134,21 +134,9 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// shift accumulates one per tick — the bug this rail was built to end. Three
     /// bounds the wreckage at three abandoned sessions and then says so out loud.
     ///
-    /// **Status: a compiled theory, held deliberately.** By the battery in
-    /// `docs/theory-placement.md` a count-shaped constant two reasonable projects
-    /// could set differently sits in the contested tier, where what matters is
-    /// who chose it and how cheaply they can change their mind. The repo owner
-    /// reviewed this constant during review of the PR that introduced it and
-    /// directed that it stay at three, with the rationale above written down and
-    /// the exhaustion behaviour pinned by tests. That is the choice; this comment
-    /// is its record.
-    ///
-    /// What remains open is placement, not the number: whether the threshold
-    /// eventually belongs in the redesign's user-land path rather than here. It
-    /// cannot move there as things stand — the bound guards a spawn the daemon
-    /// makes on its own tick, and a sweep-program cannot refuse a spawn it never
-    /// sees — so relocating it means relocating the rail, which is the
-    /// fleet-supervision redesign's business rather than this constant's.
+    /// The bound's design, the alternatives weighed against it, and why the
+    /// threshold stays compiled for now:
+    /// `docs/specs/2026-08-14-watch-desk-recovery-bound-design.md`.
     private static let maxConsecutiveRecoverySpawnsWithoutNudge = 3
 
     // MARK: - Init
@@ -719,6 +707,13 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// Tell the user once that the desk has stopped trying to staff itself.
     /// Deduplicated on the same counter that stopped it, so a desk that recovers
     /// and fails again later is a new incident and notifies again.
+    ///
+    /// The dedup flag is set only after the write lands, matching
+    /// `notifiedContentionGeneration`. Setting it first would let one failed
+    /// write silence the incident permanently: the desk has stopped staffing
+    /// itself and looks exactly like a desk that is fine, which is the single
+    /// thing this notification exists to prevent. Every tick after a failure
+    /// therefore tries again, and the first one to succeed stops the retries.
     private func notifyRecoveryExhausted(worktree: Worktree) async {
         logger.error("""
             Watch Desk gave up spawning an agent after \
@@ -726,7 +721,6 @@ public actor DeskSessionManager: DeskSessionManaging {
             that never took a nudge; no further spawns until one succeeds
             """)
         guard !notifiedRecoveryExhaustion else { return }
-        notifiedRecoveryExhaustion = true
         do {
             let notification = try await db.notifications.create(
                 worktreeID: worktree.id,
@@ -741,10 +735,11 @@ public actor DeskSessionManager: DeskSessionManaging {
                 terminalID: notification.terminalID,
                 activate: false
             )))
+            notifiedRecoveryExhaustion = true
         } catch {
             logger.error("""
-                Could not record the Watch Desk recovery-exhausted notification: \
-                \(error.localizedDescription, privacy: .public)
+                Could not record the Watch Desk recovery-exhausted notification, \
+                will retry next tick: \(error.localizedDescription, privacy: .public)
                 """)
         }
     }

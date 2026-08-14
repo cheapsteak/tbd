@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import GRDB
 import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -1736,6 +1737,59 @@ extension TBDHomeSerialized {
             #expect(
                 errors.first?.message?.contains("could not start an agent") == true,
                 "the notification must name what stopped: \(errors.first?.message ?? "nil")")
+        }
+
+        /// The give-up notification is the only user-visible sign that the desk
+        /// has stopped staffing itself — a desk that has quietly given up looks
+        /// exactly like one that is fine. So the dedup flag may not be set until
+        /// the write actually lands: setting it first means one failed write
+        /// silences the incident for good, and the notification's whole reason
+        /// for existing is gone precisely when it is needed.
+        ///
+        /// The table is dropped to make the write fail the way a real one would,
+        /// then restored, and the next tick must try again.
+        @Test("a give-up notification that fails to write is retried, not swallowed")
+        func testExhaustionNotificationRetriesAfterWriteFailure() async throws {
+            let f = try makeDeskFixture(tag: "staff-notify-retry")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            for _ in 1...3 { _ = try await killAllAndTick(f, desk: desk.id) }
+
+            // Spend the last attempt with the notifications table missing, so the
+            // give-up write throws exactly as an unwritable database would.
+            let schema = try await f.db.writerForTests.read { conn in
+                try String.fetchOne(
+                    conn, sql: "SELECT sql FROM sqlite_master WHERE name = 'notification'")
+            }
+            let createSQL = try #require(schema, "fixture must find the notification table")
+            try await f.db.writerForTests.write { conn in
+                try conn.execute(sql: "DROP TABLE notification")
+            }
+            _ = try await killAllAndTick(f, desk: desk.id)
+
+            try await f.db.writerForTests.write { conn in
+                try conn.execute(sql: createSQL)
+            }
+            #expect(
+                try await f.db.notifications.unread(worktreeID: desk.id)
+                    .filter({ $0.type == .error }).isEmpty,
+                "fixture check: the failed write must have recorded nothing")
+
+            // The database is healthy again; the very next tick must say so.
+            _ = try await killAllAndTick(f, desk: desk.id)
+            let errors = try await f.db.notifications.unread(worktreeID: desk.id)
+                .filter { $0.type == .error }
+            #expect(
+                errors.count == 1,
+                "a give-up notification lost to a failed write must be retried, not dropped")
+
+            // And it is still deduplicated once it has landed.
+            _ = try await killAllAndTick(f, desk: desk.id)
+            #expect(
+                try await f.db.notifications.unread(worktreeID: desk.id)
+                    .filter({ $0.type == .error }).count == 1,
+                "the retry must not turn into one notification per tick")
         }
 
         /// `resetRecoveryBudget` has three callers, and a delivered nudge is only
