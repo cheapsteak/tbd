@@ -209,8 +209,7 @@ def _holder_fields(lock_path: Path) -> dict[str, str]:
 
 
 def _process_is_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
+    """Liveness of a single positive pid; callers screen out 0 and negatives."""
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -228,6 +227,10 @@ def _holder_description(lock_path: Path) -> str:
     try:
         pid = int(fields["pid"])
     except (KeyError, ValueError):
+        pid = 0
+    # `os.kill(0, 0)` inspects this process's own group and would report a
+    # holder that is really us, so a non-positive pid counts as unrecorded.
+    if pid <= 0:
         return "holder has not recorded its identity yet"
     if not _process_is_alive(pid):
         return (

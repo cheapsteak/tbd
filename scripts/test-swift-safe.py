@@ -335,6 +335,16 @@ class WaitReportingTests(unittest.TestCase):
         self.assertNotIn("acme-worktree", description)
         self.assertNotIn("swift test", description)
 
+    def test_non_positive_pids_are_never_probed_or_reported(self):
+        # `os.kill(0, 0)` would signal this process's whole group, and a
+        # negative pid a whole other group: neither is a holder.
+        for recorded in ("0", "-1"):
+            with self.subTest(pid=recorded):
+                self.record(f"pid={recorded}\ncwd=/somewhere/acme-worktree\n")
+                self.assertEqual(
+                    self.description(), "holder has not recorded its identity yet"
+                )
+
     def test_garbage_lock_file_invents_no_holder(self):
         self.record("\x00\x00 not a lock record at all\npid=not-a-number\n")
         self.assertEqual(
