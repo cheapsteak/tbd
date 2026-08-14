@@ -194,6 +194,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // persists into the real plist, per repo UserDefaults rules.
         UserDefaults.standard.register(defaults: ["NSTableViewCanEstimateRowHeights": false])
 
+        // External Accessibility clients can send malformed window geometry.
+        // AppKit raises an uncaught exception if NaN or infinity reaches its
+        // frame setter, so reject only those values at the Accessibility edge.
+        AccessibilityWindowGeometryGuard.install()
+
         // Install crash handlers before any AppKit/SwiftUI code can throw or trap.
         // The Obj-C exception preprocessor must come first — it's our only chance
         // to capture the reason for exceptions that AppKit converts to SIGTRAP via
