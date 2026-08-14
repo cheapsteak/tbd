@@ -5,7 +5,10 @@ import TBDShared
 
 @Suite struct CodexHookOverlayTests {
 
-    private func runStopHook(goalStatus: String) throws -> [String] {
+    private func runStopHook(
+        goalStatus: String,
+        sessionID: String = "a1b2c3d4-e5f6-4789-abcd-0123456789ab"
+    ) throws -> [String] {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-codex-stop-hook-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -22,26 +25,29 @@ import TBDShared
             ofItemAtPath: tbdPath.path
         )
 
-        let jqPath = directory.appendingPathComponent("jq")
-        try """
-        #!/bin/sh
-        case "$*" in
-          *session_id*) printf '%s\\n' 'a1b2c3d4-e5f6-4789-abcd-0123456789ab' ;;
-          *) printf '%s\\n' 'done' ;;
-        esac
-        """.write(to: jqPath, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o755],
-            ofItemAtPath: jqPath.path
-        )
-
         let databaseProcess = Process()
         databaseProcess.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
         databaseProcess.arguments = [
             directory.appendingPathComponent("goals_1.sqlite").path,
             """
-            CREATE TABLE thread_goals (thread_id TEXT PRIMARY KEY, status TEXT NOT NULL);
-            INSERT INTO thread_goals VALUES ('a1b2c3d4-e5f6-4789-abcd-0123456789ab', '\(goalStatus)');
+            CREATE TABLE thread_goals (
+                thread_id TEXT PRIMARY KEY NOT NULL,
+                goal_id TEXT NOT NULL,
+                objective TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN (
+                    'active', 'paused', 'blocked', 'usage_limited', 'budget_limited', 'complete'
+                )),
+                token_budget INTEGER,
+                tokens_used INTEGER NOT NULL DEFAULT 0,
+                time_used_seconds INTEGER NOT NULL DEFAULT 0,
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            );
+            INSERT INTO thread_goals (
+                thread_id, goal_id, objective, status, created_at_ms, updated_at_ms
+            ) VALUES (
+                '\(sessionID)', 'goal-id', 'Test objective', '\(goalStatus)', 1, 1
+            );
             """
         ]
         databaseProcess.standardOutput = Pipe()
@@ -64,7 +70,9 @@ import TBDShared
         process.standardOutput = Pipe()
         process.standardError = Pipe()
         try process.run()
-        let payload = #"{"session_id":"a1b2c3d4-e5f6-4789-abcd-0123456789ab","hook_event_name":"Stop","last_assistant_message":"done"}"#
+        let payload = """
+        {"session_id":"\(sessionID)","hook_event_name":"Stop","last_assistant_message":"done"}
+        """
         input.fileHandleForWriting.write(Data(payload.utf8))
         try input.fileHandleForWriting.close()
         process.waitUntilExit()
@@ -136,6 +144,15 @@ import TBDShared
         let invocations = try runStopHook(goalStatus: "active")
 
         #expect(invocations.contains { $0.hasPrefix("notify --type response_complete") })
+        #expect(!invocations.contains("terminal-activity idle"))
+    }
+
+    @Test func stopHookReadsSessionIDFromPayloadJSON() throws {
+        let invocations = try runStopHook(
+            goalStatus: "active",
+            sessionID: "b2c3d4e5-f607-489a-bcde-1234567890ab"
+        )
+
         #expect(!invocations.contains("terminal-activity idle"))
     }
 
