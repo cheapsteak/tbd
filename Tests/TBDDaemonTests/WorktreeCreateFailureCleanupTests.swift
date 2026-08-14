@@ -703,6 +703,9 @@ import Testing
         let db = try TBDDatabase(inMemory: true)
         let lifecycle = makeLifecycle(db: db)
         let repo = try await makeTestRepo(db: db, tempDir: hostDir, repoDir: repoDir)
+        let tipsBefore = try await GitManager().refTips(repoPath: repoDir.path)
+        #expect(tipsBefore["pending"] == nil,
+                "the unborn-branch setup dissolved — `pending` is a real ref: \(tipsBefore)")
 
         do {
             _ = try await lifecycle.createWorktree(
@@ -715,7 +718,115 @@ import Testing
                     "the collision was not attributed to the branch name: \(text)")
             #expect(!text.contains("after all attempts"),
                     "the same branch name was retried under a fresh folder: \(text)")
+            // The premise of everything below: git's stderr carries ONLY the
+            // worktree-claim phrasing, which `cleanUpFailedWorktreeAdd`'s first
+            // gate deliberately does not match. Were git to say "a branch named
+            // …" here instead, that gate would block the delete and this test
+            // would be covering a different path than it claims.
+            #expect(text.contains("is already used by worktree at"),
+                    "git did not report the claim this test exists to cover: \(text)")
+            #expect(!text.lowercased().contains("a branch named"),
+                    "gate 1 matched, so the delete was blocked before its own gates: \(text)")
         }
+
+        let base = WorktreeLayout().basePath(for: repo)
+        let survivors = (try? FileManager.default.contentsOfDirectory(atPath: base)) ?? []
+        #expect(survivors.isEmpty, "failed create left worktree directories: \(survivors)")
+
+        // The branch half of the same failure, which the gates above do not
+        // guard. `-b` created `refs/heads/pending` at the base tip *before* git
+        // discovered the claim, so the ref standing afterwards is this
+        // attempt's own — never a branch someone else made. What makes that
+        // sound rather than lucky is the phrasing split asserted above:
+        // verified against git 2.50, "is already used by worktree at" is
+        // reachable only while the ref is absent, because once
+        // `refs/heads/pending` exists the same command answers "a branch named
+        // 'pending' already exists" instead.
+        //
+        // It stands rather than being cleaned up because the live main checkout
+        // holds it: `git branch -D` answers "cannot delete branch 'pending'
+        // used by worktree at …", the cleanup logs that and moves on. The
+        // sibling test covers the shape where the delete does go through.
+        let tipsAfter = try await GitManager().refTips(repoPath: repoDir.path)
+        expectPreExistingRefsSurvived(before: tipsBefore, after: tipsAfter)
+        let created = tipsAfter["pending"] ?? "absent"
+        let baseTip = tipsBefore["origin/main"] ?? "absent"
+        #expect(tipsAfter["pending"] == tipsBefore["origin/main"],
+                "`pending` is not the base-tip ref this attempt's `-b` created: \(created) vs base \(baseTip)")
+    }
+
+    /// Every ref that predates a failed create must still stand, unchanged.
+    /// The whole point of `cleanUpFailedWorktreeAdd`'s gates is that it deletes
+    /// only what the attempt itself made.
+    private func expectPreExistingRefsSurvived(
+        before: [String: String], after: [String: String]
+    ) {
+        for (name, sha) in before {
+            let observed = after[name] ?? "deleted"
+            #expect(after[name] == sha,
+                    "the failed create disturbed the pre-existing ref \(name): \(observed) (was \(sha))")
+        }
+    }
+
+    /// The same stderr split, in the shape where the branch delete is not
+    /// refused — so what the cleanup deletes, and what it leaves alone, is
+    /// directly observable.
+    ///
+    /// A *stale* registration claims the unborn `pending` (a linked worktree
+    /// moved onto an orphan branch, then its directory removed), so `git
+    /// worktree add … -b pending origin/main` still fails with "'pending' is
+    /// already used by worktree at …" while `refs/heads/pending` does not
+    /// exist. All three of `cleanUpFailedWorktreeAdd`'s gates therefore hold,
+    /// the prune drops the dead registration, and `git branch -D` succeeds on
+    /// the branch `-b` had just created.
+    ///
+    /// Mutation-checked: widening gate 1 to match "is already used by worktree
+    /// at" as well makes the cleanup return early and leaks `pending`.
+    @Test func anUnbornBranchClaimDeletesOnlyTheBranchTheAttemptCreated() async throws {
+        let (parentDir, hostDir, repoDir) = try await makeClonedTestRepo()
+        defer { try? FileManager.default.removeItem(at: parentDir) }
+
+        // A branch off the base tip, so "left alone" is provable against a SHA
+        // the failed attempt could not have produced.
+        try await shell(
+            "git checkout -b keepsake && git commit --allow-empty -m keepsake"
+            + " && git checkout main",
+            at: repoDir
+        )
+
+        let claimer = parentDir.appendingPathComponent("claimer")
+        try await shell("git worktree add -b claimed '\(claimer.path)' main", at: repoDir)
+        try await shell("git checkout --orphan pending", at: claimer)
+        try await shell("git branch -D claimed", at: repoDir)
+        // Directory gone, registration kept: git still honours the claim, and
+        // the cleanup's prune is what clears it.
+        try FileManager.default.removeItem(at: claimer)
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        let repo = try await makeTestRepo(db: db, tempDir: hostDir, repoDir: repoDir)
+        let tipsBefore = try await GitManager().refTips(repoPath: repoDir.path)
+        #expect(tipsBefore["pending"] == nil,
+                "the unborn-branch setup dissolved — `pending` is a real ref: \(tipsBefore)")
+
+        do {
+            _ = try await lifecycle.createWorktree(
+                repoID: repo.id, branch: "pending", skipClaude: true
+            )
+            Issue.record("expected a claimed branch name to fail the create")
+        } catch {
+            let text = String(describing: error)
+            #expect(text.contains("is already used by worktree at"),
+                    "git did not report the claim this test exists to cover: \(text)")
+            #expect(!text.lowercased().contains("a branch named"),
+                    "gate 1 matched, so the delete was blocked before its own gates: \(text)")
+        }
+
+        let tipsAfter = try await GitManager().refTips(repoPath: repoDir.path)
+        let leaked = tipsAfter["pending"] ?? "absent"
+        #expect(tipsAfter["pending"] == nil,
+                "the branch this attempt's `-b` created leaked: pending → \(leaked)")
+        expectPreExistingRefsSurvived(before: tipsBefore, after: tipsAfter)
 
         let base = WorktreeLayout().basePath(for: repo)
         let survivors = (try? FileManager.default.contentsOfDirectory(atPath: base)) ?? []
