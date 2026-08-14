@@ -24,13 +24,16 @@ stable. That is what this document states.
   fetch; it is a way to say "don't hand me numbers that aged out while I
   slept." A refresh failure does not fail the command **when the daemon
   answered the refresh attempt** — it refused, or its answer was unreadable:
-  the cause is noted on stderr, the listing still prints on stdout from
-  persisted snapshots, and the exit code stays 0. Each snapshot's own
-  `fetchedAt` and `statusKind` then say how old its numbers are, so a caller
-  that needs fresh-or-nothing must decide that from those fields rather than
-  from the exit code. An **unreachable** daemon is not tolerated: `--refresh`
-  fails the command like any other invocation would, nonzero and with no
-  listing, rather than promising one it cannot produce.
+  the cause is noted on stderr, the listing still prints on stdout, and the
+  exit code stays 0. The listing may then carry no `usageSnapshot` at all,
+  on any profile: the refusal a daemon sends is that it has no usage poller,
+  and the listing draws its snapshots from that same poller. That is the
+  "tracked, not yet fetched" state below — transient, retry later — and not
+  stale numbers. Where snapshots do come back, `fetchedAt` and `statusKind` say
+  how old they are, so a caller that needs fresh-or-nothing decides from those
+  fields rather than from the exit code. An **unreachable** daemon is not
+  tolerated: `--refresh` fails the command like any other invocation would,
+  nonzero and with no listing, rather than promising one it cannot produce.
 - **`tbd terminal list --json <worktree>`** – per-terminal rows, of which only
   `profileID` participates in this contract: it is the join from a running
   session to the profile whose capacity governs it.
@@ -90,6 +93,16 @@ The envelope also carries app-oriented configuration mirrors —
 similar. They are part of the same versioned output and the additive promise
 covers them too, but the capacity contract only *interprets* the fields
 documented here. Treat the rest as informational.
+
+**Do not log or persist the envelope verbatim.** The env-override fields —
+`globalEnvOverrides` at the top level and `envOverrides` on each profile — are
+exactly the values the daemon routes through tmux's sensitive environment
+channel specifically to keep them out of `ps` output, and they routinely carry
+auth tokens and proxy keys. A capacity consumer needs none of them. Read the
+fields you interpret and drop the rest; if a program keeps the envelope — a
+debug dump, a cached readout, a log line — redact the env-override fields
+first. They stay in the output because removing them would break the additive
+promise, not because they are safe to hold onto.
 
 ## Per profile
 

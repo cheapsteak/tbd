@@ -113,13 +113,17 @@ func profileListJSONOutput(_ result: ModelProfileListResult) -> String? {
 ///   the refresh result's shape did not match, as under daemon/CLI version
 ///   skew. The refresh outcome is unreadable; the listing may still decode.
 ///
-/// Both leave the persisted snapshots there to list, and the note names where
-/// their staleness shows.
+/// Both still produce a listing, but the note must not promise what is in it.
+/// The refusal case in particular arrives when the daemon has no usage poller,
+/// and the listing draws its snapshots from that same poller — so every profile
+/// comes back with `usageSnapshot` absent, which is the "tracked, not yet
+/// fetched" state, not stale numbers. The note therefore points at the absence
+/// rather than at staleness fields that will not be there.
 ///
 /// Anything else means the daemon is unreachable. Returning nil rethrows it, so
-/// `--refresh` fails fast exactly as a plain `profile list` would — promising
-/// "listing persisted snapshots" on stderr and then exiting nonzero with empty
-/// stdout would be a lie told one line before it was broken.
+/// `--refresh` fails fast exactly as a plain `profile list` would — promising a
+/// listing on stderr and then exiting nonzero with empty stdout would be a lie
+/// told one line before it was broken.
 ///
 /// One residual imprecision: a truncated response frame also surfaces as a
 /// `DecodingError`, so it is read here as "answered unintelligibly" rather than
@@ -141,8 +145,9 @@ func refreshFailureNote(for error: Error) -> String? {
     default:
         return nil
     }
-    return "warning: usage refresh failed (\(detail)); listing persisted snapshots — "
-        + "read each profile's fetchedAt and statusKind for staleness\n"
+    return "warning: usage refresh failed (\(detail)); listing anyway, possibly "
+        + "without usage snapshots — an absent usageSnapshot means none fetched "
+        + "yet, not stale numbers\n"
 }
 
 /// Resolve a user-supplied profile reference against the daemon's profile

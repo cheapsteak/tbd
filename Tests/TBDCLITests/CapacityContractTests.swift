@@ -147,7 +147,7 @@ struct CapacityContractTests {
         // The envelope encodes schemaVersion last, so a payload that ever
         // grows a key of that name loses to it. The printed contract version
         // is the CLI's to state.
-        struct PayloadWithItsOwnVersion: Encodable {
+        struct PayloadWithItsOwnVersion: JSONObjectPayload {
             let schemaVersion = 99
             let marker = "payload"
         }
@@ -269,9 +269,12 @@ struct CapacityContractTests {
         #expect(note.hasSuffix("\n"))
         #expect(note.hasPrefix("warning: usage refresh failed ("))
         #expect(note.contains("OAuth usage poller is not running"))
-        #expect(note.contains("listing persisted snapshots"))
-        #expect(note.contains("fetchedAt"))
-        #expect(note.contains("statusKind"))
+        // The note points at ABSENCE, not staleness: this refusal comes from a
+        // daemon with no usage poller, and the listing sources its snapshots
+        // from that same poller, so every profile comes back without one.
+        #expect(note.contains("listing anyway"))
+        #expect(note.contains("an absent usageSnapshot means none fetched yet"))
+        #expect(!note.contains("fetchedAt"))
         // The whole note is one line, so a caller's stderr stays line-oriented.
         #expect(note.filter { $0 == "\n" }.count == 1)
     }
@@ -286,7 +289,7 @@ struct CapacityContractTests {
         let note = try #require(refreshFailureNote(for: DecodingError.dataCorrupted(context)))
         #expect(note.hasPrefix("warning: usage refresh failed ("))
         #expect(note.contains("version skew"))
-        #expect(note.contains("listing persisted snapshots"))
+        #expect(note.contains("listing anyway"))
         #expect(note.filter { $0 == "\n" }.count == 1)
     }
 
