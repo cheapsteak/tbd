@@ -1640,16 +1640,24 @@ extension TBDHomeSerialized {
                 "a replacement that dies must itself be replaced")
         }
 
-        /// The incident, end to end: a healthy incumbent whose lease is valid and
-        /// renewing must survive tick after tick with no replacement spawned and no
-        /// change to who holds authority — even while one of the tmux consultations
-        /// cannot be answered.
+        /// The incident, end to end, in the order it was observed in the field: one tick
+        /// spawns a replacement desk AND invalidates the live incumbent, ~30 seconds
+        /// apart, while that incumbent's lease is renewing on its own timer and has never
+        /// missed a renewal. Both halves come from the same tick, through two different
+        /// actuators, on the same wrong verdict.
         ///
-        /// Before the fix each tick read the unanswerable consultation as "the owner's
-        /// pane is gone", revoked the lease in place (same terminal, same generation,
-        /// validity flipped off) and then spawned another agent beside the incumbent it
-        /// had just demoted: one abandoned desk per tick, all night.
-        @Test("a live incumbent with a valid lease survives repeated ticks untouched")
+        /// So this drives the whole tick — `ensureDeskSession` (which spawns),
+        /// `maintainJudgeLease` (the ownership heartbeat) and `nudgeDeskSession` (which
+        /// revoked) — with the judge renewing between ticks the way a running judge does,
+        /// and holds all four invariants across every one of them: no new terminal, the
+        /// terminal's persisted role stays `judge`, and the lease keeps its owner, its
+        /// generation and its validity.
+        ///
+        /// Before the fix each tick read an unanswerable tmux consultation as "the
+        /// owner's pane is gone", demoted the incumbent in place — same terminal, same
+        /// generation, `expiresAt` zeroed, so its next renew came back fenced — and
+        /// spawned another agent beside the judge it had just stripped of authority.
+        @Test("a live incumbent with a renewing lease survives repeated ticks untouched")
         func testLiveIncumbentSurvivesRepeatedTicks() async throws {
             let f = try makeDeskFixture(tag: "staff-incumbent")
             defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
@@ -1660,7 +1668,7 @@ extension TBDHomeSerialized {
                     .first(where: { $0.label == TerminalLabel.claudeCode }))
 
             // The incumbent holds the judge lease, as a running judge does.
-            let lease = try await f.db.watchDeskLeases.acquire(
+            var lease = try await f.db.watchDeskLeases.acquire(
                 worktreeID: desk.id, terminalID: incumbent.id, now: Date())
 
             // Its pane is alive and running an agent, but the identity consultation
@@ -1669,13 +1677,25 @@ extension TBDHomeSerialized {
 
             let terminalsBefore = try await f.db.terminals.list(worktreeID: desk.id).count
             for tick in 0..<5 {
+                // The judge's own renew loop, which never missed a beat in the field.
+                lease = try await f.db.watchDeskLeases.renew(
+                    worktreeID: desk.id, terminalID: lease.terminalID,
+                    token: lease.token, generation: lease.generation, now: Date())
+
+                // One whole tick, in the order the runner drives it.
                 _ = try await f.manager.ensureDeskSession(mode: .daywatch)
+                await f.manager.maintainJudgeLease(worktreeID: desk.id)
                 await f.manager.nudgeDeskSession(worktreeID: desk.id, act: false)
 
                 let terminals = try await f.db.terminals.list(worktreeID: desk.id)
                 #expect(
                     terminals.count == terminalsBefore,
                     "tick \(tick): no agent may be spawned beside a live incumbent")
+
+                let row = try #require(terminals.first { $0.id == incumbent.id })
+                #expect(
+                    row.watchDeskRole == .judge,
+                    "tick \(tick): the incumbent was demoted in place")
 
                 let current = try #require(try await f.db.watchDeskLeases.status(worktreeID: desk.id))
                 #expect(current.terminalID == lease.terminalID, "tick \(tick): owner changed")
