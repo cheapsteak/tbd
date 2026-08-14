@@ -7,6 +7,7 @@ clock: the shipped heartbeat is a minute apart and no test may spend one.
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import importlib.machinery
 import importlib.util
@@ -26,6 +27,7 @@ def _load_runner_module():
     """Import scripts/swift-safe (extensionless) as `swift_safe`."""
     loader = importlib.machinery.SourceFileLoader("swift_safe", str(RUNNER))
     spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None, f"no import spec for {RUNNER}"
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
     return module
@@ -45,6 +47,34 @@ class FakeClock:
 
     def sleep(self, seconds: float) -> None:
         self.now += seconds
+
+
+@contextlib.contextmanager
+def _lock_holder(env: dict[str, str], cwd: str | None = None):
+    """Run a real swift-safe that takes the lock and keeps it until exit.
+
+    Yields once the stub `swift` has printed, which happens only after the
+    lock was taken and the holder record written — so a waiter started inside
+    the block genuinely contends with a genuinely identified holder.
+    """
+    process = subprocess.Popen(
+        [str(RUNNER), "build"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=cwd,
+        env=env,
+    )
+    stdout, stderr = process.stdout, process.stderr
+    assert stdout is not None and stderr is not None
+    try:
+        assert stdout.readline().strip() == "ready"
+        yield process
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
+        stdout.close()
+        stderr.close()
 
 
 def _dead_pid() -> int:
@@ -133,25 +163,12 @@ class SwiftSafeTests(unittest.TestCase):
         )
         env = os.environ.copy()
         env.update({"TBD_HOME": str(self.tbd_home), "TBD_SWIFT_BIN": str(self.fake_swift)})
-        first = subprocess.Popen(
-            [str(RUNNER), "build"],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-        )
-        try:
-            self.assertEqual(first.stdout.readline().strip(), "ready")
+        with _lock_holder(env):
             result = self.run_runner(
                 "test", TBD_SWIFT_LOCK_TIMEOUT_SECONDS="0.05"
             )
             self.assertEqual(result.returncode, 75)
             self.assertIn("timed out", result.stderr)
-        finally:
-            first.terminate()
-            first.wait(timeout=5)
-            first.stdout.close()
-            first.stderr.close()
 
     def test_contended_lock_times_out_without_spawning_swift(self):
         lock_path = self.tbd_home / "runtime" / "swift-build.lock"
@@ -180,16 +197,7 @@ class SwiftSafeTests(unittest.TestCase):
                 "TBD_SWIFT_BIN": str(self.fake_swift),
             }
         )
-        holder = subprocess.Popen(
-            [str(RUNNER), "build"],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=str(holder_directory),
-            env=env,
-        )
-        try:
-            self.assertEqual(holder.stdout.readline().strip(), "ready")
+        with _lock_holder(env, cwd=str(holder_directory)) as holder:
             result = self.run_runner(
                 "test",
                 TBD_SWIFT_LOCK_TIMEOUT_SECONDS="0.4",
@@ -203,11 +211,6 @@ class SwiftSafeTests(unittest.TestCase):
             self.assertNotIn(str(holder_directory), result.stderr)
             # Nothing the waiter says may reach a caller parsing SwiftPM output.
             self.assertEqual(result.stdout, "")
-        finally:
-            holder.terminate()
-            holder.wait(timeout=5)
-            holder.stdout.close()
-            holder.stderr.close()
 
     def test_run_warns_that_the_slot_covers_the_whole_program(self):
         result = self.run_runner("run", "TBDApp")
