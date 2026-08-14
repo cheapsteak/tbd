@@ -1135,6 +1135,26 @@ leaves the operator's intent genuinely ambiguous, while an unregistered repo
 leaves it perfectly clear, so taking a project's supervision offline over a
 stale name would cost real coverage to fix nothing.
 
+**A project's name must be usable as a single path component**, because §6 puts
+that project's journal and proposals in a directory named by it. Where the
+requirement bites depends on where the name came from, and the asymmetry is
+deliberate:
+
+- **A declared name that fails is a loader rejection** (§8). That name came out
+  of the supervision file, so refusing the file refuses the operator's own
+  edit, and the fix is one line away in the document they were already editing.
+- **A singleton's name is its repo's display name**, which came from nowhere
+  near that file. Refusing there would take the whole fleet's coverage offline
+  over a repo renamed for unrelated reasons, with the remedy sitting in a file
+  the operator never touched. So resolution keeps the project — its mark, its
+  mode and its place in `status` intact — and reports the condition; what such
+  a project cannot have is a per-project directory until the repo is renamed.
+  The path helper itself refuses to compose a name it cannot safely use, so no
+  caller reopens the hole by building the path by hand.
+
+Coverage is not withheld over a naming problem — the same reasoning that
+resolves a phantom member rather than failing on it.
+
 **Each desk is addressed to its own project.** The daemon refuses a desk's send
 when the target lies outside that project — addressing correctness, not
 authority (§3). How the daemon knows the caller's project is deliberately
@@ -1823,7 +1843,9 @@ most one project; the loader rejects the file if one appears twice, because
 "exactly one" is the property the whole grouping rests on.
 
 `supervised` is the list of projects turned on — TBD's own attention covers
-exactly these, and an absent name is off (below). `modes` holds two things on the default-props chain: the **declared
+exactly these, and an absent name is off (below). A name here matching no
+current project is kept rather than pruned, because a project may be declared
+later; until one is, the name resolves to nothing. `modes` holds two things on the default-props chain: the **declared
 mode list** — the names a project's operator may select, defaulting to the
 built-in pair `attended`/`autonomous` when absent — and the operator's
 **selection** per project, defaulting to `attended` (§3). The map's value
