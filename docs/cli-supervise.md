@@ -13,12 +13,15 @@ Status: documents the `tbd supervise` surface specified by
 Part of that surface exists and part of it is specification the rest of this
 document describes ahead of the code:
 
-- **Built** – `on`, `off`, `status`, `mode`, `project`.
+- **Built** – `on`, `off`, `status`, `mode`, `project`. These are what
+  `tbd supervise --help` lists, and their output is quoted here exactly.
 - **Specified, not yet built** – `appoint`, `relieve`, `sweep customize`,
-  `readout`, `brief`, `ledger`.
+  `readout`, `brief`, `ledger`. Their sections below carry the same marker,
+  and any output they show is the specified shape rather than a transcript.
 
 The migration from the current implementation is planned separately. JSON
-output shown here is illustrative of the schema family until the schemas ship.
+output for the unbuilt commands is illustrative of the schema family until
+their schemas ship.
 
 ## Synopsis
 
@@ -102,23 +105,23 @@ narrative" below.
 ```
 # Hand a project over for the night
 $ tbd supervise on acme-platform
-on: acme-platform (mode autonomous, hosted desk ready)
+on: acme-platform
 
 # What is supervision doing right now?
 $ tbd supervise status
 brake: released
-acme-platform   on since 22:04   mode autonomous   supervisor: hosted desk   last sweep report 2m ago
-tbd             on since 21:40   mode attended     supervisor: appointed (⌁ main session)   last sweep report 4m ago
+acme-platform  on since 22:04  mode autonomous  supervisor: hosted desk      last sweep contact: never  coverage unknown
+acme-hooks     on since 21:40  mode attended    supervisor: appointed (t42)  last sweep contact: never  coverage unknown
 
-# Read the facts the way the sweep program does
+# Read the facts the way the sweep program does (not yet built)
 $ tbd supervise readout --project acme-platform
 
-# Answer "what did supervision actually do overnight?"
+# Answer "what did supervision actually do overnight?" (not yet built)
 $ tbd supervise ledger --project acme-platform --since 22:00
 
-# Make your current pairing session the project's supervisor for the day
-$ tbd supervise appoint tbd --terminal t42
-appointed: session t42 supervises "tbd" (relaunched with playbook layer)
+# Make your current pairing session the project's supervisor for the day (not yet built)
+$ tbd supervise appoint acme-hooks --terminal t42
+appointed: session t42 supervises "acme-hooks" (relaunched with playbook layer)
 ```
 
 ## tbd supervise on / off
@@ -153,6 +156,20 @@ summary of the span; on `on`, nothing — or the project's own script at
 delivered to the supervisor verbatim. A failing hook is recorded as an
 anomaly and never blocks the transition.
 
+A per-project call prints the resulting state and whether it changed anything
+— `on: acme-platform`, or `on: acme-platform (already on)` when the mark
+already stood. A gesture that changes nothing is not a decision: it writes no
+ledger line, and the parenthetical is how you can tell. The bare form prints
+the brake instead, `brake: engaged` or `brake: released`. The result carries
+the mark and nothing more: no mode, no supervisor state, nothing about a desk
+— reporting a fact the command did not establish is exactly the invented
+measurement this design refuses.
+
+What these gestures do today is the mark, the ledger line, and that result.
+The supervisor half described above — ensuring a hosted desk live, standing
+one down — and the transition hook belong with the not-yet-built commands,
+and arrive with them.
+
 Bare: the fleet brake. `off` pauses TBD's authority to act everywhere —
 briefings refused, identified supervisor sends refused from that instant —
 without disposing any supervisor or touching the per-project marks, so
@@ -168,10 +185,52 @@ continuous, and views over it are windowed.
 tbd supervise status [--json]
 ```
 
-One line of global state (the brake), then one line per project: on/off
-with the span's start, active
-mode, supervisor arrangement, last sweep contact age, and coverage — a
-project with no declared contact window and no tick shows `coverage unknown`.
+One line of global state (the brake), then any warning lines, then one line
+per project. A project's line carries its name, its state — `on since HH:mm`,
+or bare `on` where the record holds no opening line, or `off` — then
+`mode <name>`, the supervisor arrangement (`supervisor: hosted desk`, or
+`supervisor: appointed (<terminal>)`, which names the bound terminal rather
+than its display string), `last sweep contact: <age>` or
+`last sweep contact: never`, and coverage: the project's declared contact
+window, or `coverage unknown` where it declares none. Unknown is the honest
+not-yet value; nothing here invents a coverage claim. A fleet with no
+projects at all prints `(no projects)` where the rows would be.
+
+An off project renders exactly `off`, never a span and never a "was on
+until" — an untouched project and a turned-off one are the same state, and a
+third rendering would imply a third state that does not exist.
+
+**Warnings are stdout, and they are not errors.** A fleet state that would
+otherwise render as a calm night gets its own `warning:` line, between the
+brake and the project rows. The line is data on stdout and the exit code
+stays 0: a state worth saying out loud is not a failure of the command that
+reported it. Two conditions warn:
+
+- **`noProjectsOn`** – the brake is released and no project is on, so nothing
+  is being supervised. This is the quiet failure the whole surface exists to
+  prevent, so the line is composed from the facts the status carries — a
+  released brake with nothing effectively supervised — and appears whether or
+  not the daemon named it.
+- **`unusableProjectName`** – one or more projects have a name that cannot be
+  a directory name, so nothing can be written beside them: no playbook,
+  journal, proposals or programs. They are supervised like any other project,
+  and the message names which ones; renaming the repo gives them a directory.
+
+`--json` carries the same facts for a program. `effectivelySupervising` — the
+brake released *and* at least one project on — is the authoritative bit, and
+`warnings` is an array whose entries pair a stable `code`
+(`noProjectsOn`, `unusableProjectName`) with the sentence a human would have
+read. Branch on `effectivelySupervising` and on `code`; never on the rendered
+line. Each project entry carries `spanStartedAt`, `lastSweepContactAt` and
+`coverageWindow` as explicit nulls when unknown, so a missing value is
+readable as one rather than as an absent key.
+
+```
+$ tbd supervise status
+brake: released
+warning: the brake is released but no project is on — nothing is being supervised.
+(no projects)
+```
 
 ## tbd supervise mode
 
@@ -184,6 +243,29 @@ Selects the project's active mode, or with no mode name, shows the active
 mode and the declared choices. Names are validated against the declared mode
 list in `supervision.json`; the conduct a name stands for is the playbook's
 prose. Selection takes effect on the next briefing — no restart.
+
+Every form prints the choices beside the answer, so an operator never has to
+go looking for what would have worked — including the refusal, which names
+the condition on stderr and exits nonzero.
+
+```
+$ tbd supervise mode acme-platform
+mode: acme-platform is autonomous   choices: attended, autonomous
+
+$ tbd supervise mode acme-platform attended
+mode: acme-platform is now attended   choices: attended, autonomous
+
+$ tbd supervise mode acme-platform attended
+mode: acme-platform was already attended   choices: attended, autonomous
+
+$ tbd supervise mode acme-platform friday-freeze
+mode "friday-freeze" is not declared for project "acme-platform" — choices: attended, autonomous
+```
+
+`was already` is the same distinction the `on`/`off` parenthetical draws: a
+selection that changes nothing is not a decision and writes no ledger line. A
+project whose declared list is somehow empty renders `choices: (none
+declared)` rather than an empty space.
 
 ## tbd supervise project
 
@@ -198,7 +280,27 @@ Declares multi-repo projects and moves repos between them. A repo in no
 declared project is its own singleton project with its repo name — most
 fleets never need these commands.
 
+`list` prints one row per project: its name, its member repos, the playbook
+source it designates (`policy: repo:<repo>` or `policy: operator`), and its
+sweep program (`sweep: shipped`, or the path of the copy `sweep customize`
+wrote). An installation that has declared nothing prints `(no projects)`.
+There is no `--json` here; `status` is the machine surface.
+
+```
+$ tbd supervise project list
+acme-checkout  acme-web, acme-api  policy: repo:acme-web  sweep: shipped
+```
+
+`move --to singleton` takes a repo back to being its own project, and where
+that empties a declaration it deletes the declaration outright, along with
+that project's mark, its mode selection and any supervisor binding — a mark
+outliving its project would silently turn a later project of the same name
+on. A move that would take a surviving project's designated policy repo away
+is refused, naming the condition: designate another member's policy first.
+
 ## tbd supervise appoint / relieve
+
+*Specified, not yet built.*
 
 ```
 tbd supervise appoint  <project> --terminal <id>
@@ -225,6 +327,8 @@ than touching your session.
 
 ## tbd supervise sweep customize
 
+*Specified, not yet built.*
+
 ```
 tbd supervise sweep customize <project>
 ```
@@ -236,6 +340,8 @@ touched by TBD again. Until then, the shipped program runs on the default
 tick with no setup.
 
 ## tbd supervise readout
+
+*Specified, not yet built.*
 
 ```
 tbd supervise readout --project <name>
@@ -287,6 +393,8 @@ $ tbd supervise readout --project tbd | jq '.agents[] | {terminal, state}'
 
 ## tbd supervise brief
 
+*Specified, not yet built.*
+
 ```
 tbd supervise brief --project <name>    # briefing text on stdin
 ```
@@ -331,6 +439,8 @@ $ tbd supervise brief --project acme-platform < /dev/null
 ```
 
 ## tbd supervise ledger
+
+*Specified, not yet built.*
 
 ```
 tbd supervise ledger --project <name> --since <t>
