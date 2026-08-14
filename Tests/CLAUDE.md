@@ -249,10 +249,27 @@ are worth knowing before someone reaches for a raise.**
 guard. Grepping only for the literal `waitForSuspension(` undercounts every
 chain below, which is exactly the miscount a PR #547 reviewer made.
 
-On that basis: `GatedIntervalSleepTests.returnsAfterExpectedPollCount`
-(3 `advanceWhenSuspended` + 2 `waitForSuspension`) and
-`DaywatchRunnerTests.testSubsequentTicksAtInterval` (2 + 3) each pay **5**
-guards, i.e. 225 s of the 240 s ceiling. And counting `waitFor` at 90 s plus
+On that basis, the deepest chains in the tree are the poller tests, and their
+paper tallies do not all fit under the ceiling:
+
+- `GatedIntervalSleepTests.returnsAfterExpectedPollCount` — 3
+  `requireAdvanceWhenArmed` + 2 `requireSleeperArmed` + 1 `FireRecorder.next()`
+  = **6** guards, 270 s, i.e. **over** the 240 s limit.
+- `GatedIntervalSleepTests.boundaryIsExact` (3 + 1 + 1) and
+  `DaywatchRunnerLoopTests.testSubsequentTicksAtInterval` (2 + 3) — **5**
+  guards, 225 s.
+
+Paper is the operative word, and the arithmetic that matters is different:
+**at most one guard can elapse in any single run of these.** All three chains
+are on `EventDrivenTestClock`'s **strict** waits, where a missed arming throws
+before anything advances, so the chain stops at the first bad step and nothing
+after it runs. The one non-throwing guard in each chain — `FireRecorder.next()`,
+which records and continues — sits *last*, with no wait behind it to inherit the
+run. So the real worst case is one 45 s guard, and 270 s describes a run that
+cannot happen. That is a property of these chains' *shape*, not of strictness
+alone: put a `next()` mid-chain and its 45 s becomes payable on top of whatever
+follows. Suites on the predecessor helpers have no such property at all and pay
+the full tally. And counting `waitFor` at 90 s plus
 each clock wait at 45 s, **9 of the 13** `PaneRepairCoordinatorTests` have a
 worst case above 240 s — not just the 6-deep chain (540 s) usually cited. Every one of those is still consistent with
 the invariant, because only an already-failing test walks a full chain of
@@ -554,6 +571,18 @@ Permanent desync. The defect is emergent, not a helper bug: one advance has a
 small miss probability, one hundred makes it near-certain. That is a property
 of the *usage*, which is why it is a written rule rather than a helper fix.
 
+**The mechanism is record-and-continue desync**, and naming it says which chains
+are exposed. `EventDrivenTestClock`'s strict waits — `requireSleeperArmed`,
+`requireAdvanceWhenArmed` — do not share it: a missed arming throws *before*
+anything advances, so the chain stops at the first bad step, nothing later runs
+against a desynced clock, and the failure is a named diagnostic rather than a
+hang. **The rule is not lifted for strict callers.** The majority of
+clock-driven suites still use the predecessor helpers, where the warning holds
+in full, and both suites on the strict waits already sit inside single digits —
+so lifting it would buy nothing and cost a rule that currently holds everywhere.
+A future case with a real need can argue it on evidence now that the mechanism
+is written down.
+
 **The counter-rule, because following the above naively degrades coverage.**
 Shortening a chain silently buys a weaker assertion — and it degrades
 invisibly, because the test still passes. One migrated test named for having
@@ -680,17 +709,42 @@ past a deadline that is not in the ledger yet; the re-armed sleep is then
 measured from the new `now` and never fires, and the suite desyncs permanently —
 the same hang described above for `TestClock` under load, except deterministic
 rather than probabilistic. It is the first thing to get right when migrating a
-poller suite (`GatedIntervalSleepTests`, `DaywatchRunnerTests`), where every
-advance past the first is a re-arm.
+poller suite, where every advance past the first is a re-arm.
+
+**Each wait comes in two forms, split like `#expect` / `#require`.**
+`sleeperArmed` / `advanceWhenArmed` record a miss and continue;
+`requireSleeperArmed` / `requireAdvanceWhenArmed` throw the same
+`NoSleeperArmed` diagnostic instead. Prefer the strict pair in anything
+chain-shaped — a poller test, where each step is sound only if the previous one
+landed — and keep the soft pair for a single-shot wait whose next statement is
+an assertion that fails informatively on its own. Both suppress the diagnostic
+on *cancellation*: the wait ends, but attribution belongs to whatever cancelled
+the test. Design:
+`docs/specs/2026-08-13-poller-suite-clock-migration-design.md`.
+
+**And the migration's real work is not the clock swap.** It is replacing
+clock-state inference with the observable the test already holds: a poller suite
+that asked `checkSuspension()` whether its sleep had ended was reading a
+snapshot and relying on that call's internal megaYield to have let the resumed
+task run first. `hasSleeper` has no such nudge, so port those to the positive
+fact — `FireRecorder.next()` on the effect, or joining the task — rather than to
+a weaker negative.
 
 **Count each `FireRecorder.next()` in the
 `.clockDriven` tally too**: it carries its own 45 s hang guard, exactly like a
 `waitForSuspension`, so a test with 2 `advanceWhenArmed` + 2 `next()` has a
-180 s worst case against the 240 s limit. Either clock is a legitimate choice
-for a new clock-driven test. Existing `TestClock` suites migrate on field
-evidence, not wholesale — currently `AppearanceDebounceTests` and
-`SearchQueryDebouncerTests`,
-which reproduced the starvation in a full-suite soak. Design:
+180 s worst case against the 240 s limit. And `next()` is **non-throwing** — it
+records and returns `nil` — so it does not stop a chain the way a strict arming
+wait does: a `next()` that times out mid-chain leaves every guard after it
+payable in the same run. Put it last, which is what makes the poller chains
+above cost one guard in practice rather than their paper tally. Either clock is
+a legitimate choice for a new clock-driven test. Existing `TestClock` suites
+migrate on field evidence, not wholesale — currently `AppearanceDebounceTests`
+and `SearchQueryDebouncerTests`,
+which reproduced the starvation in a full-suite soak, plus the two poller suites
+`GatedIntervalSleepTests` and `DaywatchRunnerLoopTests`, whose chains on the
+predecessor helpers each paid five wall-clock guards — 225 s of the 240 s
+ceiling, one scheduling excursion from tripping it. Design:
 `docs/specs/2026-08-11-event-driven-test-clock-design.md`.
 
 `PollerClock` is **not** this seam and must not be copied as a template — see

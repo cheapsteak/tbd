@@ -68,14 +68,29 @@ public extension Trait where Self == TimeLimitTrait {
     /// past it, all consistent with the invariant (only an already-failing test
     /// ever pays a full chain of timeouts), but with nothing to spare:
     /// Count `advanceWhenSuspended` as a `waitForSuspension` when you tally a
-    /// chain — it *calls* one before advancing, so it pays the full guard.
+    /// chain — it *calls* one before advancing, so it pays the full guard —
+    /// and count each `EventDrivenTestClock.FireRecorder.next()` the same way.
     /// Grepping only for the literal `waitForSuspension(` undercounts every
-    /// figure below (a PR #547 reviewer did exactly that and read these as
-    /// 2 and 3 rather than 5).
-    /// - `GatedIntervalSleepTests.returnsAfterExpectedPollCount`
-    ///   (3 `advanceWhenSuspended` + 2 `waitForSuspension`) and
-    ///   `DaywatchRunnerTests.testSubsequentTicksAtInterval` (2 + 3) each pay
-    ///   **5** guards: 225 s against a 240 s ceiling.
+    /// figure below, which is how a PR #547 reviewer read two of these chains
+    /// as shallower than they are.
+    /// - `PaneRepairCoordinatorTests.readerWaitEscalatesToTheSlowInterval` is
+    ///   the deepest chain still riding this type's **non-throwing** pair: four
+    ///   `advanceWhenSuspended` plus one `waitForSuspension`, five clock guards
+    ///   for 225 s, and its two `waitFor` calls take the paper worst case to
+    ///   405 s. Every guard there is payable in one run, because a miss records
+    ///   and the chain keeps going.
+    /// - The poller chains are nominally deeper still —
+    ///   `GatedIntervalSleepTests.returnsAfterExpectedPollCount` pays six
+    ///   guards (3 `requireAdvanceWhenArmed` + 2 `requireSleeperArmed` + 1
+    ///   `FireRecorder.next()`) for 270 s, past this limit;
+    ///   `GatedIntervalSleepTests.boundaryIsExact` and
+    ///   `DaywatchRunnerLoopTests.testSubsequentTicksAtInterval` pay five for
+    ///   225 s — but they are on `EventDrivenTestClock`'s strict waits, where a
+    ///   missed arming throws before anything advances, so the chain stops at
+    ///   the first bad step. Their one non-throwing guard, `next()`, sits last
+    ///   with nothing behind it to inherit the run, so at most one 45 s guard
+    ///   elapses in any single run and 270 s describes a run that cannot
+    ///   happen (see "The event-driven alternative" below).
     /// - In `PaneRepairCoordinatorTests`, **9 of 13** tests have a worst case
     ///   above 240 s (counting `waitFor` at 90 s and each clock wait at 45 s),
     ///   not just the one 6-deep chain (540 s) usually cited.
@@ -224,10 +239,11 @@ public extension TestClock {
     ///     returns in milliseconds, so the raise costs passing runs nothing.
     ///
     ///     What 45 s does **not** buy is a deep chain: at five of these waits
-    ///     the test is at 225 s of a 240 s limit, and two tests in the fast
-    ///     pass are exactly there — `GatedIntervalSleepTests.returnsAfterExpectedPollCount`
-    ///     and `DaywatchRunnerTests.testSubsequentTicksAtInterval` (both count
-    ///     `advanceWhenSuspended` toward the five; see `.clockDriven` above).
+    ///     a test is at 225 s of a 240 s limit, and this helper's non-throwing
+    ///     shape means a chain that size pays every guard rather than stopping
+    ///     at the first miss (contrast `EventDrivenTestClock`'s strict pair,
+    ///     `requireSleeperArmed` / `requireAdvanceWhenArmed`, under "The
+    ///     event-driven alternative" below, where a miss throws immediately).
     ///     ("Fast pass", not "live": tier-3 `TBDDaemonLiveTests` pins its own
     ///     limit and is unaffected.) That is
     ///     consistent with the invariant — only a failing test walks the whole

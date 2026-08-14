@@ -55,6 +55,17 @@ struct EventDrivenTestClockSelfTests {
         var isLatched: Bool { lock.withLock { latched } }
     }
 
+    /// The same idea one step further: the matcher hands the *text* out, not
+    /// just the fact that something matched. A test that compares two
+    /// diagnostics has to hold both of them.
+    private final class Captured: @unchecked Sendable {
+        private let lock = NSLock()
+        private var text = ""
+
+        func set(_ value: String) { lock.withLock { text = value } }
+        var value: String { lock.withLock { text } }
+    }
+
     private struct HandshakeTimeout: Error, CustomStringConvertible {
         let what: String
         let timeout: Swift.Duration
@@ -178,6 +189,146 @@ struct EventDrivenTestClockSelfTests {
         #expect(await recorder.next() == "woke",
                 "an expired waiter must not poison the ledger for later waits")
         _ = await sleeper.value
+    }
+
+    // MARK: Strict arming
+
+    /// The strict pair's healthy path must be indistinguishable from the soft
+    /// pair's: a registration releases the wait, whether the waiter parked first
+    /// or the sleeper was already there.
+    @Test("requireSleeperArmed returns for a sleeper that registers after it parks")
+    func requireArmedReturnsOnRegistration() async throws {
+        let clock = EventDrivenTestClock()
+        let recorder = FireRecorder<String>()
+
+        async let armed: Void = clock.requireSleeperArmed()
+        await Self.waitUntil("an arming waiter is parked") { clock.hasParkedArmingWaiter }
+
+        let sleeper = Task { [clock] in
+            try? await clock.sleep(for: .seconds(1))
+            recorder.record("woke")
+        }
+        try await armed
+        #expect(clock.hasSleeper)
+
+        // And the fast path, on a clock that already has one: a 50 ms guard
+        // would fire if this parked instead of returning at once.
+        try await clock.requireSleeperArmed(timeout: .milliseconds(50))
+
+        try await clock.requireAdvanceWhenArmed(by: .seconds(1))
+        #expect(await recorder.next() == "woke")
+        _ = await sleeper.value
+    }
+
+    /// The whole reason the strict pair exists: a chain must **stop** at the
+    /// first missed arming rather than record and walk on. Two claims here, and
+    /// the second is the one that keeps a chain sound — nothing advanced.
+    @Test("requireAdvanceWhenArmed throws the named diagnostic and advances nothing")
+    func requireAdvanceThrowsWithoutAdvancing() async {
+        let clock = EventDrivenTestClock()
+        var thrown: (any Error)?
+        do {
+            // 50 ms rather than the 45 s default, so the proof is cheap.
+            try await clock.requireAdvanceWhenArmed(by: .seconds(1), timeout: .milliseconds(50))
+        } catch {
+            thrown = error
+        }
+
+        let text = thrown.map { String(describing: $0) } ?? "nothing was thrown"
+        #expect(text.contains("no task suspended on the clock within"),
+                "a missed arming must throw the NoSleeperArmed diagnostic — got: \(text)")
+        #expect(text.contains("EventDrivenTestClockSelfTests.swift"),
+                "the thrown diagnostic must name the step that gave up — got: \(text)")
+        #expect(clock.now.offset == .zero,
+                "throwing before the advance is what stops the ledger and now from desyncing")
+    }
+
+    /// One diagnostic, two deliveries — and the difference between them is
+    /// exactly one line, deliberately.
+    ///
+    /// The two texts are **not** identical, so a test that asserted they were
+    /// would be asserting something false, and one that compared a substring
+    /// both happen to contain would pass through any divergence in the rest of
+    /// the message — which is the only thing it could usefully catch. What is
+    /// actually true is prefix-plus-known-suffix: the strict form appends the
+    /// call site, because `Issue.record` already attributes the soft form to the
+    /// caller's line while a thrown error is attributed to the test function.
+    /// Asserting that shape catches a core that drifted *and* a suffix that
+    /// changed.
+    @Test("the strict diagnostic is the soft one verbatim, plus a call-site line")
+    func strictAndSoftShareOneDiagnostic() async {
+        let clock = EventDrivenTestClock()
+        let recorded = Captured()
+        await withKnownIssue("nothing ever arms, so the soft wait must record") {
+            await clock.sleeperArmed(timeout: .milliseconds(50))
+        } matching: { issue in
+            recorded.set(issue.error.map { String(describing: $0) } ?? "")
+            return true
+        }
+        let softText = recorded.value
+        #expect(softText.contains("no task suspended on the clock within"),
+                "the soft wait must record the NoSleeperArmed diagnostic — got: \(softText)")
+
+        // Same clock, same timeout, same virtual now: every field the two texts
+        // interpolate is identical, so any difference between them is shape.
+        var thrownText = ""
+        let callLine = #line + 2
+        do {
+            try await clock.requireSleeperArmed(timeout: .milliseconds(50))
+        } catch {
+            thrownText = String(describing: error)
+        }
+
+        #expect(thrownText.hasPrefix(softText),
+                """
+                the strict diagnostic must open with the recorded one verbatim — \
+                recorded: \(softText) / thrown: \(thrownText)
+                """)
+        let addition = String(thrownText.dropFirst(softText.count))
+        #expect(addition == "\nThe wait that gave up: \(#fileID):\(callLine).",
+                "the strict form must add the call site and nothing else — added: \(addition)")
+    }
+
+    /// The strict advance's stated invariant — *nothing is advanced unless a
+    /// sleeper is registered* — has a second way out that is easy to miss: the
+    /// wait ends silently on cancellation, with nothing armed and nothing
+    /// thrown. Advancing there would move virtual time against an empty ledger,
+    /// so it does not.
+    @Test("a cancelled requireAdvanceWhenArmed advances nothing")
+    func requireAdvanceIsInertOnCancellation() async {
+        let clock = EventDrivenTestClock()
+        let waiter = Task { [clock] in
+            // Long enough that expiry cannot be what ends this wait.
+            try? await clock.requireAdvanceWhenArmed(by: .seconds(5), timeout: .seconds(120))
+        }
+        await Self.waitUntil("an arming waiter is parked") { clock.hasParkedArmingWaiter }
+
+        waiter.cancel()
+        _ = await waiter.value
+        #expect(clock.now.offset == .zero,
+                "a wait ended by cancellation must leave virtual time where it found it")
+    }
+
+    /// Cancellation is not expiry, and the strict pair keeps that treatment:
+    /// the wait ends, but it neither throws nor records, because the failure
+    /// belongs to whatever cancelled the test.
+    @Test("a cancelled requireSleeperArmed ends without a diagnostic")
+    func requireArmedIsSilentOnCancellation() async {
+        let clock = EventDrivenTestClock()
+        let waiter = Task { [clock] () -> String in
+            do {
+                // Long enough that expiry cannot be what ends this wait.
+                try await clock.requireSleeperArmed(timeout: .seconds(120))
+                return "returned"
+            } catch {
+                return "threw: \(error)"
+            }
+        }
+        await Self.waitUntil("an arming waiter is parked") { clock.hasParkedArmingWaiter }
+
+        waiter.cancel()
+        #expect(await waiter.value == "returned",
+                "attribution belongs to whatever cancelled the test, not to this call site")
     }
 
     // MARK: Cancellation
