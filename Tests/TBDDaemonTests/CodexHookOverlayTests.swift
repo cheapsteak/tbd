@@ -8,7 +8,9 @@ import TBDShared
     private func runStopHook(
         goalStatus: String,
         sessionID: String = "a1b2c3d4-e5f6-4789-abcd-0123456789ab",
-        priorGoalStatus: String? = nil
+        priorGoalStatus: String? = nil,
+        assistantMessage: String = "done",
+        goalTimestampsTie: Bool = false
     ) throws -> [String] {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-codex-stop-hook-\(UUID().uuidString)", isDirectory: true)
@@ -20,6 +22,9 @@ import TBDShared
         try """
         #!/bin/sh
         printf '%s\\n' "$*" >> "$TBD_HOOK_TEST_LOG"
+        if [ "$1" = notify ]; then
+          printf 'notify-message=%s\\n' "$5" >> "$TBD_HOOK_TEST_LOG"
+        fi
         """.write(to: tbdPath, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o755],
@@ -31,6 +36,7 @@ import TBDShared
         // Codex 0.147 keys this table by thread_id. Only the history test
         // relaxes that constraint to exercise a possible future schema shape.
         let threadIDConstraint = priorGoalStatus == nil ? "PRIMARY KEY NOT NULL" : "NOT NULL"
+        let currentTimestamp = goalTimestampsTie ? 1 : 2
         let priorGoalInsert = priorGoalStatus.map { status in
             """
             INSERT INTO thread_goals (
@@ -60,7 +66,8 @@ import TBDShared
             INSERT INTO thread_goals (
                 thread_id, goal_id, objective, status, created_at_ms, updated_at_ms
             ) VALUES (
-                '\(sessionID)', 'goal-id', 'Test objective', '\(goalStatus)', 2, 2
+                '\(sessionID)', 'goal-id', 'Test objective', '\(goalStatus)',
+                \(currentTimestamp), \(currentTimestamp)
             );
             """
         ]
@@ -85,7 +92,7 @@ import TBDShared
         process.standardError = Pipe()
         try process.run()
         let payload = """
-        {"session_id":"\(sessionID)","hook_event_name":"Stop","last_assistant_message":"done"}
+        {"session_id":"\(sessionID)","hook_event_name":"Stop","last_assistant_message":"\(assistantMessage)"}
         """
         input.fileHandleForWriting.write(Data(payload.utf8))
         try input.fileHandleForWriting.close()
@@ -170,6 +177,15 @@ import TBDShared
         #expect(!invocations.contains("terminal-activity idle"))
     }
 
+    @Test func stopHookReadsAssistantMessageFromPayloadJSON() throws {
+        let invocations = try runStopHook(
+            goalStatus: "complete",
+            assistantMessage: "goal work finished"
+        )
+
+        #expect(invocations.contains("notify-message=goal work finished"))
+    }
+
     @Test func stopHookUsesMostRecentlyUpdatedGoalStateIfSchemaAllowsHistory() throws {
         let invocations = try runStopHook(
             goalStatus: "active",
@@ -177,6 +193,35 @@ import TBDShared
         )
 
         #expect(!invocations.contains("terminal-activity idle"))
+    }
+
+    @Test func stopHookIgnoresStaleActiveGoalIfLatestStateIsComplete() throws {
+        let invocations = try runStopHook(
+            goalStatus: "complete",
+            priorGoalStatus: "active"
+        )
+
+        #expect(invocations.contains("terminal-activity idle"))
+    }
+
+    @Test func stopHookUsesLatestActiveStateWhenGoalTimestampsTie() throws {
+        let invocations = try runStopHook(
+            goalStatus: "active",
+            priorGoalStatus: "complete",
+            goalTimestampsTie: true
+        )
+
+        #expect(!invocations.contains("terminal-activity idle"))
+    }
+
+    @Test func stopHookUsesLatestCompleteStateWhenGoalTimestampsTie() throws {
+        let invocations = try runStopHook(
+            goalStatus: "complete",
+            priorGoalStatus: "active",
+            goalTimestampsTie: true
+        )
+
+        #expect(invocations.contains("terminal-activity idle"))
     }
 
     @Test func stopHookPublishesIdleWhenCodexGoalIsComplete() throws {
