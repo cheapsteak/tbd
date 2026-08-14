@@ -98,6 +98,28 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// generation. A new generation is a new incident and notifies again.
     private var notifiedContentionGeneration: Int64?
 
+    /// The agent this rail spawned the last time it found the desk empty.
+    ///
+    /// Bounds recovery on evidence rather than on a clock. A time-based limit
+    /// cannot help here: the desk ticks roughly every fifteen minutes, so any
+    /// interval short enough to allow real recovery is also short enough to
+    /// allow one abandoned agent per tick. Instead, a second replacement waits
+    /// until this one is gone from the database or PROVEN absent — see
+    /// `spawnRecoveryTerminalIfWarranted`.
+    private var lastRecoveryTerminalID: UUID?
+
+    /// Replacements spawned since a nudge last reached a pane. Reset by a
+    /// delivered nudge and by closing the desk; bounded by
+    /// `maxConsecutiveRecoverySpawnsWithoutNudge` so a launch that dies on every
+    /// attempt cannot spawn forever.
+    private var consecutiveRecoverySpawnsWithoutNudge = 0
+
+    /// Deduplicates the give-up notification so the user is told once per
+    /// incident rather than every tick. Cleared whenever the counter it guards is.
+    private var notifiedRecoveryExhaustion = false
+
+    private static let maxConsecutiveRecoverySpawnsWithoutNudge = 3
+
     // MARK: - Init
 
     public init(
@@ -123,38 +145,36 @@ public actor DeskSessionManager: DeskSessionManaging {
 
     /// Idempotent: ensure a Watch Desk scratch space exists.
     /// Returns existing desk worktree if already created, otherwise creates one.
-    /// On recovery, respawns the configured primary agent if it has no live pane
-    /// (H1 fix: desk dead after off→on cycle).
+    /// On recovery, respawns the configured primary agent only if the desk is genuinely
+    /// unstaffed (no live agent of any supported kind). Cross-kind incumbent reuse:
+    /// an intentional handoff to the non-preferred kind is preserved.
     /// - Parameter mode: The current nightwatch mode (daywatch or nightwatch)
     /// - Returns: The Worktree for the desk session
     public func ensureDeskSession(mode: NightwatchMode) async throws -> Worktree {
         await gateAcquire()
         defer { gateRelease() }
-        let preferredKind = try await preferredAgentKind()
 
         // Validate cached desk session: the row alone is not enough. Agent
         // processes can exit before their terminal row is removed, so require a
-        // live pane owned by the currently configured primary agent.
+        // live pane of either supported kind (not just the preferred one).
         if let cachedID = deskWorktreeID,
            let existing = try await db.worktrees.getLocal(id: cachedID),
            existing.status == .active {
-            if try await liveAgentTerminal(
-                worktreeID: existing.id,
-                server: existing.tmuxServer,
-                kind: preferredKind
-            ) != nil {
-                // Fast path: cached desk is alive and valid.
+            if await deskStaffing(worktree: existing.worktree).isStaffed {
+                // Fast path: cached desk is staffed by either kind.
                 // Mode switches (daywatch ↔ nightwatch) intentionally REUSE the existing desk and terminal.
                 // The desk is NOT respawned on mode switch because every tick re-derives the mode and
                 // rewrites JUDGE-INSTRUCTIONS.md to match. Since the judge is told to read that file once
                 // rather than per tick, reuse-without-respawn is exactly the case where a memorized copy
                 // can go stale — `nudgeDeskSession` compares against `lastNudgedMode` and flags the flip.
                 // Initial frame is one-time; steady-state mode is driven per-tick.
+                // Cross-kind reuse: a Codex judge, even if Claude is the configured preference,
+                // is an intentional handoff and must not be respawned.
                 return existing.worktree
             }
         }
 
-        // Cached entry was stale (archived or no terminal); clear it and fall through to recovery/create
+        // Cached entry was stale (archived or genuinely unstaffed); clear it and fall through to recovery/create
         deskWorktreeID = nil
 
         // Query by displayName to detect existing desk worktrees (active only).
@@ -164,21 +184,14 @@ public actor DeskSessionManager: DeskSessionManaging {
         if let existing = activeWorktrees.first(where: { $0.displayName == NightwatchDeskPrompts.deskDisplayName && $0.isScratch }) {
             deskWorktreeID = existing.id
 
-            // Ensure the recovered desk has a live configured agent; respawn if
-            // its row is missing OR its pane exited.
-            if try await liveAgentTerminal(
-                worktreeID: existing.id,
-                server: existing.tmuxServer,
-                kind: preferredKind
-            ) == nil {
-                logger.info("Recovered Watch Desk \(existing.id, privacy: .public) but no live \(preferredKind.rawValue, privacy: .public) terminal; respawning")
-                do {
-                    _ = try await spawnDeskTerminal(worktree: existing.worktree, mode: mode)
-                } catch {
-                    logger.warning("Failed to respawn terminal on recovery: \(error.localizedDescription, privacy: .public)")
-                    // Best-effort; don't fail the recovery
-                }
-            }
+            // Respawn only on proof that the desk has no agent of EITHER kind,
+            // and never more than once per unaccounted-for replacement — the
+            // whole rule lives in `spawnRecoveryTerminalIfWarranted` so this
+            // site and the nudge path cannot drift apart.
+            await spawnRecoveryTerminalIfWarranted(
+                worktree: existing.worktree,
+                mode: mode,
+                staffing: await deskStaffing(worktree: existing.worktree))
 
             logger.info("Reusing existing Watch Desk session: \(existing.id, privacy: .public)")
             return existing.worktree
@@ -284,6 +297,88 @@ public actor DeskSessionManager: DeskSessionManaging {
         server: String,
         kind: TerminalKind
     ) async throws -> [Terminal] {
+        try await classifyAgentTerminals(
+            worktreeID: worktreeID, server: server, kind: kind).live
+    }
+
+    /// What the desk's consultations proved about one candidate row.
+    ///
+    /// Two questions run over the same evidence and must not share an answer:
+    /// *may I paste into this pane?* and *is anyone already sitting at this
+    /// desk?* The first is satisfied only by `.live`. The second is satisfied by
+    /// `.live` **or** `.unknown`, because spawning is a creating act and may
+    /// happen only on proof of an empty desk — never on a consultation that
+    /// could not be run. One false negative that licenses a spawn becomes a new
+    /// abandoned agent on every tick for as long as the fault lasts.
+    private enum CandidateVerdict {
+        /// Pane exists, belongs to this row, and an agent of the row's kind is
+        /// in its foreground. The only verdict a send may act on.
+        case live
+        /// PROOF the row's coordinate holds no agent of ours: the window is
+        /// gone, tmux says the pane is gone, the pane's process has exited, the
+        /// pane now belongs to a different terminal, or it is running something
+        /// that is not this kind of agent.
+        case absent
+        /// A consultation could not be answered. Proof of nothing.
+        case unknown
+    }
+
+    /// Every candidate row of one kind, split by verdict — the single traversal
+    /// both questions read. `live` keeps its original order (newest first).
+    private struct CandidateClassification {
+        var live: [Terminal] = []
+        var absent: [Terminal] = []
+        var unknown: [Terminal] = []
+        /// The candidate rows themselves could not be read, so this desk has not
+        /// been ruled empty either. Separate from `unknown`, which names rows we
+        /// did read and could not consult.
+        var rowsUnreadable = false
+
+        /// The desk could not be read at all — staffed by the same rule that
+        /// governs every other unanswerable question here.
+        static var unreadable: CandidateClassification {
+            CandidateClassification(rowsUnreadable: true)
+        }
+
+        /// True unless every candidate was PROVEN absent. An empty desk with no
+        /// rows at all is unstaffed; a desk whose rows could not be consulted is
+        /// treated as staffed, which costs a skipped tick and prevents a spawn
+        /// nobody can justify.
+        var isStaffed: Bool { !live.isEmpty || !unknown.isEmpty || rowsUnreadable }
+
+        mutating func record(_ terminal: Terminal, _ verdict: CandidateVerdict) {
+            switch verdict {
+            case .live: live.append(terminal)
+            case .absent: absent.append(terminal)
+            case .unknown: unknown.append(terminal)
+            }
+        }
+
+        mutating func merge(_ other: CandidateClassification) {
+            live.append(contentsOf: other.live)
+            absent.append(contentsOf: other.absent)
+            unknown.append(contentsOf: other.unknown)
+        }
+
+        /// Whether this row was proven absent — the only evidence that justifies
+        /// replacing it, or stripping its lease. A row nobody could consult is
+        /// not "gone".
+        func provenAbsent(_ terminalID: UUID) -> Bool {
+            absent.contains { $0.id == terminalID }
+        }
+
+        /// Live candidates across both kinds, newest first. Secondary key on id:
+        /// Swift's sort is not stable and two rows can share a `createdAt`.
+        var liveNewestFirst: [Terminal] {
+            live.sorted { ($0.createdAt, $0.id.uuidString) > ($1.createdAt, $1.id.uuidString) }
+        }
+    }
+
+    private func classifyAgentTerminals(
+        worktreeID: UUID,
+        server: String,
+        kind: TerminalKind
+    ) async throws -> CandidateClassification {
         let candidates = try await db.terminals.list(worktreeID: worktreeID)
             .filter {
                 $0.suspendedAt == nil
@@ -294,31 +389,64 @@ public actor DeskSessionManager: DeskSessionManaging {
             // createdAt, so without it the winner between same-instant rows is arbitrary.
             .sorted { ($0.createdAt, $0.id.uuidString) > ($1.createdAt, $1.id.uuidString) }
 
-        var live: [Terminal] = []
+        var classification = CandidateClassification()
         for terminal in candidates {
-            guard await tmux.windowExists(server: server, windowID: terminal.tmuxWindowID) else {
+            classification.record(
+                terminal,
+                await verdict(server: server, terminal: terminal, kind: kind))
+        }
+        return classification
+    }
+
+    /// Run every consultation against one candidate and reduce them to a verdict.
+    ///
+    /// The identity question runs first because it is the only consultation that
+    /// distinguishes "tmux looked and the pane is gone" from "tmux could not be
+    /// asked" — the distinction both callers hang on. `windowExists` and the
+    /// foreground-command check still gate `.live` exactly as before, so nothing
+    /// reaches a paste that would not have reached one previously.
+    private func verdict(
+        server: String,
+        terminal: Terminal,
+        kind: TerminalKind
+    ) async -> CandidateVerdict {
+        let identity = await paneIdentityVerdict(server: server, terminal: terminal)
+        guard identity == .live else { return identity }
+
+        guard await tmux.windowExists(server: server, windowID: terminal.tmuxWindowID) else {
+            logger.notice("""
+                Skipping stale Watch Desk terminal \(terminal.id, privacy: .public): \
+                window \(terminal.tmuxWindowID, privacy: .public) no longer exists
+                """)
+            return .absent
+        }
+
+        if tmux.verifiesPaneCurrentCommand {
+            let command: String
+            do {
+                command = try await tmux.paneCurrentCommand(
+                    server: server, paneID: terminal.tmuxPaneID)
+            } catch {
+                // Same rule as the identity consultation: a query that could not
+                // run says nothing. It still bars a send (this returns a
+                // non-`live` verdict either way), but it must not be mistaken
+                // for an empty pane.
+                logger.notice("""
+                    Skipping Watch Desk terminal \(terminal.id, privacy: .public): could not read \
+                    the foreground process of pane \(terminal.tmuxPaneID, privacy: .public): \
+                    \(String(describing: error), privacy: .public)
+                    """)
+                return .unknown
+            }
+            guard Self.agentCommand(command, matches: kind) else {
                 logger.notice("""
                     Skipping stale Watch Desk terminal \(terminal.id, privacy: .public): \
-                    window \(terminal.tmuxWindowID, privacy: .public) no longer exists
+                    pane exists but no \(kind.rawValue, privacy: .public) process is running
                     """)
-                continue
+                return .absent
             }
-            guard await paneIdentityPermitsSend(server: server, terminal: terminal) else { continue }
-            if tmux.verifiesPaneCurrentCommand {
-                guard let command = try? await tmux.paneCurrentCommand(
-                    server: server,
-                    paneID: terminal.tmuxPaneID
-                ), Self.agentCommand(command, matches: kind) else {
-                    logger.notice("""
-                        Skipping stale Watch Desk terminal \(terminal.id, privacy: .public): \
-                        pane exists but no \(kind.rawValue, privacy: .public) process is running
-                        """)
-                    continue
-                }
-            }
-            live.append(terminal)
         }
-        return live
+        return .live
     }
 
     /// Ask a candidate's pane who it belongs to, before it can become the target
@@ -345,25 +473,30 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// masquerade as the lease owner, nor pad the candidate count into a
     /// spurious fail-closed contention report.
     ///
-    /// - Returns: `true` when this pane may be sent to.
-    private func paneIdentityPermitsSend(server: String, terminal: Terminal) async -> Bool {
+    /// - Returns: `.live` when this pane may be sent to; `.absent` when tmux
+    ///   proved it holds nothing of ours; `.unknown` when nobody could tell.
+    ///   Only `.live` permits a send — the three-way split exists for the
+    ///   staffing question, which must not read "I could not look" as "empty".
+    private func paneIdentityVerdict(
+        server: String, terminal: Terminal
+    ) async -> CandidateVerdict {
         let target: PaneSendTarget
         do {
             target = try await tmux.paneSendTarget(server: server, paneID: terminal.tmuxPaneID)
         } catch {
             // The consultation could not be RUN at all (a wedged tmux tripping
             // the subprocess timeout) — no answer about the pane either way.
-            // Dropped, matching how the `paneCurrentCommand` check below already
-            // treats the same wedged server: `try?` there turns a failed query
-            // into a skipped candidate. Pasting a judge prompt into a pane we
-            // could not look at is exactly what this check exists to stop, and
-            // the cost of being wrong is only a skipped tick.
+            // Pasting a judge prompt into a pane we could not look at is exactly
+            // what this check exists to stop, and the cost of being wrong is a
+            // skipped tick. Replacing that pane on the same non-answer would
+            // cost an abandoned agent per tick, which is why this is `.unknown`
+            // and not `.absent`.
             logger.notice("""
                 Skipping Watch Desk terminal \(terminal.id, privacy: .public): could not verify \
                 pane \(terminal.tmuxPaneID, privacy: .public) belongs to it: \
                 \(String(describing: error), privacy: .public)
                 """)
-            return false
+            return .unknown
         }
 
         switch target {
@@ -372,17 +505,27 @@ public actor DeskSessionManager: DeskSessionManaging {
                 Skipping stale Watch Desk terminal \(terminal.id, privacy: .public): \
                 pane \(terminal.tmuxPaneID, privacy: .public) no longer exists
                 """)
-            return false
+            return .absent
         case .dead:
             logger.notice("""
                 Skipping stale Watch Desk terminal \(terminal.id, privacy: .public): \
                 pane \(terminal.tmuxPaneID, privacy: .public) is dead
                 """)
-            return false
+            return .absent
+        case .unverifiable(let error):
+            // Loud, and carrying tmux's own words: a rail that both refuses to
+            // send AND refuses to respawn has gone quiet on purpose, and the
+            // only way anyone finds out why is this line.
+            logger.warning("""
+                Skipping Watch Desk terminal \(terminal.id, privacy: .public): could not consult \
+                pane \(terminal.tmuxPaneID, privacy: .public) — \(error, privacy: .public). \
+                Nothing will be pasted into it, and nothing will be spawned beside it
+                """)
+            return .unknown
         case .live(let paneTerminalID):
-            guard let paneTerminalID else { return true }
+            guard let paneTerminalID else { return .live }
             guard paneTerminalID.caseInsensitiveCompare(terminal.id.uuidString) != .orderedSame
-            else { return true }
+            else { return .live }
             // Logged distinctly and loudly: to every caller this looks like an
             // ordinary absence, and "no live terminal" is a sentence this rail
             // prints for half a dozen benign reasons. A pane that has changed
@@ -394,7 +537,7 @@ public actor DeskSessionManager: DeskSessionManaging {
                 \(paneTerminalID, privacy: .public) — nothing will be pasted into it \
                 (tmux reuses pane ids, so this coordinate is stale)
                 """)
-            return false
+            return .absent
         }
     }
 
@@ -407,23 +550,160 @@ public actor DeskSessionManager: DeskSessionManaging {
             worktreeID: worktreeID, server: server, kind: kind).first
     }
 
-    private func liveJudgeCandidates(worktree: Worktree) async throws -> [Terminal] {
-        let claude = try await liveAgentTerminals(
-            worktreeID: worktree.id, server: worktree.tmuxServer, kind: .claude)
-        let codex = try await liveAgentTerminals(
-            worktreeID: worktree.id, server: worktree.tmuxServer, kind: .codex)
-        return (claude + codex).sorted {
-            ($0.createdAt, $0.id.uuidString) > ($1.createdAt, $1.id.uuidString)
+    /// Everything the desk knows about who is sitting at it, across both
+    /// supported agent kinds.
+    ///
+    /// Cross-kind on purpose: a Nightwatch handoff can legitimately replace a
+    /// Claude judge with a Codex one (or the reverse), and that successor is the
+    /// desk's agent even though it is not the configured primary preference.
+    /// Resolving only the preferred kind reads a live incumbent as an empty desk
+    /// and spawns a second agent beside it.
+    private func deskStaffing(worktree: Worktree) async -> CandidateClassification {
+        var staffing = CandidateClassification()
+        for kind in [TerminalKind.claude, .codex] {
+            do {
+                staffing.merge(try await classifyAgentTerminals(
+                    worktreeID: worktree.id, server: worktree.tmuxServer, kind: kind))
+            } catch {
+                // The row read itself failed, so this desk has not been ruled
+                // empty — the same rule the per-pane consultations follow. A
+                // sentinel `unknown` entry carries that through `isStaffed`
+                // without inventing a Terminal nobody read.
+                logger.warning("""
+                    Watch Desk staffing unknown: could not read \
+                    \(kind.rawValue, privacy: .public) terminal rows: \
+                    \(error.localizedDescription, privacy: .public)
+                    """)
+                return CandidateClassification.unreadable
+            }
         }
+        if staffing.live.isEmpty && !staffing.unknown.isEmpty {
+            logger.notice("""
+                Watch Desk has no confirmed live agent, but \(staffing.unknown.count) \
+                candidate(s) could not be consulted — treating the desk as staffed. \
+                Nothing will be spawned until a consultation proves the desk is empty
+                """)
+        }
+        return staffing
+    }
+
+    /// Replace the desk's agent — but only on proof that it has none, and never
+    /// more than once until that replacement is accounted for.
+    ///
+    /// Both recovery sites call this, so the rule cannot drift between them.
+    /// Three gates, in order:
+    ///
+    /// 1. **Proof.** `staffing.isStaffed` is false only when every candidate was
+    ///    positively ruled absent. An unanswerable consultation leaves the desk
+    ///    staffed and nothing is spawned.
+    /// 2. **The previous replacement.** A desk terminal row outlives its pane, so
+    ///    "did the last recovery work?" cannot be answered by the row's
+    ///    existence. It is answered by the same classification: spawn again only
+    ///    once that row is gone from the database or proven absent. This is what
+    ///    turns a repeating fault into ONE extra terminal instead of one per
+    ///    tick, and it still lets a genuinely dead replacement be replaced.
+    /// 3. **A backstop count.** A launch that dies every time would satisfy gate
+    ///    2 forever. After `maxConsecutiveRecoverySpawnsWithoutNudge` spawns with
+    ///    no nudge ever landing, the rail stops and says so — a Watch Desk that
+    ///    has quietly given up looks exactly like one that is fine, so this is a
+    ///    notification and not only a log line.
+    private func spawnRecoveryTerminalIfWarranted(
+        worktree: Worktree,
+        mode: NightwatchMode,
+        staffing: CandidateClassification
+    ) async {
+        guard !staffing.isStaffed else { return }
+
+        if let previous = lastRecoveryTerminalID {
+            let rowStillExists = (try? await db.terminals.get(id: previous)) != nil
+            if rowStillExists && !staffing.provenAbsent(previous) {
+                logger.notice("""
+                    Not spawning another Watch Desk agent: the previous recovery terminal \
+                    \(previous, privacy: .public) has not been proven gone
+                    """)
+                return
+            }
+        }
+
+        guard consecutiveRecoverySpawnsWithoutNudge < Self.maxConsecutiveRecoverySpawnsWithoutNudge
+        else {
+            await notifyRecoveryExhausted(worktree: worktree)
+            return
+        }
+
+        logger.notice("""
+            Watch Desk has no live agent; spawning a replacement \
+            (attempt \(self.consecutiveRecoverySpawnsWithoutNudge + 1, privacy: .public) \
+            of \(Self.maxConsecutiveRecoverySpawnsWithoutNudge, privacy: .public))
+            """)
+        let before = Set(((try? await db.terminals.list(worktreeID: worktree.id)) ?? []).map(\.id))
+        do {
+            try await spawnDeskTerminal(worktree: worktree, mode: mode)
+        } catch {
+            logger.warning("""
+                Failed to spawn a replacement Watch Desk agent: \
+                \(error.localizedDescription, privacy: .public)
+                """)
+            // A spawn that threw still counts against the backstop: the failure
+            // mode this bounds is "keeps trying, never works", and a launch that
+            // cannot even start is the purest form of it.
+            consecutiveRecoverySpawnsWithoutNudge += 1
+            return
+        }
+        consecutiveRecoverySpawnsWithoutNudge += 1
+        let after = (try? await db.terminals.list(worktreeID: worktree.id)) ?? []
+        lastRecoveryTerminalID = after
+            .filter { !before.contains($0.id) }
+            .max(by: { ($0.createdAt, $0.id.uuidString) < ($1.createdAt, $1.id.uuidString) })?.id
+    }
+
+    /// Tell the user once that the desk has stopped trying to staff itself.
+    /// Deduplicated on the same counter that stopped it, so a desk that recovers
+    /// and fails again later is a new incident and notifies again.
+    private func notifyRecoveryExhausted(worktree: Worktree) async {
+        logger.error("""
+            Watch Desk gave up spawning an agent after \
+            \(Self.maxConsecutiveRecoverySpawnsWithoutNudge, privacy: .public) attempts \
+            that never took a nudge; no further spawns until one succeeds
+            """)
+        guard !notifiedRecoveryExhaustion else { return }
+        notifiedRecoveryExhaustion = true
+        do {
+            let notification = try await db.notifications.create(
+                worktreeID: worktree.id,
+                type: .error,
+                message: "Watch Desk could not start an agent after \(Self.maxConsecutiveRecoverySpawnsWithoutNudge) attempts. Nightwatch judgment is paused. Open the desk and start an agent, or turn the mode off and on once the cause is fixed."
+            )
+            subscriptions?.broadcast(delta: .notificationReceived(NotificationDelta(
+                notificationID: notification.id,
+                worktreeID: notification.worktreeID,
+                type: notification.type,
+                message: notification.message,
+                terminalID: notification.terminalID,
+                activate: false
+            )))
+        } catch {
+            logger.error("""
+                Could not record the Watch Desk recovery-exhausted notification: \
+                \(error.localizedDescription, privacy: .public)
+                """)
+        }
+    }
+
+    /// Live judge candidates of either kind, newest first — `deskStaffing`'s
+    /// `live` set in the order the lease logic wants it.
+    private func liveJudgeCandidates(worktree: Worktree) async -> [Terminal] {
+        await deskStaffing(worktree: worktree).liveNewestFirst
     }
 
     /// Resolve the sole mutable judge. Existing valid ownership wins even when
     /// observers are present. With no lease, multiple candidates are ambiguous
     /// and fail closed rather than selecting by recency.
     private func leasedJudgeTerminal(
-        worktree: Worktree
+        worktree: Worktree,
+        staffing: CandidateClassification
     ) async throws -> (Terminal, WatchDeskLease, String)? {
-        var candidates = try await liveJudgeCandidates(worktree: worktree)
+        var candidates = staffing.liveNewestFirst
         let now = now()
 
         if let lease = try await db.watchDeskLeases.status(worktreeID: worktree.id),
@@ -438,11 +718,30 @@ public actor DeskSessionManager: DeskSessionManaging {
                 notifiedContentionGeneration = nil
                 return (owner, renewed, credentialFile)
             }
+            // Revoking is a mutation. It strips a running judge of its authority
+            // mid-shift, and the judge cannot undo it or even see it coming —
+            // its next renew simply comes back fenced. So revocation takes the
+            // same proof spawning takes: the owner's row must be gone, or a
+            // consultation must have positively placed its pane absent.
+            // "Nobody could reach tmux this tick" is not evidence that the
+            // incumbent died. Treating it as such demotes a healthy judge on a
+            // timer — and then, finding no judge, spawns a replacement beside
+            // it. That pair is one bug, and this guard and the staffing proof
+            // are its two halves.
+            let ownerRowExists = (try? await db.terminals.get(id: lease.terminalID)) != nil
+            guard !ownerRowExists || staffing.provenAbsent(lease.terminalID) else {
+                logger.notice("""
+                    Keeping Watch Desk judge lease generation \(lease.generation, privacy: .public): \
+                    owner \(lease.terminalID, privacy: .public) could not be consulted this tick, \
+                    which is not proof that it is gone — skipping this nudge rather than revoking
+                    """)
+                return nil
+            }
             logger.warning("Revoking Watch Desk judge lease generation \(lease.generation): owner pane is gone")
             try await db.watchDeskLeases.revoke(worktreeID: worktree.id)
             subscriptions?.broadcast(delta: .watchDeskRolesChanged(
                 WorktreeIDDelta(worktreeID: worktree.id)))
-            candidates = try await liveJudgeCandidates(worktree: worktree)
+            candidates = await liveJudgeCandidates(worktree: worktree)
         }
 
         guard candidates.count <= 1 else {
@@ -533,7 +832,8 @@ public actor DeskSessionManager: DeskSessionManaging {
             }
 
             guard let (agentTerminal, _, _) = try await leasedJudgeTerminal(
-                worktree: worktree.worktree
+                worktree: worktree.worktree,
+                staffing: await deskStaffing(worktree: worktree.worktree)
             ) else {
                 logger.warning("No uniquely owned live terminal in Watch Desk; skipping wrap-up prompt")
                 return
@@ -619,23 +919,32 @@ public actor DeskSessionManager: DeskSessionManaging {
             }
 
             var preferredKind = try await preferredAgentKind()
-            var judge = try await leasedJudgeTerminal(worktree: worktree.worktree)
-            if judge == nil,
-               try await liveJudgeCandidates(worktree: worktree.worktree).isEmpty {
+            // One traversal per tick, shared by both questions it answers:
+            // who may be nudged, and whether the desk is empty enough to staff.
+            let staffing = await deskStaffing(worktree: worktree.worktree)
+            var judge = try await leasedJudgeTerminal(
+                worktree: worktree.worktree, staffing: staffing)
+            if judge == nil {
                 // A terminal row can survive a process/pane exit. Recover in the
                 // nudge path itself so one failed launch does not turn into a
                 // silent all-night outage waiting for a mode toggle or daemon
                 // restart. spawnPrimaryTerminals uses the same configured
                 // primary-agent preference and production launch path as normal
                 // worktrees.
-                logger.notice("No live \(preferredKind.rawValue, privacy: .public) Watch Desk terminal; retrying spawn before nudge")
-                do {
-                    try await spawnDeskTerminal(worktree: worktree.worktree, mode: mode)
+                //
+                // Having no *judge* is not the same as having no *agent*: the
+                // lease can be unresolved while a live incumbent sits right
+                // there, so what gates the spawn is the staffing proof, not this
+                // branch.
+                let spawnedCount = consecutiveRecoverySpawnsWithoutNudge
+                await spawnRecoveryTerminalIfWarranted(
+                    worktree: worktree.worktree, mode: mode, staffing: staffing)
+                if consecutiveRecoverySpawnsWithoutNudge != spawnedCount {
                     // Re-read in case the preference changed while spawning.
                     preferredKind = try await preferredAgentKind()
-                    judge = try await leasedJudgeTerminal(worktree: worktree.worktree)
-                } catch {
-                    logger.warning("Failed to recover Watch Desk terminal before nudge: \(error.localizedDescription, privacy: .public)")
+                    judge = try await leasedJudgeTerminal(
+                        worktree: worktree.worktree,
+                        staffing: await deskStaffing(worktree: worktree.worktree))
                 }
             }
 
@@ -717,6 +1026,14 @@ public actor DeskSessionManager: DeskSessionManaging {
             // or the next tick would tell it nothing changed when everything did.
             lastNudgeTime = now()
             lastNudgedMode = mode
+
+            // A nudge landed, so the desk is staffed by something that took it:
+            // the replacement budget and its give-up notice both reset here, and
+            // only here. Any earlier reset (at spawn, say) would count a launch
+            // that never came up as a success.
+            consecutiveRecoverySpawnsWithoutNudge = 0
+            notifiedRecoveryExhaustion = false
+            lastRecoveryTerminalID = nil
 
             logger.debug("Nudged Watch Desk session: act=\(act, privacy: .public)")
         } catch {
@@ -825,7 +1142,9 @@ public actor DeskSessionManager: DeskSessionManaging {
         defer { gateRelease() }
         do {
             guard let worktree = try await db.worktrees.getLocal(id: worktreeID) else { return }
-            _ = try await leasedJudgeTerminal(worktree: worktree.worktree)
+            _ = try await leasedJudgeTerminal(
+                worktree: worktree.worktree,
+                staffing: await deskStaffing(worktree: worktree.worktree))
         } catch {
             logger.error("Failed to maintain Watch Desk judge lease: \(error.localizedDescription, privacy: .public)")
         }
@@ -899,11 +1218,18 @@ public actor DeskSessionManager: DeskSessionManaging {
         // the actor, and this is the one chokepoint both spawn paths — fresh
         // create and crash recovery — pass through.
         //
+        // Recovery state resets too: a successful spawn clears the incident,
+        // so the new session's first tick should not be rate-limited by the
+        // dead session's consecutive failures.
+        //
         // Reset unconditionally, before the spawn can throw: over-signalling
         // costs one extra file Read, under-signalling costs a judge running an
         // unattended shift on instructions it never opened.
         lastNudgedMode = nil
         lastNudgeTime = nil
+        lastRecoveryTerminalID = nil
+        consecutiveRecoverySpawnsWithoutNudge = 0
+        notifiedRecoveryExhaustion = false
 
         // Lay the instructions down before the session exists, so a judge that
         // reads them on its own initiative — before its first tick ever fires —

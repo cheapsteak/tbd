@@ -570,6 +570,14 @@ public actor HibernationCoordinator {
             disagreement = .paneMissing
         case .dead:
             disagreement = .processExited
+        case .unverifiable(let error):
+            // Could not verify the pane's status (tmux unreachable). Fail closed:
+            // do not resume, treat as a disagreement condition.
+            disagreement = .paneMissing
+            logger.notice("""
+                wake: could not verify pane \(terminal.tmuxPaneID, privacy: .public) \
+                (tmux unreachable: \(error, privacy: .public)) — treating as missing
+                """)
         }
 
         logger.warning("""
