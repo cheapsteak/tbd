@@ -25,11 +25,19 @@ v2 is purely additive:
   only when you declare it, so an undeclared verb is never called.
 - **No field is removed, renamed, or given different semantics.**
 
-So the entire adoption step is a one-line change in `describe`: declare
-`"contract_versions": [1, 2]`. You may do that today, implementing nothing new,
-and remain fully conformant. Everything else in this document is opt-in, and
-each item below states plainly what happens if you ignore it — in every case the
-answer is "your provider behaves exactly as it does under v1."
+So adoption implements nothing new. It is a two-field edit to `describe`:
+declare `"contract_versions": [1, 2]`, **and — if you implement `stop` — make
+sure `"stop"` is in your `capabilities` list.** That second half is not
+optional bookkeeping. `stop` was required at v1, so a v1 caller invoked it
+without consulting `capabilities`; at v2 it is capability-gated, and a caller
+never invokes a capability you did not declare. Change only the version list and
+your `stop` verb keeps working while no caller ever calls it — the action
+quietly vanishes from the user's surface. Section 4 covers this in full.
+
+With both fields set you are fully conformant, having written no new code.
+Everything else in this document is opt-in, and each item below states plainly
+what happens if you ignore it — in every case the answer is "your provider
+behaves exactly as it does under v1."
 
 The rest of this guide covers, per change: what it is, whether it is required,
 what you gain by adopting it, and what you experience if you don't.
@@ -490,10 +498,15 @@ In order, most value per unit of effort:
    this by re-reading section headings above if you want; there is no deadline
    and no deprecation.
 
-2. **Declare `"contract_versions": [1, 2]`.** One line in `describe`. It is
-   accurate the moment you write it, because you already satisfy every v2
-   requirement — v2 requires strictly less than v1 did. Keep `1` in the list
-   unless you are dropping `stop` (section 4).
+2. **Declare `"contract_versions": [1, 2]` — and add `"stop"` to
+   `capabilities` if you implement it.** Both fields in `describe`, in the same
+   edit. The version list is accurate the moment you write it, because you
+   already satisfy every v2 requirement — v2 requires strictly less than v1 did.
+   The capability entry is the part that is easy to miss and the only way to
+   lose something: `stop` was required at v1 and is capability-gated at v2, so
+   declaring the version without declaring the capability leaves you with a
+   `stop` verb no caller will ever invoke. Keep `1` in the list unless you are
+   dropping `stop` entirely (section 4).
 
 3. **Decide whether `complete` applies to you, before adopting any feature.**
    This is a correctness question, not an enhancement. If every successful

@@ -425,15 +425,25 @@ what archive did to the session. Four cases, mirroring archive's own:
 - **Provider declares `unarchive`** — call it, then flip the row back to
   `active`. This restores the lane whole: the session is still there, and both
   sides agree it is back in play.
-- **Provider declares `archive` without `unarchive`** — the retirement stands on
-  the backend and TBD cannot lift it. The contract declares the two verbs
-  separately precisely because a backend may retire without being able to
-  restore, so revive is unavailable and says which half is missing.
 - **The session was terminated** — archive took the `stop` path, or the
   provider's archive tore down the compute as a side effect. There is nothing to
   return to, and revive says so. Recreating a session on the same branch and
   rebinding the row — the shape `ReviveFresh` already uses locally — is additive
   and needs no model change, so it can follow if the absence chafes.
+- **Provider declares `archive` without `unarchive`, and the session still
+  exists** — the retirement stands on the backend and TBD cannot lift it. The
+  contract declares the two verbs separately precisely because a backend may
+  retire without being able to restore, so revive is unavailable and says which
+  half is missing.
+
+**These are evaluated in order, and termination is checked before capability.**
+The common `archive`+`stop`-without-`unarchive` shape satisfies both of the last
+two conditions at once, so the order is what decides which message the user sees.
+Termination wins because it is the stronger fact: if the compute is gone, an
+`unarchive` verb would not have helped either, and telling someone which half of
+a verb pair is missing invites them to go looking for a restore that could not
+work. "There is nothing to return to" is the accurate answer whenever it is
+true, whatever the provider declares.
 
 ### `gone` and `archived` compose
 
