@@ -331,6 +331,26 @@ import Testing
     /// only the `.gitUnusable` arm says "did not complete", while every
     /// `.repoLevel` exit says "git worktree add failed" — so classifying a
     /// non-`GitError` as `.repoLevel` again fails this test.
+    ///
+    /// **The classification is all this fixture can establish, so it is all it
+    /// asserts.** The 1 ms ceiling is an instance property of the `GitManager`,
+    /// so it governs *every* git subprocess the lifecycle runs — cleanup's own
+    /// existence probe, tip read, prune and `branch -D` included — and
+    /// `runBoundedProcess` reports `.timedOut` whenever real elapsed time
+    /// reached the deadline, even for a child that ran to completion. So
+    /// `cleanUpFailedWorktreeAdd`'s probes can never answer here, its gates fail
+    /// closed, and **keeping the branch is the correct outcome rather than a
+    /// leak**. Whether there is a branch to keep is a wall-clock race with no
+    /// guaranteed winner: `-b` writes the ref early in `worktree add`, so on a
+    /// loaded runner git reaches it before the deadline elapses and on an idle
+    /// one it does not. An assertion that no `tbd/` branch survives therefore
+    /// asserts that race, not the design — it held locally and went red in CI on
+    /// `["tbd/…-impressed-rook"]`. The directory is no better a subject: cleanup
+    /// removes it in-process before any probe, but the child only gets SIGTERM
+    /// (SIGKILL 500 ms later) and can still be writing into the path after the
+    /// removal. Nor does observation fix it — a second `GitManager` on an
+    /// ordinary timeout would read the tree reliably, but what it reads is the
+    /// nondeterministic part.
     @Test func aTimedOutGitFailsFastInsteadOfSpendingTheOtherBase() async throws {
         let (parentDir, hostDir, repoDir) = try await makeClonedTestRepo()
         defer { try? FileManager.default.removeItem(at: parentDir) }
@@ -356,10 +376,6 @@ import Testing
             #expect(!text.contains("after all attempts"),
                     "a second name was attempted for a wedged git: \(text)")
         }
-
-        let branches = try await localBranches(repoDir)
-        #expect(branches.filter { $0.hasPrefix("tbd/") }.isEmpty,
-                "a timed-out attempt leaked a branch: \(branches)")
     }
 
     /// An unresolvable base is not fixable by a fresh name either, so it must
