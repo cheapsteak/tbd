@@ -211,7 +211,11 @@ struct SupervisionStoreTests {
 
         #expect(first.sequence < second.sequence)
         #expect(second.sequence < third.sequence)
-        #expect([first, second, third].allSatisfy(\.changed))
+        // Spelled as a conjunction rather than `allSatisfy(\.changed)`:
+        // `allSatisfy` is `rethrows`, and inside `#expect`'s expansion the
+        // key-path-as-function conversion stops reading as non-throwing, so the
+        // macro demands a `try` for a call that cannot throw.
+        #expect(first.changed && second.changed && third.changed)
     }
 
     @Test("Overlapping brake toggles cannot reach the record out of step with the column")
