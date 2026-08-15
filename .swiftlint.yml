@@ -208,17 +208,48 @@ custom_rules:
     # fire, because the rule matches a type-declaration keyword ahead of the
     # name.
     #
-    # Two things it still cannot see, both of which need a human. A conformance
-    # added in a separate `extension X: LocalizedError` is invisible, so declare
-    # it on the type itself — the two sidecar files under `excluded:` above are
-    # the sanctioned exception and are excluded by path. And a bare `Error`
-    # reached through a refining protocol (`protocol AppError: Error` then
-    # `enum X: AppError`) is invisible, because the clause names no `Error`
-    # token of its own.
+    # WHY THE LOOKAHEAD STOPS AT `/` AND THE MATCH DOES NOT. `match_kinds`
+    # filters the characters a match CONSUMES, and a lookahead is zero-width —
+    # its scan is not part of the match, so kind filtering does not reach it.
+    # Without the `/`, a comment sitting between the colon and the brace that
+    # merely NAMES the protocol — `enum Foo: Error // TODO: add LocalizedError`
+    # — satisfied the lookahead and silently retired the rule for that
+    # declaration. That is the single most likely thing to be written on a type
+    # someone has not converted yet, so it has to keep firing. Excluding `/`
+    # from the lookahead stops the scan at the comment; a real conformance
+    # clause never contains one. The cost is a false POSITIVE on
+    # `struct X: /* the fix */ LocalizedError` — loud, and fixed by moving the
+    # comment, which is the direction to fail in.
     #
-    # `match_kinds` keeps it out of prose: a doc comment or string literal
-    # containing `enum Foo: Error` is not a declaration and does not fire.
-    regex: '\b(?:enum|struct|class|actor|extension)\s+\w+\s*(?:<[^>]*>)?\s*:(?![^{]*\bLocalizedError\b)[^{]*\bError\b'
+    # WHAT IT STILL CANNOT SEE. None of these is exploited in the tree today;
+    # they are listed so nobody mistakes the rule for exhaustive.
+    #
+    #   - A conformance in a separate `extension X: LocalizedError` — declare it
+    #     on the type itself. The two sidecar files named under `excluded:`
+    #     above are the sanctioned exception and are excluded by path.
+    #   - A bare `Error` reached through a refining protocol
+    #     (`protocol AppError: Error`, then `enum X: AppError`), or through
+    #     `CustomNSError`: the clause names no word-bounded `Error` token.
+    #   - A NESTED generic clause (`struct Box<T, U: Collection<Int>>: Error`):
+    #     `[^>]*` stops at the inner `>`. Single-level generics do match. The
+    #     fix would be to let the colon float, which costs a false positive on
+    #     every `struct Wrapper<E: Error>` — a constraint, not an error type —
+    #     so the miss is the better trade.
+    #   - A comment between the colon and the `Error` token: the match consumes
+    #     it, and `comment` is deliberately not in `match_kinds`, so the whole
+    #     match is dropped. Adding `comment` there would let a doc comment that
+    #     merely quotes `enum Foo: Error` fire on its own.
+    #
+    # It also over-fires in two shapes, both loud and both suppressible with a
+    # reasoned `swiftlint:disable:next`: a conformance to someone else's nested
+    # type named `Error` (`: MyModule.Error`), and `LocalizedError` reached
+    # through a typealias or a refining protocol (`: AppLocalizedError`), which
+    # the lookahead's literal token match cannot recognize.
+    #
+    # `match_kinds` keeps the match itself out of prose: a doc comment or string
+    # literal containing `enum Foo: Error` is not a declaration and does not
+    # fire.
+    regex: '\b(?:enum|struct|class|actor|extension)\s+\w+\s*(?:<[^>]*>)?\s*:(?![^{/]*\bLocalizedError\b)[^{]*\bError\b'
     match_kinds:
       - keyword
       - identifier
