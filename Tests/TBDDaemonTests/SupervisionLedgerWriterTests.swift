@@ -32,6 +32,16 @@ struct SupervisionLedgerWriterTests {
 
     // MARK: - The file the handle points at
 
+    // These two are a pair, and the pair is the evidence — neither alone is.
+    //
+    // Removal is caught by any check that looks at the path at all, because
+    // `stat` fails on a deleted file whether the guard compares inode identity
+    // or merely asks "does something exist here". So a guard weakened to
+    // path-existence still passes the removal test and fails only the
+    // replacement one, where a *different* file now sits at the path and the
+    // open descriptor still points at the old inode. Delete the replacement
+    // test and the guard can silently decay into a weaker one that the doc
+    // comment no longer describes.
     @Test("A ledger removed between appends is noticed and recreated, not written into a ghost")
     func removedFileIsRecreated() async throws {
         let path = try Self.makePath()
