@@ -449,10 +449,11 @@ fingerprint_with_home() { HOME="$1" TMUX_TMPDIR="$1/tmux-tmpdir" bash "$2"; }
 # ARMS, NOT ROOTS — the two counts differ and the smaller one is the tempting
 # mistake. There are four roots (`~/tbd`, `~/.claude`, `~/.codex`, the tmux
 # socket dir) but SIX arms, because `~/.claude` and `~/.codex` are each read
-# twice: once shallow for the store itself and once deeper for a nested
-# directory the shallow pass prunes or cannot reach. An arm with no assertion
-# here can be deleted wholesale and this file stays green, so the enumeration
-# is the coverage — keep it counted in arms, and add a line when you add one.
+# twice: a `-maxdepth 1` pass over the store itself, then a second pass at a
+# nested directory the depth limit puts out of the first one's reach. An arm
+# with no assertion here can be deleted wholesale and this file stays green —
+# that is how the `~/.codex/plugins/cache` arm went untested — so the
+# enumeration IS the coverage. Count in arms, and add a line when you add one.
 test_fingerprint_script_covers_every_arm() {
   local d; d="$(mktmpd)"
   local out; out="$(fingerprint_with_home "$d" "$FINGERPRINT")"

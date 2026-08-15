@@ -152,8 +152,8 @@ Full rationale is in the wrapper's header.
 The wrapper's own guards are regression-tested by `scripts/test.test.sh`, which
 runs in the `lint` CI job: it drives the symlink and ownership refusals on the
 fake home, the post-run mode-000 recheck, the fingerprint's six arms (four
-roots, two of which are read twice), the
-tmux socket fence (its `sun_path` budget and its kill-server sweep) and the
+roots, two of which are read twice), the tmux socket fence (its `sun_path`
+budget and its kill-server sweep) and the
 shared-lock pin against fixture directories with a stub `swift`, so it takes
 ~11 s, builds nothing, and touches no real store. **Every case there is
 mutation-checked** — the assertion is shown going red against a deliberately
