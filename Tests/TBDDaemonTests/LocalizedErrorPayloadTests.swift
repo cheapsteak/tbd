@@ -117,7 +117,7 @@ struct LocalizedErrorPayloadTests {
             ),
             (
                 "TmuxError.commandFailed",
-                TmuxError.commandFailed(command: Self.tmuxCommand, status: 1, output: Self.tmuxOutput)
+                TmuxError.commandFailed(command: Self.tmuxCommand, status: 127, output: Self.tmuxOutput)
             ),
             ("TmuxError.unexpectedOutput", TmuxError.unexpectedOutput(Self.tmuxOutput)),
             (
@@ -223,8 +223,8 @@ struct LocalizedErrorPayloadTests {
     @Test("tmux command, exit status and output reach the rendered description")
     func tmuxPayloadsRender() {
         assertRenders(
-            TmuxError.commandFailed(command: Self.tmuxCommand, status: 1, output: Self.tmuxOutput),
-            [Self.tmuxCommand, "1", Self.tmuxOutput],
+            TmuxError.commandFailed(command: Self.tmuxCommand, status: 127, output: Self.tmuxOutput),
+            [Self.tmuxCommand, "127", Self.tmuxOutput],
             "TmuxError.commandFailed"
         )
         assertRenders(
