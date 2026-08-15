@@ -290,14 +290,13 @@ extension WorktreeLifecycle {
                 // config write fail while the branch stands (verified against
                 // git 2.50). Those two record what they made here so the `catch`
                 // can hand it to the same `cleanUpFailedWorktreeAdd` the
-                // fresh-create path uses, with the same pre-existence gates.
+                // fresh-create path uses, with the same gates.
                 //
                 // The plain `worktreeAddExisting` leg creates NOTHING and checks
                 // out a branch the caller owns, so it leaves this nil and the
                 // catch only removes the directory. Deleting there would destroy
                 // a user's branch — the worst outcome this path has.
-                var branchCreatedByThisAttempt: String?
-                var createdBranchPreExisted: Bool?
+                var attemptedBranch: AttemptedBranch?
                 do {
                     if checkoutPRHead, let prNumber = worktree.prNumber {
                         // Fork-PR checkout: the PR head has no local ref, so
@@ -324,19 +323,37 @@ extension WorktreeLifecycle {
                         //
                         // The probe→fetch window is not its job to close, and it
                         // cannot: a branch an external actor creates inside that
-                        // gap is invisible to a probe taken before it. That is
-                        // gate 1's job on every leg, and it works here because
-                        // `fetchPullRequestHead`'s refspec is unforced — git
-                        // rejects the update instead of rewriting the branch,
+                        // gap is invisible to a probe taken before it. Gates 1
+                        // and 4 cover that window instead, and gate 1 works here
+                        // because `fetchPullRequestHead`'s refspec is unforced —
+                        // git rejects the update instead of rewriting the branch,
                         // and `gitRefusedToCreateBranch` reads the rejection.
                         // The residual is a collision the pull head *contains*,
                         // which fast-forwards silently; see that method.
-                        createdBranchPreExisted = try? await git.localBranchExists(
+                        let prBranchPreExisted = try? await git.localBranchExists(
                             repoPath: repo.path, name: localBranch
                         )
-                        branchCreatedByThisAttempt = localBranch
+                        // Recorded before the fetch so a fetch that dies with the
+                        // ref half-written still reaches cleanup — carrying no
+                        // expected tip, which blocks the delete. That is the
+                        // right answer for this leg: the fetch is the only step
+                        // that writes the ref, so a fetch that did not report
+                        // success never created the branch standing there.
+                        attemptedBranch = AttemptedBranch(
+                            name: localBranch, preExisted: prBranchPreExisted
+                        )
                         try await git.fetchPullRequestHead(
                             repoPath: repo.path, number: prNumber, localBranch: localBranch
+                        )
+                        // Only now is there a tip to speak of, and this is the
+                        // moment it becomes meaningful: the step that can still
+                        // fail with the branch standing is the checkout below,
+                        // not the fetch. Sampling the remote's `refs/pull/<n>/head`
+                        // beforehand would cost a second network round trip to
+                        // learn what the unforced refspec has just settled —
+                        // it either wrote that tip or refused outright.
+                        attemptedBranch?.expectedTip = try? await git.headSHA(
+                            repoPath: repo.path, ref: "refs/heads/\(localBranch)"
                         )
                         try await git.worktreeAddExisting(
                             repoPath: repo.path,
@@ -356,10 +373,23 @@ extension WorktreeLifecycle {
                         // from one that was already standing; the tri-state is
                         // kept (`nil` = the probe itself failed) for the same
                         // reason the fresh-create path keeps it.
-                        createdBranchPreExisted = try? await git.localBranchExists(
+                        //
+                        // The expected tip is the remote ref's, sampled BEFORE
+                        // the add for the same reason the fresh-create legs
+                        // sample the base tip before theirs: `-b <local>
+                        // <remoteRef>` copies whatever that ref held when the add
+                        // ran, and reading it afterwards would describe a ref
+                        // another fetch may have moved in between.
+                        let trackedBranchPreExisted = try? await git.localBranchExists(
                             repoPath: repo.path, name: worktree.branch
                         )
-                        branchCreatedByThisAttempt = worktree.branch
+                        attemptedBranch = AttemptedBranch(
+                            name: worktree.branch,
+                            preExisted: trackedBranchPreExisted,
+                            expectedTip: try? await git.headSHA(
+                                repoPath: repo.path, ref: ref
+                            )
+                        )
                         try await git.worktreeAddTrackingRemote(
                             repoPath: repo.path,
                             worktreePath: worktree.path,
@@ -375,14 +405,13 @@ extension WorktreeLifecycle {
                     }
                     resultPath = worktree.path
                 } catch {
-                    if let branchCreatedByThisAttempt {
+                    if let attemptedBranch {
                         // Removes the partially-created directory too, then
-                        // deletes the branch only if all three gates hold.
+                        // deletes the branch only if all four gates hold.
                         await cleanUpFailedWorktreeAdd(
                             repoPath: repo.path,
                             worktreePath: worktree.path,
-                            branch: branchCreatedByThisAttempt,
-                            branchPreExisted: createdBranchPreExisted,
+                            attempted: attemptedBranch,
                             branchNameWasAlreadyTaken: gitRefusedToCreateBranch(error)
                         )
                     } else {
@@ -611,6 +640,18 @@ extension WorktreeLifecycle {
         var lastKind: WorktreeAddFailureKind = .baseUnresolvable
 
         for baseBranch in baseBranches {
+            // Sampled per base and BEFORE the add, which is what makes it
+            // evidence: `-b <branch> <baseBranch>` points the new ref at
+            // whatever this base resolved to at that moment, so a tip read
+            // afterwards would describe a base a concurrent fetch may have
+            // moved — and would say nothing about what this attempt's own `-b`
+            // would have produced. An unresolvable base yields `nil`, which
+            // blocks the delete.
+            let attempted = AttemptedBranch(
+                name: branch,
+                preExisted: branchPreExisted,
+                expectedTip: try? await git.headSHA(repoPath: repoPath, ref: baseBranch)
+            )
             do {
                 try await git.worktreeAdd(
                     repoPath: repoPath,
@@ -625,7 +666,7 @@ extension WorktreeLifecycle {
                 logger.warning("Failed to add worktree with base branch \(baseBranch, privacy: .public): \(String(describing: error), privacy: .public)")
                 await cleanUpFailedWorktreeAdd(
                     repoPath: repoPath, worktreePath: worktreePath,
-                    branch: branch, branchPreExisted: branchPreExisted,
+                    attempted: attempted,
                     branchNameWasAlreadyTaken: gitRefusedToCreateBranch(error)
                 )
                 if lastKind == .gitUnusable {
@@ -721,6 +762,12 @@ extension WorktreeLifecycle {
             : (try? await git.localBranchExists(repoPath: repoPath, name: retryBranch))
 
         for baseBranch in baseBranches {
+            // Sampled per base and before the add, exactly as in the first loop.
+            let attempted = AttemptedBranch(
+                name: retryBranch,
+                preExisted: retryBranchPreExisted,
+                expectedTip: try? await git.headSHA(repoPath: repoPath, ref: baseBranch)
+            )
             do {
                 try await git.worktreeAdd(
                     repoPath: repoPath,
@@ -735,7 +782,7 @@ extension WorktreeLifecycle {
                 logger.warning("Failed to add worktree with retry path and base branch \(baseBranch, privacy: .public): \(String(describing: error), privacy: .public)")
                 await cleanUpFailedWorktreeAdd(
                     repoPath: repoPath, worktreePath: retryPath,
-                    branch: retryBranch, branchPreExisted: retryBranchPreExisted,
+                    attempted: attempted,
                     branchNameWasAlreadyTaken: gitRefusedToCreateBranch(error)
                 )
                 if lastKind == .gitUnusable {
@@ -839,18 +886,71 @@ extension WorktreeLifecycle {
     /// - `fatal: refusing to fetch into branch 'refs/heads/x' checked out at
     ///   '<path>'` — a ref cannot be checked out unless it exists.
     ///
-    /// The one question `cleanUpFailedWorktreeAdd` cannot answer from its own
-    /// bookkeeping: whether the branch standing there now is one this attempt
-    /// created. Git refusing to write it settles that — it isn't.
+    /// The branch a single create attempt is on the hook for, and everything
+    /// that attempt knows about it that `cleanUpFailedWorktreeAdd` cannot
+    /// reconstruct after the fact.
+    ///
+    /// Both facts are measurements with an expiry, which is why they are
+    /// captured here rather than gathered inside the cleanup: read after the
+    /// failure, "was the name free?" answers about a world the attempt has
+    /// already changed, and "where does this base point?" answers about a ref
+    /// anything else may have moved since.
+    ///
+    /// The per-leg timing for `expectedTip`, which is the whole substance of
+    /// the value:
+    ///
+    /// - **Fresh create** (`worktreeAdd(… baseBranch:)`) — the resolved tip of
+    ///   the base this attempt is about to use, sampled per base, before the
+    ///   add.
+    /// - **Remote-tracking checkout** (`worktreeAddTrackingRemote`) — the tip
+    ///   of the remote ref, before the add, for the same reason.
+    /// - **Revive from an archived SHA** (`worktreeAddNewBranch(… sha:)`) — that
+    ///   SHA. It is the argument `-b` copies, so it needs no sampling and cannot
+    ///   go stale.
+    /// - **Fork-PR checkout** — the tip the unforced
+    ///   `refs/pull/<n>/head:refs/heads/<name>` refspec wrote, read once the
+    ///   fetch reports success. Left `nil` until then: the fetch is the only
+    ///   step on that leg that writes the ref, so a fetch that failed created
+    ///   nothing, and `nil` correctly refuses to authorize a delete.
+    struct AttemptedBranch: Sendable {
+        /// The local branch name this attempt aims at — which is not always the
+        /// worktree row's branch (the fork-PR leg uniquifies it).
+        let name: String
+        /// Whether `name` was already standing when this attempt started.
+        /// `nil` means the probe itself failed.
+        let preExisted: Bool?
+        /// The SHA this attempt would have pointed `name` at. `nil` means it
+        /// could not be established, which blocks the delete.
+        var expectedTip: String?
+
+        init(name: String, preExisted: Bool?, expectedTip: String? = nil) {
+            self.name = name
+            self.preExisted = preExisted
+            self.expectedTip = expectedTip
+        }
+    }
+
+    /// Positive evidence for the one question `cleanUpFailedWorktreeAdd` cannot
+    /// answer from its own bookkeeping: whether the branch standing there now is
+    /// one this attempt created. Git refusing to write it settles that — it
+    /// isn't.
     ///
     /// Matched loosely (any branch name, not just ours) on purpose, and the
     /// direction of that looseness is what makes widening it safe: every extra
     /// match returns `true`, and `true` is the answer that *keeps* the branch.
     /// The two ways to be wrong are not symmetric — failing to delete a branch
     /// we made leaves a visible, recoverable `tbd/<name>`, while deleting one
-    /// we did not destroys work. So an unrecognized phrasing must land on
-    /// "don't delete", which is what a broad match buys. A gate that instead
-    /// *authorized* deletion would have to be narrow.
+    /// we did not destroys work.
+    ///
+    /// **`false` is an abstention, not a finding.** An unrecognized phrasing —
+    /// a future git, a non-standard build, a wrapper reformatting stderr —
+    /// produces `false`, the same value a genuine "the branch is ours" failure
+    /// produces, so this gate alone cannot carry the decision. What keeps that
+    /// abstention from *authorizing* a delete is gate 4, which asks a question
+    /// no wording can garble: does the branch point where this attempt would
+    /// have put it? Read the two together — this one narrows the window
+    /// positively when git says the words, and gate 4 corroborates whenever it
+    /// does not.
     ///
     /// Not `private`: the revive path's archived-SHA recreate (`-b <branch>
     /// <sha>` in `WorktreeLifecycle+Archive`) is the fourth `-b` call site and
@@ -895,22 +995,38 @@ extension WorktreeLifecycle {
     /// failed create used to leak a `tbd/<name>` branch and then mask the real
     /// cause behind "a branch named … already exists" on the next attempt.
     ///
-    /// **Three independent gates stand between a failure and `branch -D`, and
+    /// **Four independent gates stand between a failure and `branch -D`, and
     /// deleting a branch the user owns is the worst outcome this path has, so
-    /// each one fails toward keeping it.**
+    /// every unknown lands on keeping it.**
     ///
     /// 1. `branchNameWasAlreadyTaken == false`. When git says "a branch named
     ///    … already exists" — or rejects the fork-PR leg's fetch, the same
     ///    statement in that leg's vocabulary — it is telling us it *refused to
     ///    write* the ref, which is positive evidence the branch predates this
-    ///    attempt, whoever made it. That is the gate that closes the
-    ///    probe→attempt window:
-    ///    `branchPreExisted` is sampled before the add, so a branch created by
-    ///    anything else in between would otherwise be indistinguishable from
-    ///    one we made, and gate 2 alone would delete it.
-    /// 2. `branchPreExisted == false`. `nil` means the probe itself failed —
-    ///    not knowing is not the same as knowing it's absent.
+    ///    attempt, whoever made it. Read stderr, so it can only ever *add*
+    ///    evidence: `false` means git did not say the words, which includes
+    ///    "git said them in a phrasing this build does not recognize". It
+    ///    narrows the probe→attempt window rather than closing it, and gate 4
+    ///    is what covers the abstention.
+    /// 2. `AttemptedBranch.preExisted == false`. `nil` means the probe itself
+    ///    failed — not knowing is not the same as knowing it's absent. Sampled
+    ///    before the attempt, so a branch created by anything else in between
+    ///    is invisible to it.
     /// 3. The branch is present *now*. Nothing to do otherwise.
+    /// 4. The branch points at `AttemptedBranch.expectedTip` — the SHA this
+    ///    attempt's own `-b` or fetch would have written, sampled by the caller
+    ///    (see that type for the per-leg timing). This is the gate that does not
+    ///    depend on git's wording: a branch some other actor created in the
+    ///    probe→attempt window is a branch *they* chose the starting point for,
+    ///    and it does not match. `nil`, an unreadable current tip, and a
+    ///    mismatch all block the delete — a tip we cannot establish is never a
+    ///    licence to destroy a ref.
+    ///
+    ///    Its residual, stated plainly because overclaiming here is what let
+    ///    gate 1 look sufficient: an external actor branching from the *same*
+    ///    base inside that window lands on the same SHA, so the check passes and
+    ///    their branch is deleted. This narrows the window to a coincidence of
+    ///    name *and* starting commit; it does not eliminate it.
     ///
     /// Gate 1 is deliberately narrower than the `.nameCollision` classification,
     /// which also covers an occupied worktree *path*. Those two are not
@@ -931,15 +1047,23 @@ extension WorktreeLifecycle {
     func cleanUpFailedWorktreeAdd(
         repoPath: String,
         worktreePath: String,
-        branch: String,
-        branchPreExisted: Bool?,
+        attempted: AttemptedBranch,
         branchNameWasAlreadyTaken: Bool
     ) async {
         try? FileManager.default.removeItem(atPath: worktreePath)
 
+        let branch = attempted.name
         guard !branchNameWasAlreadyTaken else { return }
-        guard branchPreExisted == false else { return }
+        guard attempted.preExisted == false else { return }
         guard (try? await git.localBranchExists(repoPath: repoPath, name: branch)) == true else {
+            return
+        }
+        guard let expectedTip = attempted.expectedTip else { return }
+        let currentTip = try? await git.headSHA(
+            repoPath: repoPath, ref: "refs/heads/\(branch)"
+        )
+        guard let currentTip, currentTip == expectedTip else {
+            logger.info("Kept branch \(branch, privacy: .public) after a failed worktree add: it does not point where this attempt would have put it (expected \(expectedTip, privacy: .public), found \(currentTip ?? "unreadable", privacy: .public))")
             return
         }
         try? await git.worktreePrune(repoPath: repoPath)

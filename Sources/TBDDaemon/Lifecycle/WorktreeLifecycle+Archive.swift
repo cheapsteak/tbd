@@ -371,6 +371,14 @@ extension WorktreeLifecycle {
             let branchPreExisted: Bool? = try? await git.localBranchExists(
                 repoPath: repo.path, name: worktree.branch
             )
+            // The expected tip needs no sampling on this leg and cannot go
+            // stale: `-b <branch> <sha>` points the new ref at exactly this
+            // argument, so the archived SHA *is* what this attempt would have
+            // put there. A branch that stands at any other commit afterwards is
+            // not the one this recreate made.
+            let attempted = AttemptedBranch(
+                name: worktree.branch, preExisted: branchPreExisted, expectedTip: sha
+            )
             do {
                 try await git.worktreeAddNewBranch(
                     repoPath: repo.path,
@@ -380,12 +388,11 @@ extension WorktreeLifecycle {
                 )
             } catch {
                 // Removes the partial directory, then the branch `-b` made —
-                // the latter only if all three of the helper's gates hold.
+                // the latter only if all four of the helper's gates hold.
                 await cleanUpFailedWorktreeAdd(
                     repoPath: repo.path,
                     worktreePath: worktree.localPath,
-                    branch: worktree.branch,
-                    branchPreExisted: branchPreExisted,
+                    attempted: attempted,
                     branchNameWasAlreadyTaken: gitRefusedToCreateBranch(error)
                 )
                 throw error

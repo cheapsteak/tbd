@@ -111,6 +111,14 @@ import Testing
         )
     }
 
+    /// The SHA a local branch currently points at — what a caller hands the
+    /// cleanup as the attempt's `expectedTip` when some *other* gate is what
+    /// the test means to put under load. Passing the branch's own tip makes
+    /// gate 4 hold, so it neither masks nor manufactures the outcome.
+    private func tip(of branch: String, in repoDir: URL) async throws -> String {
+        try await GitManager().headSHA(repoPath: repoDir.path, ref: "refs/heads/\(branch)")
+    }
+
     // MARK: - Bug 1: a failed create must not leak the branch it just made
 
     /// Jammed for BOTH bases: a lock that stops only the remote base is now
@@ -452,18 +460,27 @@ import Testing
         try await shell("git branch appeared-mid-flight", at: repoDir)
         try await shell("git branch ours-to-clean-up", at: repoDir)
 
+        // Both branches were cut from the same commit this attempt's `-b` would
+        // have used, so gate 4 holds for both and git's refusal is the only
+        // thing telling them apart. (The case where it does NOT hold — an
+        // interloper cut from somewhere else — is
+        // `aBranchAtADifferentSHAIsKeptEvenWhenGitsRefusalGoesUnrecognized`.)
         await lifecycle.cleanUpFailedWorktreeAdd(
             repoPath: repoDir.path,
             worktreePath: tempDir.appendingPathComponent("never-created").path,
-            branch: "appeared-mid-flight",
-            branchPreExisted: false,
+            attempted: .init(
+                name: "appeared-mid-flight", preExisted: false,
+                expectedTip: try await tip(of: "appeared-mid-flight", in: repoDir)
+            ),
             branchNameWasAlreadyTaken: true
         )
         await lifecycle.cleanUpFailedWorktreeAdd(
             repoPath: repoDir.path,
             worktreePath: tempDir.appendingPathComponent("never-created").path,
-            branch: "ours-to-clean-up",
-            branchPreExisted: false,
+            attempted: .init(
+                name: "ours-to-clean-up", preExisted: false,
+                expectedTip: try await tip(of: "ours-to-clean-up", in: repoDir)
+            ),
             branchNameWasAlreadyTaken: false
         )
 
@@ -472,6 +489,141 @@ import Testing
                 "cleanup deleted a branch git had refused to create: \(branches)")
         #expect(!branches.contains("ours-to-clean-up"),
                 "cleanup left behind a branch it did create: \(branches)")
+    }
+
+    // MARK: - Gate 4: the branch must point where this attempt would have put it
+
+    /// The gate that does not read git's stderr, and the one case that needs
+    /// it. Every other signal here is either sampled before the attempt
+    /// (`preExisted`) or a phrase match (`branchNameWasAlreadyTaken`), so a
+    /// branch that appears in the probe→attempt window under a refusal this
+    /// build does not recognize — a future git, a non-standard build, a wrapper
+    /// reformatting stderr — arrives at the cleanup looking exactly like a
+    /// branch we made. Where it *points* is what tells them apart: an
+    /// interloper chose its own starting commit.
+    ///
+    /// Both arms, because a gate that only ever blocks is a synonym for "never
+    /// clean up": the branch cut from this attempt's own base is still deleted.
+    ///
+    /// Red against the tree before gate 4 existed, on the surviving arm:
+    ///   ✘ Expectation failed: (branches → ["main"]).contains("theirs-from-elsewhere")
+    @Test func aBranchAtADifferentSHAIsKeptEvenWhenGitsRefusalGoesUnrecognized() async throws {
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        let baseTip = try await tip(of: "main", in: repoDir)
+
+        // What this attempt's `-b <branch> main` would have produced.
+        try await shell("git branch ours-from-the-base", at: repoDir)
+        // Somebody else's, carrying a commit the base does not have.
+        try await shell(
+            "git checkout -q -b theirs-from-elsewhere && git commit -q --allow-empty -m theirs"
+            + " && git checkout -q main",
+            at: repoDir
+        )
+
+        let neverCreated = tempDir.appendingPathComponent("never-created").path
+        for branch in ["theirs-from-elsewhere", "ours-from-the-base"] {
+            await lifecycle.cleanUpFailedWorktreeAdd(
+                repoPath: repoDir.path,
+                worktreePath: neverCreated,
+                attempted: .init(name: branch, preExisted: false, expectedTip: baseTip),
+                // The whole premise: git's refusal went unrecognized, so gate 1
+                // abstains and every other gate reads as "this attempt made it".
+                branchNameWasAlreadyTaken: false
+            )
+        }
+
+        let branches = try await localBranches(repoDir)
+        #expect(branches.contains("theirs-from-elsewhere"),
+                "cleanup deleted a branch that does not point where this attempt would have put it: \(branches)")
+        #expect(!branches.contains("ours-from-the-base"),
+                "cleanup left behind the branch this attempt's own base produced: \(branches)")
+    }
+
+    /// The unresolvable arm. A base ref that does not resolve, a `rev-parse`
+    /// that could not run — the attempt cannot say where it would have put the
+    /// branch, and an answer we do not have is never a licence to delete a ref.
+    ///
+    /// Red against the tree before gate 4 existed:
+    ///   ✘ Expectation failed: (branches → ["main"]).contains("expected-tip-unknown")
+    @Test func anUnresolvableExpectedTipNeverDeletes() async throws {
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        try await shell("git branch expected-tip-unknown", at: repoDir)
+
+        await lifecycle.cleanUpFailedWorktreeAdd(
+            repoPath: repoDir.path,
+            worktreePath: tempDir.appendingPathComponent("never-created").path,
+            // Every other gate says "delete"; only the missing tip stands in
+            // the way.
+            attempted: .init(
+                name: "expected-tip-unknown", preExisted: false, expectedTip: nil
+            ),
+            branchNameWasAlreadyTaken: false
+        )
+
+        let branches = try await localBranches(repoDir)
+        #expect(branches.contains("expected-tip-unknown"),
+                "cleanup deleted a branch with no expected tip to compare against: \(branches)")
+    }
+
+    /// The unreadable arm: git cannot produce a tip it will vouch for. Driven
+    /// with a ref whose file names an object that is not in the repository —
+    /// what a truncated fetch or a hand-edited ref leaves — so `show-ref
+    /// --verify` answers `fatal: bad ref` (exit 128, which `localBranchExists`
+    /// rethrows rather than reading as "absent") while `rev-parse` cheerfully
+    /// echoes the recorded SHA back.
+    ///
+    /// It pins gates 3 and 4 together rather than gate 4 alone, and that is a
+    /// property of git, not a shortcut: the two reads see the same refs through
+    /// the same launcher, and no repository state satisfies one while failing
+    /// the other (both directions were tried against git 2.50 — a dangling ref
+    /// fails only `show-ref`, a dangling symref fails both). What *is* worth
+    /// asserting is the property they share: an answer git could not give never
+    /// authorizes a delete.
+    ///
+    /// Deliberately not driven by a wedged git (a 1 ms subprocess timeout, as
+    /// the timeout test above uses). That fixture proves nothing here, because
+    /// the `branch -D` at the end of this path is a git subprocess too — it
+    /// would fail whether or not the gates blocked, and the test would pass
+    /// against any implementation at all.
+    ///
+    /// Asserts preserved behavior, so it is mutation-checked: making the
+    /// unknowns in the read path permissive (`!= false` on the existence probe,
+    /// `?? expectedTip` on the tip read) deletes `unvouched-ref` — `git branch
+    /// -D` removes a dangling ref quite happily, which is what keeps this
+    /// fixture honest.
+    @Test func aRefGitCannotVouchForIsNeverDeleted() async throws {
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+
+        // A syntactically valid object name that no object answers to.
+        let absentObject = "0000000000000000000000000000000000000001"
+        let refPath = repoDir.appendingPathComponent(".git/refs/heads/unvouched-ref").path
+        try Data("\(absentObject)\n".utf8).write(to: URL(fileURLWithPath: refPath))
+
+        await lifecycle.cleanUpFailedWorktreeAdd(
+            repoPath: repoDir.path,
+            worktreePath: tempDir.appendingPathComponent("never-created").path,
+            // The SHA the ref records, so a cleanup that trusted what it could
+            // read would find a match and delete.
+            attempted: .init(
+                name: "unvouched-ref", preExisted: false, expectedTip: absentObject
+            ),
+            branchNameWasAlreadyTaken: false
+        )
+
+        #expect(FileManager.default.fileExists(atPath: refPath),
+                "cleanup deleted a ref git would not vouch for: \(refPath)")
     }
 
     /// A failed probe (`nil`) is not the same answer as "absent", so it must
@@ -488,8 +640,10 @@ import Testing
         await lifecycle.cleanUpFailedWorktreeAdd(
             repoPath: repoDir.path,
             worktreePath: tempDir.appendingPathComponent("never-created").path,
-            branch: "probe-failed",
-            branchPreExisted: nil,
+            attempted: .init(
+                name: "probe-failed", preExisted: nil,
+                expectedTip: try await tip(of: "probe-failed", in: repoDir)
+            ),
             branchNameWasAlreadyTaken: false
         )
 
@@ -727,8 +881,12 @@ import Testing
             await lifecycle.cleanUpFailedWorktreeAdd(
                 repoPath: repoDir.path,
                 worktreePath: neverCreated,
-                branch: branch,
-                branchPreExisted: preExisted,
+                // Each branch's own tip, so gate 4 holds and the probe is the
+                // only thing under test.
+                attempted: .init(
+                    name: branch, preExisted: preExisted,
+                    expectedTip: try await tip(of: branch, in: repoDir)
+                ),
                 branchNameWasAlreadyTaken: false
             )
         }
@@ -793,8 +951,11 @@ import Testing
         await lifecycle.cleanUpFailedWorktreeAdd(
             repoPath: repoDir.path,
             worktreePath: parentDir.appendingPathComponent("never-created").path,
-            branch: "raced",
-            branchPreExisted: false,
+            // The branch's own tip, so gate 4 would permit and git's refusal is
+            // the only thing keeping `raced` alive.
+            attempted: .init(
+                name: "raced", preExisted: false, expectedTip: originalSHA
+            ),
             branchNameWasAlreadyTaken: lifecycle.gitRefusedToCreateBranch(refusal)
         )
 
