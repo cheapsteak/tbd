@@ -137,9 +137,23 @@ Two triggers, and the second matters more than it looks.
 
 An external actor that creates a branch of the same name from the *same base*
 inside the probe-to-attempt window produces a tip identical to ours, so gate 4
-passes. The window is narrowed, not eliminated. `RepoSerializer` rules out any
-concurrent TBD-initiated race, so this requires a human or another tool acting
-directly on the repo at that moment.
+passes. The window is narrowed, not eliminated.
+
+`RepoSerializer` narrows who can be inside that window, but it covers two of the
+three entry points rather than all of them. `handleWorktreeCreate` and
+`handleWorktreeReviveConversationFresh` run their lifecycle calls inside
+`repoSerializer.submit(repoID:)`, so for those two no second TBD-initiated
+attempt on the same repo can be in flight. `handleWorktreeRevive` calls
+`beginReviveWorktree` directly and unserialized — deliberately, so an RPC
+connection is never held for the length of a `preSession` hook — and that path
+reaches the same gated deletion. **The gates, not serialization, are what
+constrain the delete.** On the revive path the possible occupants of the window
+therefore include another TBD create in the same repo, alongside a human or
+another tool acting on the repo directly.
+
+Serializing that handler too is a known follow-up. It would change the
+concurrency behavior of a path whose non-blocking shape is load-bearing, so it
+belongs to a change of its own rather than to the gates described here.
 
 On the fork-PR leg the branch is created by fetching `refs/pull/<n>/head` rather
 than by `-b`. That refspec is deliberately unforced, so git refuses a colliding
