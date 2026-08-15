@@ -301,17 +301,20 @@ jobs:
       # ---------------------------------------------------------------------
       # Why every pass goes through `scripts/test.sh` and not bare `swift test`
       #
-      # The wrapper points `TBD_HOME`, `TBD_SOCKET_PATH` and
-      # `TBD_CLAUDE_HOST_HOME` at a scratch dir for the run, points `HOME` and
-      # `CFFIXED_USER_HOME` at a second one whose `tbd` and `.claude` entries
-      # are mode 000 (so code that assembles a path out of the home directory
-      # rather than asking fails with EACCES at its own call site) and, as a
-      # backstop, fingerprints the real `~/tbd` and `~/.claude` on either side
-      # and fails the step if anything appeared or vanished. `CLAUDE.md` has said
+      # The wrapper points `TBD_HOME`, `TBD_SOCKET_PATH`,
+      # `TBD_CLAUDE_HOST_HOME`, `TBD_TEST_CODEX_HOME` and `TMUX_TMPDIR` at a
+      # scratch dir for the run, points `HOME` and `CFFIXED_USER_HOME` at a
+      # second one whose `tbd`, `.claude` and `.codex` entries are mode 000 (so
+      # code that assembles a path out of the home directory rather than asking
+      # fails with EACCES at its own call site) and, as a backstop, fingerprints
+      # the real `~/tbd`, `~/.claude`, `~/.codex` and tmux socket directory on
+      # either side and fails the step if anything appeared or vanished.
+      # `CLAUDE.md` has said
       # "Tests must not touch ~/tbd" all along, and the suite quietly violated
-      # it anyway: 18k orphan profile dirs and ~2.9k fake worktrees accumulated
-      # on a developer box before anyone noticed. No per-test assertion could
-      # have caught it — the invariant belongs to the whole run.
+      # it anyway: 18k orphan profile dirs, ~2.9k fake worktrees and ~7,100 dead
+      # tmux sockets accumulated on a developer box before anyone noticed. No
+      # per-test assertion could have caught it — the invariant belongs to the
+      # whole run.
       #
       # THIS JOB IS THE ONLY PLACE THE FINGERPRINT RUNS, and every step below
       # asks for it with an explicit `--fingerprint`. The wrapper's default is

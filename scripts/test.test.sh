@@ -7,7 +7,9 @@
 # standing in for `swift`, so the whole file runs in seconds on a shared box
 # while other agents are working.
 #
-# FOUR SEAMS MAKE THAT POSSIBLE, AND ALL FOUR ALREADY EXISTED IN PRODUCTION:
+# FOUR SEAMS MAKE THAT POSSIBLE, AND EVERY ONE IS A PRODUCTION MECHANISM RATHER
+# THAN A TEST-ONLY HOOK — nothing here asks the scripts under test to behave
+# differently because they are under test:
 #
 #   HOME              scripts/test.sh reads the caller's real `$HOME` to derive
 #                     the shared lock path, and `scripts/tbd-home-fingerprint.sh`
@@ -41,6 +43,14 @@
 # shellcheck disable=SC2016 # the sed mutation expressions must NOT expand here
 # shellcheck disable=SC2088 # `~/tbd` in expectations is the fingerprint's literal output, not a path
 set -uo pipefail
+# THE FIXTURES' MODES ARE ASSERTED, SO THE UMASK CANNOT BE AMBIENT. Several
+# cases pin an exact mode on a directory this file created with `mkdir -p`,
+# which yields 0777 masked by the umask — 755 at the common 022, but 700 at a
+# hardened 077, where those assertions would red with nothing actually wrong.
+# Pinning it here makes every fixture mode a property of this harness rather
+# than of whoever ran it. It does NOT weaken any guard: every mode the wrapper
+# itself sets, it sets with an explicit `chmod`.
+umask 022
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$HERE/test.sh"
 FINGERPRINT="$HERE/tbd-home-fingerprint.sh"
@@ -436,13 +446,21 @@ test_fingerprint_comparison_is_load_bearing() {
 # `/tmp/tmux-<uid>`, which exists and churns on any box with a live daemon.
 fingerprint_with_home() { HOME="$1" TMUX_TMPDIR="$1/tmux-tmpdir" bash "$2"; }
 
-test_fingerprint_script_covers_all_five_roots() {
+# ARMS, NOT ROOTS — the two counts differ and the smaller one is the tempting
+# mistake. There are four roots (`~/tbd`, `~/.claude`, `~/.codex`, the tmux
+# socket dir) but SIX arms, because `~/.claude` and `~/.codex` are each read
+# twice: once shallow for the store itself and once deeper for a nested
+# directory the shallow pass prunes or cannot reach. An arm with no assertion
+# here can be deleted wholesale and this file stays green, so the enumeration
+# is the coverage — keep it counted in arms, and add a line when you add one.
+test_fingerprint_script_covers_every_arm() {
   local d; d="$(mktmpd)"
   local out; out="$(fingerprint_with_home "$d" "$FINGERPRINT")"
   assert_contains "absent ~/tbd is a marker, not silence" "$out" "~/tbd <absent>"
   assert_contains "absent ~/.claude is a marker" "$out" "~/.claude <absent>"
   assert_contains "absent ~/.claude/projects is a marker" "$out" "~/.claude/projects <absent>"
   assert_contains "absent ~/.codex is a marker" "$out" "~/.codex <absent>"
+  assert_contains "absent ~/.codex/plugins/cache is a marker" "$out" "~/.codex/plugins/cache <absent>"
   assert_contains "absent socket dir is a marker" "$out" "<tmux-sockets> <absent>"
   rmfix "$d"
 }
@@ -705,13 +723,24 @@ test_fenced_tmux_dir_exists_and_is_mode_700_during_the_run() {
 
 # MUTATION. Without the chmod the directory takes the umask — group- and
 # world-readable on a default box, which is a socket anyone can connect to.
+#
+# THE UMASK IS PINNED, and that is what makes this case an assertion rather
+# than a reading of the developer's shell. `mkdir -p` creates 0777 masked by
+# the umask, so the mutant's mode is a function of ambient state: at 022 it is
+# 755 (the case is meaningful), but at 077 it is *already* 700 and the case
+# would red on a hardened box while nothing was wrong. Pinning 022 also lets
+# this assert the exact composed mode instead of "not 700", which is the
+# whitelist shape the rest of this file uses.
 test_fenced_tmux_dir_chmod_is_load_bearing() {
-  local fix mutant; fix="$(mkfix)"
+  local fix mutant prior_umask; fix="$(mkfix)"
   mutant="$(mutant_of "$SCRIPT" '/^chmod 700 "\$tmux_tmpdir"$/d')"
+  prior_umask="$(umask)"
+  umask 022
   run_script "$mutant" "$fix"
+  umask "$prior_umask"
   local dump; dump="$(dump_of "$fix")"
-  assert_contains "the directory still exists" "$dump" "tmux-tmpdir-mode=7"
-  assert_missing "but without the chmod it is not 700" "$dump" "tmux-tmpdir-mode=700"
+  assert_contains "without the chmod the dir takes the umask, not 700" \
+    "$dump" "tmux-tmpdir-mode=755"
   rmfix "$fix"
 }
 
@@ -766,7 +795,8 @@ test_cleanup_sweep_is_load_bearing() {
   rmfix "$fix"
 }
 
-# The detector's fourth arm, directly: a socket appearing in the CALLER's socket
+# The detector's fourth ROOT — its sixth arm, since `~/.claude` and `~/.codex`
+# are each read twice — directly: a socket appearing in the CALLER's socket
 # directory between two snapshots must change the fingerprint.
 test_fingerprint_script_sees_a_new_tmux_socket() {
   local fix; fix="$(mkfix)"

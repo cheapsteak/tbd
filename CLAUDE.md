@@ -172,7 +172,7 @@ Enforced mechanically by two SwiftLint custom rules in `.swiftlint.yml` (`no_tui
 ## Quick Reference
 
 - **Build**: `scripts/swift-safe build`
-- **Test**: `scripts/test.sh` (fences `~/tbd`, `~/.claude` and the tmux socket dir, then runs SwiftPM through `scripts/swift-safe`)
+- **Test**: `scripts/test.sh` (fences `~/tbd`, `~/.claude`, `~/.codex` and the tmux socket dir, then runs SwiftPM through `scripts/swift-safe`)
 - **Restart**: `scripts/restart.sh`
 - **Install git hooks** (one-time setup after cloning): `scripts/install-hooks.sh`
 - **Diagnostics**: see [`docs/diagnostics-strategy.md`](docs/diagnostics-strategy.md). Quick recipes:

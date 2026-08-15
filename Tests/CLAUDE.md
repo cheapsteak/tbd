@@ -79,9 +79,11 @@ through a `Process` whose `environment` you build from scratch, propagate
 `TMUX_TMPDIR` into it or every socket that run creates lands outside the fence,
 permanently; `TestSupport.shell(_:at:)` already does.
 
-Those four variables only fence code that *asks* where home is. The wrapper
-also sets `HOME` and `CFFIXED_USER_HOME` at a **separate** scratch home whose
-`tbd`, `.claude` and `.codex` entries are pre-created mode `000`. That covers
+Four of those five variables only fence code that *asks* where home is, and
+`TMUX_TMPDIR` is the odd one out — it fences a store that has nothing to do
+with `$HOME`, and tmux consults it without anyone in this tree asking. The
+wrapper also sets `HOME` and `CFFIXED_USER_HOME` at a **separate** scratch home
+whose `tbd`, `.claude` and `.codex` entries are pre-created mode `000`. That covers
 the code that assembles a path out of the home directory instead of asking: it
 gets `EACCES` at the call site, inside the failing test, with the offending path
 in the error.
@@ -149,7 +151,8 @@ Full rationale is in the wrapper's header.
 
 The wrapper's own guards are regression-tested by `scripts/test.test.sh`, which
 runs in the `lint` CI job: it drives the symlink and ownership refusals on the
-fake home, the post-run mode-000 recheck, the fingerprint's five arms, the
+fake home, the post-run mode-000 recheck, the fingerprint's six arms (four
+roots, two of which are read twice), the
 tmux socket fence (its `sun_path` budget and its kill-server sweep) and the
 shared-lock pin against fixture directories with a stub `swift`, so it takes
 ~11 s, builds nothing, and touches no real store. **Every case there is
