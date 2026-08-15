@@ -14,11 +14,13 @@ trust class, which is what the receiver's inbound gate judges. A script that
 posts to its own session's socket and then exits should present the token on
 macOS, where process evidence of the sender disappears with the process.
 
-Those two defaults are a matched pair: the environment's token authenticates as
-a child of the session that owns the environment's socket, and it means nothing
-to any other session. Pass --no-token whenever --socket names a different
-session, so a token belonging to your own session is not written to someone
-else's.
+Those two defaults are a matched pair, so the token default is taken only when
+the target really is this session: the environment's token authenticates as a
+child of the session that owns the environment's socket, and it means nothing
+to any other session. When --socket resolves to some other path, the ambient
+token is dropped with a note on stderr rather than written to a stranger.
+--token still sends a token you name explicitly, and --no-token suppresses the
+frame outright.
 
 Whether the receiving session delivers, holds, or drops the message is decided
 there, by its `crossSessionInbound` setting or, when that is unset, by the two
@@ -33,7 +35,7 @@ import json
 import os
 import socket
 import sys
-from typing import NoReturn
+from typing import NoReturn, Optional
 
 MAX_FRAME_BYTES = 1024 * 1024  # the receiver drops the connection past this
 
@@ -48,9 +50,13 @@ def parse_args() -> argparse.Namespace:
     # that begins with a dash — "-hold the release" — is parsed as options:
     # the script prints help and exits 0 having sent nothing, which reads as
     # success to anything scheduling deliveries. Without it, such a message is
-    # an unrecognized option and exits non-zero. Pass -- to send one anyway.
+    # an unrecognized option and exits non-zero. allow_abbrev is off for the
+    # same reason: it would otherwise make "--h", "--he" and "--hel" print help
+    # too. A message of exactly "--help" is the one case still left, and `--`
+    # sends that one — as it sends any message that begins with a dash.
     parser = argparse.ArgumentParser(
         add_help=False,
+        allow_abbrev=False,
         description="Post a user message into a Claude Code session's inbox socket.",
         epilog="Pass - as the message to read it from stdin, and put -- before "
         "a message that begins with a dash.",
@@ -66,14 +72,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--token",
-        default=os.environ.get("CLAUDE_CODE_MESSAGING_TOKEN"),
-        help="auth token (default: $CLAUDE_CODE_MESSAGING_TOKEN)",
+        help="auth token; defaults to $CLAUDE_CODE_MESSAGING_TOKEN, but only "
+        "when --socket resolves to this session's own socket",
     )
     parser.add_argument(
         "--no-token",
         action="store_true",
-        help="send no auth frame even when a token is in the environment; "
-        "use whenever --socket names a session other than your own",
+        help="send no auth frame at all, including one named by --token",
     )
     parser.add_argument(
         "--from",
@@ -93,6 +98,36 @@ def parse_args() -> argparse.Namespace:
         "guards against a reused pid",
     )
     return parser.parse_args()
+
+
+def resolve_token(args: argparse.Namespace) -> Optional[str]:
+    """Decide which token, if any, to authenticate with.
+
+    An explicit --token is honored as given. The environment's token is taken
+    only when the target socket is the one that same environment names, since
+    that is the only session it authenticates to; against any other socket it
+    is a secret handed to a stranger for nothing.
+    """
+    if args.no_token:
+        return None
+    if args.token:
+        return args.token
+
+    env_token = os.environ.get("CLAUDE_CODE_MESSAGING_TOKEN")
+    if not env_token:
+        return None
+    env_socket = os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")
+    if env_socket and os.path.realpath(args.socket) == os.path.realpath(
+        env_socket
+    ):
+        return env_token
+
+    print(
+        "inject-message: --socket names a session other than this one; "
+        "sending no auth frame. Pass --token to send one anyway.",
+        file=sys.stderr,
+    )
+    return None
 
 
 def main() -> int:
@@ -117,8 +152,9 @@ def main() -> int:
         fail("empty message; the receiver ignores a message with no content.")
 
     frames = []
-    if args.token and not args.no_token:
-        frames.append({"type": "auth", "token": args.token})
+    token = resolve_token(args)
+    if token:
+        frames.append({"type": "auth", "token": token})
     user_frame = {
         "type": "user",
         "from": args.sender,
