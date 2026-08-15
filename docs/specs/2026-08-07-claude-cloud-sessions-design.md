@@ -363,14 +363,29 @@ A declaration where every remote does everything demonstrates nothing. This one 
 
 The two stay separate rather than merging because `remote_backends_enabled` was written to be *deletable* after soak, on the reasoning that the feature is inert without a registered provider file. A provider compiled into the daemon is never inert, so folding this into it would silently convert a disposable flag into a permanent one.
 
-**When `remote_backends_enabled` is deleted**, its gate is removed and `claude_cloud_enabled` becomes the sole gate for the cloud provider, with the external-provider path ungated as v1's rollout intends. That ordering matters: deleting the outer flag while the inner one is still soaking must not turn cloud on for anyone, so the deletion migration leaves `claude_cloud_enabled` untouched. Graduation for the inner flag is a default flip after soak, then deletion, once discovery has held up across a few endpoint revisions.
+**When `remote_backends_enabled` is deleted**, its gate is removed and `claude_cloud_enabled` becomes the sole gate for the cloud provider, with the external-provider path ungated as v1's rollout intends. That ordering matters: deleting the outer flag while the inner one is still soaking must not turn cloud on for anyone, so the deletion migration leaves `claude_cloud_enabled` untouched.
+
+### Unset is a third state
+
+The column is added with **no** SQL default — `addColumnIfMissing(table:column:type:)` with `defaults:` omitted — so it stays genuinely NULL until somebody touches the toggle:
+
+- **NULL** — nobody has chosen. Resolves to the shipped default.
+- **0 / 1** — an explicit gesture, honored forever.
+
+Passing `defaults:` would make `ADD COLUMN ... DEFAULT` backfill every existing row, and the singleton `config` row is seeded naming only two columns, so a fresh install and an old one would both read `0` — indistinguishable from a deliberate opt-out. That distinction is destroyed on write and cannot be recovered later, which is why this is a decision at migration time rather than something to fix on graduation.
+
+The shipped default therefore lives in exactly one place: `ConfigRecord.toModel()` resolving `claude_cloud_enabled ?? Config.claudeCloudEnabledDefault`. **Graduation is a one-line edit to that constant.** It reaches everyone who never touched the toggle and preserves every explicit opt-out — which matters more here than for most flags, because this feature calls a network service on a schedule and somebody who turned it off did so deliberately.
+
+Three states, three assertions: a pre-migration row reads NULL rather than `0`; an explicit `false` survives a change to the default constant; a NULL row follows it.
+
+Graduation for this flag is that default flip after soak, then deletion, once discovery has held up across a few endpoint revisions.
 
 ## Migrations and models
 
 Each following the shared-model rule — migration, GRDB record, and the `TBDShared` Codable model in one commit, new fields optional or defaulted:
 
 - `claude_cloud_session` — the ledger table, including idempotency key state.
-- `config.claude_cloud_enabled` — the flag, defaulting to off.
+- `config.claude_cloud_enabled` — the flag. Added with **no** SQL default so unset stays NULL; the shipped OFF default resolves in `ConfigRecord.toModel()` (see "Unset is a third state" above).
 - `repo.remotes_declaration_trusted_sha` — the approved declaration hash, nullable.
 
 **No table gains a column for landing or for archiving, and `remote_session` gains none at all.** `archived` rides in the payload the mirror already stores. Landing is a change of state on one existing row: `location` flips to `local` and a real path replaces the synthetic `remote://` URI, both columns present since `v70`, and `providerName`/`providerSessionID` — also `v70` — carry the origin afterwards. What changes is the rule those two columns obey (see the land bridge above): they are written for a landed local row rather than only for a remote one. That is a write-path and invariant change in `WorktreeRecord`, with no schema edit and nothing to migrate, since every existing row already satisfies the wider rule.
@@ -390,7 +405,7 @@ No test reaches the network or a real credential store: the undocumented transpo
 - **Land** — landing converts one row in place: the same row id comes back `.local` at a real path, keeping its display name, parent edge, children, and PR badge, and no second row appears for the session. Each precondition failure — remote mismatch, missing branch, occupied path, branch already checked out elsewhere — is reported without creating a worktree and leaves the row `.remote`, unchanged. `providerName`/`providerSessionID` survive the conversion, so the landed row reports its origin, the next snapshot does not re-adopt the session into a fresh row, and the session does not render as a bare session row beside the landed lane. With `forks: true` the provider session is archived where `archive` is declared and left running where it is not, and is never stopped whatever `stop` the provider declares; with `forks: false` it is left in the working set untouched. The landed row stays `active` through all of it — a later snapshot reporting that session `archived: true` does not archive the lane, because mirroring reaches remote rows only. A session that resolves to no registered repo has no row and is offered no Land action. A `branch` beginning with `-` and an `ext::`-style `remote_url` are both rejected before reaching git.
 - **Archive composition** — a provider declaring `archive` is archived through the verb, one declaring only `stop` is stopped, one declaring neither has its row flipped alone with no provider call; each ends with the row `archived` and out of the active tree. A session sighted as `archived: true` flips its row without touching `state`, and `archived: false` returns it to `active`. An archived lane appears in the archived list and not as a session row. `unarchive` is offered only where declared.
 - **Repo declarations** — an unapproved declaration does not resolve; editing an approved file re-prompts, including an edit that only reorders the `remotes` array, since the hash is over raw bytes and reordering changes which remote is offered first; `prompt` is displayed in full at the approval gate; a params key absent from `create_params` is dropped; command-shaped top-level keys are ignored; the root checkout's copy wins over a worktree's; a declaration naming a built-in provider whose flag is off degrades to the next tier **and shows no approval prompt**.
-- **Flag branches** — all four combinations of the two flags.
+- **Flag branches** — all four combinations of the two flags; and the three states of `claude_cloud_enabled` are distinguishable: a pre-migration row reads NULL rather than `0`, a NULL row follows a change to `Config.claudeCloudEnabledDefault`, and an explicit `false` survives one.
 - **Registry** — an entry claiming the reserved name is skipped and flagged while every other entry still loads.
 
 All tests use the `TBD_HOME` isolation seams and run under `scripts/test.sh`.
