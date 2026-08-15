@@ -8,8 +8,9 @@ Usage:
 
 Each session writes a `<pid>.json` row under `$CLAUDE_CONFIG_DIR/sessions`
 (`~/.claude/sessions` when that variable is unset) describing itself: pid,
-session ID, cwd, version, name, coarse status, and the path of its inbox
-socket. Rows whose process is gone are stale; this script skips them.
+session ID, cwd, version, name and coarse status, and — on most rows, not all
+— the path of its inbox socket. Rows whose process is gone are stale; this
+script skips them.
 
 The registry lives under the config directory, so it fragments per config
 directory: a session started with a different `CLAUDE_CONFIG_DIR` writes its
@@ -53,6 +54,10 @@ def process_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True  # exists, owned by another user
+    except OverflowError:
+        # Too large for a C int. OverflowError is not an OSError, so it would
+        # otherwise escape and take down the whole listing over one bad row.
+        return False
     except OSError:
         return False
     return True

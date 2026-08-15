@@ -3,7 +3,7 @@
 
 Usage:
     inject-message.py "text"                          # post to this session
-    inject-message.py --socket /tmp/cc-socks/PID.sock "text"
+    inject-message.py --socket /tmp/cc-socks/PID.sock --no-token "text"
     printf 'text' | inject-message.py --socket /tmp/cc-socks/PID.sock -
 
 The target socket defaults to $CLAUDE_CODE_MESSAGING_SOCKET and the auth frame
@@ -13,6 +13,12 @@ is available; it does not gate entry to the socket, it establishes the sender's
 trust class, which is what the receiver's inbound gate judges. A script that
 posts to its own session's socket and then exits should present the token on
 macOS, where process evidence of the sender disappears with the process.
+
+Those two defaults are a matched pair: the environment's token authenticates as
+a child of the session that owns the environment's socket, and it means nothing
+to any other session. Pass --no-token whenever --socket names a different
+session, so a token belonging to your own session is not written to someone
+else's.
 
 Whether the receiving session delivers, holds, or drops the message is decided
 there, by its `crossSessionInbound` setting or, when that is unset, by the two
@@ -38,9 +44,19 @@ def fail(message: str, code: int = 2) -> NoReturn:
 
 
 def parse_args() -> argparse.Namespace:
+    # add_help is off deliberately. With argparse's default `-h`, a message
+    # that begins with a dash — "-hold the release" — is parsed as options:
+    # the script prints help and exits 0 having sent nothing, which reads as
+    # success to anything scheduling deliveries. Without it, such a message is
+    # an unrecognized option and exits non-zero. Pass -- to send one anyway.
     parser = argparse.ArgumentParser(
+        add_help=False,
         description="Post a user message into a Claude Code session's inbox socket.",
-        epilog="Pass - as the message to read it from stdin.",
+        epilog="Pass - as the message to read it from stdin, and put -- before "
+        "a message that begins with a dash.",
+    )
+    parser.add_argument(
+        "--help", action="help", help="show this help message and exit"
     )
     parser.add_argument("message", help="message text, or - to read stdin")
     parser.add_argument(
@@ -52,6 +68,12 @@ def parse_args() -> argparse.Namespace:
         "--token",
         default=os.environ.get("CLAUDE_CODE_MESSAGING_TOKEN"),
         help="auth token (default: $CLAUDE_CODE_MESSAGING_TOKEN)",
+    )
+    parser.add_argument(
+        "--no-token",
+        action="store_true",
+        help="send no auth frame even when a token is in the environment; "
+        "use whenever --socket names a session other than your own",
     )
     parser.add_argument(
         "--from",
@@ -95,7 +117,7 @@ def main() -> int:
         fail("empty message; the receiver ignores a message with no content.")
 
     frames = []
-    if args.token:
+    if args.token and not args.no_token:
         frames.append({"type": "auth", "token": args.token})
     user_frame = {
         "type": "user",
@@ -110,8 +132,11 @@ def main() -> int:
     payload = b"".join(
         json.dumps(frame).encode("utf-8") + b"\n" for frame in frames
     )
+    # Measured against the newline the receiver is scanning for: its buffer
+    # holds the frame plus that terminator, so a frame of exactly
+    # MAX_FRAME_BYTES bytes is still fine and one byte more is not.
     for line in payload.split(b"\n"):
-        if len(line) + 1 > MAX_FRAME_BYTES:
+        if len(line) > MAX_FRAME_BYTES:
             fail(
                 f"frame is {len(line)} bytes; the receiver drops any connection "
                 f"whose line exceeds {MAX_FRAME_BYTES} bytes."
