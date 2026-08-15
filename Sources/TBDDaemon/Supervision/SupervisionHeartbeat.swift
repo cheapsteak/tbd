@@ -101,9 +101,19 @@ public actor SupervisionHeartbeat {
     /// leaves behind a file that says `engaged`, which the watchdog reads as
     /// "nothing is effectively on" and therefore never alarms about, no matter
     /// how long it then sits untouched.
+    /// Two overlapping edges must not leave the timer disagreeing with the
+    /// brake. The edge write is an `await`, so an actor releases itself across
+    /// it and a second edge can run entirely inside the first's suspension —
+    /// after which the first would resume and arm a timer the second had just
+    /// disarmed. Recording the intent before the write and reconciling against
+    /// the **latest** intent afterwards means whichever edge landed last is the
+    /// one the timer ends up matching, whichever order they resume in.
+    private var brakeReleased = false
+
     public func applyBrake(released: Bool) async {
+        brakeReleased = released
         await tick()
-        if released {
+        if brakeReleased {
             startTimer()
         } else {
             await cancelTimer()
