@@ -13,6 +13,7 @@ public enum SupervisionStoreError: Error, Equatable, CustomStringConvertible, Lo
     case unknownProject(String)
     case projectAlreadyDeclared(String)
     case modeNotDeclared(project: String, requested: String, declared: [String])
+    case concurrentEdit(project: String)
 
     public var description: String {
         switch self {
@@ -30,6 +31,9 @@ public enum SupervisionStoreError: Error, Equatable, CustomStringConvertible, Lo
             let choices = declared.isEmpty ? "(none declared)" : declared.joined(separator: ", ")
             return "Mode \"\(requested)\" is not declared for project \"\(project)\" "
                 + "— choices: \(choices)."
+        case .concurrentEdit(let project):
+            return "The supervision file kept changing while \"\(project)\"'s mark was being "
+                + "set, so nothing was written. Something else is editing it — try again."
         }
     }
 
@@ -200,7 +204,8 @@ public actor SupervisionStore {
     public func status(brake: SupervisionBrakeState) async throws -> SupervisionStatus {
         try await ensureLoaded()
         let repos = try await fleet.repos()
-        let projects = try SupervisionTopology.resolve(file: try freshFile(), repos: repos)
+        let file = try freshFile()
+        let projects = try SupervisionTopology.resolve(file: file, repos: repos)
         let effectivelySupervising = brake == .released && projects.contains { $0.mark }
 
         var warnings: [SupervisionWarning] = []
@@ -259,7 +264,8 @@ public actor SupervisionStore {
         -> SupervisionStatusFile {
         try await ensureLoaded()
         let repos = try await fleet.repos()
-        let projects = try SupervisionTopology.resolve(file: try freshFile(), repos: repos)
+        let file = try freshFile()
+        let projects = try SupervisionTopology.resolve(file: file, repos: repos)
         return SupervisionStatusFile(
             writtenAt: SupervisionInstant(now()),
             brake: brake,
@@ -287,32 +293,42 @@ public actor SupervisionStore {
         try await ensureLoaded()
         let repos = try await fleet.repos()
 
-        // Read-modify-write, no suspension inside.
-        let file = try freshFile()
-        let projects = try SupervisionTopology.resolve(file: file, repos: repos)
-        guard let resolved = projects.first(where: { $0.name == project }) else {
-            throw SupervisionStoreError.unknownProject(project)
-        }
-        let updated = file.settingMark(project, on: on)
-        guard updated != file else {
-            return SuperviseSetProjectMarkResult(project: project, on: on, changed: false)
-        }
-        try persist(updated)
+        // The roster has to be read before the mark is committed — a snapshot
+        // taken afterwards could fail, leaving the gesture done and the caller
+        // told it failed — but reading it is a suspension, and a suspension
+        // between the read and the write is what lets two operators clobber
+        // each other. So: decide, snapshot, then commit only if the file has
+        // not moved underneath, and start over if it has. Three attempts is a
+        // bound on a race that human-rate gestures essentially never lose.
+        for _ in 0..<3 {
+            let file = try freshFile()
+            let projects = try SupervisionTopology.resolve(file: file, repos: repos)
+            guard let resolved = projects.first(where: { $0.name == project }) else {
+                throw SupervisionStoreError.unknownProject(project)
+            }
+            let updated = file.settingMark(project, on: on)
+            guard updated != file else {
+                return SuperviseSetProjectMarkResult(project: project, on: on, changed: false)
+            }
+            let roster = on ? try await rosterSnapshot(for: resolved) : []
+            guard try freshFile() == file else { continue }
 
-        let at = now()
-        if on {
-            let roster = try await rosterSnapshot(for: resolved)
-            let recorded = await ledger.append(SupervisionLedgerLine.projectOn(
-                project: project, mode: resolved.activeMode, roster: roster, at: at))
-            // The span start is memory of the record, not a second copy of it:
-            // if the opening line did not land, the span reads as unknown here
-            // exactly as it would after a restart, and the status renders a
-            // bare `on` rather than inventing a start.
-            if recorded { spanStarts[project] = SupervisionInstant(at) }
-        } else {
-            await appendProjectOff(project: project, mode: resolved.activeMode, at: at)
+            try persist(updated)
+            let at = now()
+            if on {
+                let recorded = await ledger.append(SupervisionLedgerLine.projectOn(
+                    project: project, mode: resolved.activeMode, roster: roster, at: at))
+                // The span start is memory of the record, not a second copy of
+                // it: if the opening line did not land, the span reads as
+                // unknown here exactly as it would after a restart, and the
+                // status renders a bare `on` rather than inventing a start.
+                if recorded { spanStarts[project] = SupervisionInstant(at) }
+            } else {
+                await appendProjectOff(project: project, mode: resolved.activeMode, at: at)
+            }
+            return SuperviseSetProjectMarkResult(project: project, on: on, changed: true)
         }
-        return SuperviseSetProjectMarkResult(project: project, on: on, changed: true)
+        throw SupervisionStoreError.concurrentEdit(project: project)
     }
 
     /// The `projectOff` line and the span bookkeeping that goes with it. Shared
@@ -402,7 +418,8 @@ public actor SupervisionStore {
     public func projectList() async throws -> SuperviseProjectListResult {
         try await ensureLoaded()
         let repos = try await fleet.repos()
-        return try topologyResult(file: try freshFile(), repos: repos)
+        let file = try freshFile()
+        return try topologyResult(file: file, repos: repos)
     }
 
     public func projectCreate(
