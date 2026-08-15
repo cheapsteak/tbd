@@ -103,29 +103,60 @@ struct SupervisionLedgerWriterTests {
             SupervisionLedgerLine.self, from: Data(rows[1].utf8)).project == "acme-web")
     }
 
+    /// A `delivery` line, as a later slice will write it.
+    ///
+    /// Its timestamp is deliberately **not** `epoch`: a fixture whose
+    /// unrecognized line shares a timestamp with the span it sits beside cannot
+    /// tell "read past" from "opened a span at the same instant", and the whole
+    /// point of this fixture is to tell those apart.
+    private static func deliveryLine(project: String) -> String {
+        // epoch + 300s = 2023-11-14T22:18:20Z. Built by concatenation rather
+        // than a multiline literal: a `\` continuation inside `"""` is one
+        // keystroke away from producing JSON that silently fails to parse, and
+        // a fixture that does not decode makes every assertion below vacuous.
+        "{\"id\":\"deadbeef\",\"ts\":\"2023-11-14T22:18:20.000Z\",\"mode\":\"attended\","
+            + "\"project\":\"\(project)\",\"kind\":\"delivery\",\"hash\":\"abc123\"}\n"
+    }
+
+    private static func appendRaw(_ text: String, to path: String) throws {
+        if !FileManager.default.fileExists(atPath: path) {
+            FileManager.default.createFile(atPath: path, contents: nil)
+        }
+        let handle = try #require(FileHandle(forWritingAtPath: path))
+        _ = try handle.seekToEnd()
+        try handle.write(contentsOf: Data(text.utf8))
+        try handle.close()
+    }
+
     @Test("A line of a kind this build does not model opens and closes nothing")
     func unrecognizedKindsAreReadPast() async throws {
-        let path = try Self.makePath()
-        let writer = SupervisionLedgerWriter(path: path)
+        let raw = Self.deliveryLine(project: "acme-web")
+
+        // Pinned first, and on its own. Span recovery's read-past behavior is
+        // defined against a line that actually *decodes* as `.unrecognized`; a
+        // fixture that fails to decode is counted as corruption instead and
+        // never reaches the arm under test, which would make both assertions
+        // below pass for the wrong reason. If this fixture ever stops
+        // decoding, the failure should say so by name.
+        let decoded = try JSONDecoder().decode(SupervisionLedgerLine.self, from: Data(raw.utf8))
+        #expect(decoded.payload == .unrecognized)
+        #expect(decoded.project == "acme-web")
+
+        // It must not close a span that stands …
+        let beside = try Self.makePath()
+        let writer = SupervisionLedgerWriter(path: beside)
         await writer.append(.projectOn(
             project: "acme-web", mode: "attended", roster: [], at: Self.epoch))
+        try Self.appendRaw(raw, to: beside)
+        #expect(await SupervisionLedgerWriter(path: beside).spanStarts()
+            == ["acme-web": SupervisionInstant(Self.epoch)],
+                "an unrecognized line neither closes the span nor restamps it")
 
-        // A `delivery` line, as a later slice will write it. It must not close
-        // the span above, and it must not be counted as damage — a record that
-        // reports itself corrupt the first time somebody adds a kind is an
-        // alarm nobody will keep reading.
-        let delivery = """
-            {"id":"deadbeef","ts":"2023-11-14T22:13:20.000Z","mode":"attended",\
-            "project":"acme-web","kind":"delivery","hash":"abc123"}
-
-            """
-        let handle = try #require(FileHandle(forWritingAtPath: path))
-        try handle.seekToEnd()
-        try handle.write(contentsOf: Data(delivery.utf8))
-        try handle.close()
-
-        let spans = await SupervisionLedgerWriter(path: path).spanStarts()
-        #expect(spans == ["acme-web": SupervisionInstant(Self.epoch)])
+        // … and must not open one where none does.
+        let alone = try Self.makePath()
+        try Self.appendRaw(raw, to: alone)
+        #expect(await SupervisionLedgerWriter(path: alone).spanStarts().isEmpty,
+                "coverage starts from a projectOn line and nothing else")
     }
 
     @Test("An empty or absent file recovers no spans")

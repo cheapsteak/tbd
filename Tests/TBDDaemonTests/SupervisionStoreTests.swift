@@ -368,6 +368,7 @@ struct SupervisionStoreTests {
         // where "off" and "has a span" meet.
         try SupervisionFileStore(fileURL: URL(fileURLWithPath: fixture.filePath))
             .save(SupervisionFile())
+        let beforeRestart = try lines(at: fixture.ledgerPath).map(\.id)
         let restarted = Self.reopen(fixture, fleet: fleet)
         try await restarted.load()
 
@@ -375,6 +376,13 @@ struct SupervisionStoreTests {
         #expect(status.projects.first?.on == false)
         #expect(status.projects.first?.spanStartedAt == nil,
                 "an off project renders exactly off — a span here would be a third state")
+        // Startup recovers state; it does not settle it. Reconciling here would
+        // close the span with an end time nobody observed, and it is the one
+        // arrangement where a load *could* — the mark is gone and the span is
+        // open, exactly what an outside edit leaves behind. Asserted on ids so
+        // a rewrite fails it as well as an extra append.
+        #expect(try lines(at: fixture.ledgerPath).map(\.id) == beforeRestart,
+                "loading writes no ledger line, even with a span to settle")
     }
 
     // MARK: - Restart
