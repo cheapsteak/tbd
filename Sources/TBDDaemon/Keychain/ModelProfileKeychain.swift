@@ -15,11 +15,24 @@ import Foundation
 /// POSIX perms, FileVault-at-rest) and strictly better than Keychain's
 /// per-binary ACL model for an unbundled / unsigned SPM daemon that rebuilds
 /// frequently.
-public enum ModelProfileKeychainError: Error, Equatable {
+public enum ModelProfileKeychainError: LocalizedError, Equatable {
     case dataEncoding
     case permissionMismatch(String)
     case ownerMismatch
     case ioFailure(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .dataEncoding:
+            return "profile secret is not valid UTF-8"
+        case .permissionMismatch(let detail):
+            return "profile secret file has the wrong mode (\(detail)); refusing to read it"
+        case .ownerMismatch:
+            return "profile secret file is owned by another user; refusing to read it"
+        case .ioFailure(let detail):
+            return "profile secret file I/O failed: \(detail)"
+        }
+    }
 }
 
 public enum ModelProfileKeychain {

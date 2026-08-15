@@ -2,10 +2,25 @@ import Darwin
 import Foundation
 
 /// Errors raised by `FDChannel.sendFD` / `sendData` / `receiveMessage`.
-public enum FDChannelError: Error, Equatable {
+public enum FDChannelError: LocalizedError, Equatable {
     case sendFailed(Int32)          // errno from sendmsg/write or setup
     case receiveFailed(Int32)       // errno from recvmsg
     case peerClosed                 // clean EOF from the peer
+
+    public var errorDescription: String? {
+        switch self {
+        case .sendFailed(let code):
+            return "fd channel send failed: errno \(code) (\(Self.errnoText(code)))"
+        case .receiveFailed(let code):
+            return "fd channel receive failed: errno \(code) (\(Self.errnoText(code)))"
+        case .peerClosed:
+            return "fd channel peer closed the connection (clean EOF)"
+        }
+    }
+
+    private static func errnoText(_ code: Int32) -> String {
+        String(cString: strerror(code))
+    }
 }
 
 /// Structured header accompanying every vended pane fd (JSON-encoded into the

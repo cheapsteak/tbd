@@ -10,15 +10,22 @@ struct PaneKey: Hashable {
     let paneID: String
 }
 
-enum PaneFanoutError: Error {
+enum PaneFanoutError: LocalizedError {
     case pipeAllocationFailed(Int32)
+
+    var errorDescription: String? {
+        switch self {
+        case .pipeAllocationFailed(let code):
+            return "pipe(2) for the pane fanout sink failed: \(String(cString: strerror(code))) (errno \(code))"
+        }
+    }
 }
 
 /// Failures of `PaneFanout.writeReplay`. `notAttached` and `superseded` are
 /// distinct so the attach orchestrator can tell "the pane is gone" from "my
 /// attach was replaced by a newer one" (the latter is a normal race, not an
 /// error worth surfacing).
-enum PaneReplayWriteError: Error, Equatable {
+enum PaneReplayWriteError: LocalizedError, Equatable {
     /// No sink registered for the key (detached, timed out, or never attached).
     case notAttached
     /// A sink exists but belongs to a different attach generation — a
@@ -29,6 +36,19 @@ enum PaneReplayWriteError: Error, Equatable {
     /// write(2) failed with an errno other than EAGAIN/EINTR (e.g. EPIPE
     /// after the app closed the read end).
     case writeFailed(errno: Int32)
+
+    var errorDescription: String? {
+        switch self {
+        case .notAttached:
+            return "Replay write failed: no sink is registered for the pane"
+        case .superseded:
+            return "Replay write failed: the pane's sink belongs to a newer attach generation"
+        case let .deadlineExceeded(written, total):
+            return "Replay write timed out with the pipe full: wrote \(written) of \(total) bytes"
+        case .writeFailed(let code):
+            return "Replay write(2) failed: \(String(cString: strerror(code))) (errno \(code))"
+        }
+    }
 }
 
 /// Locked snapshot of one pane's flow-control counters (Phase B M1/M3) —

@@ -5,7 +5,7 @@ import TBDShared
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "gc")
 
 /// Errors thrown by `OrphanGC.restore(recordID:)`.
-public enum OrphanGCError: Error, CustomStringConvertible, Equatable {
+public enum OrphanGCError: LocalizedError, CustomStringConvertible, Equatable {
     /// No `ReapRecord` exists with the given id.
     case recordNotFound(UUID)
     /// `restore(recordID:)` only supports `.agentWorktree` records — scratchpads
@@ -25,6 +25,8 @@ public enum OrphanGCError: Error, CustomStringConvertible, Equatable {
             return "OrphanGC: reap record \(id) was already restored"
         }
     }
+
+    public var errorDescription: String? { description }
 }
 
 // `OrphanGC.sweep` returns `TBDShared.GCSweepResult` (the Codable RPC wire

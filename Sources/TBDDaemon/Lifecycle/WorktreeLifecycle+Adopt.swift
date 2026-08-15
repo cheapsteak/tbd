@@ -97,7 +97,7 @@ extension WorktreeLifecycle {
     }
 }
 
-public enum WorktreeAdoptError: Error, CustomStringConvertible {
+public enum WorktreeAdoptError: LocalizedError, CustomStringConvertible {
     case notInGitWorktreeList(path: String)
 
     public var description: String {
@@ -106,4 +106,6 @@ public enum WorktreeAdoptError: Error, CustomStringConvertible {
             return "Path is not registered in `git worktree list` for the resolved repo: \(path). Run `git worktree repair` and retry."
         }
     }
+
+    public var errorDescription: String? { description }
 }

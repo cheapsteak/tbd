@@ -2,10 +2,22 @@ import Foundation
 import os
 
 /// Error surfaced to command senders.
-enum TmuxCommandError: Error, Equatable {
+enum TmuxCommandError: LocalizedError, Equatable {
     case commandFailed(lines: [String])   // %error block
     case connectionClosed                  // stream ended / client torn down with commands pending
     case invalidCommand                    // command text was blank or contained a newline (would desync the FIFO)
+
+    var errorDescription: String? {
+        switch self {
+        case .commandFailed(let lines):
+            let detail = lines.joined(separator: " / ")
+            return "tmux command failed: \(detail.isEmpty ? "(no %error detail)" : detail)"
+        case .connectionClosed:
+            return "tmux control-mode connection closed with the command still pending"
+        case .invalidCommand:
+            return "tmux command text was blank or contained a newline"
+        }
+    }
 }
 
 /// A single command queued on the control stream.

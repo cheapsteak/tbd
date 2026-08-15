@@ -236,7 +236,7 @@ public actor ActuationLog {
     /// already reached the file would duplicate it; re-appending after a
     /// half-written line would glue the retry onto the fragment and make one
     /// unparseable line out of two rows.
-    private enum AppendFailure: Error {
+    private enum AppendFailure: LocalizedError {
         /// Nothing reached the file (encode, rotate, open, or a `write` that
         /// failed on its first byte). A plain re-append is safe.
         case nothingWritten(any Error)
@@ -250,6 +250,25 @@ public actor ActuationLog {
         /// into, so the retry can tell "still the same file" from "replaced
         /// under us" — `nil` only if even `fstat` on the open descriptor failed.
         case unflushed(any Error, identity: FileIdentity?)
+
+        var errorDescription: String? {
+            switch self {
+            case .nothingWritten(let underlying):
+                return "actuation-log append failed before any byte reached the file: "
+                    + underlying.localizedDescription
+            case .partiallyWritten(let underlying, let line, let offset, let identity):
+                return "actuation-log append wrote \(offset) of \(line.count) bytes"
+                    + " into \(Self.render(identity)): " + underlying.localizedDescription
+            case .unflushed(let underlying, let identity):
+                return "actuation-log append wrote the whole row into \(Self.render(identity))"
+                    + " but fsync failed: " + underlying.localizedDescription
+            }
+        }
+
+        private static func render(_ identity: FileIdentity?) -> String {
+            guard let identity else { return "an unidentified file" }
+            return "device \(identity.device) inode \(identity.inode)"
+        }
     }
 
     /// The `(device, inode)` pair naming one file on disk.

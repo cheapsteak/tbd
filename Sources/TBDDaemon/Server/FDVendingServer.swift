@@ -3,10 +3,21 @@ import Foundation
 import TBDShared
 import os
 
-enum FDVendingServerError: Error, Equatable {
+enum FDVendingServerError: LocalizedError, Equatable {
     case notConnected
     case bindFailed(Int32)
     case listenFailed(Int32)
+
+    var errorDescription: String? {
+        switch self {
+        case .notConnected:
+            return "No sidecar connection is adopted"
+        case .bindFailed(let code):
+            return "bind(2) on the sidecar socket failed: \(String(cString: strerror(code))) (errno \(code))"
+        case .listenFailed(let code):
+            return "listen(2) on the sidecar socket failed: \(String(cString: strerror(code))) (errno \(code))"
+        }
+    }
 }
 
 /// Lock-protected connection-epoch counter, readable off-actor (R5-M2). Each

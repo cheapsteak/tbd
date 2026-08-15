@@ -92,8 +92,15 @@ public struct RPCResponse: Codable, Sendable {
     }
 }
 
-public enum RPCError: Error, Sendable {
+public enum RPCError: LocalizedError, Sendable {
     case noResultData
+
+    public var errorDescription: String? {
+        switch self {
+        case .noResultData:
+            return "RPC response carried no result payload to decode"
+        }
+    }
 }
 
 /// Machine-readable code carried alongside `RPCResponse.error`'s human string,

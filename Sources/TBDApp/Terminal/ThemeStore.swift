@@ -109,14 +109,32 @@ final class ThemeStore: ObservableObject {
 
     // MARK: - Save
 
-    enum SaveError: Error, Equatable {
+    enum SaveError: LocalizedError, Equatable {
         case bundledIDCollision(String)
         case ioFailed(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .bundledIDCollision(let id):
+                return "Can't save theme \"\(id)\": a built-in theme already uses that name — pick a different one"
+            case .ioFailed(let reason):
+                return "Couldn't save the theme: \(reason)"
+            }
+        }
     }
 
-    enum DeleteError: Error, Equatable {
+    enum DeleteError: LocalizedError, Equatable {
         case notFound(String)
         case ioFailed(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .notFound(let id):
+                return "Can't delete theme \"\(id)\": no custom theme with that name"
+            case .ioFailed(let reason):
+                return "Couldn't delete the theme: \(reason)"
+            }
+        }
     }
 
     @discardableResult

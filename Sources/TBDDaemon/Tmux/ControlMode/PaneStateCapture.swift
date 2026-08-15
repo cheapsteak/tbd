@@ -71,7 +71,7 @@ struct PaneState: Equatable, Sendable {
 /// so the parser throws instead of skipping (a half-parsed state would replay
 /// wrong modes into the pane). Blank lines are tolerated; anything else
 /// malformed throws.
-enum PaneStateCaptureError: Error, Equatable {
+enum PaneStateCaptureError: LocalizedError, Equatable {
     /// A non-blank line didn't have exactly `PaneStateCapture.fieldCount`
     /// space-separated fields.
     case wrongFieldCount(line: String, expected: Int, actual: Int)
@@ -79,6 +79,15 @@ enum PaneStateCaptureError: Error, Equatable {
     /// its `%` prefix). An *empty* field is how an unknown format variable
     /// manifests — tmux expands unknown `#{...}` to nothing.
     case invalidField(name: String, value: String)
+
+    var errorDescription: String? {
+        switch self {
+        case let .wrongFieldCount(line, expected, actual):
+            return "Pane-state line had \(actual) fields, expected \(expected): \(line)"
+        case let .invalidField(name, value):
+            return "Pane-state field \(name) could not be parsed from value: \(value.isEmpty ? "(empty)" : value)"
+        }
+    }
 }
 
 /// The canonical `list-panes -F` format for pane-state capture, plus its

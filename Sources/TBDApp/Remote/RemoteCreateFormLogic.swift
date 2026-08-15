@@ -12,9 +12,18 @@ enum RemoteCreateFormLogic {
     /// A field failed local validation. Carries the field's raw `name` (the
     /// key the provider knows it by), so the view can look up its `label`
     /// for display.
-    enum FieldError: Error, Equatable {
+    enum FieldError: LocalizedError, Equatable {
         case missingRequired(fieldName: String)
         case invalidInt(fieldName: String)
+
+        var errorDescription: String? {
+            switch self {
+            case .missingRequired(let fieldName):
+                return "\(fieldName) is required"
+            case .invalidInt(let fieldName):
+                return "\(fieldName) must be a whole number"
+            }
+        }
     }
 
     /// Derives the `repo` create-param prefill from a repo's `remoteURL`,
