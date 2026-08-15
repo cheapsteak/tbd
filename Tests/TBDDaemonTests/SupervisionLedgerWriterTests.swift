@@ -17,6 +17,59 @@ struct SupervisionLedgerWriterTests {
 
     private static let epoch = Date(timeIntervalSince1970: 1_700_000_000)
 
+    /// Every project named by a line in the file, in order — enough to say
+    /// which line landed where.
+    private func projects(at path: String) throws -> [String?] {
+        guard let data = FileManager.default.contents(atPath: path) else { return [] }
+        return try data.split(separator: 0x0A, omittingEmptySubsequences: true).map { raw in
+            try JSONDecoder().decode(SupervisionLedgerLine.self, from: Data(raw)).project
+        }
+    }
+
+    private static func line(_ project: String) -> SupervisionLedgerLine {
+        .projectOn(project: project, mode: "attended", roster: [], at: epoch)
+    }
+
+    // MARK: - The file the handle points at
+
+    @Test("A ledger removed between appends is noticed and recreated, not written into a ghost")
+    func removedFileIsRecreated() async throws {
+        let path = try Self.makePath()
+        let directory = URL(fileURLWithPath: path).deletingLastPathComponent()
+        let writer = SupervisionLedgerWriter(path: path)
+
+        #expect(await writer.append(Self.line("acme-web")))
+        // Someone moved the whole directory aside. The still-open `O_APPEND`
+        // descriptor would happily accept writes into the unlinked inode —
+        // into a file nobody will ever read — so the identity check has to
+        // fail the append and let the reopen-retry recreate the path.
+        try FileManager.default.removeItem(at: directory)
+
+        #expect(await writer.append(Self.line("acme-api")),
+                "the retry recreates the file rather than reporting the line lost")
+        #expect(try projects(at: path) == ["acme-api"])
+    }
+
+    @Test("A ledger replaced between appends is followed, not written past")
+    func replacedFileIsFollowed() async throws {
+        let path = try Self.makePath()
+        let directory = URL(fileURLWithPath: path).deletingLastPathComponent()
+        let archived = directory.appendingPathComponent("archived.jsonl").path
+        let writer = SupervisionLedgerWriter(path: path)
+
+        #expect(await writer.append(Self.line("acme-web")))
+        // An external rotation: the segment is moved aside and a fresh file
+        // takes its place at the same path. The line must land in the file
+        // that is at `path` *now*.
+        try FileManager.default.moveItem(atPath: path, toPath: archived)
+        FileManager.default.createFile(atPath: path, contents: Data())
+
+        #expect(await writer.append(Self.line("acme-api")))
+        #expect(try projects(at: path) == ["acme-api"], "the new line follows the path")
+        #expect(try projects(at: archived) == ["acme-web"],
+                "and the rotated segment keeps only what it already held")
+    }
+
     @Test("Each append is one whole line, and a line survives the round trip")
     func appendsWholeLines() async throws {
         let path = try Self.makePath()

@@ -120,6 +120,17 @@ public actor SupervisionHeartbeat {
         }
     }
 
+    /// Whether the periodic timer is currently armed.
+    ///
+    /// Internal, and a deliberate test seam rather than an accident of access
+    /// control: the timer's *presence* can be observed by waiting on the clock,
+    /// but its **absence** cannot — a clock advance with no sleeper registered
+    /// simply moves time, so "no tick arrived" is equally consistent with a
+    /// disarmed timer and with one that had not yet reached its sleep. Every
+    /// assertion here that matters is an absence, so it needs to be read rather
+    /// than waited for.
+    var isTimerArmed: Bool { loop != nil }
+
     private func startTimer() {
         guard loop == nil else { return }
         loop = Task { [weak self] in
