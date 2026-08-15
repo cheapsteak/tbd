@@ -31,6 +31,16 @@ public final class RPCRouter: Sendable {
     /// `nil` in mock mode / unit tests, where a poll simply refreshes statuses
     /// and judges nothing.
     public nonisolated(unsafe) var mergeTrigger: AllResolvedMergeTrigger?
+    /// Fleet supervision's single writer of `~/tbd/supervision/` — the
+    /// operator's file, the ledger beside it, and the coverage decisions that
+    /// connect them. Wired post-construction by `Daemon.swift` (mirrors
+    /// `orphanGC`); `nil` in mock mode / unit tests that don't need it, where
+    /// the `supervise.*` handlers refuse with a named condition rather than
+    /// crashing. Never defaulted to a store built on `TBDConstants`: that
+    /// default is the "helper ignores its caller's injected seam" shape, and
+    /// every router a test constructs would share the developer's real
+    /// `~/tbd/supervision`.
+    public nonisolated(unsafe) var supervision: SupervisionStore?
     /// Orphan-GC actor. `nil` in mock mode / unit tests that don't need it;
     /// set post-construction by `Daemon.swift` (mirrors `claudeUsagePoller`).
     /// The `gc.*` handlers return an error response rather than crashing when
@@ -593,6 +603,20 @@ public final class RPCRouter: Sendable {
                 return try await handleGCRestore(request.paramsData)
             case RPCMethod.gcSweepNow:
                 return try await handleGCSweepNow(request.paramsData)
+            case RPCMethod.superviseStatus:
+                return try await handleSuperviseStatus()
+            case RPCMethod.superviseSetProjectMark:
+                return try await handleSuperviseSetProjectMark(request.paramsData)
+            case RPCMethod.superviseSetMode:
+                return try await handleSuperviseSetMode(request.paramsData)
+            case RPCMethod.superviseProjectList:
+                return try await handleSuperviseProjectList()
+            case RPCMethod.superviseProjectCreate:
+                return try await handleSuperviseProjectCreate(request.paramsData)
+            case RPCMethod.superviseProjectDelete:
+                return try await handleSuperviseProjectDelete(request.paramsData)
+            case RPCMethod.superviseProjectMove:
+                return try await handleSuperviseProjectMove(request.paramsData)
             case RPCMethod.panelGet:
                 return try await handlePanelGet(request.paramsData)
             case RPCMethod.panelApply:

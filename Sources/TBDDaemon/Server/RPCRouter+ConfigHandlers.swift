@@ -173,16 +173,29 @@ extension RPCRouter {
     }
 
     /// Persist the fleet supervision brake (design 2026-07-26 §3, §7) — the
-    /// fleet-wide on/off switch for supervision. Shipped OFF and, for now,
-    /// inert: nothing in the daemon reads this column to gate an actuation
-    /// yet, because the rest of the supervision subsystem (per-project marks,
-    /// playbooks, the sweep, actuation preconditions) is landing in the same
-    /// series of changes. This handler exists so the switch itself — settable
-    /// from app and CLI, broadcast on change, surviving restart — is in place
-    /// before anything depends on it.
+    /// fleet-wide on/off switch for supervision. Shipped OFF; nothing in the
+    /// daemon reads this column to gate an actuation yet, because the acting
+    /// half of supervision (the sweep, deliveries, actuation preconditions)
+    /// lands in later slices. What the column already does is decide what
+    /// `supervise.status` reports and what the heartbeat publishes.
+    ///
+    /// The change is recorded in the supervision ledger, and **the line carries
+    /// no project and no mode**: the brake is one bit over the whole fleet, so
+    /// naming a project on its line would be a lie. That holds by construction
+    /// — the factories behind `recordBrakeChange` take no project.
+    ///
+    /// The column is written on every call, because writing either value is the
+    /// explicit gesture that lifts it out of NULL forever after. The *ledger*
+    /// line is written only when the resolved brake actually moved: sending
+    /// `false` while the brake already stands engaged is a gesture on the
+    /// column but no change to what the brake means, and a gesture that changes
+    /// nothing is not a decision.
     func handleConfigSetSupervisionEnabled(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(ConfigSetSupervisionEnabledParams.self, from: paramsData)
+        let before = try await supervisionBrake()
         try await db.config.setSupervisionEnabled(enabled: params.enabled)
+        let after: SupervisionBrakeState = params.enabled ? .released : .engaged
+        await supervision?.recordBrakeChange(engaged: !params.enabled, changed: before != after)
         // Reuse the existing config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()
