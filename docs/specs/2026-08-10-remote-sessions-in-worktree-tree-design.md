@@ -417,7 +417,19 @@ a hazard that is not present. So:
 ### Revive
 
 Revive returns a lane to the working set, and how far it reaches is decided by
-what archive did to the session. Four cases, mirroring archive's own:
+what archive did to the session.
+
+**A `gone` row is checked first, before any of the cases below.** A row that is
+both `archived` and `gone` has a session the provider has stopped listing, so
+there is nothing to unarchive whatever the provider declares — reviving it flips
+the row alone and says the session is no longer there. Without that precedence
+such a row would fall into a capability-keyed case and issue a provider call
+that can only come back `not_found`: not a data-loss risk, but a confusing
+error where a plain statement belongs. This is the same precedence the
+terminated case already takes, for the same reason — what happened to the
+session outranks what the provider can be asked.
+
+Four cases then remain, mirroring archive's own:
 
 - **Nothing was retired on the provider** — archive flipped the row alone. Revive
   flips it back. The session never left the provider's working set, so there is

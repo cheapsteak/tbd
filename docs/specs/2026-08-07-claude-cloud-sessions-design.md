@@ -335,9 +335,7 @@ The declaration also carries no statement of what a remote *can do*. A grammar f
 Location for a new session resolves most-specific-first:
 
 1. **Explicit per-creation choice** in the create sheet. Always available, always wins.
-2. **The repository's approved declaration.** Several declared remotes are offered in order with their labels.
-3. **Global default location**, when configured.
-4. **Local.**
+2. **The repository's approved declaration.** Several declared remotes are offered in order with their labels. **Unusable entries are skipped within this tier, not around it**: an entry naming an unregistered provider, or a built-in one whose flag is off, is passed over and the next declared remote is offered. The tier is exhausted only when no declared remote is usable, and only then does resolution fall to tier 3. A repository that lists two remotes has said both are appropriate for it, so dropping to a global default while the second one is available would ignore what the declaration says in favour of a setting that knows nothing about this repository.
 
 A declaration naming an unregistered provider is configuration drift: resolution degrades to the next tier and the app flags it, rather than blocking creation. **A declaration naming a built-in provider whose flag is off degrades identically** — `claude-cloud` is compiled in rather than registry-loaded, so it does not fall under "unregistered" and needs saying separately. It is skipped at resolution and, importantly, **its trust prompt is never shown**: asking a user to approve a declaration for a disabled feature would display a prompt value for something that cannot run, and would leave an approval recorded for a decision they never got to act on. A disabled feature stays invisible rather than surfacing as a create that fails at the RPC gate with an error explaining nothing.
 
