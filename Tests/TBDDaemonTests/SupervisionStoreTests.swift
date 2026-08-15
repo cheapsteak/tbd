@@ -308,6 +308,28 @@ struct SupervisionStoreTests {
         #expect(b.projects.first?.spanStartedAt == nil)
     }
 
+    @Test("A project turned off by hand still renders exactly off, span or no span")
+    func handClearedMarkRendersBareOffDespiteAnOpenLine() async throws {
+        let web = Self.repo("acme-web")
+        let fleet = StubFleet(repoList: [web])
+        let fixture = try Self.makeFixture(fleet: fleet)
+        _ = try await fixture.store.setProjectMark(project: "acme-web", on: true)
+
+        // The operator clears the mark in the file itself, so the ledger keeps
+        // an opening line with no `off` after it. A restart therefore recovers
+        // an open span for a project whose mark is gone — the one arrangement
+        // where "off" and "has a span" meet.
+        try SupervisionFileStore(fileURL: URL(fileURLWithPath: fixture.filePath))
+            .save(SupervisionFile())
+        let restarted = Self.reopen(fixture, fleet: fleet)
+        try await restarted.load()
+
+        let status = try await restarted.status(brake: .released)
+        #expect(status.projects.first?.on == false)
+        #expect(status.projects.first?.spanStartedAt == nil,
+                "an off project renders exactly off — a span here would be a third state")
+    }
+
     // MARK: - Restart
 
     @Test("A restart resumes the span from the two files and replays no decision")

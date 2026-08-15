@@ -77,6 +77,24 @@ struct SupervisionHeartbeatTests {
         #expect(try read(path)?.brake == .released)
     }
 
+    @Test("The file exists before a single interval has elapsed")
+    func firstTickPrecedesTheFirstInterval() async throws {
+        let path = try Self.path()
+        let snapshots = Snapshots(Self.statusFile(brake: .released))
+        let clock = TestClock()
+        let heartbeat = SupervisionHeartbeat(
+            path: path, snapshot: snapshots.provider,
+            interval: SupervisionHeartbeat.defaultInterval, clock: clock)
+
+        await heartbeat.start()
+        // Parking on the clock is the loop's first act after its immediate
+        // write, so a registered sleeper with no file on disk would mean the
+        // daemon published nothing for a whole interval after boot.
+        await clock.waitForSuspension()
+        #expect(FileManager.default.fileExists(atPath: path))
+        await heartbeat.stop()
+    }
+
     @Test("Stopping ends the cadence")
     func stopEndsTheCadence() async throws {
         let path = try Self.path()
