@@ -110,7 +110,26 @@ public actor SupervisionHeartbeat {
     /// one the timer ends up matching, whichever order they resume in.
     private var brakeReleased = false
 
-    public func applyBrake(released: Bool) async {
+    /// The highest ordering token seen from the store's gate. An edge carrying
+    /// a lower one lost its race and is discarded.
+    private var lastBrakeSequence: UInt64 = 0
+
+    /// - Parameter sequence: the ordering token from
+    ///   `SupervisionStore.applyBrakeChange`, or `0` at boot where there is no
+    ///   transition to order against.
+    ///
+    /// **Two orderings, and both are needed.** The sequence orders edges
+    /// against the *commits* they describe: the store's gate serializes the
+    /// commit and the ledger line, but the heartbeat is notified after that
+    /// region ends, so two toggles can arrive here in the opposite order to the
+    /// one they committed in. Discarding a lower token is what stops the
+    /// chronologically losing toggle from arming or disarming the timer. The
+    /// `brakeReleased` re-check below orders edges against *each other* inside
+    /// this actor, where the write is an await and a later edge can complete
+    /// entirely within an earlier one's suspension. Neither subsumes the other.
+    public func applyBrake(released: Bool, sequence: UInt64) async {
+        guard sequence >= lastBrakeSequence else { return }
+        lastBrakeSequence = sequence
         brakeReleased = released
         await tick()
         if brakeReleased {

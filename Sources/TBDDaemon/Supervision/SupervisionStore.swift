@@ -40,6 +40,32 @@ public enum SupervisionStoreError: Error, Equatable, CustomStringConvertible, Lo
     public var errorDescription: String? { description }
 }
 
+/// What one brake transition did, and where it sits in the order they were
+/// committed.
+///
+/// The sequence exists because more than one thing has to react to a brake
+/// change — the ledger, and the heartbeat's timer — and only the store's gate
+/// knows what order the transitions actually landed in. Handing that order out
+/// as a token lets a consumer outside the gate discard an edge that lost its
+/// race, **without** lengthening the serialized region to cover that consumer's
+/// work. It is a number rather than a callback on purpose: the store is the
+/// single writer of the record and must not acquire references to the observers
+/// that read it — the heartbeat's snapshot closure already holds the store, so
+/// injecting the heartbeat back into the store would close a retain cycle
+/// between two actors.
+public struct SupervisionBrakeTransition: Sendable, Equatable {
+    /// Whether the brake actually moved. A gesture that resolved to no change
+    /// still gets a sequence — it is an ordering token, not a change counter.
+    public let changed: Bool
+    /// Monotonic within one store, assigned inside the gate.
+    public let sequence: UInt64
+
+    public init(changed: Bool, sequence: UInt64) {
+        self.changed = changed
+        self.sequence = sequence
+    }
+}
+
 /// The daemon's single writer of `~/tbd/supervision/supervision.json`, and the
 /// one place a coverage decision becomes a ledger line.
 ///
@@ -643,21 +669,30 @@ public actor SupervisionStore {
     /// `SupervisionLedgerLine.brakeEngaged` / `.brakeReleased` take none, which
     /// is what keeps a fleet-wide line from ever naming one project.
     ///
-    /// - Returns: whether the brake actually moved.
+    /// Orders brake transitions for consumers outside this actor. Assigned
+    /// inside the gate, so its order is the commit order by construction.
+    private var brakeSequence: UInt64 = 0
+
+    /// - Returns: whether the brake actually moved, and the ordering token that
+    ///   says where this transition sits relative to every other one.
     @discardableResult
     public func applyBrakeChange(
         released: Bool, commit: @Sendable () async throws -> Bool
-    ) async throws -> Bool {
+    ) async throws -> SupervisionBrakeTransition {
         await acquireBrakeGate()
         defer { releaseBrakeGate() }
 
+        brakeSequence += 1
+        let sequence = brakeSequence
         let wasReleased = try await commit()
-        guard wasReleased != released else { return false }
+        guard wasReleased != released else {
+            return SupervisionBrakeTransition(changed: false, sequence: sequence)
+        }
         let at = now()
         await ledger.append(released
             ? SupervisionLedgerLine.brakeReleased(at: at)
             : SupervisionLedgerLine.brakeEngaged(at: at))
-        return true
+        return SupervisionBrakeTransition(changed: true, sequence: sequence)
     }
 
     // MARK: - Projects

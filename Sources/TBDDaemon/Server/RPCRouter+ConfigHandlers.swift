@@ -201,17 +201,21 @@ extension RPCRouter {
             try await db.config.setSupervisionEnabled(enabled: params.enabled)
         }
         if let supervision {
-            try await supervision.applyBrakeChange(released: params.enabled, commit: commit)
+            // The transition's ordering token travels with the edge, so the
+            // heartbeat can discard a toggle that lost its race in the gate.
+            // Notifying from out here rather than from inside the gate is
+            // deliberate: publishing performs a file write, and every brake
+            // gesture would otherwise pay for it inside the serialized region.
+            let transition = try await supervision.applyBrakeChange(
+                released: params.enabled, commit: commit)
+            await supervisionHeartbeat?.applyBrake(
+                released: params.enabled, sequence: transition.sequence)
         } else {
             // Nothing to keep in step with, so the column moves on its own. The
             // brake is a daemon-wide switch and must not depend on supervision
             // being wired — see `brakeWorksWithoutAStore`.
             _ = try await commit()
         }
-        // Publish the edge and match the timer to it. Doing this here rather
-        // than inside the store keeps the heartbeat out of the serialized
-        // region: it reads state, it does not decide any.
-        await supervisionHeartbeat?.applyBrake(released: params.enabled)
         // Reuse the existing config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()

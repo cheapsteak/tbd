@@ -973,7 +973,9 @@ public final class Daemon: Sendable {
                 // effectively on" and never alarms about.
                 let brakeReleased = (try? await database.config.get())?.supervisionEnabled
                     ?? Config.supervisionEnabledDefault
-                await heartbeat.applyBrake(released: brakeReleased)
+                // Sequence 0: boot orders against nothing, and every real
+                // transition the store hands out starts at 1.
+                await heartbeat.applyBrake(released: brakeReleased, sequence: 0)
             }
 
             // 13. Periodic git status refresh (branch sync, conflict detection).

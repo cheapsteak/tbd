@@ -193,9 +193,25 @@ struct SupervisionStoreTests {
         // The column moved in both cases; what it resolved to did not.
         let engagedAgain = try await fixture.store.applyBrakeChange(released: false) { false }
         let releasedAgain = try await fixture.store.applyBrakeChange(released: true) { true }
-        #expect(engagedAgain == false)
-        #expect(releasedAgain == false)
+        #expect(engagedAgain.changed == false)
+        #expect(releasedAgain.changed == false)
         #expect(try lines(at: fixture.ledgerPath).isEmpty)
+        // A gesture that moved nothing still takes an ordering token: the
+        // sequence says where a transition sits, not whether it mattered.
+        #expect(engagedAgain.sequence < releasedAgain.sequence)
+    }
+
+    @Test("Every transition takes a token, and the tokens follow commit order")
+    func brakeTransitionsAreOrdered() async throws {
+        let fixture = try Self.makeFixture(fleet: StubFleet(repoList: [Self.repo("acme-web")]))
+
+        let first = try await fixture.store.applyBrakeChange(released: true) { false }
+        let second = try await fixture.store.applyBrakeChange(released: false) { true }
+        let third = try await fixture.store.applyBrakeChange(released: true) { false }
+
+        #expect(first.sequence < second.sequence)
+        #expect(second.sequence < third.sequence)
+        #expect([first, second, third].allSatisfy(\.changed))
     }
 
     @Test("Overlapping brake toggles cannot reach the record out of step with the column")

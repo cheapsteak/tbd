@@ -145,7 +145,7 @@ struct SupervisionHeartbeatTests {
             path: path, snapshot: snapshots.provider,
             interval: SupervisionHeartbeat.defaultInterval, clock: clock)
 
-        await heartbeat.applyBrake(released: true)
+        await heartbeat.applyBrake(released: true, sequence: 1)
         // The first advance proves the loop reached its sleep, which it can
         // only do after the immediate tick. The second waits for the sleep that
         // follows the *second* tick — so its returning is the evidence that a
@@ -167,7 +167,7 @@ struct SupervisionHeartbeatTests {
             path: path, snapshot: snapshots.provider,
             interval: SupervisionHeartbeat.defaultInterval, clock: clock)
 
-        await heartbeat.applyBrake(released: true)
+        await heartbeat.applyBrake(released: true, sequence: 1)
         // Parking on the clock is the loop's first act after its immediate
         // write, so a registered sleeper with no file on disk would mean the
         // daemon published nothing for a whole interval after boot.
@@ -185,7 +185,7 @@ struct SupervisionHeartbeatTests {
             path: path, snapshot: snapshots.provider,
             interval: SupervisionHeartbeat.defaultInterval, clock: clock)
 
-        await heartbeat.applyBrake(released: true)
+        await heartbeat.applyBrake(released: true, sequence: 1)
         await clock.advanceWhenSuspended(by: SupervisionHeartbeat.defaultInterval)
         // `stop()` returns only once the loop has unwound, so what follows is
         // an assertion about a settled state rather than a race.
@@ -206,7 +206,7 @@ struct SupervisionHeartbeatTests {
             path: path, snapshot: snapshots.provider,
             interval: SupervisionHeartbeat.defaultInterval, clock: clock)
 
-        await heartbeat.applyBrake(released: false)
+        await heartbeat.applyBrake(released: false, sequence: 2)
         #expect(snapshots.calls == 1, "the edge is published even while braked")
         #expect(try read(path)?.brake == .engaged)
 
@@ -228,7 +228,7 @@ struct SupervisionHeartbeatTests {
             path: path, snapshot: snapshots.provider,
             interval: SupervisionHeartbeat.defaultInterval, clock: clock)
 
-        await heartbeat.applyBrake(released: true)
+        await heartbeat.applyBrake(released: true, sequence: 1)
         // Each advance waits for a registered sleeper first, so returning at
         // all is the evidence the timer is armed and re-arming.
         await clock.advanceWhenSuspended(by: SupervisionHeartbeat.defaultInterval)
@@ -236,7 +236,7 @@ struct SupervisionHeartbeatTests {
         #expect(snapshots.calls >= 2, "the timer runs while the brake is released")
 
         snapshots.set(Self.statusFile(brake: .engaged))
-        await heartbeat.applyBrake(released: false)
+        await heartbeat.applyBrake(released: false, sequence: 2)
         #expect(try read(path)?.brake == .engaged, "the engaging edge is published")
 
         // `applyBrake` awaits the loop's unwind before returning, so no tick
@@ -259,7 +259,12 @@ struct SupervisionHeartbeatTests {
         // actor — exactly the window in which a second edge can run start to
         // finish. Without the intent re-check, the parked call would resume and
         // arm a timer the engaging edge had just decided against.
-        let releasing = Task { await heartbeat.applyBrake(released: true) }
+        // Whatever happens below, the park is lifted on the way out, so a
+        // failed assertion degrades to one red test rather than a task parked
+        // for the rest of the run. `release()` is idempotent.
+        defer { snapshots.release() }
+
+        let releasing = Task { await heartbeat.applyBrake(released: true, sequence: 1) }
         await snapshots.waitForFirstCall()
 
         // Deterministic, and this is why: the engaging edge does not depend on
@@ -267,7 +272,7 @@ struct SupervisionHeartbeatTests {
         // released. No yields, no polling, no timing — unlike its sibling at
         // the store layer, where the guard's whole purpose is that the second
         // caller *cannot* proceed and so cannot be awaited.
-        let engaging = Task { await heartbeat.applyBrake(released: false) }
+        let engaging = Task { await heartbeat.applyBrake(released: false, sequence: 2) }
         await engaging.value
 
         snapshots.release()
@@ -278,6 +283,28 @@ struct SupervisionHeartbeatTests {
             one here is a loop ticking under a brake the operator pulled
             """)
         #expect(snapshots.calls == 2, "both edges published; neither was skipped")
+    }
+
+    @Test("A brake edge that lost its ordering in the store's gate cannot move the timer")
+    func staleBrakeEdgeIsDiscarded() async throws {
+        let path = try Self.path()
+        let snapshots = Snapshots(Self.statusFile(brake: .engaged))
+        let heartbeat = SupervisionHeartbeat(
+            path: path, snapshot: snapshots.provider,
+            interval: SupervisionHeartbeat.defaultInterval, clock: TestClock())
+
+        // The store's gate committed `engaged` second, so it holds the higher
+        // token. The notifications reach the heartbeat in the other order —
+        // which is the whole race, since the notification happens after the
+        // serialized region ends.
+        await heartbeat.applyBrake(released: false, sequence: 2)
+        await heartbeat.applyBrake(released: true, sequence: 1)
+
+        #expect(await heartbeat.isTimerArmed == false, """
+            the losing toggle must not arm a timer under a brake the winning \
+            one engaged — a stale edge is discarded, not applied
+            """)
+        #expect(snapshots.calls == 1, "and the stale edge publishes nothing either")
     }
 
     @Test("The heartbeat publishes an engaged brake — observability is never withheld")
