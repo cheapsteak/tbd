@@ -42,7 +42,9 @@ enum PaneReplayWriteError: LocalizedError, Equatable {
         case .notAttached:
             return "Replay write failed: no sink is registered for the pane"
         case .superseded:
-            return "Replay write failed: the pane's sink belongs to a newer attach generation"
+            // Not a failure: the doc comment above calls this a normal race, so
+            // the text must not read like a bug when it reaches a log line.
+            return "Replay write superseded: the pane's sink belongs to a newer attach generation"
         case let .deadlineExceeded(written, total):
             return "Replay write timed out with the pipe full: wrote \(written) of \(total) bytes"
         case .writeFailed(let code):
