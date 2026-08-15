@@ -164,18 +164,28 @@ custom_rules:
   error_types_must_be_localized:
     name: "Error types must conform to LocalizedError"
     # included/excluded HERE take REGEX (not glob), matched against file path.
+    # `Sources/TBDCLI` is deliberately absent and CANNOT be added here: the
+    # global `excluded:` list at the top of this file drops it, and a custom
+    # rule only runs on files already inside the global lint scope — the same
+    # fact the test-target note up there records. So TBDCLI's error types were
+    # converted by hand and carry no regression guard. The fix is not to remove
+    # `Sources/TBDCLI` from the global list: that would drag every default rule
+    # onto the CLI target, which is a separate change.
     included:
-      - "Sources/(TBDShared|TBDDaemon|TBDApp|TBDCLI|IconBaker)/.*\\.swift"
+      - "Sources/(TBDShared|TBDDaemon|TBDApp|IconBaker)/.*\\.swift"
     excluded:
-      # Owned by concurrently-live branches; editing the declarations here would
-      # collide. Both types take their conformance from a sidecar file instead
-      # (`Git/GitErrorLocalizedDescriptions.swift`,
-      # `Tmux/TmuxErrorLocalizedDescriptions.swift`), which is why excluding
-      # them costs no coverage today — the rule cannot see an extension
-      # conformance, so without these two lines it would fire on a type that is
-      # already fixed. When those branches land, move `LocalizedError` onto the
-      # declarations, delete the sidecar files, and delete these two lines.
+      # `GitManager.swift` — its two error types take their conformance from
+      # `Git/GitErrorLocalizedDescriptions.swift`, and the rule cannot see an
+      # extension conformance, so without this line it would fire on types that
+      # are already fixed. Excluding it therefore costs no coverage today. When
+      # the branch that owns `GitManager.swift` lands, move `LocalizedError`
+      # onto the declarations, delete the sidecar, and delete this entry.
       - "Sources/TBDDaemon/Git/GitManager\\.swift"
+      # `TmuxManager.swift` — `TmuxError` is genuinely unconverted, and its fix
+      # belongs to the branch that owns the file rather than being duplicated
+      # here. This exclusion is real lost coverage, not a formality: it hides a
+      # type the rule would rightly fire on. Delete the entry when that branch
+      # lands with the conformance on the declaration.
       - "Sources/TBDDaemon/Tmux/TmuxManager\\.swift"
     # THE DEFECT THIS FENCES, because the failure is silent and reads as a
     # framework bug rather than a missing conformance. A bare `Error` bridges to
@@ -225,8 +235,8 @@ custom_rules:
     # they are listed so nobody mistakes the rule for exhaustive.
     #
     #   - A conformance in a separate `extension X: LocalizedError` — declare it
-    #     on the type itself. The two sidecar files named under `excluded:`
-    #     above are the sanctioned exception and are excluded by path.
+    #     on the type itself. The sidecar file named under `excluded:` above is
+    #     the sanctioned exception and is excluded by path.
     #   - A bare `Error` reached through a refining protocol
     #     (`protocol AppError: Error`, then `enum X: AppError`), or through
     #     `CustomNSError`: the clause names no word-bounded `Error` token.

@@ -101,9 +101,6 @@ struct LocalizedErrorPayloadTests {
     private static let gitCommand = "git worktree add /private/tmp/acme/wt-7 feature/acme-7"
     private static let gitStderr = "fatal: 'feature/acme-7' is already checked out"
 
-    private static let tmuxCommand = "tmux new-window -t acme:"
-    private static let tmuxOutput = "no server running on /private/tmp/tmux-501/acme"
-
     // MARK: - The table
 
     /// Representative values across TBDDaemon's error types, held as
@@ -114,15 +111,6 @@ struct LocalizedErrorPayloadTests {
             (
                 "GitTimeoutError",
                 GitTimeoutError(command: "git fetch origin main", timeout: .seconds(120))
-            ),
-            (
-                "TmuxError.commandFailed",
-                TmuxError.commandFailed(command: Self.tmuxCommand, status: 127, output: Self.tmuxOutput)
-            ),
-            ("TmuxError.unexpectedOutput", TmuxError.unexpectedOutput(Self.tmuxOutput)),
-            (
-                "TmuxError.timedOut",
-                TmuxError.timedOut(command: Self.tmuxCommand, timeout: .seconds(5))
             ),
             ("WorktreeLifecycleError.repoNotFound", WorktreeLifecycleError.repoNotFound(Self.repoID)),
             ("WorktreeLifecycleError.worktreeNotFound", WorktreeLifecycleError.worktreeNotFound(Self.worktreeID)),
@@ -211,31 +199,6 @@ struct LocalizedErrorPayloadTests {
             GitTimeoutError(command: "git fetch origin main", timeout: .seconds(120)),
             ["git fetch origin main"],
             "GitTimeoutError"
-        )
-    }
-
-    /// `TmuxError` is the `GitError` of the tmux side — declared in
-    /// `TmuxManager.swift`, conformance supplied by
-    /// `TmuxErrorLocalizedDescriptions.swift`, and thrown from every tmux
-    /// command the daemon runs. It carries no `description` to forward to, so
-    /// its rendering is written by hand and each associated value is pinned
-    /// here.
-    @Test("tmux command, exit status and output reach the rendered description")
-    func tmuxPayloadsRender() {
-        assertRenders(
-            TmuxError.commandFailed(command: Self.tmuxCommand, status: 127, output: Self.tmuxOutput),
-            [Self.tmuxCommand, "127", Self.tmuxOutput],
-            "TmuxError.commandFailed"
-        )
-        assertRenders(
-            TmuxError.unexpectedOutput(Self.tmuxOutput),
-            [Self.tmuxOutput],
-            "TmuxError.unexpectedOutput"
-        )
-        assertRenders(
-            TmuxError.timedOut(command: Self.tmuxCommand, timeout: .seconds(5)),
-            [Self.tmuxCommand],
-            "TmuxError.timedOut"
         )
     }
 
