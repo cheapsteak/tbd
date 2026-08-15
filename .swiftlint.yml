@@ -161,6 +161,52 @@ custom_rules:
     message: "Don't hand-build a path into ~/tbd, ~/.claude or ~/.codex out of the home directory — it ignores TBD_HOME / TBD_CLAUDE_HOST_HOME / TBD_TEST_CODEX_HOME and writes into the developer's real store under scripts/test.sh. Use TBDConstants (configDir, reposDir, worktreesDir, …), TBDConstants.claudeHostHome / ClaudeProfileConfigDirManager.resolveHostBaseDirectory, or CodexHomeManager. Suppress with `// swiftlint:disable:next no_home_relative_store_path - <reason>` only with a reason."
     severity: error
 
+  error_types_must_be_localized:
+    name: "Error types must conform to LocalizedError"
+    # included/excluded HERE take REGEX (not glob), matched against file path.
+    included:
+      - "Sources/(TBDShared|TBDDaemon|TBDApp)/.*\\.swift"
+    excluded:
+      # Owned by concurrently-live branches; converting them here would collide.
+      # Convert both when those branches land, then delete these two lines.
+      - "Sources/TBDDaemon/Git/GitManager\\.swift"
+      - "Sources/TBDDaemon/Tmux/TmuxManager\\.swift"
+    # THE DEFECT THIS FENCES, because the failure is silent and reads as a
+    # framework bug rather than a missing conformance. A bare `Error` bridges to
+    # NSError, and `localizedDescription` on that bridge renders
+    # "The operation couldn't be completed. (Module.Type error 3.)" — the case
+    # name is gone, and every payload the case was carrying (path, errno,
+    # command, exit status, UUID) is gone with it. That string is what lands in
+    # the os.Logger error line and in the user-facing alert, so a throw that had
+    # everything needed to diagnose it arrives with nothing.
+    #
+    # THE TRAP, and the reason a `description` is not the fix: the bridge
+    # consults `LocalizedError.errorDescription` and nothing else.
+    # `CustomStringConvertible` is not consulted, so a type with a perfect
+    # `description` still logs the bridge string. Conform to `LocalizedError`
+    # and forward — `var errorDescription: String? { description }` — rather
+    # than duplicating the text.
+    #
+    # WHAT THE REGEX CAN AND CANNOT SEE. It reads the inheritance clause on the
+    # declaration line only: the negative lookahead clears the type when
+    # `LocalizedError` appears in that same clause, in either order
+    # (`Error, LocalizedError` and `LocalizedError, Error` both pass), and
+    # `[^{\n]*` keeps it from running past the opening brace into the body. It
+    # therefore CANNOT see a conformance added in a separate
+    # `extension X: LocalizedError` — declare it on the type itself. Generic
+    # constraints (`func f<E: Error>(…)`) are unaffected, since the rule matches
+    # a declaration keyword ahead of the name.
+    #
+    # `match_kinds` keeps it out of prose: a doc comment or string literal
+    # containing `enum Foo: Error` is not a declaration and does not fire.
+    regex: '\b(?:enum|struct|class|actor|extension)\s+\w+\s*:(?![^{\n]*\bLocalizedError\b)[^{\n]*\bError\b'
+    match_kinds:
+      - keyword
+      - identifier
+      - typeidentifier
+    message: "Error types must declare LocalizedError on the type itself, with an errorDescription that renders the case's full payload. Without it, localizedDescription returns the NSError bridge string (\"The operation couldn't be completed. (Module.Type error N.)\") and the payload is lost from logs and alerts. A CustomStringConvertible `description` does NOT fix this — localizedDescription consults errorDescription only; forward to it with `var errorDescription: String? { description }`. A conformance in a separate extension is invisible to this rule and must move onto the declaration. Reference pattern: Sources/TBDShared/CLIInstaller.swift. Suppress with `// swiftlint:disable:next error_types_must_be_localized - <reason>` only with a reason."
+    severity: error
+
   no_scrollview_in_transcript_cards:
     name: "No direct ScrollView in transcript row cards"
     # included/excluded HERE take REGEX (not glob), matched against file path.
