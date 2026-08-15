@@ -70,6 +70,21 @@ struct SupervisionStoreTests {
             now: fixture.dates.provider)
     }
 
+    /// The supervision file's bytes, or nil when there is no file.
+    ///
+    /// **Optional on purpose, and compared as an optional.** An absent file is
+    /// not a missing baseline — it is the empty state, the one every fresh
+    /// install is in, and `SupervisionFileStore.load()` reads it as exactly the
+    /// value an empty file would produce. So "unchanged" has to include "there
+    /// were no bytes and there still are none"; unwrapping the baseline with
+    /// `#require` instead would demand bytes that ought not to exist and fail
+    /// before the refusal under test was even attempted. Comparing optionals
+    /// keeps the assertion discriminating in both directions: a refusal that
+    /// wrote a file moves nil to non-nil and reddens.
+    private func fileBytes(_ fixture: Fixture) -> Data? {
+        FileManager.default.contents(atPath: fixture.filePath)
+    }
+
     /// Every ledger line, decoded, in order.
     private func lines(at path: String) throws -> [SupervisionLedgerLine] {
         guard let data = FileManager.default.contents(atPath: path) else { return [] }
@@ -434,7 +449,7 @@ struct SupervisionStoreTests {
             fleet: StubFleet(repoList: [web, api]),
             seed: SupervisionFile(projects: ["acme-platform": SupervisionProjectDeclaration(
                 repos: [web.id, api.id], policy: .repo(web.id))]))
-        let before = try #require(FileManager.default.contents(atPath: fixture.filePath))
+        let before = fileBytes(fixture)
         let listedBefore = try await fixture.store.projectList()
 
         await #expect(throws: SupervisionTopologyError.policySourceWouldLeaveProject(
@@ -442,8 +457,7 @@ struct SupervisionStoreTests {
             _ = try await fixture.store.projectMove(repo: "acme-web", to: .singleton)
         }
 
-        #expect(FileManager.default.contents(atPath: fixture.filePath) == before,
-                "a refused move leaves the file byte-identical")
+        #expect(fileBytes(fixture) == before, "a refused move leaves the file byte-identical")
         #expect(try await fixture.store.projectList() == listedBefore)
         #expect(try lines(at: fixture.ledgerPath).isEmpty)
     }
@@ -452,12 +466,16 @@ struct SupervisionStoreTests {
     func moveToUnknownProjectLeavesStateUntouched() async throws {
         let web = Self.repo("acme-web")
         let fixture = try Self.makeFixture(fleet: StubFleet(repoList: [web]))
-        let before = try #require(FileManager.default.contents(atPath: fixture.filePath))
+        // Nothing has been declared, so there is no file — and a refused move
+        // must leave it that way. `nil == nil` is the assertion, and a store
+        // that wrote anything on the way to refusing moves it off nil.
+        let before = fileBytes(fixture)
+        #expect(before == nil, "the fixture starts from the empty state, which is an absent file")
 
         await #expect(throws: SupervisionTopologyError.unknownProject(project: "acme-platform")) {
             _ = try await fixture.store.projectMove(repo: "acme-web", to: .project("acme-platform"))
         }
-        #expect(FileManager.default.contents(atPath: fixture.filePath) == before)
+        #expect(fileBytes(fixture) == before)
     }
 
     @Test("A repo lands in exactly one project across a move, and the emptied one is closed")
@@ -507,7 +525,7 @@ struct SupervisionStoreTests {
             fleet: StubFleet(repoList: [web]),
             seed: SupervisionFile(supervised: ["acme-web"]))
         _ = try await fixture.store.projectList()
-        let before = try #require(FileManager.default.contents(atPath: fixture.filePath))
+        let before = fileBytes(fixture)
 
         // Read and traverse but never write: the temp the atomic save needs
         // cannot be created.
@@ -524,7 +542,7 @@ struct SupervisionStoreTests {
 
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o700], ofItemAtPath: fixture.directory.path)
-        #expect(FileManager.default.contents(atPath: fixture.filePath) == before)
+        #expect(fileBytes(fixture) == before)
         let status = try await fixture.store.status(brake: .released)
         #expect(status.projects.first?.on == true, "the in-memory mark did not move either")
         #expect(try lines(at: fixture.ledgerPath).isEmpty,

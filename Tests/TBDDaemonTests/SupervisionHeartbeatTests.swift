@@ -161,6 +161,12 @@ struct SupervisionHeartbeatTests {
             path: path, snapshot: snapshots.provider, clock: TestClock())
 
         await heartbeat.tick()
+        // `#require` is the right form here and must stay: a tick with a
+        // readable snapshot was supposed to write, so absence is a real
+        // failure. Capturing this as an optional instead would let a heartbeat
+        // that never wrote at all pass vacuously on `nil == nil`. The opposite
+        // reasoning applies where absence is a legitimate state — see
+        // `SupervisionStoreTests.fileBytes`.
         let first = try #require(FileManager.default.contents(atPath: path))
 
         snapshots.set(nil)
