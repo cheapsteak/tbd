@@ -996,8 +996,11 @@ extension WorktreeLifecycle {
     /// cause behind "a branch named … already exists" on the next attempt.
     ///
     /// **Four independent gates stand between a failure and `branch -D`, and
-    /// deleting a branch the user owns is the worst outcome this path has, so
-    /// every unknown lands on keeping it.**
+    /// deleting a branch the user owns is the worst outcome this path has.
+    /// Gates 2, 3 and 4 fail closed — an answer they cannot establish keeps the
+    /// branch. Gate 1 does not: reading stderr can only ever *add* evidence, so
+    /// its `false` is an abstention rather than a finding. That asymmetry is
+    /// what gate 4 exists to cover.**
     ///
     /// 1. `branchNameWasAlreadyTaken == false`. When git says "a branch named
     ///    … already exists" — or rejects the fork-PR leg's fetch, the same
@@ -1036,7 +1039,7 @@ extension WorktreeLifecycle {
     /// the whole `.nameCollision` case would reintroduce exactly the leak this
     /// function exists to stop.
     ///
-    /// `worktreePrune` runs only once all three gates hold, immediately before
+    /// `worktreePrune` runs only once all four gates hold, immediately before
     /// the delete it exists to serve: git refuses to delete a branch checked out
     /// in a live worktree, and a stale registration would manufacture that
     /// refusal (see `GitManager.deleteLocalBranch`). Pruning is repo-wide and
