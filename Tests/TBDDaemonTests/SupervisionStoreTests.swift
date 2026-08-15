@@ -211,10 +211,22 @@ struct SupervisionStoreTests {
 
         #expect(first.sequence < second.sequence)
         #expect(second.sequence < third.sequence)
-        // Spelled as a conjunction rather than `allSatisfy(\.changed)`:
-        // `allSatisfy` is `rethrows`, and inside `#expect`'s expansion the
-        // key-path-as-function conversion stops reading as non-throwing, so the
-        // macro demands a `try` for a call that cannot throw.
+        // **Inside `#expect`, avoid any `rethrows` call whose non-throwing-ness
+        // depends on an implicit conversion.** `allSatisfy(\.changed)` reads as
+        // non-throwing in ordinary code because the key path converts to a
+        // non-throwing closure, but `#expect` re-evaluates the expression and
+        // that conversion stops carrying its throwing-ness through the
+        // expansion — so the macro demands a `try` for a call that cannot
+        // throw, and the error points at the expansion rather than at this
+        // line, which makes it a slow one to place.
+        //
+        // It is the *implicit conversion* that trips, not `allSatisfy`: the two
+        // sites in this suite that pass an explicit closure literal
+        // (`allSatisfy { $0.project == nil ... }`) have compiled since the day
+        // they were written. So the fix is to spell the predicate out, hoist it
+        // to a `let` above the macro, or — as here, for three values — drop the
+        // call entirely. The same caution applies to `contains(where:)`,
+        // `first(where:)` and friends given a key path or a bare function name.
         #expect(first.changed && second.changed && third.changed)
     }
 
