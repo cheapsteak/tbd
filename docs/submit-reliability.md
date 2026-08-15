@@ -30,8 +30,9 @@ multi-line messages. Optionally layer a verify-and-retry step so the unattended
 
 For messages that must arrive without touching a user's in-progress composer,
 `terminal.send` is the wrong abstraction even when submission is reliable.
-Interactive Claude Code Channels preserved an unsent draft during testing; see
-[Claude Code Channels: draft-safe message injection](research/2026-07-26-claude-code-channels/findings.md).
+A message posted to a Claude Code session's inbox socket preserved an unsent
+draft byte-for-byte in testing; see
+[draft-safe message injection: the Claude Code inbox socket and Codex app-server](research/2026-07-26-claude-code-channels/findings.md).
 
 ## The mechanism (current code)
 
