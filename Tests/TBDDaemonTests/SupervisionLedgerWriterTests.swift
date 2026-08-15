@@ -103,6 +103,31 @@ struct SupervisionLedgerWriterTests {
             SupervisionLedgerLine.self, from: Data(rows[1].utf8)).project == "acme-web")
     }
 
+    @Test("A line of a kind this build does not model opens and closes nothing")
+    func unrecognizedKindsAreReadPast() async throws {
+        let path = try Self.makePath()
+        let writer = SupervisionLedgerWriter(path: path)
+        await writer.append(.projectOn(
+            project: "acme-web", mode: "attended", roster: [], at: Self.epoch))
+
+        // A `delivery` line, as a later slice will write it. It must not close
+        // the span above, and it must not be counted as damage — a record that
+        // reports itself corrupt the first time somebody adds a kind is an
+        // alarm nobody will keep reading.
+        let delivery = """
+            {"id":"deadbeef","ts":"2023-11-14T22:13:20.000Z","mode":"attended",\
+            "project":"acme-web","kind":"delivery","hash":"abc123"}
+
+            """
+        let handle = try #require(FileHandle(forWritingAtPath: path))
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(delivery.utf8))
+        try handle.close()
+
+        let spans = await SupervisionLedgerWriter(path: path).spanStarts()
+        #expect(spans == ["acme-web": SupervisionInstant(Self.epoch)])
+    }
+
     @Test("An empty or absent file recovers no spans")
     func absentFileRecoversNothing() async throws {
         let path = try Self.makePath()
