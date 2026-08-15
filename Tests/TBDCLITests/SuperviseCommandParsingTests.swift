@@ -169,7 +169,6 @@ struct SuperviseArgumentValueTests {
 
     @Test func moveTargetReadsTheSingletonSentinel() throws {
         #expect(try parseSupervisionMoveTarget("singleton") == .singleton)
-        #expect(try parseSupervisionMoveTarget(" singleton ") == .singleton)
         #expect(SupervisionMoveTarget.singletonArgument == "singleton")
     }
 
@@ -179,6 +178,17 @@ struct SuperviseArgumentValueTests {
         // word is the sentinel, and the round trip proves what gets sent.
         #expect(try parseSupervisionMoveTarget("acme-platform").argument == "acme-platform")
         #expect(try parseSupervisionMoveTarget("singleton").argument == "singleton")
+    }
+
+    /// The destination is a project name, and a repo display name may carry
+    /// surrounding spaces — `isSafeProjectName` permits them. Trimming here
+    /// would make `" staging "` visible in `status` and unreachable by `move`.
+    @Test func moveTargetKeepsSurroundingSpacesSoSuchProjectsStayAddressable() throws {
+        #expect(try parseSupervisionMoveTarget(" staging ") == .project(" staging "))
+        #expect(try parseSupervisionMoveTarget(" staging ").argument == " staging ")
+        // Quoted spaces around the sentinel were typed deliberately, so they
+        // name a project rather than the sentinel.
+        #expect(try parseSupervisionMoveTarget(" singleton ") == .project(" singleton "))
     }
 
     @Test func moveTargetRefusesAnEmptyDestination() {
@@ -191,6 +201,17 @@ struct SuperviseArgumentValueTests {
     @Test func emptyProjectNameIsRefusedRatherThanReadAsTheBareForm() {
         #expect(throws: CLIError.self) { _ = try requireSupervisionProjectName("") }
         #expect(throws: CLIError.self) { _ = try requireSupervisionProjectName("   ") }
-        #expect((try? requireSupervisionProjectName(" acme-checkout ")) == "acme-checkout")
+        #expect(throws: CLIError.self) { _ = try requireSupervisionProjectName("\t \n") }
+    }
+
+    /// A singleton's name is its repo's display name, and `isSafeProjectName`
+    /// rejects only genuinely unsafe components — so `" api "` is a project the
+    /// operator can see in `status`. Trimming it here would send `api` and earn
+    /// an `unknownProject` refusal for a project plainly on screen.
+    @Test func projectNameReachesTheDaemonVerbatimIncludingSurroundingSpaces() throws {
+        #expect(try requireSupervisionProjectName(" api ") == " api ")
+        #expect(try requireSupervisionProjectName("acme-checkout") == "acme-checkout")
+        #expect(try requireSupervisionProjectName(" leading") == " leading")
+        #expect(try requireSupervisionProjectName("trailing ") == "trailing ")
     }
 }

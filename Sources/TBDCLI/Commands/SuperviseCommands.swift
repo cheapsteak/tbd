@@ -72,10 +72,12 @@ struct SuperviseOff: AsyncParsableCommand {
 /// no mark, and a mark never moves the brake.
 private func applySupervisionSwitch(project: String?, on: Bool) throws {
     guard let raw = project else {
-        try SocketClient().callVoid(
+        let client = SocketClient()
+        try client.callVoid(
             method: RPCMethod.configSetSupervisionEnabled,
             params: ConfigSetSupervisionEnabledParams(enabled: on))
         print(renderSupervisionBrake(on ? .released : .engaged))
+        if on { warnIfReleasingCoversNothing(client: client) }
         return
     }
     let name = try requireSupervisionProjectName(raw)
@@ -84,6 +86,38 @@ private func applySupervisionSwitch(project: String?, on: Bool) throws {
         params: SuperviseSetProjectMarkParams(project: name, on: on),
         resultType: SuperviseSetProjectMarkResult.self)
     print(renderSupervisionMarkResult(result))
+}
+
+/// Say so, right at the release, when the brake comes off over a fleet where
+/// nothing is marked on.
+///
+/// Best-effort by construction, and in that order for a reason: the brake is
+/// already released by the time this runs, so a readout that fails must not
+/// turn a gesture that succeeded into a nonzero exit. It stays quiet only when
+/// it has read the state and found nothing to say — a readout it could not take
+/// is reported as a readout it could not take, never as a calm night.
+///
+/// The lines go to stderr because the command's data is the one `brake:` line;
+/// under `status` the same lines are part of the readout and belong on stdout.
+private func warnIfReleasingCoversNothing(client: SocketClient) {
+    let status: SupervisionStatus
+    do {
+        status = try client.call(
+            method: RPCMethod.superviseStatus,
+            resultType: SupervisionStatus.self)
+    } catch {
+        printToStandardError(
+            "warning: the brake is released, but supervision state could not be read "
+                + "(\(error)) — run 'tbd supervise status'")
+        return
+    }
+    for line in supervisionBrakeReleaseWarningLines(status) {
+        printToStandardError(line)
+    }
+}
+
+private func printToStandardError(_ line: String) {
+    FileHandle.standardError.write(Data("\(line)\n".utf8))
 }
 
 // MARK: - status

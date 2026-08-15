@@ -57,6 +57,18 @@ func supervisionStatusWarningLines(_ status: SupervisionStatus) -> [String] {
     return lines
 }
 
+/// The lines bare `tbd supervise on` emits after releasing the brake.
+///
+/// Deliberately the very same composition `status` renders, not a second
+/// wording: releasing the brake is where an operator forms the belief that
+/// supervision is running, and it is the only gesture that can create the state
+/// the warning describes — so it is the highest-value place to say it. One fact
+/// gets one sentence, and this seam is what stops the two surfaces drifting
+/// into two.
+func supervisionBrakeReleaseWarningLines(_ status: SupervisionStatus) -> [String] {
+    supervisionStatusWarningLines(status)
+}
+
 /// Compose the human-readable `tbd supervise status` readout: the brake, the
 /// loud lines, then one row per project.
 ///
@@ -272,21 +284,37 @@ func parseSupervisionPolicy(_ raw: String) throws -> SupervisionPolicyRequest {
 
 /// Reads `--to <project|singleton>`. `singleton` is the documented sentinel
 /// that returns a repo to being its own project.
+///
+/// The destination is a project name, so it is passed through verbatim for the
+/// same reason `requireSupervisionProjectName` does — `--to " staging "` must be
+/// able to name the project `status` shows as `" staging "`. The sentinel is the
+/// exact word: `--to " singleton "` names a project, not the sentinel, because
+/// a caller who quoted those spaces typed them deliberately.
 func parseSupervisionMoveTarget(_ raw: String) throws -> SupervisionMoveTarget {
-    let value = raw.trimmingCharacters(in: .whitespaces)
-    guard !value.isEmpty else {
+    guard !raw.trimmingCharacters(in: .whitespaces).isEmpty else {
         throw CLIError.invalidArgument(
             "--to must name a project or \"\(SupervisionMoveTarget.singletonArgument)\"")
     }
-    return SupervisionMoveTarget(argument: value)
+    return SupervisionMoveTarget(argument: raw)
 }
 
-/// A project name typed on the command line. Empty is refused rather than
-/// silently read as the bare (fleet-brake) form of `on`/`off`.
+/// A project name typed on the command line, passed to the daemon **verbatim**.
+///
+/// A name of nothing but whitespace is refused, because that is the empty case
+/// — it would otherwise read as the bare (fleet-brake) form of `on`/`off`. Any
+/// other name goes through exactly as typed, surrounding spaces included: a
+/// singleton project's name is its repo's display name, and `isSafeProjectName`
+/// deliberately rejects only genuinely unsafe components (empty, `.`, `..`, a
+/// path separator, NUL) so a repo named `" staging "` keeps its directory. If
+/// the CLI trimmed, that project would appear in `status` and be unaddressable
+/// by every other verb.
+///
+/// The CLI resolves no names: the daemon is the single resolver, so a name that
+/// matches nothing comes back as a refusal naming the condition rather than
+/// being silently repaired into a neighbouring project's.
 func requireSupervisionProjectName(_ raw: String) throws -> String {
-    let value = raw.trimmingCharacters(in: .whitespaces)
-    guard !value.isEmpty else {
+    guard !raw.trimmingCharacters(in: .whitespaces).isEmpty else {
         throw CLIError.invalidArgument("project name must not be empty")
     }
-    return value
+    return raw
 }

@@ -143,6 +143,47 @@ struct SupervisionStatusLoudCaseTests {
         #expect(text.contains("mode attended"))
     }
 
+    /// Releasing the brake is the moment an operator forms the belief that
+    /// supervision is running, and the only gesture that can create the state
+    /// the warning describes — so bare `on` says it too.
+    @Test func releasingTheBrakeOverNothingWarnsAtTheRelease() {
+        let lines = supervisionBrakeReleaseWarningLines(
+            SuperviseFixture.status(
+                brake: .released, effectivelySupervising: false,
+                projects: [SuperviseFixture.project(name: "acme-checkout", on: false)]))
+        #expect(lines.count == 1)
+        #expect(lines.first?.contains("no project is on") == true)
+        #expect(lines.first?.contains("nothing is being supervised") == true)
+    }
+
+    /// One fact, one sentence: `on` and `status` must not drift into two
+    /// wordings for the same condition.
+    @Test func theReleaseWarningIsTheSameCompositionStatusRenders() {
+        for status in [
+            SuperviseFixture.status(
+                brake: .released, effectivelySupervising: false, projects: []),
+            SuperviseFixture.status(
+                brake: .released, effectivelySupervising: false, projects: [],
+                warnings: [SupervisionWarning(code: .unusableProjectName, message: "")]),
+            SuperviseFixture.status(
+                brake: .released, effectivelySupervising: true,
+                projects: [SuperviseFixture.project(name: "acme", on: true)]),
+        ] {
+            #expect(supervisionBrakeReleaseWarningLines(status)
+                == supervisionStatusWarningLines(status))
+        }
+    }
+
+    /// A release that covers something is quiet — the warning is a finding, not
+    /// a ceremony printed on every gesture.
+    @Test func releasingTheBrakeOverASupervisedFleetIsQuiet() {
+        let lines = supervisionBrakeReleaseWarningLines(
+            SuperviseFixture.status(
+                brake: .released, effectivelySupervising: true,
+                projects: [SuperviseFixture.project(name: "acme-checkout", on: true)]))
+        #expect(lines.isEmpty)
+    }
+
     @Test func aSupervisedFleetGetsNoWarning() {
         let text = SuperviseFixture.render(
             SuperviseFixture.status(
