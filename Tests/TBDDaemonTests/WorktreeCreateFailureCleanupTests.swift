@@ -849,6 +849,111 @@ import Testing
                 "cleanup deleted the branch the caller brought: \(branches)")
     }
 
+    /// Writes a `post-checkout` hook that parks inside `git worktree add` until
+    /// the test releases it. Git runs that hook as part of `worktree add`
+    /// (verified against git 2.50), which is what makes the interlock below
+    /// exact instead of a sleep race: while it is parked, the fetch and the
+    /// checkout have both succeeded and nothing after them has run yet.
+    ///
+    /// Capped at ~60 s so a test that never releases it fails inside
+    /// `GitManager.commandTimeout` rather than wedging the run.
+    private func installCheckoutBarrier(
+        in repoDir: URL, marker: URL, release: URL
+    ) throws {
+        let script = """
+        #!/bin/sh
+        : > '\(marker.path)'
+        i=0
+        while [ ! -e '\(release.path)' ] && [ "$i" -lt 600 ]; do
+            sleep 0.1
+            i=$((i + 1))
+        done
+        exit 0
+        """
+        let hook = repoDir.appendingPathComponent(".git/hooks/post-checkout")
+        try script.write(to: hook, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: hook.path
+        )
+    }
+
+    /// Bounded poll for a file the code under test creates, with the observed
+    /// state in the diagnostic (assertion-hygiene rule 4).
+    private func waitForFile(_ url: URL, _ what: String) async {
+        let deadline = 300
+        for _ in 0..<deadline {
+            if FileManager.default.fileExists(atPath: url.path) { return }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        Issue.record("\(what): \(url.path) never appeared after polling 30 seconds")
+    }
+
+    /// The failure this leg's cleanup must NOT answer: one that arrives *after*
+    /// the git work succeeded. The fetch wrote `pr-7-2` and the checkout stands
+    /// on disk, so nothing is left over to withdraw — but a successful fetch is
+    /// also exactly the state that clears all four of
+    /// `cleanUpFailedWorktreeAdd`'s gates, so routing a later failure through it
+    /// deletes a correct branch and a correct checkout.
+    ///
+    /// The failure is induced by deleting the worktree row while the checkout is
+    /// parked in a `post-checkout` hook, which is the real shape rather than a
+    /// contrivance: `forgetWorktree` deletes that row over RPC with no interlock
+    /// against an in-flight create, and `updateBranch` throws on a row that is
+    /// gone.
+    ///
+    /// The create must still fail — the row it was building is gone — but it
+    /// must fail leaving the repo exactly as the git work left it.
+    @Test func aFailureAfterThePullHeadCheckoutKeepsTheBranchAndTheDirectory() async throws {
+        let (parentDir, hostDir, repoDir) = try await makeClonedTestRepo(
+            pullRequestHeads: [7]
+        )
+        defer { try? FileManager.default.removeItem(at: parentDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        let repo = try await makeTestRepo(db: db, tempDir: hostDir, repoDir: repoDir)
+
+        // The caller's own `pr-7` pushes the fetch onto `pr-7-2`, which is what
+        // makes the create reach the `updateBranch` write that records it.
+        try await shell("git branch pr-7", at: repoDir)
+
+        let pending = try await lifecycle.beginCreateWorktree(
+            repoID: repo.id, branch: "pr-7", skipClaude: true,
+            useExistingBranch: true, prNumber: 7
+        )
+
+        let marker = parentDir.appendingPathComponent("checkout-parked")
+        let release = parentDir.appendingPathComponent("resume-checkout")
+        try installCheckoutBarrier(in: repoDir, marker: marker, release: release)
+
+        let forget = Task {
+            await self.waitForFile(marker, "the post-checkout barrier never armed")
+            try? await db.worktrees.delete(id: pending.id)
+            FileManager.default.createFile(atPath: release.path, contents: nil)
+        }
+
+        var thrown: Error?
+        do {
+            _ = try await lifecycle.completeCreateWorktree(
+                worktreeID: pending.id, skipClaude: true,
+                existingBranchRef: "pr-7", checkoutPRHead: true
+            )
+        } catch {
+            thrown = error
+        }
+        await forget.value
+
+        #expect(thrown != nil,
+                "the create reported success after its own row was deleted")
+        let branches = try await localBranches(repoDir)
+        #expect(branches.contains("pr-7-2"),
+                "a failure after the checkout deleted the branch the fetch correctly created: \(branches)")
+        #expect(branches.contains("pr-7"),
+                "the caller's own branch did not survive: \(branches)")
+        #expect(FileManager.default.fileExists(atPath: pending.localPath),
+                "a failure after the checkout deleted the working tree at \(pending.localPath)")
+    }
+
     /// The two arms of that tri-state which *block* the delete, driven at the
     /// cleanup boundary because neither is reachable end to end on this leg:
     /// `true` needs a branch to appear inside the gap between the probe and the

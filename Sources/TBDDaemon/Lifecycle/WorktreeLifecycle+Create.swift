@@ -297,6 +297,13 @@ extension WorktreeLifecycle {
                 // catch only removes the directory. Deleting there would destroy
                 // a user's branch — the worst outcome this path has.
                 var attemptedBranch: AttemptedBranch?
+                // Set by the fork-PR leg once its checkout has succeeded: the
+                // local branch the fetch wrote, which `uniqueLocalBranchName`
+                // may have moved off the row's own branch name. Carried out of
+                // the protected scope because the DB bookkeeping it implies
+                // belongs *after* the git work, not inside the `catch` that
+                // deletes what that work produced.
+                var fetchedPullHeadBranch: String?
                 do {
                     if checkoutPRHead, let prNumber = worktree.prNumber {
                         // Fork-PR checkout: the PR head has no local ref, so
@@ -360,13 +367,7 @@ extension WorktreeLifecycle {
                             worktreePath: worktree.path,
                             branch: localBranch
                         )
-                        if localBranch != worktree.branch {
-                            try await db.worktrees.updateBranch(id: worktreeID, branch: localBranch)
-                        }
-                        // TBD made this directory but not its contents: stamp
-                        // the row so folder-trust is never pre-answered for it.
-                        checkedOutForeignHead = true
-                        try await db.worktrees.markForeignHead(id: worktreeID)
+                        fetchedPullHeadBranch = localBranch
                     } else if ref.hasPrefix("origin/") {
                         // `--track -b <localBranch>` creates the branch. Probe
                         // first so cleanup can tell a branch this attempt made
@@ -403,7 +404,6 @@ extension WorktreeLifecycle {
                             branch: worktree.branch
                         )
                     }
-                    resultPath = worktree.path
                 } catch {
                     if let attemptedBranch {
                         // Removes the partially-created directory too, then
@@ -422,6 +422,28 @@ extension WorktreeLifecycle {
                     throw WorktreeLifecycleError.createFailed(
                         "git worktree add failed for existing branch '\(ref)': \(error)"
                     )
+                }
+                // The protected scope ends at the git work's success, matching
+                // the other two legs. What follows is bookkeeping about a
+                // checkout that already exists on disk, so it must not run where
+                // `cleanUpFailedWorktreeAdd` can reach it. A successful fetch is
+                // exactly the state that clears that helper's gates — the branch
+                // was probed absent, git raised no refusal, and it now stands at
+                // the tip the fetch wrote — so a throw from either write below
+                // would hand it a correctly-fetched branch and a valid directory
+                // to destroy. Failing the create is still right (the outer catch
+                // drops the row); destroying the checkout is not.
+                resultPath = worktree.path
+                if let fetchedPullHeadBranch {
+                    if fetchedPullHeadBranch != worktree.branch {
+                        try await db.worktrees.updateBranch(
+                            id: worktreeID, branch: fetchedPullHeadBranch
+                        )
+                    }
+                    // TBD made this directory but not its contents: stamp
+                    // the row so folder-trust is never pre-answered for it.
+                    checkedOutForeignHead = true
+                    try await db.worktrees.markForeignHead(id: worktreeID)
                 }
             } else {
                 let result = try await attemptWorktreeAdd(
