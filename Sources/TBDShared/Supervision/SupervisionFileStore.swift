@@ -56,14 +56,23 @@ public struct SupervisionFileStore: Sendable {
 
     // MARK: - Save
 
-    /// Writes the file atomically: a fresh temporary in the **same directory**,
-    /// then `rename(2)` over the target.
+    /// Writes the file durably: a fresh temporary in the **same directory**,
+    /// flushed to the platter, then `rename(2)` over the target, then the
+    /// directory itself flushed.
     ///
-    /// Two consequences a caller may rely on. A crash mid-write leaves the
+    /// Three consequences a caller may rely on. A crash mid-write leaves the
     /// previous bytes in place — never a half-written file the loader would
-    /// reject on next start. And a file that would not load is refused before
-    /// anything touches the disk, so `save` can never produce a file `load`
-    /// rejects.
+    /// reject on next start. **Power loss** after the rename leaves either the
+    /// previous file or the complete new one, never an empty file where the
+    /// topology used to be: `rename(2)` orders the metadata, but only the two
+    /// `fsync`s order the *data*, and without them the renamed file can surface
+    /// with its blocks unwritten. And a file that would not load is refused
+    /// before anything touches the disk, so `save` can never produce a file
+    /// `load` rejects.
+    ///
+    /// The cost is two `fsync`s per operator gesture — `on`, `off`, `mode`, a
+    /// project mutation. Nothing writes this file in a loop, and losing it
+    /// silently loses the fleet's topology and every mark with it.
     public func save(_ file: SupervisionFile) throws {
         try file.validate()
 
@@ -77,15 +86,35 @@ public struct SupervisionFileStore: Sendable {
 
         let temporary = temporaryURL()
         do {
-            try data.write(to: temporary)
+            guard FileManager.default.createFile(atPath: temporary.path, contents: nil) else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            let handle = try FileHandle(forWritingTo: temporary)
+            do {
+                try handle.write(contentsOf: data)
+                try handle.synchronize()  // the bytes, before the name points at them
+                try handle.close()
+            } catch {
+                try? handle.close()
+                throw error
+            }
         } catch {
             try? FileManager.default.removeItem(at: temporary)
             throw error
         }
+
         guard rename(temporary.path, fileURL.path) == 0 else {
             let code = POSIXErrorCode(rawValue: errno) ?? .EIO
             try? FileManager.default.removeItem(at: temporary)
             throw POSIXError(code)
+        }
+
+        // The rename itself is a directory change, and it needs flushing too —
+        // otherwise power loss can lose the new name and leave the old one.
+        let directory = open(directoryURL.path, O_RDONLY)
+        if directory >= 0 {
+            fsync(directory)
+            close(directory)
         }
     }
 

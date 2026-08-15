@@ -67,13 +67,21 @@ public struct SupervisionInstant: Codable, Sendable, Equatable, Hashable, Compar
 
 // MARK: - Preserved JSON
 
-/// A JSON value carried through `supervision.json` verbatim.
+/// A JSON value carried through `supervision.json` as a *value*.
 ///
 /// Used for the per-project `sweep` selection, whose vocabulary belongs to the
 /// sweep program (`docs/specs/2026-08-01-fleet-supervision-sweep-program-design.md`)
-/// rather than to this loader. Modeling it as preserved JSON means a rewrite
-/// after an unrelated edit cannot drop a key this version does not know about,
-/// and it keeps this file from inventing fields it does not own.
+/// rather than to this loader. Modeling it this way means a rewrite after an
+/// unrelated edit cannot drop a key this version does not know about, and it
+/// keeps this file from inventing fields it does not own.
+///
+/// **What is preserved is the value, not the text.** Every key, every nesting,
+/// and every value survives a round trip; the *spelling* of a number does not,
+/// because `JSONDecoder` hands over a parsed `Int` or `Double` and the original
+/// token is gone by then. A hand-written `15.0` comes back as `15`, and `1e3`
+/// as `1000`. Those are the same JSON value to every consumer, so nothing a
+/// sweep program reads changes — but do not describe this type as byte-faithful,
+/// and do not use it where the literal text carries meaning.
 public enum SupervisionJSONValue: Codable, Sendable, Equatable {
     case null
     case bool(Bool)
@@ -165,8 +173,9 @@ public enum SupervisionPolicySource: Codable, Sendable, Equatable {
 // MARK: - Sweep selection
 
 /// A project's sweep selection — the schedule, the declared contact window, and
-/// the custom-program pointer. Preserved verbatim (see `SupervisionJSONValue`);
-/// this slice reads only `script` and writes nothing.
+/// the custom-program pointer. Carried through as values rather than as text
+/// (see `SupervisionJSONValue`), so no key is lost on rewrite; this slice reads
+/// only `script` and writes nothing.
 public struct SupervisionSweepSelection: Codable, Sendable, Equatable {
     public var fields: [String: SupervisionJSONValue]
 
@@ -453,6 +462,13 @@ public struct SupervisionFile: Codable, Sendable, Equatable {
             guard Self.isSafeProjectName(name) else {
                 throw SupervisionFileError.invalidProjectName(project: name)
             }
+            // `--to singleton` resolves the word before it looks for a project,
+            // so a declared project of that name could be created and then
+            // never targeted. Refusing the name is what keeps the sentinel
+            // safe.
+            guard name != SupervisionMoveTarget.singletonArgument else {
+                throw SupervisionFileError.reservedProjectName(project: name)
+            }
             guard !declaration.repos.isEmpty else {
                 throw SupervisionFileError.projectHasNoRepos(project: name)
             }
@@ -514,6 +530,7 @@ public enum SupervisionFileError: Error, Equatable, CustomStringConvertible, Loc
     case policyRepoNotAMember(project: String, repo: UUID)
     case projectHasNoRepos(project: String)
     case invalidProjectName(project: String)
+    case reservedProjectName(project: String)
     case emptyDeclaredModeList(project: String)
     case selectedModeNotDeclared(project: String, selected: String, declared: [String])
     case malformed(path: String, detail: String)
@@ -534,8 +551,12 @@ public enum SupervisionFileError: Error, Equatable, CustomStringConvertible, Loc
         case .projectHasNoRepos(let project):
             return "Project \"\(project)\" declares no member repos."
         case .invalidProjectName(let project):
-            return "Project name \"\(project)\" is not usable: a name must be a single path "
-                + "component with no slashes and no leading or trailing spaces."
+            return "Project name \"\(project)\" is not usable: a name must be one path "
+                + "component — not empty, not \".\" or \"..\", and containing no \"/\"."
+        case .reservedProjectName(let project):
+            return "Project name \"\(project)\" is reserved: it is the word "
+                + "\"tbd supervise project move --to\" takes to mean \"back to being its own "
+                + "project\", so a project of that name could never be a move destination."
         case .emptyDeclaredModeList(let project):
             return "Project \"\(project)\" declares an empty mode list, so no mode could be selected."
         case .selectedModeNotDeclared(let project, let selected, let declared):

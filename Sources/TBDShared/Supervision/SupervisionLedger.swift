@@ -107,14 +107,27 @@ public enum SupervisionLedgerPayload: Sendable, Equatable {
     case brakeEngaged
     case brakeReleased
     case modeChanged(from: String, to: String)
+    /// A line whose envelope this build understands and whose body it does
+    /// not — a `delivery`, `enrollment` or `anomaly` line, or a lifecycle event
+    /// a later build writes.
+    ///
+    /// **The record is append-only and documented, so a reader will meet lines
+    /// it did not write.** Failing to decode them would report a healthy record
+    /// as damaged — `Skipped N unreadable line(s)` on every boot, with real
+    /// corruption buried in the false alarm. The envelope (`id`, `ts`, `mode`,
+    /// `project`, `kind`) is still read, which is all a windowing or grouping
+    /// query needs; only the body is skipped.
+    case unrecognized
 
-    public var event: SupervisionLifecycleEvent {
+    /// The lifecycle event, or nil for a line this build does not model.
+    public var event: SupervisionLifecycleEvent? {
         switch self {
         case .projectOn: return .projectOn
         case .projectOff: return .projectOff
         case .brakeEngaged: return .brakeEngaged
         case .brakeReleased: return .brakeReleased
         case .modeChanged: return .modeChanged
+        case .unrecognized: return nil
         }
     }
 }
@@ -210,6 +223,11 @@ public struct SupervisionLedgerLine: Codable, Sendable, Equatable {
         case event, roster, coverage, from, to
     }
 
+    /// Encoding a `.unrecognized` line throws rather than writing a line whose
+    /// body was never parsed: this build only ever writes lines it composed
+    /// itself, and re-emitting a half-understood one would silently truncate
+    /// somebody else's record. A reader that must reproduce such a line copies
+    /// its original bytes.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(id, forKey: .id)
@@ -219,20 +237,34 @@ public struct SupervisionLedgerLine: Codable, Sendable, Equatable {
         try container.encode(mode, forKey: .mode)
         try container.encode(project, forKey: .project)
         try container.encode(kind, forKey: .kind)
-        try container.encode(payload.event, forKey: .event)
         switch payload {
         case .projectOn(let roster):
+            try container.encode(SupervisionLifecycleEvent.projectOn, forKey: .event)
             try container.encode(roster, forKey: .roster)
         case .projectOff(let coverage):
+            try container.encode(SupervisionLifecycleEvent.projectOff, forKey: .event)
             try container.encode(coverage, forKey: .coverage)
-        case .brakeEngaged, .brakeReleased:
-            break
+        case .brakeEngaged:
+            try container.encode(SupervisionLifecycleEvent.brakeEngaged, forKey: .event)
+        case .brakeReleased:
+            try container.encode(SupervisionLifecycleEvent.brakeReleased, forKey: .event)
         case .modeChanged(let from, let to):
+            try container.encode(SupervisionLifecycleEvent.modeChanged, forKey: .event)
             try container.encode(from, forKey: .from)
             try container.encode(to, forKey: .to)
+        case .unrecognized:
+            throw EncodingError.invalidValue(payload, EncodingError.Context(
+                codingPath: container.codingPath,
+                debugDescription: "a ledger line this build did not parse cannot be re-encoded; "
+                    + "copy its original bytes instead"))
         }
     }
 
+    /// Reads the envelope first and the body only for the kinds and events this
+    /// build models. A `delivery`, `enrollment` or `anomaly` line — or a
+    /// lifecycle event added by a later build — decodes as `.unrecognized`
+    /// rather than throwing, because throwing would report an intact
+    /// append-only record as corrupt.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
@@ -240,8 +272,13 @@ public struct SupervisionLedgerLine: Codable, Sendable, Equatable {
         mode = try container.decodeIfPresent(String.self, forKey: .mode)
         project = try container.decodeIfPresent(String.self, forKey: .project)
         kind = try container.decode(SupervisionLedgerKind.self, forKey: .kind)
-        let event = try container.decode(SupervisionLifecycleEvent.self, forKey: .event)
-        switch event {
+
+        guard kind == .lifecycle else {
+            payload = .unrecognized
+            return
+        }
+        let name = try container.decodeIfPresent(String.self, forKey: .event)
+        switch name.flatMap(SupervisionLifecycleEvent.init(rawValue:)) {
         case .projectOn:
             payload = .projectOn(
                 roster: try container.decodeIfPresent(
@@ -258,6 +295,8 @@ public struct SupervisionLedgerLine: Codable, Sendable, Equatable {
             payload = .modeChanged(
                 from: try container.decode(String.self, forKey: .from),
                 to: try container.decode(String.self, forKey: .to))
+        case nil:
+            payload = .unrecognized
         }
     }
 }

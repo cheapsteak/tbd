@@ -135,13 +135,71 @@ private func generatedRepos(count: Int, using generator: inout SplitMix64) -> [S
         #expect(projects.map(\.name) == ["acme-api", "tbd"])
     }
 
-    @Test func twoReposWithOneNameAreReportedRatherThanCollapsed() {
-        let twins = [SupervisionRepo(id: repoA, name: "acme-web"),
-                     SupervisionRepo(id: repoB, name: "acme-web")]
-        let thrown = #expect(throws: SupervisionTopologyError.self) {
-            try SupervisionTopology.resolve(file: SupervisionFile(), repos: twins)
+    /// Display names carry no uniqueness constraint, so two clones of `api`
+    /// under different parents is an ordinary state. Neither resolves to a
+    /// project — two candidates for one name identify nothing — but the rest of
+    /// the fleet resolves, and `resolve` does not throw.
+    @Test func twoReposWithOneNameResolveToNoProjectAndTakeNothingElseDown() throws {
+        let twins = [SupervisionRepo(id: repoA, name: "api"),
+                     SupervisionRepo(id: repoB, name: "api"),
+                     SupervisionRepo(id: repoC, name: "tbd")]
+        let projects = try SupervisionTopology.resolve(file: SupervisionFile(), repos: twins)
+
+        #expect(projects.map(\.name) == ["tbd"])
+        #expect(projects.flatMap(\.repos) == [repoC])
+
+        let ambiguous = SupervisionTopology.ambiguousRepoNames(
+            file: SupervisionFile(), repos: twins)
+        #expect(ambiguous == [SupervisionAmbiguousRepoName(
+            name: "api", repos: [repoA, repoB].sorted { $0.uuidString < $1.uuidString })])
+    }
+
+    /// The compounding failure the throw used to cause: every supervision
+    /// surface, the `status.json` heartbeat included, went down together — and
+    /// a fleet with no heartbeat is indistinguishable from a dead daemon to the
+    /// watchdog. Resolution must survive so the heartbeat can be written.
+    @Test func anAmbiguousNameDoesNotStopTheRestOfTheFleetResolving() throws {
+        let repos = [SupervisionRepo(id: repoA, name: "api"),
+                     SupervisionRepo(id: repoB, name: "api"),
+                     SupervisionRepo(id: repoC, name: "tbd")]
+        let file = SupervisionFile(
+            supervised: ["tbd"], modes: ["tbd": .bare("autonomous")])
+        let projects = try SupervisionTopology.resolve(file: file, repos: repos)
+        let survivor = try #require(projects.first { $0.name == "tbd" })
+        #expect(survivor.mark)
+        #expect(survivor.activeMode == "autonomous")
+    }
+
+    /// A declaration naming the shared repos resolves them — the second fix
+    /// the warning suggests.
+    @Test func declaringAProjectResolvesTheSharedName() throws {
+        let twins = [SupervisionRepo(id: repoA, name: "api"),
+                     SupervisionRepo(id: repoB, name: "api")]
+        let file = SupervisionFile(projects: [
+            "acme-api": .init(repos: [repoA, repoB], policy: .repo(repoA)),
+        ])
+        let projects = try SupervisionTopology.resolve(file: file, repos: twins)
+        #expect(projects.map(\.name) == ["acme-api"])
+        #expect(SupervisionTopology.ambiguousRepoNames(file: file, repos: twins).isEmpty)
+    }
+
+    /// A name from the operator's own file still refuses loudly, even when the
+    /// repos sharing it are ambiguous among themselves.
+    @Test func aDeclaredNameCollidingWithSharedRepoNamesStillThrows() {
+        let twins = [SupervisionRepo(id: repoA, name: "api"),
+                     SupervisionRepo(id: repoB, name: "api"),
+                     SupervisionRepo(id: repoC, name: "tbd")]
+        let file = SupervisionFile(projects: [
+            "api": .init(repos: [repoC], policy: .repo(repoC)),
+        ])
+        #expect(throws: SupervisionTopologyError.self) {
+            try SupervisionTopology.resolve(file: file, repos: twins)
         }
-        #expect(thrown?.description.contains("acme-web") == true)
+    }
+
+    @Test func aFleetOfDistinctNamesReportsNoAmbiguity() {
+        #expect(SupervisionTopology.ambiguousRepoNames(
+            file: SupervisionFile(), repos: repos).isEmpty)
     }
 
     /// A repo displayed as `acme/web` is a project whose name cannot be a

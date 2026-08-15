@@ -141,6 +141,52 @@ import Foundation
         }
     }
 
+    /// The record is append-only and documented, so a reader meets lines it did
+    /// not write. A `delivery`, `enrollment` or `anomaly` line must read as an
+    /// envelope, not as damage: counting them as unreadable would report a
+    /// healthy record as corrupt on every boot and bury real corruption in the
+    /// false alarm.
+    @Test(arguments: ["delivery", "enrollment", "anomaly"])
+    func aLineOfAnotherKindReadsAsAnEnvelopeRatherThanDamage(_ kind: String) throws {
+        let json = """
+            {"id":"abc123","ts":"2026-08-14T02:13:12.482Z","mode":"autonomous",
+             "project":"acme-checkout","kind":"\(kind)",
+             "textHash":"deadbeef","conductHash":"cafe"}
+            """
+        let line = try JSONDecoder().decode(SupervisionLedgerLine.self, from: Data(json.utf8))
+        #expect(line.id == "abc123")
+        #expect(line.project == "acme-checkout")
+        #expect(line.mode == "autonomous")
+        #expect(line.kind.rawValue == kind)
+        #expect(line.payload == .unrecognized)
+        #expect(line.payload.event == nil)
+    }
+
+    /// The same protection one level down: a lifecycle event a later build
+    /// writes — a desk recycle, an appointment — is an envelope, not damage.
+    @Test func aLifecycleEventFromALaterBuildReadsAsAnEnvelope() throws {
+        let json = """
+            {"id":"abc123","ts":"2026-08-14T02:13:12.482Z","mode":"attended",
+             "project":"acme-checkout","kind":"lifecycle","event":"deskRecycled",
+             "reason":"contextFull"}
+            """
+        let line = try JSONDecoder().decode(SupervisionLedgerLine.self, from: Data(json.utf8))
+        #expect(line.kind == .lifecycle)
+        #expect(line.project == "acme-checkout")
+        #expect(line.payload == .unrecognized)
+    }
+
+    /// Re-encoding a line whose body was never parsed would silently truncate
+    /// somebody else's record, so it is refused instead.
+    @Test func anUnparsedLineCannotBeReEncoded() throws {
+        let json = """
+            {"id":"abc123","ts":"2026-08-14T02:13:12.482Z","mode":null,
+             "project":null,"kind":"anomaly","detail":"something"}
+            """
+        let line = try JSONDecoder().decode(SupervisionLedgerLine.self, from: Data(json.utf8))
+        #expect(throws: (any Error).self) { try JSONEncoder().encode(line) }
+    }
+
     @Test func lineIdsAreOpaqueAndUnique() {
         let first = SupervisionLedgerLine.newID()
         let second = SupervisionLedgerLine.newID()
@@ -213,9 +259,36 @@ import Foundation
     @Test func warningCodesAreTheDocumentedStrings() throws {
         #expect(SupervisionWarningCode.noProjectsOn.rawValue == "noProjectsOn")
         #expect(SupervisionWarningCode.unusableProjectName.rawValue == "unusableProjectName")
+        #expect(SupervisionWarningCode.ambiguousRepoName.rawValue == "ambiguousRepoName")
+        #expect(SupervisionWarningCode.brakeEngagedWithProjectsOn.rawValue
+            == "brakeEngagedWithProjectsOn")
         let decoded = try JSONDecoder().decode(
             SupervisionWarningCode.self, from: Data("\"unusableProjectName\"".utf8))
         #expect(decoded == .unusableProjectName)
+    }
+
+    /// The two quiet failures are opposite states that `effectivelySupervising`
+    /// alone reports identically — released with nothing marked, and marks
+    /// standing under an engaged brake. They call for opposite actions (mark a
+    /// project, or release the brake), so the enumerated code is the thing a
+    /// program branches on.
+    @Test func theTwoQuietFailuresAreDistinguishableBeyondOneBit() throws {
+        let nothingMarked = SupervisionStatus(
+            brake: .released, effectivelySupervising: false, projects: [],
+            warnings: [.init(code: .noProjectsOn, message: "nothing is being supervised")])
+        let markedButBraked = SupervisionStatus(
+            brake: .engaged, effectivelySupervising: false, projects: [],
+            warnings: [.init(code: .brakeEngagedWithProjectsOn,
+                             message: "the brake is engaged; nothing is being supervised")])
+
+        #expect(nothingMarked.effectivelySupervising == markedButBraked.effectivelySupervising)
+        #expect(nothingMarked.warnings.map(\.code) != markedButBraked.warnings.map(\.code))
+
+        for status in [nothingMarked, markedButBraked] {
+            let decoded = try JSONDecoder().decode(
+                SupervisionStatus.self, from: try JSONEncoder().encode(status))
+            #expect(decoded == status)
+        }
     }
 
     @Test func everyResultDTOCarriesASchemaVersion() throws {

@@ -2088,6 +2088,28 @@ public enum SupervisionWarningCode: String, Codable, Sendable {
     /// Supervision covers them regardless; the fix is renaming the repo, and
     /// the message names which ones.
     case unusableProjectName
+    /// Two or more repos share a display name, so none of them resolves to a
+    /// project and none is supervised — a project is identified by its name,
+    /// and two candidates for one name identify nothing
+    /// (`SupervisionTopology.ambiguousRepoNames(file:repos:)`). The rest of the
+    /// fleet is unaffected. The message names the repos; the operator's fix is
+    /// to rename one, or to declare a project naming them.
+    case ambiguousRepoName
+    /// The brake is engaged while at least one project's mark stands — the
+    /// exact mirror of `noProjectsOn`. An operator who runs
+    /// `tbd supervise on acme` against an engaged brake sees `on: acme` and
+    /// forms the belief that supervision is running; nothing is watching.
+    ///
+    /// **Emitted only when a mark actually stands.** An engaged brake over a
+    /// fleet with nothing marked is a deliberately quiet system, not a warning,
+    /// and warning there would train an operator to ignore the line — which
+    /// costs more than it buys.
+    ///
+    /// `SupervisionStatus.effectivelySupervising` is false in this state and in
+    /// `noProjectsOn` alike, and cannot tell them apart; they call for opposite
+    /// actions — release the brake, or mark a project — so the code is what a
+    /// program branches on.
+    case brakeEngagedWithProjectsOn
 }
 
 /// One warning on the status readout: a stable code, and the sentence a human

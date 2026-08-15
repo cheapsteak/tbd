@@ -121,10 +121,23 @@ public enum SupervisionMoveTarget: Sendable, Equatable {
     }
 }
 
+/// A display name two or more undeclared repos share, and the repos that share
+/// it. None of them resolves to a project until one is renamed or a declaration
+/// names them.
+public struct SupervisionAmbiguousRepoName: Sendable, Equatable {
+    public let name: String
+    /// The repos sharing the name, in a stable order.
+    public let repos: [UUID]
+
+    public init(name: String, repos: [UUID]) {
+        self.name = name
+        self.repos = repos
+    }
+}
+
 /// Why a topology operation was refused.
 public enum SupervisionTopologyError: Error, Equatable, CustomStringConvertible, LocalizedError {
     case projectNameCollidesWithRepo(project: String, repo: UUID, repoName: String)
-    case duplicateRepoName(name: String, repos: [UUID])
     case unknownRepo(repo: UUID)
     case unknownProject(project: String)
     case policySourceWouldLeaveProject(project: String, repo: UUID)
@@ -135,10 +148,6 @@ public enum SupervisionTopologyError: Error, Equatable, CustomStringConvertible,
             return "Declared project \"\(project)\" has the same name as repo \(repoName) "
                 + "(\(repo.uuidString)), which is not one of its members — that repo's own "
                 + "project would have the same name. Rename the project or move the repo into it."
-        case .duplicateRepoName(let name, let repos):
-            let ids = repos.map(\.uuidString).joined(separator: ", ")
-            return "Two repos are both named \"\(name)\" (\(ids)), so each would be its own "
-                + "project under the same name. Rename one, or declare a project for them."
         case .unknownRepo(let repo):
             return "There is no repo \(repo.uuidString)."
         case .unknownProject(let project):
@@ -163,35 +172,27 @@ public enum SupervisionTopology {
     /// can tell it from a one-repo declared project — its policy source is
     /// `.repo(thatRepo)`, precisely what such a declaration resolves to.
     ///
-    /// Reports rather than repairs: a name collision is refused whole and no
-    /// partial resolution is served.
+    /// **A declared** name that collides is refused whole, and no partial
+    /// resolution is served: that name is the operator's own edit, in a file
+    /// they can fix. An **undeclared** repo whose display name is not unique is
+    /// reported instead — see `ambiguousRepoNames(file:repos:)`.
     public static func resolve(
         file: SupervisionFile, repos: [SupervisionRepo]
     ) throws -> [SupervisionProject] {
         try file.validate()
 
-        var declaredOwner: [UUID: String] = [:]
-        for (name, declaration) in file.projects {
-            for repo in declaration.repos { declaredOwner[repo] = name }
-        }
+        let declaredOwner = declaredOwners(file: file)
+        let implicitOwner = implicitOwners(file: file, repos: repos)
 
-        // Implicit names first, so a collision is reported before anything is
+        // The declared collision first, so it is reported before anything is
         // built.
-        var implicitOwner: [String: [UUID]] = [:]
-        for repo in repos where declaredOwner[repo.id] == nil {
-            implicitOwner[repo.name, default: []].append(repo.id)
-        }
         for name in implicitOwner.keys.sorted() {
-            let owners = implicitOwner[name] ?? []
-            if owners.count > 1 {
-                throw SupervisionTopologyError.duplicateRepoName(
-                    name: name, repos: owners.sorted { $0.uuidString < $1.uuidString })
-            }
-            if file.projects[name] != nil, let repo = owners.first {
+            if file.projects[name] != nil, let repo = implicitOwner[name]?.first {
                 throw SupervisionTopologyError.projectNameCollidesWithRepo(
                     project: name, repo: repo, repoName: name)
             }
         }
+        let ambiguous = Set(implicitOwner.filter { $0.value.count > 1 }.keys)
 
         var projects: [SupervisionProject] = []
         for (name, declaration) in file.projects {
@@ -199,12 +200,59 @@ public enum SupervisionTopology {
                 named: name, repos: declaration.repos, policy: declaration.policy,
                 sweep: declaration.sweep, file: file))
         }
-        for repo in repos where declaredOwner[repo.id] == nil {
+        for repo in repos
+        where declaredOwner[repo.id] == nil && !ambiguous.contains(repo.name) {
             projects.append(project(
                 named: repo.name, repos: [repo.id], policy: .repo(repo.id),
                 sweep: nil, file: file))
         }
         return projects.sorted { $0.name < $1.name }
+    }
+
+    /// The display names shared by two or more repos that no declaration
+    /// names, each with its repos, sorted.
+    ///
+    /// Those repos resolve to **no project**: a project is identified by its
+    /// name, so two candidates for one name identify nothing. The rest of the
+    /// fleet resolves normally, which is the whole point — display names carry
+    /// no uniqueness constraint anywhere in TBD (`RepoStore.addRepo` defaults
+    /// to the path's last component and rename accepts anything), so two
+    /// clones of `api` under different parents is an ordinary state, and it
+    /// must not take `status`, `project list`, every mark and mode gesture, and
+    /// the `status.json` heartbeat down together. A fleet whose heartbeat stops
+    /// is indistinguishable from a dead daemon to the watchdog, which is the
+    /// one distinction that file exists to draw.
+    ///
+    /// Reported as `SupervisionWarningCode.ambiguousRepoName`. The operator's
+    /// fix is to rename one repo, or to declare a project naming them.
+    public static func ambiguousRepoNames(
+        file: SupervisionFile, repos: [SupervisionRepo]
+    ) -> [SupervisionAmbiguousRepoName] {
+        implicitOwners(file: file, repos: repos)
+            .filter { $0.value.count > 1 }
+            .map { SupervisionAmbiguousRepoName(name: $0.key, repos: $0.value) }
+            .sorted { $0.name < $1.name }
+    }
+
+    private static func declaredOwners(file: SupervisionFile) -> [UUID: String] {
+        var owners: [UUID: String] = [:]
+        for (name, declaration) in file.projects {
+            for repo in declaration.repos { owners[repo] = name }
+        }
+        return owners
+    }
+
+    /// Repos no declaration names, grouped by the project name they would take,
+    /// each group in a stable order.
+    private static func implicitOwners(
+        file: SupervisionFile, repos: [SupervisionRepo]
+    ) -> [String: [UUID]] {
+        let declaredOwner = declaredOwners(file: file)
+        var implicitOwner: [String: [UUID]] = [:]
+        for repo in repos where declaredOwner[repo.id] == nil {
+            implicitOwner[repo.name, default: []].append(repo.id)
+        }
+        return implicitOwner.mapValues { $0.sorted { $0.uuidString < $1.uuidString } }
     }
 
     /// The resolved projects that cannot have a directory of their own, by

@@ -149,6 +149,35 @@ import Foundation
         #expect((sweep?["somethingLaterVersionsAdd"] as? [Int]) == [1, 2])
     }
 
+    /// The narrowed contract, pinned: every key and value survives a rewrite,
+    /// but the *spelling* of a number does not — `JSONDecoder` hands over a
+    /// parsed number and the original token is gone. Same JSON value to every
+    /// consumer; not byte-faithful, and the doc comment must not claim it is.
+    @Test func numbersSurviveAsValuesNotAsText() throws {
+        let json = """
+            {"version": 1,
+             "projects": {"acme-checkout": {"repos": ["11111111-1111-1111-1111-111111111111"],
+                                            "policy": {"operator": true},
+                                            "sweep": {"everyMinutes": 15.0, "ratio": 0.5,
+                                                      "count": 3}}}}
+            """
+        let file = try JSONDecoder().decode(SupervisionFile.self, from: Data(json.utf8))
+        let sweep = try #require(file.projects["acme-checkout"]?.sweep)
+        // Preserved as values: every key is still there, and the numbers are
+        // equal to what was written.
+        #expect(sweep.fields.keys.sorted() == ["count", "everyMinutes", "ratio"])
+        #expect(sweep.fields["everyMinutes"] == .integer(15))
+        #expect(sweep.fields["ratio"] == .number(0.5))
+        #expect(sweep.fields["count"] == .integer(3))
+
+        let reencoded = try JSONSerialization.jsonObject(
+            with: try JSONEncoder().encode(file)) as? [String: Any]
+        let rewritten = ((reencoded?["projects"] as? [String: Any])?["acme-checkout"]
+            as? [String: Any])?["sweep"] as? [String: Any]
+        #expect(rewritten?["everyMinutes"] as? Double == 15)
+        #expect(rewritten?["ratio"] as? Double == 0.5)
+    }
+
     @Test func emptyFileEncodesWithoutEmptyScaffolding() throws {
         let encoded = try JSONEncoder().encode(SupervisionFile())
         let object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
@@ -311,6 +340,32 @@ import Foundation
         let file = SupervisionFile(projects: [name: .init(repos: [repoA], policy: .operator)])
         try file.validate()
         #expect(SupervisionFile.isSafeProjectName(name))
+    }
+
+    /// `--to singleton` resolves the word before it looks for a project, so a
+    /// declared project of that name could be created and never targeted.
+    @Test func theSingletonSentinelCannotBeTakenAsAProjectName() {
+        let file = SupervisionFile(projects: ["singleton": .init(repos: [repoA], policy: .operator)])
+        #expect(throws: SupervisionFileError.reservedProjectName(project: "singleton")) {
+            try file.validate()
+        }
+    }
+
+    @Test func aNameMerelyContainingSingletonIsFine() throws {
+        let file = SupervisionFile(projects: [
+            "singleton-web": .init(repos: [repoA], policy: .operator),
+        ])
+        try file.validate()
+    }
+
+    /// The refusal message has to describe the rule the predicate actually
+    /// applies — it once claimed to reject leading and trailing spaces, which
+    /// `isSafeProjectName` permits.
+    @Test func theInvalidNameMessageMatchesThePredicate() {
+        let message = SupervisionFileError.invalidProjectName(project: "acme/web").description
+        #expect(message.contains("acme/web"))
+        #expect(!message.contains("space"))
+        #expect(SupervisionFile.isSafeProjectName(" acme "))
     }
 
     @Test func aSelectionOutsideTheDeclaredListIsRejected() {
