@@ -17,10 +17,17 @@ import os
 enum PasteExecutor {
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "tmuxControlMode")
 
-    enum PasteError: Error, Equatable {
+    enum PasteError: LocalizedError, Equatable {
         /// The temp path contained a character that can't be safely single-quoted
         /// into a tmux command (should never happen for a FileManager temp path).
         case unsafeTempPath(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .unsafeTempPath(let path):
+                return "Paste temp path can't be safely quoted into a tmux command: \(path)"
+            }
+        }
     }
 
     /// Write `bytes` to a temp file, load it into a unique buffer, paste it into

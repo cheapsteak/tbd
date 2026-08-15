@@ -1962,6 +1962,13 @@ struct GHPRViewResult {
     let mergeQueuePosition: Int?
 }
 
-public enum PRStatusError: Error {
+public enum PRStatusError: LocalizedError {
     case invalidJSON
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidJSON:
+            return "the GitHub response could not be parsed as the expected PR-status JSON shape"
+        }
+    }
 }

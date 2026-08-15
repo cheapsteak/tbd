@@ -19,9 +19,18 @@ enum TmuxPreparationStage: String, Equatable, Sendable {
     case verifySelection
 }
 
-enum TmuxPreparationFailure: Error, Equatable, Sendable {
+enum TmuxPreparationFailure: LocalizedError, Equatable, Sendable {
     case windowMissing(failedStage: TmuxPreparationStage)
     case commandFailed(stage: TmuxPreparationStage, output: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .windowMissing(let stage):
+            return "tmux window is missing (failed at stage: \(stage.rawValue))"
+        case .commandFailed(let stage, let output):
+            return "tmux command failed at stage \(stage.rawValue): \(output)"
+        }
+    }
 }
 
 /// File-based debug log for diagnostics

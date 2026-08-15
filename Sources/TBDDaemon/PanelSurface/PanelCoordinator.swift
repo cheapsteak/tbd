@@ -2,7 +2,7 @@ import Foundation
 import TBDShared
 
 /// Errors `PanelCoordinator.apply` can throw. See spec C §7.2/§7.4.
-public enum PanelCoordinatorError: Error, Equatable, Sendable {
+public enum PanelCoordinatorError: LocalizedError, Equatable, Sendable {
     /// `daemon_panel_surface_enabled` is off — no mutating origin may proceed.
     case surfaceDisabled
     /// `origin == .agentCLI` while `agent_panel_control_enabled` is off.
@@ -18,6 +18,24 @@ public enum PanelCoordinatorError: Error, Equatable, Sendable {
     /// The reducer rejected the operation against a FRESH base (baseRevision
     /// absent, current, or the error isn't a vanished-target case).
     case operation(PanelOperationError)
+
+    public var errorDescription: String? {
+        switch self {
+        case .surfaceDisabled:
+            return "the panel surface is disabled (daemon_panel_surface_enabled is off)"
+        case .agentControlDisabled:
+            return "agent panel control is disabled (agent_panel_control_enabled is off)"
+        case .tabNotFound(let tabID):
+            return "no panel surface exists for tab \(tabID.uuidString)"
+        case .staleTarget(let underlying):
+            return "the operation's target changed under a stale base revision: "
+                + (underlying.errorDescription ?? "\(underlying)")
+        case .invalidResource(let detail):
+            return "the operation referenced a resource that does not exist in this worktree: \(detail)"
+        case .operation(let underlying):
+            return "the panel operation was rejected: " + (underlying.errorDescription ?? "\(underlying)")
+        }
+    }
 }
 
 /// Vanished-target reducer errors — the only `PanelOperationError` cases a

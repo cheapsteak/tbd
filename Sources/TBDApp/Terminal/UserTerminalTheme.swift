@@ -15,11 +15,24 @@ struct UserTerminalTheme: Codable, Equatable, Hashable {
     let cursor: String
     let selection: String
 
-    enum ValidationError: Error, Equatable {
+    enum ValidationError: LocalizedError, Equatable {
         case wrongAnsiCount(Int)
         case invalidHex(field: String, value: String)
         case invalidID(String)
         case unsupportedSchemaVersion(Int)
+
+        var errorDescription: String? {
+            switch self {
+            case .wrongAnsiCount(let count):
+                return "Theme needs exactly 16 ANSI colors, but has \(count)"
+            case .invalidHex(let field, let value):
+                return "\(field) is \"\(value)\", which isn't a hex color — use a form like #1a1b26"
+            case .invalidID(let id):
+                return "Theme id \"\(id)\" is invalid — use lowercase letters, numbers, and hyphens only"
+            case .unsupportedSchemaVersion(let version):
+                return "Theme schemaVersion \(version) isn't supported — this version of TBD reads schemaVersion 1"
+            }
+        }
     }
 
     func validated() throws -> UserTerminalTheme {

@@ -13,7 +13,7 @@ public struct PanelSurfaceState: Codable, Sendable, Equatable {
     }
 }
 
-public enum PanelOperationError: Error, Equatable, Sendable {
+public enum PanelOperationError: LocalizedError, Equatable, Sendable {
     case panelNotFound(PanelID)
     case splitNotFound(SplitID)
     case anchorNotFound
@@ -21,6 +21,25 @@ public enum PanelOperationError: Error, Equatable, Sendable {
     case invalidPlacement(reason: String)
     case historyUnavailable(PanelID)
     case notTabScoped
+
+    public var errorDescription: String? {
+        switch self {
+        case .panelNotFound(let panelID):
+            return "panel not found: \(panelID.uuidString)"
+        case .splitNotFound(let splitID):
+            return "split not found: \(splitID.uuidString)"
+        case .anchorNotFound:
+            return "anchor panel not found in the surface"
+        case .invalidRatios(let reason):
+            return "invalid split ratios: \(reason)"
+        case .invalidPlacement(let reason):
+            return "invalid panel placement: \(reason)"
+        case .historyUnavailable(let panelID):
+            return "no navigation history for panel: \(panelID.uuidString)"
+        case .notTabScoped:
+            return "operation requires a tab-scoped surface"
+        }
+    }
 }
 
 /// Pure reducer for Spec C §7.3 panel operations. No clock, no I/O — every

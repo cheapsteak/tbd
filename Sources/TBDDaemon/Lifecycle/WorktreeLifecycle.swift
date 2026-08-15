@@ -5,7 +5,7 @@ import os
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "reaper")
 
 /// Errors that can occur during worktree lifecycle operations.
-public enum WorktreeLifecycleError: Error, CustomStringConvertible, LocalizedError {
+public enum WorktreeLifecycleError: LocalizedError, CustomStringConvertible {
     case repoNotFound(UUID)
     case worktreeNotFound(UUID)
     case worktreeNotArchived(UUID)

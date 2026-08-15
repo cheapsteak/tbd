@@ -7,7 +7,7 @@ import Darwin
 import TBDShared
 
 /// Errors that can occur when communicating with the daemon.
-enum SocketClientError: Error, CustomStringConvertible {
+enum SocketClientError: LocalizedError, CustomStringConvertible {
     case daemonNotRunning
     case connectionFailed(String)
     case sendFailed(String)
@@ -28,6 +28,8 @@ enum SocketClientError: Error, CustomStringConvertible {
             return "Invalid response from daemon"
         }
     }
+
+    var errorDescription: String? { description }
 }
 
 /// A simple synchronous Unix domain socket client that connects to the TBD daemon.
@@ -175,7 +177,7 @@ struct SocketClient: Sendable {
 }
 
 /// General CLI errors.
-enum CLIError: Error, CustomStringConvertible {
+enum CLIError: LocalizedError, CustomStringConvertible {
     case rpcError(String)
     case invalidArgument(String)
 
@@ -187,4 +189,6 @@ enum CLIError: Error, CustomStringConvertible {
             return msg
         }
     }
+
+    var errorDescription: String? { description }
 }

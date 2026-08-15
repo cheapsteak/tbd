@@ -2,7 +2,7 @@ import Foundation
 import TBDShared
 
 /// Errors thrown by `ReapSnapshot`'s snapshot/restore orchestration.
-public enum ReapSnapshotError: Error, CustomStringConvertible, Equatable {
+public enum ReapSnapshotError: LocalizedError, CustomStringConvertible, Equatable {
     /// The snapshot ref was written but a subsequent `listRefs` read didn't
     /// find it — the caller must keep the worktree rather than delete it.
     case verificationFailed(String)
@@ -23,6 +23,8 @@ public enum ReapSnapshotError: Error, CustomStringConvertible, Equatable {
             return "ReapSnapshot: record has neither a live branch nor a headSHA to restore from"
         }
     }
+
+    public var errorDescription: String? { description }
 }
 
 /// Orchestrates the orphan-GC "snapshot before delete, restore on demand"

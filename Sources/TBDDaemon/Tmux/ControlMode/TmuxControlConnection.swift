@@ -229,6 +229,13 @@ final class TmuxControlConnection: @unchecked Sendable {
 }
 
 /// Failure modes for `TmuxControlConnection.start()`.
-enum TmuxControlConnectionError: Error {
+enum TmuxControlConnectionError: LocalizedError {
     case ptyAllocationFailed(Int32)
+
+    var errorDescription: String? {
+        switch self {
+        case .ptyAllocationFailed(let code):
+            return "openpty(3) for the control-mode connection failed: \(String(cString: strerror(code))) (errno \(code))"
+        }
+    }
 }

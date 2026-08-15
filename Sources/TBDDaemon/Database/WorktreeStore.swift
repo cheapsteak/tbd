@@ -173,7 +173,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
 /// validation rules (`parentNotFound`, `parentIsMain`, `parentIsArchived`)
 /// apply identically at both call sites. The `selfReference` and `cycle`
 /// cases are move-only by construction (a brand-new row has no descendants).
-public enum WorktreeMoveError: Error, CustomStringConvertible {
+public enum WorktreeMoveError: LocalizedError, CustomStringConvertible {
     case selfReference
     case cycle
     case parentNotFound
@@ -191,14 +191,18 @@ public enum WorktreeMoveError: Error, CustomStringConvertible {
         case .worktreeNotFound: return "Worktree not found."
         }
     }
+
+    public var errorDescription: String? { description }
 }
 
-public enum WorktreeArchiveError: Error, CustomStringConvertible {
+public enum WorktreeArchiveError: LocalizedError, CustomStringConvertible {
     case hasActiveChildren
 
     public var description: String {
         "Archive nested worktrees first."
     }
+
+    public var errorDescription: String? { description }
 }
 
 /// Provides CRUD operations for worktrees.

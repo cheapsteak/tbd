@@ -497,7 +497,7 @@ extension WorktreeLifecycle {
 }
 
 /// Why a manual `preSession` re-run was refused.
-public enum RerunPreSessionError: Error, Equatable, CustomStringConvertible {
+public enum RerunPreSessionError: LocalizedError, Equatable, CustomStringConvertible {
     case worktreeNotFound(UUID)
     case noHookConfigured
     case alreadyRunning

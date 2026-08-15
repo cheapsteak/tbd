@@ -29,7 +29,7 @@ public struct QueuedDeletion: Sendable, Equatable {
     }
 }
 
-public enum WorktreeDeletionQueueError: Error, CustomStringConvertible, Equatable {
+public enum WorktreeDeletionQueueError: LocalizedError, CustomStringConvertible, Equatable {
     /// `rename(2)` refused. `errno` is `EXDEV` when the queue directory landed
     /// on a different filesystem than the worktree — the case the archive
     /// path's fallback exists for.
@@ -41,6 +41,8 @@ public enum WorktreeDeletionQueueError: Error, CustomStringConvertible, Equatabl
             return "rename(\(from) -> \(to)) failed: \(describeErrno(code)) (errno \(code))"
         }
     }
+
+    public var errorDescription: String? { description }
 }
 
 /// Owns the hand-off point between "this worktree is archived" and "its bytes

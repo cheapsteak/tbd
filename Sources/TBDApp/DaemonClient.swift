@@ -56,9 +56,14 @@ enum DaemonClientError: Error, CustomStringConvertible, LocalizedError, Sendable
 /// and can kill a healthy racing re-attach's fresh sink (the 56029f5b class,
 /// from a different throw site). `generation` is nil only when an older
 /// daemon minted none.
-struct AttachFDVendError: Error {
+struct AttachFDVendError: LocalizedError {
     let generation: UInt64?
     let underlying: any Error
+
+    var errorDescription: String? {
+        let gen = generation.map(String.init) ?? "none"
+        return "Attach fd vend failed (generation: \(gen)): \(underlying.localizedDescription)"
+    }
 }
 
 /// Actor that communicates with the TBD daemon over a Unix domain socket.

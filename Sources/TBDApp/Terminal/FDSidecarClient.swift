@@ -3,12 +3,28 @@ import Foundation
 import TBDShared
 import os
 
-enum FDSidecarError: Error {
+enum FDSidecarError: LocalizedError {
     case connectFailed(Int32)
     case notConnected
     case timedOut
     case superseded      // a newer expectation for the same key replaced this one
     case disconnected    // sidecar socket EOF'd with waiters pending
+
+    var errorDescription: String? {
+        switch self {
+        case .connectFailed(let errnoValue):
+            let detail = String(cString: strerror(errnoValue))
+            return "FD sidecar connect failed: \(detail) (errno \(errnoValue))"
+        case .notConnected:
+            return "FD sidecar is not connected"
+        case .timedOut:
+            return "FD sidecar timed out waiting for a vended fd"
+        case .superseded:
+            return "FD sidecar wait superseded by a newer attach for the same pane"
+        case .disconnected:
+            return "FD sidecar socket disconnected while waiting for a vended fd"
+        }
+    }
 }
 
 /// App-side sidecar client: connects to the daemon's FD-vending socket and
