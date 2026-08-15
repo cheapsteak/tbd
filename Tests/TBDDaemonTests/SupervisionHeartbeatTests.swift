@@ -44,6 +44,77 @@ struct SupervisionHeartbeatTests {
         }
     }
 
+    /// A snapshot source whose **first** call parks until the test releases it,
+    /// so one `applyBrake` can be held inside its edge write while another runs
+    /// to completion.
+    ///
+    /// Lock-guarded rather than an actor, deliberately: an actor that parked
+    /// inside its own isolated method would still be holding itself, so the
+    /// second call could not get in and the test would deadlock instead of
+    /// interleaving. The lock is only ever held across bookkeeping, never
+    /// across the suspension.
+    private final class ParkingSnapshots: @unchecked Sendable {
+        private let lock = NSLock()
+        private let value: SupervisionStatusFile
+        private var callCount = 0
+        private var sawFirstCall = false
+        private var firstCallWaiters: [CheckedContinuation<Void, Never>] = []
+        private var isReleased = false
+        private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+        init(_ value: SupervisionStatusFile) { self.value = value }
+
+        var calls: Int { lock.withLock { callCount } }
+
+        var provider: @Sendable () async throws -> SupervisionStatusFile {
+            { [self] in
+                let shouldPark = lock.withLock { () -> Bool in
+                    callCount += 1
+                    guard !sawFirstCall else { return false }
+                    sawFirstCall = true
+                    return true
+                }
+                guard shouldPark else { return value }
+
+                let arrivals = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+                    defer { firstCallWaiters = [] }
+                    return firstCallWaiters
+                }
+                for waiter in arrivals { waiter.resume() }
+
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    let alreadyReleased = lock.withLock { () -> Bool in
+                        guard !isReleased else { return true }
+                        releaseWaiters.append(continuation)
+                        return false
+                    }
+                    if alreadyReleased { continuation.resume() }
+                }
+                return value
+            }
+        }
+
+        func waitForFirstCall() async {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                let alreadyArrived = lock.withLock { () -> Bool in
+                    guard !sawFirstCall else { return true }
+                    firstCallWaiters.append(continuation)
+                    return false
+                }
+                if alreadyArrived { continuation.resume() }
+            }
+        }
+
+        func release() {
+            let waiters = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+                isReleased = true
+                defer { releaseWaiters = [] }
+                return releaseWaiters
+            }
+            for waiter in waiters { waiter.resume() }
+        }
+    }
+
     private static func path() throws -> String {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-heartbeat-\(UUID().uuidString)", isDirectory: true)
@@ -174,6 +245,39 @@ struct SupervisionHeartbeatTests {
         await clock.advance(by: SupervisionHeartbeat.defaultInterval * 5)
         for _ in 0..<20 { await Task.yield() }
         #expect(snapshots.calls == afterEngaging, "and the timer is disarmed behind it")
+    }
+
+    @Test("Overlapping brake edges leave the timer matching the edge that landed last")
+    func overlappingBrakeEdgesSettleOnTheLastOne() async throws {
+        let path = try Self.path()
+        let snapshots = ParkingSnapshots(Self.statusFile(brake: .released))
+        let heartbeat = SupervisionHeartbeat(
+            path: path, snapshot: snapshots.provider,
+            interval: SupervisionHeartbeat.defaultInterval, clock: TestClock())
+
+        // The releasing edge parks inside its own write, which releases the
+        // actor — exactly the window in which a second edge can run start to
+        // finish. Without the intent re-check, the parked call would resume and
+        // arm a timer the engaging edge had just decided against.
+        let releasing = Task { await heartbeat.applyBrake(released: true) }
+        await snapshots.waitForFirstCall()
+
+        // Deterministic, and this is why: the engaging edge does not depend on
+        // the parked one, so it can be awaited to completion before the park is
+        // released. No yields, no polling, no timing — unlike its sibling at
+        // the store layer, where the guard's whole purpose is that the second
+        // caller *cannot* proceed and so cannot be awaited.
+        let engaging = Task { await heartbeat.applyBrake(released: false) }
+        await engaging.value
+
+        snapshots.release()
+        await releasing.value
+
+        #expect(await heartbeat.isTimerArmed == false, """
+            the engaging edge landed last, so no timer may be running — an armed \
+            one here is a loop ticking under a brake the operator pulled
+            """)
+        #expect(snapshots.calls == 2, "both edges published; neither was skipped")
     }
 
     @Test("The heartbeat publishes an engaged brake — observability is never withheld")
