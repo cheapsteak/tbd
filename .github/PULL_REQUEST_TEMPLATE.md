@@ -5,6 +5,11 @@ Summary carrying the motivation. Replace each section's guidance comment with
 prose. Sections whose guidance marks them optional may be deleted outright
 when they don't apply. This repo is public: no org, ticket, or host names —
 see CLAUDE.md.
+
+Write for a cold reader with none of your session's context: establish the
+real-world pathway before the mechanism (who or what triggers this, when, and
+why), and lead with what the diff actually changes — not the investigation
+that motivated it.
 -->
 
 <!-- ═══════════════════════ BUG FIX ═══════════════════════ -->
