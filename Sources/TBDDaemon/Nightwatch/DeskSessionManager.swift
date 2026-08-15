@@ -670,9 +670,9 @@ public actor DeskSessionManager: DeskSessionManaging {
             (attempt \(self.consecutiveRecoverySpawnsWithoutNudge + 1, privacy: .public) \
             of \(Self.maxConsecutiveRecoverySpawnsWithoutNudge, privacy: .public))
             """)
-        let before = Set(((try? await db.terminals.list(worktreeID: worktree.id)) ?? []).map(\.id))
+        let spawned: [UUID]
         do {
-            try await spawnDeskTerminal(worktree: worktree, mode: mode)
+            spawned = try await spawnDeskTerminal(worktree: worktree, mode: mode)
         } catch {
             logger.warning("""
                 Failed to spawn a replacement Watch Desk agent: \
@@ -685,10 +685,23 @@ public actor DeskSessionManager: DeskSessionManaging {
             return
         }
         consecutiveRecoverySpawnsWithoutNudge += 1
-        let after = (try? await db.terminals.list(worktreeID: worktree.id)) ?? []
-        lastRecoveryTerminalID = after
-            .filter { !before.contains($0.id) }
+        // Take the id the spawn itself returned rather than diffing the terminal
+        // table around it. The desk is an ordinary sidebar-visible scratch
+        // worktree and this actor's gate serializes only its own methods, so a
+        // terminal the user opens during the spawn lands inside a before/after
+        // diff and would be adopted as the tracked replacement. A shell adopted
+        // that way can never be proven absent by an agent-kind consultation,
+        // which wedges gate 2 shut and stops recovery for that desk until
+        // someone closes the terminal by hand.
+        //
+        // Newest of the returned ids for the same reason the classification
+        // prefers newest: `spawnPrimaryTerminals` mints the primary agent first,
+        // and a later row is the more recent coordinate.
+        let spawnedRows = ((try? await db.terminals.list(worktreeID: worktree.id)) ?? [])
+            .filter { spawned.contains($0.id) }
+        lastRecoveryTerminalID = spawnedRows
             .max(by: { ($0.createdAt, $0.id.uuidString) < ($1.createdAt, $1.id.uuidString) })?.id
+            ?? spawned.last
     }
 
     /// Clear the replacement budget and everything keyed to the same incident.
@@ -1271,7 +1284,10 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// Note: Model selection (daywatch=Sonnet, nightwatch=Opus) requires per-profile configuration.
     /// The resolved profile's model is what gets used; mode affects behavior (conservative vs. free-acting),
     /// not the LLM model directly (that's a user's profile choice).
-    private func spawnDeskTerminal(worktree: Worktree, mode: NightwatchMode) async throws {
+    @discardableResult
+    private func spawnDeskTerminal(
+        worktree: Worktree, mode: NightwatchMode
+    ) async throws -> [UUID] {
         // Get initial prompt for mode (includes absolute skillDir paths and field learnings)
         let initialPrompt = NightwatchDeskPrompts.initialPrompt(mode: mode, skillDir: skillDir)
 
@@ -1324,8 +1340,9 @@ public actor DeskSessionManager: DeskSessionManaging {
         let actuationID = try await actuationLog.appendRequest(row)
 
         // Use production spawn path which handles trust, overlay, and all lifecycle concerns
+        let spawned: [(id: UUID, label: String)]
         do {
-            _ = try await lifecycle.spawnPrimaryTerminals(
+            spawned = try await lifecycle.spawnPrimaryTerminals(
                 worktree: worktree,
                 repo: nil,
                 skipClaude: false,
@@ -1341,6 +1358,7 @@ public actor DeskSessionManager: DeskSessionManaging {
         // Model follows the profile spawnPrimaryTerminals resolves internally —
         // resolving here too would just double the keychain-backed lookup.
         logger.info("Spawned desk terminal in \(worktree.id, privacy: .public)")
+        return spawned.map(\.id)
     }
 
 }
