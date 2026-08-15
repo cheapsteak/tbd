@@ -290,7 +290,7 @@ private func supervisionPolicyDescription(
 /// them is the daemon's job; the CLI only refuses an empty list.
 func parseSupervisionRepoList(_ raw: String) throws -> [String] {
     let repos = raw.split(separator: ",")
-        .map { $0.trimmingCharacters(in: .whitespaces) }
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         .filter { !$0.isEmpty }
     guard !repos.isEmpty else {
         throw CLIError.invalidArgument("--repos must name at least one repo (comma-separated)")
@@ -303,11 +303,11 @@ let supervisionPolicyRepoPrefix = "repo:"
 
 /// Reads `--policy repo:<id>|operator`.
 func parseSupervisionPolicy(_ raw: String) throws -> SupervisionPolicyRequest {
-    let value = raw.trimmingCharacters(in: .whitespaces)
+    let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
     if value == "operator" { return .operator }
     if value.hasPrefix(supervisionPolicyRepoPrefix) {
         let repo = String(value.dropFirst(supervisionPolicyRepoPrefix.count))
-            .trimmingCharacters(in: .whitespaces)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         if !repo.isEmpty { return .repo(repo) }
     }
     throw CLIError.invalidArgument(
@@ -322,8 +322,12 @@ func parseSupervisionPolicy(_ raw: String) throws -> SupervisionPolicyRequest {
 /// able to name the project `status` shows as `" staging "`. The sentinel is the
 /// exact word: `--to " singleton "` names a project, not the sentinel, because
 /// a caller who quoted those spaces typed them deliberately.
+///
+/// The emptiness test is `.whitespacesAndNewlines` for the reason spelled out on
+/// `requireSupervisionProjectName`: these two guards are twins over the same
+/// input class, and they have to move together or one of them is a hole.
 func parseSupervisionMoveTarget(_ raw: String) throws -> SupervisionMoveTarget {
-    guard !raw.trimmingCharacters(in: .whitespaces).isEmpty else {
+    guard !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
         throw CLIError.invalidArgument(
             "--to must name a project or \"\(SupervisionMoveTarget.singletonArgument)\"")
     }
@@ -344,8 +348,14 @@ func parseSupervisionMoveTarget(_ raw: String) throws -> SupervisionMoveTarget {
 /// The CLI resolves no names: the daemon is the single resolver, so a name that
 /// matches nothing comes back as a refusal naming the condition rather than
 /// being silently repaired into a neighbouring project's.
+///
+/// **The emptiness test is `.whitespacesAndNewlines`, and the distinction is
+/// load-bearing.** `CharacterSet.whitespaces` holds spaces and tabs but no
+/// newline, so `"\t \n"` trimmed by it is `"\n"` — not empty, guard passed, a
+/// whitespace-only name on its way to the daemon. That is the exact input this
+/// guard exists to stop, and a shell-expanded argument is where it comes from.
 func requireSupervisionProjectName(_ raw: String) throws -> String {
-    guard !raw.trimmingCharacters(in: .whitespaces).isEmpty else {
+    guard !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
         throw CLIError.invalidArgument("project name must not be empty")
     }
     return raw

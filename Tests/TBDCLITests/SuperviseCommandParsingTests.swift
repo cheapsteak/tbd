@@ -160,9 +160,22 @@ struct SuperviseArgumentValueTests {
     }
 
     @Test func reposRefusesAnEmptyList() {
-        for bad in ["", "   ", ",", " , "] {
+        for bad in ["", "   ", ",", " , ", "\n", "\t \n", ",\n,"] {
             #expect(throws: CLIError.self) { _ = try parseSupervisionRepoList(bad) }
         }
+    }
+
+    /// A shell-expanded `--repos "$(…)"` arrives with a trailing newline far
+    /// more often than with a trailing space.
+    @Test func reposStripsTrailingNewlinesFromShellExpandedValues() throws {
+        #expect(try parseSupervisionRepoList("acme-web\n") == ["acme-web"])
+        #expect(try parseSupervisionRepoList("acme-web,\nacme-api\n") == ["acme-web", "acme-api"])
+    }
+
+    @Test func policyToleratesAShellExpandedTrailingNewline() throws {
+        #expect(try parseSupervisionPolicy("operator\n") == .operator)
+        #expect(try parseSupervisionPolicy("repo:acme-web\n") == .repo("acme-web"))
+        #expect(throws: CLIError.self) { _ = try parseSupervisionPolicy("repo:\n") }
     }
 
     // MARK: to flag
@@ -191,9 +204,15 @@ struct SuperviseArgumentValueTests {
         #expect(try parseSupervisionMoveTarget(" singleton ") == .project(" singleton "))
     }
 
-    @Test func moveTargetRefusesAnEmptyDestination() {
+    /// The twin of `emptyProjectNameIsRefusedRatherThanReadAsTheBareForm`, and
+    /// it covers the newline for the same reason: `CharacterSet.whitespaces`
+    /// excludes newlines, so a guard written with it lets `"\t \n"` through as a
+    /// name. The two guards are one input class and must be proven together.
+    @Test func moveTargetRefusesAnEmptyDestinationIncludingNewlineOnlyWhitespace() {
         #expect(throws: CLIError.self) { _ = try parseSupervisionMoveTarget("") }
         #expect(throws: CLIError.self) { _ = try parseSupervisionMoveTarget("   ") }
+        #expect(throws: CLIError.self) { _ = try parseSupervisionMoveTarget("\n") }
+        #expect(throws: CLIError.self) { _ = try parseSupervisionMoveTarget("\t \n") }
     }
 
     // MARK: project names
