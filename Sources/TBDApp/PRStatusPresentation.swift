@@ -2,6 +2,73 @@ import AppKit
 import SwiftUI
 import TBDShared
 
+/// How a display-tier PR fact describes its own age and its own uncertainty.
+///
+/// `PRStatus` is a cache, and it was measured lying — showing "Ready to merge"
+/// for pull requests merged days earlier. So no surface may render it as current
+/// truth: wherever it appears it carries when it was last read, and wherever the
+/// last attempt to read it failed, it says so. These are pure functions of
+/// (fact, now) precisely so both render sites compose the same words from the
+/// same inputs and cannot drift.
+enum PRFreshness {
+    /// Age buckets, coarsening as they grow.
+    ///
+    /// Deliberately not per-second or per-minute. The toolbar's split button is
+    /// materialized once by AppKit and only rebuilt when its `.id` changes, so
+    /// the id must include whatever the help string renders — and a label that
+    /// changed every minute would rebuild the item (and its NSMenu) every
+    /// minute. Five-minute resolution is far finer than the failure this stamp
+    /// exists to expose, which was measured in days.
+    static func checkedLabel(observedAt: Date?, now: Date) -> String {
+        guard let observedAt else { return "last checked at an unknown time" }
+        let seconds = Int(max(0, now.timeIntervalSince(observedAt)))
+        switch seconds {
+        case ..<300:
+            return "checked just now"
+        case ..<3600:
+            // Floored to a 5-minute step, so the string is stable between steps.
+            return "checked \((seconds / 60 / 5) * 5)m ago"
+        case ..<86_400:
+            return "checked \(seconds / 3600)h ago"
+        default:
+            return "checked \(seconds / 86_400)d ago"
+        }
+    }
+
+    /// The clause naming an unresolved last attempt, or nil when the last
+    /// attempt settled the question (either way) or when none is on record.
+    ///
+    /// `.none` deliberately produces nothing: "the forge answered, and this
+    /// branch has no PR" is settled knowledge, not a caveat.
+    static func undeterminedClause(_ observation: PRObservation?) -> String? {
+        guard case .undetermined(let cause) = observation?.outcome else { return nil }
+        return "last check did not resolve (\(cause))"
+    }
+
+    /// The trailing clauses every PR surface appends: how old the shown value
+    /// is, then whether the last attempt to reconfirm it failed. Both, in that
+    /// order, so a reader never sees a value without its age.
+    /// `status` is optional because the multi-PR surfaces choose the binding
+    /// they describe and a binding can carry no status yet; a missing status is
+    /// a missing stamp, which reads as an unknown check time rather than as
+    /// silence.
+    static func clauses(status: PRStatus?, observation: PRObservation?, now: Date) -> [String] {
+        var out = [checkedLabel(observedAt: status?.observedAt, now: now)]
+        if let clause = undeterminedClause(observation) { out.append(clause) }
+        return out
+    }
+
+    /// The tooltip for a worktree with **no** cached PR whose last attempt came
+    /// back `.undetermined` — the case that would otherwise be invisible and
+    /// therefore indistinguishable from having no pull request at all. nil for
+    /// every other observation, including `.none`.
+    static func unknownIndicatorTooltip(_ observation: PRObservation?, now: Date) -> String? {
+        guard case .undetermined(let cause) = observation?.outcome, let observation else { return nil }
+        return "PR status unknown — \(cause) · "
+            + checkedLabel(observedAt: observation.observedAt, now: now)
+    }
+}
+
 struct PRStatusPresentation: Equatable {
     enum ColorSemantic: Equatable {
         case pending

@@ -1202,7 +1202,14 @@ extension WorktreeLifecycle {
         primaryAgentPreference: PrimaryAgentPreference? = nil,
         claudeSettingsOverlay: String? = nil,
         carryover: ConversationCarryover? = nil,
-        preparedCodexLaunch: CodexLaunchPreparation? = nil
+        preparedCodexLaunch: CodexLaunchPreparation? = nil,
+        /// Non-nil when this spawn is a Watch Desk session, and the only thing
+        /// that installs the statusline tee (`StatuslineTee`). The desk spawn
+        /// path passes `.readOnlyCoordinator` — the role a desk terminal holds
+        /// until the lease store promotes one of them to `.judge` — because at
+        /// spawn time no lease has been acquired yet. Every other caller leaves
+        /// it nil and gets exactly the overlay it got before the tee existed.
+        watchDeskRole: WatchDeskRole? = nil
     ) async throws -> [(id: UUID, label: String)] {
         let worktreeID = worktree.id
         let tmuxServer = worktree.tmuxServer
@@ -1399,7 +1406,13 @@ extension WorktreeLifecycle {
                     // an archived-session resume must not reapply it. Hooks
                     // overlay still resolves for resumes — only
                     // extraSettingsJSON goes nil.
-                    extraSettingsJSON: isResume ? nil : claudeSettingsOverlay
+                    extraSettingsJSON: isResume ? nil : claudeSettingsOverlay,
+                    // Desk sessions only — see the parameter's doc comment.
+                    watchDeskRole: watchDeskRole,
+                    worktreePath: worktreePath,
+                    // The same config dir this spawn runs with, so the tee
+                    // delegates to the user-scope statusline THIS session reads.
+                    profileConfigDir: profileConfigDir
                 ),
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides,
@@ -1434,7 +1447,11 @@ extension WorktreeLifecycle {
             label: primaryLabel,
             claudeSessionID: primarySessionID,
             profileID: primaryProfileID,
-            kind: primaryTerminalKind
+            kind: primaryTerminalKind,
+            // Same value the overlay above was built from, written to the row
+            // so the fact outlives this call. A desk woken from hibernation
+            // reuses this row, and the wake site has nothing else to read.
+            watchDeskRole: watchDeskRole
         )
         if carryover != nil {
             SessionRecaptureScheduler(db: db, tmux: tmux).schedule(

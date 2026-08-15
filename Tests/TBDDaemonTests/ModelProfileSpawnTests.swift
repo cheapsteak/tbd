@@ -741,6 +741,66 @@ struct ModelProfileSpawnTests {
         #expect(joined.contains("CLAUDE_CONFIG_DIR="))
     }
 
+    /// An in-place swap kills the pane's Claude and respawns it, keeping the
+    /// SAME terminal row — so a permission prompt that was on screen when the
+    /// user switched account died with the old process while its recorded
+    /// reason stayed on the row.
+    ///
+    /// Nothing on the row's own rails retracts it: the swap writes only
+    /// `profile_id` and the session id, `transcriptPath` is unchanged so the
+    /// resolver's growth comparison still says "no growth since the prompt",
+    /// and the respawned session's `tbd terminal-activity idle` is a separate
+    /// best-effort CLI invocation seconds away at best. So the swap retracts it
+    /// itself, from its own act.
+    @Test("in-place swap: retracts a prompt recorded against the process it killed")
+    func inPlaceSwapRetractsAStandingWaitReason() async throws {
+        let (router, db, _) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let a = try await seedOAuthProfile(db, name: "A")
+        let b = try await seedOAuthProfile(db, name: "B")
+        try await db.config.setDefaultProfileID(a.id)
+
+        let createResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: wt.id, type: .claude)
+        ))
+        let oldTerm = try createResp.decodeResult(Terminal.self)
+
+        let workingAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let promptAt = workingAt.addingTimeInterval(30)
+        try await db.terminals.setActivityState(
+            id: oldTerm.id, activityState: .working,
+            source: .hookEvent(RPCMethod.terminalActivityEvent), observedAt: workingAt)
+        try await db.terminals.recordAwaitingInputReason(
+            id: oldTerm.id,
+            reason: AwaitingInputReason(
+                message: "Claude needs your permission to use Bash",
+                hookEventName: "Notification",
+                notificationType: "permission_prompt"),
+            observedAt: promptAt)
+
+        let swapResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(
+                terminalID: oldTerm.id, newProfileID: b.id, mode: .inPlace)
+        ))
+        #expect(swapResp.success)
+
+        let after = try #require(try await db.terminals.get(id: oldTerm.id))
+        #expect(after.profileID == b.id)
+        #expect(after.awaitingInputReason == nil)
+        #expect(after.awaitingInputObservedAt == nil)
+        // The dead prompt is gone from the composed answer — and with no
+        // growth fact at all, which is the shape that used to pin it.
+        let state = SessionStateResolver().resolve(SessionStateFacts(terminal: after))
+        #expect(state.value == .working)
+        // The activity columns are untouched: the swap knows the old prompt is
+        // gone, not what the respawned session is doing.
+        #expect(after.activityState == .working)
+        #expect(after.activityStateObservedAt == workingAt)
+    }
+
     // MARK: - Swap over a NON-BLANK session: resume + --fork-session flag
 
     /// Seed a real claude terminal, then give its session a NON-blank transcript

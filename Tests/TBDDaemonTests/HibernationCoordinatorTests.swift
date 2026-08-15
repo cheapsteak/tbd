@@ -52,7 +52,7 @@ struct HibernationCoordinatorTests {
             label: "claude", claudeSessionID: sessionID, kind: kind
         )
         if activityState != .unknown {
-            try await db.terminals.setActivityState(id: terminal.id, activityState: activityState)
+            try await db.terminals.setActivityState(id: terminal.id, activityState: activityState, source: .derived)
         }
         if keepWarm {
             try await db.terminals.setKeepWarm(id: terminal.id, keepWarm: true)

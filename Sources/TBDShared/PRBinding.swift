@@ -70,6 +70,28 @@ public struct PRBinding: Codable, Sendable, Equatable, Identifiable {
                   status: status, source: source, detached: detached, boundAt: boundAt)
     }
 
+    /// Whether two bindings describe the **same observation**, ignoring when
+    /// the status inside them was read.
+    ///
+    /// **Change detection uses this; `==` does not**, for exactly the reason
+    /// `PRStatus.sameValue(as:)` states: `observedAt` advances on every poll, so
+    /// an equality that includes it answers "different" every cadence and turns
+    /// the poll's persist-on-change into one row UPDATE per binding per tick,
+    /// forever, on a fleet whose steady state is zero writes.
+    ///
+    /// `Equatable` itself keeps the stamp, so a persisted round trip can still
+    /// prove the stamp survived.
+    public func sameValue(as other: PRBinding) -> Bool {
+        unstamped == other.unstamped
+    }
+
+    /// This binding with its status's freshness stamp cleared, so the compiler
+    /// writes the field-by-field comparison `sameValue(as:)` needs.
+    private var unstamped: PRBinding {
+        withObservation(status: status?.withObservedAt(nil),
+                        headBranch: headBranch, baseRef: baseRef)
+    }
+
     /// Identity for deduplication — matches the table's UNIQUE constraint.
     /// Owner and repo compare case-insensitively because GitHub treats them so.
     public var identityKey: String {

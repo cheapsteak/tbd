@@ -933,7 +933,15 @@ public actor DeskSessionManager: DeskSessionManaging {
                 repo: nil,
                 skipClaude: false,
                 initialPrompt: initialPrompt,
-                preSessionTerminalID: nil
+                preSessionTerminalID: nil,
+                // Marks the spawn as a desk session, which is what installs the
+                // statusline tee — a desk's context-recycling thresholds are
+                // fractions of its effective window, and the tee is the only
+                // source that reports one. Fleet sessions never get it: TBD's
+                // per-session settings outrank the operator's own statusline in
+                // every scope they can write. `.readOnlyCoordinator` is the role
+                // a desk terminal holds before any judge lease exists.
+                watchDeskRole: .readOnlyCoordinator
             )
         } catch {
             await actuationLog.appendOutcome(

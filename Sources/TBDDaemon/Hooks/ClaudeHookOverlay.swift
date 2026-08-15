@@ -12,7 +12,7 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claude-overl
 /// its own overlay file pinned at spawn time without touching the user's
 /// settings.json at all.
 ///
-/// The overlay registers six event types:
+/// The overlay registers seven event types:
 /// - `SessionStart` (matcher `*`): calls `tbd session-event`, which
 ///   relays the new session ID + transcript path to the daemon. This is
 ///   what fixes the post-`/clear`/`/compact` transcript freeze. Also
@@ -39,6 +39,9 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claude-overl
 ///   (the overwhelming majority) from spawning a `tbd` process. It is a
 ///   cost optimization, not a gate — `PRBindingExtractor`'s tokenizer
 ///   decides what actually counts as a create.
+/// - `Notification` (no matcher): runs `tbd hooks notification`, which
+///   forwards the payload verbatim so the daemon can record a structured
+///   reason an agent is waiting.
 ///
 /// The overlay is regenerated on every daemon startup so changes to the
 /// shape (new hooks, new commands) take effect on the next worktree open.
@@ -96,6 +99,24 @@ public enum ClaudeHookOverlay {
     /// continues processing after the user answers.
     static let askUserQuestionPostCommand =
         #"tbd ask-user-question post 2>/dev/null || true; tbd terminal-activity working 2>/dev/null || true"#
+
+    /// Bridges Claude Code's `Notification` hook into TBD, so "waiting" can
+    /// carry a structured reason instead of being inferred.
+    ///
+    /// Why `Notification` and not `PreToolUse`: only `Notification` can say a
+    /// prompt is on screen *now*. `PreToolUse` fires before *every* tool call —
+    /// it is where an agent-native hook decides a permission for itself, which
+    /// is configuration at the source, and it can never report that a raised
+    /// prompt is currently waiting on a human.
+    ///
+    /// Why no matcher: a matcher here would decide, in a file the operator can
+    /// edit, which notification types TBD ever hears about. Any supervision
+    /// fork belongs in the daemon's RPC handler, where it is compiled, tested,
+    /// and the same for every install — so this entry reports every type and
+    /// decides nothing. Silent failure like every other entry: a hook must
+    /// never wedge the agent.
+    static let notificationCommand =
+        #"tbd hooks notification 2>/dev/null || true"#
 
     /// Sets the terminal activity state to working (shows the thinking
     /// indicator in the sidebar while Claude processes a prompt).
@@ -200,9 +221,18 @@ public enum ClaudeHookOverlay {
     /// `fallbackModel`: object-valued keys present in both recurse; any other
     /// clash lets the `extraSettings` value win. This preserves TBD's `hooks`
     /// when the fragment only adds top-level keys (e.g. `skillOverrides`).
+    ///
+    /// `statusLineCommand`, when present, installs the statusline tee — and is
+    /// applied AFTER the deep merge, so it wins over a `statusLine` a fragment
+    /// supplied. That is not a clobber: the caller resolved the operator's
+    /// statusline first (`OperatorStatuslineResolver`, which reads the same
+    /// fragment at the top of its precedence list) and the tee runs it as its
+    /// delegate. Nil — every non-desk spawn — leaves the key absent entirely,
+    /// so the body is byte-identical to one generated without this parameter.
     public static func generateBody(
         fallbackModels: [String]? = nil,
-        extraSettings: [String: Any]? = nil
+        extraSettings: [String: Any]? = nil,
+        statusLineCommand: String? = nil
     ) throws -> Data {
         var body: [String: Any] = [
             "hooks": [
@@ -262,6 +292,16 @@ public enum ClaudeHookOverlay {
                              "timeout": prBindTimeoutSeconds] as [String: Any]
                         ]
                     ]
+                ],
+                // No "matcher" key: omitting it runs the hook for every
+                // notification type. See `notificationCommand` for why the
+                // classification lives in the daemon instead.
+                "Notification": [
+                    [
+                        "hooks": [
+                            ["type": "command", "command": notificationCommand]
+                        ]
+                    ]
                 ]
             ]
         ]
@@ -270,6 +310,9 @@ public enum ClaudeHookOverlay {
         }
         if let extraSettings {
             deepMerge(&body, extraSettings)
+        }
+        if let statusLineCommand {
+            body["statusLine"] = ["type": "command", "command": statusLineCommand]
         }
         return try JSONSerialization.data(
             withJSONObject: body,
@@ -356,19 +399,60 @@ public enum ClaudeHookOverlay {
     /// spawn paths (fresh create, resume, wake, profile swap) and edits made
     /// during a preSession hook wait are picked up. The per-spawn fragment
     /// applies at FRESH spawn only — callers gate it.
+    ///
+    /// `watchDeskRole` is the **only** thing that installs the statusline tee,
+    /// and it is the existing desk-role concept rather than a parallel flag: a
+    /// non-nil role means this spawn is a Watch Desk session. The tee takes over
+    /// the `statusLine` slot, which TBD's `--settings` file outranks in every
+    /// scope an operator can write — acceptable on a desk TBD configures end to
+    /// end, never on a session someone opened to work in. Nil (every ordinary
+    /// spawn, and the default at every call site that does not opt in) produces
+    /// a byte-identical overlay to the one this function produced before the tee
+    /// existed. `worktreePath` is only read when a role is present, to find the
+    /// project-scope statusline the tee will delegate to, and `profileConfigDir`
+    /// — the `CLAUDE_CONFIG_DIR` this spawn will run with — for the same reason:
+    /// a desk on a model profile has its user-scope `settings.json` inside that
+    /// directory, not in the host Claude store. Pass the same value handed to
+    /// `ClaudeSpawnCommandBuilder.build`; nil means the ambient install.
     public static func resolveOverlayPath(
         fallbackModels: [String]?,
         sessionKey: String,
         repoSettingsJSON: String? = nil,
-        extraSettingsJSON: String? = nil
+        extraSettingsJSON: String? = nil,
+        watchDeskRole: WatchDeskRole? = nil,
+        worktreePath: String? = nil,
+        profileConfigDir: String? = nil
     ) -> String {
+        // A session that is not installing a tee must not be able to read one's
+        // leftovers. The capture path is keyed by the session, and several
+        // spawn paths reuse a session key across lives (a wake reuses the whole
+        // terminal row), so a capture published before this spawn would be read
+        // by `ContextLoadReader` and reported as an `.observed` window with
+        // `isPairedReading == true` — a stale denominator wearing a fresh
+        // session's clothes, which is the one failure the whole context-load
+        // path exists to avoid.
+        //
+        // Deleting it here rather than trusting the tee to be reinstalled is
+        // what makes that structural: every Claude spawn resolves an overlay,
+        // so every life of a session passes through this line, and the file
+        // simply is not there for a non-desk session to misread. It runs before
+        // the shared-overlay early return below, because a session with no
+        // fragments and no fallback models takes that return and still needs
+        // the capture gone.
+        if watchDeskRole == nil {
+            StatuslineTee.removeCapture(sessionKey: sessionKey)
+        }
         let hasFallback = !(fallbackModels?.isEmpty ?? true)
         // A non-empty fragment string forces a per-session overlay even if it
         // later fails to parse — a malformed fragment degrades to hooks-only,
         // it must not silently fall back to (and mutate) the shared global file.
         let hasExtra = !(extraSettingsJSON?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
             || !(repoSettingsJSON?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
-        guard hasFallback || hasExtra else {
+        // The tee is per-session (its capture path is keyed by session), so it
+        // forces a per-session overlay for the same reason the fragments do:
+        // the shared global file must never carry one session's statusline.
+        let isDesk = watchDeskRole != nil
+        guard hasFallback || hasExtra || isDesk else {
             return overlayPath
         }
         // Repo fragment first, per-spawn fragment deep-merged on top.
@@ -378,9 +462,27 @@ public enum ClaudeHookOverlay {
             deepMerge(&base, perSpawn)
             extraSettings = base
         }
+        // Resolve the operator's statusline BEFORE installing ours, so a
+        // statusline a fragment supplied becomes the tee's delegate instead of
+        // being clobbered by it.
+        let statusLineCommand: String? = isDesk
+            ? StatuslineTee.statusLineCommand(
+                capturePath: StatuslineTee.capturePath(sessionKey: sessionKey),
+                delegateCommand: OperatorStatuslineResolver.resolve(
+                    perSpawnSettingsJSON: extraSettingsJSON,
+                    repoSettingsJSON: repoSettingsJSON,
+                    worktreePath: worktreePath,
+                    profileConfigDir: profileConfigDir
+                )
+            )
+            : nil
         let path = perSessionOverlayPath(sessionKey: sessionKey)
         do {
-            let data = try generateBody(fallbackModels: fallbackModels, extraSettings: extraSettings)
+            let data = try generateBody(
+                fallbackModels: fallbackModels,
+                extraSettings: extraSettings,
+                statusLineCommand: statusLineCommand
+            )
             let parent = (path as NSString).deletingLastPathComponent
             try FileManager.default.createDirectory(
                 atPath: parent,
@@ -416,36 +518,39 @@ public enum ClaudeHookOverlay {
     static let perSessionPrefix = "claude-overlay-session-"
     static let perSessionSuffix = ".json"
 
-    private static var runtimeDir: URL {
-        TBDConstants.configDir.appendingPathComponent("runtime")
-    }
+    private static var runtimeDir: URL { TBDConstants.runtimeDir }
 
     /// Filesystem-safe rendering of `sessionKey` (non-`[A-Za-z0-9_-]` → `_`).
+    /// Delegates to `TBDConstants` so overlay files and statusline captures
+    /// sanitize identically — two implementations is how a path builder and a
+    /// prune sweep drift apart.
     static func sanitize(_ sessionKey: String) -> String {
-        String(sessionKey.unicodeScalars.map { scalar -> Character in
-            let isSafe = scalar == "-" || scalar == "_"
-                || (scalar >= "0" && scalar <= "9")
-                || (scalar >= "a" && scalar <= "z")
-                || (scalar >= "A" && scalar <= "Z")
-            return isSafe ? Character(scalar) : "_"
-        })
+        TBDConstants.sanitizedSessionKey(sessionKey)
     }
 
-    /// Delete the per-session overlay file for `sessionKey`, if present.
+    /// Delete the per-session overlay file for `sessionKey`, if present, and
+    /// the statusline capture that rode with it.
     /// Best-effort — a missing file or removal error is ignored. Called on
     /// terminal teardown so per-session overlays don't accumulate under
     /// `~/tbd/runtime/`.
+    ///
+    /// The capture goes here rather than at each teardown call site for the
+    /// same reason the orphan prune exists: one place to remove a session's
+    /// runtime files means a new teardown path cannot forget half of them.
     static func removePerSessionOverlay(sessionKey: String) {
         let path = perSessionOverlayPath(sessionKey: sessionKey)
         try? FileManager.default.removeItem(atPath: path)
+        StatuslineTee.removeCapture(sessionKey: sessionKey)
     }
 
     /// Startup sweep: delete every `claude-overlay-session-*.json` file whose
     /// (sanitized) session key is NOT in `liveSessionKeys`. This reclaims
     /// per-session overlays orphaned by crashes, worktree archive, or any
     /// teardown path that didn't call `removePerSessionOverlay` — so cleanup
-    /// can't drift as new teardown paths are added. Best-effort.
+    /// can't drift as new teardown paths are added. Best-effort. Sweeps the
+    /// statusline captures in the same pass, on the same liveness rule.
     static func pruneOrphanedSessionOverlays(liveSessionKeys: [String]) {
+        StatuslineTee.pruneOrphanedCaptures(liveSessionKeys: liveSessionKeys)
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(atPath: runtimeDir.path) else {
             return

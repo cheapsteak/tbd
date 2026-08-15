@@ -203,6 +203,7 @@ public enum RPCMethod {
     public static let terminalSwapProfile = "terminal.swapProfile"
     public static let terminalSessionEvent = "terminal.sessionEvent"
     public static let terminalActivityEvent = "terminal.activityEvent"
+    public static let terminalNotificationEvent = "terminal.notificationEvent"
     public static let terminalAskUserQuestionPending = "terminal.askUserQuestionPending"
     public static let terminalAskUserQuestionCleared = "terminal.askUserQuestionCleared"
     public static let appSetForegroundState = "app.setForegroundState"
@@ -212,6 +213,7 @@ public enum RPCMethod {
     public static let repoSetExpanded = "repo.setExpanded"
     public static let sessionList = "session.list"
     public static let sessionMessages = "session.messages"
+    public static let sessionStates = "session.states"
     public static let setMainAreaSize = "app.setMainAreaSize"
     public static let daemonLegacyHooksStatus = "daemon.legacyHooksStatus"
     public static let daemonRemoveLegacyGlobalHooks = "daemon.removeLegacyGlobalHooks"
@@ -849,7 +851,36 @@ public struct NotificationsMarkReadParams: Codable, Sendable {
 
 public struct PRListResult: Codable, Sendable {
     public let statuses: [UUID: PRStatus]
-    public init(statuses: [UUID: PRStatus]) { self.statuses = statuses }
+
+    /// The outcome of the last attempt to learn each worktree's PR state.
+    ///
+    /// Carried beside `statuses` rather than folded into it, because the two
+    /// answer different questions and routinely disagree: a worktree absent
+    /// from `statuses` may have no PR (`.none`) or may be one nobody could ask
+    /// about (`.undetermined`), and a worktree *present* in `statuses` may be
+    /// holding a value the last attempt failed to reconfirm. Collapsing them
+    /// is the bug this field exists to prevent — an outage that reads as a
+    /// fleet with no pull requests looks exactly like a calm night.
+    ///
+    /// Empty when the daemon predates the field; a missing entry means no
+    /// attempt is on record, which is a third thing again from either outcome.
+    public let observations: [UUID: PRObservation]
+
+    public init(statuses: [UUID: PRStatus], observations: [UUID: PRObservation] = [:]) {
+        self.statuses = statuses
+        self.observations = observations
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case statuses
+        case observations
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        statuses = try c.decode([UUID: PRStatus].self, forKey: .statuses)
+        observations = try c.decodeIfPresent([UUID: PRObservation].self, forKey: .observations) ?? [:]
+    }
 }
 
 public struct PRRefreshParams: Codable, Sendable {
@@ -857,11 +888,39 @@ public struct PRRefreshParams: Codable, Sendable {
     public init(worktreeID: UUID) { self.worktreeID = worktreeID }
 }
 
-// PRRefreshResult wraps an optional PRStatus.
-// nil means no PR found for this worktree's branch.
+/// The result of an on-demand `pr.refresh`.
+///
+/// `status` is the newest value anyone holds for the worktree — which is not
+/// the same as the value this refresh found. A refresh that could not reach the
+/// forge deliberately returns the *previous cached* status rather than guessing,
+/// so a non-nil `status` does not mean "confirmed just now", and a nil `status`
+/// does not mean "no PR": it means nothing is cached, whether because the forge
+/// said there is no PR or because nobody ever got an answer.
+///
+/// `observation` is what disambiguates. It reports the outcome of *this*
+/// attempt — `.observed`, `.none`, or `.undetermined(cause:)` — with the moment
+/// it was made. nil only when the attempt could not be made at all (the
+/// worktree is no longer known), or when talking to a daemon that predates the
+/// field.
 public struct PRRefreshResult: Codable, Sendable {
     public let status: PRStatus?
-    public init(status: PRStatus?) { self.status = status }
+    public let observation: PRObservation?
+
+    public init(status: PRStatus?, observation: PRObservation? = nil) {
+        self.status = status
+        self.observation = observation
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case status
+        case observation
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        status = try c.decodeIfPresent(PRStatus.self, forKey: .status)
+        observation = try c.decodeIfPresent(PRObservation.self, forKey: .observation)
+    }
 }
 
 // MARK: - PR bindings (multi-PR per worktree)
@@ -1622,6 +1681,24 @@ public struct TerminalContinueInCodexResult: Codable, Sendable, Equatable {
 public struct TerminalListParams: Codable, Sendable {
     public let worktreeID: UUID?
     public init(worktreeID: UUID? = nil) { self.worktreeID = worktreeID }
+}
+
+/// Which terminals `session.states` should report on. Absent `worktreeID` means
+/// the whole fleet — the ordinary call, since the point of the method is asking
+/// about every agent every cycle.
+public struct SessionStatesParams: Codable, Sendable {
+    public let worktreeID: UUID?
+    public init(worktreeID: UUID? = nil) { self.worktreeID = worktreeID }
+}
+
+/// One `session.states` answer: a `SessionStateReport` per terminal.
+///
+/// A wrapper rather than a bare array so a later slice can add a fleet-level
+/// field (a pass timestamp, a count of terminals skipped) without changing the
+/// shape every existing reader decodes.
+public struct SessionStatesResult: Codable, Sendable {
+    public let reports: [SessionStateReport]
+    public init(reports: [SessionStateReport]) { self.reports = reports }
 }
 
 /// One `terminal.send` request. Exactly one payload kind per call — `text` or
@@ -2629,6 +2706,54 @@ public struct TerminalActivityEventParams: Codable, Sendable {
     public init(terminalID: UUID, activityState: TerminalActivityState) {
         self.terminalID = terminalID
         self.activityState = activityState
+    }
+}
+
+/// Params for `terminal.notificationEvent` — sent by `tbd hooks notification`
+/// for EVERY Claude Code `Notification` event, whatever its type.
+///
+/// The CLI interprets nothing: it lifts the fields it can name, carries the
+/// whole payload in `rawPayload`, and lets the daemon do the only classifying
+/// there is. Keeping the fork daemon-side is deliberate — the hook entry lives
+/// in a file an operator can edit, so a matcher or a branch out there would be
+/// a policy decision TBD could not rely on.
+public struct TerminalNotificationEventParams: Codable, Sendable, Equatable {
+    public let terminalID: UUID
+    /// `notification_type` verbatim, or nil when the payload carried none.
+    /// Never normalized, never defaulted to a known type.
+    public let notificationType: String?
+    /// The notification text, verbatim.
+    public let message: String
+    /// The notification title, when the payload carried one. Reported rather
+    /// than persisted in a column of its own: `AwaitingInputReason` models the
+    /// message and the type, and the title survives inside `rawPayload` for a
+    /// consumer that wants it. Carried on the wire anyway so the daemon can
+    /// start using it without a CLI release — an older CLI is the thing that
+    /// cannot be fixed retroactively.
+    public let title: String?
+    /// The entire stdin payload as it arrived, so a later consumer can read a
+    /// field this build does not model.
+    public let rawPayload: String?
+    /// Claude's reported working directory, used only for the same
+    /// foreign-session guard `terminal.sessionEvent` applies: a hook fired by a
+    /// session living in another worktree must not write to this terminal.
+    /// Optional for backward compatibility with older CLIs.
+    public let cwd: String?
+
+    public init(
+        terminalID: UUID,
+        notificationType: String?,
+        message: String,
+        title: String? = nil,
+        rawPayload: String? = nil,
+        cwd: String? = nil
+    ) {
+        self.terminalID = terminalID
+        self.notificationType = notificationType
+        self.message = message
+        self.title = title
+        self.rawPayload = rawPayload
+        self.cwd = cwd
     }
 }
 

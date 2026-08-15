@@ -169,7 +169,7 @@ struct FakeInspector: PaneProcessInspecting {
     @Test func paneWithNoIdentityStillGetsTheResume() async throws {
         // The no-regression branch: absence is not disagreement.
         tmux.paneTarget = .live(terminalID: nil)
-        try await db.terminals.setActivityState(id: terminalID, activityState: .working)
+        try await db.terminals.setActivityState(id: terminalID, activityState: .working, source: .derived)
         let outcome = await makeActuator().actuate(row)
         #expect(outcome == .sent)
         #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
@@ -177,7 +177,7 @@ struct FakeInspector: PaneProcessInspecting {
 
     @Test func paneIdentityMatchIsCaseInsensitiveAndSends() async throws {
         tmux.paneTarget = .live(terminalID: terminalID.uuidString.lowercased())
-        try await db.terminals.setActivityState(id: terminalID, activityState: .working)
+        try await db.terminals.setActivityState(id: terminalID, activityState: .working, source: .derived)
         let outcome = await makeActuator().actuate(row)
         #expect(outcome == .sent)
         #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
@@ -233,7 +233,7 @@ struct FakeInspector: PaneProcessInspecting {
 
     @Test func happyPathSendsEscapeContinueEnterAndVerifiesViaActivity() async throws {
         // Activity hook already reports working → first verify poll succeeds.
-        try await db.terminals.setActivityState(id: terminalID, activityState: .working)
+        try await db.terminals.setActivityState(id: terminalID, activityState: .working, source: .derived)
         let outcome = await makeActuator().actuate(row)
         #expect(outcome == .sent)
         #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
@@ -241,7 +241,7 @@ struct FakeInspector: PaneProcessInspecting {
 
     @Test func verifyTimeoutRetriesOnceThenFails() async throws {
         // Activity never becomes working and transcript never grows.
-        try await db.terminals.setActivityState(id: terminalID, activityState: .idle)
+        try await db.terminals.setActivityState(id: terminalID, activityState: .idle, source: .derived)
         let outcome = await makeActuator().actuate(row)
         if case .failed = outcome {} else { Issue.record("expected .failed, got \(outcome)") }
         // Sequence sent twice: initial + one retry (spec §Actuation 6).
@@ -250,7 +250,7 @@ struct FakeInspector: PaneProcessInspecting {
     }
 
     @Test func transcriptGrowthCountsAsVerification() async throws {
-        try await db.terminals.setActivityState(id: terminalID, activityState: .idle)
+        try await db.terminals.setActivityState(id: terminalID, activityState: .idle, source: .derived)
         // Transcript grows between pre-send snapshot and verify polls.
         let counter = OSAllocatedUnfairLock(initialState: 0)
         let growing: @Sendable (String) -> Data? = { _ in
@@ -272,7 +272,7 @@ struct FakeInspector: PaneProcessInspecting {
         // 1's verify window times out (idle, flat transcript); attempt 2's
         // eligibility RE-CHECK sees copy-mode now set and reschedules
         // instead of blind-Escaping the user's scrollback.
-        try await db.terminals.setActivityState(id: terminalID, activityState: .idle)
+        try await db.terminals.setActivityState(id: terminalID, activityState: .idle, source: .derived)
         tmux.inModeSequence = [false, true]
         let outcome = await makeActuator().actuate(row)
         #expect(outcome == .paneInCopyMode)
@@ -285,7 +285,7 @@ struct FakeInspector: PaneProcessInspecting {
         // 2's eligibility RE-CHECK reads a transcript that now has a record
         // newer than the limit (user typed manually in the window) and
         // cancels instead of sending again.
-        try await db.terminals.setActivityState(id: terminalID, activityState: .idle)
+        try await db.terminals.setActivityState(id: terminalID, activityState: .idle, source: .derived)
         let counter = OSAllocatedUnfairLock(initialState: 0)
         // Padding is deliberately LARGER than the newer-record line so the
         // growth check during attempt 1's verify polls (which only compares
@@ -316,7 +316,7 @@ struct FakeInspector: PaneProcessInspecting {
         // interKeyPause after attempt 1's Escape), so by the time attempt
         // 2's eligibility RE-CHECK (step 0a) runs, the gate is off and it
         // cancels instead of sending again.
-        try await db.terminals.setActivityState(id: terminalID, activityState: .idle)
+        try await db.terminals.setActivityState(id: terminalID, activityState: .idle, source: .derived)
         let counter = OSAllocatedUnfairLock(initialState: 0)
         let flippingWaiter: @Sendable (Duration) async -> Void = { _ in
             let n = counter.withLock { $0 += 1; return $0 }
@@ -366,7 +366,7 @@ struct FakeInspector: PaneProcessInspecting {
     @Test func apiErrorRowProceedsPastEligibility0aWhenApiErrorToggleOnEvenIfLimitResetOff() async throws {
         try await db.config.setAutoResumeOnLimitReset(false)
         try await db.config.setAutoResumeOnApiError(true)
-        try await db.terminals.setActivityState(id: terminalID, activityState: .working)
+        try await db.terminals.setActivityState(id: terminalID, activityState: .working, source: .derived)
         let apiErrorRow = try await insertApiErrorRow()
         let outcome = await makeActuator().actuate(apiErrorRow)
         // Falls through past 0a and runs the full send sequence (happy path).
@@ -377,7 +377,7 @@ struct FakeInspector: PaneProcessInspecting {
     @Test func sessionRowUnaffectedByApiErrorToggle() async throws {
         try await db.config.setAutoResumeOnLimitReset(true)
         try await db.config.setAutoResumeOnApiError(false)
-        try await db.terminals.setActivityState(id: terminalID, activityState: .working)
+        try await db.terminals.setActivityState(id: terminalID, activityState: .working, source: .derived)
         let outcome = await makeActuator().actuate(row)
         #expect(outcome == .sent)
         #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
@@ -400,7 +400,7 @@ struct FakeInspector: PaneProcessInspecting {
         // seam as the toggle test above). Attempt 2's eligibility RE-CHECK
         // (step 1b) sees the row is no longer `.pending` and cancels
         // instead of sending again.
-        try await db.terminals.setActivityState(id: terminalID, activityState: .idle)
+        try await db.terminals.setActivityState(id: terminalID, activityState: .idle, source: .derived)
         let counter = OSAllocatedUnfairLock(initialState: 0)
         let cancellingWaiter: @Sendable (Duration) async -> Void = { _ in
             let n = counter.withLock { $0 += 1; return $0 }
@@ -519,7 +519,7 @@ struct FakeInspector: PaneProcessInspecting {
     // MARK: - Thrown send retries instead of instant .failed
 
     @Test func throwingSendOnFirstAttemptRetriesAndSucceeds() async throws {
-        try await db.terminals.setActivityState(id: terminalID, activityState: .working)
+        try await db.terminals.setActivityState(id: terminalID, activityState: .working, source: .derived)
         tmux.throwOnEscapeAttempts = [1]
         let outcome = await makeActuator().actuate(row)
         #expect(outcome == .sent)
@@ -528,7 +528,7 @@ struct FakeInspector: PaneProcessInspecting {
     }
 
     @Test func throwingSendOnBothAttemptsFails() async throws {
-        try await db.terminals.setActivityState(id: terminalID, activityState: .idle)
+        try await db.terminals.setActivityState(id: terminalID, activityState: .idle, source: .derived)
         tmux.throwOnEscapeAttempts = [1, 2]
         let outcome = await makeActuator().actuate(row)
         if case .failed = outcome {} else { Issue.record("expected .failed, got \(outcome)") }

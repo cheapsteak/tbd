@@ -27,6 +27,20 @@ public enum GitPollCadence {
         isForeground ? .seconds(60) : .seconds(300)
     }
 
+    /// Pull-request poll interval: 30s foregrounded, 5min backgrounded.
+    ///
+    /// The foreground value matches what the app's own `pr.list` cadence
+    /// produced before the fetch moved onto the daemon's clock (one poll per 15
+    /// two-second cycles), so a user watching the sidebar sees no change. The
+    /// background value is slower than the status sweep's because each pass is
+    /// a network round trip against a rate-limited forge rather than a local
+    /// subprocess — and because nothing overnight needs a PR state fresher than
+    /// five minutes. As with every loop here it never stops: supervision runs
+    /// with no app at all.
+    public static func prInterval(isForeground: Bool) -> Duration {
+        isForeground ? .seconds(30) : .seconds(300)
+    }
+
     /// How often the timer loops wake to re-evaluate the gated interval.
     /// Short enough that a foreground transition (or the app disappearing)
     /// changes the effective cadence within ~10s instead of one full

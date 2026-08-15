@@ -677,6 +677,12 @@ final class AppState: ObservableObject {
     @Published var editingWorktreeID: UUID? = nil
     @Published var isRenamingWorktree = false
     @Published var prStatuses: [UUID: PRStatus] = [:]
+    /// The outcome of the daemon's last attempt to learn each worktree's PR
+    /// state. Kept beside `prStatuses`, never merged into it: a worktree absent
+    /// from `prStatuses` has no PR only when this says `.none`, and a worktree
+    /// present in it may be showing a value the last attempt could not
+    /// reconfirm. A missing key means no attempt is on record.
+    @Published var prObservations: [UUID: PRObservation] = [:]
     /// Every live PR bound to each worktree, in bind order — the multi-PR
     /// surface behind the toolbar dropdown. `prStatuses` remains the single
     /// worst-of summary the daemon writes to `Worktree.prStatus`; this is the
@@ -706,6 +712,7 @@ final class AppState: ObservableObject {
             detachedCount: prDetachedCounts[worktreeID] ?? 0
         )
     }
+
     @Published var modelProfiles: [ModelProfileWithUsage] = []
     @Published var defaultProfileID: UUID? = nil
     /// Ephemeral one-shot Codex account/usage snapshot loaded when the
@@ -2575,6 +2582,15 @@ final class AppState: ObservableObject {
                     prStatuses[wt.id] = pr
                 }
             }
+            // Same rule for the attempt outcome: seed the persisted one on cold
+            // start so a row shows "not reconfirmed" from the first frame
+            // instead of looking freshly confirmed, and never overwrite a live
+            // entry.
+            for wt in fetched where prObservations[wt.id] == nil {
+                if let observation = wt.prObservation {
+                    prObservations[wt.id] = observation
+                }
+            }
 
             // A revive that was gated by a blocking preSession hook lingers
             // `.inFlight` until the daemon reports the row `.active` — this
@@ -2769,9 +2785,26 @@ final class AppState: ObservableObject {
     func refreshPRStatuses() async {
         do {
             let fetched = try await daemonClient.listPRStatuses()
-            // Only update if changed to avoid unnecessary SwiftUI redraws
-            if fetched != prStatuses {
-                prStatuses = fetched
+            // Only update if changed to avoid unnecessary SwiftUI redraws.
+            //
+            // These two comparisons deliberately DO include `observedAt`, which
+            // makes them true on every poll. That is the opposite of the rule
+            // `PRStatus.sameValue(as:)` states for the daemon's persistence
+            // decision, and the difference is the point: a write to SQLite is a
+            // cost with no reader, while a republication here is how the age
+            // these facts carry reaches the surfaces that render it. Both PR
+            // freshness surfaces (`WorktreeRowView.prUnknownTooltip` and the
+            // toolbar's `prFreshnessClauses`) read `now` in their view body, so
+            // this republication IS their ticker; suppressing it would freeze
+            // "checked 25m ago" at whatever it said when the pull request last
+            // actually changed. And it would save nothing either way — the
+            // observations below carry a stamp that advances every attempt, so
+            // the same rows are invalidated on the same cadence regardless.
+            if fetched.statuses != prStatuses {
+                prStatuses = fetched.statuses
+            }
+            if fetched.observations != prObservations {
+                prObservations = fetched.observations
             }
         } catch {
             logger.error("Failed to list PR statuses: \(error)")
@@ -2822,9 +2855,15 @@ final class AppState: ObservableObject {
     /// Trigger an immediate PR refresh for one worktree (on-select).
     func refreshPRStatus(worktreeID: UUID) async {
         do {
-            let status = try await daemonClient.refreshPRStatus(worktreeID: worktreeID)
-            if status != prStatuses[worktreeID] {
-                prStatuses[worktreeID] = status
+            let refreshed = try await daemonClient.refreshPRStatus(worktreeID: worktreeID)
+            if refreshed.status != prStatuses[worktreeID] {
+                prStatuses[worktreeID] = refreshed.status
+            }
+            // A nil observation means no attempt was made at all (the daemon
+            // no longer knows the worktree) — leave whatever is on record
+            // rather than erasing it into a third meaning.
+            if let observation = refreshed.observation, observation != prObservations[worktreeID] {
+                prObservations[worktreeID] = observation
             }
         } catch {
             logger.error("Failed to refresh PR status for \(worktreeID): \(error)")

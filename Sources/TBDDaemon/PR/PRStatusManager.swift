@@ -4,6 +4,35 @@ import os
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "PRStatusManager")
 
+/// Why an attempt to learn a worktree's PR state produced no answer.
+///
+/// Deliberately a small closed vocabulary of *failure classes*, never the
+/// underlying tool's message: these strings reach a tooltip, and a forge error
+/// routinely names a host, an organization, a repository, or an account. A
+/// class says what went wrong without carrying any of that.
+enum PRUndeterminedCause {
+    /// No forge CLI could be launched at all.
+    static let cliUnavailable = "the forge CLI was unavailable"
+    /// The CLI ran but the query did not produce an answer for this worktree.
+    static let queryFailed = "the forge query failed"
+    /// An answer came back in a shape this build could not read.
+    static let unparseableResponse = "the forge response did not parse"
+    /// Every branch this worktree is known by came back without a pull
+    /// request, yet a pull request is already cached for it — so the cached one
+    /// lives on a branch the query could not name (a fork head, a rename-push)
+    /// and this attempt settles nothing. Not `.none`: the branch list is a
+    /// guess at where to look, and its silence is not the forge saying "there
+    /// is no pull request here".
+    static let branchQueryFoundNothing = "no pull request was found on any branch this worktree is known by"
+    /// The pull request resolved, but its check state could not be read, so the
+    /// value on hand was kept rather than recomputed from partial data.
+    static let checkQueryFailed = "the forge check query failed"
+    /// A recorded outcome was on the row but could not be read back — a
+    /// truncated or malformed blob. Not the absence of a record: an attempt was
+    /// made, and only what it concluded is lost.
+    static let unreadableRecord = "the recorded outcome could not be read"
+}
+
 /// In-memory cache of GitHub PR status per worktree.
 ///
 /// `fetchAll` runs one batch GraphQL call for all viewer PRs, plus one combined per-PR
@@ -12,6 +41,14 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "PRStatusMana
 /// flag, and a pagination flag in a single round trip. `refresh` runs
 /// `gh pr view` plus the same combined call for OPEN PRs. On transient fetch failure,
 /// callers keep the previous cached status instead of guessing.
+///
+/// Two facts, not one. The cached `PRStatus` is the newest *value* anyone holds;
+/// the `PRObservation` beside it is the outcome of the last *attempt*. They
+/// disagree exactly when it matters: a failed fetch keeps the previous value
+/// (it remains the best anyone has) while recording `.undetermined`, so a reader
+/// gets a value from before, honestly labeled as not reconfirmed. And a worktree
+/// with no cached status is `.none` only when the forge actually answered —
+/// never because nobody could ask.
 public actor PRStatusManager {
 
     /// One worktree's poll inputs: its identity, the branch it owns, the branch
@@ -36,6 +73,12 @@ public actor PRStatusManager {
 
     private var cache: [UUID: PRStatus] = [:]
 
+    /// The outcome of the last attempt per worktree, kept beside `cache` rather
+    /// than inside it: an entry can exist here with no cache entry (the forge
+    /// answered "no PR"), and a cache entry can survive an attempt recorded
+    /// here as `.undetermined`.
+    private var observations: [UUID: PRObservation] = [:]
+
     /// TTL cache for `resolveNameWithOwner` so the periodic poll's by-number and
     /// open-PR queries don't spawn a `gh repo view` subprocess per call. Keyed by
     /// repoPath; ~15-min TTL (a checkout's owner/name effectively never changes).
@@ -58,6 +101,8 @@ public actor PRStatusManager {
     private var onMergedTransition: (@Sendable (UUID, Int) async -> Void)?
 
     private var onStatusPersist: (@Sendable (UUID, PRStatus?) async -> Void)?
+
+    private var onObservationPersist: (@Sendable (UUID, PRObservation?) async -> Void)?
 
     /// Worktrees whose cached PR head ref has been *attempted* in this daemon
     /// run (see the head-ref heal in `fetchAll`), whether or not the by-number
@@ -85,24 +130,84 @@ public actor PRStatusManager {
 
     private let ghRunner: GHRunner?
 
-    public init() {
+    /// Date seam for the observed-at this actor *stamps* on the facts it
+    /// records — `PRStatus.observedAt` and `PRObservation.observedAt`. Both are
+    /// persisted and later compared to age a cache, so they are data, and take
+    /// the `now:` seam rather than a `Clock` (`Duration` is behavior, `Date` is
+    /// data). This actor schedules nothing, so it has no clock at all.
+    private let now: @Sendable () -> Date
+
+    public init(now: @escaping @Sendable () -> Date = { Date() }) {
         self.ghRunner = nil
+        self.now = now
     }
 
-    init(ghRunner: @escaping GHRunner) {
+    init(ghRunner: @escaping GHRunner, now: @escaping @Sendable () -> Date = { Date() }) {
         self.ghRunner = ghRunner
+        self.now = now
     }
 
     // MARK: - Public interface
 
     public func allStatuses() -> [UUID: PRStatus] { cache }
 
-    public func invalidate(worktreeID: UUID) {
+    /// The outcome of the last attempt per worktree. A missing key means no
+    /// attempt is on record — a third thing again from `.none` or
+    /// `.undetermined`, and one no caller may fold into either.
+    public func allObservations() -> [UUID: PRObservation] { observations }
+
+    public func observation(for worktreeID: UUID) -> PRObservation? { observations[worktreeID] }
+
+    public func invalidate(worktreeID: UUID) async {
+        // FIRST, and above every `await` below. This actor's suspensions are
+        // reentrancy points: an in-flight `fetchAll` resumes inside one of the
+        // persist callbacks, reads `directRefreshLanded == false`, and rewrites
+        // both the cache entry and the row — resurrecting exactly what this call
+        // is removing. Stamping before anything suspends is what makes the
+        // invalidation hold.
+        lastDirectUpdate[worktreeID] = now()
         cache.removeValue(forKey: worktreeID)
-        lastDirectUpdate[worktreeID] = Date()   // an in-flight fetchAll must not resurrect the entry
+        await onStatusPersist?(worktreeID, nil)
+        // The value is gone, so any outcome recorded for it describes a value
+        // that no longer exists. Drop it — in memory **and** on disk, because
+        // `hydrateObservations` reads that row back at the next daemon start
+        // and an in-memory-only drop would resurrect the very `.observed`
+        // pointing at nothing this line exists to remove.
+        observations.removeValue(forKey: worktreeID)
+        await onObservationPersist?(worktreeID, nil)
         // Whatever PR attaches next is a different attachment and deserves its
         // own head-ref check.
         headRefVerifiedIDs.remove(worktreeID)
+    }
+
+    /// Drop the recorded outcome of every worktree not in `active`, bounding
+    /// this actor's memory to the fleet that still exists.
+    ///
+    /// The persisted side of this fact is already scoped that way:
+    /// `allPRObservations` reads **unarchived** rows only, so the map a fresh
+    /// daemon hydrates holds active worktrees and nothing else. Without this
+    /// call the running daemon drifts away from that shape — an entry recorded
+    /// while a worktree was active outlives its archival for the life of the
+    /// process and rides in every `pr.list` payload — and only `invalidate`,
+    /// which has no production caller, ever removed one.
+    ///
+    /// **The cached statuses are deliberately left alone.** They are the
+    /// baseline the merged-PR edge is computed against, and `.merged` is never
+    /// persisted (see `apply`), so an in-memory entry is the *only* record that
+    /// a worktree's pull request was already seen merged. Dropping it would rest
+    /// the whole no-double-fire guarantee on the per-worktree disarm that
+    /// archive/revive writes. The map is bounded in practice anyway: an entry
+    /// exists only for a worktree that had a pull request, it is persisted and
+    /// re-hydrated unarchived-only at every restart, and it is a small value
+    /// per worktree. The outcome map has none of those excuses — it grows an
+    /// entry per worktree *considered*, PR or no PR.
+    ///
+    /// Nothing is written through to the DB: the row belongs to a worktree that
+    /// may be revived, and clearing it would destroy a fact this call is only
+    /// declining to hold in memory. `invalidate` is the caller that means
+    /// "forget it everywhere".
+    public func retain(active: Set<UUID>) {
+        observations = observations.filter { active.contains($0.key) }
     }
 
     /// Register a callback fired when a worktree's cached PR state transitions
@@ -118,6 +223,62 @@ public actor PRStatusManager {
     /// next daemon start.
     public func setOnStatusPersist(_ cb: @escaping @Sendable (UUID, PRStatus?) async -> Void) {
         self.onStatusPersist = cb
+    }
+
+    /// Register a callback fired whenever an attempt's outcome is recorded, so
+    /// the daemon can persist it to `worktree.prObservation`.
+    ///
+    /// A nil observation means the entry was dropped and the DB row must be
+    /// cleared too — exactly as `onStatusPersist`'s nil does. `invalidate` is
+    /// the one caller: without the nil case `hydrateObservations` would
+    /// resurrect an outcome describing a value that no longer exists, which is
+    /// the `.observed`-pointing-at-nothing that invalidation exists to prevent.
+    /// "No attempt on record" is still expressed by never having fired.
+    public func setOnObservationPersist(_ cb: @escaping @Sendable (UUID, PRObservation?) async -> Void) {
+        self.onObservationPersist = cb
+    }
+
+    /// Seed the observation map from persisted DB state at startup, so an
+    /// `.undetermined` recorded before a restart is not silently downgraded to
+    /// "no attempt on record". Writes directly, firing no persist callback.
+    public func hydrateObservations(_ observed: [UUID: PRObservation]) {
+        for (id, observation) in observed { observations[id] = observation }
+    }
+
+    /// Whether a forge CLI could be launched at all — the difference between
+    /// "asked and got nothing back" and "there was nobody to ask". An injected
+    /// runner counts as available: it is what stands in for the binary.
+    private var forgeCLIAvailable: Bool {
+        ghRunner != nil || Self.resolvedGHPath != nil
+    }
+
+    /// Record one attempt's outcome and persist it — unless a newer attempt is
+    /// already on record.
+    ///
+    /// **An attempt is an attempt whether or not it resolved.** `fetchAll`
+    /// stamps its outcomes with `batchStartedAt` and skips any worktree a
+    /// *successful* direct refresh touched mid-batch (`directRefreshLanded`),
+    /// but only the success path writes `lastDirectUpdate`. Without this guard a
+    /// batch that started at T0 would land its `.none` over a `pr.refresh` that
+    /// failed at T1 > T0: `observedAt` would move backwards, the "the last check
+    /// did not resolve" clause would vanish from the tooltip, and the freshness
+    /// label would report an age older than the most recent attempt.
+    ///
+    /// The value is deliberately left to its own rules — a batch that resolved a
+    /// pull request still applies it, because it is the newest value anyone
+    /// holds. Only the *outcome* is monotonic, which is exactly the split this
+    /// type's two facts are for.
+    ///
+    /// Equal stamps still write: two attempts on one instant are ordered by
+    /// call, not by clock resolution.
+    private func record(_ outcome: PRObservation.Outcome, for worktreeID: UUID, at observedAt: Date) async {
+        if let existing = observations[worktreeID], existing.observedAt > observedAt {
+            logger.debug("skipping an outcome for worktree \(worktreeID, privacy: .public): a newer attempt is already on record")
+            return
+        }
+        let observation = PRObservation(outcome: outcome, observedAt: observedAt)
+        observations[worktreeID] = observation
+        await onObservationPersist?(worktreeID, observation)
     }
 
     /// Seed the cache from persisted DB state at startup. Writes directly (not via
@@ -150,6 +311,21 @@ public actor PRStatusManager {
     /// merge-while-daemon-down recovery guarantee. Re-archive loops are still
     /// prevented because archived worktrees leave the active poll set and revive
     /// disarms the override.
+    ///
+    /// **The change that triggers a write is a change of *value*, never of
+    /// stamp.** `PRStatus` is `Equatable` including `observedAt`, which advances
+    /// on every poll, so writing on `previous != status` would write one SQLite
+    /// transaction per worktree per cadence forever — on a forty-worktree fleet
+    /// whose steady state is zero. `sameValue(as:)` is the comparison for this
+    /// job and says why on the type itself.
+    ///
+    /// The cache still takes the fresh stamp either way, so the freshness a
+    /// surface ages by is current in the answer `pr.list` returns. What lags is
+    /// only the *persisted* stamp, between a value change and the next one —
+    /// and only until the first poll after a restart re-reads the pull request
+    /// and refreshes it. `PRObservation` covers that window directly: it is
+    /// written on every attempt, it is the fact that says when TBD last looked,
+    /// and it hydrates at startup beside this one.
     private func apply(_ status: PRStatus, for worktreeID: UUID) async {
         let previous = cache[worktreeID]
         let wasMerged = (previous?.state == .merged)
@@ -157,7 +333,7 @@ public actor PRStatusManager {
         // Persist every non-terminal change so the PR icon survives restart, but
         // deliberately skip `.merged` (the auto-archive trigger) — see the doc
         // comment above for why persisting it would break #295's recovery.
-        if previous != status && status.state != .merged {
+        if previous?.sameValue(as: status) != true && status.state != .merged {
             await onStatusPersist?(worktreeID, status)
         }
         if !wasMerged && status.state == .merged {
@@ -230,6 +406,19 @@ public actor PRStatusManager {
     /// — also emits the PR it cleared in `disproved`, because clearing the cache
     /// alone is not enough: a binding written by an earlier pass's branch match
     /// is re-queried by number and neither heal can see it.
+    ///
+    /// Every worktree this pass *considered* also leaves with a recorded
+    /// `PRObservation` — `.observed`, `.none`, or `.undetermined(cause:)` — and
+    /// the three are never interchanged. The exception is a worktree a
+    /// user-initiated refresh touched mid-batch, whose own attempt is newer than
+    /// this one:
+    ///
+    /// - a refresh that **landed a value** is skipped outright by
+    ///   `directRefreshLanded`, so this pass leaves both its value and its
+    ///   outcome alone;
+    /// - a refresh that **failed** wrote no value to protect, so this pass may
+    ///   still apply its own — but `record` is monotonic, so the newer failure's
+    ///   outcome and stamp stand.
     @discardableResult
     public func fetchAll(worktrees: [PollWorktree]) async -> PollOutcome {
         var outcome = PollOutcome()
@@ -237,7 +426,11 @@ public actor PRStatusManager {
         guard !fetchAllInProgress else { return outcome }   // a previous poll is still running; skip to avoid interleaved generations
         fetchAllInProgress = true
         defer { fetchAllInProgress = false }
-        let batchStartedAt = Date()
+        let batchStartedAt = now()
+        // Outcomes accrue here and are recorded in one pass at the end, so the
+        // "every considered worktree gets exactly one observation" rule is
+        // visible in one place instead of spread across six early exits.
+        var outcomes: [UUID: PRObservation.Outcome] = [:]
         // Worktrees may span multiple repos. repoPath is only gh's working
         // directory for the viewer batch (gh auth is host-scoped, so any
         // checkout works); by-number lookups resolve each worktree's own repo.
@@ -273,6 +466,10 @@ public actor PRStatusManager {
         // fetch or parse failure it contributes no matches, but the numbered
         // path above has already resolved independently.
         var batchSucceeded = false
+        /// Which failure class the viewer batch hit, when it hit one. Retained
+        /// rather than collapsed to a Bool so an unnumbered worktree's
+        /// `.undetermined` names what actually went wrong.
+        var batchFailureCause = PRUndeterminedCause.queryFailed
         if !unnumbered.isEmpty {
             // Resolve each unnumbered worktree's own repo once, mirroring the
             // numbered path's `resolved` dictionary. TTL-cached, so the poll
@@ -324,7 +521,12 @@ public actor PRStatusManager {
                     matches += branchMatches
                 } else {
                     logger.warning("Failed to parse GraphQL response")
+                    batchFailureCause = PRUndeterminedCause.unparseableResponse
                 }
+            } else {
+                batchFailureCause = forgeCLIAvailable
+                    ? PRUndeterminedCause.queryFailed
+                    : PRUndeterminedCause.cliUnavailable
             }
         }
 
@@ -418,12 +620,17 @@ public actor PRStatusManager {
         for match in matches {
             // A user-initiated refresh (or invalidate) landed after this batch's snapshot —
             // its data is fresher than ours; don't clobber it.
-            if let direct = lastDirectUpdate[match.worktreeID], direct > batchStartedAt { continue }
+            if directRefreshLanded(match.worktreeID, after: batchStartedAt) { continue }
             let signals: (failing: Bool, pending: Bool)
             if let fetched = signalsByID[match.worktreeID] ?? nil {
                 signals = fetched
             } else if cache[match.worktreeID] != nil {
-                continue   // transient failure: keep the previous status rather than guessing
+                // Transient failure: keep the previous status rather than
+                // guessing — and say so. The value stands because it is still
+                // the newest anyone has; the outcome records that this attempt
+                // did not reconfirm it. Both halves, together, are the point.
+                outcomes[match.worktreeID] = .undetermined(cause: PRUndeterminedCause.checkQueryFailed)
+                continue
             } else {
                 signals = Self.aggregateFallbackSignals(match.node.statusCheckRollupState)
             }
@@ -436,8 +643,36 @@ public actor PRStatusManager {
                 requiredChecksPending: signals.pending
             )
             let status = PRStatus(number: match.node.number, url: match.node.url, state: state, reason: reason,
-                                  mergeQueuePosition: match.node.mergeQueuePosition)
+                                  mergeQueuePosition: match.node.mergeQueuePosition,
+                                  observedAt: batchStartedAt)
             await apply(status, for: match.worktreeID)
+            outcomes[match.worktreeID] = .observed
+        }
+
+        // Everything this pass considered but did not resolve. The split is the
+        // whole point of `PRObservation`, so it is stated rather than implied:
+        //
+        // - A NUMBERED worktree that did not resolve is always `.undetermined`.
+        //   It carries a PR number, so "this branch has no PR" is a conclusion
+        //   the evidence cannot support — only the lookup failing can explain it.
+        // - An UNNUMBERED worktree is `.none` only when the viewer batch
+        //   actually parsed. `batchSucceeded` is exactly the "the forge
+        //   answered" predicate the fallback and the head-ref heals already
+        //   gate on: with a failed batch, "unmatched" means nothing at all.
+        //
+        // Worktrees cleared by a head-ref heal land here unmatched and, on a
+        // succeeded batch, correctly read `.none`: the heal's evidence is that
+        // the PR belonged to a branch this worktree merely tracks, so this
+        // worktree has none of its own.
+        for wt in numbered where outcomes[wt.id] == nil && !directRefreshLanded(wt.id, after: batchStartedAt) {
+            outcomes[wt.id] = .undetermined(cause: PRUndeterminedCause.queryFailed)
+        }
+        for wt in unnumbered where outcomes[wt.id] == nil && !directRefreshLanded(wt.id, after: batchStartedAt) {
+            outcomes[wt.id] = batchSucceeded ? PRObservation.Outcome.none
+                                             : .undetermined(cause: batchFailureCause)
+        }
+        for (id, observedOutcome) in outcomes {
+            await record(observedOutcome, for: id, at: batchStartedAt)
         }
 
         // The branch-match emitter. Derived from the post-heal `matches`, so a
@@ -448,6 +683,14 @@ public actor PRStatusManager {
         outcome.discovered = Self.branchMatchedPRURLs(
             matches.filter { branchMatchedIDs.contains($0.worktreeID) })
         return outcome
+    }
+
+    /// Whether a user-initiated refresh (or an invalidate) touched this
+    /// worktree after `batchStartedAt`. Such an entry has a newer attempt of its
+    /// own, so this pass overwrites neither its value nor its outcome.
+    private func directRefreshLanded(_ worktreeID: UUID, after batchStartedAt: Date) -> Bool {
+        guard let direct = lastDirectUpdate[worktreeID] else { return false }
+        return direct > batchStartedAt
     }
 
     /// Render matched PR nodes as `ParsedPRURL`s for `PRBindingCoordinator`.
@@ -655,8 +898,15 @@ public actor PRStatusManager {
                 requiredChecksPending: signals.pending
             )
             observations[binding.id] = PRBindingObservation(
+                // Stamped, like every other freshly observed status: a binding's
+                // status reaches the sidebar dot and the toolbar help through
+                // `worktree.prStatus`, and a value with no `observedAt` renders
+                // as "last checked at an unknown time" there. The failure paths
+                // above deliberately do NOT re-stamp — they carry a previous
+                // value forward, and its stamp says when it was actually read.
                 status: PRStatus(number: node.number, url: node.url, state: state,
-                                 reason: reason, mergeQueuePosition: node.mergeQueuePosition),
+                                 reason: reason, mergeQueuePosition: node.mergeQueuePosition,
+                                 observedAt: now()),
                 headBranch: Self.refOrNil(node.headRefName),
                 baseRef: Self.refOrNil(node.baseRefName))
         }
@@ -708,20 +958,47 @@ public actor PRStatusManager {
             return await refreshByNumber(worktreeID: worktreeID, number: prNumber, repoPath: repoPath)
         }
         guard let ownerRepo = await cachedNameWithOwner(repoPath: repoPath) else {
-            return cache[worktreeID]   // can't resolve owner/name → leave cache unchanged
+            // Can't resolve owner/name → leave cache unchanged, and say the
+            // attempt settled nothing rather than letting the unchanged value
+            // pass for a fresh one.
+            await record(.undetermined(cause: PRUndeterminedCause.queryFailed),
+                         for: worktreeID, at: now())
+            return cache[worktreeID]
         }
         let candidates = Self.branchCandidates(localBranch: branch, upstreamBranch: upstreamBranch,
                                                defaultBranch: defaultBranch, pushBranch: pushBranch)
+        // "The forge answered, and this branch has no PR" and "we could not ask"
+        // both used to fall out of the same `continue`. They are tracked apart
+        // here so the outcome recorded at the end can tell them apart.
+        var failureCause: String?
         for candidate in candidates {
             let args = Self.prByBranchArgs(owner: ownerRepo.owner, name: ownerRepo.name, branch: candidate)
             let result = await runGHResult(args: args, repoPath: repoPath)
             guard let result,
                   result.exitStatus == 0,
-                  let data = Self.graphQLOutputData(stdout: result.stdout),
-                  let obj = try? Self.parsePRByBranch(from: data) else {
+                  let data = Self.graphQLOutputData(stdout: result.stdout) else {
                 let exit = result?.exitStatus ?? -1
                 let errSuffix = result?.stderr.trimmingCharacters(in: .whitespacesAndNewlines) ?? "gh not launched"
-                logger.debug("refresh: gh graphql failed or unparseable for branch \(candidate, privacy: .public) (exit \(exit, privacy: .public)): \(errSuffix, privacy: .public); trying next candidate")
+                logger.debug("refresh: gh graphql failed for branch \(candidate, privacy: .private) (exit \(exit, privacy: .public)): \(errSuffix, privacy: .public); trying next candidate")
+                failureCause = (result == nil && !forgeCLIAvailable)
+                    ? PRUndeterminedCause.cliUnavailable
+                    : PRUndeterminedCause.queryFailed
+                continue
+            }
+            // `try?` would flatten the throw and the nil into one optional —
+            // exactly the collapse this whole path exists to undo. A malformed
+            // response is ignorance; an empty node list is an answer.
+            let parsed: GHPRViewResult?
+            do {
+                parsed = try Self.parsePRByBranch(from: data)
+            } catch {
+                logger.debug("refresh: gh graphql response was unparseable for branch \(candidate, privacy: .private); trying next candidate")
+                failureCause = PRUndeterminedCause.unparseableResponse
+                continue
+            }
+            guard let obj = parsed else {
+                // A parsed, empty node list: the forge answered, and this
+                // branch has no PR. Not a failure — try the next candidate.
                 continue
             }
 
@@ -731,9 +1008,21 @@ public actor PRStatusManager {
                 isDraft: obj.isDraft, mergeQueuePosition: obj.mergeQueuePosition, repoPath: repoPath)
         }
 
-        // gh exited non-zero or parse failed for every candidate — leave cache unchanged.
+        // No candidate yielded a PR — leave the cache unchanged either way, but
+        // record which kind of "no" this was.
         logger.debug("refresh: no candidate branch yielded a PR for worktree \(worktreeID, privacy: .public); keeping cached status")
-        return cache[worktreeID]
+        let cached = cache[worktreeID]
+        if let failureCause {
+            await record(.undetermined(cause: failureCause), for: worktreeID, at: now())
+        } else if cached != nil {
+            // Every candidate answered "no PR", yet one is cached — so it lives
+            // on a branch this query could not name. Nothing was settled.
+            await record(.undetermined(cause: PRUndeterminedCause.branchQueryFoundNothing),
+                         for: worktreeID, at: now())
+        } else {
+            await record(.none, for: worktreeID, at: now())
+        }
+        return cached
     }
 
     /// Refresh a single worktree by its stored PR number — one aliased
@@ -743,6 +1032,8 @@ public actor PRStatusManager {
     /// untouched on any failure to resolve the number.
     private func refreshByNumber(worktreeID: UUID, number: Int, repoPath: String) async -> PRStatus? {
         guard let ownerRepo = await cachedNameWithOwner(repoPath: repoPath) else {
+            await record(.undetermined(cause: PRUndeterminedCause.queryFailed),
+                         for: worktreeID, at: now())
             return cache[worktreeID]
         }
         let query = Self.numberedPRQuery(aliases: [(alias: "pr0", number: number)])
@@ -755,6 +1046,10 @@ public actor PRStatusManager {
         guard let result = await runGHResult(args: args, repoPath: repoPath),
               let data = Self.graphQLOutputData(stdout: result.stdout) else {
             logger.debug("refresh: by-number query produced no data for PR #\(number, privacy: .public); keeping cached status")
+            await record(.undetermined(cause: forgeCLIAvailable
+                                        ? PRUndeterminedCause.queryFailed
+                                        : PRUndeterminedCause.cliUnavailable),
+                         for: worktreeID, at: now())
             return cache[worktreeID]
         }
         if result.exitStatus != 0 {
@@ -764,6 +1059,11 @@ public actor PRStatusManager {
         let matches = Self.parseNumberedPRNodes(from: data, aliases: [(alias: "pr0", worktreeID: worktreeID)])
         guard let node = matches.first?.node else {
             logger.debug("refresh: PR #\(number, privacy: .public) did not resolve by number; keeping cached status")
+            // A stored number that will not resolve — deleted, inaccessible, or
+            // a partial batch error — is ignorance, never "this worktree has no
+            // pull request": it demonstrably had one, by number.
+            await record(.undetermined(cause: PRUndeterminedCause.queryFailed),
+                         for: worktreeID, at: now())
             return cache[worktreeID]
         }
         return await applyRefreshedNode(
@@ -783,13 +1083,18 @@ public actor PRStatusManager {
         mergeStateStatus: String, reviewDecision: String, isDraft: Bool,
         mergeQueuePosition: Int?, repoPath: String
     ) async -> PRStatus {
+        let observedAt = now()
         let signals: (failing: Bool, pending: Bool)
         if state != "OPEN" {
             signals = (false, false)   // mapState ignores signals for MERGED/CLOSED
         } else if let fetched = await fetchCheckSignals(url: url, number: number, repoPath: repoPath) {
             signals = fetched
         } else if let cached = cache[worktreeID] {
-            return cached   // transient failure: keep the previous status rather than guessing
+            // Transient failure: keep the previous status rather than guessing,
+            // and record that this attempt did not reconfirm it.
+            await record(.undetermined(cause: PRUndeterminedCause.checkQueryFailed),
+                         for: worktreeID, at: observedAt)
+            return cached
         } else {
             signals = (false, false)   // bootstrap with no data; the next poll corrects it
         }
@@ -802,9 +1107,10 @@ public actor PRStatusManager {
             requiredChecksPending: signals.pending
         )
         let status = PRStatus(number: number, url: url, state: mappedState, reason: reason,
-                              mergeQueuePosition: mergeQueuePosition)
+                              mergeQueuePosition: mergeQueuePosition, observedAt: observedAt)
         await apply(status, for: worktreeID)
-        lastDirectUpdate[worktreeID] = Date()
+        await record(.observed, for: worktreeID, at: observedAt)
+        lastDirectUpdate[worktreeID] = observedAt
         return status
     }
 
@@ -812,6 +1118,18 @@ public actor PRStatusManager {
     /// merge-transition logic is exercised exactly as in production.
     public func seedForTesting(worktreeID: UUID, status: PRStatus) async {
         await apply(status, for: worktreeID)
+    }
+
+    /// For tests only: the exact predicate an in-flight `fetchAll` consults
+    /// before it overwrites an entry.
+    ///
+    /// Exposed rather than re-derived in the test, because the property worth
+    /// pinning is that `invalidate`'s stamp is visible **to this question** by
+    /// the time the first persist callback suspends it — and a test that
+    /// reimplemented the comparison could agree with itself while disagreeing
+    /// with `fetchAll`.
+    func directRefreshLandedForTesting(_ worktreeID: UUID, after batchStartedAt: Date) -> Bool {
+        directRefreshLanded(worktreeID, after: batchStartedAt)
     }
 
     // MARK: - State mapping (internal but static for testability)

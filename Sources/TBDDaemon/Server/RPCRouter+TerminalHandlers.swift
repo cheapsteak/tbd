@@ -1047,8 +1047,18 @@ extension RPCRouter {
                     windowID: window.windowID,
                     paneID: window.paneID
                 )
+                // TBD just recreated the window, so nothing has yet been
+                // observed about what runs in it: `.derived` from our own act.
+                //
+                // `observedAt` from the router's date seam, never the store's
+                // default `Date()`. This stamp is *compared*, not just stored:
+                // `SessionStateResolver`'s rung 4 orders it against the
+                // awaiting-input stamp to decide which observation is newer, so
+                // a stamp minted inside the store is one a test cannot pin and
+                // therefore a decision a test cannot pin either.
                 try await db.terminals.setActivityState(
-                    id: params.terminalID, activityState: .unknown)
+                    id: params.terminalID, activityState: .unknown, source: .derived,
+                    observedAt: now())
                 return try await db.terminals.get(id: params.terminalID)
             }
 
@@ -1464,6 +1474,15 @@ extension RPCRouter {
         // In-place respawn keeps the EXISTING terminal id so its `TBD_TERMINAL_ID`
         // (and thus SessionStart-hook routing) stays stable; fork uses a fresh id.
         let plannedTerminalID = mode == .inPlace ? oldTerminal.id : UUID()
+        // The desk role of the row this spawn will actually land on. An in-place
+        // swap keeps the row, and nothing in this handler touches
+        // `watch_desk_role`, so a resolve without the role would leave a row that
+        // still claims to be a desk running with no statusline tee — and, because
+        // a roleless resolve deletes the session's capture, with no denominator
+        // either. A fork creates a fresh row that is branded no desk (see
+        // `forkSwapNewTab`), so it must resolve without one or the overlay and
+        // the row would disagree in the other direction.
+        let swapDeskRole: WatchDeskRole? = mode == .inPlace ? oldTerminal.watchDeskRole : nil
         let swapConfig = try? await db.config.get()
         var env = SystemPromptBuilder.promptLayers(
             repo: repo, worktree: worktree.worktree, scratchInstructions: swapConfig?.scratchInstructions,
@@ -1586,7 +1605,10 @@ extension RPCRouter {
                 settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
                     fallbackModels: resolved?.fallbackModels,
                     sessionKey: plannedTerminalID.uuidString,
-                    repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id)
+                    repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
+                    watchDeskRole: swapDeskRole,
+                    worktreePath: worktree.path,
+                    profileConfigDir: configDirManager.resolveConfigDir(for: resolved)
                 ),
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides,
@@ -1617,7 +1639,10 @@ extension RPCRouter {
                 settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
                     fallbackModels: resolved?.fallbackModels,
                     sessionKey: plannedTerminalID.uuidString,
-                    repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id)
+                    repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
+                    watchDeskRole: swapDeskRole,
+                    worktreePath: worktree.path,
+                    profileConfigDir: configDirManager.resolveConfigDir(for: resolved)
                 ),
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides,
@@ -1781,6 +1806,16 @@ extension RPCRouter {
         //    later respawn failure still leaves the row on the new account.
         try await db.terminals.setProfileID(id: oldTerminal.id, profileID: newProfileID)
         try await db.terminals.updateSessionID(id: oldTerminal.id, sessionID: storedSessionID)
+        // Step 1 killed the process any recorded prompt was raised on, and this
+        // row survives the swap — so a `permission_prompt` standing here now
+        // describes a dead pane. `SessionStateResolver`'s rung 4 would keep
+        // reporting it as a live wait: `transcriptPath` is unchanged and its
+        // mtime still predates the reason, so the "prompt stands" branch holds
+        // until some later hook happens to write an activity state. Retract it
+        // from TBD's own act rather than waiting for the respawned session's
+        // hooks to arrive — they may be seconds away, or lost to a stale `tbd`
+        // on the pane's PATH.
+        try await db.terminals.clearAwaitingInputReason(id: oldTerminal.id)
 
         // 3. Respawn IN PLACE — same window id / pane id → the tab and terminal
         //    row survive.
@@ -2671,6 +2706,70 @@ extension RPCRouter {
             .appendingPathComponent("projects", isDirectory: true)
     }
 
+    /// Worktree-ownership guard shared by every hook bridge that routes on
+    /// `TBD_TERMINAL_ID`.
+    ///
+    /// That variable is injected at terminal creation and INHERITED by every
+    /// descendant process — including multi-agent teammates and subprocesses
+    /// that run their own Claude session and fire their own hooks. Routing
+    /// solely by it lets such a foreign session write to a terminal that is not
+    /// its own. Defend by requiring the hook's reported `cwd` to resolve to the
+    /// SAME worktree as the target terminal. A mismatch means the event came
+    /// from a foreign session living in a different worktree — the caller
+    /// rejects it (soft success; hooks are fire-and-forget).
+    ///
+    /// Self-heal: the guard ACCEPTS the legitimate session's events even when
+    /// the terminal's stored pointer is currently foreign, so a hijacked
+    /// terminal recovers on its next valid event (e.g. resume/clear).
+    ///
+    /// One guard, one behavior: every hook bridge gets the same answer,
+    /// including the promoted-scratch acceptance, rather than a per-handler
+    /// variant that drifts.
+    func hookCWDBelongsToTerminal(
+        _ cwd: String,
+        terminal: Terminal,
+        event: String
+    ) async throws -> Bool {
+        let resolved = try await resolvePathToRepoOrWorktree(cwd)
+        var accepted = resolved?.worktreeID == terminal.worktreeID
+        // Promotion follow-up: when the terminal's worktree is a promoted
+        // scratch row (promotedToRepoID set), its live session now runs in
+        // the moved folder — whose path resolves to the NEW repo's main
+        // worktree, not the scratch row. That's the same session, not a
+        // foreign one: accept when the cwd resolves to the main worktree
+        // of the promoted-to repo.
+        if !accepted,
+           let resolvedWorktreeID = resolved?.worktreeID,
+           let ownerWorktree = try await db.worktrees.getLocal(id: terminal.worktreeID),
+           let promotedRepoID = ownerWorktree.promotedToRepoID,
+           let resolvedWorktree = try await db.worktrees.getLocal(id: resolvedWorktreeID),
+           resolvedWorktree.repoID == promotedRepoID,
+           resolvedWorktree.status == .main {
+            accepted = true
+            logger.info("\(event, privacy: .public): accepted post-promote session for terminal \(terminal.id.uuidString, privacy: .public) — cwd resolves to main worktree of promoted repo \(promotedRepoID.uuidString, privacy: .public)")
+        }
+        if !accepted {
+            // The cwd is the one interpolation here that is not TBD's own
+            // vocabulary: it is a real checkout path, and in this product those
+            // routinely carry an employer, a client or a repository name. Every
+            // agent hook reaches this guard, so a `.public` cwd would write that
+            // into the system log on an ordinary cadence. The identifiers stay
+            // public — they are what the line is for.
+            logger.info(
+                """
+                \(event, privacy: .public): REJECTED foreign session for terminal \
+                \(terminal.id.uuidString, privacy: .public) — hook cwd \
+                \(cwd, privacy: .private) resolves to worktree \
+                \(resolved?.worktreeID?.uuidString ?? "none", privacy: .public) \
+                but terminal belongs to worktree \
+                \(terminal.worktreeID.uuidString, privacy: .public); \
+                event ignored
+                """
+            )
+        }
+        return accepted
+    }
+
     /// Bridge for the Claude SessionStart hook. The CLI relays the hook
     /// payload (session_id, transcript_path, source) plus the spawn-time
     /// `TBD_TERMINAL_ID` env to this method. We persist both fields and
@@ -2686,56 +2785,13 @@ extension RPCRouter {
             logger.debug("sessionEvent: unknown terminalID=\(params.terminalID.uuidString, privacy: .public) — ignoring")
             return .ok()
         }
+        await sessionCounters.recordHookEvent(terminalID: terminal.id, at: now())
 
-        // Worktree-ownership guard: `TBD_TERMINAL_ID` is injected at terminal
-        // creation and INHERITED by every descendant process — including
-        // multi-agent teammates and subprocesses that run their own Claude
-        // session and fire their own SessionStart hook. Routing solely by
-        // `TBD_TERMINAL_ID` lets such a foreign session hijack the terminal's
-        // `claudeSessionID`, so the transcript pane shows the wrong
-        // conversation. Defend by requiring the hook's reported `cwd` to
-        // resolve to the SAME worktree as the target terminal. A mismatch
-        // means the event came from a foreign session living in a different
-        // worktree — reject it (soft success; the hook is fire-and-forget).
-        //
-        // Self-heal: the guard ACCEPTS the legitimate session's events even
-        // when the stored pointer is currently foreign, so a hijacked terminal
-        // recovers to its real session on the next valid SessionStart (e.g.
-        // resume/clear). `cwd` is optional for backward compatibility — when
-        // absent we cannot validate, so we fall back to the old behavior.
+        // `cwd` is optional for backward compatibility — when absent we cannot
+        // validate, so we fall back to the old behavior.
         if let cwd = params.cwd, !cwd.isEmpty {
-            let resolved = try await resolvePathToRepoOrWorktree(cwd)
-            var accepted = resolved?.worktreeID == terminal.worktreeID
-            // Promotion follow-up: when the terminal's worktree is a promoted
-            // scratch row (promotedToRepoID set), its live session now runs in
-            // the moved folder — whose path resolves to the NEW repo's main
-            // worktree, not the scratch row. That's the same session, not a
-            // foreign one: accept when the cwd resolves to the main worktree
-            // of the promoted-to repo.
-            if !accepted,
-               let resolvedWorktreeID = resolved?.worktreeID,
-               let ownerWorktree = try await db.worktrees.getLocal(id: terminal.worktreeID),
-               let promotedRepoID = ownerWorktree.promotedToRepoID,
-               let resolvedWorktree = try await db.worktrees.getLocal(id: resolvedWorktreeID),
-               resolvedWorktree.repoID == promotedRepoID,
-               resolvedWorktree.status == .main {
-                accepted = true
-                logger.info("sessionEvent: accepted post-promote session for terminal \(terminal.id.uuidString, privacy: .public) — cwd resolves to main worktree of promoted repo \(promotedRepoID.uuidString, privacy: .public)")
-            }
-            if !accepted {
-                logger.info(
-                    """
-                    sessionEvent: REJECTED foreign session for terminal \
-                    \(terminal.id.uuidString, privacy: .public) — hook cwd \
-                    \(cwd, privacy: .public) resolves to worktree \
-                    \(resolved?.worktreeID?.uuidString ?? "none", privacy: .public) \
-                    but terminal belongs to worktree \
-                    \(terminal.worktreeID.uuidString, privacy: .public); \
-                    not updating claudeSessionID
-                    """
-                )
-                return .ok()
-            }
+            guard try await hookCWDBelongsToTerminal(cwd, terminal: terminal, event: "sessionEvent")
+            else { return .ok() }
         }
 
         // Sanitize: an empty transcriptPath shouldn't overwrite an existing
@@ -2755,8 +2811,32 @@ extension RPCRouter {
             sessionID: params.sessionID,
             transcriptPath: cleanedPath
         )
+        // A new session context has started in this pane — a `/clear`, a
+        // resume after an in-place profile swap, or a hand relaunch — so a
+        // wait reason recorded against the PREVIOUS one is not on screen any
+        // more. It has to be retracted here, from the event that establishes
+        // it, for two reasons `SessionStateResolver`'s rung 4 makes concrete.
+        // A `/clear` points `transcriptPath` at a file Claude Code creates
+        // lazily, so the growth fact is nil and "we could not look is not
+        // evidence it went away" keeps the dead prompt standing; and the
+        // overlay's own `tbd terminal-activity idle` — the rail that would
+        // otherwise clear the columns — no-ops when the row already reads idle
+        // and can be lost on its own while this call lands.
+        //
+        // Deliberately NOT `setActivityState`: this event says a session
+        // exists, not what it is doing, and `activityState` gates hibernation.
+        try await db.terminals.clearAwaitingInputReason(id: terminal.id)
         if terminal.kind == .codex || terminal.label == TerminalLabel.codex {
-            try await db.terminals.setActivityState(id: terminal.id, activityState: .idle)
+            // This handler is driven by the session-start hook, which is what
+            // told us the session exists and is between turns.
+            //
+            // `observedAt` from the router's date seam, for the same reason as
+            // every other stamp this file writes: `SessionStateResolver`'s
+            // rung 4 *compares* it, and the store's default `Date()` is a
+            // timestamp nothing outside the store can name.
+            try await db.terminals.setActivityState(
+                id: terminal.id, activityState: .idle, source: .hookEvent("SessionStart"),
+                observedAt: now())
         }
 
         // Invalidate cached transcript parse for the OLD session file (if any)
@@ -2789,6 +2869,75 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Bridge for Claude Code's `Notification` hook — the one event that can
+    /// say a prompt is on screen *now*.
+    ///
+    /// The hook entry that feeds this handler carries no matcher, so every
+    /// notification type arrives here and every fork lives in this function.
+    /// That placement is the design, not an accident: the hook entry sits in a
+    /// settings file an operator can edit, so a matcher out there would be a
+    /// policy decision TBD could not depend on, while a fork here is compiled
+    /// and testable.
+    ///
+    /// The handler records a fact and changes nothing else. There is no
+    /// broadcast: no delta shape carries a wait reason, and inventing one to
+    /// carry a fact no surface renders yet would ship app behavior this slice
+    /// deliberately does not have.
+    func handleTerminalNotificationEvent(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalNotificationEventParams.self, from: paramsData)
+
+        guard let terminal = try await db.terminals.get(id: params.terminalID) else {
+            // Soft success — the caller is a fire-and-forget hook, and the
+            // terminal may have been deleted between fire and arrival. An
+            // error response here would be noise nobody reads and a non-zero
+            // exit nobody wants in a hook.
+            logger.debug("notificationEvent: unknown terminalID=\(params.terminalID.uuidString, privacy: .public) — ignoring")
+            return .ok()
+        }
+        await sessionCounters.recordHookEvent(terminalID: terminal.id, at: now())
+
+        if let cwd = params.cwd, !cwd.isEmpty {
+            guard try await hookCWDBelongsToTerminal(cwd, terminal: terminal, event: "notificationEvent")
+            else { return .ok() }
+        }
+
+        // The classification is a label on the record, computed once here from
+        // the verbatim type. An unrecognized or absent type stays unrecognized.
+        let reason = AwaitingInputReason(
+            message: params.message,
+            hookEventName: "Notification",
+            raw: params.rawPayload,
+            notificationType: params.notificationType)
+
+        // Deliberately NOT `setActivityState`: this hook reports that a prompt
+        // was raised, not that the session is still sitting on one, and
+        // `activityState` is a *gating* field — `HibernationGate.blockingRail`
+        // reads it, so writing `waiting_for_user` from here would silently
+        // change which sessions park, on the strength of a message TBD does
+        // not parse. `recordAwaitingInputReason` writes the reason columns and
+        // leaves the activity columns exactly as they were. The resolver
+        // composes `.awaitingInput(reason:)` from this record instead — so if
+        // you are here to "fix" a missing state transition, fix it there.
+        //
+        // `observedAt` comes from the router's date seam, never a bare `Date()`
+        // at the write site: a persisted observed-at is data, so it is the date
+        // seam rather than a `Clock`.
+        try await db.terminals.recordAwaitingInputReason(
+            id: terminal.id, reason: reason, observedAt: now())
+
+        // `message` may quote repo content, so it is `.private`; the type and
+        // the class are TBD's own closed vocabulary and stay public.
+        logger.debug(
+            """
+            notificationEvent: terminal=\(terminal.id.uuidString, privacy: .public) \
+            type=\(params.notificationType ?? "none", privacy: .public) \
+            class=\(reason.classification.rawValue, privacy: .public) \
+            message=\(params.message, privacy: .private)
+            """
+        )
+        return .ok()
+    }
+
     func handleTerminalActivityEvent(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalActivityEventParams.self, from: paramsData)
 
@@ -2796,6 +2945,13 @@ extension RPCRouter {
             logger.debug("activityEvent: unknown terminalID=\(params.terminalID.uuidString, privacy: .public) — ignoring")
             return .ok()
         }
+
+        // §13's hook-event rate. Counted here — before the unchanged-state
+        // early return below — because a session emitting the same state over
+        // and over is exactly the shape the counter exists to make visible, and
+        // a count taken after that guard would report zero for it. One actor
+        // hop and an integer add, which is the whole per-event budget.
+        await sessionCounters.recordHookEvent(terminalID: terminal.id, at: now())
 
         // UserPromptSubmit reaches the daemon as activity=working. If a
         // session-limit auto-resume is pending, the user just continued
@@ -2841,7 +2997,22 @@ extension RPCRouter {
             return .ok()
         }
 
-        try await db.terminals.setActivityState(id: terminal.id, activityState: params.activityState)
+        // Every caller of this RPC is an agent hook bridged through
+        // `tbd terminal-activity`. The params do not yet carry WHICH hook event
+        // fired, so the RPC surface stands in as the source name until a later
+        // slice threads the event through — a coarser answer than we want, but
+        // a true one, and one no reader can mistake for an observation TBD made
+        // itself.
+        // `observedAt` from the router's date seam, never the store's default
+        // `Date()`. The resolver's rung-4 decision is an ordering comparison
+        // between exactly this stamp and the one `recordAwaitingInputReason`
+        // writes above, so a test that cannot pin both ends cannot pin the
+        // decision at all.
+        try await db.terminals.setActivityState(
+            id: terminal.id,
+            activityState: params.activityState,
+            source: .hookEvent(RPCMethod.terminalActivityEvent),
+            observedAt: now())
         subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
             terminalID: terminal.id,
             worktreeID: terminal.worktreeID,

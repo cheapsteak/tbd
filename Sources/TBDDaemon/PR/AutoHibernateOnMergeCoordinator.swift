@@ -42,7 +42,13 @@ public struct AutoHibernateOnMergeCoordinator: Sendable {
             let terminals = try await db.terminals.list(worktreeID: worktreeID)
             var parked = 0
             for terminal in terminals {
-                let result = await hibernation.hibernateForMerge(terminalID: terminal.id)
+                // The pending-input veto rides on the same config snapshot that
+                // armed this fan-out: merge-park kills a live session, and a
+                // merge is no more a reason to eat typed-but-unsent input than
+                // an idle timeout is.
+                let result = await hibernation.hibernateForMerge(
+                    terminalID: terminal.id,
+                    inputVetoEnabled: config.hibernateInputVetoEnabled)
                 switch result {
                 case .ok:
                     parked += 1

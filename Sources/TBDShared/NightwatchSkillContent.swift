@@ -138,9 +138,12 @@ is an *archive question for the human*, not a harvest to fire. Report it and mov
 they are wrong; this rule wins.)
 
 **Hand off at the context ceiling — never push through it.** A judge session that runs past
-~600k tokens starts truncating its own shift. (The ceiling was 200k until 2026-07-29; on a
-1000k Opus window that forced a relay roughly every two hours, so the desk spent its shift
-handing off instead of judging. `handoff.py --check` is the authority — don't eyeball it.)
+its context ceiling starts truncating its own shift. That ceiling is three quarters of the
+context window *this* session reported — TBD installs a statusline tee on desk sessions so
+the window Claude Code resolved is knowable — and falls back to a fixed guess when there is
+no capture to read. It is therefore a different number on a different desk, and there is no
+figure to memorise: `handoff.py --check` computes it and says which of the two it used.
+That script is the authority — don't eyeball it.
 Do not "flag for respawn" and keep working, and
 do NOT use `tbd terminal close --all` — **that command does not exist**. The relay uses
 the supported single-terminal `tbd terminal close --terminal <id>`, which preserves
@@ -744,22 +747,114 @@ def _lastmeaning(lines):
         return s[:90]
     return ""
 
-CTX_PAT = re.compile(r"(\d+)%\s*context used")
-COMPACT_PAT = re.compile(r"(\d+)%\s*until auto-compact")
-def burn_risk(cap):
+# The window a percentage is computed against when nothing has reported the
+# session's real one. It is an ASSUMPTION, and every line that prints a
+# percentage derived from it says so. 200k errs early: if the real window is
+# larger the flag fires sooner than it needed to, which costs attention, while
+# the opposite error costs a session.
+#
+# The same number is spelled in Swift as `ContextWindow.assumedTokens`
+# (Sources/TBDShared/SessionStateModel.swift). Two languages, one assumption and
+# no way to share it, so it is stated twice on purpose — change one, change the
+# other, and keep the word ASSUMED next to it in whatever a human reads.
+ASSUMED_WINDOW = 200_000
+BURN_PCT = 85
+
+# How much of a transcript's tail to read for the numerator. The same 64 KiB
+# window `ContextLoadReader.defaultTailWindowBytes` uses, for the same reasons:
+# it spans several assistant records, and a supervision tick reads one
+# transcript per agent, where these files run to many megabytes.
+TAIL_WINDOW_BYTES = 64 * 1024
+
+def _usage_int(usage, key):
+    """One usage bucket as an int — 0 when it is absent, null, or not a number.
+
+    A `null` bucket is a shape that really appears in these files, and adding
+    one to an int raises. The raise would not stay local: burn_risk() is called
+    inline in the fleet loop with no `try` around it, so ONE such record ends
+    the whole tick — classification table, decision queue, everything — not just
+    that agent's numerator.
+
+    Coercing to 0 is also what keeps the two implementations in step:
+    ContextLoadReader.lastUsage sums the same buckets with `as? Int ?? 0`, so a
+    bucket Swift counts as nothing has to count as nothing here too.
+    """
+    value = usage.get(key)
+    return value if isinstance(value, int) else 0
+
+def context_tokens(transcript_path):
+    """Current context size, read off the transcript's own usage records.
+
+    Claude Code stamps every assistant message with the usage that produced it;
+    input + both cache buckets is the prompt weight the next request carries.
+    Returns None when the transcript can't be read rather than guessing zero —
+    a bogus low reading would silently un-flag a session that is actually full.
+
+    THIS MUST AGREE WITH `ContextLoadReader.lastUsage`
+    (Sources/TBDDaemon/Claude/ContextLoadReader.swift), record for record. The
+    same session is reported by two surfaces — TBD's `session.states` and this
+    desk's burn-risk list — and two selection rules over one file give a reader
+    two numbers with nothing to say which is right. So the rule is the Swift
+    one: the LAST record carrying a usage block wins, never the largest. A
+    parent session's subagents append into the same JSONL, so "largest" reports
+    whichever turn was heaviest anywhere in the tail rather than what this
+    session is carrying now.
+
+    The read is bounded to the tail for the same reason the Swift side bounds
+    it — one seek per agent per tick instead of a whole file. The accepted cost
+    is that a session whose last TAIL_WINDOW_BYTES hold no usage record reads as
+    unknown rather than as a figure from further back, which is the same answer
+    the Swift reader gives and the same direction it errs in.
+    """
+    if not transcript_path: return None
+    try:
+        with open(transcript_path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - TAIL_WINDOW_BYTES))
+            tail = fh.read()
+    except OSError:
+        return None
+    best = None
+    # A tail begins wherever the seek landed, so its first line is usually a
+    # fragment of a record. It fails to parse and is skipped, which is what the
+    # Swift reader does with it too.
+    for raw in tail.split(b"\n"):
+        try:
+            rec = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict): continue
+        msg = rec.get("message")
+        if not isinstance(msg, dict): continue
+        u = msg.get("usage")
+        if not isinstance(u, dict): continue
+        inp = u.get("input_tokens")
+        if not isinstance(inp, int): continue
+        best = (inp
+                + _usage_int(u, "cache_creation_input_tokens")
+                + _usage_int(u, "cache_read_input_tokens"))
+    return best
+
+def burn_risk(transcript_path):
     """The dominant quota driver is token WEIGHT per request: a session dragging a
-    near-full context window (esp. 1M Opus) sends up to ~1M input tokens EVERY request.
-    Flag agents at high context — they incinerate the weekly cap fastest. Returns
-    (pct:int|None, is_1m:bool, risk:bool)."""
-    pct = None
-    m = CTX_PAT.search(cap)
-    if m: pct = int(m.group(1))
-    else:
-        c = COMPACT_PAT.search(cap)
-        if c: pct = 100 - int(c.group(1))
-    is_1m = "opus[1m]" in cap or "[1m]" in cap
-    risk = pct is not None and pct >= 85
-    return pct, is_1m, risk
+    near-full context window sends its whole prompt on EVERY request. Flag agents
+    at high context — they incinerate the weekly cap fastest.
+
+    The numerator is the transcript's own usage record. The denominator is NOT
+    known: only Claude Code resolves a session's effective window, and it reports
+    it on exactly one surface (the statusline), which TBD tees on desk sessions
+    only. So the percentage here is against ASSUMED_WINDOW and is labelled as an
+    assumption wherever it is printed. Reading the rendered pane for it — which
+    this used to do — was screen-scraping: it broke silently whenever Claude Code
+    reworded its status line, and a `[1m]` suffix sniffed off the screen reports
+    capability rather than the window actually in force.
+
+    Returns (tokens:int|None, pct:int|None, risk:bool)."""
+    used = context_tokens(transcript_path)
+    if used is None: return None, None, False
+    pct = int(round(100.0 * used / ASSUMED_WINDOW))
+    return used, pct, pct >= BURN_PCT
 
 def _composer(lines, raw_lines=None):
     """Text a HUMAN actually left in the composer, or "" if there's nothing real there.
@@ -815,31 +910,50 @@ def codex_state(activity):
         "unknown": ("IDLE", "Codex activity is not known yet"),
     }.get(activity or "unknown", ("IDLE", f"Codex hook state: {activity}"))
 
+FLEET_COLUMNS = 8
+
+def _fleet_row(line, ncols=FLEET_COLUMNS):
+    """One tab-separated fleet row as a tuple, or None when it isn't one.
+
+    A worktree display name is free text a human typed, and a transcript path
+    can hold anything a filesystem accepts — either may contain a tab, which
+    widens the row and makes every field after it ambiguous. Unpacking such a
+    row raises, and a raise here ends the tick for the WHOLE fleet: one odd
+    display name and nothing gets supervised tonight.
+
+    There is no honest way to put a widened row back together — the separator
+    is the only thing that said where the name ended — so the row is dropped.
+    Losing one agent from a tick is a cost; losing every agent is an outage.
+    """
+    parts = line.split("\t")
+    return tuple(parts) if len(parts) == ncols else None
+
 def fleet():
     rows = sh(["sqlite3","-separator","\t",DB,
       "SELECT t.tmuxPaneID, w.displayName, w.tmuxServer, t.id, w.repoID, t.kind, "
-      "COALESCE(t.activityState,'unknown') "
+      "COALESCE(t.activityState,'unknown'), COALESCE(t.transcriptPath,'') "
       "FROM worktree w JOIN terminal t ON t.worktreeID=w.id "
       "AND t.kind IN ('claude','codex') AND t.suspendedAt IS NULL AND t.hibernatedAt IS NULL "
       "WHERE w.status='active' ORDER BY w.tmuxServer, w.displayName;"])
     out = []
     for l in rows.splitlines():
-        p = l.split("\t")
-        if len(p) < 7: continue
-        pane, name, srv, tid, rid, kind, activity = p
+        row = _fleet_row(l)
+        if row is None: continue
+        pane, name, srv, tid, rid, kind, activity, transcript = row
+        # Context load comes off the transcript for every agent kind — it is a
+        # file the agent writes, not a picture of its screen.
+        ctx_tokens, ctx_pct, burn = burn_risk(transcript)
         if kind == "codex":
             # Codex installs TBD hooks that publish activityState. Its rendered
             # terminal is not Claude's UI and must not be interpreted with the
             # grandfathered Claude-only screen classifier.
             state, note = codex_state(activity)
-            ctx_pct, is_1m, burn = None, False, False
         else:
             # -e keeps the escapes: dimness is the only thing distinguishing a ghost
             # suggestion from typed input, and it's gone by the time tmux strips ANSI.
             cap_raw = sh(["tmux","-L",srv,"capture-pane","-p","-e","-t",pane])
             cap = ANSI_RE.sub("", cap_raw)
             state, note = classify(cap, cap_raw)
-            ctx_pct, is_1m, burn = burn_risk(cap)
         hook = POLICIES.get(rid, {})
         pol = hook.get("policy", {})
         # priorities/dont-touch are the UNION of global config + the repo's own hook
@@ -852,7 +966,8 @@ def fleet():
                     "priority": prio, "protected": protect,
                     "repo": hook.get("name"), "gate": pol.get("gate", {}).get("ready_when"),
                     "advance_skill": pol.get("advance_skill"), "deploy_skill": pol.get("deploy_skill"),
-                    "ctx_pct": ctx_pct, "is_1m": is_1m, "burn_risk": burn})
+                    "ctx_tokens": ctx_tokens, "ctx_pct": ctx_pct,
+                    "ctx_window_assumed": ASSUMED_WINDOW, "burn_risk": burn})
     return out
 
 def _pane(*lines):
@@ -938,6 +1053,79 @@ def selftest():
           codex_state("waiting_for_user"), ("DECISION", "Codex is waiting for user input"))
     check("codex unknown fails quiet",
           codex_state("unknown"), ("IDLE", "Codex activity is not known yet"))
+
+    # A row is dropped, never fatal. Unpacking a widened row raises, and the
+    # raise takes the whole tick down — so a single display name with a tab in
+    # it would leave the entire fleet unsupervised for the night.
+    check("a well-formed fleet row parses",
+          _fleet_row("%1\tworktree\tsrv\tT1\tR1\tclaude\tworking\t/t.jsonl"),
+          ("%1", "worktree", "srv", "T1", "R1", "claude", "working", "/t.jsonl"))
+    check("a display name containing a tab drops its row instead of raising",
+          _fleet_row("%1\twork\ttree\tsrv\tT1\tR1\tclaude\tworking\t/t.jsonl"), None)
+    check("a truncated row drops too", _fleet_row("%1\tworktree"), None)
+
+    # context_tokens must answer exactly what ContextLoadReader.lastUsage
+    # answers for the same file: TBD's session.states and this desk's burn-risk
+    # list describe the same sessions, and two selection rules over one
+    # transcript put two numbers in front of a reader with no way to tell which
+    # is right.
+    import tempfile
+
+    def transcript(*records):
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as fh:
+            for rec in records:
+                fh.write(rec + "\n")
+            return fh.name
+
+    def usage(total):
+        return json.dumps({"message": {"usage": {
+            "input_tokens": total - 30, "cache_creation_input_tokens": 20,
+            "cache_read_input_tokens": 10}}})
+
+    # LAST wins, not largest: a parent session's subagents append into the same
+    # file, so the heaviest record in the tail can belong to something that has
+    # already finished while the session itself is nearly empty.
+    ordered = transcript(usage(180_000), usage(12_345),
+                         "not json at all", json.dumps({"message": {}}))
+    check("the last usage record wins, not the largest",
+          context_tokens(ordered), 12_345)
+    check("an unreadable transcript is unknown, never zero",
+          context_tokens("/nonexistent/transcript.jsonl"), None)
+    check("no transcript path is unknown", context_tokens(""), None)
+
+    # The read is bounded to the tail. A usage record pushed past the window by
+    # a large intervening record is not seen — which is what makes this a seek
+    # rather than a whole-file read on multi-megabyte transcripts.
+    beyond = transcript(usage(999_999),
+                        json.dumps({"filler": "x" * (TAIL_WINDOW_BYTES + 4096)}))
+    check("a usage record beyond the tail window is not read",
+          context_tokens(beyond), None)
+
+    # A usage bucket the record spells as null contributes nothing rather than
+    # raising. This is the whole-tick failure mode: burn_risk() runs inline in
+    # the fleet loop with no `try`, so one such record used to end the tick for
+    # EVERY agent — no classification table, no decision queue. Swift's
+    # ContextLoadReader coerces the same buckets the same way, so tolerating it
+    # is also what keeps the two numerators agreeing.
+    nulls = transcript(json.dumps({"message": {"usage": {
+        "input_tokens": 100, "cache_creation_input_tokens": None,
+        "cache_read_input_tokens": None}}}))
+    check("a null cache bucket counts as nothing instead of ending the tick",
+          context_tokens(nulls), 100)
+    check("and burn_risk survives it too", burn_risk(nulls), (100, 0, False))
+    strings = transcript(json.dumps({"message": {"usage": {
+        "input_tokens": 100, "cache_read_input_tokens": "12"}}}))
+    check("a non-numeric cache bucket counts as nothing too",
+          context_tokens(strings), 100)
+
+    # The percentage is against an ASSUMPTION, and burn_risk's caller prints it
+    # as one. Pinned so the denominator cannot quietly become a model figure.
+    full = transcript(usage(ASSUMED_WINDOW))
+    check("burn risk is a fraction of the assumed window",
+          burn_risk(full), (ASSUMED_WINDOW, 100, True))
+
+    for path in (ordered, beyond, nulls, strings, full):
+        os.unlink(path)
 
     print(f"selftest: {n}/{n} agent-state scenarios passed")
 
@@ -1054,10 +1242,14 @@ def main():
     burners = sorted([a for a in rep["agents"] if a.get("burn_risk")],
                      key=lambda a: -(a.get("ctx_pct") or 0))
     if burners:
-        print(f"🔥 BURN-RISK ({len(burners)} at ctx≥85% — top quota drivers, weight not count):")
+        print(f"🔥 BURN-RISK ({len(burners)} at ctx≥{BURN_PCT}% of an ASSUMED {ASSUMED_WINDOW:,}-token "
+              f"window — top quota drivers, weight not count):")
         for a in burners[:8]:
-            print(f"  · {a['name']} ({a['pane']}): {a['ctx_pct']}% ctx{' [1M]' if a['is_1m'] else ''}"
+            print(f"  · {a['name']} ({a['pane']}): {a['ctx_tokens']:,} tokens "
+                  f"= {a['ctx_pct']}% of assumed {ASSUMED_WINDOW:,}"
                   f" — {'compact/clear' if a['ctx_pct']>=95 else 'watch'}")
+        print("    (percentages assume a 200k window: only Claude Code knows the window it "
+              "resolved, and it reports it on the statusline, which TBD tees on desks only.)")
     if auto:
         print(f"AUTO (Tier-0 safe, {len(auto)}):")
         for x in auto: print(f"  · {x['kind']}: {x['name']} ({x['pane']})")
@@ -1107,11 +1299,23 @@ import time
 
 QUEUE = pathlib.Path(__file__).resolve().parent.parent / "queue"
 LATEST = QUEUE / "HANDOFF-LATEST.md"
-# 600k of a 1000k Opus window. Raised from 200k on 2026-07-29: at 200k a desk
-# session hit the ceiling roughly every two hours and spent the shift relaying
-# instead of judging, while the model it runs on had 800k of headroom left.
-# 600k still leaves ~400k of slack for the handoff write + the successor's boot.
-DEFAULT_THRESHOLD = 600_000
+# The ceiling is a fraction of THIS session's context window. The remaining
+# quarter is what the handoff write and the successor's boot run in.
+CEILING_FRACTION = 0.75
+# The ceiling when this session's window could not be read.
+#
+# It is a capability guess, not a fraction of anything — there is no window here
+# to take a fraction of — and every line that prints it says so.
+#
+# The figure is the one the desk has been running. A 200k ceiling was measured
+# as too aggressive: on a large window it forced a relay roughly every two
+# hours, so the desk spent its shift relaying instead of working. Guessing below
+# a value already measured as too small would reintroduce exactly that. The
+# tradeoff is accepted deliberately: on a genuinely small window this fallback
+# sits above the real ceiling and the desk can truncate — but that is the case
+# `observed_window` below covers, and regressing a measured behaviour for every
+# desk in order to guess at a case that has a real answer is the worse trade.
+FALLBACK_THRESHOLD = 600_000
 SUCCESSOR_MODEL = "opus"
 
 
@@ -1144,29 +1348,162 @@ def tmux_server():
     return pathlib.PurePath(tmux.split(",")[0]).name if tmux else ""
 
 
+def _sanitized_session_key(key):
+    """Filesystem-safe session key — the same mapping Swift applies.
+
+    `TBDConstants.sanitizedSessionKey` (Sources/TBDShared/Constants.swift) maps
+    every character outside `[A-Za-z0-9_-]` to `_`, and names the capture file
+    with the result. One rule spelled in two languages with nothing connecting
+    them, so each site names the other: change one, change this.
+    """
+    return "".join(
+        c if (c.isascii() and (c.isalnum() or c in "-_")) else "_" for c in key
+    )
+
+
+def statusline_capture_path(terminal_id):
+    """Where the tee publishes this session's statusline payload.
+
+    Derived exactly as `TBDConstants.statuslineCapturePath(sessionKey:)` does —
+    `TBD_HOME` first, never hand-built from `$HOME`, which is how a path
+    silently stops following the rest of TBD. The session key is the terminal
+    id, the same one `resolve_self` reads out of the environment.
+    """
+    root = os.environ.get("TBD_HOME") or os.path.expanduser("~/tbd")
+    name = "statusline-capture-" + _sanitized_session_key(terminal_id) + ".json"
+    return os.path.join(root, "runtime", name)
+
+
+def observed_window(terminal_id):
+    """The context window Claude Code actually resolved for this session.
+
+    A session's effective window is a session fact, not a model fact: Claude
+    Code resolves it from the model id, a long-context suffix, a beta header,
+    environment overrides and a remote flag, and reports the result on exactly
+    one surface — the statusline command's stdin JSON. The desk is the session
+    that HAS a statusline tee: TBD installs one on desk sessions precisely so
+    this value is knowable, and it publishes the payload verbatim.
+
+    Returns None when nothing reported it. Every field is treated as
+    absent-able — a missing file, an unreadable one, malformed JSON, a missing
+    key or a non-positive number are all "not observed" — and nothing here
+    raises: this runs on the path that keeps a shift alive, so an odd capture
+    file must cost a ceiling's precision, never the ceiling itself.
+    """
+    if not terminal_id:
+        return None
+    try:
+        with open(statusline_capture_path(terminal_id), "rb") as fh:
+            payload = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    window = payload.get("context_window")
+    if not isinstance(window, dict):
+        return None
+    size = window.get("context_window_size")
+    if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+        return None
+    return size
+
+
+def resolve_ceiling(terminal_id, override=None):
+    """The ceiling for this session, and where the number came from.
+
+    The provenance is returned rather than left implicit because the two cases
+    are not equally trustworthy and a bare number reads as though something had
+    measured it. An observed window gives a ceiling that is genuinely three
+    quarters of what this session has; the fallback is a guess (see
+    FALLBACK_THRESHOLD) and says so wherever it is printed.
+    """
+    if override is not None:
+        return override, "set explicitly with --threshold"
+    window = observed_window(terminal_id)
+    if window is None:
+        return FALLBACK_THRESHOLD, (
+            "this session's window was NOT observed — no statusline capture to read, "
+            "so this ceiling is a fallback guess rather than a fraction of a known window"
+        )
+    return int(window * CEILING_FRACTION), (
+        f"{int(CEILING_FRACTION * 100)}% of this session's OBSERVED "
+        f"{window:,}-token window"
+    )
+
+
+# How much of a transcript's tail to read. The same 64 KiB window tick.py and
+# ContextLoadReader seek to, for the same reason: it spans several assistant
+# records, and these files run to many megabytes. `--check` runs on the hot path
+# of a shift that is already near its ceiling, so reading the whole file into
+# memory to keep its last few hundred lines is the one thing this must not do.
+TAIL_WINDOW_BYTES = 64 * 1024
+
+
+def _usage_int(usage, key):
+    """One usage bucket as an int — 0 when it is absent, null, or not a number.
+
+    A `null` bucket is a shape that really appears in these files, and adding
+    one to an int raises. cmd_check documents exactly two outcomes, 0 and 10;
+    a traceback is neither, and it exits 1 — which no caller reads as OVER. So
+    every bucket is coerced and the fail-closed contract stays true for a
+    malformed record as much as for an unreadable file.
+    """
+    value = usage.get(key)
+    return value if isinstance(value, int) else 0
+
+
 def context_tokens(transcript_path):
     """Current context size, read off the transcript's own usage records.
 
     Claude Code stamps every assistant message with the usage that produced it;
-    input + both cache buckets is what the statusline renders as `NNNk/1000k`.
+    input + both cache buckets is the numerator the statusline renders.
     Returns None when the transcript can't be read rather than guessing zero —
     a bogus low reading would silently disable the ceiling.
+
+    The LARGEST record in the tail wins here, where tick.py's same-named
+    function takes the last one. The two are answering different questions and
+    the difference is deliberate: tick.py reports what a session is carrying
+    right now, and must agree with what TBD reports for the same session, while
+    this is a one-way ceiling on a shift that has already been running. Reading
+    high is the safe direction for a ceiling — it relays early — and it survives
+    a tail whose last record belongs to a subagent that finished small.
+
+    Nothing in here may raise on a malformed record. A record whose usage block
+    holds a null, a line that is not valid UTF-8, a line that is not JSON, a
+    record that is not an object — each is skipped. This function is the whole
+    input to cmd_check's fail-closed decision, and an exception escaping it is
+    not "OVER", it is a traceback and exit 1.
     """
     try:
         with open(transcript_path, "rb") as fh:
-            tail = fh.readlines()[-400:]
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - TAIL_WINDOW_BYTES))
+            tail = fh.read()
     except OSError:
         return None
     best = None
-    for raw in tail:
+    # A tail begins wherever the seek landed, so its first line is usually a
+    # fragment of a record. It fails to parse and is skipped. `ValueError`
+    # covers both ways that happens: json.JSONDecodeError for a broken record,
+    # and UnicodeDecodeError — also a ValueError — for bytes that are not UTF-8.
+    for raw in tail.split(b"\n"):
         try:
-            u = json.loads(raw).get("message", {}).get("usage") or {}
-        except (json.JSONDecodeError, AttributeError):
+            rec = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        msg = rec.get("message")
+        if not isinstance(msg, dict):
+            continue
+        u = msg.get("usage")
+        if not isinstance(u, dict):
             continue
         total = (
-            u.get("input_tokens", 0)
-            + u.get("cache_creation_input_tokens", 0)
-            + u.get("cache_read_input_tokens", 0)
+            _usage_int(u, "input_tokens")
+            + _usage_int(u, "cache_creation_input_tokens")
+            + _usage_int(u, "cache_read_input_tokens")
         )
         if total and (best is None or total > best):
             best = total
@@ -1193,22 +1530,27 @@ def cmd_check(args):
     one costs the shift to truncation, which is the failure this script exists
     to prevent.
     """
-    *_, row = resolve_self()
+    tid, _, row = resolve_self()
     transcript = row.get("transcriptPath") or ""
     used = context_tokens(transcript) if transcript else None
+    threshold, provenance = resolve_ceiling(tid, args.threshold)
     if used is None:
         why = "no transcriptPath on the terminal row" if not transcript else "transcript unreadable"
         print(f"context: UNKNOWN ({why}) — failing closed, treat as OVER")
         return 10
-    over = used >= args.threshold
-    print(f"context: {used:,} / ceiling {args.threshold:,} — {'OVER' if over else 'ok'}")
+    over = used >= threshold
+    # The ceiling is quoted with its provenance, in both cases. A reader has to
+    # be able to tell a fraction of this session's real window from a fallback
+    # guess, and a number printed bare reads as though something had measured it.
+    print(f"context: {used:,} / ceiling {threshold:,} ({provenance}) — "
+          f"{'OVER' if over else 'ok'}")
     return 10 if over else 0
 
 
-def successor_prompt(doc_path, pred_tid, pred_window, server, threshold):
+def successor_prompt(doc_path, pred_tid, pred_window, server, threshold, provenance):
     return f"""You are the successor Nightwatch/Daywatch judge session for this desk.
-The previous session hit its context ceiling ({threshold:,} tokens) and handed off
-to you rather than getting truncated mid-shift.
+The previous session hit its context ceiling ({threshold:,} tokens — {provenance})
+and handed off to you rather than getting truncated mid-shift.
 
 FIRST, before anything else:
 1. Read the handoff document: {doc_path}
@@ -1236,7 +1578,9 @@ FIRST, before anything else:
 4. Confirm in your first message what you picked up and what you closed.
 
 STANDING INSTRUCTION — this applies to YOU now, and to every session you spawn:
-When your own context passes {threshold:,} tokens, do not push through it. Run
+Do not push through your own context ceiling. Your ceiling is yours, not this one:
+--check resolves it against the window YOUR session reports, so run it rather than
+watching for a number.
   python3 "{pathlib.Path(__file__).resolve()}" --check
 and when it reports OVER, write your own handoff notes to a file and run
   python3 "{pathlib.Path(__file__).resolve()}" --act --notes-file <your-notes.md>
@@ -1294,7 +1638,8 @@ Transcript: {row.get('transcriptPath')}
         LATEST.unlink()
     LATEST.symlink_to(doc.name)
 
-    prompt = successor_prompt(doc, tid, row.get("tmuxWindowID"), server, args.threshold)
+    threshold, provenance = resolve_ceiling(tid, args.threshold)
+    prompt = successor_prompt(doc, tid, row.get("tmuxWindowID"), server, threshold, provenance)
     spawn = _run(
         [
             "tbd", "terminal", "create", wid,
@@ -1384,11 +1729,15 @@ def cmd_close(args):
 def selftest():
     """Offline test of the ceiling arithmetic and the fail-closed paths.
 
-    No subprocesses, no tbd, no tmux, no transcript on disk. Covers the two
-    behaviours that decide whether a shift survives: context_tokens() picking
+    No subprocesses, no tbd, no tmux, no transcript on disk. Covers the three
+    behaviours that decide whether a shift survives: the ceiling resolving
+    against the window this session actually reported, context_tokens() picking
     the largest usage record, and cmd_check refusing to report "under" when it
     cannot actually tell.
     """
+    import contextlib
+    import io
+    import shutil
     import tempfile
     n = 0
 
@@ -1398,7 +1747,9 @@ def selftest():
         n += 1
 
     class Args:
-        threshold = DEFAULT_THRESHOLD
+        # None, not a number: the ceiling is resolved per session, and pinning
+        # one here would test arithmetic no caller performs.
+        threshold = None
 
     def with_row(row):
         """Run cmd_check against a fixed terminal row, no tbd/env involved."""
@@ -1410,13 +1761,77 @@ def selftest():
         finally:
             g["resolve_self"] = real
 
+    # A scratch TBD_HOME for the whole selftest, so the capture cases below read
+    # files this function wrote and never the running desk's own.
+    home = tempfile.mkdtemp(prefix="handoff-selftest-")
+    prior_home = os.environ.get("TBD_HOME")
+    os.environ["TBD_HOME"] = home
+
+    def publish_capture(payload, terminal_id="T"):
+        """Put a statusline payload where the tee would have put it."""
+        path = statusline_capture_path(terminal_id)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            fh.write(payload)
+        return path
+
+    def window_payload(size):
+        return json.dumps({"context_window": {"context_window_size": size}})
+
+    # The capture path is the one Swift builds. Nothing mechanical ties the two
+    # spellings together, so a drift here reads as "no capture" — the ceiling
+    # would fall back on every desk forever, silently.
+    check("the capture path is TBD_HOME/runtime/statusline-capture-<key>.json",
+          statusline_capture_path("T-1_2"),
+          os.path.join(home, "runtime", "statusline-capture-T-1_2.json"))
+    check("a key with unsafe characters sanitizes the way Swift sanitizes",
+          os.path.basename(statusline_capture_path("a/b .c")),
+          "statusline-capture-a_b__c.json")
+
+    # THE CEILING IS THREE QUARTERS OF THE WINDOW THIS SESSION REPORTED. A desk
+    # on a large window that was held to a small ceiling spends its shift
+    # relaying instead of working; one on a small window held to a large ceiling
+    # truncates. Only the capture can tell them apart.
+    publish_capture(window_payload(1_000_000))
+    check("a 1M-window desk gets a 750k ceiling", resolve_ceiling("T")[0], 750_000)
+    check("and is told the window was observed",
+          "OBSERVED" in resolve_ceiling("T")[1], True)
+    publish_capture(window_payload(200_000))
+    check("a 200k-window desk gets a 150k ceiling", resolve_ceiling("T")[0], 150_000)
+
+    # Every unreadable shape is "not observed", never an exception: this runs on
+    # the path that keeps a shift alive.
+    for label, payload in (
+        ("malformed JSON", "{not json"),
+        ("no context_window object", json.dumps({"model": {"id": "x"}})),
+        ("no context_window_size key", json.dumps({"context_window": {}})),
+        ("a zero window", window_payload(0)),
+        ("a negative window", window_payload(-1)),
+        ("a non-numeric window", json.dumps({"context_window": {"context_window_size": "1m"}})),
+        ("a payload that is not an object", json.dumps([1, 2, 3])),
+    ):
+        publish_capture(payload)
+        check(f"{label} reads as no capture", observed_window("T"), None)
+        check(f"{label} falls back rather than raising",
+              resolve_ceiling("T")[0], FALLBACK_THRESHOLD)
+
+    os.unlink(statusline_capture_path("T"))
+    check("no capture at all falls back", resolve_ceiling("T")[0], FALLBACK_THRESHOLD)
+    check("and the fallback says it is a guess, not a measurement",
+          ("NOT observed" in resolve_ceiling("T")[1]
+           and "fallback" in resolve_ceiling("T")[1]), True)
+    check("an explicit --threshold wins over both",
+          resolve_ceiling("T", 42), (42, "set explicitly with --threshold"))
+
+    # Everything below runs in the fallback regime — there is no capture left on
+    # disk — so the ceiling in effect is FALLBACK_THRESHOLD.
+    #
     # context_tokens: the reported figure is input + BOTH cache buckets, and the
     # largest record in the tail wins (the tail holds smaller earlier turns).
-    # Derived from DEFAULT_THRESHOLD, never a literal: the 2026-07-29 raise to
-    # 600k silently turned a hardcoded 250_000 "over" fixture into an "under"
-    # one, so the selftest would have kept passing while asserting the opposite
-    # of its own label.
-    over_total = DEFAULT_THRESHOLD + 50_000
+    # Derived from the ceiling in effect, never a literal: a hardcoded "over"
+    # fixture becomes an "under" one the moment the ceiling moves past it, and
+    # the selftest keeps passing while asserting the opposite of its own label.
+    over_total = FALLBACK_THRESHOLD + 50_000
     with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as fh:
         for total in (10_000, over_total, 40_000):
             fh.write(json.dumps({"message": {"usage": {
@@ -1433,6 +1848,26 @@ def selftest():
         small = fh.name
     check("under ceiling exits 0", with_row({"transcriptPath": small}), 0)
 
+    # --check prints the ceiling WITH its provenance, in both regimes. A reader
+    # who cannot tell a fraction of a real window from a fallback guess has been
+    # handed a number that looks measured and is not.
+    said = io.StringIO()
+    with contextlib.redirect_stdout(said):
+        with_row({"transcriptPath": small})
+    reported = said.getvalue()
+    check("a fallback ceiling is reported as not observed",
+          (f"{FALLBACK_THRESHOLD:,}" in reported and "NOT observed" in reported), True)
+
+    publish_capture(window_payload(1_000_000))
+    said = io.StringIO()
+    with contextlib.redirect_stdout(said):
+        with_row({"transcriptPath": small})
+    observed_report = said.getvalue()
+    check("an observed ceiling is reported as observed, with the window it came from",
+          ("750,000" in observed_report and "OBSERVED" in observed_report
+           and "1,000,000-token window" in observed_report), True)
+    os.unlink(statusline_capture_path("T"))
+
     # FAIL CLOSED. Each of these once returned 0 ("under ceiling"), which is how
     # a session runs past its ceiling with nobody ever telling it to hand off.
     check("unreadable transcript fails closed",
@@ -1441,8 +1876,48 @@ def selftest():
     check("empty transcriptPath fails closed", with_row({"transcriptPath": ""}), 10)
     check("no usage records fails closed", context_tokens(os.devnull), None)
 
+    # A MALFORMED record must fail closed too, and that is a different claim
+    # from an unreadable file: each of these once raised out of context_tokens,
+    # past cmd_check, and out of the process as a traceback with status 1 —
+    # neither documented outcome, so no caller reads it as OVER and the shift
+    # runs on to truncation. Every shape is asserted through cmd_check, since
+    # the exit status is the contract.
+    with tempfile.NamedTemporaryFile("wb", suffix=".jsonl", delete=False) as fh:
+        fh.write(json.dumps({"message": {"usage": {
+            "input_tokens": None, "cache_creation_input_tokens": None,
+            "cache_read_input_tokens": None}}}).encode() + b"\n")
+        fh.write(b"\xff\xfe not utf-8 at all\n")
+        fh.write(json.dumps({"message": {"usage": {
+            "input_tokens": over_total - 30, "cache_creation_input_tokens": None,
+            "cache_read_input_tokens": 30}}}).encode() + b"\n")
+        fh.write(json.dumps([1, 2, 3]).encode() + b"\n")
+        malformed = fh.name
+    check("null buckets and invalid UTF-8 are skipped, not raised",
+          context_tokens(malformed), over_total)
+    check("and the surviving record still drives the exit status",
+          with_row({"transcriptPath": malformed}), 10)
+
+    # The read is bounded to the tail, so `--check` costs one seek rather than a
+    # multi-megabyte file read on the hot path of a shift that is already tiring.
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as fh:
+        fh.write(json.dumps({"message": {"usage": {
+            "input_tokens": over_total}}}) + "\n")
+        fh.write(json.dumps({"filler": "x" * (TAIL_WINDOW_BYTES + 4096)}) + "\n")
+        beyond = fh.name
+    check("a usage record beyond the tail window is not read",
+          context_tokens(beyond), None)
+    check("and an unreadable tail still fails closed",
+          with_row({"transcriptPath": beyond}), 10)
+
+    os.unlink(malformed)
+    os.unlink(beyond)
     os.unlink(path)
     os.unlink(small)
+    shutil.rmtree(home, ignore_errors=True)
+    if prior_home is None:
+        os.environ.pop("TBD_HOME", None)
+    else:
+        os.environ["TBD_HOME"] = prior_home
     print(f"selftest: {n}/{n} handoff ceiling scenarios passed")
 
 
@@ -1457,7 +1932,12 @@ def main():
     g.add_argument("--close-predecessor", metavar="TID", help="successor closes the old session")
     g.add_argument("--selftest", action="store_true", help="offline ceiling/fail-closed test")
     p.add_argument("--notes-file", help="markdown file holding the handoff body (required with --act)")
-    p.add_argument("--threshold", type=int, default=DEFAULT_THRESHOLD)
+    # No default: the ceiling is resolved per session (resolve_ceiling), and a
+    # default here would be a third number competing with the two that mean
+    # something. Passing --threshold is an explicit override and says so.
+    p.add_argument("--threshold", type=int, default=None,
+                   help="override the resolved ceiling (default: ¾ of this session's "
+                        "reported window, else the fallback)")
     args = p.parse_args()
 
     if args.check:

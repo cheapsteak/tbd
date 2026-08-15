@@ -651,7 +651,8 @@ struct QueuedPromptDeliveryTests {
         let terminal = try await fixture.db.terminals.create(
             worktreeID: fixture.worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
             kind: .codex)
-        try await fixture.db.terminals.setActivityState(id: terminal.id, activityState: .idle)
+        try await fixture.db.terminals.setActivityState(
+            id: terminal.id, activityState: .idle, source: .hookEvent("Stop"))
         let announced = try #require(try await fixture.db.terminals.get(id: terminal.id))
         #expect(announced.transcriptPath == nil)
         #expect(PendingPromptCoordinator.hasAnnouncedItself(announced))

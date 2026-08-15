@@ -16,7 +16,14 @@ struct RuntimeIntegrationRefresher {
             writeFallbackSkill: { try SkillFileWriter().writeFallback() },
             writeClaudePlugin: { try PluginDirWriter().writePlugin() },
             ensureCodexProfilePlugin: { _ = try CodexHomeManager().ensureProfilePlugin() },
-            writeClaudeHookOverlay: { ClaudeHookOverlay.writeOverlay() }
+            writeClaudeHookOverlay: {
+                ClaudeHookOverlay.writeOverlay()
+                // The statusline tee ships beside the overlay and is rewritten
+                // on every startup for the same reason: a desk session's
+                // overlay points at it by path, so the file has to be current
+                // before the next spawn resolves that path.
+                StatuslineTee.writeScript()
+            }
         )
     }
 
@@ -496,6 +503,15 @@ public final class Daemon: Sendable {
         await prManager.setOnStatusPersist { worktreeID, status in
             try? await database.worktrees.setPRStatus(id: worktreeID, status: status)
         }
+        // The outcome of the last attempt rides alongside the value, and
+        // survives a restart for the same reason the value does: an
+        // `.undetermined` that reset to "no attempt on record" at every daemon
+        // start would quietly hide an outage that spans one.
+        let persistedPRObservations = (try? await database.worktrees.allPRObservations()) ?? [:]
+        await prManager.hydrateObservations(persistedPRObservations)
+        await prManager.setOnObservationPersist { worktreeID, observation in
+            try? await database.worktrees.setPRObservation(id: worktreeID, observation: observation)
+        }
 
         // 8. Initialize RPC router.
         //
@@ -544,9 +560,18 @@ public final class Daemon: Sendable {
         // coordinator needs `rpcRouter.hibernationCoordinator`, which only exists
         // after the RPCRouter is constructed above. It's safe here because the
         // only thing that fires a merged transition is `PRStatusManager.fetchAll`
-        // / `refresh`, both reachable ONLY via the `pr.list` / `pr.refresh` RPC
-        // handlers — and the socket server that serves those doesn't start until
-        // step 9 below. So no merge can be observed between construction and here.
+        // / `refresh`, and the three paths that reach them all start later: the
+        // `pr.list` / `pr.refresh` RPC handlers wait on the socket server (step
+        // 9), and `PRPoller`'s loop is not started until step 12f.
+        //
+        // ONE OWNER FOR THE EDGE. The merged transition is edge-triggered on a
+        // cache change, so whichever path updates the cache consumes it, and a
+        // second periodic driver would swallow edges this dispatcher's
+        // consumers are waiting for. The edge's owner is
+        // `PRStatusManager.apply` — the single funnel every cache write goes
+        // through, which fires this callback exactly once per non-merged →
+        // merged move. `PRPoller` is the only thing that calls into that funnel
+        // on a timer; `pr.list` serves the snapshot and never fetches.
         let autoArchiveCoordinator = AutoArchiveOnMergeCoordinator(
             db: database, lifecycle: lifecycle, subscriptions: subs, actuationLog: actuationLog)
         let autoHibernateCoordinator = AutoHibernateOnMergeCoordinator(
@@ -887,6 +912,14 @@ public final class Daemon: Sendable {
                 }
             }
 
+            // 12f. Pull-request poll on the daemon's own clock (30s foreground,
+            // 5min background — GitPollCadence.prInterval). This is the only
+            // periodic driver of the PR fetch, so PR facts keep arriving with
+            // no app running — and so exactly one path consumes the merged-PR
+            // transition edge (see the dispatcher wiring above).
+            await rpcRouter.prPoller.setForegroundGate(effectivelyForeground)
+            await rpcRouter.prPoller.start()
+
             // 14. Auto-hibernate idle sweep. Cheap poll every 30s; the actual
             // kill decision is made against the configured idle window (default
             // 30 min) with a debounce, inside the coordinator. The feature's
@@ -994,6 +1027,11 @@ public final class Daemon: Sendable {
         // Stop daywatch runner.
         if let runner = daywatchRunner {
             await runner.apply(mode: .off)
+        }
+
+        // Stop the daemon-clock PR poll (no-op when it was never started).
+        if let router = self.router {
+            await router.prPoller.stop()
         }
 
         // Stop any tmux control-mode connections (no-op when the gate is off).

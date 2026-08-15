@@ -71,7 +71,7 @@ struct MergedTransitionPrecedenceTests {
         let terminal = try await db.terminals.create(
             worktreeID: wt.id, tmuxWindowID: "@0", tmuxPaneID: "%0",
             label: "claude", claudeSessionID: "sess-1", kind: .claude)
-        try await db.terminals.setActivityState(id: terminal.id, activityState: .idle)
+        try await db.terminals.setActivityState(id: terminal.id, activityState: .idle, source: .derived)
         return (wt.id, terminal.id)
     }
 

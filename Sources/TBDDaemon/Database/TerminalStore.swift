@@ -28,6 +28,15 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var keepWarm: Bool?
     var pendingResumeAt: Date?
     var watch_desk_role: String?
+    /// JSON-encoded `FactSource` — where `activityState` came from. nil on rows
+    /// written before v70 and on any row stamped without provenance.
+    var activityStateSource: String?
+    var activityStateObservedAt: Date?
+    /// JSON-encoded `AwaitingInputReason`, carried verbatim from the
+    /// `Notification` hook. nil when the session is not waiting, or when the
+    /// wait carried no structured reason.
+    var awaitingInputReason: String?
+    var awaitingInputObservedAt: Date?
 
     init(from terminal: Terminal) {
         self.id = terminal.id.uuidString
@@ -49,6 +58,10 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.keepWarm = terminal.keepWarm
         self.pendingResumeAt = terminal.pendingResumeAt
         self.watch_desk_role = terminal.watchDeskRole?.rawValue
+        self.activityStateSource = FactColumnJSON.encode(terminal.activityStateSource)
+        self.activityStateObservedAt = terminal.activityStateObservedAt
+        self.awaitingInputReason = FactColumnJSON.encode(terminal.awaitingInputReason)
+        self.awaitingInputObservedAt = terminal.awaitingInputObservedAt
     }
 
     /// Failable decode: skips (returns nil after a logged warning) rather than
@@ -84,8 +97,31 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             pendingResumeAt: pendingResumeAt,
             watchDeskRole: watch_desk_role.map {
                 WatchDeskRole(rawValue: $0) ?? .readOnlyCoordinator
-            }
+            },
+            activityStateSource: FactColumnJSON.decode(FactSource.self, from: activityStateSource),
+            activityStateObservedAt: activityStateObservedAt,
+            awaitingInputReason: FactColumnJSON.decode(AwaitingInputReason.self, from: awaitingInputReason),
+            awaitingInputObservedAt: awaitingInputObservedAt
         )
+    }
+}
+
+/// JSON codec for the state-model blobs that ride in TEXT columns.
+///
+/// Failure is silent and produces nil on both sides, matching `prStatus`'s
+/// existing `try?` treatment: an unreadable provenance blob must degrade to
+/// "no provenance recorded" — which `Terminal.observedActivity` already reads
+/// as no fact — rather than take the whole row's decode with it.
+enum FactColumnJSON {
+    static func encode<T: Encodable>(_ value: T?) -> String? {
+        guard let value else { return nil }
+        guard let data = try? JSONEncoder().encode(value) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    static func decode<T: Decodable>(_ type: T.Type, from json: String?) -> T? {
+        guard let json, let data = json.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(type, from: data)
     }
 }
 
@@ -116,6 +152,14 @@ public struct TerminalStore: Sendable {
     /// only after the spawn succeeds, for crash consistency); the RPC
     /// handler rejects user-driven creates on archived rows before spawn.
     /// Promoted rows have no such flow — they are never revived.
+    ///
+    /// `watchDeskRole` is stamped here so that "this row was spawned as a Watch
+    /// Desk session" is durable from the row's first instant rather than only
+    /// from whenever a judge lease is first acquired. The wake path reads it to
+    /// decide whether to reinstall the statusline tee, and a desk that has
+    /// never held a lease is still a desk. The lease store keeps maintaining
+    /// the column afterwards — this is the same mechanism, given a starting
+    /// value, not a second one.
     public func create(
         id: UUID = UUID(),
         worktreeID: UUID,
@@ -124,7 +168,8 @@ public struct TerminalStore: Sendable {
         label: String? = nil,
         claudeSessionID: String? = nil,
         profileID: UUID? = nil,
-        kind: TerminalKind? = nil
+        kind: TerminalKind? = nil,
+        watchDeskRole: WatchDeskRole? = nil
     ) async throws -> Terminal {
         let terminal = Terminal(
             id: id,
@@ -134,7 +179,8 @@ public struct TerminalStore: Sendable {
             label: label,
             claudeSessionID: claudeSessionID,
             profileID: profileID,
-            kind: kind
+            kind: kind,
+            watchDeskRole: watchDeskRole
         )
         let record = TerminalRecord(from: terminal)
         try await writer.write { db in
@@ -256,7 +302,11 @@ public struct TerminalStore: Sendable {
 
     /// Clear Claude-specific metadata after window recreation.
     /// The recreated window runs a plain shell, not Claude.
-    public func clearRecreated(id: UUID) async throws {
+    ///
+    /// Takes `at` because it also writes an activity state, and every activity
+    /// state carries provenance: this one is `.derived`, composed from TBD's
+    /// own act of recreating the window, observed as that act completed.
+    public func clearRecreated(id: UUID, at date: Date = Date()) async throws {
         try await writer.write { db in
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Terminal not found")
@@ -270,6 +320,10 @@ public struct TerminalStore: Sendable {
             record.label = TerminalLabel.shell
             record.kind = TerminalKind.shell.rawValue
             record.activityState = TerminalActivityState.unknown.rawValue
+            record.activityStateSource = FactColumnJSON.encode(FactSource.derived)
+            record.activityStateObservedAt = date
+            record.awaitingInputReason = nil
+            record.awaitingInputObservedAt = nil
             try record.update(db)
         }
     }
@@ -296,13 +350,137 @@ public struct TerminalStore: Sendable {
         }
     }
 
-    /// Update the current activity state for a terminal.
-    public func setActivityState(id: UUID, activityState: TerminalActivityState) async throws {
+    /// Record an observation of a terminal's activity state.
+    ///
+    /// `source` has no default, and that is the whole point of the signature:
+    /// there is no way to write an activity state without saying where it came
+    /// from, so a value with no provenance cannot enter the database at all.
+    /// `observedAt` follows the one-shot stamp seam (`at date: Date = Date()`
+    /// in CLAUDE.md's date-seam rule) — it is *data*, the moment the machine
+    /// fact was read, which callers that read earlier than they write must
+    /// pass explicitly.
+    ///
+    /// `awaitingInputReason` rides with the observation rather than in a writer
+    /// of its own, because a wait reason belongs to one state observation and
+    /// is superseded by the next: passing nil (the default) clears any previous
+    /// reason, so the stored reason always describes the state stored beside
+    /// it, never a wait that has since ended.
+    public func setActivityState(
+        id: UUID,
+        activityState: TerminalActivityState,
+        source: FactSource,
+        observedAt: Date = Date(),
+        awaitingInputReason: AwaitingInputReason? = nil
+    ) async throws {
         try await writer.write { db in
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Terminal not found")
             }
             record.activityState = activityState.rawValue
+            record.activityStateSource = FactColumnJSON.encode(source)
+            record.activityStateObservedAt = observedAt
+            // Unconditional, including the nil case: this IS the superseding
+            // rail. A caller that observes a new activity state without naming
+            // a reason clears the old one, so a "needs your permission"
+            // recorded by a `Notification` hook cannot outlive the prompt it
+            // described. Making this write conditional on a non-nil reason
+            // would leave stale waits pinned to the row forever.
+            record.awaitingInputReason = FactColumnJSON.encode(awaitingInputReason)
+            record.awaitingInputObservedAt = awaitingInputReason == nil ? nil : observedAt
+            try record.update(db)
+        }
+    }
+
+    /// Record a wait reason observed by a hook, WITHOUT asserting an activity
+    /// state.
+    ///
+    /// `setActivityState` writes a reason alongside a state it is also
+    /// asserting; this writer exists for the one source that can report a
+    /// reason it is not entitled to turn into a state. Claude Code's
+    /// `Notification` hook says a prompt was raised — it does not say the
+    /// session is still sitting on it, and `activityState` is a *gating* field:
+    /// `HibernationGate.blockingRail` reads it, so writing `waiting_for_user`
+    /// here would change which sessions park, from a hook whose only job is to
+    /// report. So the two activity columns are left exactly as they were, and
+    /// the recorded reason is composed into a session state downstream instead.
+    ///
+    /// The superseding rail is unchanged and is what keeps this honest: the
+    /// next `setActivityState` observation clears both columns (its
+    /// `awaitingInputReason` defaults to nil), so a reason recorded here cannot
+    /// outlive the wait it described.
+    ///
+    /// `observedAt` is the moment the hook reported, following the one-shot
+    /// stamp seam — it is data, not behavior.
+    ///
+    /// **A write from a class that establishes no state cannot clear a standing
+    /// `promptOnScreen`.** The hook overlay registers `Notification` with no
+    /// matcher, so every type arrives here — including the ones that fire while
+    /// a permission prompt is up. A subagent finishing sends `agent_completed`
+    /// (`.informational`); an unconditional overwrite would replace the live
+    /// prompt with it, and the session would read as un-blocked while a human is
+    /// still being waited on. `.informational` and `.unrecognized` say nothing
+    /// about whether a prompt went away, so they are recorded only when no
+    /// `promptOnScreen` reason is standing. `.promptOnScreen` and `.doneWaiting`
+    /// write unconditionally: the first is a newer prompt, the second is the
+    /// agent reporting it is back at its own prompt.
+    ///
+    /// The *activity* rail is untouched by this and keeps superseding as it
+    /// always has: `setActivityState` clears both columns, so a genuine
+    /// observation of the session moving on still retracts the reason. This
+    /// guard only refuses to let a report that observed nothing do it.
+    public func recordAwaitingInputReason(
+        id: UUID,
+        reason: AwaitingInputReason,
+        observedAt: Date
+    ) async throws {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            let establishesNothing = reason.classification == .informational
+                || reason.classification == .unrecognized
+            if establishesNothing,
+               let standing = FactColumnJSON.decode(
+                    AwaitingInputReason.self, from: record.awaitingInputReason),
+               standing.classification == .promptOnScreen {
+                return
+            }
+            record.awaitingInputReason = FactColumnJSON.encode(reason)
+            record.awaitingInputObservedAt = observedAt
+            try record.update(db)
+        }
+    }
+
+    /// Retract a standing wait reason WITHOUT asserting an activity state.
+    ///
+    /// The mirror of `recordAwaitingInputReason`, and it exists for the same
+    /// reason: a caller can be entitled to say a recorded prompt is gone
+    /// without being entitled to say what the session is doing instead. The two
+    /// callers are both TBD's own knowledge that the process the prompt was
+    /// raised on has been replaced — the in-place profile swap, which kills the
+    /// pane's agent itself, and the SessionStart bridge, where Claude Code
+    /// reports a new session context (a `/clear`, a resume, a hand relaunch).
+    /// Neither knows what the new process is doing, so `activityState` and its
+    /// provenance are left exactly as they were; writing one here would move a
+    /// field `HibernationGate.blockingRail` gates on, from a step that observed
+    /// no turn boundary.
+    ///
+    /// The activity rail is **not** a sufficient retraction on its own here,
+    /// which is why this writer is not just a `setActivityState` call.
+    /// `handleTerminalActivityEvent` returns early when the state is unchanged,
+    /// so the SessionStart overlay's own `tbd terminal-activity idle` clears
+    /// nothing when the row already reads idle — and it is a second, separate,
+    /// best-effort CLI invocation that a stale `tbd` on `PATH` can lose while
+    /// the first one lands.
+    ///
+    /// Idempotent: clearing columns that are already nil is a no-op write.
+    public func clearAwaitingInputReason(id: UUID) async throws {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            record.awaitingInputReason = nil
+            record.awaitingInputObservedAt = nil
             try record.update(db)
         }
     }
@@ -343,6 +521,14 @@ public struct TerminalStore: Sendable {
                 record.suspendedSnapshot = snapshot
             }
             record.activityState = TerminalActivityState.idle.rawValue
+            // A parked session is idle because TBD's own record says it is
+            // parked — `.database`, observed at the moment of the park. A
+            // parked session is also waiting for nothing, so any carried
+            // awaiting-input reason is cleared with it.
+            record.activityStateSource = FactColumnJSON.encode(FactSource.database)
+            record.activityStateObservedAt = date
+            record.awaitingInputReason = nil
+            record.awaitingInputObservedAt = nil
             try record.update(db)
             // AFTER record.update: the routine nils pendingResumeAt via raw
             // SQL, and an update of the (stale-fetched) record afterward

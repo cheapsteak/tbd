@@ -277,21 +277,34 @@ public actor HibernationCoordinator {
     }
 
     /// Park a session because its worktree's PR merged. Honors every safety rail
-    /// (including keep-warm, unlike `manualHibernate`) but NOT the idle window or
-    /// the idle-sweep master switch — see `HibernationGate.decideForMerge`.
+    /// (including keep-warm, unlike `manualHibernate`, and the pending-input
+    /// veto, exactly as the sweep does) but NOT the idle window or the
+    /// idle-sweep master switch — see `HibernationGate.decideForMerge`.
+    ///
+    /// `inputVetoEnabled` is `config.hibernateInputVetoEnabled`, passed in by
+    /// the caller rather than re-read here: `AutoHibernateOnMergeCoordinator`
+    /// already loaded the config snapshot that armed the fan-out, and arming
+    /// the veto from that same snapshot keeps the two decisions consistent and
+    /// adds no config read that could fail open per terminal.
     ///
     /// A daemon-internal rail: no RPC carried this, so it writes its own row
     /// with no `method` and the rail-named actor. `AutoHibernateOnMergeCoordinator`
     /// fans out over every terminal in the worktree and most are refused by the
     /// rails above, so — like the idle sweep — the row goes after the gate, at
     /// the moment this rail is actually about to act on a session.
-    public func hibernateForMerge(terminalID: UUID) async -> HibernateResult {
+    public func hibernateForMerge(
+        terminalID: UUID, inputVetoEnabled: Bool
+    ) async -> HibernateResult {
         guard let terminal = try? await db.terminals.get(id: terminalID) else {
             return .notFound
         }
         guard terminal.hibernatedAt == nil else { return .alreadyHibernated }
-        if let blocked = HibernationGate.blockingRail(terminal: terminal) {
-            return .notEligible(reason: Self.mergeBlockReason(blocked))
+        let decision = HibernationGate.decideForMerge(
+            terminal: terminal,
+            inputVetoEnabled: inputVetoEnabled,
+            lastInputAt: inputActivity.lastInput(paneID: terminal.tmuxPaneID))
+        guard decision == .eligible else {
+            return .notEligible(reason: Self.mergeBlockReason(decision))
         }
 
         // Fail-closed, as everywhere else: an unrecordable park does not
@@ -318,7 +331,9 @@ public actor HibernationCoordinator {
 
     /// The reason a merge-park was refused, for logging/telemetry. Mirrors
     /// `manualBlockReason` but maps every `blockingRail` case — including
-    /// keep-warm, which merge-park honors but manual bypasses.
+    /// keep-warm, which merge-park honors but manual bypasses — plus the
+    /// pending-input veto, whose wording matches the backup TUI scrape's so a
+    /// reader cannot tell which of the two rails fired and does not need to.
     private static func mergeBlockReason(_ decision: HibernationGate.Decision) -> String {
         switch decision {
         case .notClaudeResumable: return "Not a resumable Claude session"
@@ -327,7 +342,8 @@ public actor HibernationCoordinator {
         case .keepWarm: return "Terminal is pinned keep-warm"
         case .running: return "Session is actively running"
         case .waitingForUser: return "Session is waiting on a permission prompt"
-        case .eligible, .featureDisabled, .notIdleLongEnough, .pendingTypedInput: return "Not hibernatable"
+        case .pendingTypedInput: return "Terminal has unsent typed input"
+        case .eligible, .featureDisabled, .notIdleLongEnough: return "Not hibernatable"
         }
     }
 
@@ -670,13 +686,44 @@ public actor HibernationCoordinator {
             repo: repo?.envOverrides,
             profile: resolvedProfile?.envOverrides
         )
+        let profileConfigDir = configDirManager.resolveConfigDir(for: resolvedProfile)
         let overlayPath = ClaudeHookOverlay.resolveOverlayPath(
             fallbackModels: resolvedProfile?.fallbackModels,
             sessionKey: terminal.id.uuidString,
             // Repo fragment is file-backed config, read fresh — reapplied on wake.
-            repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id)
+            repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
+            // A wake reuses the SAME terminal row and therefore the same
+            // statusline capture path, so a desk woken without the tee would
+            // otherwise keep reading a capture whose mtime predates the resume.
+            //
+            // The row's own `watch_desk_role` is what this site reads, and it
+            // is durable in the direction that matters: the desk spawn path
+            // stamps it at create, so a desk is recognizable here from its first
+            // instant and without a lease ever having existed. It is **not**
+            // durable in every direction — `WatchDeskLeaseStore.release` and
+            // `.revoke` NULL the column for the whole worktree, and a
+            // hibernated desk is exactly the state that makes
+            // `DeskSessionManager` revoke (its pane no longer runs an agent, so
+            // the lease owner reads as gone). Such a desk wakes without a tee
+            // and reports its window as unknown until a lease is reacquired.
+            //
+            // Demoting instead of NULLing would not fix that: `setRoles` brands
+            // every terminal in the worktree, so a surviving role would install
+            // the tee — which outranks the operator's own statusline in every
+            // scope they can write — in ordinary sessions that merely happen to
+            // sit in a desk's worktree. Reporting no denominator is the right
+            // side to be wrong on, and it is only safe because the staleness is
+            // closed independently: `ClaudeHookOverlay.resolveOverlayPath`
+            // deletes the session's capture whenever it resolves an overlay
+            // WITHOUT a tee, so a session that is not (re)installing one cannot
+            // read a capture from a previous life. An ordinary terminal has nil
+            // here and gets a byte-identical overlay.
+            watchDeskRole: terminal.watchDeskRole,
+            worktreePath: worktree.path,
+            // The same config dir the resume below runs with, so the tee
+            // delegates to the user-scope statusline THIS session reads.
+            profileConfigDir: profileConfigDir
         )
-        let profileConfigDir = configDirManager.resolveConfigDir(for: resolvedProfile)
         // Pre-accept Claude's folder-trust dialog so a wake onto a fresh
         // isolated profile dir (never seeded before) doesn't re-prompt — the
         // dialog blocks before SessionStart, so the stalled wake would be

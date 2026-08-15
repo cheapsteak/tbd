@@ -942,6 +942,39 @@ struct PRStatusManagerTests {
         #expect(all[id] == nil)
     }
 
+    /// Invalidation has to reach the row, not just the map.
+    ///
+    /// `hydrate`/`hydrateObservations` read those rows back at the next daemon
+    /// start, so an in-memory-only drop resurrects exactly what invalidation
+    /// removed — an `.observed` outcome describing a value that no longer
+    /// exists, which is the thing the code's own comment promises not to leave
+    /// behind. The nil is the clear, in both persisters.
+    @Test("invalidate clears the persisted row too, not only the in-memory maps")
+    func invalidatePersistsTheClear() async {
+        let manager = PRStatusManager()
+        let id = UUID()
+        let persistedStatuses = PersistedClearRecorder()
+        let persistedObservations = PersistedClearRecorder()
+        await manager.setOnStatusPersist { worktreeID, status in
+            await persistedStatuses.record(worktreeID, isClear: status == nil)
+        }
+        await manager.setOnObservationPersist { worktreeID, observation in
+            await persistedObservations.record(worktreeID, isClear: observation == nil)
+        }
+        await manager.seedForTesting(
+            worktreeID: id,
+            status: PRStatus(number: 3, url: "https://github.com/o/r/pull/3", state: .mergeable))
+        await manager.hydrateObservations([id: PRObservation(outcome: .observed, observedAt: Date())])
+
+        await manager.invalidate(worktreeID: id)
+
+        #expect(await manager.observation(for: id) == nil)
+        #expect(await persistedObservations.clears == [id],
+                "the dropped observation was never written through to the row")
+        #expect(await persistedStatuses.clears.contains(id),
+                "the dropped status was never written through to the row")
+    }
+
     // MARK: - Reason computation
 
     @Test("computeReason returns 'Merged' for merged state")
@@ -2425,5 +2458,106 @@ struct PRStatusManagerFetchAllTests {
 
         #expect(await manager.allStatuses()[wt]?.number == 88)
         #expect(await recorder.clearedIDs.isEmpty)
+    }
+}
+
+/// Records which worktrees a persist callback was asked to CLEAR (nil value),
+/// so a test can prove an in-memory drop was written through.
+private actor PersistedClearRecorder {
+    private(set) var clears: [UUID] = []
+    func record(_ id: UUID, isClear: Bool) { if isClear { clears.append(id) } }
+}
+
+// MARK: - Actor reentrancy around `invalidate`
+
+/// A `now` seam that never returns the same instant twice, so "later than the
+/// batch started" is a fact about ordering rather than about clock resolution.
+private final class MonotonicNow: @unchecked Sendable {
+    private let lock = NSLock()
+    private var tick = 0
+    private let base = Date(timeIntervalSince1970: 1_780_000_000)
+    func next() -> Date {
+        lock.lock()
+        defer { lock.unlock() }
+        tick += 1
+        return base.addingTimeInterval(Double(tick))
+    }
+}
+
+/// What each persist callback saw when it ran. Lock-guarded rather than an
+/// actor: it is written from inside a callback that is already suspending the
+/// actor under test, and an extra hop there buys nothing.
+private final class StampProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var seen: [String: Bool] = [:]
+    func record(_ label: String, _ landed: Bool) {
+        lock.lock(); seen[label] = landed; lock.unlock()
+    }
+    subscript(label: String) -> Bool? {
+        lock.lock(); defer { lock.unlock() }; return seen[label]
+    }
+}
+
+@Suite("PRStatusManager invalidate reentrancy")
+struct PRStatusManagerInvalidateReentrancyTests {
+
+    /// `invalidate` stamps `lastDirectUpdate` **before** it suspends, and that
+    /// ordering is the whole invalidation.
+    ///
+    /// On an actor every `await` is a reentrancy point. `invalidate`'s two
+    /// persist callbacks are awaits, so a `fetchAll` parked in its `gh` call
+    /// resumes *inside* them, asks `directRefreshLanded`, and — if the answer is
+    /// still no — applies its match and puts back the very entry this call had
+    /// just removed. That is the thing the line's own comment says it prevents.
+    ///
+    /// So the invariant is exactly: **by the time the first persist callback
+    /// runs, the stamp is already in place.** This asserts it from inside the
+    /// callbacks themselves, which *are* the suspension points, and through the
+    /// same predicate `fetchAll` consults.
+    ///
+    /// Tier 1, and deliberately single-task. An earlier cut staged a real
+    /// two-task interleaving with latches; it proved the same property far less
+    /// reliably (it stalled in the parallel pass, reporting a latch state its
+    /// own choreography said was impossible) and a test whose result "says
+    /// nothing" is worse than no test. The reentrancy is real; the *guarantee*
+    /// is an ordering within one call, and that is directly observable.
+    @Test func theStampLandsBeforeTheFirstSuspensionSoAnInFlightBatchCannotResurrectTheEntry() async {
+        let wt = UUID()
+        let clock = MonotonicNow()
+        // Stands in for an in-flight batch's `batchStartedAt`, taken before
+        // `invalidate` runs so any stamp it writes is strictly newer.
+        let batchStartedAt = clock.next()
+        let manager = PRStatusManager(ghRunner: { _, _ in nil }, now: { clock.next() })
+        let probe = StampProbe()
+
+        // Seed BEFORE registering the callbacks: `seedForTesting` routes through
+        // `apply`, which persists, and that call is not the one under test.
+        await manager.seedForTesting(
+            worktreeID: wt,
+            status: PRStatus(number: 77, url: "https://github.com/acme/acme-prod/pull/77",
+                             state: .pending))
+        await manager.hydrateObservations(
+            [wt: PRObservation(outcome: .observed, observedAt: Date())])
+
+        await manager.setOnStatusPersist { [weak manager] _, _ in
+            guard let manager else { return }
+            probe.record("status", await manager.directRefreshLandedForTesting(
+                wt, after: batchStartedAt))
+        }
+        await manager.setOnObservationPersist { [weak manager] _, _ in
+            guard let manager else { return }
+            probe.record("observation", await manager.directRefreshLandedForTesting(
+                wt, after: batchStartedAt))
+        }
+
+        await manager.invalidate(worktreeID: wt)
+
+        #expect(probe["status"] == true,
+                "the status persist callback is invalidate's FIRST suspension point; it ran before the stamp, so an in-flight fetchAll resuming there would resurrect the entry")
+        #expect(probe["observation"] == true,
+                "the observation persist callback ran before the stamp")
+        // …and the invalidation itself still does what it always did.
+        #expect(await manager.allStatuses()[wt] == nil)
+        #expect(await manager.observation(for: wt) == nil)
     }
 }
