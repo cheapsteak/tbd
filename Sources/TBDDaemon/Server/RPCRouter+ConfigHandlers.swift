@@ -182,7 +182,7 @@ extension RPCRouter {
     /// The change is recorded in the supervision ledger, and **the line carries
     /// no project and no mode**: the brake is one bit over the whole fleet, so
     /// naming a project on its line would be a lie. That holds by construction
-    /// — the factories behind `recordBrakeChange` take no project.
+    /// — the factories behind `applyBrakeChange` take no project.
     ///
     /// The column is written on every call, because writing either value is the
     /// explicit gesture that lifts it out of NULL forever after. The *ledger*
@@ -192,12 +192,26 @@ extension RPCRouter {
     /// nothing is not a decision.
     func handleConfigSetSupervisionEnabled(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(ConfigSetSupervisionEnabledParams.self, from: paramsData)
-        // The store reads the previous value inside the same transaction as the
-        // write, so two concurrent toggles cannot both believe they caused the
-        // transition and write two identical brake lines for one change.
-        let wasReleased = try await db.config.setSupervisionEnabled(enabled: params.enabled)
-        await supervision?.recordBrakeChange(
-            engaged: !params.enabled, changed: wasReleased != params.enabled)
+        // One serialized region per transition: the store holds a gate across
+        // the commit *and* the line it justifies, so two overlapping toggles
+        // cannot commit in one order and reach the record in the other. The
+        // transaction inside `commit` makes the column atomic; the gate is what
+        // keeps the record's order from contradicting it.
+        let commit: @Sendable () async throws -> Bool = { [db] in
+            try await db.config.setSupervisionEnabled(enabled: params.enabled)
+        }
+        if let supervision {
+            try await supervision.applyBrakeChange(released: params.enabled, commit: commit)
+        } else {
+            // Nothing to keep in step with, so the column moves on its own. The
+            // brake is a daemon-wide switch and must not depend on supervision
+            // being wired — see `brakeWorksWithoutAStore`.
+            _ = try await commit()
+        }
+        // Publish the edge and match the timer to it. Doing this here rather
+        // than inside the store keeps the heartbeat out of the serialized
+        // region: it reads state, it does not decide any.
+        await supervisionHeartbeat?.applyBrake(released: params.enabled)
         // Reuse the existing config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()

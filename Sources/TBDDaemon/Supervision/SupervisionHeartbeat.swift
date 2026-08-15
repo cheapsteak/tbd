@@ -5,20 +5,34 @@ import TBDShared
 private let heartbeatLogger = Logger(subsystem: "com.tbd.daemon", category: "supervision.heartbeat")
 
 /// The out-of-band heartbeat (design §14, requirement P3-1): a small
-/// `status.json` under `~/tbd/supervision/`, rewritten atomically on a fixed
-/// cadence with the brake, each project's mark and active mode, and each
-/// project's last sweep contact.
+/// `status.json` under `~/tbd/supervision/`, rewritten atomically with the
+/// brake, each project's mark and active mode, and each project's last sweep
+/// contact.
 ///
-/// **It writes regardless of the brake.** Observability is never withheld, and
-/// the watchdog's rule — *if any project claims to be effectively on and this
-/// file has not changed in about ten minutes, raise a notification* — needs the
-/// file fresh enough to read `engaged`. A heartbeat that fell silent under the
-/// brake would make a paused fleet indistinguishable from a dead daemon, which
-/// is the one distinction this file exists to draw.
+/// **The file is published at every brake edge; the periodic timer runs only
+/// while the brake is released.** So the fleet brake is the one switch that
+/// starts and stops this, and a braked daemon runs no background loop at all —
+/// no second flag hides behind the brake, and nothing here acts before an
+/// operator has released it.
+///
+/// That costs the watchdog nothing, which is the part worth spelling out. Its
+/// rule is *if any project claims to be **effectively on** and this file has
+/// not changed in about ten minutes, raise a notification*, and effectively on
+/// means a standing mark **and** a released brake. A file that says `engaged`
+/// therefore claims nothing is effectively on, and cannot trip the rule however
+/// stale it grows — the freshness requirement only bites while the brake is
+/// released, which is exactly when the timer runs. Publishing at the edges is
+/// what keeps that true across the transition itself: the moment the brake
+/// moves, the file says so, before the timer starts or stops.
 ///
 /// The watchdog reads a file rather than the socket or the DB, so a dead daemon
 /// cannot make it unavailable. That is also why the writer is deliberately dumb:
 /// it composes nothing and judges nothing, it asks for a snapshot and writes it.
+///
+/// Known and accepted: while the brake is engaged, marks and modes an operator
+/// changes are not reflected here until the next edge, because nothing is
+/// ticking. The file's consumer is the watchdog, which is indifferent to both
+/// while braked; `tbd supervise status` is the live surface for a human.
 public actor SupervisionHeartbeat {
     /// How often the file is rewritten.
     ///
@@ -75,12 +89,39 @@ public actor SupervisionHeartbeat {
         self.clock = clock
     }
 
-    /// Start ticking. Idempotent: a second call while running does nothing.
-    public func start() {
+    /// Publish the file now, and match the timer to the brake.
+    ///
+    /// The single entry point, used both at boot and on every brake gesture, so
+    /// there is no way to arm the timer without also publishing the edge that
+    /// justifies it. Idempotent in both directions: calling it twice with the
+    /// same value republishes and leaves the timer as it was.
+    ///
+    /// The edge write happens **first and unconditionally**, including when the
+    /// brake is engaging. That write is what makes gating the timer safe: it
+    /// leaves behind a file that says `engaged`, which the watchdog reads as
+    /// "nothing is effectively on" and therefore never alarms about, no matter
+    /// how long it then sits untouched.
+    public func applyBrake(released: Bool) async {
+        await tick()
+        if released {
+            startTimer()
+        } else {
+            await cancelTimer()
+        }
+    }
+
+    private func startTimer() {
         guard loop == nil else { return }
         loop = Task { [weak self] in
             await self?.run()
         }
+    }
+
+    private func cancelTimer() async {
+        guard let loop else { return }
+        loop.cancel()
+        self.loop = nil
+        await loop.value
     }
 
     /// Stop ticking, and return only once the loop has actually finished. The
@@ -94,17 +135,12 @@ public actor SupervisionHeartbeat {
     /// suspension releases the actor, which is exactly what the loop needs to
     /// unwind.
     public func stop() async {
-        guard let loop else { return }
-        loop.cancel()
-        self.loop = nil
-        await loop.value
+        await cancelTimer()
     }
 
     private func run() async {
-        // Write once immediately: a daemon that just started should publish
-        // fresh facts rather than leave a whole interval in which the file
-        // still describes the previous run.
-        if !Task.isCancelled { await tick() }
+        // No opening tick: `applyBrake` published the edge that armed this loop,
+        // so a tick here would rewrite the same facts a moment later.
         while !Task.isCancelled {
             do {
                 try await clock.sleep(for: interval)

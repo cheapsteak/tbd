@@ -595,23 +595,69 @@ public actor SupervisionStore {
 
     // MARK: - The brake
 
-    /// Record a fleet brake change, after the config column already took it.
+    /// Serializes brake transitions. Actor isolation is not enough on its own:
+    /// `commit` is an `await` on the database, and an actor releases itself
+    /// across every suspension, so without this gate a second transition can
+    /// run its whole commit-and-record while the first is still inside its own.
+    private var brakeGateBusy = false
+    private var brakeGateWaiters: [CheckedContinuation<Void, Never>] = []
+
+    private func acquireBrakeGate() async {
+        if brakeGateBusy {
+            await withCheckedContinuation { brakeGateWaiters.append($0) }
+            // Resumed by releaseBrakeGate(); `brakeGateBusy` stays true.
+        } else {
+            brakeGateBusy = true
+        }
+    }
+
+    private func releaseBrakeGate() {
+        if brakeGateWaiters.isEmpty {
+            brakeGateBusy = false
+        } else {
+            brakeGateWaiters.removeFirst().resume()
+        }
+    }
+
+    /// Commit a fleet brake change and record it as one indivisible step.
     ///
-    /// The line carries no project and no mode, and cannot be given either: the
-    /// brake is one bit over the whole fleet, so naming a project on its line
-    /// would be a lie. `SupervisionLedgerLine.brakeEngaged` / `.brakeReleased`
-    /// take no project, which is what holds this by construction.
+    /// **The commit and the line it justifies happen inside one serialized
+    /// region, and that is the whole point of this method existing.** Putting
+    /// the column's read-and-write in a single transaction makes the *column*
+    /// atomic, but it says nothing about the order two transitions reach the
+    /// ledger: two overlapping toggles — the CLI racing the app's Settings
+    /// switch — could commit in one order and append in the other, leaving the
+    /// record's last line disagreeing with the database about what the brake
+    /// is now. The ledger is exactly what a watchdog or a person reads to
+    /// answer that question, so a record that can contradict the live state is
+    /// worse than no record.
     ///
-    /// `changed` is the caller's comparison of the resolved brake before and
-    /// after: the column is tri-state, so writing `false` over an unset column
-    /// is a real gesture on the column but no change to what the brake means,
-    /// and a gesture that changes nothing writes no line.
-    public func recordBrakeChange(engaged: Bool, changed: Bool) async {
-        guard changed else { return }
+    /// `commit` performs the database write and returns the **resolved**
+    /// previous brake, so the decision "did this call actually move the brake"
+    /// is made from a value read in the same transaction that wrote it. A call
+    /// that moved nothing writes no line: the column is tri-state, so writing
+    /// `false` over an unset column is a real gesture on the column and no
+    /// change at all to what the brake means.
+    ///
+    /// The line carries no project and no mode, and cannot be given either —
+    /// `SupervisionLedgerLine.brakeEngaged` / `.brakeReleased` take none, which
+    /// is what keeps a fleet-wide line from ever naming one project.
+    ///
+    /// - Returns: whether the brake actually moved.
+    @discardableResult
+    public func applyBrakeChange(
+        released: Bool, commit: @Sendable () async throws -> Bool
+    ) async throws -> Bool {
+        await acquireBrakeGate()
+        defer { releaseBrakeGate() }
+
+        let wasReleased = try await commit()
+        guard wasReleased != released else { return false }
         let at = now()
-        await ledger.append(engaged
-            ? SupervisionLedgerLine.brakeEngaged(at: at)
-            : SupervisionLedgerLine.brakeReleased(at: at))
+        await ledger.append(released
+            ? SupervisionLedgerLine.brakeReleased(at: at)
+            : SupervisionLedgerLine.brakeEngaged(at: at))
+        return true
     }
 
     // MARK: - Projects

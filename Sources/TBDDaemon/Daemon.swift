@@ -938,19 +938,19 @@ public final class Daemon: Sendable {
                 reconcileLogger.error("Failed to restore daywatch mode on boot: \(String(describing: error), privacy: .public)")
             }
 
-            // 12f. Out-of-band supervision heartbeat (design §14). Writes
-            // `status.json` on its own cadence **regardless of the brake** — a
-            // watchdog that cannot reach the socket or the DB still needs to
-            // read "engaged" from a fresh file, and a heartbeat that fell
-            // silent under a pause would make a paused fleet
-            // indistinguishable from a dead daemon.
+            // 12f. Out-of-band supervision heartbeat (design §14). Publishes
+            // `status.json` at every brake edge, and runs its periodic timer
+            // only while the brake is released — the brake is the one switch,
+            // and a braked daemon runs no background loop. See the type's own
+            // doc for why that costs the watchdog nothing.
             //
             // The snapshot closure reads the brake per tick rather than
             // capturing it: the app's toggle and the CLI's bare `on`/`off`
             // both write that column, and the file must not go on publishing a
             // brake that moved a minute ago. A tick that cannot read the state
-            // publishes nothing and lets the file go stale, which is precisely
-            // the signal the watchdog exists to notice.
+            // publishes nothing and lets the file go stale — which, while the
+            // brake is released, is precisely the signal the watchdog exists
+            // to notice.
             if let supervisionStore {
                 let heartbeat = SupervisionHeartbeat(
                     path: TBDConstants.supervisionStatusPath,
@@ -965,7 +965,15 @@ public final class Daemon: Sendable {
                         return try await supervisionStore.statusFileSnapshot(brake: brake)
                     })
                 self.supervisionHeartbeat = heartbeat
-                await heartbeat.start()
+                rpcRouter.supervisionHeartbeat = heartbeat
+                // Publish once at boot and arm the timer only if the brake is
+                // already released. A braked daemon therefore starts no loop —
+                // the brake is the switch — and still leaves behind a file
+                // saying `engaged`, which the watchdog reads as "nothing is
+                // effectively on" and never alarms about.
+                let brakeReleased = (try? await database.config.get())?.supervisionEnabled
+                    ?? Config.supervisionEnabledDefault
+                await heartbeat.applyBrake(released: brakeReleased)
             }
 
             // 13. Periodic git status refresh (branch sync, conflict detection).

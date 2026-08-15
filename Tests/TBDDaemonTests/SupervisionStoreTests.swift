@@ -85,6 +85,50 @@ struct SupervisionStoreTests {
         FileManager.default.contents(atPath: fixture.filePath)
     }
 
+    /// Lets a test park inside a `commit` closure and observe what a second,
+    /// overlapping toggle can see while it is parked. Every wait is a
+    /// continuation rather than a sleep, so the handshake is exact rather than
+    /// timed.
+    private actor CommitGate {
+        /// The ledger line count each commit saw, in commit order.
+        private(set) var observed: [Int] = []
+        private var sawFirstCommit = false
+        private var firstCommitWaiters: [CheckedContinuation<Void, Never>] = []
+        private var isReleased = false
+        private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+        func noteCommit(linesOnDisk: Int) {
+            observed.append(linesOnDisk)
+            guard !sawFirstCommit else { return }
+            sawFirstCommit = true
+            for waiter in firstCommitWaiters { waiter.resume() }
+            firstCommitWaiters = []
+        }
+
+        func waitForFirstCommit() async {
+            guard !sawFirstCommit else { return }
+            await withCheckedContinuation { firstCommitWaiters.append($0) }
+        }
+
+        func waitForRelease() async {
+            guard !isReleased else { return }
+            await withCheckedContinuation { releaseWaiters.append($0) }
+        }
+
+        func release() {
+            isReleased = true
+            for waiter in releaseWaiters { waiter.resume() }
+            releaseWaiters = []
+        }
+    }
+
+    /// How many lines the ledger holds right now. Non-throwing so it can be
+    /// read from inside a `commit` closure without `try` noise.
+    private static func lineCount(at path: String) -> Int {
+        guard let data = FileManager.default.contents(atPath: path) else { return 0 }
+        return data.split(separator: 0x0A, omittingEmptySubsequences: true).count
+    }
+
     /// Every ledger line, decoded, in order.
     private func lines(at path: String) throws -> [SupervisionLedgerLine] {
         guard let data = FileManager.default.contents(atPath: path) else { return [] }
@@ -127,9 +171,11 @@ struct SupervisionStoreTests {
     func brakeChangeWritesAFleetWideLine() async throws {
         let fixture = try Self.makeFixture(fleet: StubFleet(repoList: [Self.repo("acme-web")]))
 
-        await fixture.store.recordBrakeChange(engaged: true, changed: true)
+        // `commit` stands in for the transaction, returning the resolved brake
+        // it replaced — engaged, then released.
+        try await fixture.store.applyBrakeChange(released: false) { true }
         fixture.dates.advance(by: 60)
-        await fixture.store.recordBrakeChange(engaged: false, changed: true)
+        try await fixture.store.applyBrakeChange(released: true) { false }
 
         let decoded = try lines(at: fixture.ledgerPath)
         #expect(decoded.map(\.payload) == [.brakeEngaged, .brakeReleased])
@@ -144,9 +190,53 @@ struct SupervisionStoreTests {
     @Test("A brake gesture that changes nothing writes no line")
     func unchangedBrakeWritesNoLine() async throws {
         let fixture = try Self.makeFixture(fleet: StubFleet(repoList: [Self.repo("acme-web")]))
-        await fixture.store.recordBrakeChange(engaged: true, changed: false)
-        await fixture.store.recordBrakeChange(engaged: false, changed: false)
+        // The column moved in both cases; what it resolved to did not.
+        let engagedAgain = try await fixture.store.applyBrakeChange(released: false) { false }
+        let releasedAgain = try await fixture.store.applyBrakeChange(released: true) { true }
+        #expect(engagedAgain == false)
+        #expect(releasedAgain == false)
         #expect(try lines(at: fixture.ledgerPath).isEmpty)
+    }
+
+    @Test("Overlapping brake toggles cannot reach the record out of step with the column")
+    func concurrentBrakeTogglesStayOrdered() async throws {
+        let fixture = try Self.makeFixture(fleet: StubFleet(repoList: [Self.repo("acme-web")]))
+        let ledgerPath = fixture.ledgerPath
+        let store = fixture.store
+        let gate = CommitGate()
+
+        // The first toggle's commit parks inside the serialized region, holding
+        // it open. Whatever the second toggle does, it must not be able to
+        // commit while the first has not yet written its line.
+        let first = Task {
+            try await store.applyBrakeChange(released: true) {
+                await gate.noteCommit(linesOnDisk: Self.lineCount(at: ledgerPath))
+                await gate.waitForRelease()
+                return false
+            }
+        }
+        await gate.waitForFirstCommit()
+
+        let second = Task {
+            try await store.applyBrakeChange(released: false) {
+                await gate.noteCommit(linesOnDisk: Self.lineCount(at: ledgerPath))
+                return true
+            }
+        }
+        // Give the second toggle every chance to reach the gate before the
+        // first is let go; if it slips past the region, the counts below say so.
+        for _ in 0..<20 { await Task.yield() }
+        await gate.release()
+        _ = try await first.value
+        _ = try await second.value
+
+        #expect(await gate.observed == [0, 1], """
+            the second commit must see the first toggle's line already on the \
+            record — [0, 0] means the two overlapped and their order can diverge
+            """)
+        let decoded = try lines(at: fixture.ledgerPath)
+        #expect(decoded.map(\.payload) == [.brakeReleased, .brakeEngaged],
+                "the record's order is the commit order")
     }
 
     // MARK: - The per-project mark, both branches

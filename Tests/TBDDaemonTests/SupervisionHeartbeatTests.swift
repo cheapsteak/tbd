@@ -74,7 +74,7 @@ struct SupervisionHeartbeatTests {
             path: path, snapshot: snapshots.provider,
             interval: SupervisionHeartbeat.defaultInterval, clock: clock)
 
-        await heartbeat.start()
+        await heartbeat.applyBrake(released: true)
         // The first advance proves the loop reached its sleep, which it can
         // only do after the immediate tick. The second waits for the sleep that
         // follows the *second* tick — so its returning is the evidence that a
@@ -96,7 +96,7 @@ struct SupervisionHeartbeatTests {
             path: path, snapshot: snapshots.provider,
             interval: SupervisionHeartbeat.defaultInterval, clock: clock)
 
-        await heartbeat.start()
+        await heartbeat.applyBrake(released: true)
         // Parking on the clock is the loop's first act after its immediate
         // write, so a registered sleeper with no file on disk would mean the
         // daemon published nothing for a whole interval after boot.
@@ -114,7 +114,7 @@ struct SupervisionHeartbeatTests {
             path: path, snapshot: snapshots.provider,
             interval: SupervisionHeartbeat.defaultInterval, clock: clock)
 
-        await heartbeat.start()
+        await heartbeat.applyBrake(released: true)
         await clock.advanceWhenSuspended(by: SupervisionHeartbeat.defaultInterval)
         // `stop()` returns only once the loop has unwound, so what follows is
         // an assertion about a settled state rather than a race.
@@ -124,6 +124,56 @@ struct SupervisionHeartbeatTests {
         await clock.advance(by: SupervisionHeartbeat.defaultInterval * 5)
         #expect(snapshots.calls == afterStop)
         #expect(try read(path) != nil, "the last tick's file is left exactly as it was")
+    }
+
+    @Test("An engaged brake publishes the edge and arms no timer")
+    func engagedBrakePublishesOnceAndArmsNoTimer() async throws {
+        let path = try Self.path()
+        let snapshots = Snapshots(Self.statusFile(brake: .engaged))
+        let clock = TestClock()
+        let heartbeat = SupervisionHeartbeat(
+            path: path, snapshot: snapshots.provider,
+            interval: SupervisionHeartbeat.defaultInterval, clock: clock)
+
+        await heartbeat.applyBrake(released: false)
+        #expect(snapshots.calls == 1, "the edge is published even while braked")
+        #expect(try read(path)?.brake == .engaged)
+
+        // Nothing is registered on the clock, so this advance moves virtual
+        // time past five intervals and releases nobody. A braked daemon runs no
+        // background loop at all — the brake is the switch.
+        await clock.advance(by: SupervisionHeartbeat.defaultInterval * 5)
+        for _ in 0..<20 { await Task.yield() }
+        #expect(snapshots.calls == 1)
+        await heartbeat.stop()
+    }
+
+    @Test("Releasing the brake arms the timer; engaging it publishes and disarms")
+    func brakeEdgesArmAndDisarmTheTimer() async throws {
+        let path = try Self.path()
+        let snapshots = Snapshots(Self.statusFile(brake: .released))
+        let clock = TestClock()
+        let heartbeat = SupervisionHeartbeat(
+            path: path, snapshot: snapshots.provider,
+            interval: SupervisionHeartbeat.defaultInterval, clock: clock)
+
+        await heartbeat.applyBrake(released: true)
+        // Each advance waits for a registered sleeper first, so returning at
+        // all is the evidence the timer is armed and re-arming.
+        await clock.advanceWhenSuspended(by: SupervisionHeartbeat.defaultInterval)
+        await clock.advanceWhenSuspended(by: SupervisionHeartbeat.defaultInterval)
+        #expect(snapshots.calls >= 2, "the timer runs while the brake is released")
+
+        snapshots.set(Self.statusFile(brake: .engaged))
+        await heartbeat.applyBrake(released: false)
+        #expect(try read(path)?.brake == .engaged, "the engaging edge is published")
+
+        // `applyBrake` awaits the loop's unwind before returning, so no tick
+        // can still be in flight and this count is settled.
+        let afterEngaging = snapshots.calls
+        await clock.advance(by: SupervisionHeartbeat.defaultInterval * 5)
+        for _ in 0..<20 { await Task.yield() }
+        #expect(snapshots.calls == afterEngaging, "and the timer is disarmed behind it")
     }
 
     @Test("The heartbeat publishes an engaged brake — observability is never withheld")
