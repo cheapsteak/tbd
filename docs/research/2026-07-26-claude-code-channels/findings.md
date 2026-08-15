@@ -42,8 +42,9 @@ have not been tested.
 Official documentation:
 
 - [Cross-session messaging](https://code.claude.com/docs/en/cross-session-messaging)
-- [Channels](https://code.claude.com/docs/en/channels) — the separate shipped
-  feature for pushing external events (CI results, chat) into a session
+- [Channels](https://code.claude.com/docs/en/channels) — the separate
+  research-preview feature for pushing external events (CI results, chat) into
+  a session
 - [Settings](https://code.claude.com/docs/en/settings) — `crossSessionInbound`,
   `dialogExpiry`, `isolatePeerMachines`
 - [Codex app-server](https://learn.chatgpt.com/docs/app-server.md)
@@ -313,8 +314,8 @@ after and compared byte-for-byte.
   the reply answered the injected message and the original prompt together. The
   composer was again identical before and after.
 
-Four posts in all landed on one session while an unsent draft sat in its
-composer, and the draft's bytes never changed.
+Those three posts landed on one session while an unsent draft sat in its
+composer, and in none of them did the draft's bytes change.
 
 This is the property that matters for scheduled delivery: a message arriving on
 the socket does not compete with a person typing. It establishes the behavior
@@ -350,11 +351,13 @@ Two runnable Python 3 scripts sit next to this document. Both are standard
 library only.
 
 - **[`inject-message.py`](inject-message.py)** — posts a user message to a
-  socket. Defaults the target to `$CLAUDE_CODE_MESSAGING_SOCKET` and sends the
-  `CLAUDE_CODE_MESSAGING_TOKEN` auth frame when one is available. Takes
-  `--from`, `--priority`, `--session-id` and `--no-token`. Pass `--no-token`
-  whenever `--socket` names a session other than your own: the environment's
-  token belongs to your session and means nothing to a different one.
+  socket. Defaults the target to `$CLAUDE_CODE_MESSAGING_SOCKET`, and sends the
+  `CLAUDE_CODE_MESSAGING_TOKEN` auth frame only when `--socket` resolves to
+  that same path: the environment's token belongs to your session and means
+  nothing to a different one, so against any other socket it is dropped with a
+  note on stderr. Takes `--from`, `--priority`, `--session-id`, `--token` to
+  present a token you name yourself, and `--no-token` to send no auth frame at
+  all.
 - **[`list-sessions.py`](list-sessions.py)** — reads the session registry from
   `$CLAUDE_CONFIG_DIR/sessions`, falling back to `~/.claude/sessions`, and
   prints live peers with pid, name, status, cwd and socket, skipping rows whose
