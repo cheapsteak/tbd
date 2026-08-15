@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# The test suite, with the developer's real `~/tbd`, `~/.claude` and `~/.codex`
-# fenced off.
+# The test suite, with the developer's real `~/tbd`, `~/.claude`, `~/.codex`
+# and tmux socket directory fenced off.
 #
 # SwiftPM is invoked through `scripts/swift-safe`, never directly: that wrapper
 # holds a machine-global admission lock and bounds compiler jobs so concurrent
@@ -24,12 +24,12 @@
 #
 # Three layers. The first two are always on; the third is CI-only.
 #
-#   1. CONTAINMENT — always on. `TBD_HOME`, `TBD_SOCKET_PATH` and
-#      `TBD_CLAUDE_HOST_HOME` point at a fresh scratch dir for the whole run,
-#      so any code path that resolves a TBD-owned path — or the host Claude
-#      store a profile dir mirrors — lands there instead of in the real one.
-#      This catches leaks nobody has diagnosed yet, including ones in code that
-#      has no injection seam at all.
+#   1. CONTAINMENT — always on. `TBD_HOME`, `TBD_SOCKET_PATH`,
+#      `TBD_CLAUDE_HOST_HOME` and `TMUX_TMPDIR` point at a fresh scratch dir
+#      for the whole run, so any code path that resolves a TBD-owned path — or
+#      the host Claude store a profile dir mirrors, or a tmux socket — lands
+#      there instead of in the real one. This catches leaks nobody has
+#      diagnosed yet, including ones in code that has no injection seam at all.
 #   2. THE TRIPWIRE — always on. `HOME` and `CFFIXED_USER_HOME` point at a
 #      *different* directory from layer 1, and the two names a leak reaches for
 #      inside it — `tbd` and `.claude` — are pre-created mode `000`. Code that
@@ -39,10 +39,10 @@
 #      the error. See "READING A PERMISSION-DENIED FAILURE" below.
 #   3. DETECTION — on in CI (`$CI` set), off elsewhere; `--fingerprint` opts in
 #      locally and `--no-fingerprint` forces it off anywhere. The real `~/tbd`,
-#      `~/.claude` and `~/.codex` are fingerprinted before and after, and a
-#      changed fingerprint fails the run even when every test passed. This is
-#      now a backstop rather than the primary guard; see "WHY THE TRIPWIRE
-#      SUPERSEDES THE FINGERPRINT".
+#      `~/.claude`, `~/.codex` and tmux socket directory are fingerprinted
+#      before and after, and a changed fingerprint fails the run even when
+#      every test passed. This is now a backstop rather than the primary
+#      guard; see "WHY THE TRIPWIRE SUPERSEDES THE FINGERPRINT".
 #
 # READING A PERMISSION-DENIED FAILURE. If a test under this wrapper fails with
 # "You don't have permission to save the file …" or `EACCES`/`NSFileWriteNoPermissionError`
@@ -119,19 +119,19 @@
 # `--no-fingerprint` forces it off anywhere, including CI. The fence is the layer
 # that actually *stops* leaks, and it is never optional.
 #
-# All six FENCE vars are OVERWRITTEN, not defaulted: an inherited value is
+# All seven FENCE vars are OVERWRITTEN, not defaulted: an inherited value is
 # discarded for the duration of the run. That is the point — a fence you can
 # disable by exporting something first is not a fence — but it does mean this
 # wrapper cannot be pointed at a config dir of your own.
 #
-# `TBD_SWIFT_LOCK_PATH`, the seventh, is the deliberate exception: it is
+# `TBD_SWIFT_LOCK_PATH`, the eighth, is the deliberate exception: it is
 # admission control rather than isolation, an inherited value names a lock the
 # caller wants this run to contend on, and honouring it can only ever make the
 # run wait for more things. Nothing about the fence weakens if it is respected.
 #
 # They are applied as a prefix on the `swift test` invocation rather than
-# exported, so this script's own `$HOME` stays real and
-# `scripts/tbd-home-fingerprint.sh` — which deliberately reads `${HOME}` — needs
+# exported, so this script's own `$HOME` and `$TMUX_TMPDIR` stay real and
+# `scripts/tbd-home-fingerprint.sh` — which deliberately reads both — needs
 # no special-casing on either side of the run. The shared-lock computation below
 # depends on the same property: it reads the real `$HOME` / `$TBD_HOME`, which
 # only works because nothing here has exported the fenced values.
@@ -304,8 +304,64 @@ fi
 # creates directories and writes a plugin manifest, hooks and a profile TOML
 # there. It was previously left to individual tests to remember, which is
 # exactly the shape the run-wide fence exists to replace.
+#
+# TMUX_TMPDIR is the fifth, and the store it fences is not a TBD one at all:
+# `/tmp/tmux-<uid>`, shared by every tmux server this user runs. Nothing in
+# `Sources/` or `Tests/` ever passes an absolute `-S <path>`; every call site
+# uses `-L <name>`, which tmux resolves under `$TMUX_TMPDIR/tmux-<uid>/`, so
+# this one variable redirects all of them.
+#
+# WHY IT MATTERS MORE THAN IT LOOKS: **tmux never unlinks its socket file on
+# server exit** — measured against tmux 3.6a, and true for a killed server, a
+# cleanly `kill-server`ed one and one that self-exits when its last session
+# ends alike. It unlinks a stale socket lazily instead, at bind time, when a
+# NEW server is started on that exact path. Every test here mints a fresh
+# UUID-suffixed socket name, so that lazy unlink never fires and every file
+# survives forever: ~7,100 dead socket files accumulated in one developer's
+# real `/tmp/tmux-<uid>` over nine days, behind 7 live servers. No teardown
+# can fix that — a test that dutifully kills its server still leaves the file
+# — which is why the fix is a fenced directory that gets deleted wholesale,
+# not a missing `kill-server` somewhere.
+#
+# IT MUST STAY DIRECTLY UNDER THE SHORT `/tmp` SCRATCH ROOT. tmux connects
+# over a unix socket, so `$TMUX_TMPDIR/tmux-<uid>/<name>` is bound by the same
+# ~104-byte `sun_path` cap as TBD's own socket, and tmux reports an overflow
+# only as `error connecting to <path> (File name too long)`. The budget:
+# `/tmp/tbd-test-home.XXXXXXXX/tmux/tmux-<uid>/` is ~42 bytes, and the suite's
+# longest socket name is ~31 bytes today (`tbd-test-send-mismatch-` plus 8 hex
+# characters) with 50 budgeted as headroom — ~92 bytes against ~104. Nesting
+# this directory any deeper spends that headroom and every live tmux test
+# starts failing at once. `scripts/test.test.sh` asserts the budget so a
+# refactor that moves it cannot land quietly.
 scratch_home="$(mktemp -d /tmp/tbd-test-home.XXXXXXXX)"
-cleanup() { rm -rf "$scratch_home"; }
+tmux_tmpdir="$scratch_home/tmux"
+
+# THE SWEEP KILLS SERVERS; THE `rm -rf` ONLY REMOVES FILES. Those are not the
+# same leak, and the expensive one is the process: unlinking a socket out from
+# under a live tmux server leaves it running forever with nothing able to reach
+# it. So every socket the run created is issued a `kill-server` BEFORE the
+# scratch dir goes away. Most will already be dead — a dead server's file is
+# still there (see above) — so errors are ignored throughout.
+sweep_tmux_servers() {
+  local tmux_bin socket_dir socket
+  tmux_bin="$(command -v tmux || true)"
+  # No tmux on PATH means no server this run could have started.
+  [ -n "$tmux_bin" ] || return 0
+  # `${var:-}` — defensive under `set -u`. The assignment above precedes the
+  # trap today; this keeps that ordering from being load-bearing.
+  [ -n "${tmux_tmpdir:-}" ] || return 0
+  socket_dir="$tmux_tmpdir/tmux-$(id -u)"
+  [ -d "$socket_dir" ] || return 0
+  for socket in "$socket_dir"/*; do
+    # `-e` rather than `-S`: it skips the unmatched-glob case, and tmux owns
+    # this directory exclusively, so anything in it is one of its sockets.
+    [ -e "$socket" ] || continue
+    "$tmux_bin" -S "$socket" kill-server >/dev/null 2>&1 || true
+  done
+  return 0
+}
+
+cleanup() { sweep_tmux_servers; rm -rf "$scratch_home"; }
 # EXIT alone is sufficient, including when this wrapper is killed:
 # `scripts/nightly-flake-stress.sh` TERMs it when its outer deadline fires, and
 # bash runs an EXIT trap on a fatal signal as well as on a normal exit —
@@ -352,6 +408,14 @@ fake_home="${TMPDIR:-/tmp}"
 fake_home="${fake_home%/}/tbd-test-fakehome.$(id -u)"
 mkdir -p "$sanctioned_home"
 
+# tmux creates `$TMUX_TMPDIR/tmux-<uid>` itself, but refuses if the parent is
+# missing — so the parent is ours to make. Mode 700 for the same reason tmux
+# insists on 700 for the directory it creates inside: a socket anyone can
+# connect to is a shell anyone can type into. The scratch root is already
+# ours alone; this is belt and braces on a `/tmp` path.
+mkdir -p "$tmux_tmpdir"
+chmod 700 "$tmux_tmpdir"
+
 require_owned_dir "$fake_home" "the fake home"
 mkdir -p "$fake_home"
 require_owned_dir_after_mkdir "$fake_home" "the fake home"
@@ -385,6 +449,7 @@ env \
   TBD_SOCKET_PATH="$sanctioned_home/sock" \
   TBD_CLAUDE_HOST_HOME="$sanctioned_home/claude-host" \
   TBD_TEST_CODEX_HOME="$sanctioned_home/codex-host" \
+  TMUX_TMPDIR="$tmux_tmpdir" \
   TBD_SWIFT_LOCK_PATH="$swift_lock_path" \
   HOME="$fake_home" \
   CFFIXED_USER_HOME="$fake_home" \
@@ -415,13 +480,14 @@ fingerprint_after="$(scripts/tbd-home-fingerprint.sh)"
 if [ "$fingerprint_before" != "$fingerprint_after" ]; then
   echo >&2
   echo "=======================================================================" >&2
-  echo "  THE TEST RUN WROTE INTO ~/tbd, ~/.claude OR ~/.codex" >&2
+  echo "  THE TEST RUN WROTE INTO ~/tbd, ~/.claude, ~/.codex OR /tmp/tmux-<uid>" >&2
   echo "=======================================================================" >&2
   echo >&2
   echo "CLAUDE.md: \"Tests must not touch ~/tbd\". Something resolved a real" >&2
   echo "config path despite TBD_HOME=$sanctioned_home," >&2
   echo "TBD_CLAUDE_HOST_HOME=$sanctioned_home/claude-host," >&2
-  echo "TBD_TEST_CODEX_HOME=$sanctioned_home/codex-host and" >&2
+  echo "TBD_TEST_CODEX_HOME=$sanctioned_home/codex-host," >&2
+  echo "TMUX_TMPDIR=$tmux_tmpdir and" >&2
   echo "HOME=CFFIXED_USER_HOME=$fake_home." >&2
   echo >&2
   echo "Entries added (+) or removed (-):" >&2
@@ -432,6 +498,14 @@ if [ "$fingerprint_before" != "$fingerprint_after" ]; then
   echo "injected seam, or a path hand-built from \$HOME instead of going" >&2
   echo "through TBDConstants. Fix the leak — do not delete the entries and" >&2
   echo "move on; ~/tbd holds real state (see \"NEVER delete ~/tbd/state.db\")." >&2
+  echo >&2
+  echo "If the entry is a tmux socket, the fix is TMUX_TMPDIR — never a" >&2
+  echo "relaxed guard and never a teardown. tmux does NOT unlink its socket" >&2
+  echo "file when a server exits, so killing the server leaves the file" >&2
+  echo "behind; the only thing that removes it is deleting the directory it" >&2
+  echo "lives in, which this wrapper can do only for a directory it owns." >&2
+  echo "Something spawned tmux with an environment that dropped TMUX_TMPDIR:" >&2
+  echo "look for a Process whose \`environment\` is built from scratch." >&2
   echo >&2
   echo "Reaching here at all is now unusual: a hand-built \$HOME path normally" >&2
   echo "dies at its call site on the mode-000 decoys in $fake_home." >&2

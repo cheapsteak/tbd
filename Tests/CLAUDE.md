@@ -63,10 +63,21 @@ invalidates any measurement they are midway through.
 Every invocation in this file, in `test.yml` and in the pre-push hook goes
 through `scripts/test.sh`, which forwards its arguments to `swift test` behind a
 scratch `TBD_HOME` / `TBD_SOCKET_PATH` / `TBD_CLAUDE_HOST_HOME` /
-`TBD_TEST_CODEX_HOME`. Bare `swift test` writes into the developer's real
-`~/tbd`, `~/.claude` and `~/.codex` — 18k orphan profile dirs and ~2.9k fake
-worktrees accumulated that way before anyone noticed. Read `swift test …` below
+`TBD_TEST_CODEX_HOME` / `TMUX_TMPDIR`. Bare `swift test` writes into the
+developer's real `~/tbd`, `~/.claude`, `~/.codex` and `/tmp/tmux-<uid>` — 18k
+orphan profile dirs, ~2.9k fake worktrees and ~7,100 dead tmux sockets
+accumulated that way before anyone noticed. Read `swift test …` below
 as `scripts/test.sh …`.
+
+The tmux leg is the one with no teardown remedy: **tmux never unlinks its
+socket file when a server exits.** It unlinks a stale socket lazily instead, at
+bind time, when a new server claims that exact path — and every test mints a
+fresh UUID-suffixed name, so nothing ever reclaims one. Killing your server in
+a `defer` is still worth doing (it stops the orphan *process*, which the
+wrapper also sweeps on exit) but it cannot remove the file. If you spawn tmux
+through a `Process` whose `environment` you build from scratch, propagate
+`TMUX_TMPDIR` into it or every socket that run creates lands outside the fence,
+permanently; `TestSupport.shell(_:at:)` already does.
 
 Those four variables only fence code that *asks* where home is. The wrapper
 also sets `HOME` and `CFFIXED_USER_HOME` at a **separate** scratch home whose
@@ -124,7 +135,7 @@ before trusting it: the home value has to be visible near the append, so a path
 built from a `home` that arrived as a parameter matches nothing. It narrows the
 shape rather than closing it.
 
-The wrapper's last layer, a before/after fingerprint of the three real
+The wrapper's last layer, a before/after fingerprint of the four real
 directories, is on when `$CI` is set and off otherwise; `--fingerprint` opts in
 locally and `--no-fingerprint` forces it off. The default follows the argument
 rather than contradicting it: a live daemon and sibling worktrees write to
@@ -138,7 +149,8 @@ Full rationale is in the wrapper's header.
 
 The wrapper's own guards are regression-tested by `scripts/test.test.sh`, which
 runs in the `lint` CI job: it drives the symlink and ownership refusals on the
-fake home, the post-run mode-000 recheck, the fingerprint's four arms and the
+fake home, the post-run mode-000 recheck, the fingerprint's five arms, the
+tmux socket fence (its `sun_path` budget and its kill-server sweep) and the
 shared-lock pin against fixture directories with a stub `swift`, so it takes
 ~11 s, builds nothing, and touches no real store. **Every case there is
 mutation-checked** — the assertion is shown going red against a deliberately
