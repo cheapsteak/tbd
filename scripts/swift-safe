@@ -17,6 +17,7 @@ stall watchdog sees liveness.
 from __future__ import annotations
 
 import fcntl
+import math
 import os
 from pathlib import Path
 import shutil
@@ -79,6 +80,12 @@ def _positive_number(name: str, default: float) -> float:
         value = float(raw)
     except ValueError:
         raise SystemExit(f"{name} must be a positive number, got {raw!r}")
+    # `float()` accepts "nan" and "inf", and every comparison against nan is
+    # False — an unchecked nan would make the timeout's deadline unreachable
+    # (waiting forever) and the heartbeat's next-beat check never fire
+    # (waiting in silence). Both are the failure this wrapper exists to avoid.
+    if not math.isfinite(value):
+        raise SystemExit(f"{name} must be a finite number, got {raw!r}")
     if value <= 0:
         raise SystemExit(f"{name} must be positive, got {raw!r}")
     return value
@@ -216,7 +223,10 @@ def _process_is_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
-    except OSError:
+    # A number too large for the platform's pid_t raises OverflowError, which
+    # is not an OSError — left uncaught it would crash the waiter mid-wait on
+    # a corrupt record. No such process can exist, so it is simply not alive.
+    except (OSError, OverflowError):
         return False
     return True
 
@@ -234,7 +244,7 @@ def _holder_description(lock_path: Path) -> str:
         return "holder has not recorded its identity yet"
     if not _process_is_alive(pid):
         return (
-            f"the lock file names pid {pid}, which is no longer running; "
+            f"the lock file names pid {pid}, which is not running; "
             "the current holder is unidentified"
         )
 

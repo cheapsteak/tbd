@@ -182,6 +182,36 @@ class SwiftSafeTests(unittest.TestCase):
         self.assertIn("timed out", result.stderr)
         self.assertEqual(result.stdout, "")
 
+    def test_a_corrupt_holder_record_does_not_crash_the_waiter(self):
+        """An unusable pid must degrade to "unidentified", never a traceback."""
+        lock_path = self.tbd_home / "runtime" / "swift-build.lock"
+        lock_path.parent.mkdir(parents=True)
+        with lock_path.open("a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # Well-formed and numeric, but far past the platform's pid_t.
+            lock_file.write("pid=99999999999\ncwd=/somewhere/acme-worktree\n")
+            lock_file.flush()
+            result = self.run_runner("build", TBD_SWIFT_LOCK_TIMEOUT_SECONDS="0.05")
+        self.assertEqual(result.returncode, 75)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("is not running", result.stderr)
+        self.assertNotIn("acme-worktree", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_non_finite_wait_settings_are_rejected(self):
+        """nan/inf survive float() and would silently disable the wait's limits."""
+        for variable in (
+            "TBD_SWIFT_LOCK_TIMEOUT_SECONDS",
+            "TBD_SWIFT_HEARTBEAT_SECONDS",
+        ):
+            for value in ("nan", "inf", "-inf", "NaN", "Infinity"):
+                with self.subTest(variable=variable, value=value):
+                    result = self.run_runner("build", **{variable: value})
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(variable, result.stderr)
+                    # Rejected before SwiftPM is exec'd, not after.
+                    self.assertEqual(result.stdout, "")
+
     def test_waiting_reports_the_holder_and_heartbeats_on_stderr(self):
         """End to end: a real waiter behind a real holder, compressed cadence."""
         holder_directory = Path(self.temp.name) / "acme-worktree"
@@ -333,7 +363,7 @@ class WaitReportingTests(unittest.TestCase):
         stale = _dead_pid()
         self.record(f"pid={stale}\ncwd=/somewhere/acme-worktree\ncommand=swift test\n")
         description = self.description()
-        self.assertIn(f"names pid {stale}, which is no longer running", description)
+        self.assertIn(f"names pid {stale}, which is not running", description)
         self.assertIn("unidentified", description)
         self.assertNotIn("acme-worktree", description)
         self.assertNotIn("swift test", description)
@@ -348,6 +378,13 @@ class WaitReportingTests(unittest.TestCase):
                     self.description(), "holder has not recorded its identity yet"
                 )
 
+    def test_a_pid_too_large_for_the_platform_is_not_alive(self):
+        # `os.kill` raises OverflowError — not an OSError — past pid_t's range.
+        self.record(f"pid={2**31}\ncwd=/somewhere/acme-worktree\n")
+        description = self.description()
+        self.assertIn(f"names pid {2**31}, which is not running", description)
+        self.assertNotIn("acme-worktree", description)
+
     def test_garbage_lock_file_invents_no_holder(self):
         self.record("\x00\x00 not a lock record at all\npid=not-a-number\n")
         self.assertEqual(
@@ -359,7 +396,7 @@ class WaitReportingTests(unittest.TestCase):
         self.record(f"pid={stale}\ncwd=/somewhere/acme-worktree\n")
         first = self.wait_messages()[0]
         self.assertIn("waiting for the shared build slot", first)
-        self.assertIn("no longer running", first)
+        self.assertIn("is not running", first)
         self.assertNotIn("acme-worktree", first)
 
     def test_heartbeat_rereads_a_holder_that_identifies_itself_late(self):
