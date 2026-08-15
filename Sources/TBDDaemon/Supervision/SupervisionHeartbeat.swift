@@ -51,11 +51,21 @@ public actor SupervisionHeartbeat {
     ///     into a state that cannot be resolved at all, where the daemon
     ///     genuinely cannot state coverage; staleness is then the honest signal,
     ///     and the log says which file and why.
+    ///
+    ///     **Throwing is the only way to say "no snapshot", deliberately.** An
+    ///     `Optional` return would add a second, reasonless way to say the same
+    ///     thing, and every caller would then have to handle two flavours of one
+    ///     outcome with the compiler no longer able to tell them apart. There is
+    ///     no legitimately-absent case to model: a fleet with no projects
+    ///     publishes an empty list, which is a true statement about an empty
+    ///     fleet, so the only reason a snapshot does not exist is that composing
+    ///     it failed — and a failure that cannot say why is the thing finding 3
+    ///     of the review was about.
     ///   - clock: the delay seam. `Duration` is behavior; the timestamps in the
     ///     file are data and come from the snapshot's own date seam.
     public init(
         path: String,
-        snapshot: @Sendable @escaping () async -> SupervisionStatusFile?,
+        snapshot: @Sendable @escaping () async throws -> SupervisionStatusFile,
         interval: Duration = SupervisionHeartbeat.defaultInterval,
         clock: any Clock<Duration> = ContinuousClock()
     ) {

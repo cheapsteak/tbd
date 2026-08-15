@@ -12,11 +12,15 @@ import Testing
 @Suite("Supervision heartbeat", .clockDriven)
 struct SupervisionHeartbeatTests {
 
-    /// Counts ticks and hands back whatever the test wants published.
     /// The reason a snapshot could not be composed, so a test can assert the
     /// heartbeat skips rather than publishes.
     private struct Unreadable: Error {}
 
+    /// Counts ticks and hands back whatever the test wants published.
+    ///
+    /// Holding `nil` means **the next call throws**, not that it publishes
+    /// nothing: the production seam has exactly one way to say "no snapshot",
+    /// and this stub speaks it rather than inventing a second.
     private final class Snapshots: @unchecked Sendable {
         private let lock = NSLock()
         private var value: SupervisionStatusFile?
