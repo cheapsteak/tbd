@@ -440,3 +440,92 @@ final class LockedCommandRecorder: @unchecked Sendable {
         return calls
     }
 }
+
+/// A tmux failure has to survive the trip to a log line.
+///
+/// `TmuxError.commandFailed` has always carried the tmux subcommand, its exit
+/// status and tmux's own stdout/stderr, but the enum conformed to plain `Error`
+/// — so every site that formatted it through `localizedDescription` got the
+/// `NSError` bridge's "<Module>.<Type> error <caseIndex>" instead, and the
+/// payload was thrown away at the point of display. The daemon's create path
+/// logs at `.error` and `.debug`/`.info` are not persisted for the daemon
+/// subsystem by default, which made that one line the entire diagnostic record.
+///
+/// These assert on the whole composed sentence a human reads, not on fragments.
+@Suite struct TmuxErrorDescriptionTests {
+    static let command = "tmux -L tbd-a1b2c3d4 new-window -t main: -c /worktrees/example"
+
+    @Test func commandFailedNamesCommandStatusAndOutput() {
+        let error = TmuxError.commandFailed(
+            command: Self.command,
+            status: 1,
+            output: "no server running on /private/tmp/tmux-0/tbd-a1b2c3d4"
+        )
+        let expected = """
+            tmux command failed (exit 1): \(Self.command)
+            Output: no server running on /private/tmp/tmux-0/tbd-a1b2c3d4
+            """
+        // `localizedDescription` deliberately, not `description`: it is the
+        // accessor the daemon's log sites use, it exists on every `Error`, and
+        // it is the one the `NSError` bridge used to answer with a case index.
+        #expect(error.localizedDescription == expected)
+        #expect(!error.localizedDescription.contains("TmuxError error"))
+    }
+
+    @Test func commandFailedWithSilentTmuxOmitsTheOutputLine() {
+        let error = TmuxError.commandFailed(command: Self.command, status: 2, output: "   \n")
+        #expect(error.localizedDescription == "tmux command failed (exit 2): \(Self.command)")
+    }
+
+    @Test func timedOutNamesCommandAndTimeout() {
+        let error = TmuxError.timedOut(command: Self.command, timeout: .seconds(30))
+        #expect(
+            error.localizedDescription
+                == "tmux command timed out after \(Duration.seconds(30)): \(Self.command)")
+        // The timeout must be legible as a number of seconds, not an opaque value.
+        #expect(error.localizedDescription.contains("30"))
+        #expect(!error.localizedDescription.contains("TmuxError error"))
+    }
+
+    @Test func unexpectedOutputNamesWhatTmuxSaid() {
+        let error = TmuxError.unexpectedOutput("%unknown-directive")
+        #expect(error.localizedDescription == "tmux returned unexpected output: %unknown-directive")
+        #expect(!error.localizedDescription.contains("TmuxError error"))
+    }
+
+    @Test func unexpectedOutputWithNothingToShowSaysSo() {
+        #expect(
+            TmuxError.unexpectedOutput("").localizedDescription
+                == "tmux returned unexpected output: (none)")
+    }
+
+    @Test func outputIsKeptWholeUpToTheTruncationBoundary() {
+        let output = String(repeating: "x", count: 500)
+        let rendered = TmuxError.commandFailed(
+            command: Self.command, status: 1, output: output
+        ).localizedDescription
+        #expect(rendered.hasSuffix("Output: \(output)"))
+        #expect(!rendered.contains("…"))
+    }
+
+    @Test func outputPastTheBoundaryIsTruncatedWithAnEllipsis() {
+        let rendered = TmuxError.commandFailed(
+            command: Self.command, status: 1, output: String(repeating: "x", count: 501)
+        ).localizedDescription
+        #expect(rendered.hasSuffix("Output: \(String(repeating: "x", count: 500))…"))
+        // The command stays whole — truncation bounds tmux's output, not the
+        // identity of the subcommand that failed.
+        #expect(rendered.contains(Self.command))
+    }
+
+    /// The daemon's background-create log site formats with `String(describing:)`
+    /// so error types it cannot reach still print a payload rather than a case
+    /// index. Pin that this renders the same sentence for a tmux failure.
+    @Test func stringDescribingRendersTheSameSentence() {
+        let error = TmuxError.commandFailed(
+            command: Self.command, status: 1, output: "can't find window: main"
+        )
+        #expect(String(describing: error) == error.localizedDescription)
+        #expect(String(describing: error).contains("can't find window: main"))
+    }
+}

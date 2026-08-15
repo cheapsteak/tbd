@@ -1148,11 +1148,45 @@ final class ContinuationGuard: @unchecked Sendable {
     var isClaimed: Bool { lock.withLock { $0 } }
 }
 
-public enum TmuxError: Error, Sendable {
+/// Failure of a tmux subcommand.
+///
+/// Conforms to `LocalizedError` so `localizedDescription` renders a sentence
+/// naming the subcommand, its exit status and tmux's own output. Without it the
+/// `NSError` bridge prints "TBDDaemonLib.TmuxError error 0", which names the
+/// type and the case index and nothing else — every daemon log line that formats
+/// a caught error through `localizedDescription` would throw the payload away.
+public enum TmuxError: Error, Sendable, CustomStringConvertible, LocalizedError {
     case commandFailed(command: String, status: Int32, output: String)
     case unexpectedOutput(String)
     /// The subprocess outlived its timeout and was killed. Callers on the wake
     /// path catch this and leave the row hibernated for retry rather than
     /// hanging until the app's 300s RPC ceiling.
     case timedOut(command: String, timeout: Duration)
+
+    public var description: String {
+        switch self {
+        case let .commandFailed(command, status, output):
+            let detail = Self.truncate(output)
+            let suffix = detail.isEmpty ? "" : "\nOutput: \(detail)"
+            return "tmux command failed (exit \(status)): \(command)\(suffix)"
+        case let .unexpectedOutput(output):
+            let detail = Self.truncate(output)
+            return "tmux returned unexpected output: \(detail.isEmpty ? "(none)" : detail)"
+        case let .timedOut(command, timeout):
+            return "tmux command timed out after \(timeout): \(command)"
+        }
+    }
+
+    public var errorDescription: String? { description }
+
+    /// Bounds tmux's own output at ~500 characters so a wall of stderr can't
+    /// swamp the log line — long enough for the messages tmux actually emits
+    /// ("no server running on …", "can't find window", a failed shell command)
+    /// and short enough to stay one readable record.
+    static func truncate(_ text: String, maxLength: Int = 500) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > maxLength else { return trimmed }
+        return String(trimmed.prefix(maxLength))
+            .trimmingCharacters(in: .whitespacesAndNewlines) + "…"
+    }
 }

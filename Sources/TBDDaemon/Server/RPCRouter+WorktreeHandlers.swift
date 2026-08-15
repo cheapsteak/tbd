@@ -142,7 +142,16 @@ extension RPCRouter {
                     worktreeID: pending.id,
                     creationFailed: true
                 )))
-                logger.error("background worktreeCreate failed for \(pending.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                // `String(describing:)` rather than `localizedDescription`:
+                // this line is the only record of the failure — the create runs
+                // detached, so nothing about it returns down the RPC. An error
+                // type that carries a payload but is not bridged as a localized
+                // error renders through `localizedDescription` as
+                // "<Module>.<Type> error <caseIndex>", which names neither the
+                // command that failed nor what it said; `String(describing:)`
+                // prints the type's own `description` and falls back to the
+                // case with its payload rather than to the case index.
+                logger.error("background worktreeCreate failed for \(pending.id, privacy: .public): \(String(describing: error), privacy: .public)")
             }
         }
 
