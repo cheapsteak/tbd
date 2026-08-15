@@ -64,7 +64,12 @@ that reads the `readout`, checks the `ledger` for what TBD already did, and
 submits composed briefings to `brief`. Those three commands are the program's
 entire contract with TBD.
 
-Conventions: data goes to stdout, messages to stderr. JSON output carries a
+Conventions: data goes to stdout, messages to stderr. **Project names are
+taken verbatim** — a `<project>` argument reaches the daemon exactly as typed,
+surrounding spaces included, because a singleton's name is its repo's display
+name and TBD lets a repo be called ` api `. A name of nothing but whitespace
+is refused: that is the empty case, and it would otherwise read as the bare
+fleet-brake form of `on`/`off`. JSON output carries a
 top-level `schemaVersion`; changes within a version are additive only.
 Commands exit 0 on success and nonzero with the refusing condition named on
 stderr; exit codes called out below as stable are a contract scripts may
@@ -165,10 +170,30 @@ the mark and nothing more: no mode, no supervisor state, nothing about a desk
 — reporting a fact the command did not establish is exactly the invented
 measurement this design refuses.
 
-What these gestures do today is the mark, the ledger line, and that result.
-The supervisor half described above — ensuring a hosted desk live, standing
-one down — and the transition hook belong with the not-yet-built commands,
-and arrive with them.
+**`on` warns; `off` deliberately does not.** After the switch has taken
+effect, both forms of `on` — releasing the brake, and marking a project —
+print the same warning composition `status` renders, unfiltered. The gesture
+is where an operator forms the belief that supervision is running, and each
+of the two is the only gesture that can create the state its warning
+describes: release the brake over an unmarked fleet and you get
+`noProjectsOn`; mark a project while the brake is engaged and you get
+`brakeEngagedWithProjectsOn`, having just been told `on: acme-platform`.
+Turning something off is a deliberate reduction of coverage rather than a
+mistaken belief, so it says nothing extra.
+
+**The streams split, so the command stays scriptable.** The one result line —
+`on: acme-platform`, or `brake: released` — is stdout; the warnings are
+stderr; the exit code is unchanged by either. `$(tbd supervise on acme-web)`
+captures the result and nothing else, and a terminal shows both. The check is
+best-effort in one direction only: it runs after the switch, so a readout it
+cannot take never turns a gesture that succeeded into a nonzero exit — but it
+says on stderr that it could not read the state, rather than falling silent
+and letting silence read as a calm night.
+
+What these gestures do today is the mark, the ledger line, the result and
+that warning. The supervisor half described above — ensuring a hosted desk
+live, standing one down — and the transition hook belong with the
+not-yet-built commands, and arrive with them.
 
 Bare: the fleet brake. `off` pauses TBD's authority to act everywhere —
 briefings refused, identified supervisor sends refused from that instant —
@@ -200,28 +225,40 @@ An off project renders exactly `off`, never a span and never a "was on
 until" — an untouched project and a turned-off one are the same state, and a
 third rendering would imply a third state that does not exist.
 
-**Warnings are stdout, and they are not errors.** A fleet state that would
-otherwise render as a calm night gets its own `warning:` line, between the
-brake and the project rows. The line is data on stdout and the exit code
-stays 0: a state worth saying out loud is not a failure of the command that
-reported it. Two conditions warn:
+**Here warnings are stdout, and they are not errors.** A fleet state that
+would otherwise render as a calm night gets its own `warning:` line, between
+the brake and the project rows. Under `status` the lines are part of the
+readout, so they go to stdout; the exit code stays 0 either way, because a
+state worth saying out loud is not a failure of the command that reported it.
+(The same lines appear under `on`, where they go to stderr instead — see that
+section.) Four conditions warn:
 
 - **`noProjectsOn`** – the brake is released and no project is on, so nothing
-  is being supervised. This is the quiet failure the whole surface exists to
-  prevent, so the line is composed from the facts the status carries — a
-  released brake with nothing effectively supervised — and appears whether or
-  not the daemon named it.
+  is being supervised. The quiet failure the whole surface exists to prevent,
+  so the line is composed from the facts the status carries — a released brake
+  with nothing effectively supervised — and appears whether or not the daemon
+  named it.
+- **`brakeEngagedWithProjectsOn`** – the mirror: the brake is engaged while
+  projects are marked on, so nothing is watching projects you believe are
+  covered. Release it with `tbd supervise on`. It appears only while a mark
+  actually stands — an engaged brake over an unmarked fleet is a deliberately
+  quiet system, and a line there would teach you to stop reading the line.
+- **`ambiguousRepoName`** – two or more repos share a display name, so none of
+  them resolves to a project and none is supervised: a name with two
+  candidates identifies nothing. Rename one, or declare a project naming them.
+  The message names the repos, and the rest of the fleet is unaffected.
 - **`unusableProjectName`** – one or more projects have a name that cannot be
   a directory name, so nothing can be written beside them: no playbook,
   journal, proposals or programs. They are supervised like any other project,
   and the message names which ones; renaming the repo gives them a directory.
 
-`--json` carries the same facts for a program. `effectivelySupervising` — the
-brake released *and* at least one project on — is the authoritative bit, and
-`warnings` is an array whose entries pair a stable `code`
-(`noProjectsOn`, `unusableProjectName`) with the sentence a human would have
-read. Branch on `effectivelySupervising` and on `code`; never on the rendered
-line. Each project entry carries `spanStartedAt`, `lastSweepContactAt` and
+`--json` carries the same facts for a program. `warnings` is an array whose
+entries pair a stable `code` — the four above — with the sentence a human
+would have read. `effectivelySupervising` (the brake released *and* at least
+one project on) is a useful bit but not a diagnosis: it is false for
+`noProjectsOn` and `brakeEngagedWithProjectsOn` alike, and those call for
+opposite gestures, so branch on `code`. Never branch on the rendered line.
+Each project entry carries `spanStartedAt`, `lastSweepContactAt` and
 `coverageWindow` as explicit nulls when unknown, so a missing value is
 readable as one rather than as an absent key.
 
@@ -297,6 +334,16 @@ that project's mark, its mode selection and any supervisor binding — a mark
 outliving its project would silently turn a later project of the same name
 on. A move that would take a surviving project's designated policy repo away
 is refused, naming the condition: designate another member's policy first.
+
+`singleton` is a reserved name: `create` refuses it, because it is the word
+`--to` takes to mean "back to being its own project" and a project holding it
+could never be a move destination. `--to` is otherwise verbatim like every
+other project name, so the sentinel is the exact word — `--to " singleton "`
+names a project whose name has spaces around it, on the reading that whoever
+quoted those spaces typed them deliberately. `--repos` is the one place that
+still trims: it splits on commas and trims each element, so a repo whose
+display name carries surrounding spaces cannot be named there. `project move`
+reaches it.
 
 ## tbd supervise appoint / relieve
 

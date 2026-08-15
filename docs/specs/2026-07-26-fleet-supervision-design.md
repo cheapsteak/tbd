@@ -698,8 +698,11 @@ substance: one gesture, one ledger, one account. The switch is
 the fleet **brake**, and only that: supervising anything also takes the
 per-project gesture (§8) — `tbd supervise on <project>` — because every
 project starts off and there is no default stance. A fleet switched on with
-no projects on supervises nothing, and `status` and the account must say so
-loudly rather than render it as a calm night. The bare bit is ANDed over the
+no projects on supervises nothing, and so does a fleet whose marks all stand
+under an engaged brake; `status`, the switching gestures themselves, and the
+account must say each of those loudly rather than render it as a calm night.
+The conditions are enumerated and distinguishable, never inferred from one
+boolean (§8). The bare bit is ANDed over the
 per-project marks and never writes them, so pulling the brake disturbs no
 configuration and releasing it restores exactly the coverage that stood.
 
@@ -1109,31 +1112,43 @@ degenerate case is that arrangement exactly. Any behavior that differs
 between "no projects declared" and the plain per-repo arrangement is a bug, not
 a feature.
 
-**Every name resolves to exactly one project, and resolution refuses rather
-than repairs.** Because a repo declared nowhere is a project named by that
-repo, a name can be claimed twice, in two ways, and both are resolution
-errors that name the collision and serve no partial result:
+**Every name identifies exactly one project, and a name that identifies none
+is reported rather than repaired.** Because a repo declared nowhere is a
+project named by that repo, a name can be claimed twice — and where the claim
+came from decides what happens:
 
 - **A declared project whose name is also a repo's display name**, where that
-  repo is not one of its members — that repo's own singleton would claim the
-  same name. The operator says which they meant: rename the project, or move
-  the repo into it.
-- **Two registered repos sharing a display name** — each would be its own
-  project under the one name. This constraint is supervision's own, worth
-  stating because nothing else in TBD requires repo display names to be
-  unique; grouping is the first thing that reads them as identity.
+  repo is not one of its members, is **refused whole**, no partial resolution
+  served. That repo's own singleton would claim the same name, and a silent
+  repair — picking a winner, suffixing a name — would hand an operator
+  coverage on a policy they never declared. The name came out of the
+  operator's own file, so the refusal points at a line they can fix: rename
+  the project, or move the repo into it.
+- **Two undeclared repos sharing a display name** resolve to **no project**
+  each, reported as a warning, while the rest of the fleet resolves normally.
+  A name with two candidates identifies nothing, so neither repo can be
+  addressed — but nothing about a coincidence between those two says anything
+  about the others.
 
-Refusing whole is the posture the duplicate-membership rejection takes (§8),
-for the same reason. "Exactly one project" is what the grouping rests on, and
-a silent repair — picking a winner, suffixing a name — would hand an operator
-coverage on a policy they never declared.
+The second is not leniency, and the asymmetry is the point: nothing in TBD
+constrains repo display names, so two clones of one upstream under different
+parents is an ordinary state an operator reaches without thinking about
+supervision at all. Refusing resolution there would take down `status`, the
+project list, every mark and mode gesture — and, decisively, the `status.json`
+heartbeat (§14), the one artifact that distinguishes a paused fleet from a
+dead daemon. A watchdog cannot tell a heartbeat stopped by a naming
+coincidence from a daemon that died, so failing whole in that direction
+silently disables the out-of-band safety net for a reason having nothing to do
+with supervision. Where this design does still refuse whole — a declared
+collision, the loader's rejections (§8) — the offending input came from the
+file the operator was editing.
 
 **A declared project naming a repo that is no longer registered keeps
 working**, the phantom member resolving into the project and contributing no
-sessions. The asymmetry with the two refusals is deliberate: a collision
-leaves the operator's intent genuinely ambiguous, while an unregistered repo
-leaves it perfectly clear, so taking a project's supervision offline over a
-stale name would cost real coverage to fix nothing.
+sessions. A declared collision leaves the operator's intent genuinely
+ambiguous, while an unregistered repo leaves it perfectly clear, so taking a
+project's supervision offline over a stale name would cost real coverage to
+fix nothing.
 
 **A project's name must be usable as a single path component**, because §6 puts
 that project's journal and proposals in a directory named by it. Where the
@@ -1152,8 +1167,10 @@ deliberate:
   The path helper itself refuses to compose a name it cannot safely use, so no
   caller reopens the hole by building the path by hand.
 
-Coverage is not withheld over a naming problem — the same reasoning that
-resolves a phantom member rather than failing on it.
+One principle runs through all of these: a naming problem costs the fleet
+nothing beyond the projects the name actually touches. It is why a phantom
+member resolves, why an ambiguous display name stops at the repos that share
+it, and why a project that cannot have a directory is still supervised.
 
 **Each desk is addressed to its own project.** The daemon refuses a desk's send
 when the target lies outside that project — addressing correctness, not
@@ -1224,15 +1241,14 @@ offered: with "every repo belongs to exactly one project" as the invariant, a
 place, so the pair can express states the model forbids and every caller would
 have to sequence them correctly. `move` cannot express them at all.
 
-Two rules govern the edges of a move, and both follow from the same invariant.
-**`--to singleton` deletes a declaration the move empties, and deletes its
-mark, its mode entry and its supervisor binding with it.** A mark outliving its
-project would silently turn a later project of the same name on with no
-operator gesture — coverage nobody asked for, which is precisely what
-per-project marks exist to prevent (§8). And **a move is refused, naming the
-condition, when it would take a surviving project's designated policy source
-out from under it**: a project whose policy repo has left is a project with no
-resolvable playbook, so the operator designates another member's policy first.
+Two rules govern the edges of a move. **`--to singleton` deletes a declaration
+the move empties**, and that project's mark, mode entry and supervisor binding
+go with it — one instance of the general rule that a project which stops
+resolving has its coverage closed, whatever made it stop (§9). And **a move is
+refused, naming the condition, when it would take a surviving project's
+designated policy source out from under it**: a project whose policy repo has
+left is a project with no resolvable playbook, so the operator designates
+another member's policy first.
 
 **Project mutations take effect on the next tick.** A definition edited
 while its desk is live is legal; it just does not retroactively change a desk that is already
@@ -1892,9 +1908,16 @@ Beyond a version this build does not read, the refusals are:
   to no sessions, and can only be an editing accident.
 - **A project name that cannot name a directory** under
   `~/tbd/supervision/projects/` — the name is a path component holding that
-  project's playbook, journal, proposals and programs (§7), so slashes,
-  emptiness, `.` and `..`, and leading or trailing spaces are refused at the
-  door rather than discovered as a broken path later.
+  project's playbook, journal, proposals and programs (§7), so emptiness, `.`
+  and `..`, and any name containing a slash are refused at the door rather
+  than discovered as a broken path later. The test is path safety and nothing
+  more: a singleton's name is a repo display name, so spaces, inner dots,
+  leading dots and non-ASCII all pass, and an over-tight rule would start
+  refusing ordinary repos for taste.
+- **A project named `singleton`** — that word is what `move --to` takes to
+  mean "back to being its own project", resolved before any project is looked
+  up, so a project holding the name could be created and then never be a move
+  destination. Reserving it is what keeps the sentinel unambiguous.
 - **An empty declared mode list** — no mode could be selected, so the project
   could run no conduct at all.
 - **A selection outside the declared list** — the lookup this section already
@@ -1958,6 +1981,31 @@ A project that is off gets none of TBD's own attention — no
 tick, no prompt cases, no desk. It still appears in the readout and the account —
 observability is never withheld, and "project X needed attention but is out of
 supervision" is the honest report.
+
+**The loud conditions are enumerated, not inferred.** A state that would
+otherwise render as a calm night carries a warning with a stable code beside
+the human sentence, so a program branches on the code and a person reads the
+words. Four exist:
+
+- **`noProjectsOn`** — the brake is released and not one project is marked.
+  Supervision is on and watching nothing.
+- **`brakeEngagedWithProjectsOn`** — the brake is engaged while at least one
+  mark stands, so nothing is watching projects the operator believes are
+  covered. It is emitted **only when a mark actually stands**: an engaged
+  brake over an unmarked fleet is a deliberately quiet system, and warning
+  there would train an operator to ignore the line, which costs more than it
+  buys.
+- **`ambiguousRepoName`** — two or more undeclared repos share a display name,
+  so none of them resolves to a project (§5). The message names them.
+- **`unusableProjectName`** — a project's name cannot be a directory name, so
+  nothing can be written beside it (§5). It is supervised regardless.
+
+The first two are why the loud case is a set of codes rather than a single
+"is anything covered" bit. A derived `effectivelySupervising` — the brake
+released *and* some mark standing — is false in both, and cannot tell them
+apart; yet they call for opposite gestures, releasing the brake in one case
+and marking a project in the other. A surface that reported only the bit would
+be telling an operator that something is wrong while withholding which thing.
 
 Coverage is also a recorded event, not only a resolved fact. Because
 membership derives — agent → repo → project → mark — a new agent spawned
@@ -2032,6 +2080,16 @@ no derived "covered since" to drift out of step with the lines that record
 coverage. A span opened while nothing was recording has no `projectOn` to pair
 with, and its closing line reports the start as unknown rather than inventing
 one.
+
+**A project that stops resolving has its coverage closed.** Whatever made it
+stop — a declared project deleted, one emptied by a `move`, a marked singleton
+absorbed into a declared project — the record sees one event: the span ends
+with that project's `projectOff` line, and its mark, mode selection and
+supervisor binding go with it. Stating it as an invariant rather than as a
+property of any one gesture is what keeps it true of gestures added later. A
+mark outliving its project would silently turn a later project of the same
+name on with no operator gesture — coverage nobody asked for, which is the
+failure per-project marks exist to prevent (§5, §8).
 
 **A no-op writes no line.** Turning on a project already on, turning off one
 already off, selecting the mode already selected, moving a repo to where it
