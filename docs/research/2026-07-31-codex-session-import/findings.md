@@ -27,7 +27,7 @@ entire client path landed upstream between plugin 1.0.4 and 1.0.6.
 
 Bare `codex app-server` speaks newline-delimited JSON-RPC on stdio. (A socket form,
 `codex app-server --listen unix://…`, is documented in
-[the channels findings](../2026-07-26-claude-code-channels/findings.md).)
+[the message-injection findings](../2026-07-26-claude-code-channels/findings.md).)
 
 ```jsonc
 >> {"jsonrpc":"2.0","id":1,"method":"initialize",

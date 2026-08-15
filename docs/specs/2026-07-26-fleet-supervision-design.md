@@ -2680,12 +2680,15 @@ the same source-and-freshness treatment as any other fact.
 today.** This is the parity choice, and for much of the fleet it is
 permanent: older agent versions and future agent kinds may never offer a
 message channel, so typing is the floor that delivery stands on when nothing
-better exists. Claude Code's research-preview Channels interface was
-validated as a prototype
+better exists. Claude Code's per-session inbox socket was validated as a
+draft-safe path
 (`docs/research/2026-07-26-claude-code-channels/findings.md`, landed on
-`main` separately): it delivers a message without touching the composer, but
-it needs agent-side setup and an interactive consent prompt at session
-start, so it cannot be assumed for fleet sessions.
+`main` separately): it delivers a message without touching the composer and
+needs no agent-side setup, but it exists only on recent Claude Code versions
+on supported platforms, and whether a message is delivered or held is decided
+by the receiving session's inbound settings. Reachability is therefore a
+per-session fact to be measured, not something fleet sessions can be assumed
+to have.
 
 Typing carries one known risk, and this design names it rather than waving
 it off. If a human has typed something into an agent's composer and not yet
