@@ -631,21 +631,28 @@ public final class Daemon: Sendable {
         // project's coverage span from the ledger. **It writes no ledger line,
         // sends nothing, and starts nothing** — a restart resumes coverage from
         // the two files and never replays a decision.
-        let supervisionStore = SupervisionStore(
-            files: SupervisionFileStore(),
-            ledger: SupervisionLedgerWriter(path: TBDConstants.supervisionLedgerPath),
-            fleet: DatabaseSupervisionFleetReader(db: database))
-        self.supervision = supervisionStore
-        rpcRouter.supervision = supervisionStore
-        do {
-            try await supervisionStore.load()
-        } catch {
-            // A file the operator can hand-edit into an unloadable state must
-            // not stop the daemon from booting. Every supervision gesture will
-            // refuse with the same named condition until it is fixed, and
-            // everything else TBD does is unaffected.
-            daemonLogger.error(
-                "Could not load supervision state: \(String(describing: error), privacy: .public)")
+        // Skipped in mock mode like every other rail: a fixture render must not
+        // read the operator's real supervision file, and `supervise.*` refuses
+        // with a named condition there rather than answering from it.
+        let supervisionStore: SupervisionStore? = mockMode == nil
+            ? SupervisionStore(
+                files: SupervisionFileStore(),
+                ledger: SupervisionLedgerWriter(path: TBDConstants.supervisionLedgerPath),
+                fleet: DatabaseSupervisionFleetReader(db: database))
+            : nil
+        if let supervisionStore {
+            self.supervision = supervisionStore
+            rpcRouter.supervision = supervisionStore
+            do {
+                try await supervisionStore.load()
+            } catch {
+                // A file the operator can hand-edit into an unloadable state
+                // must not stop the daemon from booting. Every supervision
+                // gesture will refuse with the same named condition until it is
+                // fixed, and everything else TBD does is unaffected.
+                let detail = String(describing: error)
+                daemonLogger.error("Could not load supervision state: \(detail, privacy: .public)")
+            }
         }
 
         // 8b. Migrate legacy per-repo claude_settings_overlay column values
@@ -942,16 +949,18 @@ public final class Daemon: Sendable {
             // brake that moved a minute ago. A tick that cannot read the state
             // publishes nothing and lets the file go stale, which is precisely
             // the signal the watchdog exists to notice.
-            let heartbeat = SupervisionHeartbeat(
-                path: TBDConstants.supervisionStatusPath,
-                snapshot: { [database, supervisionStore] in
-                    guard let config = try? await database.config.get() else { return nil }
-                    let brake: SupervisionBrakeState =
-                        config.supervisionEnabled ? .released : .engaged
-                    return try? await supervisionStore.statusFileSnapshot(brake: brake)
-                })
-            self.supervisionHeartbeat = heartbeat
-            await heartbeat.start()
+            if let supervisionStore {
+                let heartbeat = SupervisionHeartbeat(
+                    path: TBDConstants.supervisionStatusPath,
+                    snapshot: { [database, supervisionStore] in
+                        guard let config = try? await database.config.get() else { return nil }
+                        let brake: SupervisionBrakeState =
+                            config.supervisionEnabled ? .released : .engaged
+                        return try? await supervisionStore.statusFileSnapshot(brake: brake)
+                    })
+                self.supervisionHeartbeat = heartbeat
+                await heartbeat.start()
+            }
 
             // 13. Periodic git status refresh (branch sync, conflict detection).
             // 10s foreground, 60s background (GitPollCadence.statusInterval);
