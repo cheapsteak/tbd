@@ -647,9 +647,11 @@ public final class Daemon: Sendable {
                 try await supervisionStore.load()
             } catch {
                 // A file the operator can hand-edit into an unloadable state
-                // must not stop the daemon from booting. Every supervision
-                // gesture will refuse with the same named condition until it is
-                // fixed, and everything else TBD does is unaffected.
+                // must not stop the daemon from booting, and everything else
+                // TBD does is unaffected. The store stays unloaded, so each
+                // later gesture retries the read and refuses with whatever the
+                // file says at that moment — which means fixing the file makes
+                // the next gesture work with no restart.
                 let detail = String(describing: error)
                 daemonLogger.error("Could not load supervision state: \(detail, privacy: .public)")
             }
@@ -953,10 +955,14 @@ public final class Daemon: Sendable {
                 let heartbeat = SupervisionHeartbeat(
                     path: TBDConstants.supervisionStatusPath,
                     snapshot: { [database, supervisionStore] in
-                        guard let config = try? await database.config.get() else { return nil }
+                        // Errors propagate rather than collapsing to "no
+                        // snapshot": a heartbeat that goes quiet looks exactly
+                        // like a dead daemon to the watchdog, so the reason has
+                        // to reach the log even though the tick is skipped.
+                        let config = try await database.config.get()
                         let brake: SupervisionBrakeState =
                             config.supervisionEnabled ? .released : .engaged
-                        return try? await supervisionStore.statusFileSnapshot(brake: brake)
+                        return try await supervisionStore.statusFileSnapshot(brake: brake)
                     })
                 self.supervisionHeartbeat = heartbeat
                 await heartbeat.start()

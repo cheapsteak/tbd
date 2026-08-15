@@ -114,7 +114,6 @@ public actor SupervisionLedgerWriter {
 
         var bytes = Data()
         if isolatingFragment || fragmentPendingIsolation { bytes.append(0x0A) }
-        fragmentPendingIsolation = false
         bytes.append(try encoder.encode(line))
         bytes.append(0x0A)
 
@@ -129,6 +128,13 @@ public actor SupervisionLedgerWriter {
         }
         // One `fsync` per row is affordable at coverage-gesture rates.
         guard fsync(descriptor) == 0 else { throw Self.posixError("fsync") }
+        // Cleared here and nowhere earlier: the flag is a debt owed to bytes
+        // still on disk, and only a write that actually landed pays it. Clearing
+        // it up front loses the isolating newline whenever both the attempt and
+        // its retry fail — the fragment survives, the flag does not, and the
+        // *next* append fuses a valid object onto it, turning a junk line into a
+        // permanently unreadable one.
+        fragmentPendingIsolation = false
     }
 
     // MARK: - Reading the record back
@@ -144,6 +150,14 @@ public actor SupervisionLedgerWriter {
     /// A line that does not decode is skipped rather than fatal. A hand-edit or
     /// a crash fragment must not take the whole record's memory offline, and
     /// the count is logged so the damage is visible.
+    ///
+    /// **That count means corruption, and only corruption.** A line of a kind
+    /// this build does not know — a `delivery` or `enrollment` line from a later
+    /// slice, or a lifecycle event added after this one — decodes into
+    /// `.unrecognized` rather than failing, so it passes through here as a line
+    /// that opens and closes nothing. Without that, the first slice to write a
+    /// new kind would have made every restart log its whole record as damaged,
+    /// which is the shape of alarm an operator learns to ignore.
     public func spanStarts() -> [String: SupervisionInstant] {
         guard let data = FileManager.default.contents(atPath: path), !data.isEmpty else {
             return [:]
@@ -162,14 +176,17 @@ public actor SupervisionLedgerWriter {
             switch line.payload {
             case .projectOn: open[project] = line.ts
             case .projectOff: open.removeValue(forKey: project)
-            case .brakeEngaged, .brakeReleased, .modeChanged: break
+            // A line of a kind this build does not recognize neither opens a
+            // span nor closes one. It is somebody else's record, read past.
+            case .brakeEngaged, .brakeReleased, .modeChanged, .unrecognized: break
             }
         }
         if skipped > 0 {
             ledgerLogger.warning(
                 """
-                Skipped \(skipped, privacy: .public) unreadable line(s) in \
-                \(self.path, privacy: .public) while recovering coverage spans.
+                Skipped \(skipped, privacy: .public) corrupt line(s) in \
+                \(self.path, privacy: .public) while recovering coverage spans — \
+                lines of an unrecognized kind are read past and are not counted here.
                 """)
         }
         return open

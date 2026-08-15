@@ -369,12 +369,27 @@ public struct ConfigStore: Sendable {
     /// that leaves the column non-NULL forever after — including `false`,
     /// which is the point: an operator who pulls the brake stays braked when
     /// the shipped default eventually graduates.
-    public func setSupervisionEnabled(enabled: Bool) async throws {
+    /// Returns the **resolved** brake as it stood immediately before this write
+    /// — the column when it was set, the shipped default when it was NULL — so
+    /// a caller can tell a real transition from a gesture that changed nothing.
+    ///
+    /// The read and the write share one transaction on purpose. Read-then-write
+    /// across two calls lets two concurrent toggles observe the same previous
+    /// value, and each then believes it caused the transition: the supervision
+    /// ledger gets two identical brake lines for one change, and the record
+    /// claims something happened twice. Serializing them here is what makes
+    /// "did this call move the brake" answerable at all.
+    @discardableResult
+    public func setSupervisionEnabled(enabled: Bool) async throws -> Bool {
         try await writer.write { db in
+            let previous = try Bool.fetchOne(
+                db, sql: "SELECT supervision_enabled FROM config WHERE id = ?",
+                arguments: [Self.singletonID])
             try db.execute(
                 sql: "UPDATE config SET supervision_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
+            return previous ?? Config.supervisionEnabledDefault
         }
     }
 

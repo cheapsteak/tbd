@@ -284,11 +284,43 @@ struct SupervisionStoreTests {
         #expect(status.warnings.isEmpty)
     }
 
-    @Test("An engaged brake is not the noProjectsOn warning")
-    func engagedBrakeDoesNotWarnAboutProjects() async throws {
-        let fixture = try Self.makeFixture(fleet: StubFleet(repoList: [Self.repo("acme-web")]))
-        let status = try await fixture.store.status(brake: .engaged)
-        #expect(status.warnings.isEmpty, "a paused fleet is a stated choice, not a quiet failure")
+    @Test("An engaged brake over a standing mark warns; over an unmarked fleet it does not")
+    func engagedBrakeWarnsOnlyWhenAMarkStands() async throws {
+        let web = Self.repo("acme-web")
+        let quiet = try Self.makeFixture(fleet: StubFleet(repoList: [web]))
+        #expect(try await quiet.store.status(brake: .engaged).warnings.isEmpty,
+                "a paused fleet with nothing marked is a stated choice, not a quiet failure")
+
+        let marked = try Self.makeFixture(
+            fleet: StubFleet(repoList: [web]),
+            seed: SupervisionFile(supervised: ["acme-web"]))
+        let status = try await marked.store.status(brake: .engaged)
+        #expect(status.warnings.map(\.code) == [.brakeEngagedWithProjectsOn])
+        #expect(status.warnings.first?.message.contains("\"acme-web\"") == true)
+        #expect(status.effectivelySupervising == false)
+        #expect(status.warnings.contains { $0.code == .noProjectsOn } == false,
+                "the two halves of \"nothing is watching\" are never both true")
+    }
+
+    @Test("A shared display name costs those repos their projects, not the fleet's coverage")
+    func ambiguousRepoNamesAreReportedNotFatal() async throws {
+        let first = SupervisionRepo(id: UUID(), name: "acme-web")
+        let second = SupervisionRepo(id: UUID(), name: "acme-web")
+        let api = Self.repo("acme-api")
+        let fixture = try Self.makeFixture(
+            fleet: StubFleet(repoList: [first, second, api]),
+            seed: SupervisionFile(supervised: ["acme-api"]))
+
+        let status = try await fixture.store.status(brake: .released)
+
+        #expect(status.projects.map(\.name) == ["acme-api"],
+                "the colliding repos resolve to no project; the rest of the fleet is unaffected")
+        #expect(status.effectivelySupervising, "one repo's naming does not take coverage down")
+        #expect(status.warnings.map(\.code) == [.ambiguousRepoName])
+        let message = try #require(status.warnings.first?.message)
+        #expect(message.contains("\"acme-web\""))
+        #expect(message.contains(first.id.uuidString))
+        #expect(message.contains(second.id.uuidString))
     }
 
     @Test("A project whose name cannot be a directory warns and is supervised anyway")
@@ -501,6 +533,135 @@ struct SupervisionStoreTests {
         let onDisk = try SupervisionFileStore(
             fileURL: URL(fileURLWithPath: fixture.filePath)).load()
         #expect(onDisk.supervised.isEmpty, "a mark must not outlive its project")
+    }
+
+    // MARK: - A project that stops resolving
+
+    @Test("Absorbing a marked singleton by move closes its coverage and clears its mark")
+    func moveAbsorbingAMarkedSingletonClosesItsCoverage() async throws {
+        let web = Self.repo("acme-web")
+        let api = Self.repo("acme-api")
+        let fixture = try Self.makeFixture(
+            fleet: StubFleet(repoList: [web, api]),
+            seed: SupervisionFile(projects: ["acme-platform": SupervisionProjectDeclaration(
+                repos: [web.id], policy: .repo(web.id))]))
+        // `acme-api` is its own project — declared nowhere — and it is on.
+        _ = try await fixture.store.setProjectMark(project: "acme-api", on: true)
+        fixture.dates.advance(by: 600)
+
+        _ = try await fixture.store.projectMove(repo: "acme-api", to: .project("acme-platform"))
+
+        let decoded = try lines(at: fixture.ledgerPath)
+        #expect(decoded.count == 2, "the absorbed project's coverage ends on the record")
+        let closing = try #require(decoded.last)
+        #expect(closing.project == "acme-api")
+        guard case .projectOff(let coverage) = closing.payload else {
+            Issue.record("a project that stops resolving must have its span closed")
+            return
+        }
+        #expect(coverage.durationSeconds == 600)
+
+        let onDisk = try SupervisionFileStore(
+            fileURL: URL(fileURLWithPath: fixture.filePath)).load()
+        #expect(onDisk.supervised.isEmpty,
+                "a mark that outlived its project would resurrect it without a gesture")
+    }
+
+    @Test("A dissolved group does not resurrect an absorbed project's coverage")
+    func absorbedProjectDoesNotComeBackOn() async throws {
+        let web = Self.repo("acme-web")
+        let api = Self.repo("acme-api")
+        let fixture = try Self.makeFixture(
+            fleet: StubFleet(repoList: [web, api]),
+            seed: SupervisionFile(projects: ["acme-platform": SupervisionProjectDeclaration(
+                repos: [web.id], policy: .repo(web.id))]))
+        _ = try await fixture.store.setProjectMark(project: "acme-api", on: true)
+        _ = try await fixture.store.projectMove(repo: "acme-api", to: .project("acme-platform"))
+        let afterAbsorption = try lines(at: fixture.ledgerPath).count
+
+        // Hours later the group is dissolved and `acme-api` is its own project
+        // again. Nobody has turned it on since.
+        fixture.dates.advance(by: 6 * 3600)
+        _ = try await fixture.store.projectMove(repo: "acme-api", to: .singleton)
+
+        let status = try await fixture.store.status(brake: .released)
+        let resurrected = try #require(status.projects.first { $0.name == "acme-api" })
+        #expect(resurrected.on == false, "coverage may only start from an operator gesture")
+        #expect(resurrected.spanStartedAt == nil)
+        #expect(status.effectivelySupervising == false)
+        #expect(try lines(at: fixture.ledgerPath).count == afterAbsorption,
+                "coming back into existence is not a decision and writes no line")
+    }
+
+    @Test("Declaring a group over a marked singleton closes its coverage too")
+    func projectCreateAbsorbingAMarkedSingletonClosesItsCoverage() async throws {
+        let web = Self.repo("acme-web")
+        let api = Self.repo("acme-api")
+        let fixture = try Self.makeFixture(fleet: StubFleet(repoList: [web, api]))
+        _ = try await fixture.store.setProjectMark(project: "acme-api", on: true)
+
+        _ = try await fixture.store.projectCreate(
+            name: "acme-platform", repos: ["acme-web", "acme-api"], policy: .repo("acme-web"))
+
+        let decoded = try lines(at: fixture.ledgerPath)
+        #expect(decoded.count == 2)
+        #expect(decoded.last?.project == "acme-api")
+        guard case .projectOff = try #require(decoded.last).payload else {
+            Issue.record("declaring a group over a marked singleton ends that project")
+            return
+        }
+        let status = try await fixture.store.status(brake: .released)
+        #expect(status.projects.map(\.name) == ["acme-platform"])
+        #expect(status.effectivelySupervising == false,
+                "the group is off until someone turns it on")
+    }
+
+    // MARK: - An edit made outside this store
+
+    @Test("A mark cleared by hand closes its span on the next read")
+    func markClearedByHandIsReconciled() async throws {
+        let web = Self.repo("acme-web")
+        let fixture = try Self.makeFixture(fleet: StubFleet(repoList: [web]))
+        _ = try await fixture.store.setProjectMark(project: "acme-web", on: true)
+        fixture.dates.advance(by: 900)
+
+        // The operator clears the mark in the file. The same running store then
+        // reads it — this is an observation it really made, unlike a restart,
+        // which only recovers state and must write nothing.
+        try SupervisionFileStore(fileURL: URL(fileURLWithPath: fixture.filePath))
+            .save(SupervisionFile())
+        let status = try await fixture.store.status(brake: .released)
+        #expect(status.projects.first?.on == false)
+
+        let decoded = try lines(at: fixture.ledgerPath)
+        #expect(decoded.count == 2, "the span left open by the edit is closed as of now")
+        guard case .projectOff(let coverage) = try #require(decoded.last).payload else {
+            Issue.record("expected the orphaned span to be closed")
+            return
+        }
+        #expect(coverage.durationSeconds == 900)
+
+        // And the next `on` opens a fresh span rather than a second one over
+        // the first.
+        _ = try await fixture.store.setProjectMark(project: "acme-web", on: true)
+        #expect(try lines(at: fixture.ledgerPath).count == 3)
+    }
+
+    @Test("A mark added by hand is not turned into a decision TBD authored")
+    func markAddedByHandWritesNoOpeningLine() async throws {
+        let web = Self.repo("acme-web")
+        let fixture = try Self.makeFixture(fleet: StubFleet(repoList: [web]))
+        _ = try await fixture.store.projectList()
+
+        try SupervisionFileStore(fileURL: URL(fileURLWithPath: fixture.filePath))
+            .save(SupervisionFile(supervised: ["acme-web"]))
+        let status = try await fixture.store.status(brake: .released)
+
+        #expect(status.projects.first?.on == true)
+        #expect(status.projects.first?.spanStartedAt == nil,
+                "a bare `on` is what the readout shows when the record holds no opening line")
+        #expect(try lines(at: fixture.ledgerPath).isEmpty,
+                "TBD does not author a decision an operator made in a text editor")
     }
 
     @Test("Deleting a declaration returns its repos to being their own projects")

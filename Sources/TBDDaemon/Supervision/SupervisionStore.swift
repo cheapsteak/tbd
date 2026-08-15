@@ -87,6 +87,12 @@ public actor SupervisionStore {
     /// Set once the first read of both files has happened.
     private var loaded = false
 
+    /// Set when `freshFile()` reloaded bytes this store did not write, and
+    /// cleared by `reconcileExternalEdits(repos:)`. Deliberately not set by the
+    /// **initial** load: recovering state at boot is reading, not observing a
+    /// change, and a restart must write no ledger line.
+    private var sawExternalEdit = false
+
     /// Per-project counters the coverage summary reports.
     ///
     /// **Nothing increments these in this slice, so zero is accurate rather
@@ -152,9 +158,15 @@ public actor SupervisionStore {
     private func ensureLoaded() async throws {
         guard !loaded else { return }
         let recovered = await ledger.spanStarts()
-        // Set after the await, so a second caller that arrives mid-suspension
-        // repeats the (idempotent, side-effect-free) read rather than
-        // proceeding on half-initialized state.
+        // Re-check after the await. Two callers can both pass the guard above
+        // and suspend on the ledger read; if the first finishes and then
+        // completes a whole `on` gesture — including its `spanStarts` entry —
+        // the second's continuation would overwrite `spanStarts` with a
+        // snapshot taken before that opening line existed, and the project
+        // would render a bare `on` with its opening line sitting on disk. The
+        // first completer leaves the actor fully initialized, so returning
+        // here is strictly safe.
+        guard !loaded else { return }
         cached = try files.load()
         fingerprint = FileFingerprint(path: files.fileURL.path)
         spanStarts = recovered
@@ -185,6 +197,11 @@ public actor SupervisionStore {
             "supervision.json changed on disk; reloading \(self.files.fileURL.path, privacy: .public)")
         cached = try files.load()
         fingerprint = current
+        // The reload may have taken coverage away from a project this store is
+        // still holding a span for. Closing that span needs the ledger, which
+        // needs a suspension this method must not take — see
+        // `reconcileExternalEdits(repos:)`, which drains the flag.
+        sawExternalEdit = true
         return cached
     }
 
@@ -198,26 +215,189 @@ public actor SupervisionStore {
         fingerprint = FileFingerprint(path: files.fileURL.path)
     }
 
+    // MARK: - Reconciling what an edit outside this store did
+
+    /// Close the coverage of any project this store holds a span for that the
+    /// file no longer covers, after an edit this store did not make.
+    ///
+    /// The ledger is written from the gesture path, so without this a mark
+    /// cleared by hand — or a repo removed, or a singleton absorbed by a hand
+    /// edit — would leave the span open forever, and the next `on` would append
+    /// a second `projectOn` over it. A reader would then see one span covering
+    /// hours in which the mark was off. The file is hand-editable **by design**,
+    /// so that is a foreseeable state, not abuse.
+    ///
+    /// **The closing line is timestamped when the daemon noticed, not when the
+    /// operator edited**, because the daemon does not know when they edited.
+    /// That overstates the span by the un-noticed interval — bounded by the
+    /// heartbeat's cadence, since the heartbeat reads through here every minute
+    /// — and the alternative overstates it by everything that follows, forever.
+    /// Noticing is an observation the daemon really made; inventing an earlier
+    /// end time would not be.
+    ///
+    /// **This is not the startup path.** `ensureLoaded` never sets the flag this
+    /// drains, so a restart still writes no line: a mark that is off with an
+    /// open span in the record simply renders off, which is what a bare `on`
+    /// with no opening line already means on the readout.
+    ///
+    /// The reverse case is deliberately not handled: a mark *added* by hand
+    /// gets no synthesized `projectOn`. Writing one would make TBD the author
+    /// of a decision the operator made in a text editor, at a time it guessed.
+    private func reconcileExternalEdits(repos: [SupervisionRepo]) {
+        guard sawExternalEdit else { return }
+        sawExternalEdit = false
+        guard !spanStarts.isEmpty else { return }
+
+        let file = cached
+        // A file that will not resolve tells us nothing about which projects
+        // still exist, so close nothing: leaving a span open is recoverable,
+        // and closing one on a guess is not. The reload already ran
+        // `validate()`, so the only condition that reaches here is a declared
+        // name colliding with a repo's own project — a real state, and one
+        // worth saying out loud rather than swallowing.
+        let projects: [SupervisionProject]
+        do {
+            projects = try SupervisionTopology.resolve(file: file, repos: repos)
+        } catch {
+            let reason = String(describing: error)
+            storeLogger.error(
+                """
+                Could not reconcile coverage after an edit to \
+                \(self.files.fileURL.path, privacy: .public): \(reason, privacy: .public). \
+                Open spans are left open rather than closed on a guess.
+                """)
+            return
+        }
+        let covered = Set(projects.filter(\.mark).map(\.name))
+        orphanedSpans = spanStarts.keys
+            .filter { !covered.contains($0) }
+            .sorted()
+            .map { (project: $0, mode: file.activeMode(for: $0)) }
+    }
+
+    /// Projects whose spans `reconcileExternalEdits` found orphaned, waiting for
+    /// the ledger append that closes them. Held between the synchronous
+    /// detection and the asynchronous write so neither has to happen in the
+    /// other's context.
+    private var orphanedSpans: [(project: String, mode: String)] = []
+
+    private func closeOrphanedSpans() async {
+        guard !orphanedSpans.isEmpty else { return }
+        let orphans = orphanedSpans
+        orphanedSpans = []
+        for orphan in orphans {
+            storeLogger.notice(
+                """
+                Coverage of "\(orphan.project, privacy: .public)" ended outside TBD — closing \
+                its span on the record as of now.
+                """)
+            await appendProjectOff(project: orphan.project, mode: orphan.mode, at: now())
+        }
+    }
+
+    /// Everything every entry point does before it touches the file: load once,
+    /// read the repo list, and settle any coverage an outside edit ended.
+    ///
+    /// Returns the repo list, because every caller needs it and resolving
+    /// topology without it is impossible.
+    private func prepare() async throws -> [SupervisionRepo] {
+        try await ensureLoaded()
+        let repos = try await fleet.repos()
+        // `freshFile()` is what notices an outside edit, so this pass primes the
+        // flag that the drain below consumes.
+        _ = try freshFile()
+        reconcileExternalEdits(repos: repos)
+        await closeOrphanedSpans()
+        return repos
+    }
+
+    /// The projects a topology edit stops resolving, and the coverage that has
+    /// to end with them.
+    ///
+    /// **Computed by comparing resolved project sets, not declarations.** A
+    /// singleton has no entry in `projects`, so a rule phrased over declarations
+    /// misses the two edits that make one stop resolving — a `move` absorbing it
+    /// into a declared project, and a `create` that names it as a member — and
+    /// both are ordinary operator gestures. Getting this wrong is not merely a
+    /// missing line: the absorbed project keeps its mark, so dissolving the
+    /// group later brings it back **on**, hours later, with no gesture and no
+    /// opening line. Comparing what resolves before against what resolves after
+    /// covers every way a project can vanish, including ones no verb has yet.
+    private func applyTopologyEdit(
+        from file: SupervisionFile, to proposed: SupervisionFile, repos: [SupervisionRepo]
+    ) async throws -> SuperviseProjectListResult {
+        let before = try SupervisionTopology.resolve(file: file, repos: repos)
+        // Resolving the proposal is also what validates it — a name colliding
+        // with a repo's own project throws here, before anything is written.
+        let after = try SupervisionTopology.resolve(file: proposed, repos: repos)
+        let surviving = Set(after.map(\.name))
+        let vanished = before.filter { !surviving.contains($0.name) }
+
+        // A vanished project leaves nothing behind that could bind a future
+        // project of the same name — the mark above all, but the mode selection
+        // and supervisor binding with it, matching what `SupervisionTopology`
+        // already does for a declaration a move empties.
+        var updated = proposed
+        for project in vanished {
+            updated.supervised.removeAll { $0 == project.name }
+            updated.modes.removeValue(forKey: project.name)
+            updated.supervisors.removeValue(forKey: project.name)
+        }
+
+        let result = try topologyResult(file: updated, repos: repos)
+        try persist(updated)
+
+        for project in vanished where project.mark {
+            await appendProjectOff(
+                project: project.name, mode: project.activeMode, at: now())
+        }
+        return result
+    }
+
     // MARK: - Status
 
     /// The `supervise.status` readout.
     public func status(brake: SupervisionBrakeState) async throws -> SupervisionStatus {
-        try await ensureLoaded()
-        let repos = try await fleet.repos()
+        let repos = try await prepare()
         let file = try freshFile()
         let projects = try SupervisionTopology.resolve(file: file, repos: repos)
         let effectivelySupervising = brake == .released && projects.contains { $0.mark }
 
+        // The two halves of "nothing is watching" are separate codes because
+        // they call for opposite actions — mark a project, or release the brake
+        // — and `effectivelySupervising` is false in both, so it cannot tell
+        // them apart.
         var warnings: [SupervisionWarning] = []
-        if brake == .released && !effectivelySupervising {
+        let anyMarked = projects.contains(\.mark)
+        if brake == .released && !anyMarked {
             warnings.append(SupervisionWarning(
                 code: .noProjectsOn,
                 message: "the brake is released but no project is on — nothing is being supervised."))
+        }
+        // Only when a mark actually stands. An engaged brake over a fleet with
+        // nothing marked is a deliberately quiet system; warning there would
+        // train an operator to ignore the line.
+        if brake == .engaged && anyMarked {
+            let marked = projects.filter(\.mark).map { "\"\($0.name)\"" }.joined(separator: ", ")
+            warnings.append(SupervisionWarning(
+                code: .brakeEngagedWithProjectsOn,
+                message: """
+                    the fleet brake is engaged, so nothing is being supervised — \(marked) \
+                    \(projects.filter(\.mark).count == 1 ? "is" : "are") marked on and will \
+                    resume the moment the brake is released.
+                    """))
         }
         let unusable = SupervisionTopology.projectsWithoutUsableDirectory(in: projects)
         if !unusable.isEmpty {
             warnings.append(SupervisionWarning(
                 code: .unusableProjectName, message: Self.unusableNameSentence(unusable)))
+        }
+        // These repos resolve to no project at all, so they appear in no row
+        // above — the warning is the only place their absence is visible.
+        let ambiguous = SupervisionTopology.ambiguousRepoNames(file: file, repos: repos)
+        if !ambiguous.isEmpty {
+            warnings.append(SupervisionWarning(
+                code: .ambiguousRepoName, message: Self.ambiguousNameSentence(ambiguous)))
         }
 
         return SupervisionStatus(
@@ -259,11 +439,26 @@ public actor SupervisionStore {
             """
     }
 
+    /// The sentence the `ambiguousRepoName` warning carries. It names both the
+    /// name and the repos holding it, because the operator's fix — rename one,
+    /// or declare a project over them — needs to know which ones.
+    static func ambiguousNameSentence(_ ambiguous: [SupervisionAmbiguousRepoName]) -> String {
+        let clauses = ambiguous.map { entry in
+            "\(entry.repos.count) repos are named \"\(entry.name)\" "
+                + "(\(entry.repos.map(\.uuidString).joined(separator: ", ")))"
+        }
+        return """
+            \(clauses.joined(separator: "; ")). A project is identified by its name, so two \
+            candidates for one name identify nothing: those repos resolve to no project and \
+            are not supervised. The rest of the fleet is unaffected. Rename one, or declare a \
+            project naming them.
+            """
+    }
+
     /// The heartbeat's view of the same facts (design §14).
     public func statusFileSnapshot(brake: SupervisionBrakeState) async throws
         -> SupervisionStatusFile {
-        try await ensureLoaded()
-        let repos = try await fleet.repos()
+        let repos = try await prepare()
         let file = try freshFile()
         let projects = try SupervisionTopology.resolve(file: file, repos: repos)
         return SupervisionStatusFile(
@@ -290,8 +485,7 @@ public actor SupervisionStore {
     /// to prevent.
     public func setProjectMark(project: String, on: Bool) async throws
         -> SuperviseSetProjectMarkResult {
-        try await ensureLoaded()
-        let repos = try await fleet.repos()
+        let repos = try await prepare()
 
         // The roster has to be read before the mark is committed — a snapshot
         // taken afterwards could fail, leaving the gesture done and the caller
@@ -365,8 +559,7 @@ public actor SupervisionStore {
     // MARK: - Modes
 
     public func setMode(project: String, mode: String) async throws -> SuperviseSetModeResult {
-        try await ensureLoaded()
-        let repos = try await fleet.repos()
+        let repos = try await prepare()
 
         // Read-modify-write, no suspension inside.
         let file = try freshFile()
@@ -416,8 +609,7 @@ public actor SupervisionStore {
     // MARK: - Projects
 
     public func projectList() async throws -> SuperviseProjectListResult {
-        try await ensureLoaded()
-        let repos = try await fleet.repos()
+        let repos = try await prepare()
         let file = try freshFile()
         return try topologyResult(file: file, repos: repos)
     }
@@ -425,8 +617,7 @@ public actor SupervisionStore {
     public func projectCreate(
         name: String, repos identifiers: [String], policy: SupervisionPolicyRequest
     ) async throws -> SuperviseProjectListResult {
-        try await ensureLoaded()
-        let repos = try await fleet.repos()
+        let repos = try await prepare()
 
         // Read-modify-write, no suspension inside.
         let file = try freshFile()
@@ -443,12 +634,12 @@ public actor SupervisionStore {
         var updated = file
         updated.projects[name] = SupervisionProjectDeclaration(
             repos: members, policy: resolvedPolicy)
-        // Resolve before saving, not after: it is the check that catches a name
-        // colliding with a repo's own project, and running it first is what
-        // makes a refused create byte-identical to no create at all.
-        let result = try topologyResult(file: updated, repos: repos)
-        try persist(updated)
-        return result
+        // Declaring a group over repos that were their own projects makes each
+        // of those stop resolving — and a marked one's coverage ends there,
+        // whether or not the operator was thinking of it that way. Validation
+        // runs inside the same helper, before anything is written, so a refused
+        // create is byte-identical to no create at all.
+        return try await applyTopologyEdit(from: file, to: updated, repos: repos)
     }
 
     /// Delete a declaration, returning its repos to being their own projects.
@@ -459,28 +650,21 @@ public actor SupervisionStore {
     /// project's coverage genuinely ends here, so its span is closed on the
     /// record like any other `off`.
     public func projectDelete(name: String) async throws -> SuperviseProjectListResult {
-        try await ensureLoaded()
-        let repos = try await fleet.repos()
+        let repos = try await prepare()
 
         // Read-modify-write, no suspension inside.
         let file = try freshFile()
         guard file.projects[name] != nil else {
             throw SupervisionStoreError.unknownProject(name)
         }
-        let wasMarked = file.isMarked(name)
-        let mode = file.activeMode(for: name)
-
         var updated = file
         updated.projects.removeValue(forKey: name)
-        updated.supervised.removeAll { $0 == name }
-        updated.modes.removeValue(forKey: name)
-        updated.supervisors.removeValue(forKey: name)
-
-        let result = try topologyResult(file: updated, repos: repos)
-        try persist(updated)
-
-        if wasMarked { await appendProjectOff(project: name, mode: mode, at: now()) }
-        return result
+        // The mark, mode and binding go with the declaration, and the coverage
+        // ends with it — all of that is `applyTopologyEdit`'s job, which sees
+        // this project stop resolving. Deleting a group also makes its members
+        // resolve again as their own projects, which the same comparison
+        // handles: they appear rather than vanish.
+        return try await applyTopologyEdit(from: file, to: updated, repos: repos)
     }
 
     /// Move a repo between projects — the only membership verb.
@@ -492,32 +676,19 @@ public actor SupervisionStore {
     /// were.
     public func projectMove(repo identifier: String, to target: SupervisionMoveTarget) async throws
         -> SuperviseProjectListResult {
-        try await ensureLoaded()
-        let repos = try await fleet.repos()
+        let repos = try await prepare()
 
         // Read-modify-write, no suspension inside.
         let file = try freshFile()
         let repoID = try resolveRepo(identifier, in: repos)
         let updated = try SupervisionTopology.move(
             repo: repoID, to: target, in: file, repos: repos)
-        let result = try topologyResult(file: updated, repos: repos)
-        guard updated != file else { return result }
+        guard updated != file else { return try topologyResult(file: file, repos: repos) }
 
-        // A move that empties a declaration deletes it, and takes its mark with
-        // it. Where that mark stood, the span it opened ends here.
-        let vanished = Set(file.supervised.filter { name in
-            file.projects[name] != nil && updated.projects[name] == nil
-        })
-        let modes = Dictionary(
-            vanished.map { ($0, file.activeMode(for: $0)) }, uniquingKeysWith: { first, _ in first })
-
-        try persist(updated)
-
-        for name in vanished.sorted() {
-            await appendProjectOff(
-                project: name, mode: modes[name] ?? SupervisionModeEntry.defaultMode, at: now())
-        }
-        return result
+        // Absorbing a repo into a declared project makes that repo's own
+        // project stop resolving — and a singleton has no declaration, so only
+        // comparing what resolves catches it. See `applyTopologyEdit`.
+        return try await applyTopologyEdit(from: file, to: updated, repos: repos)
     }
 
     private func topologyResult(file: SupervisionFile, repos: [SupervisionRepo]) throws

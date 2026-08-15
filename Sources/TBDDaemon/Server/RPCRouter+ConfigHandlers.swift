@@ -192,10 +192,12 @@ extension RPCRouter {
     /// nothing is not a decision.
     func handleConfigSetSupervisionEnabled(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(ConfigSetSupervisionEnabledParams.self, from: paramsData)
-        let before = try await supervisionBrake()
-        try await db.config.setSupervisionEnabled(enabled: params.enabled)
-        let after: SupervisionBrakeState = params.enabled ? .released : .engaged
-        await supervision?.recordBrakeChange(engaged: !params.enabled, changed: before != after)
+        // The store reads the previous value inside the same transaction as the
+        // write, so two concurrent toggles cannot both believe they caused the
+        // transition and write two identical brake lines for one change.
+        let wasReleased = try await db.config.setSupervisionEnabled(enabled: params.enabled)
+        await supervision?.recordBrakeChange(
+            engaged: !params.enabled, changed: wasReleased != params.enabled)
         // Reuse the existing config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()

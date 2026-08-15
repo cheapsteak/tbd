@@ -13,6 +13,10 @@ import Testing
 struct SupervisionHeartbeatTests {
 
     /// Counts ticks and hands back whatever the test wants published.
+    /// The reason a snapshot could not be composed, so a test can assert the
+    /// heartbeat skips rather than publishes.
+    private struct Unreadable: Error {}
+
     private final class Snapshots: @unchecked Sendable {
         private let lock = NSLock()
         private var value: SupervisionStatusFile?
@@ -24,12 +28,14 @@ struct SupervisionHeartbeatTests {
 
         var calls: Int { lock.withLock { callCount } }
 
-        var provider: @Sendable () async -> SupervisionStatusFile? {
+        var provider: @Sendable () async throws -> SupervisionStatusFile {
             { [self] in
-                lock.withLock {
+                let value = lock.withLock { () -> SupervisionStatusFile? in
                     callCount += 1
-                    return value
+                    return self.value
                 }
+                guard let value else { throw Unreadable() }
+                return value
             }
         }
     }

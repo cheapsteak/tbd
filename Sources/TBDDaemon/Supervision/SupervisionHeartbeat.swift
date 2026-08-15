@@ -33,7 +33,7 @@ public actor SupervisionHeartbeat {
     public static let defaultInterval: Duration = .seconds(60)
 
     private let path: String
-    private let snapshot: @Sendable () async -> SupervisionStatusFile?
+    private let snapshot: @Sendable () async throws -> SupervisionStatusFile
     private let interval: Duration
     private let clock: any Clock<Duration>
 
@@ -43,10 +43,14 @@ public actor SupervisionHeartbeat {
     ///   - path: where the heartbeat is written. Injected rather than resolved
     ///     from `TBDConstants` inside, so a test cannot be made to write into
     ///     the developer's real `~/tbd`.
-    ///   - snapshot: the facts to publish, or nil when they could not be read
-    ///     this tick — a malformed `supervision.json`, say. A nil skips the
-    ///     write rather than publishing a half-truth, and the file's mtime
-    ///     going stale is precisely the signal the watchdog is built to notice.
+    ///   - snapshot: the facts to publish. A throw skips this tick's write
+    ///     rather than publishing a half-truth — an empty project list would be
+    ///     a claim, not an absence — and **the thrown error is logged**, so the
+    ///     file going stale is never the only trace of what went wrong. The
+    ///     residual throwing case is a `supervision.json` an operator edited
+    ///     into a state that cannot be resolved at all, where the daemon
+    ///     genuinely cannot state coverage; staleness is then the honest signal,
+    ///     and the log says which file and why.
     ///   - clock: the delay seam. `Duration` is behavior; the timestamps in the
     ///     file are data and come from the snapshot's own date seam.
     public init(
@@ -106,12 +110,16 @@ public actor SupervisionHeartbeat {
     /// Compose and publish one heartbeat. Internal so tests can drive a single
     /// write without arming the loop.
     func tick() async {
-        guard let file = await snapshot() else {
-            heartbeatLogger.warning(
+        let file: SupervisionStatusFile
+        do {
+            file = try await snapshot()
+        } catch {
+            let reason = String(describing: error)
+            heartbeatLogger.error(
                 """
-                Skipped a supervision heartbeat: the current state could not be read. \
+                Skipped a supervision heartbeat: \(reason, privacy: .public). \
                 \(self.path, privacy: .public) keeps its previous contents and will read \
-                as stale.
+                as stale, so a watchdog may report this daemon as down.
                 """)
             return
         }

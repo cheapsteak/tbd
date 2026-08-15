@@ -88,6 +88,23 @@ struct SupervisionRPCTests {
         #expect(try lines(at: fixture.ledgerPath).isEmpty)
     }
 
+    @Test("The brake write reports the resolved value it replaced")
+    func brakeWriteReportsWhatItReplaced() async throws {
+        let db = try TBDDatabase(inMemory: true)
+
+        // The column starts unset, so the value being replaced is the shipped
+        // default rather than a written one — the distinction that stops an
+        // opening `off` from being recorded as a transition.
+        let firstPrevious = try await db.config.setSupervisionEnabled(enabled: false)
+        #expect(firstPrevious == Config.supervisionEnabledDefault)
+
+        let secondPrevious = try await db.config.setSupervisionEnabled(enabled: true)
+        #expect(secondPrevious == false, "now reading the written value, not the default")
+
+        let thirdPrevious = try await db.config.setSupervisionEnabled(enabled: true)
+        #expect(thirdPrevious == true, "a repeat reports no transition")
+    }
+
     @Test("A released brake with no projects reports the loud case through RPC")
     func statusReportsTheLoudCase() async throws {
         let fixture = try makeFixture()
