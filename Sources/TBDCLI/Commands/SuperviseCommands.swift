@@ -71,35 +71,42 @@ struct SuperviseOff: AsyncParsableCommand {
 /// named project is that project's mark. The two never mix — the brake writes
 /// no mark, and a mark never moves the brake.
 private func applySupervisionSwitch(project: String?, on: Bool) throws {
+    let client = SocketClient()
     guard let raw = project else {
-        let client = SocketClient()
         try client.callVoid(
             method: RPCMethod.configSetSupervisionEnabled,
             params: ConfigSetSupervisionEnabledParams(enabled: on))
         print(renderSupervisionBrake(on ? .released : .engaged))
-        if on { warnIfReleasingCoversNothing(client: client) }
+        if on { warnAfterSupervisionGesture(client: client) }
         return
     }
     let name = try requireSupervisionProjectName(raw)
-    let result: SuperviseSetProjectMarkResult = try SocketClient().call(
+    let result: SuperviseSetProjectMarkResult = try client.call(
         method: RPCMethod.superviseSetProjectMark,
         params: SuperviseSetProjectMarkParams(project: name, on: on),
         resultType: SuperviseSetProjectMarkResult.self)
     print(renderSupervisionMarkResult(result))
+    if on { warnAfterSupervisionGesture(client: client) }
 }
 
-/// Say so, right at the release, when the brake comes off over a fleet where
-/// nothing is marked on.
+/// Say so, at the gesture, when what the operator just switched on covers
+/// nothing: the brake released over an unmarked fleet, or a mark set while the
+/// brake is engaged.
 ///
-/// Best-effort by construction, and in that order for a reason: the brake is
-/// already released by the time this runs, so a readout that fails must not
+/// Runs only for `on`, never `off`. Turning something off is a deliberate
+/// reduction of coverage — the operator is not forming a mistaken belief, and a
+/// line telling them what they just chose is the noise that teaches people to
+/// stop reading the line.
+///
+/// Best-effort by construction, and in that order for a reason: the switch has
+/// already taken effect by the time this runs, so a readout that fails must not
 /// turn a gesture that succeeded into a nonzero exit. It stays quiet only when
 /// it has read the state and found nothing to say — a readout it could not take
 /// is reported as a readout it could not take, never as a calm night.
 ///
-/// The lines go to stderr because the command's data is the one `brake:` line;
+/// The lines go to stderr because the command's data is its one result line;
 /// under `status` the same lines are part of the readout and belong on stdout.
-private func warnIfReleasingCoversNothing(client: SocketClient) {
+private func warnAfterSupervisionGesture(client: SocketClient) {
     let status: SupervisionStatus
     do {
         status = try client.call(
@@ -107,11 +114,11 @@ private func warnIfReleasingCoversNothing(client: SocketClient) {
             resultType: SupervisionStatus.self)
     } catch {
         printToStandardError(
-            "warning: the brake is released, but supervision state could not be read "
+            "warning: the change took effect, but supervision state could not be read "
                 + "(\(error)) — run 'tbd supervise status'")
         return
     }
-    for line in supervisionBrakeReleaseWarningLines(status) {
+    for line in supervisionGestureWarningLines(status) {
         printToStandardError(line)
     }
 }

@@ -21,6 +21,11 @@ import TBDShared
 /// would render as boilerplate instead of as words, which is the quiet failure
 /// this whole surface exists to prevent. The compile error is the forcing
 /// function that makes every new warning get a human sentence.
+///
+/// It has already earned that twice in this subsystem's first day —
+/// `unusableProjectName` and then `ambiguousRepoName` / `brakeEngagedWithProjectsOn`
+/// each stopped the build until an operator-facing sentence existed. Under a
+/// `default` arm all four would have shipped as boilerplate. Keep it exhaustive.
 func supervisionWarningSentence(_ code: SupervisionWarningCode) -> String {
     switch code {
     case .noProjectsOn:
@@ -30,6 +35,18 @@ func supervisionWarningSentence(_ code: SupervisionWarningCode) -> String {
             a project's name cannot be used as a directory name, so nothing can be \
             written beside it — no playbook, journal, proposals or programs. It is \
             supervised like any other project; rename the repo to give it a directory.
+            """
+    case .ambiguousRepoName:
+        return """
+            two or more repos share a display name, so none of them resolves to a \
+            project and none is supervised — a name with two candidates identifies \
+            nothing. Rename one, or declare a project naming them. The rest of the \
+            fleet is unaffected.
+            """
+    case .brakeEngagedWithProjectsOn:
+        return """
+            the brake is engaged while projects are marked on — nothing is watching \
+            them. Release it with `tbd supervise on`.
             """
     }
 }
@@ -44,28 +61,43 @@ func supervisionWarningSentence(_ code: SupervisionWarningCode) -> String {
 /// daemon that forgot to warn render a calm night.
 func supervisionStatusWarningLines(_ status: SupervisionStatus) -> [String] {
     var lines: [String] = []
-    var sawNoProjectsOn = false
+    var seen: Set<SupervisionWarningCode> = []
     for warning in status.warnings {
-        if warning.code == .noProjectsOn { sawNoProjectsOn = true }
+        seen.insert(warning.code)
         let supplied = warning.message.trimmingCharacters(in: .whitespacesAndNewlines)
         let message = supplied.isEmpty ? supervisionWarningSentence(warning.code) : supplied
         lines.append("warning: \(message)")
     }
-    if !sawNoProjectsOn && status.brake == .released && !status.effectivelySupervising {
+    if !seen.contains(.noProjectsOn) && status.brake == .released
+        && !status.effectivelySupervising {
         lines.append("warning: \(supervisionWarningSentence(.noProjectsOn))")
+    }
+    // The mirror, recomputed for the same reason and worth more: here the
+    // operator has performed a gesture and been told it succeeded.
+    // `effectivelySupervising` is false in both states and cannot tell them
+    // apart, so the condition is read from the brake and the marks.
+    if !seen.contains(.brakeEngagedWithProjectsOn) && status.brake == .engaged
+        && status.projects.contains(where: { $0.on }) {
+        lines.append("warning: \(supervisionWarningSentence(.brakeEngagedWithProjectsOn))")
     }
     return lines
 }
 
-/// The lines bare `tbd supervise on` emits after releasing the brake.
+/// The lines a switching gesture emits after it has taken effect — bare
+/// `tbd supervise on` releasing the brake, and `on <project>` setting a mark.
 ///
 /// Deliberately the very same composition `status` renders, not a second
-/// wording: releasing the brake is where an operator forms the belief that
-/// supervision is running, and it is the only gesture that can create the state
-/// the warning describes — so it is the highest-value place to say it. One fact
-/// gets one sentence, and this seam is what stops the two surfaces drifting
-/// into two.
-func supervisionBrakeReleaseWarningLines(_ status: SupervisionStatus) -> [String] {
+/// wording. A gesture is where an operator forms the belief that supervision is
+/// running, and each of these two is the only gesture that can create the state
+/// its warning describes — so they are the highest-value places to say it. One
+/// fact gets one sentence, and this seam is what stops the surfaces drifting
+/// into three.
+///
+/// Nothing is filtered to "the warning about this gesture". A finding true of
+/// supervision is worth saying at the moment an operator is about to rely on
+/// it, and a filter is a rule that can silently drop a warning a later slice
+/// adds — the failure this surface exists to prevent, arriving by omission.
+func supervisionGestureWarningLines(_ status: SupervisionStatus) -> [String] {
     supervisionStatusWarningLines(status)
 }
 

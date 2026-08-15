@@ -147,7 +147,7 @@ struct SupervisionStatusLoudCaseTests {
     /// supervision is running, and the only gesture that can create the state
     /// the warning describes — so bare `on` says it too.
     @Test func releasingTheBrakeOverNothingWarnsAtTheRelease() {
-        let lines = supervisionBrakeReleaseWarningLines(
+        let lines = supervisionGestureWarningLines(
             SuperviseFixture.status(
                 brake: .released, effectivelySupervising: false,
                 projects: [SuperviseFixture.project(name: "acme-checkout", on: false)]))
@@ -156,9 +156,38 @@ struct SupervisionStatusLoudCaseTests {
         #expect(lines.first?.contains("nothing is being supervised") == true)
     }
 
-    /// One fact, one sentence: `on` and `status` must not drift into two
-    /// wordings for the same condition.
-    @Test func theReleaseWarningIsTheSameCompositionStatusRenders() {
+    /// The mirror, and the worse of the two: the operator ran `on acme`, was
+    /// told `on: acme`, and nothing is watching it.
+    @Test func markingAProjectOnUnderAnEngagedBrakeSaysNothingIsWatching() {
+        let lines = supervisionGestureWarningLines(
+            SuperviseFixture.status(
+                brake: .engaged, effectivelySupervising: false,
+                projects: [SuperviseFixture.project(name: "acme-checkout", on: true)]))
+        #expect(lines.count == 1)
+        #expect(lines.first?.contains("brake is engaged") == true)
+        #expect(lines.first?.contains("nothing is watching") == true)
+        #expect(lines.first?.contains("tbd supervise on") == true)
+        // Not the other half of the pair: these two states are both
+        // `effectivelySupervising == false` and call for opposite actions.
+        #expect(lines.first?.contains("no project is on") == false)
+    }
+
+    /// An engaged brake over a fleet with no marks is a deliberately quiet
+    /// system. Warning there would train an operator to ignore the line.
+    @Test func anEngagedBrakeWithNoMarksStandingIsQuiet() {
+        let lines = supervisionGestureWarningLines(
+            SuperviseFixture.status(
+                brake: .engaged, effectivelySupervising: false,
+                projects: [
+                    SuperviseFixture.project(name: "acme-checkout", on: false),
+                    SuperviseFixture.project(name: "tbd", on: false),
+                ]))
+        #expect(lines.isEmpty)
+    }
+
+    /// One fact, one sentence: the gesture surfaces and `status` must not drift
+    /// into separate wordings for the same condition.
+    @Test func theGestureWarningIsTheSameCompositionStatusRenders() {
         for status in [
             SuperviseFixture.status(
                 brake: .released, effectivelySupervising: false, projects: []),
@@ -166,22 +195,52 @@ struct SupervisionStatusLoudCaseTests {
                 brake: .released, effectivelySupervising: false, projects: [],
                 warnings: [SupervisionWarning(code: .unusableProjectName, message: "")]),
             SuperviseFixture.status(
+                brake: .engaged, effectivelySupervising: false,
+                projects: [SuperviseFixture.project(name: "acme", on: true)]),
+            SuperviseFixture.status(
                 brake: .released, effectivelySupervising: true,
                 projects: [SuperviseFixture.project(name: "acme", on: true)]),
         ] {
-            #expect(supervisionBrakeReleaseWarningLines(status)
+            #expect(supervisionGestureWarningLines(status)
                 == supervisionStatusWarningLines(status))
         }
     }
 
-    /// A release that covers something is quiet — the warning is a finding, not
+    /// A gesture that covers something is quiet — the warning is a finding, not
     /// a ceremony printed on every gesture.
     @Test func releasingTheBrakeOverASupervisedFleetIsQuiet() {
-        let lines = supervisionBrakeReleaseWarningLines(
+        let lines = supervisionGestureWarningLines(
             SuperviseFixture.status(
                 brake: .released, effectivelySupervising: true,
                 projects: [SuperviseFixture.project(name: "acme-checkout", on: true)]))
         #expect(lines.isEmpty)
+    }
+
+    /// The daemon's own line wins over the recomputed one — never both.
+    @Test func theDaemonsEngagedBrakeWarningIsNotDuplicatedByTheRecomputation() {
+        let lines = supervisionGestureWarningLines(
+            SuperviseFixture.status(
+                brake: .engaged, effectivelySupervising: false,
+                projects: [SuperviseFixture.project(name: "acme", on: true)],
+                warnings: [
+                    SupervisionWarning(
+                        code: .brakeEngagedWithProjectsOn,
+                        message: "the brake is engaged; acme is marked on."),
+                ]))
+        #expect(lines == ["warning: the brake is engaged; acme is marked on."])
+    }
+
+    /// Two repos answering to one name resolve to nothing, so neither is
+    /// covered — a coverage loss, stated as one.
+    @Test func anAmbiguousRepoNameWarnsThatNeitherRepoIsSupervised() {
+        let text = SuperviseFixture.render(
+            SuperviseFixture.status(
+                brake: .released, effectivelySupervising: true,
+                projects: [SuperviseFixture.project(name: "acme", on: true)],
+                warnings: [SupervisionWarning(code: .ambiguousRepoName, message: "")]))
+        #expect(text.contains("share a display name"))
+        #expect(text.contains("none is supervised"))
+        #expect(text.contains("Rename one"))
     }
 
     @Test func aSupervisedFleetGetsNoWarning() {
