@@ -69,12 +69,21 @@ public actor SupervisionHeartbeat {
         }
     }
 
-    /// Stop ticking. The file is left exactly as the last tick wrote it — a
-    /// stopped heartbeat says nothing, and its staleness is the fact the
-    /// watchdog reads.
-    public func stop() {
-        loop?.cancel()
-        loop = nil
+    /// Stop ticking, and return only once the loop has actually finished. The
+    /// file is left exactly as the last tick wrote it — a stopped heartbeat
+    /// says nothing, and its staleness is the fact the watchdog reads.
+    ///
+    /// Awaiting the task rather than firing `cancel()` and walking away is what
+    /// makes "stopped" an observable state instead of a request: a shutdown
+    /// that returned with a tick still in flight could leave a write racing the
+    /// process teardown. Awaiting from inside the actor is safe — this
+    /// suspension releases the actor, which is exactly what the loop needs to
+    /// unwind.
+    public func stop() async {
+        guard let loop else { return }
+        loop.cancel()
+        self.loop = nil
+        await loop.value
     }
 
     private func run() async {
