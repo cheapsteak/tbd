@@ -246,7 +246,10 @@ section.) Four conditions warn:
 - **`ambiguousRepoName`** – two or more repos share a display name, so none of
   them resolves to a project and none is supervised: a name with two
   candidates identifies nothing. Rename one, or declare a project naming them.
-  The message names the repos, and the rest of the fleet is unaffected.
+  The message names the repos, and the rest of the fleet is unaffected. Those
+  repos have **no rows at all** below, so if you marked one on and cannot find
+  its row, this line is the explanation — the repo is still in TBD, it is the
+  project that has stopped resolving.
 - **`unusableProjectName`** – one or more projects have a name that cannot be
   a directory name, so nothing can be written beside them: no playbook,
   journal, proposals or programs. They are supervised like any other project,

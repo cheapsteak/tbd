@@ -1128,7 +1128,9 @@ came from decides what happens:
   each, reported as a warning, while the rest of the fleet resolves normally.
   A name with two candidates identifies nothing, so neither repo can be
   addressed — but nothing about a coincidence between those two says anything
-  about the others.
+  about the others. A mark previously set for that name is not cleared: it
+  stops applying while the name is ambiguous and applies again if the
+  ambiguity is resolved, which is the boundary §9 states plainly.
 
 The second is not leniency, and the asymmetry is the point: nothing in TBD
 constrains repo display names, so two clones of one upstream under different
@@ -1861,7 +1863,10 @@ most one project; the loader rejects the file if one appears twice, because
 `supervised` is the list of projects turned on — TBD's own attention covers
 exactly these, and an absent name is off (below). A name here matching no
 current project is kept rather than pruned, because a project may be declared
-later; until one is, the name resolves to nothing. `modes` holds two things on the default-props chain: the **declared
+later; until one is, the name resolves to nothing. That is also how a mark
+survives its project ceasing to resolve for a reason no supervision gesture
+caused — a repo renamed or unregistered — and how it can apply again if the
+name resolves once more (§5, §9). `modes` holds two things on the default-props chain: the **declared
 mode list** — the names a project's operator may select, defaulting to the
 built-in pair `attended`/`autonomous` when absent — and the operator's
 **selection** per project, defaulting to `attended` (§3). The map's value
@@ -2081,15 +2086,28 @@ coverage. A span opened while nothing was recording has no `projectOn` to pair
 with, and its closing line reports the start as unknown rather than inventing
 one.
 
-**A project that stops resolving has its coverage closed.** Whatever made it
-stop — a declared project deleted, one emptied by a `move`, a marked singleton
-absorbed into a declared project — the record sees one event: the span ends
-with that project's `projectOff` line, and its mark, mode selection and
-supervisor binding go with it. Stating it as an invariant rather than as a
-property of any one gesture is what keeps it true of gestures added later. A
-mark outliving its project would silently turn a later project of the same
-name on with no operator gesture — coverage nobody asked for, which is the
-failure per-project marks exist to prevent (§5, §8).
+**A topology gesture that ends a project closes its coverage.** Deleting a
+declared project, emptying one by a `move`, absorbing a marked singleton into
+a declared project: whichever gesture it was, the record sees one event — the
+span ends with that project's `projectOff` line, and its mark, mode selection
+and supervisor binding go with it. Binding this to the gestures as a class,
+rather than to each verb separately, is what keeps it true of topology
+gestures added later. A mark outliving its project would silently turn a
+later project of the same name on with no operator gesture — coverage nobody
+asked for, which is the failure per-project marks exist to prevent (§5, §8).
+
+**Coverage is not closed when a project stops resolving because the repo
+table changed underneath it.** Supervision reconciles resolution against edits
+to its own file; a repo renamed or unregistered is not a supervision gesture,
+so nothing notices. The consequence is a mark that outlives the resolution it
+was set against, and that can take effect again later: mark a singleton on,
+let a second repo be renamed to the same display name, and the project stops
+resolving with the mark still standing (§5, §8) — rename either repo again and
+it comes back on with no gesture, on whichever repo now holds the name, which
+with two candidates was never determined to be the one the operator meant.
+This is the mechanism's boundary and not an oversight in it: closing the gap
+means the daemon reconciling resolution against the repo table as well as
+against the file, on repo events it does not watch today.
 
 **A no-op writes no line.** Turning on a project already on, turning off one
 already off, selecting the mode already selected, moving a repo to where it
