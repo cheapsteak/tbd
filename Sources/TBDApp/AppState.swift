@@ -739,10 +739,12 @@ final class AppState: ObservableObject {
     @Published var autoHibernateEnabled: Bool = false
     /// Auto-hibernate idle timeout in minutes. Loaded from `Config`.
     @Published var hibernateIdleMinutes: Int = Config.defaultHibernateIdleMinutes
-    /// The supervision fleet brake (design 2026-07-26 §3, §7) — supervision's
-    /// fleet-wide on/off switch. Shipped OFF; for now inert, since the rest
-    /// of the supervision subsystem is landing in the same series of
-    /// changes. Loaded from the daemon `Config` via `loadSupervisionConfig()`.
+    /// Supervision's fleet-wide authority switch (design 2026-07-26 §3, §7).
+    /// `true` means supervision is enabled — the fleet brake is *released*,
+    /// the opposite sense from the brake's own name. Shipped OFF (braked);
+    /// for now inert, since the rest of the supervision subsystem is landing
+    /// in the same series of changes. Loaded from the daemon `Config` via
+    /// `loadSupervisionConfig()`.
     @Published var supervisionEnabled: Bool = false
     /// Daemon-persisted gate for session-limit auto-resume (default OFF).
     /// Daemon-side (not @AppStorage) because the daemon must act while the
