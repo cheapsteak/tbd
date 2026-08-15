@@ -16,6 +16,13 @@ directory: a session started with a different `CLAUDE_CONFIG_DIR` writes its
 row somewhere this script will not look unless you point `--registry` there.
 The socket directory does not fragment — it is per OS user.
 
+Liveness here is only "a process with that pid exists". A row whose session
+died can be resurrected by an unrelated process inheriting its pid, so treat a
+listed socket as a candidate rather than a confirmed target. The row's
+`procStart` is the discriminator if you need to be sure, and posting a message
+with the row's `sessionId` as the frame's `session_id` makes the receiver drop
+a misaddressed message rather than act on it.
+
 Python 3 standard library only.
 """
 
@@ -36,6 +43,10 @@ def registry_dir(override: Optional[str]) -> Path:
 
 
 def process_alive(pid: int) -> bool:
+    # pid 0 would signal the caller's whole process group, and bool is an int
+    # subclass, so both are rejected before os.kill sees them.
+    if isinstance(pid, bool) or pid <= 0:
+        return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -51,8 +62,10 @@ def read_rows(directory: Path) -> list:
     rows = []
     for path in sorted(directory.glob("*.json")):
         try:
-            row = json.loads(path.read_text())
+            row = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
+            continue
+        if not isinstance(row, dict):
             continue
         pid = row.get("pid")
         if not isinstance(pid, int) or not process_alive(pid):

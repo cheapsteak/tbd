@@ -12,8 +12,8 @@ posts into.
 
 Claude Code binds a Unix-domain **inbox socket** for every session with
 cross-session messaging enabled. Anything running as the same OS user can
-connect to it and post a message, and the receiving session enqueues that
-message as a user turn without writing into its terminal composer. It is a
+connect to it and post a message, and a message the receiving session accepts
+is enqueued as a user turn without writing into its terminal composer. It is a
 supported, documented surface: no agent-side MCP server, no startup flag, and
 no per-session consent prompt.
 
@@ -26,9 +26,10 @@ the mid-turn case (the message was read during a turn already running).
 The real constraint is not access, it is the receiver's **inbound gate**. A
 message can be delivered, held for approval, or dropped, depending on the
 receiving session's `crossSessionInbound` setting and — when that is unset — on
-the two sessions' permission-mode classes. A fire-and-exit script on macOS must
-present the session's messaging token, or a bypass-permissions receiver will
-hold its message.
+the two sessions' permission-mode classes. Upstream documents one consequence
+that matters most here: a fire-and-exit script on macOS must present the
+session's messaging token, or a bypass-permissions receiver will hold its
+message.
 
 Codex exposes a separate native pathway through its experimental app-server
 protocol. A client can steer an active turn or start a new turn without sending
@@ -51,7 +52,8 @@ A broader external message-injection API is an open upstream feature request:
 
 ## How these findings were established
 
-Three kinds of evidence appear below, and each claim says which one backs it:
+Three kinds of evidence back the Claude Code sections, and each section says
+which ones it rests on. A section citing two has both:
 
 - **Measured** — reproduced live against Claude Code 2.1.233 on macOS 26.1, by
   running a session and probing it.
@@ -61,10 +63,16 @@ Three kinds of evidence appear below, and each claim says which one backs it:
 - **Documented** — stated by upstream documentation and not independently
   reproduced here.
 
+The Codex app-server section rests on a different and older basis: the
+generated experimental schema shipped with codex-cli 0.145.0, read on
+2026-07-26, plus upstream Codex documentation. Nothing in it was measured
+against a running Codex session.
+
 ## The session registry
 
-**Measured.** Every session writes a `<pid>.json` row under
-`$CLAUDE_CONFIG_DIR/sessions`, defaulting to `~/.claude/sessions`. Across the
+**Measured.** Every session that binds an inbox socket also writes a
+`<pid>.json` row under `$CLAUDE_CONFIG_DIR/sessions`, defaulting to
+`~/.claude/sessions`. Across the
 61 rows present on the probe machine, every row carried `pid`, `sessionId`,
 `cwd`, `startedAt`, `procStart`, `version`, `peerProtocol`, `kind`,
 `entrypoint`, `name`, `status`, `statusUpdatedAt` and `updatedAt`; most also
@@ -220,7 +228,7 @@ For an unattended `claude -p` worker, set `crossSessionInbound: accept` in its
 This is the single most important operational detail for anything TBD would
 build here.
 
-**Documented, and confirmed in the 2.1.233 binary.** When no
+**Documented, and matched by the 2.1.233 binary's verification logic.** When no
 `crossSessionInbound` value applies, a message Claude Code verifies came from
 its own child process — a hook or a Bash command posting back to its own
 session's socket — is delivered. Verification has a platform seam:
@@ -236,6 +244,12 @@ Where process evidence is missing, the `CLAUDE_CODE_MESSAGING_TOKEN` auth frame
 is what verifies the child. **A fire-and-exit script on macOS must therefore
 present the token**, or it is treated as asserting no permission class — which
 a bypass-permissions receiver holds for approval.
+
+*Documented.* One prerequisite sits underneath all of this: a Bash command
+running inside Claude Code's sandbox reaches the socket only if the sandbox's
+Unix-socket settings, `sandbox.network.allowAllUnixSockets` and
+`sandbox.network.allowUnixSockets`, permit it. That constrains the hook and
+Bash-command path, not a host-side process posting from outside the session.
 
 ## Availability
 

@@ -83,7 +83,14 @@ def main() -> int:
             "inside a session with cross-session messaging)."
         )
 
-    text = sys.stdin.read() if args.message == "-" else args.message
+    if args.message == "-":
+        # Drop one trailing newline so `echo text | …` and `printf text | …`
+        # put the same content on the wire.
+        text = sys.stdin.read()
+        if text.endswith("\n"):
+            text = text[:-1]
+    else:
+        text = args.message
     if not text:
         fail("empty message; the receiver ignores a message with no content.")
 
