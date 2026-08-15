@@ -323,21 +323,80 @@ extension WorktreeLifecycle {
         // Re-add the git worktree. Prefer the existing branch; fall back to
         // a new branch pointing at the captured archived HEAD SHA when the
         // branch is no longer present (renamed/deleted before archive ran).
+        //
+        // Both legs can fail with a directory half-written, and the recreate
+        // leg is a `-b` call site: git creates the branch first and can fail
+        // afterwards (a failing `post-checkout` hook leaves the branch, the
+        // directory AND the worktree registration standing — verified against
+        // git 2.50), so a bare rethrow leaks all three.
         let branchExists = await git.refExists(repoPath: repo.path, ref: worktree.branch)
         if branchExists {
-            try await git.worktreeAddExisting(
-                repoPath: repo.path,
-                worktreePath: worktree.localPath,
-                branch: worktree.branch
-            )
+            do {
+                try await git.worktreeAddExisting(
+                    repoPath: repo.path,
+                    worktreePath: worktree.localPath,
+                    branch: worktree.branch
+                )
+            } catch {
+                // Directory only, and deliberately not `cleanUpFailedWorktreeAdd`.
+                // This leg runs *because* the branch is already there: it checks
+                // out a ref the user owns and creates nothing, so there is no
+                // branch of ours to withdraw and no argument that would make
+                // deleting one correct. Routing it through the shared helper —
+                // treating both legs alike — is the one mistake that turns this
+                // fix into data loss, so the branch-deleting code is not on this
+                // path at all.
+                //
+                // Git also leaves the worktree registration standing here, and
+                // removing the directory only turns it prunable (git 2.50).
+                // It is left alone: `worktree prune` is repo-wide and drops any
+                // registration whose directory is missing — including a healthy
+                // worktree on an unmounted volume — so the helper runs it only
+                // when it has a branch of ours to delete and git's refusal to
+                // touch a claimed branch forces its hand. A retry is blocked
+                // either way until the user prunes, as it was before this fix.
+                try? FileManager.default.removeItem(atPath: worktree.localPath)
+                throw error
+            }
         } else if let sha = worktree.archivedHeadSHA, !sha.isEmpty {
             archiveLogger.info("revive: branch '\(worktree.branch, privacy: .public)' missing for \(worktreeID, privacy: .public), recreating from archived SHA \(sha, privacy: .public)")
-            try await git.worktreeAddNewBranch(
-                repoPath: repo.path,
-                worktreePath: worktree.localPath,
-                branch: worktree.branch,
-                sha: sha
+            // Probed independently rather than reusing `branchExists`, even
+            // though this leg runs only when that said "absent". `refExists` is
+            // non-throwing and answers `false` for *any* failure, collapsing
+            // "the branch is gone" and "the probe itself failed" into one
+            // value — and telling those apart is the whole reason the cleanup
+            // takes a tri-state. `localBranchExists` fails closed (only git's
+            // "no such ref" exit 1 becomes `false`), so a broken probe lands on
+            // `nil` and blocks deletion instead of authorizing it.
+            let branchPreExisted: Bool? = try? await git.localBranchExists(
+                repoPath: repo.path, name: worktree.branch
             )
+            // The expected tip needs no sampling on this leg and cannot go
+            // stale: `-b <branch> <sha>` points the new ref at exactly this
+            // argument, so the archived SHA *is* what this attempt would have
+            // put there. A branch that stands at any other commit afterwards is
+            // not the one this recreate made.
+            let attempted = AttemptedBranch(
+                name: worktree.branch, preExisted: branchPreExisted, expectedTip: sha
+            )
+            do {
+                try await git.worktreeAddNewBranch(
+                    repoPath: repo.path,
+                    worktreePath: worktree.localPath,
+                    branch: worktree.branch,
+                    sha: sha
+                )
+            } catch {
+                // Removes the partial directory, then the branch `-b` made —
+                // the latter only if all four of the helper's gates hold.
+                await cleanUpFailedWorktreeAdd(
+                    repoPath: repo.path,
+                    worktreePath: worktree.localPath,
+                    attempted: attempted,
+                    branchNameWasAlreadyTaken: gitRefusedToCreateBranch(error)
+                )
+                throw error
+            }
         } else {
             archiveLogger.error("revive: branch '\(worktree.branch, privacy: .public)' missing for \(worktreeID, privacy: .public) and no archivedHeadSHA — cannot recover")
             throw WorktreeLifecycleError.branchMissingNoFallback(branch: worktree.branch)
