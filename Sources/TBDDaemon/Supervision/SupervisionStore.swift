@@ -361,15 +361,15 @@ public actor SupervisionStore {
         let repos = try await prepare()
         let file = try freshFile()
         let projects = try SupervisionTopology.resolve(file: file, repos: repos)
-        let effectivelySupervising = brake == .released && projects.contains { $0.mark }
+        let markedProjects = projects.filter(\.mark)
+        let effectivelySupervising = brake == .released && !markedProjects.isEmpty
 
         // The two halves of "nothing is watching" are separate codes because
         // they call for opposite actions — mark a project, or release the brake
         // — and `effectivelySupervising` is false in both, so it cannot tell
         // them apart.
         var warnings: [SupervisionWarning] = []
-        let anyMarked = projects.contains(\.mark)
-        if brake == .released && !anyMarked {
+        if brake == .released && markedProjects.isEmpty {
             warnings.append(SupervisionWarning(
                 code: .noProjectsOn,
                 message: "the brake is released but no project is on — nothing is being supervised."))
@@ -377,14 +377,14 @@ public actor SupervisionStore {
         // Only when a mark actually stands. An engaged brake over a fleet with
         // nothing marked is a deliberately quiet system; warning there would
         // train an operator to ignore the line.
-        if brake == .engaged && anyMarked {
-            let marked = projects.filter(\.mark).map { "\"\($0.name)\"" }.joined(separator: ", ")
+        if brake == .engaged && !markedProjects.isEmpty {
+            let named = markedProjects.map { "\"\($0.name)\"" }.joined(separator: ", ")
+            let verb = markedProjects.count == 1 ? "is" : "are"
             warnings.append(SupervisionWarning(
                 code: .brakeEngagedWithProjectsOn,
                 message: """
-                    the fleet brake is engaged, so nothing is being supervised — \(marked) \
-                    \(projects.filter(\.mark).count == 1 ? "is" : "are") marked on and will \
-                    resume the moment the brake is released.
+                    the fleet brake is engaged, so nothing is being supervised — \(named) \
+                    \(verb) marked on and will resume the moment the brake is released.
                     """))
         }
         let unusable = SupervisionTopology.projectsWithoutUsableDirectory(in: projects)
@@ -504,7 +504,15 @@ public actor SupervisionStore {
             guard updated != file else {
                 return SuperviseSetProjectMarkResult(project: project, on: on, changed: false)
             }
-            let roster = on ? try await rosterSnapshot(for: resolved) : []
+            // Spelled out rather than as a ternary: `try await` inside one
+            // branch of `?:` sits to the right of a non-assignment operator,
+            // which the grammar does not accept.
+            let roster: [SupervisionRosterEntry]
+            if on {
+                roster = try await rosterSnapshot(for: resolved)
+            } else {
+                roster = []
+            }
             guard try freshFile() == file else { continue }
 
             try persist(updated)
@@ -710,10 +718,15 @@ public actor SupervisionStore {
     /// Resolve a repo id or display name to a repo.
     ///
     /// A display name shared by two repos is refused naming the condition,
-    /// never guessed — and that refusal is not a new rule, only an earlier one:
-    /// `SupervisionTopology.resolve` already rejects the whole topology for
-    /// exactly that ambiguity, because both repos' singleton projects would
-    /// carry the same name.
+    /// never guessed: the operator typed one name and there are two answers, so
+    /// there is nothing to act on.
+    ///
+    /// Refusing here does not contradict `SupervisionTopology.resolve`, which
+    /// *reports* the same ambiguity as a warning and carries on covering the
+    /// rest of the fleet. The two are asymmetric on purpose. Reading is a
+    /// question about everything, and one repo's naming must not take the
+    /// fleet's coverage down; a gesture is a question about one repo, and
+    /// picking either candidate would act on a repo the operator did not name.
     private func resolveRepo(_ identifier: String, in repos: [SupervisionRepo]) throws -> UUID {
         if let id = UUID(uuidString: identifier) {
             guard repos.contains(where: { $0.id == id }) else {

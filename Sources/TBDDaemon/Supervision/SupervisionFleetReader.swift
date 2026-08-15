@@ -62,7 +62,10 @@ public struct DatabaseSupervisionFleetReader: SupervisionFleetReading {
     }
 
     public func repos() async throws -> [SupervisionRepo] {
-        try await db.repos.list().map(SupervisionRepo.init)
+        // Spelled out rather than `map(SupervisionRepo.init)`: that type has two
+        // initializers, and naming one by arity alone is the kind of overload
+        // resolution that reads as fine and breaks when a third is added.
+        try await db.repos.list().map { SupervisionRepo($0) }
     }
 
     /// Archived worktrees are excluded — an archived worktree's sessions are
