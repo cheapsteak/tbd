@@ -3054,9 +3054,10 @@ overrides (§15).
 
 ## 14. Out-of-band heartbeat (P3-1)
 
-On a fixed cadence of its own, the daemon writes a small `status.json` file
-under `~/tbd/supervision/`. It contains the brake, each project's mark and
-active mode, and each project's last sweep contact. The watchdog is an
+The daemon writes a small `status.json` file under `~/tbd/supervision/` at
+start, at every fleet brake edge, and then on a fixed cadence of its own **for
+as long as the brake is released**. It contains the brake, each project's mark
+and active mode, and each project's last sweep contact. The watchdog is an
 optional `launchd` job with one rule: *if any project claims to be
 effectively on and the
 status file has not changed in about 10 minutes, raise a notification.* It
@@ -3065,6 +3066,19 @@ watchdog unavailable. The watchdog never acts on the fleet. It can only alert
 the operator; it cannot pretend to be the supervisor. A down daemon therefore
 means silence plus an alarm. This applies the rule that uncertainty must lead
 to inaction at the largest scale.
+
+Gating the cadence on the brake costs the watchdog nothing, which is what
+makes the brake the single switch here rather than something the heartbeat
+sits outside of. Effectively on means a project's mark **and** a released
+brake, so a status file reading `engaged` claims that nothing is effectively
+on and cannot trip the rule however old it grows; the freshness requirement
+binds exactly while the brake is released, which is exactly when the cadence
+runs. Writing at the edges is what carries that across the transition itself —
+the moment the brake moves, the file says so, before the cadence starts or
+stops. The consequence to state plainly for whoever builds the watchdog:
+**staleness is a liveness signal only while the file reads `released`.** Under
+an engaged brake a file untouched for hours means a paused fleet, not a dead
+daemon.
 
 ## 15. Deliberately not built
 

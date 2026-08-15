@@ -30,6 +30,43 @@ struct SupervisionStoreTests {
         }
     }
 
+    /// Counts roster reads and gives each one a distinct value to write.
+    private final class EditCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = 0
+        func next() -> Int { lock.withLock { value += 1; return value } }
+        var count: Int { lock.withLock { value } }
+    }
+
+    /// A fleet whose roster read edits `supervision.json` underneath the
+    /// gesture that asked for it.
+    ///
+    /// The roster read is the *only* suspension inside `setProjectMark`'s
+    /// read-modify-write, so an edit landing here is a competing writer at the
+    /// worst possible moment — and doing it on every read is that writer
+    /// winning the race three times running, which is what the retry bound
+    /// exists for.
+    private struct EditingFleet: SupervisionFleetReading {
+        let repoList: [SupervisionRepo]
+        let fileURL: URL
+        let counter: EditCounter
+
+        func repos() async throws -> [SupervisionRepo] { repoList }
+
+        func agents(inRepos repoIDs: Set<UUID>) async throws -> [SupervisionFleetAgent] {
+            // A distinct binding each time, so the file the gesture re-reads
+            // never matches the one it started from. Supervisor bindings are
+            // not validated and do not affect resolution, so this changes the
+            // bytes without changing what the project *is*.
+            let edit = counter.next()
+            try SupervisionFileStore(fileURL: fileURL).save(
+                SupervisionFile(supervisors: [
+                    "acme-web": SupervisionSupervisorBinding(terminal: "t\(edit)")
+                ]))
+            return []
+        }
+    }
+
     private struct Fixture {
         let directory: URL
         let filePath: String
@@ -744,6 +781,33 @@ struct SupervisionStoreTests {
         #expect(status.projects.map(\.name) == ["acme-platform"])
         #expect(status.effectivelySupervising == false,
                 "the group is off until someone turns it on")
+    }
+
+    @Test("A gesture that keeps losing to an outside editor refuses by name, and writes nothing")
+    func repeatedExternalEditsExhaustTheRetries() async throws {
+        let web = Self.repo("acme-web")
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-supervision-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let fileURL = directory.appendingPathComponent("supervision.json")
+        let ledgerPath = directory.appendingPathComponent("ledger.jsonl").path
+        let counter = EditCounter()
+        let store = SupervisionStore(
+            files: SupervisionFileStore(fileURL: fileURL),
+            ledger: SupervisionLedgerWriter(path: ledgerPath),
+            fleet: EditingFleet(repoList: [web], fileURL: fileURL, counter: counter))
+
+        await #expect(throws: SupervisionStoreError.concurrentEdit(project: "acme-web")) {
+            _ = try await store.setProjectMark(project: "acme-web", on: true)
+        }
+
+        #expect(counter.count == 3, "bounded at three attempts rather than retrying forever")
+        // The refusal is the whole point: losing the race must not degrade into
+        // writing the mark against a file the gesture never read, nor into
+        // reporting success for something that did not happen.
+        let onDisk = try SupervisionFileStore(fileURL: fileURL).load()
+        #expect(onDisk.isMarked("acme-web") == false)
+        #expect(try lines(at: ledgerPath).isEmpty, "and nothing reaches the record")
     }
 
     // MARK: - An edit made outside this store

@@ -10,12 +10,30 @@ public enum SupervisionBrakeState: String, Codable, Sendable {
 
 /// `~/tbd/supervision/status.json` — the out-of-band heartbeat (design §14).
 ///
-/// Written on a fixed cadence, atomically, **regardless of the brake**:
-/// observability is never withheld, and the watchdog's rule ("if any project
-/// claims to be effectively on and this file has not changed in about ten
-/// minutes, raise a notification") needs the file fresh enough to read
-/// "engaged". `writtenAt` changes every tick so that rule works on content as
-/// well as on mtime.
+/// Always written atomically, and `writtenAt` changes on every write, so a
+/// reader can work on content as well as on mtime and never sees a torn file.
+///
+/// **When it is written, in full — this is the whole contract a watchdog needs:**
+///
+/// - at daemon start, once;
+/// - at every fleet brake edge, before the timer below is armed or disarmed;
+/// - and then on a fixed cadence **only while the brake is released**.
+///
+/// **Staleness is therefore a liveness signal only while `brake` reads
+/// `released`.** Under an engaged brake the daemon runs no periodic write at
+/// all, and a file that has not changed for hours means the fleet is paused,
+/// not that the daemon is gone. Reading it the other way produces exactly the
+/// false alarm this arrangement exists to prevent.
+///
+/// That costs the watchdog nothing, because its rule is *if any project claims
+/// to be **effectively on** and this file has not changed in about ten minutes,
+/// raise a notification* — and effectively on means a project's `on` **and** a
+/// released `brake`. A file saying `engaged` claims nothing is effectively on,
+/// so it cannot trip the rule however old it is. The freshness requirement
+/// binds precisely when the timer runs.
+///
+/// The brake is the only switch over this: there is no separate flag, and
+/// nothing here writes before an operator has released it.
 public struct SupervisionStatusFile: Codable, Sendable, Equatable {
     public static let currentSchemaVersion = 1
 

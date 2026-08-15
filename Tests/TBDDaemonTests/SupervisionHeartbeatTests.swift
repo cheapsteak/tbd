@@ -307,7 +307,12 @@ struct SupervisionHeartbeatTests {
         #expect(snapshots.calls == 1, "and the stale edge publishes nothing either")
     }
 
-    @Test("The heartbeat publishes an engaged brake — observability is never withheld")
+    // "Never withheld" would overstate it now: under an engaged brake there is
+    // no cadence, so what this pins is that a *write* — an edge, or boot —
+    // publishes the engaged state rather than declining to describe a paused
+    // fleet. The cadence's absence is pinned by
+    // `engagedBrakePublishesOnceAndArmsNoTimer`.
+    @Test("A write under an engaged brake publishes the engaged state, marks and all")
     func writesWhileTheBrakeIsEngaged() async throws {
         let path = try Self.path()
         let snapshots = Snapshots(Self.statusFile(
