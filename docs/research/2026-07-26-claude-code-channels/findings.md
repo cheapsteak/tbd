@@ -1,7 +1,8 @@
 # Draft-safe message injection: the Claude Code inbox socket and Codex app-server
 
 **Status:** Investigated, not implemented
-**Claude Code measured:** 2026-08-14 against Claude Code 2.1.233 on macOS 26.1
+**Claude Code measured:** 2026-08-14 and 2026-08-15 against Claude Code 2.1.233
+on macOS 26.1
 **Codex schema inspected:** 2026-07-26 with codex-cli 0.145.0
 
 This directory is named for Claude Code channels; the Claude Code mechanism it
@@ -20,8 +21,9 @@ no per-session consent prompt.
 Draft safety was measured directly. With an unsent draft sitting in the
 composer, an external Python script posted a message to the socket; the message
 was delivered and answered, and the draft was byte-for-byte unchanged
-afterward. This held in both the idle case (the message started a new turn) and
-the mid-turn case (the message was read during a turn already running).
+afterward. This held with the receiver idle, and with a turn already running —
+both when the message waited for that turn to finish and when it joined the
+turn in flight.
 
 The real constraint is not access, it is the receiver's **inbound gate**. A
 message can be delivered, held for approval, or dropped, depending on the
@@ -50,6 +52,16 @@ Official documentation:
 A broader external message-injection API is an open upstream feature request:
 [anthropics/claude-code#53049](https://github.com/anthropics/claude-code/issues/53049).
 
+TBD already ships against this mechanism, and those two documents are where to
+start before designing anything further on it:
+
+- [`docs/cross-session-messaging.md`](../../cross-session-messaging.md) — the
+  user-facing description of what TBD supports today.
+- [`docs/specs/2026-08-09-cross-session-messaging-design.md`](../../specs/2026-08-09-cross-session-messaging-design.md)
+  — the shipped design, including the decision to mirror the session registry
+  into the host store so TBD's per-profile config directories stay mutually
+  visible.
+
 ## How these findings were established
 
 Three kinds of evidence back the Claude Code sections, and each section says
@@ -76,8 +88,9 @@ against a running Codex session.
 61 rows present on the probe machine, every row carried `pid`, `sessionId`,
 `cwd`, `startedAt`, `procStart`, `version`, `peerProtocol`, `kind`,
 `entrypoint`, `name`, `status`, `statusUpdatedAt` and `updatedAt`; most also
-carried `tmux` (a target pane), `messagingSocketPath` and `nameSource`. Rows
-that carry `bridgeSessionId` are the link to cloud and Remote Control sessions.
+carried `tmux` (a target pane), `messagingSocketPath` and `nameSource`. Some rows
+carry `bridgeSessionId`; on the probe machine those were the rows belonging to
+cloud and Remote Control sessions.
 `status` is coarse — `idle`, `busy`, `waiting`, `shell`. **No transcript
 content appears in the registry.**
 
@@ -107,10 +120,10 @@ call:
 - **`CLAUDE_CODE_MESSAGING_SOCKET`** — this session's own socket path.
 - **`CLAUDE_CODE_MESSAGING_TOKEN`** — this session's **child** token.
 
-Each session exports its own pair, never one inherited from a parent. When a
-session starts before the feature flag that turns messaging on has resolved,
-both are exported once the fetch completes, so processes started earlier keep
-seeing them unset. `/status` shows the same path in its `Peer address` row,
+Each session exports its own pair, never one inherited from a parent. *Read
+from the 2.1.233 binary:* when a session starts before the feature flag that
+turns messaging on has resolved, both are exported once the fetch completes, so
+processes started earlier keep seeing them unset. `/status` shows the same path in its `Peer address` row,
 prefixed `uds:`.
 
 ## Wire protocol
@@ -138,7 +151,10 @@ warning. Optional fields on the user frame:
 - **`session_id`** — if present and it does not match the receiving session's
   ID, the message is dropped. This is the guard against a reused pid.
 - **`priority`** — `now`, `next`, or `later`; anything else falls back to
-  `next`.
+  `next`. *Measured:* posted to a session mid-turn, `next` waits for the
+  running turn to finish, while `now` joins that turn in flight and is answered
+  in the same assistant reply as the prompt already being worked on. `later`
+  was not exercised.
 - **`msg_id`** — correlates the sender-side delivery receipt described below.
 - **`uuid`** — the queue entry's identifier; one is generated if omitted.
 - **`file_attachments`** — materialized locally before the message is enqueued.
@@ -159,6 +175,13 @@ An injected user message is enqueued with `isMeta: true` and
 `skipSlashCommands: true`, so **a slash command inside an injected message is
 inert** — it arrives as plain text and is never executed. That is a meaningful
 safety property for anything built on this surface.
+
+**Measured.** The transcript entry an injected message produces carries
+`isMeta: true`, `promptSource: "system"`, `userType: "external"` and
+`origin: {"kind":"peer","from":"<the label the sender asserted>"}`. Posting the
+literal text `/help` drew a prose answer describing the session rather than the
+slash command's output, so the inert-slash-command property holds in practice
+and not only in the binary.
 
 The CLI logs its own injection recipe at bind time, which is the most direct
 citation for the format:
@@ -245,7 +268,7 @@ is what verifies the child. **A fire-and-exit script on macOS must therefore
 present the token**, or it is treated as asserting no permission class — which
 a bypass-permissions receiver holds for approval.
 
-*Documented.* One prerequisite sits underneath all of this: a Bash command
+**Documented.** One prerequisite sits underneath all of this: a Bash command
 running inside Claude Code's sandbox reaches the socket only if the sandbox's
 Unix-socket settings, `sandbox.network.allowAllUnixSockets` and
 `sandbox.network.allowUnixSockets`, permit it. That constrains the hook and
@@ -268,19 +291,30 @@ and appears in the listing. Bare mode binds no socket and does not appear
 
 ## Draft safety
 
-**Measured** on 2026-08-14 against Claude Code 2.1.233 on macOS 26.1. A
-throwaway interactive session was started in its own tmux server, and an
-unrelated external Python process — no Claude involved, no auth token
-presented — posted a message to that session's socket. The composer's rendered
-draft line was captured before and after and compared byte-for-byte.
+**Measured** against Claude Code 2.1.233 on macOS 26.1. A throwaway
+interactive session ran in its own tmux server, and an unrelated external
+Python process — no Claude involved, no auth token presented — posted messages
+to that session's socket with [`inject-message.py`](inject-message.py). A
+distinct sentinel string was typed into the composer and left unsent before
+each post, and the composer region of the rendered pane was captured before and
+after and compared byte-for-byte.
 
-- **Idle receiver, unsent draft present.** The message was delivered, rendered
-  in the conversation, and started a new turn that ran to completion. The draft
-  was unchanged afterward.
-- **Mid-turn receiver, unsent draft typed while the turn ran.** The session's
-  registry `status` was confirmed `busy` immediately before and after the post.
-  The message was delivered and answered, and the draft was unchanged
-  afterward.
+- **Idle receiver.** The message was delivered, rendered in the conversation,
+  and started a new turn that ran to completion. The composer was unchanged:
+  same byte length, same SHA-256 before and after.
+- **Turn already running, default `priority: next`.** The registry `status` was
+  confirmed `busy` when the draft was typed, immediately before the post, and
+  immediately after it. The message waited for the running turn to finish and
+  was answered once it did. The composer was captured both while that turn was
+  still running and again after the session went idle; both matched the before
+  capture byte for byte.
+- **Turn already running, `priority: now`.** The message joined the turn in
+  flight: the transcript records it ahead of that turn's assistant reply, and
+  the reply answered the injected message and the original prompt together. The
+  composer was again identical before and after.
+
+Four posts in all landed on one session while an unsent draft sat in its
+composer, and the draft's bytes never changed.
 
 This is the property that matters for scheduled delivery: a message arriving on
 the socket does not compete with a person typing. It establishes the behavior
@@ -318,7 +352,9 @@ library only.
 - **[`inject-message.py`](inject-message.py)** — posts a user message to a
   socket. Defaults the target to `$CLAUDE_CODE_MESSAGING_SOCKET` and sends the
   `CLAUDE_CODE_MESSAGING_TOKEN` auth frame when one is available. Takes
-  `--from`, `--priority` and `--session-id`.
+  `--from`, `--priority`, `--session-id` and `--no-token`. Pass `--no-token`
+  whenever `--socket` names a session other than your own: the environment's
+  token belongs to your session and means nothing to a different one.
 - **[`list-sessions.py`](list-sessions.py)** — reads the session registry from
   `$CLAUDE_CONFIG_DIR/sessions`, falling back to `~/.claude/sessions`, and
   prints live peers with pid, name, status, cwd and socket, skipping rows whose
@@ -380,9 +416,10 @@ documented integration point for TBD.
 
 ## Unknowns and limitations
 
-- Draft preservation is established for Claude Code 2.1.233 on macOS. It is not
-  a compatibility guarantee for future versions, and it was not re-measured on
-  Linux.
+- Draft preservation is established for Claude Code 2.1.233 on macOS, for a
+  single-line composer draft. It is not a compatibility guarantee for future
+  versions, it was not re-measured on Linux, and a multi-line or
+  attachment-bearing draft was not tested.
 - The own-child macOS seam — that a fire-and-exit poster needs the token — was
   not reproduced against a bypass-permissions receiver; it rests on the
   documentation and on the binary's verification logic.
@@ -422,10 +459,14 @@ Three consequences follow for TBD specifically:
   session to a worktree without reading terminal content. Sending `session_id`
   on the user frame makes a reused pid a dropped message rather than a
   misdelivered one.
-- **The registry fragments per profile.** TBD gives each model profile its own
-  `CLAUDE_CONFIG_DIR`, so the daemon must look under the profile the session
-  was spawned with, not under `~/.claude`. The socket directory is per OS user
-  and does not fragment.
+- **The registry fragments per config directory, and TBD already un-fragments
+  it.** TBD gives each model profile its own `CLAUDE_CONFIG_DIR`, which would
+  otherwise leave profiles mutually invisible to one another.
+  `ClaudeProfileConfigDirManager` lists `sessions` among its host-mirror slots,
+  so every profile's `sessions/` is a symlink to the single host store and a
+  TBD session is discoverable whichever profile spawned it. The daemon should
+  read the host store rather than hunt for a per-profile copy. The socket
+  directory is per OS user and never fragmented.
 - **Delivery is gated at the receiver, so it must be arranged at spawn.** A
   fleet session running in bypass-permissions mode holds an unauthenticated
   message. TBD would need to pass `crossSessionInbound: accept` in the
