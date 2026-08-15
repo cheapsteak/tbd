@@ -148,9 +148,14 @@ than being one caller's private bookkeeping. This is the operation the caller
 now uses for "retire this from my working set," which under v1 it had to
 approximate with `stop`.
 
-**If you ignore it.** The caller offers no archive action for your sessions.
-Whatever archive concept you have stays internal to your backend, and `archived`
-(if you report it) is read-only from the caller's point of view.
+**If you ignore it.** The caller still has an archive action, because retiring a
+session from *its* own working set is its decision to make; what changes is how
+much of that reaches you. It composes over what you declare — with `stop`
+declared it terminates the session and files it as retired on its side, and with
+neither verb declared it files it on its side and calls you not at all. What you
+lose is the shared state: your backend never learns the session was retired, so
+`archived` (if you report it) is read-only from the caller's point of view, and
+the retirement is invisible to your other clients.
 
 A note on what archiving means to your backend: it is worth being explicit in
 your own documentation about whether an archived session still accepts input. If
@@ -196,7 +201,13 @@ The recommendation, in order:
 1. **Declare both `stop` and `archive`.** Your one operation genuinely provides
    both meanings, so declaring both capabilities is more accurate than declaring
    only `stop`. Pointing both verbs at the same underlying operation is
-   acceptable and is the smallest correct change.
+   acceptable and is the smallest correct change. It also earns your sessions
+   the protections a caller reserves for termination: TBD reads a declared
+   `stop` as "this backend can end compute" and, on such a provider, guards
+   archiving the same way it guards stopping — refusing without an explicit
+   force while the agent is mid-task or the remote checkout is known dirty.
+   Declaring `archive` alone tells it the opposite, so archiving through you is
+   treated as the filing change you said it was.
 2. **Then consider whether they should become separable operations.** Ask
    whether your backend can terminate compute without retiring the session
    record, and whether it can retire the record while leaving compute alone. If
@@ -317,12 +328,16 @@ repository's configured remote must match `remote_url`, the branch must exist on
 the remote, and the target workspace path must be free.
 
 With `forks: true`, the caller presents the landed copy and the remote session
-as two independent lines of work: it records the link between them, retires
-neither, and never implies that typing in one reaches the other. Landing the
-same session twice produces a second workspace on a suffixed branch
-(`<branch>-2`, then `-3`) from the same commit, because one branch cannot be
-checked out into two workspaces — deliberately, since two landings are two
-independent lines of work.
+as two independent lines of work and never implies that typing in one reaches
+the other. What it then does with your session is caller policy rather than
+contract, and it is worth knowing which way TBD goes: having brought the work
+to the user's own machine, it retires the session from the working set — an
+`archive` call right after the `land`, if you declare `archive`, and nothing at
+all if you don't. It never calls `stop` on the strength of a landing, whichever
+capabilities you declare, because landing is not a teardown and your box may
+still hold work that was never pushed. With `forks: false` it leaves the session
+in the working set untouched, since the landed copy and the session are one
+conversation.
 
 Landing is always a user gesture. The caller never triggers it from session
 state, so implementing `land` does not expose you to background invocations.
@@ -427,6 +442,46 @@ majors. Inside `describe` it is worse than unnecessary: there the value
 describes the caller rather than any agreement with you, and branching on it is
 the mistake the MUST-NOT-vary rule above exists to prevent.
 
+## 8. Worktree identity keys — new since v1, but not a v2 change
+
+**What they are.** Two well-known `meta` keys on the Session object,
+`tbd_worktree_id` and `tbd_parent_worktree_id`, both UUID strings. The first is
+the session's own lane identity; the second names the lane that spawned it. The
+normative rules — including what the caller does with a value that is absent,
+malformed, or names a lane it already has — are under Worktree identity keys in
+the contract.
+
+**Why they are in this guide even though they are not a v2 delta.** They ride
+inside `meta`, which is a provider-defined map at every major, so they are
+readable at contract major 1 and 2 alike. You can populate them without
+declaring `[1, 2]`, and declaring `[1, 2]` does not oblige you to. They are here
+because they did not exist when v1 was published, so a v1 implementer who reads
+only the version delta would never learn about them.
+
+**Required?** No. A provider that sets neither is fully conformant, and the
+caller mints identifiers of its own. Both values are things a caller tells you
+rather than things you can look up, and the contract's `create` stdin does not
+yet carry either one — so until it does, populate them only where your own
+registration or invocation path already hands you the value.
+
+**What you gain.** A spawned session lands in the caller's tree instead of a
+flat list. `tbd_parent_worktree_id` nests it beneath the lane that spawned it,
+so a fan-out reads as the hierarchy it actually is — which is what makes a
+remote session orchestratable rather than merely watchable. `tbd_worktree_id`
+makes the binding between session and row self-healing: if the caller loses the
+row while the session is still running, the echo lets it recreate the row under
+the same identity rather than minting a second one.
+
+**What you must not do.** Never invent either value. Both describe caller-side
+facts you were told, not facts you discovered; a made-up identifier names no
+lane, and for `tbd_worktree_id` it defeats the echo it exists to serve. If you
+were told nothing, omit the key.
+
+**If you ignore them.** Sessions still get their rows. They appear at top level
+in their repository rather than nested, and the caller mints a fresh identity
+for each — so an agent inside the session has no ambient lane identity of its
+own.
+
 ## What to do if you maintain a v1 provider
 
 In order, most value per unit of effort:
@@ -464,7 +519,12 @@ In order, most value per unit of effort:
    few lines returning metadata you already track. Emit plain ref names and a
    normal clone URL so the caller's validation passes without incident.
 
-7. **If you cannot terminate a running session at all, drop `stop`** — and in
+7. **If you are told a worktree identity, echo it back.** Two `meta` strings
+   (section 8), readable at either major, and they are what put a spawned
+   session in the caller's tree nested under the lane that spawned it. Never
+   invent a value you were not given.
+
+8. **If you cannot terminate a running session at all, drop `stop`** — and in
    that case declare `contract_versions: [2]` only, since v1 requires it.
 
-Anything not on this list requires no action.
+Anything not on this list requires no action to remain conformant.
