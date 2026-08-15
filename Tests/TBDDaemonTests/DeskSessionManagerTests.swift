@@ -119,6 +119,26 @@ private final class PaneIdentities: @unchecked Sendable {
     }
 }
 
+/// Fires exactly once, so a dry-run tmux hook can stand in for a concurrent
+/// event at a deterministic point inside one spawn instead of racing it.
+private final class OneShotLatch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var armed = false
+
+    func arm() {
+        lock.lock(); defer { lock.unlock() }
+        armed = true
+    }
+
+    /// True once, for the first caller after `arm()`.
+    func consume() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard armed else { return false }
+        armed = false
+        return true
+    }
+}
+
 private final class SpawnFailureSwitch: @unchecked Sendable {
     private let lock = NSLock()
     private var failing = false
@@ -1737,6 +1757,108 @@ extension TBDHomeSerialized {
             #expect(
                 errors.first?.message?.contains("could not start an agent") == true,
                 "the notification must name what stopped: \(errors.first?.message ?? "nil")")
+        }
+
+        /// Gate 2 tracks the terminal this rail spawned, so it has to know which
+        /// one that is. Diffing the terminal table around the spawn does not:
+        /// the desk is an ordinary sidebar-visible scratch worktree and the
+        /// actor's gate serializes only its own methods, so a terminal the user
+        /// opens *while the spawn is in flight* falls inside the before/after
+        /// window and gets adopted as the tracked replacement.
+        ///
+        /// The consequence is the failure mode this whole PR is about, reached
+        /// by a different road: a shell adopted that way can never be proven
+        /// absent by an agent-kind consultation, so gate 2 stays shut and the
+        /// desk quietly stops restaffing itself.
+        ///
+        /// The interleave is deterministic rather than raced — the dry-run tmux
+        /// recorder fires inside `spawnPrimaryTerminals`, so the intruder row is
+        /// written from there, landing strictly between the two snapshots the
+        /// old code compared. A test that raced a real task here would be timing
+        /// dependent and would pass on the broken code most of the time.
+        @Test("a terminal opened during the spawn is not mistaken for the replacement")
+        func testConcurrentTerminalIsNotAdoptedAsTheReplacement() async throws {
+            let f = try makeDeskFixture(tag: "staff-spawn-identity")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            let original = try #require(
+                try await f.db.terminals.list(worktreeID: desk.id)
+                    .first(where: { $0.label == TerminalLabel.claudeCode }))
+
+            // Second manager over the same database, whose tmux writes the
+            // intruder row mid-spawn. Fires once, on the recovery spawn only.
+            let intruderID = UUID()
+            let armed = OneShotLatch()
+            let writer = f.db.writerForTests
+            // The window is opened by `spawnPrimaryTerminals`, which runs on the
+            // LIFECYCLE's tmux — not the manager's. Hanging this recorder only on
+            // the manager's would never fire, the intruder row would never land,
+            // and the test would pass against the very code it is meant to pin.
+            let openIntruderMidSpawn: (@Sendable ([String]) -> Void) = { args in
+                guard args.contains("new-window") || args.contains("new-session"),
+                      armed.consume() else { return }
+                // A user opening a shell in the desk, right now.
+                try? writer.write { conn in
+                    try conn.execute(
+                        sql: """
+                            INSERT INTO terminal
+                            (id, worktreeID, tmuxWindowID, tmuxPaneID, label, createdAt, kind)
+                            VALUES (?, ?, '@99', '%99', 'shell', ?, 'shell')
+                            """,
+                        arguments: [
+                            intruderID.uuidString, desk.id.uuidString,
+                            Date().addingTimeInterval(60),
+                        ])
+                }
+            }
+            let manager = DeskSessionManager(
+                db: f.db,
+                lifecycle: WorktreeLifecycle(
+                    db: f.db, git: GitManager(),
+                    tmux: TmuxManager(dryRun: true, dryRunRecorder: openIntruderMidSpawn),
+                    hooks: HookResolver()),
+                tmux: TmuxManager(
+                    dryRun: true,
+                    dryRunRecorder: openIntruderMidSpawn,
+                    dryRunWindowIsDead: { f.dead.isDead($0) },
+                    dryRunWindowExistence: { _, windowID in f.dead.existence(windowID) },
+                    dryRunPaneCurrentCommand: { _, paneID in f.commands.command(for: paneID) },
+                    dryRunPaneSendTarget: { _, paneID in try f.identities.answer(for: paneID) }
+                ),
+                skillDir: f.home.appendingPathComponent("skills/nightwatch").path,
+                actuationLog: makeTestActuationLog()
+            )
+
+            f.identities.set(.missing, for: original.tmuxPaneID)
+            f.dead.markDead(original.tmuxWindowID)
+            armed.arm()
+            _ = try await manager.ensureDeskSession(mode: .daywatch)
+
+            #expect(
+                try await f.db.terminals.get(id: intruderID) != nil,
+                "fixture check: the intruder must have landed mid-spawn")
+
+            // Kill the agents only; the user's shell stays open, as it would.
+            for terminal in try await f.db.terminals.list(worktreeID: desk.id)
+            where terminal.id != intruderID {
+                f.identities.set(.missing, for: terminal.tmuxPaneID)
+                f.dead.markDead(terminal.tmuxWindowID)
+            }
+
+            // The replacement is dead. If the shell had been adopted as the
+            // tracked replacement, gate 2 could never clear — a shell is not an
+            // agent candidate, so no consultation can ever prove it absent — and
+            // this death would buy nothing.
+            let before = try await f.db.terminals.list(worktreeID: desk.id).count
+            _ = try await manager.ensureDeskSession(mode: .daywatch)
+            let after = try await f.db.terminals.list(worktreeID: desk.id).count
+            #expect(
+                after == before + 1,
+                "a terminal opened during the spawn must not wedge gate 2 shut")
+            #expect(
+                try await f.db.terminals.get(id: intruderID) != nil,
+                "the user's terminal is not this rail's to touch")
         }
 
         /// The give-up notification is the only user-visible sign that the desk
