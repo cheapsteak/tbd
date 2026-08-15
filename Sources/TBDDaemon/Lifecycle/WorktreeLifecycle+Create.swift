@@ -874,18 +874,6 @@ extension WorktreeLifecycle {
         return .repoLevel
     }
 
-    /// True when git's stderr says it *refused to write the ref* because the
-    /// name was already taken. Three phrasings mean it, all verified against
-    /// git 2.50 — the first from `worktree add -b`, the other two from the
-    /// fork-PR leg's `fetch refs/pull/<n>/head:refs/heads/<name>`:
-    ///
-    /// - `fatal: a branch named 'x' already exists`
-    /// - ` ! [rejected]  refs/pull/7/head -> x  (non-fast-forward)` — a fetch
-    ///   only ever rejects a destination ref that already exists, so the line
-    ///   says the same thing the `fatal:` one does.
-    /// - `fatal: refusing to fetch into branch 'refs/heads/x' checked out at
-    ///   '<path>'` — a ref cannot be checked out unless it exists.
-    ///
     /// The branch a single create attempt is on the hook for, and everything
     /// that attempt knows about it that `cleanUpFailedWorktreeAdd` cannot
     /// reconstruct after the fact.
@@ -934,6 +922,18 @@ extension WorktreeLifecycle {
     /// answer from its own bookkeeping: whether the branch standing there now is
     /// one this attempt created. Git refusing to write it settles that — it
     /// isn't.
+    ///
+    /// Three phrasings mean that refusal, all verified against git 2.50 — the
+    /// first from `worktree add -b`, the other two from the fork-PR leg's
+    /// `fetch refs/pull/<n>/head:refs/heads/<name>`. Each of them says the
+    /// name was already taken:
+    ///
+    /// - `fatal: a branch named 'x' already exists`
+    /// - ` ! [rejected]  refs/pull/7/head -> x  (non-fast-forward)` — a fetch
+    ///   only ever rejects a destination ref that already exists, so the line
+    ///   says the same thing the `fatal:` one does.
+    /// - `fatal: refusing to fetch into branch 'refs/heads/x' checked out at
+    ///   '<path>'` — a ref cannot be checked out unless it exists.
     ///
     /// Matched loosely (any branch name, not just ours) on purpose, and the
     /// direction of that looseness is what makes widening it safe: every extra
