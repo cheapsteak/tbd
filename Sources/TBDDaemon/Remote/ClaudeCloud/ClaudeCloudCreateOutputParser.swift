@@ -15,11 +15,10 @@ import TBDShared
 enum ClaudeCloudCreateOutputParser {
     static let titlePrefix = "Created cloud session: "
     /// The vendor's id shape. Fixed, and printed on all three lines, which is
-    /// what makes disagreement detectable.
-    /// `nonisolated(unsafe)`: a `Regex` literal is immutable after
-    /// construction and only ever read, so sharing it across threads is safe
-    /// — the same rationale as `TranscriptParser.iso8601`.
-    nonisolated(unsafe) private static let idPattern = /session_[A-Za-z0-9]+/
+    /// what makes disagreement detectable. A computed property rather than a
+    /// stored `static let`, so building it sidesteps `Regex`'s missing
+    /// `Sendable` conformance instead of reaching for `nonisolated(unsafe)`.
+    private static var idPattern: Regex<Substring> { /session_[A-Za-z0-9]+/ }
 
     enum ParseFailure: Error, Equatable {
         case noSessionID
@@ -58,7 +57,13 @@ enum ClaudeCloudCreateOutputParser {
     /// the pty reports inserts a real newline mid-title.
     static func title(fromOutput raw: String) -> String? {
         let text = ANSIEscape.strip(raw)
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        // `split(separator: "\n")` treats `\n` as one specific Character and
+        // does not split `"\r\n"` at all — CRLF is a single grapheme cluster
+        // in Swift, distinct from `"\n"`. A pty's canonical line discipline
+        // emits CRLF by default, and `create` runs on a pty, so that is the
+        // realistic case here, not an edge case. `.isNewline` recognizes
+        // `\r\n`, lone `\r`, and lone `\n` alike as one separator each.
+        let lines = text.split(omittingEmptySubsequences: false, whereSeparator: { $0.isNewline })
             .map { String($0).trimmingCharacters(in: .whitespaces) }
         guard let start = lines.firstIndex(where: { $0.hasPrefix(titlePrefix) }) else {
             return nil

@@ -100,4 +100,47 @@ struct ClaudeCloudCreateOutputParserTests {
         #expect(try ClaudeCloudCreateOutputParser.sessionID(fromOutput: output).get()
             == "session_01AAAAAAAAAAAAAAAAAAAAAA")
     }
+
+    /// A pty's canonical line discipline emits `\r\n`, and `"\r\n"` is ONE
+    /// `Character` in Swift — distinct from `"\n"` — so a naive
+    /// `split(separator: "\n")` does not split this at all. Built by
+    /// concatenation with explicit `\r\n`, not a triple-quoted literal:
+    /// Swift's compiler normalizes triple-quoted literals to bare `\n`, which
+    /// is exactly why the suite's other wrapped-title test could not have
+    /// caught this — it structurally cannot construct CRLF.
+    @Test func aWrappedTitleLineWithRealCRLFIsStillRejoinedCleanly() {
+        let wrapped = "Created cloud session: Add probe pong\r\nreply\r\n"
+            + "View: https://claude.ai/code/session_01AAA?from=cli\r\n"
+            + "Resume with: claude --teleport session_01AAA\r\n"
+        #expect(ClaudeCloudCreateOutputParser.title(fromOutput: wrapped)
+            == "Add probe pong reply")
+    }
+
+    // MARK: - The title's three line-terminator branches, independently
+
+    /// A blank line ends the title even with no trailing `View:`/`Resume
+    /// with:` line to catch it.
+    @Test func aBlankLineEndsTheTitle() {
+        let output = "Created cloud session: Add probe pong reply\n\nignored trailer\n"
+        #expect(ClaudeCloudCreateOutputParser.title(fromOutput: output)
+            == "Add probe pong reply")
+    }
+
+    /// A `View:` line ends the title even with no blank line before it.
+    @Test func aViewLineEndsTheTitle() {
+        let output = "Created cloud session: Add probe pong reply\n"
+            + "View: https://claude.ai/code/session_01AAA?from=cli\n"
+        #expect(ClaudeCloudCreateOutputParser.title(fromOutput: output)
+            == "Add probe pong reply")
+    }
+
+    /// A `Resume with:` line ends the title even with no `View:` line before
+    /// it (the `--print`-refused form never omits `View:`, but the parser
+    /// does not assume that — each terminator is checked independently).
+    @Test func aResumeWithLineEndsTheTitle() {
+        let output = "Created cloud session: Add probe pong reply\n"
+            + "Resume with: claude --teleport session_01AAA\n"
+        #expect(ClaudeCloudCreateOutputParser.title(fromOutput: output)
+            == "Add probe pong reply")
+    }
 }
