@@ -186,6 +186,122 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// The provider's declared capability set, read from the cached
+    /// `describe` response `providerStatuses()` already exposes — the same
+    /// data the app reads client-side via
+    /// `remoteProviders.first { ... }?.describe?.capabilities`
+    /// (`AppState+Remote.swift`). No new manager surface: this is a read of
+    /// existing state, not a probe.
+    private func declaredCapabilities(_ manager: RemoteProviderManager, provider: String) async -> Set<String> {
+        let status = await manager.providerStatuses().first { $0.config.name == provider }
+        return Set(status?.describe?.capabilities ?? [])
+    }
+
+    private static func missingCapabilityResponse(provider: String, capability: String) -> RPCResponse {
+        RPCResponse(error:
+            "provider '\(provider)' has not declared capability '\(capability)' " +
+            "(docs/remote-provider-contract.md § \(capability) <id>)")
+    }
+
+    /// Retires a session from the working inventory
+    /// (`docs/remote-provider-contract.md` § `archive <id>` / `unarchive
+    /// <id>`). Mirrors `handleRemoteStop`'s shape exactly: same gate, same
+    /// stale-snapshot guard, same timeout/failureClass handling, same
+    /// best-effort mirror upsert of whatever session object the provider
+    /// hands back — so the row reflects the new `archived` value immediately
+    /// rather than waiting for the next poll.
+    ///
+    /// The one addition is the capability check below. `archive` is
+    /// optional, and the contract states a caller "MUST NOT invoke a verb
+    /// whose capability the provider has not declared" — unlike `rename`
+    /// (whose doc comment explains why it skips this check: the app already
+    /// decides there), nothing upstream of this handler is trusted to have
+    /// checked, so it refuses before any process is spawned rather than
+    /// letting the refusal masquerade as an ordinary provider failure.
+    func handleRemoteArchive(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
+        guard let manager = try await remoteGate() else {
+            return Self.remoteBackendsDisabledResponse
+        }
+        let params = try decoder.decode(RemoteArchiveParams.self, from: paramsData)
+        if await manager.hasStaleSnapshot(provider: params.provider) {
+            return Self.staleSnapshotMutationResponse(provider: params.provider)
+        }
+        guard await declaredCapabilities(manager, provider: params.provider).contains("archive") else {
+            return Self.missingCapabilityResponse(provider: params.provider, capability: "archive")
+        }
+        let actuationID = try await beginActuation(
+            .remoteArchive, actor: actor,
+            target: .remote(provider: params.provider, session: params.sessionID))
+        let result: ProviderResult
+        do {
+            result = try await manager.invoke(
+                providerName: params.provider, verb: ["archive", params.sessionID], stdin: nil, timeout: 30)
+        } catch let error as ProviderRunError {
+            remoteHandlerLogger.error("remote.archive provider=\(params.provider, privacy: .public) timed out")
+            let message = Self.friendlyMessage(for: error, provider: params.provider)
+            await finishActuation(actuationID, .transportFailed, error: message)
+            return RPCResponse(error: message)
+        }
+        if result.failureClass != nil {
+            let message = result.decodedError?.message ?? "archive failed (exit \(result.exitCode))"
+            remoteHandlerLogger.error(
+                "remote.archive provider=\(params.provider, privacy: .public) failed: \(message, privacy: .public)")
+            await finishActuation(actuationID, .transportFailed, error: message)
+            return RPCResponse(error: message)
+        }
+        if let session = try? result.decoded(RemoteSessionPayload.self) {
+            await manager.applyUpsert(session, provider: params.provider)
+        }
+        await finishActuation(actuationID, .dispatched)
+        return .ok()
+    }
+
+    /// Returns an archived session to the working inventory. See
+    /// `handleRemoteArchive`'s doc comment for the shared shape and the
+    /// capability-check rationale; this differs only in verb and capability
+    /// name.
+    func handleRemoteUnarchive(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
+        guard let manager = try await remoteGate() else {
+            return Self.remoteBackendsDisabledResponse
+        }
+        let params = try decoder.decode(RemoteUnarchiveParams.self, from: paramsData)
+        if await manager.hasStaleSnapshot(provider: params.provider) {
+            return Self.staleSnapshotMutationResponse(provider: params.provider)
+        }
+        guard await declaredCapabilities(manager, provider: params.provider).contains("unarchive") else {
+            return Self.missingCapabilityResponse(provider: params.provider, capability: "unarchive")
+        }
+        let actuationID = try await beginActuation(
+            .remoteUnarchive, actor: actor,
+            target: .remote(provider: params.provider, session: params.sessionID))
+        let result: ProviderResult
+        do {
+            result = try await manager.invoke(
+                providerName: params.provider, verb: ["unarchive", params.sessionID], stdin: nil, timeout: 30)
+        } catch let error as ProviderRunError {
+            remoteHandlerLogger.error("remote.unarchive provider=\(params.provider, privacy: .public) timed out")
+            let message = Self.friendlyMessage(for: error, provider: params.provider)
+            await finishActuation(actuationID, .transportFailed, error: message)
+            return RPCResponse(error: message)
+        }
+        if result.failureClass != nil {
+            let message = result.decodedError?.message ?? "unarchive failed (exit \(result.exitCode))"
+            remoteHandlerLogger.error(
+                "remote.unarchive provider=\(params.provider, privacy: .public) failed: \(message, privacy: .public)")
+            await finishActuation(actuationID, .transportFailed, error: message)
+            return RPCResponse(error: message)
+        }
+        if let session = try? result.decoded(RemoteSessionPayload.self) {
+            await manager.applyUpsert(session, provider: params.provider)
+        }
+        await finishActuation(actuationID, .dispatched)
+        return .ok()
+    }
+
     func handleRemoteSend(
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {

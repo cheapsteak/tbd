@@ -104,6 +104,17 @@ enum ActuationSurface: CaseIterable, Sendable {
     case remoteCreate
     case remoteStop
     case remoteSend
+    /// Retires a remote session from the working inventory
+    /// (`docs/remote-provider-contract.md` § `archive <id>`) — same shape as
+    /// `worktreeArchive`'s `dispose`, one level down: this is the provider
+    /// verb the daemon-side worktree archive path (Task 5) invokes underneath
+    /// its own row, not a second row for the same act.
+    case remoteArchive
+    /// Returns an archived remote session to the working inventory
+    /// (`docs/remote-provider-contract.md` § `unarchive <id>`) — `spawn`,
+    /// matching `worktreeRevive`'s kind for the same reason: it brings a
+    /// retired lane back into use.
+    case remoteUnarchive
 
     /// The exact public method name that carries this surface's requests.
     var method: String {
@@ -134,6 +145,8 @@ enum ActuationSurface: CaseIterable, Sendable {
         case .remoteCreate: return RPCMethod.remoteCreate
         case .remoteStop: return RPCMethod.remoteStop
         case .remoteSend: return RPCMethod.remoteSend
+        case .remoteArchive: return RPCMethod.remoteArchive
+        case .remoteUnarchive: return RPCMethod.remoteUnarchive
         }
     }
 
@@ -146,9 +159,9 @@ enum ActuationSurface: CaseIterable, Sendable {
         case .terminalCreate, .terminalRecreateWindow, .terminalSwapProfile,
              .terminalContinueInCodex, .terminalHistoryRevive, .worktreeCreate,
              .scratchCreate, .worktreeRevive, .worktreeReviveConversationFresh,
-             .worktreeRerunPreSession, .remoteCreate: return .spawn
+             .worktreeRerunPreSession, .remoteCreate, .remoteUnarchive: return .spawn
         case .terminalDelete, .worktreeArchive, .worktreeForget, .repoRemove,
-             .scratchDelete, .scratchArchive, .remoteStop: return .dispose
+             .scratchDelete, .scratchArchive, .remoteStop, .remoteArchive: return .dispose
         case .terminalHibernate, .terminalSuspend, .worktreeSuspend: return .hibernate
         case .terminalWake, .terminalResume, .worktreeResume: return .wake
         }
