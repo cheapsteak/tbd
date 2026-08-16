@@ -178,7 +178,8 @@ public actor SupervisionLedgerWriter {
             case .projectOff: open.removeValue(forKey: project)
             // A line of a kind this build does not recognize neither opens a
             // span nor closes one. It is somebody else's record, read past.
-            case .brakeEngaged, .brakeReleased, .modeChanged, .unrecognized: break
+            case .brakeEngaged, .brakeReleased, .modeChanged, .deskSpawned, .deskReplaced,
+                 .unrecognized: break
             }
         }
         if skipped > 0 {
