@@ -526,14 +526,14 @@ struct GeneralSettingsTab: View {
         let capabilities = appState.daemonCapabilities
         let enabled = capabilities?.claudeCloudEnabled ?? false
         let live = capabilities?.claudeCloudLive ?? false
+        let remoteEnabled = capabilities?.remoteBackendsEnabled ?? false
         Toggle("Enable Claude cloud sessions", isOn: Binding(
             get: { enabled },
             set: { newValue in Task { await appState.setClaudeCloudEnabled(newValue) } }
         ))
-        .disabled(!AppState.claudeCloudToggleOperable(
-            remoteBackendsEnabled: capabilities?.remoteBackendsEnabled ?? false))
+        .disabled(!AppState.claudeCloudToggleOperable(remoteBackendsEnabled: remoteEnabled))
         .help("Creates and watches Claude Code sessions running on Anthropic's hosted infrastructure. Requires remote agent sessions above, and a daemon restart before anything is polled. Off by default (soaking).")
-        Text(AppState.claudeCloudStatusCaption(enabled: enabled, live: live))
+        Text(AppState.claudeCloudStatusCaption(enabled: enabled, live: live, remoteBackendsEnabled: remoteEnabled))
             .font(.caption)
             .foregroundStyle(.secondary)
     }

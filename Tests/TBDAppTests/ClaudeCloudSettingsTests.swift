@@ -25,26 +25,65 @@ struct ClaudeCloudSettingsTests {
         defaults.removePersistentDomain(forName: name)
     }
 
-    // MARK: - The caption, one case per branch
+    // MARK: - The caption, one case per reachable (enabled, live, remoteBackendsEnabled) branch
+    //
+    // `config.setClaudeCloud` persists `enabled` unconditionally — it does not
+    // check the outer remote-sessions flag — so `enabled` can be true while
+    // `remoteBackendsEnabled` is false, and a caption that only looked at
+    // (enabled, live) could describe that state as "on" when a restart right
+    // now would not actually start cloud sessions. Every branch below is a
+    // state genuinely reachable by toggling the two flags independently and
+    // optionally restarting.
 
-    @Test func captionOffAndNeverLive() {
-        #expect(AppState.claudeCloudStatusCaption(enabled: false, live: false)
+    @Test func captionOffNeverLiveRemoteAlsoOff() {
+        #expect(AppState.claudeCloudStatusCaption(enabled: false, live: false, remoteBackendsEnabled: false)
+                == "Off. Turning this on requires remote sessions above enabled and a daemon restart before cloud sessions appear.")
+    }
+
+    @Test func captionOffNeverLiveRemoteOn() {
+        #expect(AppState.claudeCloudStatusCaption(enabled: false, live: false, remoteBackendsEnabled: true)
                 == "Off. Turning this on requires a daemon restart before cloud sessions appear.")
     }
 
-    @Test func captionOnButNotYetRestarted() {
-        #expect(AppState.claudeCloudStatusCaption(enabled: true, live: false)
+    @Test func captionOnButNotYetRestartedRemoteOn() {
+        #expect(AppState.claudeCloudStatusCaption(enabled: true, live: false, remoteBackendsEnabled: true)
                 == "On, but restart the daemon before cloud sessions appear.")
     }
 
-    @Test func captionOnAndLive() {
-        #expect(AppState.claudeCloudStatusCaption(enabled: true, live: true)
+    /// The brief's original two-argument signature would have said "On, but
+    /// restart the daemon before cloud sessions appear" here too — implying a
+    /// restart alone is sufficient. It is not: the outer flag also has to be
+    /// turned on before a restart can make cloud live.
+    @Test func captionOnButNotYetRestartedRemoteOff() {
+        #expect(AppState.claudeCloudStatusCaption(enabled: true, live: false, remoteBackendsEnabled: false)
+                == "On, but remote sessions above are off — enable both, then restart the daemon before cloud sessions appear.")
+    }
+
+    @Test func captionOnAndLiveRemoteOn() {
+        #expect(AppState.claudeCloudStatusCaption(enabled: true, live: true, remoteBackendsEnabled: true)
                 == "On and running — cloud sessions are being polled.")
     }
 
-    @Test func captionOffButStillLiveFromBeforeTheChange() {
-        #expect(AppState.claudeCloudStatusCaption(enabled: false, live: true)
-                == "Off, but the provider registered before this change is still live in the daemon — restart to fully stop it.")
+    /// The brief's original two-argument signature would have said "On and
+    /// running" here too — reachable by enabling both, restarting, then
+    /// turning the outer flag off again without restarting. The toggle greys
+    /// out via `claudeCloudToggleOperable`, but the caption must not still
+    /// claim cloud sessions are being polled: a restart right now would stop
+    /// them.
+    @Test func captionOnAndLiveRemoteOff() {
+        #expect(AppState.claudeCloudStatusCaption(enabled: true, live: true, remoteBackendsEnabled: false)
+                == "On, but remote sessions above are now off — restarting will stop cloud sessions unless you re-enable remote sessions above first.")
+    }
+
+    /// `(enabled: false, live: true)` is unaffected by the outer flag's
+    /// current value: turning the cloud flag off already guarantees the next
+    /// restart will not bring cloud back, regardless of `remoteBackendsEnabled`
+    /// — so both values of the outer flag must produce the identical message.
+    @Test func captionOffButStillLiveIsUnaffectedByRemoteFlag() {
+        let withRemoteOn = AppState.claudeCloudStatusCaption(enabled: false, live: true, remoteBackendsEnabled: true)
+        let withRemoteOff = AppState.claudeCloudStatusCaption(enabled: false, live: true, remoteBackendsEnabled: false)
+        #expect(withRemoteOn == "Off, but the provider registered before this change is still live in the daemon — restart to fully stop it.")
+        #expect(withRemoteOn == withRemoteOff)
     }
 
     // MARK: - The inner-gate predicate, both branches
