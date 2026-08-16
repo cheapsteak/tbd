@@ -107,6 +107,74 @@ struct RemoteProviderTests {
         #expect(s.isArchived == false)
     }
 
+    // MARK: - `meta` degrades instead of failing (tier 1)
+
+    /// A provider that puts a nested object under a `meta` key violates the
+    /// contract's flat string-to-string map — but `meta` is untrusted input, so
+    /// the offending key is dropped and every other key survives, including the
+    /// identity keys adoption reads.
+    @Test func aNestedObjectMetaValueIsDroppedAndTheRestOfTheMapSurvives() throws {
+        let parentID = UUID().uuidString
+        let json = """
+        {"id": "s-1", "state": "running",
+         "meta": {"repo": "acme/api", "branch": "fix-ci",
+                  "tbd_parent_worktree_id": "\(parentID)",
+                  "delivery": {"status": "failed", "error": "not verified"},
+                  "tags": ["a", "b"],
+                  "nothing": null}}
+        """.data(using: .utf8)!
+
+        let s = try JSONDecoder().decode(RemoteSessionPayload.self, from: json)
+
+        #expect(s.meta?["repo"] == "acme/api")
+        #expect(s.meta?["branch"] == "fix-ci")
+        #expect(s.meta?["tbd_parent_worktree_id"] == parentID)
+        #expect(s.meta?["delivery"] == nil)
+        #expect(s.meta?["tags"] == nil)
+        #expect(s.meta?["nothing"] == nil)
+    }
+
+    /// `meta` is a display map, so an unambiguously displayable scalar is kept
+    /// in its literal form rather than thrown away.
+    @Test func scalarMetaValuesCoerceToTheirLiteralString() throws {
+        let json = """
+        {"id": "s-1", "state": "running",
+         "meta": {"attached": true, "detached": false, "turns": 42, "cost": 1.5}}
+        """.data(using: .utf8)!
+
+        let s = try JSONDecoder().decode(RemoteSessionPayload.self, from: json)
+
+        #expect(s.meta?["attached"] == "true")
+        #expect(s.meta?["detached"] == "false")
+        #expect(s.meta?["turns"] == "42")
+        #expect(s.meta?["cost"] == "1.5")
+    }
+
+    /// `meta` itself not being an object costs the map, never the session.
+    @Test func aMetaThatIsNotAnObjectDegradesToNoMeta() throws {
+        let json = #"{"id": "s-1", "state": "running", "meta": "not-a-map"}"#.data(using: .utf8)!
+        let s = try JSONDecoder().decode(RemoteSessionPayload.self, from: json)
+        #expect(s.id == "s-1")
+        #expect(s.meta == nil)
+    }
+
+    /// One malformed element must not blind the caller to the whole fleet: the
+    /// rest of the inventory decodes, so only the offending session goes
+    /// missing instead of every session at once.
+    @Test func oneUndecodableSessionDoesNotLoseTheOthers() throws {
+        let json = """
+        {"sessions": [
+          {"id": "good-1", "state": "running"},
+          {"id": "broken", "state": "running", "exit_code": "not-a-number"},
+          {"state": "running"},
+          {"id": "good-2", "state": "exited", "exit_code": 0}]}
+        """.data(using: .utf8)!
+
+        let envelope = try JSONDecoder().decode(RemoteSessionListEnvelope.self, from: json)
+
+        #expect(envelope.sessions.map(\.id) == ["good-1", "good-2"])
+    }
+
     @Test func staleProjectionDemotesActiveStateWithoutMutatingTheSnapshot() {
         let original = RemoteSessionPayload(
             id: "x", title: "worker", state: .running,
