@@ -260,13 +260,10 @@ struct RepoSectionView: View {
                             repoID: repo.id,
                             highlightDefaultProfile: newWorktreeMenu.isTriggerHovered,
                             onClose: { newWorktreeMenu.closeNow() },
-                            onSelectCloudSession: RepoSectionView.cloudSessionProvider(
-                                providers: appState.remoteProviders,
-                                claudeCloudEnabled: appState.daemonCapabilities?
-                                    .claudeCloudEnabled ?? false
-                            ).map { provider in
-                                { openRemoteCreateSheet(for: provider) }
-                            }
+                            // The picker closes itself first (see
+                            // `startRemoteSession`), so this only has to
+                            // present the sheet this view already owns.
+                            onStartRemoteSession: { openRemoteCreateSheet(for: $0) }
                         )
                         .environmentObject(appState)
                         .background(.ultraThickMaterial)
@@ -406,8 +403,10 @@ struct RepoSectionView: View {
     // create surfaces render, so a test can call the exact decision each
     // surface makes rather than re-deriving it. See
     // `CloudCreateEntryPresentationTests`'s cross-surface parity suite,
-    // which checks these two against `RemoteProviderHeaderRow.canCreate`
-    // (`RemoteSectionView.swift`) — the third owned surface — for agreement.
+    // which checks this against `CloudCreateEntryPresentation.pickerProviders`
+    // (the `+` picker's gate) and `RemoteProviderHeaderRow.canCreate`
+    // (`RemoteSectionView.swift`) — the other two owned surfaces — for
+    // agreement.
 
     /// The providers `newRemoteSessionMenuItem`'s context menu lists. A thin,
     /// named forward to `CloudCreateEntryPresentation.createProviders` so the
@@ -419,15 +418,6 @@ struct RepoSectionView: View {
         CloudCreateEntryPresentation.createProviders(providers, claudeCloudEnabled: claudeCloudEnabled)
     }
 
-    /// The provider `newWorktreePlusButton` opens the create sheet for, or
-    /// nil to omit the `+` picker's cloud row entirely. A thin, named forward
-    /// to `CloudCreateEntryPresentation.cloudProvider` for the same reason as
-    /// `remoteSessionMenuProviders` above.
-    nonisolated static func cloudSessionProvider(
-        providers: [RemoteProviderStatus], claudeCloudEnabled: Bool
-    ) -> RemoteProviderStatus? {
-        CloudCreateEntryPresentation.cloudProvider(providers, claudeCloudEnabled: claudeCloudEnabled)
-    }
 
     // MARK: - Context menu
 
