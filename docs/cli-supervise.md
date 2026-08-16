@@ -35,7 +35,7 @@ tbd supervise status [--json]
 tbd supervise mode <project> [<mode-name>]
 tbd supervise project <list|create|delete|move> …
 tbd supervise playbook show      --project <name> [--content] [--json]
-tbd supervise playbook customize --project <name> [--repo] [--json]
+tbd supervise playbook customize --project <name> [--repo-level] [--json]
 tbd supervise appoint <project> --terminal <id>
 tbd supervise relieve <project>
 tbd supervise sweep customize <project>
@@ -376,7 +376,7 @@ reaches it.
 
 ```
 tbd supervise playbook show      --project <name> [--content] [--json]
-tbd supervise playbook customize --project <name> [--repo] [--json]
+tbd supervise playbook customize --project <name> [--repo-level] [--json]
 ```
 
 The **playbook** is the project's conduct as prose — `supervision.md`,
@@ -424,9 +424,11 @@ hash: 9c02…
 ```
 
 `customize` is the "Customize playbook…" action: it copies the **current
-shipped default** into the operator level, or with `--repo` into the project's
-designated repo file, and prints the path it wrote. Two properties matter more
-than the gesture itself.
+shipped default** into the operator level, or with `--repo-level` into the
+project's designated repo file, and prints the path it wrote. The flag is named
+for the level rather than the repo because `--repo` names *which repo*
+everywhere else in this CLI. Two properties matter more than the gesture
+itself.
 
 **Write-once.** Tool-provided content lives only in the level the tool owns —
 the shipped default, which updates may freely replace. The operator and
@@ -446,15 +448,27 @@ hash: 4f1a…
 It is yours now — TBD writes the operator level exactly once and never again.
 
 $ tbd supervise playbook customize --project acme-platform
-Project "acme-platform" already has a operator-level playbook at
+The operator-level playbook for project "acme-platform" already exists at
 /Users/me/tbd/repos/6f3…/supervision.md, and TBD writes that level exactly once.
 Edit the file directly; nothing here will overwrite it.
 ```
 
-A declared project that designated `policy: operator` has no repo level, so
-`--repo` is refused there naming that condition; a project whose name cannot
-be a directory component has no operator level, and the refusal says to rename
-the repo.
+Two conditions refuse `--repo-level`, each naming itself: a project that
+designated `policy: operator` has no repo level at all, and a project whose
+designated repo has a checkout that is no longer on disk has no tree to write
+into — writing there would materialize a `.agents/` directory outside any
+repository and then refuse forever, so the gesture waits for the checkout to
+come back.
+
+**Resolution follows the project, so moving a repo between projects moves which
+operator copy is read.** A singleton's operator level lives at
+`~/tbd/repos/<repo-id>/supervision.md`; once that repo is declared into a
+project, the project's own `~/tbd/supervision/projects/<name>/supervision.md`
+is the operator level, and the per-repo copy is no longer that project's
+conduct. Nothing deletes it — it is read again if the repo goes back to being
+its own project — but `playbook show` reports the project's levels, not the
+repo's former ones, so check `show` after a `project create` or
+`project move`.
 
 ## tbd supervise appoint / relieve
 

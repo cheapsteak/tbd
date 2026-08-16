@@ -375,25 +375,31 @@ struct SupervisePlaybookShow: AsyncParsableCommand {
 struct SupervisePlaybookCustomize: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "customize",
-        abstract: "Copy the shipped playbook into the operator level, or with --repo the repo level",
+        abstract:
+            "Copy the shipped playbook into the operator level, or with --repo-level the repo level",
         discussion: """
             Writes the current shipped default and prints the path. Refused if \
             that level already exists: TBD writes it exactly once and never \
             touches it again, so an existing copy is edited directly.
 
-            Without --repo the copy goes to the operator level — beside a \
+            Without --repo-level the copy goes to the operator level — beside a \
             declared project's definition, or in a singleton's per-repo config \
-            directory. With --repo it goes to the project's designated repo \
-            file, .agents/supervision.md in that repo's main checkout, where it \
-            is committed and shared with everyone working in the repo.
+            directory. With --repo-level it goes to the project's designated \
+            repo file, .agents/supervision.md in that repo's main checkout, \
+            where it is committed and shared with everyone working in the repo.
             """
     )
 
     @Option(name: .long, help: "Project name")
     var project: String
 
-    @Flag(name: .long, help: "Write the project's designated repo file instead of the operator level")
-    var repo = false
+    /// Named for the *level*, not the repo. Everywhere else in this CLI
+    /// `--repo` takes a value naming one — `tbd worktree list --repo <name>`,
+    /// `tbd gc --repo <path>` — so a boolean `--repo` here would answer a
+    /// typed-out repo id with an opaque "unexpected argument".
+    @Flag(name: .long,
+          help: "Write the project's designated repo file instead of the operator level")
+    var repoLevel = false
 
     @Flag(name: .long, help: "Output JSON")
     var json = false
@@ -403,7 +409,7 @@ struct SupervisePlaybookCustomize: AsyncParsableCommand {
         let result: SupervisePlaybookCustomizeResult = try SocketClient().call(
             method: RPCMethod.supervisePlaybookCustomize,
             params: SupervisePlaybookCustomizeParams(
-                project: name, level: repo ? .repo : .operator),
+                project: name, level: repoLevel ? .repo : .operator),
             resultType: SupervisePlaybookCustomizeResult.self)
         if json {
             printJSON(result)

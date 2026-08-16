@@ -47,11 +47,21 @@ struct SuperviseCommandParsingTests {
 
     @Test func playbookCustomizeDefaultsToTheOperatorLevel() throws {
         let operatorLevel = try SupervisePlaybookCustomize.parse(["--project", "acme-checkout"])
-        #expect(operatorLevel.repo == false)
+        #expect(operatorLevel.repoLevel == false)
         let repoLevel = try SupervisePlaybookCustomize.parse(
-            ["--project", "acme-checkout", "--repo"])
-        #expect(repoLevel.repo == true)
+            ["--project", "acme-checkout", "--repo-level"])
+        #expect(repoLevel.repoLevel == true)
         #expect(throws: (any Error).self) { try SupervisePlaybookCustomize.parse([]) }
+    }
+
+    /// `--repo` names *which repo* everywhere else in this CLI — `tbd worktree
+    /// list --repo <name>`, `tbd gc --repo <path>`. The level selector must not
+    /// take that spelling, or a typed-out repo id gets an opaque
+    /// "unexpected argument" instead of doing anything.
+    @Test func playbookCustomizeDoesNotClaimTheRepoNamingFlag() {
+        #expect(throws: (any Error).self) {
+            try SupervisePlaybookCustomize.parse(["--project", "acme-checkout", "--repo"])
+        }
     }
 
     @Test func projectGroupRegistersOnlyTheRestrictedVocabulary() {

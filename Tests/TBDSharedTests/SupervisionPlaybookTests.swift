@@ -14,12 +14,35 @@ struct SupervisionPlaybookTests {
     // MARK: - Fixture
 
     /// A fenced `TBD_HOME` plus a fake repo checkout, and the resolver over it.
-    private struct Fixture {
+    ///
+    /// A class rather than a struct so `deinit` reclaims the temp tree when the
+    /// test that made it ends. `scripts/test.sh` fences `~/tbd`, `~/.claude`,
+    /// `~/.codex` and the tmux socket dir but not `$TMPDIR`, so a fixture that
+    /// only ever creates directories leaks silently at one tree per test — the
+    /// shape of every accumulation `Tests/CLAUDE.md` records. Tying the cleanup
+    /// to the fixture's lifetime rather than to a `defer` at each call site is
+    /// what keeps the next test from having to remember.
+    private final class Fixture {
         let root: URL
         let home: URL
         let checkout: URL
         let repo: SupervisionRepo
         let resolver: SupervisionPlaybookResolver
+
+        init(root: URL, home: URL, checkout: URL,
+             repo: SupervisionRepo, resolver: SupervisionPlaybookResolver) {
+            self.root = root
+            self.home = home
+            self.checkout = checkout
+            self.repo = repo
+            self.resolver = resolver
+        }
+
+        deinit {
+            // A level deliberately chmod'ed 0o000 by a test is still removable:
+            // unlinking depends on the parent directory's mode, not the file's.
+            try? FileManager.default.removeItem(at: root)
+        }
 
         /// `~/tbd/repos/<id>/supervision.md` — a singleton's operator level.
         var repoOperatorPath: String {

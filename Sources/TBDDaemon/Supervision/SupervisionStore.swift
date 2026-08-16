@@ -776,6 +776,19 @@ public actor SupervisionStore {
                         project: project, repo: repoID)
                 }
             }
+            // The repo level is the only one that writes outside `~/tbd`, and a
+            // checkout on record can be gone from disk — that drift is why
+            // `WorktreeLifecycle+Reconcile` exists. Without this the write below
+            // would conjure `<gone-checkout>/.agents/` out of nothing, report
+            // success, and then refuse forever because the file it invented is
+            // there. Refusing while the ground truth is missing is the honest
+            // answer, and it leaves the gesture available once it is back.
+            if case .repo(let repoID) = resolved.policy,
+               let checkout = repos.first(where: { $0.id == repoID })?.path,
+               !FileManager.default.fileExists(atPath: checkout) {
+                throw SupervisionPlaybookError.missingRepoCheckout(
+                    project: project, checkout: checkout)
+            }
             target = path
         }
 

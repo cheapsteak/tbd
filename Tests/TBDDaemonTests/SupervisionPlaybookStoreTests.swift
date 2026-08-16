@@ -20,12 +20,27 @@ struct SupervisionPlaybookStoreTests {
         func agents(inRepos repoIDs: Set<UUID>) async throws -> [SupervisionFleetAgent] { [] }
     }
 
-    private struct Fixture {
+    /// A class rather than a struct so `deinit` reclaims the temp tree when the
+    /// test that made it ends — `scripts/test.sh` fences `~/tbd`, `~/.claude`,
+    /// `~/.codex` and the tmux socket dir, but not `$TMPDIR`, so a fixture that
+    /// only ever creates directories leaks one tree per test unnoticed.
+    private final class Fixture {
         let root: URL
         let home: URL
         let checkout: URL
         let repo: SupervisionRepo
         let store: SupervisionStore
+
+        init(root: URL, home: URL, checkout: URL,
+             repo: SupervisionRepo, store: SupervisionStore) {
+            self.root = root
+            self.home = home
+            self.checkout = checkout
+            self.repo = repo
+            self.store = store
+        }
+
+        deinit { try? FileManager.default.removeItem(at: root) }
 
         var environment: [String: String] { ["TBD_HOME": home.path] }
 
@@ -40,8 +55,11 @@ struct SupervisionPlaybookStoreTests {
         }
     }
 
+    /// `seed` receives the fixture repo's id, which is what a declaration has to
+    /// name — so a test that needs a declared project gets one without
+    /// rebuilding the whole tree by hand, and inherits the fixture's cleanup.
     private static func makeFixture(
-        seed: SupervisionFile? = nil, extraRepos: [SupervisionRepo] = []
+        seed: ((UUID) -> SupervisionFile)? = nil, extraRepos: [SupervisionRepo] = []
     ) throws -> Fixture {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-playbook-store-\(UUID().uuidString)", isDirectory: true)
@@ -53,7 +71,7 @@ struct SupervisionPlaybookStoreTests {
         let repo = SupervisionRepo(id: UUID(), name: "acme-web", path: checkout.path)
         let files = SupervisionFileStore(
             fileURL: home.appendingPathComponent("supervision.json"))
-        if let seed { try files.save(seed) }
+        if let seed { try files.save(seed(repo.id)) }
 
         return Fixture(
             root: root, home: home, checkout: checkout, repo: repo,
@@ -148,59 +166,54 @@ struct SupervisionPlaybookStoreTests {
 
     @Test("A declared project customizes beside its definition")
     func declaredProjectCustomizesItsProjectDirectory() async throws {
-        let repoID = UUID()
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tbd-playbook-store-\(UUID().uuidString)", isDirectory: true)
-        let home = root.appendingPathComponent("tbd", isDirectory: true)
-        let checkout = root.appendingPathComponent("checkout", isDirectory: true)
-        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: checkout, withIntermediateDirectories: true)
-        let repo = SupervisionRepo(id: repoID, name: "acme-web", path: checkout.path)
-        let files = SupervisionFileStore(
-            fileURL: home.appendingPathComponent("supervision.json"))
-        try files.save(SupervisionFile(projects: [
-            "acme-checkout": SupervisionProjectDeclaration(repos: [repoID], policy: .repo(repoID))
-        ]))
-        let store = SupervisionStore(
-            files: files,
-            ledger: SupervisionLedgerWriter(path: home.appendingPathComponent("ledger.jsonl").path),
-            fleet: StubFleet(repoList: [repo]),
-            playbooks: SupervisionPlaybookResolver(environment: ["TBD_HOME": home.path]),
-            now: TestDateSource().provider)
+        let fixture = try Self.makeFixture(seed: { repoID in
+            SupervisionFile(projects: [
+                "acme-checkout": SupervisionProjectDeclaration(
+                    repos: [repoID], policy: .repo(repoID))
+            ])
+        })
 
-        let written = try await store.customizePlaybook(project: "acme-checkout", level: .operator)
-        #expect(written.path == TBDConstants.supervisionPlaybookPath(
-            project: "acme-checkout", environment: ["TBD_HOME": home.path]))
+        let written = try await fixture.store.customizePlaybook(
+            project: "acme-checkout", level: .operator)
+        #expect(written.path == fixture.projectOperatorPath("acme-checkout"))
         #expect(FileManager.default.fileExists(atPath: written.path))
     }
 
     @Test("A project whose policy is the operator level has no repo level to customize")
     func operatorPolicyRefusesRepoCustomize() async throws {
-        let repoID = UUID()
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tbd-playbook-store-\(UUID().uuidString)", isDirectory: true)
-        let home = root.appendingPathComponent("tbd", isDirectory: true)
-        let checkout = root.appendingPathComponent("checkout", isDirectory: true)
-        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: checkout, withIntermediateDirectories: true)
-        let repo = SupervisionRepo(id: repoID, name: "acme-web", path: checkout.path)
-        let files = SupervisionFileStore(
-            fileURL: home.appendingPathComponent("supervision.json"))
-        try files.save(SupervisionFile(projects: [
-            "acme-checkout": SupervisionProjectDeclaration(repos: [repoID], policy: .operator)
-        ]))
-        let store = SupervisionStore(
-            files: files,
-            ledger: SupervisionLedgerWriter(path: home.appendingPathComponent("ledger.jsonl").path),
-            fleet: StubFleet(repoList: [repo]),
-            playbooks: SupervisionPlaybookResolver(environment: ["TBD_HOME": home.path]),
-            now: TestDateSource().provider)
+        let fixture = try Self.makeFixture(seed: { repoID in
+            SupervisionFile(projects: [
+                "acme-checkout": SupervisionProjectDeclaration(repos: [repoID], policy: .operator)
+            ])
+        })
 
         await #expect(throws: SupervisionPlaybookError.noRepoLevel(project: "acme-checkout")) {
-            try await store.customizePlaybook(project: "acme-checkout", level: .repo)
+            try await fixture.store.customizePlaybook(project: "acme-checkout", level: .repo)
         }
-        #expect(!FileManager.default.fileExists(
-            atPath: TBDConstants.repoAgentsPlaybookPath(checkout: checkout.path)),
-            "a refused customize writes nothing")
+        #expect(!FileManager.default.fileExists(atPath: fixture.agentsPath),
+                "a refused customize writes nothing")
+    }
+
+    @Test("customize --repo-level refuses a checkout that is no longer on disk")
+    func repoCustomizeRefusesAVanishedCheckout() async throws {
+        let fixture = try Self.makeFixture()
+        // The repo row survives; its checkout does not. That drift is ordinary
+        // — it is why `WorktreeLifecycle+Reconcile` exists.
+        try FileManager.default.removeItem(at: fixture.checkout)
+
+        await #expect(throws: SupervisionPlaybookError.missingRepoCheckout(
+            project: "acme-web", checkout: fixture.checkout.path)) {
+            try await fixture.store.customizePlaybook(project: "acme-web", level: .repo)
+        }
+        #expect(!FileManager.default.fileExists(atPath: fixture.checkout.path),
+                "the refusal must not conjure the checkout tree back into existence")
+
+        // And the gesture is still available once the checkout is restored —
+        // the refusal is a state, not a permanent verdict.
+        try FileManager.default.createDirectory(
+            at: fixture.checkout, withIntermediateDirectories: true)
+        let written = try await fixture.store.customizePlaybook(
+            project: "acme-web", level: .repo)
+        #expect(written.path == fixture.agentsPath)
     }
 }

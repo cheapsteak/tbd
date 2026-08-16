@@ -120,9 +120,11 @@ public struct SupervisionPlaybook: Sendable, Equatable {
 /// at all — is answered once, where the topology is known.
 public struct SupervisionPlaybookSite: Sendable, Equatable {
     public let project: String
-    /// The operator's copy. Nil when the project's name cannot be a directory
-    /// component, which can only happen for a declared project; a singleton's
-    /// operator path is keyed by repo id and always composes.
+    /// The operator's copy. Optional for the type's sake rather than for any
+    /// topology the daemon can produce: a declared project's name is validated
+    /// as one path component before resolution runs, and a singleton's path is
+    /// keyed by repo id, so both always compose. Nil is left expressible only
+    /// for a project that is neither declared nor holds a repo.
     public let operatorPath: String?
     /// The designated repo's `.agents/supervision.md`. Nil when the project's
     /// policy is `{"operator": true}` — that designation *is* "there is no repo
@@ -260,7 +262,6 @@ public struct SupervisePlaybookCustomizeParams: Codable, Sendable, Equatable {
     }
 }
 
-
 /// What `supervise.playbook` answers: which level stands, where it is, its
 /// hash, and its bytes.
 ///
@@ -300,6 +301,27 @@ public struct SupervisionPlaybookView: Codable, Sendable, Equatable {
                   hash: playbook.conductHash, content: playbook.text,
                   skipped: playbook.skipped)
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, project, tier, path, hash, content, skipped
+    }
+
+    /// Written by hand because synthesized `Codable` *omits* a nil optional, and
+    /// the shipped tier — every project's answer before anyone customizes
+    /// anything — is exactly the case with no path. `"path":null` says "TBD
+    /// resolved this and there is no file"; an absent key says nothing, and
+    /// leaves a reader unable to tell that answer from an older build that did
+    /// not carry the field. Same rule as the readout, ledger and brief surfaces.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(project, forKey: .project)
+        try container.encode(tier, forKey: .tier)
+        try container.encode(path, forKey: .path)
+        try container.encode(hash, forKey: .hash)
+        try container.encode(content, forKey: .content)
+        try container.encode(skipped, forKey: .skipped)
+    }
 }
 
 /// What `supervise.playbookCustomize` answers: the level it took ownership of,
@@ -334,18 +356,19 @@ public enum SupervisionPlaybookError: Error, Equatable, CustomStringConvertible,
     case noOperatorLevel(project: String)
     case noRepoLevel(project: String)
     case unknownRepoCheckout(project: String, repo: UUID)
+    case missingRepoCheckout(project: String, checkout: String)
     case writeFailed(path: String, detail: String)
 
     public var description: String {
         switch self {
         case .alreadyCustomized(let project, let level, let path):
-            return "Project \"\(project)\" already has a \(level.rawValue)-level playbook at "
-                + "\(path), and TBD writes that level exactly once. Edit the file directly; "
-                + "nothing here will overwrite it."
+            return "The \(level.rawValue)-level playbook for project \"\(project)\" already "
+                + "exists at \(path), and TBD writes that level exactly once. Edit the file "
+                + "directly; nothing here will overwrite it."
         case .noOperatorLevel(let project):
-            return "Project \"\(project)\" has no operator-level playbook location: its name "
-                + "cannot be a directory component, so nothing can be written beside it. "
-                + "Rename the repo to give the project a directory."
+            return "Project \"\(project)\" has neither a declaration nor a member repo, so "
+                + "there is no operator-level playbook location to write: the operator level "
+                + "lives beside a declaration or in a member repo's config directory."
         case .noRepoLevel(let project):
             return "Project \"\(project)\" designates the operator level as its policy source, "
                 + "so it has no repo-level playbook. Customize the operator level instead, or "
@@ -354,6 +377,10 @@ public enum SupervisionPlaybookError: Error, Equatable, CustomStringConvertible,
             return "Project \"\(project)\" designates repo \(repo.uuidString) as its policy "
                 + "source, but TBD does not know that repo's checkout, so there is no "
                 + "repo-level playbook path to write."
+        case .missingRepoCheckout(let project, let checkout):
+            return "Project \"\(project)\" designates a repo whose checkout \(checkout) is not "
+                + "on disk. Writing there would create a directory tree outside any repository "
+                + "and then refuse to write it again. Restore the checkout first."
         case .writeFailed(let path, let detail):
             return "The playbook at \(path) could not be written: \(detail)"
         }

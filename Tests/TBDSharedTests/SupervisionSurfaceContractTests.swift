@@ -169,6 +169,31 @@ struct SupervisionSurfaceContractTests {
         #expect(try jsonText(line).contains("\"delivery\":null"))
     }
 
+    /// The shipped tier is every project's answer before anyone customizes
+    /// anything, so "no path" is the *common* case on this surface rather than
+    /// an edge of it — which is exactly why it has to be said rather than
+    /// omitted.
+    @Test("A shipped-tier playbook encodes path as an explicit null")
+    func shippedPlaybookPathEncodesAsExplicitNull() throws {
+        let view = SupervisionPlaybookView(
+            project: "acme-platform", tier: .shipped, path: nil,
+            hash: SupervisionPlaybook.hash(of: SupervisionPlaybookContent.bytes),
+            content: SupervisionPlaybookContent.body, skipped: [])
+        let text = try jsonText(view)
+        #expect(text.contains("\"path\":null"))
+        #expect(text.contains("\"tier\":\"shipped\""))
+        #expect(text.contains("\"schemaVersion\":1"))
+    }
+
+    @Test("A playbook resolved to a file carries that path as a value")
+    func resolvedPlaybookPathEncodesAsAValue() throws {
+        let view = SupervisionPlaybookView(
+            project: "acme-platform", tier: .operator, path: "/tbd/repos/x/supervision.md",
+            hash: SupervisionPlaybook.hash(of: Data("conduct\n".utf8)),
+            content: "conduct\n", skipped: [])
+        #expect(try jsonText(view).contains("\"path\":\"/tbd/repos/x/supervision.md\""))
+    }
+
     @Test("A brief result with no retry window encodes retryAfter as an explicit null")
     func briefResultRetryAfterEncodesAsExplicitNull() throws {
         let result = SupervisionBriefResult(
