@@ -33,15 +33,16 @@ written by both.
 ### Where the setting lives
 
 `QueuedPromptComposer` — the enum in `Sources/TBDApp/Worktree/QueuedPromptModal.swift`
-that already declares itself the shared home for settings the two first-message
-composers must agree on — gains three members alongside the existing default:
+that holds what a new first message starts from — carries three members, two of
+them new:
 
 - **`sendImmediatelyKey`** — `"queuedPromptSendImmediately"`, the `UserDefaults`
-  key.
+  key. New.
 - **`sendImmediatelyDefault`** — unchanged at `false`. Still the single place
   the shipped default lives.
-- **`resolveSendImmediately(defaults:)`** — `defaults.object(forKey:) as? Bool
-  ?? sendImmediatelyDefault`.
+- **`resolveSendImmediately(defaults:shippedDefault:)`** —
+  `defaults.object(forKey:) as? Bool ?? shippedDefault`, with `shippedDefault`
+  defaulted to `sendImmediatelyDefault`. New.
 
 The resolver's `object(forKey:) as? Bool ??` shape, matching
 `AppState.enableTranscript` (`AppState.swift`), is the point rather than a
@@ -52,6 +53,14 @@ explicitly-off read alike, a later change to the shipped default either skips
 everyone or overrides deliberate opt-outs. Reading the raw object keeps three
 states, so flipping `sendImmediatelyDefault` later reaches everyone who never
 touched the toggle and preserves everyone who did.
+
+`shippedDefault` is a defaulted test seam, not a production knob — every real
+caller takes the default and reads `sendImmediatelyDefault`. It exists so a
+test can prove the absent case *follows* the shipped default rather than
+coincidentally matching today's `false`: without it, the absent-key assertion
+degenerates to `false == false`, which a resolver that collapsed absent into
+`false` — the exact defect this shape exists to prevent — would pass by
+accident.
 
 ### Who reads and writes it
 
@@ -76,9 +85,18 @@ message, and nothing else.
 
 **Settings ▸ General ▸ Worktrees** gains a row bound to the same key by
 `@AppStorage`, next to the other defaults that apply to newly created
-worktrees: "Send first messages immediately", carrying the same help text the
-composer's toggle uses. That placement is what makes the preference
-discoverable and resettable without opening a composer.
+worktrees: "Send first messages immediately". That placement is what makes the
+preference discoverable and resettable without opening a composer.
+
+The two surfaces do not share help text, because each has a different thing to
+add. The composer's toggle explains what ticking the box does to the message
+being written, then says the tick is remembered and points at Settings. The
+Settings row explains the default it sets and names the surface that also
+writes it — specifically the sheet that opens while a new worktree comes up,
+because a *second* sheet carries the identical title (`First message for
+<name>`) and the identical checkbox label, and that one reads back an
+already-parked message and edits only that message. Naming which sheet is what
+stops an operator reading the row as a claim about the read-back.
 
 ### What does not change
 
@@ -101,7 +119,9 @@ never `UserDefaults.standard`, which on this unbundled executable is the
 developer's real `TBDApp.plist`. Three cases, one per state the resolver must
 keep distinct:
 
-- An absent key resolves to `sendImmediatelyDefault`.
+- An absent key resolves to `sendImmediatelyDefault` — asserted through
+  `shippedDefault` in both positions, so the case proves the fallback is
+  *followed* rather than agreeing with it by coincidence.
 - An explicit `false` reads `false` and stays `false` regardless of what the
   default constant says — the assertion that a future graduation cannot
   override a deliberate opt-out.

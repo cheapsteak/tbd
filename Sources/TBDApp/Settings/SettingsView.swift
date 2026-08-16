@@ -161,7 +161,7 @@ struct GeneralSettingsTab: View {
                     .help("Hide the repo-less Scratch section. Existing scratch spaces and their terminals keep running.")
 
                 Toggle("Send first messages immediately", isOn: $sendFirstMessageImmediately)
-                    .help("On: TBD presses Return, and the agent starts working the moment the first message is in. Off: the text waits in the composer for you to read and send. The checkbox in the first-message sheet changes this too.")
+                    .help("Default for first messages you write while a new worktree is coming up. On: TBD presses Return, and the agent starts working the moment the message is in. Off: the text waits in the composer for you to read and send. The \"Send immediately\" checkbox in that creation sheet changes this too; the identical-looking checkbox on an already-parked message edits only that message.")
 
                 Toggle("Automatically clean up orphaned agent worktrees", isOn: Binding(
                     get: { appState.gcEnabled },
