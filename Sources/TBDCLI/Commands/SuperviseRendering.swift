@@ -247,6 +247,56 @@ func supervisionModeRefusal(
     return "mode \"\(requested)\" is not declared for project \"\(project)\" — choices: \(choices)"
 }
 
+// MARK: - playbook
+
+/// The rendering of the shipped tier's absent path. The shipped default has no
+/// file, and saying so is more useful than an empty column.
+let supervisionShippedPlaybookPath = "(shipped default)"
+
+/// The human form of `playbook show`: which level stands, where it is, and the
+/// conduct hash — then the bytes when they were asked for.
+///
+/// The hash is on its own line because it is the value a reader copies: it is
+/// what a delivery records as the conduct it ran under, so "is the desk still on
+/// this text" is answered by comparing it.
+func renderSupervisionPlaybook(
+    _ view: SupervisionPlaybookView, includeContent: Bool
+) -> String {
+    var lines = [
+        "playbook: \(view.project)   tier: \(view.tier.rawValue)   "
+            + (view.path ?? supervisionShippedPlaybookPath),
+        "hash: \(view.hash)",
+    ]
+    if includeContent {
+        lines.append("")
+        lines.append(view.content)
+    }
+    return lines.joined(separator: "\n")
+}
+
+/// The lines naming a level that had a path and did not answer.
+///
+/// A fall-through is worth saying out loud: an operator editing a file that is
+/// empty, or that TBD cannot read, would otherwise see a lower level's conduct
+/// reported as the project's with nothing to explain it.
+func supervisionPlaybookSkipLines(_ view: SupervisionPlaybookView) -> [String] {
+    view.skipped.map { level in
+        let why = level.reason == .empty
+            ? "is empty, and an empty copy is not conduct"
+            : "could not be read"
+        return "note: the \(level.tier.rawValue)-level playbook at \(level.path) \(why) — "
+            + "the \(view.tier.rawValue) level stands instead"
+    }
+}
+
+func renderSupervisionPlaybookCustomize(_ result: SupervisePlaybookCustomizeResult) -> String {
+    """
+    playbook: wrote the shipped default to \(result.path)
+    hash: \(result.hash)
+    It is yours now — TBD writes the \(result.level.rawValue) level exactly once and never again.
+    """
+}
+
 // MARK: - projects
 
 func renderSupervisionProjectList(_ result: SuperviseProjectListResult) -> String {

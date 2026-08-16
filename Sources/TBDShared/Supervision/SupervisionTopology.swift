@@ -1,18 +1,28 @@
 import Foundation
 
-/// A repo as project resolution sees it: an id and the display name a
-/// singleton project takes.
+/// A repo as project resolution sees it: an id, the display name a singleton
+/// project takes, and the main checkout its in-repo playbook lives under.
 public struct SupervisionRepo: Sendable, Equatable, Hashable, Identifiable {
     public let id: UUID
     public let name: String
+    /// The repo's main checkout — where `.agents/supervision.md`, the repo tier
+    /// of playbook resolution, is looked for.
+    ///
+    /// Carried on this value rather than fetched separately so a caller
+    /// resolving topology and a caller resolving a playbook read one answer
+    /// taken at one moment. Empty means the caller had none to give, which
+    /// playbook resolution treats exactly as it treats a missing file: the repo
+    /// tier is skipped and the next level stands.
+    public let path: String
 
-    public init(id: UUID, name: String) {
+    public init(id: UUID, name: String, path: String = "") {
         self.id = id
         self.name = name
+        self.path = path
     }
 
     public init(_ repo: Repo) {
-        self.init(id: repo.id, name: repo.displayName)
+        self.init(id: repo.id, name: repo.displayName, path: repo.path)
     }
 }
 

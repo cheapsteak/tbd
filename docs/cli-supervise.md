@@ -13,8 +13,8 @@ Status: documents the `tbd supervise` surface specified by
 Part of that surface exists and part of it is specification the rest of this
 document describes ahead of the code:
 
-- **Built** – `on`, `off`, `status`, `mode`, `project`, and the sweep
-  program's three surfaces: `readout`, `brief`, `ledger`. These are what
+- **Built** – `on`, `off`, `status`, `mode`, `project`, `playbook`, and the
+  sweep program's three surfaces: `readout`, `brief`, `ledger`. These are what
   `tbd supervise --help` lists, and their output is quoted here as it prints,
   with long JSON values elided for the page.
 - **Specified, not yet built** – `appoint`, `relieve`, `sweep customize`.
@@ -34,6 +34,8 @@ tbd supervise on | off [<project>]
 tbd supervise status [--json]
 tbd supervise mode <project> [<mode-name>]
 tbd supervise project <list|create|delete|move> …
+tbd supervise playbook show      --project <name> [--content] [--json]
+tbd supervise playbook customize --project <name> [--repo] [--json]
 tbd supervise appoint <project> --terminal <id>
 tbd supervise relieve <project>
 tbd supervise sweep customize <project>
@@ -105,6 +107,8 @@ Operating (human operators):
 - **status** – the brake and per-project supervision state
 - **mode** – show or select a project's active mode
 - **project** – declare and edit multi-repo projects
+- **playbook** – show the standing conduct a project's supervisor stands on,
+  or take ownership of a level of it
 - **appoint / relieve** – bind or unbind an operator-chosen supervisor
 - **sweep customize** – take ownership of a project's sweep program
 
@@ -367,6 +371,90 @@ quoted those spaces typed them deliberately. `--repos` is the one place that
 still trims: it splits on commas and trims each element, so a repo whose
 display name carries surrounding spaces cannot be named there. `project move`
 reaches it.
+
+## tbd supervise playbook
+
+```
+tbd supervise playbook show      --project <name> [--content] [--json]
+tbd supervise playbook customize --project <name> [--repo] [--json]
+```
+
+The **playbook** is the project's conduct as prose — `supervision.md`,
+installed whole as the supervisor's standing instruction layer when its
+session launches. Every desk stands on exactly one, because a desk supervises
+exactly one project.
+
+Resolution runs **per project**, three levels, first existing non-empty file
+wins, and the whole file is used — **levels are never merged**:
+
+- the operator's copy, beside a declared project's definition at
+  `~/tbd/supervision/projects/<name>/supervision.md`, or for a singleton in
+  its per-repo config directory at `~/tbd/repos/<repo-id>/supervision.md`
+- the project's designated policy source — `.agents/supervision.md` in the
+  member repo named by `policy: repo:<id>`, and nothing at all when the
+  project designated `policy: operator`, which *is* the statement that it has
+  no repo level
+- the shipped default
+
+An empty or unreadable file at a level falls through to the next one — an
+empty copy is not conduct — and `show` says so on stderr, so a file being
+ignored is never silent.
+
+**TBD never parses a playbook.** It resolves the path, hashes the bytes, and
+installs them verbatim; the desk is the only structure-aware reader. Mode
+names come from `supervision.json`, never from the prose, which is why
+selecting a mode changes nothing about which file resolves. By convention a
+playbook describes each mode in a section named for it, and the shipped
+default carries `attended` and `autonomous`, so every project has both without
+authoring anything.
+
+`show` prints which level stands, its path and the conduct hash — the value a
+delivery records as the conduct it ran under, and what "is this desk still on
+the current text" is answered by comparing. `--content` appends the bytes;
+`--json` prints the same facts as an object, which always carries the content.
+
+```
+$ tbd supervise playbook show --project acme-platform
+playbook: acme-platform   tier: shipped   (shipped default)
+hash: 4f1a…
+
+$ tbd supervise playbook show --project acme-checkout
+playbook: acme-checkout   tier: repo   /Users/me/src/acme-web/.agents/supervision.md
+hash: 9c02…
+```
+
+`customize` is the "Customize playbook…" action: it copies the **current
+shipped default** into the operator level, or with `--repo` into the project's
+designated repo file, and prints the path it wrote. Two properties matter more
+than the gesture itself.
+
+**Write-once.** Tool-provided content lives only in the level the tool owns —
+the shipped default, which updates may freely replace. The operator and
+repository levels are written exactly once and TBD never writes them again: it
+does not overwrite them, merge into them, or reconcile them at startup. A
+second `customize` against a level that exists is refused, naming the path,
+and the file it refuses to touch is byte-for-byte unchanged.
+
+**It copies the default, not what currently resolves.** Customizing the repo
+level of a project that already has an operator copy gives you the tool's
+default to edit, never a duplicate of the level above.
+
+```
+$ tbd supervise playbook customize --project acme-platform
+playbook: wrote the shipped default to /Users/me/tbd/repos/6f3…/supervision.md
+hash: 4f1a…
+It is yours now — TBD writes the operator level exactly once and never again.
+
+$ tbd supervise playbook customize --project acme-platform
+Project "acme-platform" already has a operator-level playbook at
+/Users/me/tbd/repos/6f3…/supervision.md, and TBD writes that level exactly once.
+Edit the file directly; nothing here will overwrite it.
+```
+
+A declared project that designated `policy: operator` has no repo level, so
+`--repo` is refused there naming that condition; a project whose name cannot
+be a directory component has no operator level, and the refusal says to rename
+the repo.
 
 ## tbd supervise appoint / relieve
 
@@ -858,8 +946,14 @@ facts TBD itself observed.
 - `~/tbd/supervision/projects/<name>/journal.md` – the supervisor's
   narrative, appended by conduct; displayed by TBD as-is, beside the
   account.
-- `.agents/supervision.md` (in each repo) – the playbook; resolved per
-  project through the standard tiers.
+- `~/tbd/supervision/projects/<name>/supervision.md` – a declared project's
+  operator-level playbook, written once by `playbook customize` and never
+  touched by TBD again.
+- `~/tbd/repos/<repo-id>/supervision.md` – a singleton project's
+  operator-level playbook, on the same write-once terms.
+- `.agents/supervision.md` (in each repo) – the playbook's repository level,
+  consulted for the member repo a project designates as its policy source;
+  resolved per project through the standard tiers.
 
 ## Environment
 

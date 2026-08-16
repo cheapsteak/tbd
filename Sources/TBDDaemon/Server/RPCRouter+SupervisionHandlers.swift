@@ -79,6 +79,26 @@ extension RPCRouter {
             repo: params.repo, to: SupervisionMoveTarget(argument: params.to)))
     }
 
+    // MARK: - The playbook
+
+    /// `supervise.playbook` — the project's resolved standing conduct: which
+    /// level answered, its path, its hash, and its bytes. Read-only.
+    func handleSupervisePlaybook(_ paramsData: Data) async throws -> RPCResponse {
+        let store = try requireSupervision()
+        let params = try decoder.decode(SupervisePlaybookParams.self, from: paramsData)
+        return try RPCResponse(result: await store.playbook(project: params.project))
+    }
+
+    /// `supervise.playbookCustomize` — copy the shipped default into one level,
+    /// once. Refused when that level already exists: TBD writes it exactly once
+    /// and never reconciles it (design §5).
+    func handleSupervisePlaybookCustomize(_ paramsData: Data) async throws -> RPCResponse {
+        let store = try requireSupervision()
+        let params = try decoder.decode(SupervisePlaybookCustomizeParams.self, from: paramsData)
+        return try RPCResponse(result: await store.customizePlaybook(
+            project: params.project, level: params.level))
+    }
+
     // MARK: - The read-only surfaces
     //
     // Neither makes a decision, sends anything, or starts anything. They are

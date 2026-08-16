@@ -268,6 +268,8 @@ public enum RPCMethod {
     public static let superviseProjectCreate = "supervise.projectCreate"
     public static let superviseProjectDelete = "supervise.projectDelete"
     public static let superviseProjectMove = "supervise.projectMove"
+    public static let supervisePlaybook = "supervise.playbook"
+    public static let supervisePlaybookCustomize = "supervise.playbookCustomize"
     public static let superviseReadout = "supervise.readout"
     public static let superviseLedger = "supervise.ledger"
     public static let superviseBrief = "supervise.brief"
