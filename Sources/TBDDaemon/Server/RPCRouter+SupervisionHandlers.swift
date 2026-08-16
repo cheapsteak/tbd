@@ -1,5 +1,9 @@
 import Foundation
+import os
 import TBDShared
+
+private let supervisionLogger = Logger(
+    subsystem: "com.tbd.daemon", category: "supervision.handlers")
 
 /// RPC handlers for the `supervise.*` surface (`docs/cli-supervise.md`,
 /// `docs/specs/2026-07-26-fleet-supervision-design.md` §10).
@@ -40,11 +44,66 @@ extension RPCRouter {
         return try RPCResponse(result: await store.status(brake: brake))
     }
 
+    /// `supervise.setProjectMark` — `tbd supervise on/off <project>`.
+    ///
+    /// **`on <project>` is ensure-desk** (design §9): the mark is set first,
+    /// then a live supervisor is verified to exist. The two are ordered that
+    /// way deliberately — the mark is what the gesture promises, and a desk that
+    /// could not be spawned is an anomaly, never a refusal of coverage the
+    /// operator asked for.
+    ///
+    /// **`off` disposes nothing.** The mark is a delivery precondition
+    /// rechecked at act time, so a stood-down desk simply receives nothing —
+    /// an idle session holding context that cost real tokens to build. No
+    /// disposal path exists on this surface at all.
+    ///
+    /// **The result line carries the mark and nothing more.** No desk state
+    /// reaches stdout: reporting a fact the command did not establish is the
+    /// invented measurement this design refuses (`docs/cli-supervise.md`).
     func handleSuperviseSetProjectMark(_ paramsData: Data) async throws -> RPCResponse {
         let store = try requireSupervision()
         let params = try decoder.decode(SuperviseSetProjectMarkParams.self, from: paramsData)
-        return try RPCResponse(
-            result: await store.setProjectMark(project: params.project, on: params.on))
+
+        // The Nightwatch coexistence gate. The two supervision paths are
+        // mutually exclusive until Nightwatch is retired, not sequential, so
+        // turning a project on while Nightwatch is running is refused with the
+        // condition named. **Only `on`.** `off` is never refusable in either
+        // direction: an operator who could not turn coverage off while the
+        // other path held it on would be wedged with no way out.
+        if params.on {
+            let mode = try await db.config.get().nightwatchMode
+            guard mode == .off else {
+                throw SupervisionNightwatchConflict.superviseOnWhileNightwatchRunning(mode: mode)
+            }
+        }
+
+        let result = try await store.setProjectMark(project: params.project, on: params.on)
+
+        if params.on {
+            await ensureDesk(project: params.project)
+        }
+        return try RPCResponse(result: result)
+    }
+
+    /// Ensure `project` has a live supervisor, reporting rather than refusing.
+    ///
+    /// Every failure here is an anomaly on the daemon's own record — the log
+    /// and, for a dangling binding, an operator notification — and none of them
+    /// reaches the caller: the mark is already set, and retroactively failing a
+    /// gesture that took effect would be a lie about what happened.
+    private func ensureDesk(project: String) async {
+        guard let desks = supervisionDesks, let store = supervision else { return }
+        do {
+            let inputs = try await store.deskInputs(project: project)
+            _ = try await desks.ensureDesk(project: inputs)
+        } catch {
+            supervisionLogger.error(
+                """
+                Coverage of "\(project, privacy: .public)" is on, but its supervisor could not \
+                be ensured: \(String(describing: error), privacy: .public). The mark stands; \
+                nothing will be delivered until a supervisor exists.
+                """)
+        }
     }
 
     func handleSuperviseSetMode(_ paramsData: Data) async throws -> RPCResponse {
@@ -179,6 +238,41 @@ extension RPCRouter {
             project: params.project, text: params.text, brake: brake,
             deliverer: supervisionBriefingDeliverer))
     }
+}
+
+/// The refusals that keep the two supervision paths apart while both are live.
+///
+/// **Nightwatch stays live until the redesign's cutover, so the two are mutually
+/// exclusive rather than sequential.** Both drive the same fleet through the
+/// same terminals, on different theories of who decides what — running them
+/// together would have two rails nudging one agent with neither aware of the
+/// other. Each direction refuses the *on* gesture and names the condition.
+///
+/// **Neither direction can refuse an `off`**, and that asymmetry is the whole
+/// safety property: turning supervision off, and setting Nightwatch to `.off`,
+/// always work. An operator who ran into a refusal in both directions would be
+/// wedged with the fleet running and no gesture that could stop it.
+enum SupervisionNightwatchConflict: Error, CustomStringConvertible, LocalizedError {
+    case superviseOnWhileNightwatchRunning(mode: NightwatchMode)
+    case nightwatchOnWhileProjectsSupervised(projects: [String])
+
+    var description: String {
+        switch self {
+        case .superviseOnWhileNightwatchRunning(let mode):
+            return "Nightwatch is running (mode: \(mode.rawValue)), and it supervises the same "
+                + "fleet this would. Turn it off first with \"tbd nightwatch mode off\", then "
+                + "turn the project on. Turning projects OFF is never refused."
+        case .nightwatchOnWhileProjectsSupervised(let projects):
+            let named = projects.map { "\"\($0)\"" }.joined(separator: ", ")
+            let verb = projects.count == 1 ? "is" : "are"
+            return "\(named) \(verb) under fleet supervision, which watches the same fleet "
+                + "Nightwatch would. Turn each project off first with "
+                + "\"tbd supervise off <project>\", then set the Nightwatch mode. Setting "
+                + "Nightwatch to off is never refused."
+        }
+    }
+
+    var errorDescription: String? { description }
 }
 
 /// The refusal a `supervise.*` call gets when the daemon has no supervision

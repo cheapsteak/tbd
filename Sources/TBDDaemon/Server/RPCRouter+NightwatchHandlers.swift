@@ -15,8 +15,31 @@ extension RPCRouter {
             role: valid ? .judge : .readOnlyCoordinator)
     }
 
+    /// `nightwatch.setMode`.
+    ///
+    /// **The single choke point for the coexistence gate**, which is why the
+    /// refusal lives here rather than in the CLI or in `DaywatchRunner`: this is
+    /// the one place ahead of both the DB write and `runner.apply`, so a mode
+    /// that is refused here neither persists nor starts a loop.
+    ///
+    /// Anything but `.off` is refused while any project is under fleet
+    /// supervision — the two paths watch the same fleet and are mutually
+    /// exclusive until Nightwatch is retired. **`.off` is never refused**, in
+    /// this direction or the other: an operator must always be able to stop
+    /// either path.
     func handleSetNightwatchMode(_ data: Data) async throws -> RPCResponse {
         let params = try decoder.decode(NightwatchSetModeParams.self, from: data)
+        if params.mode != .off, let supervision {
+            // A store that cannot answer is not evidence that nothing is
+            // supervised, so a throw here propagates rather than being read as
+            // "clear to start". Failing toward refusal is the safe direction:
+            // the remedy is one readable error, and `off` still works.
+            let marked = try await supervision.markedProjects()
+            guard marked.isEmpty else {
+                throw SupervisionNightwatchConflict.nightwatchOnWhileProjectsSupervised(
+                    projects: marked.sorted())
+            }
+        }
         try await db.config.setNightwatchMode(params.mode)
         // Apply the mode to the runner (start/stop the loop).
         if let runner = daywatchRunner {
