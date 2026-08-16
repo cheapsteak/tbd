@@ -217,9 +217,28 @@ daemon takes the text as given; it never parses, edits, or ranks it. What it
 does, synchronously, in this order — no step of which reads the briefing
 text:
 
-1. **Timestamp and attribute.** Every submission updates the project's
-   liveness record — last contact, evaluation count (§6).
-2. **Pace.** One identity-blind check: the per-project briefing rate limit
+1. **Refuse for a standing state**, before anything is recorded. A project
+   whose mark is off gets the `refused-off` result (design §8) — the "not
+   covered" answer rather than the "not now" one; with the brake engaged the
+   pipe refuses with a distinct machine-readable paused result and its pinned
+   exit code (§10), so a program can tell "not now" from "broken". **When both
+   stand, `refused-off` wins.** Off is a standing state: releasing the brake
+   would change nothing while the mark is off, so "retry when supervision
+   resumes" would send the program back forever, and `refused-off` — stop
+   submitting — is the advice that holds. Neither refusal feeds the watchdog
+   (§6), neither records contact (the contact window is disarmed while
+   coverage is closed, so no contact is owed and none is counted), and nothing
+   is delivered.
+2. **Timestamp and attribute.** Every submission that gets past step 1 updates
+   the project's liveness record — last contact, evaluation count (§6) —
+   empty or not, and ahead of the two refusals below. That ordering is the
+   point: a sweep program whose composer has a runaway bug and submits 300 KiB
+   every tick must read as *broken*, not as *silent*. Silence is the one
+   signal reserved for "nobody looked".
+3. **Bound the size.** A submission over the §10 bound is refused
+   `refused-size`, counted in bytes. Its contact is already recorded by then,
+   which is the whole reason step 2 precedes this.
+4. **Pace.** One identity-blind check: the per-project briefing rate limit
    (§10) — at most one briefing delivered per project per interval, enforced
    on timestamps alone. A submission inside the window is refused with a
    machine-readable result; the refusal still counts as contact. **Pacing must
@@ -231,14 +250,12 @@ text:
    that needs no identity. The per-target reasons not to act live inside the
    identified send's preconditions (design §3), where the target is explicit
    in the call (`--terminal <id>`) — the same check-at-the-act pattern that
-   makes the off switch bind.
-3. **Refuse while paused.** With the brake engaged, the pipe
-   refuses with a distinct machine-readable paused result — a pinned exit
-   code (§10) — so a program can tell "not now" from "broken"; a project
-   whose mark is off gets the `refused-off` result instead (design §8),
-   the "not covered" answer rather than the "not now" one. Refusals
-   while paused do not feed the watchdog (§6), and nothing is delivered.
-4. **Deliver.** A surviving briefing goes to the project's supervisor: the
+   makes the off switch bind. **The slot is committed when a submission
+   reaches the delivery attempt, not at the moment of the check** — ordinary
+   rate-limiter shape, test the window and spend the token when the action
+   proceeds — so a submission refused as paused, off or oversize never burns
+   it, and a program is not silently penalised for a refusal it did not cause.
+5. **Deliver.** A surviving briefing goes to the project's supervisor: the
    daemon
    prepends the compiled **header** — the active mode's name and any pending
    conduct delta (§8) — resolves the supervisor (the operator's appointed
@@ -262,6 +279,14 @@ hour); its durable trace is the coverage summary on the lifecycle line that
 ends the project's coverage span (§6, design §9). It
 is not a courtesy: it is what makes a quiet fleet distinguishable from a dead
 sensor. Pacing applies only to delivered briefings, never to quiet contact.
+
+**Its result is `delivered`**, in that value's wider sense: the submission was
+accepted and everything it required happened, which for a quiet contact is the
+liveness update alone. Any refusal there would tell a program that something
+went wrong when nothing did, and the result's `detail` sentence says plainly
+which of the two happened. **Empty means zero bytes**, and nothing else: a
+briefing of three newlines takes the ordinary path, because deciding that it
+"says nothing" would mean reading it — which no step of this pipe does.
 
 The pipe takes **pure text and nothing else**, bounded in size (§10). A
 structured evaluation report

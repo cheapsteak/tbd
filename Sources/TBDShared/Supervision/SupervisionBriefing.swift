@@ -50,7 +50,15 @@ public struct SuperviseBriefParams: Codable, Sendable, Equatable {
 /// shipped program runs `on` (ensure) and resubmits in the same run. Collapsing
 /// any pair of those would turn a specific next step into a guess.
 public enum SupervisionBriefOutcome: String, Codable, Sendable, CaseIterable {
-    /// Delivered to the project's supervisor, and recorded.
+    /// The submission was accepted and everything it required happened.
+    ///
+    /// For a briefing with text, that is delivery to the project's supervisor,
+    /// recorded in the ledger. For an **empty** submission — the attested
+    /// "looked, found nothing" — it is the liveness update alone: nothing is
+    /// delivered, no ledger line is written, and pacing never applies. The
+    /// sense is deliberately the wider one, because a quiet contact that
+    /// answered a refusal would tell a program something went wrong when
+    /// nothing did; `detail` says plainly which of the two happened.
     case delivered = "delivered"
     /// The fleet brake is engaged. "Not now, retry later" — the CLI exits
     /// `SupervisionBriefing.pausedExitCode`.

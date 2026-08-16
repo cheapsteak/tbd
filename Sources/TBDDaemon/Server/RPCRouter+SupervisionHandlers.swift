@@ -126,6 +126,30 @@ extension RPCRouter {
             projectRepos: Set(facts.project.repos),
             since: params.since))
     }
+
+    // MARK: - The brief pipe
+
+    /// `supervise.brief` — one briefing submission, answered synchronously
+    /// (sweep-program design §3).
+    ///
+    /// A shell like the rest: the whole pipeline — the standing-state refusals,
+    /// the liveness contact, the size bound, the identity-blind pacing and the
+    /// single delivery attempt — lives in `SupervisionStore.submitBriefing`,
+    /// where the state it reads and writes already lives. The brake is read
+    /// here, once, and handed down, so the refusal and the record are computed
+    /// from one value taken at one moment.
+    ///
+    /// **The CLI performs no local size check**, so every submission reaches
+    /// this handler, including an oversize one: refusing locally would move no
+    /// liveness record, and a broken composer would then read as a silent one.
+    func handleSuperviseBrief(_ paramsData: Data) async throws -> RPCResponse {
+        let store = try requireSupervision()
+        let params = try decoder.decode(SuperviseBriefParams.self, from: paramsData)
+        let brake = try await supervisionBrake()
+        return try RPCResponse(result: await store.submitBriefing(
+            project: params.project, text: params.text, brake: brake,
+            deliverer: supervisionBriefingDeliverer))
+    }
 }
 
 /// The refusal a `supervise.*` call gets when the daemon has no supervision

@@ -514,9 +514,12 @@ text is delivered verbatim under a short compiled header (active mode name,
 any pending playbook update); TBD never parses it. Delivery is recorded in
 the ledger with the delivered text's hash.
 
-**The pipeline is four steps, in this order, and no step reads your text:**
+**The pipeline runs in this order, and no step reads your text:** refuse for a
+standing state (the project off, or the fleet brake engaged),
 timestamp-and-attribute (the submission updates the project's liveness
-record), pace, refuse while the project is paused or off, deliver.
+record), size, pace, deliver. Attribution sits ahead of the size and pacing
+refusals deliberately: a composer with a runaway bug submitting 300 KiB every
+tick must read as broken, not as silent.
 
 **Pacing is identity-blind.** One briefing per project per 2 minutes, decided
 on timestamps alone. It does not consult who is submitting, and it must not:
@@ -535,7 +538,7 @@ evaluation — is the submitting program's continuation policy; the shipped
 program handles `no-live-supervisor` by running `on` (ensure) and
 resubmitting in the same run.
 
-**Delivery has not shipped, so today every submission answers
+**Delivery has not shipped, so today every submission carrying text answers
 `no-live-supervisor`.** Nothing else about the surface is a stub: the
 submission is timestamped, attributed, paced, refused where it should be
 refused, and counted as liveness contact exactly as described here. It is an
@@ -548,17 +551,31 @@ found nothing": it updates the liveness record, delivers nothing, writes no
 ledger line, and pacing never applies to it. Its durable trace is the coverage
 summary on the lifecycle line that ends the project's coverage span, which is
 what lets the account say "checked 14 times, nothing found" — an attested calm
-night rather than an absence of evidence.
+night rather than an absence of evidence. It answers `delivered`, in that
+value's wider sense: the submission was accepted and everything it required
+happened, which for a quiet contact is the liveness update alone. A refusal
+there would tell a program something went wrong when nothing did; `detail`
+says plainly which of the two happened. Empty means **zero bytes** and nothing
+else — a briefing of three newlines takes the ordinary path, because deciding
+that it "says nothing" would mean reading it.
 
 Refusals: while the fleet brake is engaged, exits **75**
 (temporary; retry when supervision resumes). A project whose mark is off is
 refused with an ordinary nonzero result naming the condition — off is a
 standing state, not a pause, and a program should stop submitting rather
-than retry. The contact window is disarmed in both cases, so a refused
+than retry. **When both stand, the answer is `refused-off`**: releasing the
+brake would change nothing while the mark is off, so "retry when supervision
+resumes" would send the program back forever, and "stop submitting" is the
+advice that holds. The contact window is disarmed in both cases, so a refused
 submission neither counts as
 liveness contact nor needs to — no contact is owed while coverage is closed.
 Submissions beyond the per-project rate limit (one briefing per 2
-minutes) or the size bound (256 KiB) are refused with the condition named.
+minutes) or the size bound (256 KiB) are refused with the condition named,
+and both are counted as contact — the program looked.
+
+**The pacing slot is spent at the delivery attempt, not at the check**, so a
+submission refused as paused, off or oversize never burns it and the next one
+is free to go. A program is not penalised for a refusal it did not cause.
 
 ### Examples
 

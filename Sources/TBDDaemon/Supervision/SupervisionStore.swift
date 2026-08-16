@@ -151,18 +151,30 @@ public actor SupervisionStore {
     /// change, and a restart must write no ledger line.
     private var sawExternalEdit = false
 
-    /// Per-project counters the coverage summary reports.
+    /// Per-project counters the coverage summary reports, fed by the brief pipe
+    /// (`submitBriefing`).
     ///
-    /// **Nothing increments these in this slice, so zero is accurate rather
-    /// than fabricated** — and they are counters rather than literals so that
-    /// the change which ships briefing delivery has somewhere to feed. Feeding
-    /// them is part of that change, not an optional follow-up: the moment
-    /// briefings exist and these stay at zero, every closing line starts lying.
     /// In memory rather than persisted because both facts become queries over
-    /// the ledger's own `delivery` lines once those exist.
+    /// the ledger's own `delivery` lines once those exist, and a persisted copy
+    /// would be a second answer to a question with one.
     private var sweepContacts: [String: Int] = [:]
     private var briefingsDelivered: [String: Int] = [:]
     private var lastSweepContact: [String: SupervisionInstant] = [:]
+
+    /// When each project last spent its briefing pacing slot — the *only* input
+    /// the rate limit reads besides `now()`, which is what makes it
+    /// identity-blind (design §3 step 2).
+    ///
+    /// In memory, beside the counters above and for the same reason. A daemon
+    /// restart forgetting that a briefing was paced two minutes ago costs one
+    /// extra delivery; persisting it would be a second copy of a fact the
+    /// ledger's own `delivery` lines answer once they exist.
+    ///
+    /// **A `Date` behind the store's date seam, deliberately not a `Clock`.**
+    /// Nothing here sleeps, debounces, polls or times out — pacing compares a
+    /// stored stamp against `now()`, so this is data, not behavior, and the
+    /// repo's injected-clock rule does not apply. `now` is what a test pins.
+    private var lastPacedBriefing: [String: Date] = [:]
 
     public init(
         files: SupervisionFileStore,
@@ -890,22 +902,211 @@ public actor SupervisionStore {
         }
     }
 
+    // MARK: - The brief pipe
+
+    /// Take one briefing submission and answer, synchronously, what became of
+    /// it (`docs/specs/2026-08-01-fleet-supervision-sweep-program-design.md` §3,
+    /// `docs/cli-supervise.md`).
+    ///
+    /// **The order of the steps is the design, not an implementation detail.**
+    ///
+    /// 1. *Resolve the project.* An unknown name is refused — never answered
+    ///    with an empty success, for the same reason `projectFacts` refuses
+    ///    one: a program that mistook a typo for "nothing to report" would
+    ///    report a quiet fleet.
+    /// 2. *Refuse for a standing state, before anything is recorded.* An off
+    ///    project answers `refused-off`; an engaged brake answers
+    ///    `refused-paused`. Neither records contact: the contact window is
+    ///    disarmed while coverage is closed, so no contact is owed and none is
+    ///    counted.
+    /// 3. *Record the contact* — for every submission past step 2, empty or
+    ///    not, and **before** the remaining refusals. That ordering is the
+    ///    point: a sweep program whose composer has a runaway bug and submits
+    ///    300 KiB every tick must read as *broken*, not as *silent*. Silence is
+    ///    the one signal reserved for "nobody looked".
+    /// 4. *An empty submission stops here*, answering `delivered`.
+    /// 5. *Size bound*, on bytes.
+    /// 6. *Pace*, identity-blind, on timestamps alone.
+    /// 7. *Deliver* — one full attempt, never a retry. Persistence is the
+    ///    submitting program's concern; TBD's job is an honest synchronous
+    ///    result.
+    ///
+    /// **`refused-off` wins when a project is off and the brake is engaged.**
+    /// Off is a standing state: releasing the brake would change nothing, so
+    /// answering "retry when supervision resumes" would send the program back
+    /// forever. `refused-off` is the answer that says *stop submitting*, which
+    /// is the correct advice in that state.
+    ///
+    /// **This creates no durable external resource.** The pacing and liveness
+    /// state above is in memory and dies with the process, and the only write
+    /// path is an append to the ledger, a file `SupervisionLedgerWriter`
+    /// creates and owns. Nothing here is orphanable, so no reconciler is owed
+    /// one (repo `CLAUDE.md`, "Every durable external resource needs a named
+    /// reconciler").
+    ///
+    /// **No step reads the briefing text.** Its byte count and whether that
+    /// count is zero are the only two facts taken from it, and that boundary is
+    /// what the whole design rests on.
+    public func submitBriefing(
+        project: String, text: String, brake: SupervisionBrakeState,
+        deliverer: any SupervisionBriefingDelivering
+    ) async throws -> SupervisionBriefResult {
+        // 1. Resolve. Throws `unknownProject` — a refusal, never an empty
+        // success.
+        let facts = try await projectFacts(project: project, brake: brake)
+        let at = now()
+
+        // 2. The standing states, before anything is recorded. Off is checked
+        // first on purpose: with both conditions true, "stop submitting" is the
+        // advice that holds, while "retry when supervision resumes" would send
+        // a program back to a project that is off regardless of the brake.
+        if !facts.project.mark {
+            return Self.briefResult(project: project, outcome: .refusedOff, at: at, detail: """
+                Project "\(project)" is off, so nothing is supervising it — this briefing was \
+                not delivered and no contact was recorded. Turn it on with \
+                "tbd supervise on \(project)" rather than resubmitting.
+                """)
+        }
+        if brake == .engaged {
+            return Self.briefResult(project: project, outcome: .refusedPaused, at: at, detail: """
+                The fleet brake is engaged, so nothing was delivered and no contact was \
+                recorded. Retry when supervision resumes.
+                """)
+        }
+
+        // 3. Contact, for every submission that got past the standing states,
+        // and ahead of every remaining refusal so that a broken composer reads
+        // as broken rather than silent.
+        noteSweepContact(project: project, at: at)
+
+        // 4. Empty means zero bytes, and nothing else. Whitespace is not empty:
+        // TBD does not read the text, and deciding that a briefing of three
+        // newlines "says nothing" would be reading it.
+        //
+        // `delivered` here carries the widened sense the outcome's own doc
+        // comment states — the submission was accepted and everything it
+        // required happened, which for a quiet contact is the liveness update
+        // alone. It writes no ledger line, and pacing never applies to it: its
+        // durable trace is the coverage summary on the lifecycle line that ends
+        // the span, and throttling the heartbeat would make a healthy sweep
+        // look like a dead one.
+        guard !text.utf8.isEmpty else {
+            return Self.briefResult(project: project, outcome: .delivered, at: at, detail: """
+                Quiet contact recorded for "\(project)"; nothing delivered.
+                """)
+        }
+
+        // 5. Bytes, not characters — the bound is on what gets stored and sent.
+        // Contact is already recorded by now, which is the whole reason step 3
+        // precedes this.
+        let size = text.utf8.count
+        guard size <= SupervisionBriefing.maxBriefingBytes else {
+            return Self.briefResult(project: project, outcome: .refusedSize, at: at, detail: """
+                The briefing is \(size) bytes, over the \
+                \(SupervisionBriefing.maxBriefingBytes)-byte bound, so it was not delivered — \
+                compose a smaller one. The contact was recorded.
+                """)
+        }
+
+        // 6. Pace. Timestamps and the project name, and nothing else: the
+        // moment this consults who is submitting or what the text says, pacing
+        // stops being a mechanism and becomes a policy, and policy is
+        // user-land's.
+        if let spent = lastPacedBriefing[project],
+           at.timeIntervalSince(spent) < SupervisionBriefing.rateLimitInterval {
+            let opensAt = spent.addingTimeInterval(SupervisionBriefing.rateLimitInterval)
+            return Self.briefResult(
+                project: project, outcome: .refusedRateLimit, at: at,
+                retryAfter: SupervisionInstant(opensAt),
+                detail: """
+                    A briefing for "\(project)" went out less than \
+                    \(Int(SupervisionBriefing.rateLimitInterval)) seconds ago, so this one was \
+                    not delivered. The window lifts at \(SupervisionInstant(opensAt).wireValue). \
+                    The contact was recorded.
+                    """)
+        }
+        // The slot is spent when a submission reaches the delivery attempt, not
+        // at the moment of the check above — ordinary rate-limiter shape (test
+        // the window, spend the token when the action proceeds). The
+        // consequence is worth stating: a submission refused as paused, off or
+        // oversize never burns the slot, so a program is not silently penalised
+        // for a refusal it did not cause.
+        lastPacedBriefing[project] = at
+
+        // 7. One full attempt, never a retry — adapter fallback included. What
+        // happens next is the submitting program's continuation policy, which
+        // is why the result stays specific instead of collapsing into a generic
+        // failure.
+        let outcome = await deliverer.deliver(project: project, text: text)
+        if outcome == .delivered {
+            noteBriefingDelivered(project: project)
+            // Slice 5, which ships delivery, owes the ledger's `delivery` line
+            // here: written request-first, carrying the delivered text's hash
+            // and the conduct hash (design §6, §12). Nothing delivers yet, so
+            // there is no untested branch pretending to write one.
+        }
+        return Self.briefResult(
+            project: project, outcome: outcome, at: at,
+            detail: Self.deliveryDetail(project: project, outcome: outcome))
+    }
+
+    /// One submission's answer, assembled in one place so every outcome carries
+    /// the same shape — and so `retryAfter` is null everywhere except
+    /// `refused-rate-limit`, whose remedy is the only one that is "wait".
+    private static func briefResult(
+        project: String, outcome: SupervisionBriefOutcome, at date: Date,
+        retryAfter: SupervisionInstant? = nil, detail: String
+    ) -> SupervisionBriefResult {
+        SupervisionBriefResult(
+            project: project, result: outcome, submittedAt: SupervisionInstant(date),
+            detail: detail, retryAfter: retryAfter)
+    }
+
+    /// The sentence a human reads for an outcome the deliverer decided. Never
+    /// parsed — the machine-readable answer is `result`.
+    private static func deliveryDetail(
+        project: String, outcome: SupervisionBriefOutcome
+    ) -> String {
+        switch outcome {
+        case .delivered:
+            return "Delivered to \"\(project)\"'s supervisor."
+        case .noLiveSupervisor:
+            return """
+                No supervisor stands for "\(project)", so the briefing was not delivered. \
+                Establish one and resubmit; the contact was recorded.
+                """
+        case .transportFailed:
+            return """
+                The delivery attempt to "\(project)"'s supervisor failed. TBD makes one \
+                attempt and never retries a briefing; the contact was recorded.
+                """
+        // The refusals above never reach the deliverer, so an outcome landing
+        // here would mean a deliverer answered with one. Say what happened
+        // rather than inventing a remedy for a state that has none.
+        case .refusedOff, .refusedPaused, .refusedRateLimit, .refusedSize:
+            return """
+                The delivery attempt for "\(project)" answered \(outcome.rawValue); nothing \
+                was delivered.
+                """
+        }
+    }
+
     // MARK: - Counters the coverage summary reports
 
-    /// Record that a sweep program made contact with a project.
+    /// Record that a sweep program made contact with a project — every briefing
+    /// submission that gets past the standing-state refusals, empty or not.
     ///
-    /// Unused in this slice — nothing submits a briefing yet, so every counter
-    /// reads zero and zero is accurate. **The change that ships delivery must
-    /// call this**, or the closing line's `sweepContacts` and the status
-    /// readout's `lastSweepContactAt` start lying the moment briefings exist.
+    /// Called from `submitBriefing` step 3, which is the obligation this method
+    /// was written for: without it the closing line's `sweepContacts` and the
+    /// status readout's `lastSweepContactAt` would lie the moment briefings
+    /// exist.
     public func noteSweepContact(project: String, at date: Date) {
         sweepContacts[project, default: 0] += 1
         lastSweepContact[project] = SupervisionInstant(date)
     }
 
-    /// Record that a briefing was delivered to a project's supervisor. Unused
-    /// in this slice, for the same reason and with the same obligation as
-    /// `noteSweepContact`.
+    /// Record that a briefing was delivered to a project's supervisor. Called
+    /// from `submitBriefing` step 7, on delivery only.
     public func noteBriefingDelivered(project: String) {
         briefingsDelivered[project, default: 0] += 1
     }
