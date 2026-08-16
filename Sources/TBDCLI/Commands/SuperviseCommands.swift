@@ -385,12 +385,13 @@ struct SuperviseLedgerCommand: AsyncParsableCommand {
 /// the only way this command is actually called. Closed stdin reads as EOF
 /// immediately rather than hanging.
 ///
-/// **An empty submission is valid and meaningful** — the attested "looked, found
-/// nothing" that keeps the project's liveness contact fresh while delivering
-/// nothing. Both `< /dev/null` and a pipe that closes with no bytes are empty
-/// submissions, and both are sent rather than refused locally: refusing here
-/// would turn an attested calm night into no contact at all, which is exactly
-/// the dead-sensor reading the heartbeat exists to rule out.
+/// **Every submission is sent, and none is refused locally.** An empty one is
+/// valid and meaningful — the attested "looked, found nothing" that keeps the
+/// project's liveness contact fresh while delivering nothing — and an oversize
+/// one is sent too, because the pipeline records contact before it refuses
+/// anything (see `supervisionBriefParams`). A briefing this command turned away
+/// itself would move no liveness record, and a broken composer would then read
+/// as a silent one.
 ///
 /// **The streams split**: the result goes to stdout as JSON, carrying the
 /// machine-readable `result` a program branches on, and the human sentence goes
@@ -416,19 +417,11 @@ struct SuperviseBriefCommand: AsyncParsableCommand {
 
     mutating func run() async throws {
         let name = try requireSupervisionProjectName(project)
-        let text = FileHandle.standardInput.readDataToEndOfFile()
-
-        let result: SupervisionBriefResult
-        if supervisionBriefingExceedsSizeBound(text.count) {
-            result = supervisionOversizeBriefResult(
-                project: name, byteCount: text.count, at: Date())
-        } else {
-            result = try SocketClient().call(
-                method: RPCMethod.superviseBrief,
-                params: SuperviseBriefParams(
-                    project: name, text: String(decoding: text, as: UTF8.self)),
-                resultType: SupervisionBriefResult.self)
-        }
+        let stdin = FileHandle.standardInput.readDataToEndOfFile()
+        let result: SupervisionBriefResult = try SocketClient().call(
+            method: RPCMethod.superviseBrief,
+            params: supervisionBriefParams(project: name, stdin: stdin),
+            resultType: SupervisionBriefResult.self)
 
         printJSON(result)
         printToStandardError(result.detail)

@@ -372,44 +372,53 @@ struct SuperviseBriefResultTests {
         #expect(supervisionBriefExitCode(.delivered) == 0)
     }
 
-    // MARK: the size bound
+    // MARK: what gets sent
 
-    @Test func theSizeBoundIsInclusiveAtTheLimitAndAcceptsAnEmptySubmission() {
-        #expect(supervisionBriefingExceedsSizeBound(0) == false)
-        #expect(supervisionBriefingExceedsSizeBound(1) == false)
-        #expect(supervisionBriefingExceedsSizeBound(
-            SupervisionBriefing.maxBriefingBytes) == false)
-        #expect(supervisionBriefingExceedsSizeBound(
-            SupervisionBriefing.maxBriefingBytes + 1) == true)
-        #expect(SupervisionBriefing.maxBriefingBytes == 256 * 1024)
+    /// **An oversize briefing is sent, not refused locally.** The pipeline's
+    /// first step is unconditional — timestamp and attribute, which is what
+    /// moves the project's liveness record — and it comes before the size
+    /// refusal. A submission the CLI turned away would move no record, so a
+    /// sweep program with a runaway composer would read as *silent* rather than
+    /// broken, counterfeiting the one signal reserved for "nobody looked".
+    ///
+    /// `supervisionBriefParams` composes params and cannot refuse: it does not
+    /// throw, so the early refusal cannot come back without changing its
+    /// signature. This test pins the other half — that the payload arrives
+    /// whole rather than truncated at the bound.
+    @Test func anOversizeBriefingIsSentWholeRatherThanRefusedLocally() {
+        let oversize = Data(
+            repeating: UInt8(ascii: "a"), count: SupervisionBriefing.maxBriefingBytes + 1)
+        let params = supervisionBriefParams(project: "acme-platform", stdin: oversize)
+        #expect(params.project == "acme-platform")
+        #expect(params.text.utf8.count == SupervisionBriefing.maxBriefingBytes + 1)
     }
 
-    /// **Bytes, not characters.** A briefing of multi-byte text has far more
-    /// bytes than characters, and counting characters would let three times the
-    /// bound onto the wire.
-    @Test func theBoundCountsBytesRatherThanCharacters() {
-        let text = String(repeating: "🙂", count: 65_537)
-        let bytes = Data(text.utf8).count
-        #expect(text.count < SupervisionBriefing.maxBriefingBytes)
-        #expect(bytes > SupervisionBriefing.maxBriefingBytes)
-        #expect(supervisionBriefingExceedsSizeBound(bytes) == true)
-        #expect(supervisionBriefingExceedsSizeBound(text.count) == false)
+    /// **An empty submission is still a submission** — the attested "looked,
+    /// found nothing". It is composed and sent like any other, because refusing
+    /// it locally is the same hole: no submission, no contact, and a calm night
+    /// becomes indistinguishable from a dead sensor.
+    @Test func anEmptySubmissionIsComposedAndSent() {
+        let params = supervisionBriefParams(project: "acme-platform", stdin: Data())
+        #expect(params.project == "acme-platform")
+        #expect(params.text.isEmpty)
     }
 
-    /// The local refusal composes the same machine-readable shape the daemon
-    /// would have answered with, so a program branching on `result` never has
-    /// to know which end refused it.
-    @Test func theLocalOversizeRefusalIsARealResultCarryingTheCondition() {
-        let stamped = Date(timeIntervalSince1970: 1_786_000_000)
-        let result = supervisionOversizeBriefResult(
-            project: "acme-platform", byteCount: 300_000, at: stamped)
-        #expect(result.project == "acme-platform")
-        #expect(result.result == .refusedSize)
-        #expect(result.retryAfter == nil)
-        #expect(result.submittedAt == SupervisionInstant(stamped))
-        #expect(result.schemaVersion == SupervisionBriefResult.currentSchemaVersion)
-        #expect(result.detail.contains("300000"))
-        #expect(result.detail.contains("\(SupervisionBriefing.maxBriefingBytes)"))
-        #expect(supervisionBriefExitCode(result.result) == supervisionBriefRefusedExitCode)
+    /// The bytes go through as typed — no trimming, no normalization. TBD never
+    /// parses a briefing, so nothing here is entitled to edit one.
+    @Test func theBriefingTextIsPassedThroughVerbatim() {
+        let composed = "  findings:\n\n  - acme-web is stalled\n"
+        let params = supervisionBriefParams(
+            project: " staging ", stdin: Data(composed.utf8))
+        #expect(params.text == composed)
+        #expect(params.project == " staging ")
+    }
+
+    /// `refused-size` remains a value the *daemon* can answer with, and the
+    /// mapping covers it — the bound is real, it is just enforced on the side
+    /// that records contact first.
+    @Test func refusedSizeIsStillAnOutcomeTheMappingCovers() {
+        #expect(supervisionBriefExitCode(.refusedSize) == supervisionBriefRefusedExitCode)
+        #expect(supervisionBriefExitCode(.refusedSize) != 0)
+        #expect(supervisionBriefExitCode(.refusedSize) != SupervisionBriefing.pausedExitCode)
     }
 }

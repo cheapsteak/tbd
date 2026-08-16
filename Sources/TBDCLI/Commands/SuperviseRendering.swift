@@ -533,36 +533,34 @@ func supervisionBriefExitCode(_ outcome: SupervisionBriefOutcome) -> Int32 {
     }
 }
 
-/// Whether a submission of this many bytes is over the compiled bound.
+/// Compose one submission's params from the bytes stdin gave us.
 ///
-/// **The daemon enforces the same bound authoritatively; this is the courteous
-/// early refusal, not the guarantee.** Refusing here spares the socket a quarter
-/// of a megabyte that would only be refused at the other end, and it is measured
-/// in **bytes rather than characters** because that is what the bound counts —
-/// a briefing of emoji or CJK text costs several bytes per character, and a
-/// character count would let three times the bound through.
-func supervisionBriefingExceedsSizeBound(_ byteCount: Int) -> Bool {
-    byteCount > SupervisionBriefing.maxBriefingBytes
-}
-
-/// The `refused-size` result the CLI composes itself when stdin is over the
-/// bound and the submission is therefore never sent.
+/// **Every submission is sent, whatever its size, and this function cannot
+/// refuse one — it does not throw, and that signature is the guard.** The
+/// briefing pipeline's four steps are ordered
+/// (`docs/specs/2026-08-01-fleet-supervision-sweep-program-design.md` §3), and
+/// the first is unconditional: timestamp and attribute, which is what updates
+/// the project's liveness record. Pacing, the refusals and delivery all come
+/// after it. A submission the CLI turned away locally never reaches step one,
+/// so it moves no liveness record — and a sweep program whose composer had a
+/// runaway bug and emitted 300 KiB every tick would read to the watchdog as
+/// **silent** rather than broken. Silence is the one signal reserved for
+/// "nobody looked", and counterfeiting it is far worse than a wasted socket
+/// write.
 ///
-/// It is a real `SupervisionBriefResult` rather than a bare error so the caller
-/// sees the same machine-readable shape on stdout it would have seen from the
-/// daemon: a program branching on `result` does not need to know which end
-/// refused it. `retryAfter` is null, because the remedy is a smaller briefing
-/// rather than a wait.
-func supervisionOversizeBriefResult(
-    project: String, byteCount: Int, at date: Date
-) -> SupervisionBriefResult {
-    SupervisionBriefResult(
-        project: project,
-        result: .refusedSize,
-        submittedAt: SupervisionInstant(date),
-        detail: "briefing is \(byteCount) bytes, over the "
-            + "\(SupervisionBriefing.maxBriefingBytes)-byte limit — nothing was submitted",
-        retryAfter: nil)
+/// The size bound is real and belongs to the daemon
+/// (`SupervisionBriefing.maxBriefingBytes`), which enforces it *after*
+/// recording contact and answers `refused-size`. **Do not add the early
+/// refusal back as an optimization**: it also required the CLI to mint a
+/// `SupervisionBriefResult` the daemon never produced, whose `submittedAt`
+/// claimed a contact that never happened. The CLI reports results; it does not
+/// invent them.
+///
+/// Invalid UTF-8 is repaired rather than refused, for the same reason: a
+/// briefing is prose for a desk and TBD parses none of it, so a mangled byte
+/// is the desk's problem to read around, not grounds to lose the contact.
+func supervisionBriefParams(project: String, stdin: Data) -> SuperviseBriefParams {
+    SuperviseBriefParams(project: project, text: String(decoding: stdin, as: UTF8.self))
 }
 
 /// A project name typed on the command line, passed to the daemon **verbatim**.
