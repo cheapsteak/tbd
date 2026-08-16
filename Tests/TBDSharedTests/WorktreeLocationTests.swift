@@ -83,7 +83,8 @@ import Foundation
             pendingPromptSubmit: true,
             prObservation: PRObservation(
                 outcome: .undetermined(cause: "network unreachable"),
-                observedAt: Date(timeIntervalSince1970: 1_700_000_400))
+                observedAt: Date(timeIntervalSince1970: 1_700_000_400)),
+            remoteParentAssigned: true
         )
         let decoded = try JSONDecoder().decode(Worktree.self, from: JSONEncoder().encode(wt))
         #expect(decoded == wt)

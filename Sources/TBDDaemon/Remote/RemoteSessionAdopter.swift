@@ -23,10 +23,13 @@ private let adoptionLogger = Logger(subsystem: "com.tbd.daemon", category: "remo
 /// The row is created once and never re-derived: adoption never renames a row
 /// it already made, never rewrites its branch, and never moves a row that has a
 /// parent, because identity and tree position are the user's from that point
-/// on. One edge is not a re-derivation and is therefore permitted — a row with
-/// **no** parent taking its first one from a later sighting. Nothing is
-/// overwritten there; a fact that was not knowable at adoption time became
-/// knowable, and refusing it would strand the lane at top level forever.
+/// on. One edge is not a re-derivation and is therefore permitted — a row
+/// adoption has never placed taking its first parent from a later sighting.
+/// Nothing is overwritten there; a fact that was not knowable at adoption time
+/// became knowable, and refusing it would strand the lane at top level forever.
+/// "Never placed" is a recorded fact (`Worktree.remoteParentAssigned`) rather
+/// than the current nil, because a lane the user un-nested reads as nil too and
+/// filing it again would revert the gesture.
 ///
 /// Where the parent comes from is normally the provider's stamp,
 /// `meta["tbd_parent_worktree_id"]`. A TBD-initiated create is the exception:
@@ -189,18 +192,31 @@ struct RemoteSessionAdopter: Sendable {
     /// adoption runs on every convergence and every one of them would find the
     /// row already bound.
     ///
-    /// Strictly nil→value. A row that already has a parent keeps it: adoption
-    /// does not reparent, because where a lane sits once the user can see it is
-    /// the user's decision. `assignParentIfUnset` enforces that same nil-check
-    /// again inside its write transaction, and holds the late edge to the full
-    /// parent validation `move()` uses — including the two guards a fresh row
-    /// could not need, since a brand-new row can be neither its own parent nor
-    /// an ancestor of one.
+    /// Strictly nil→value, and **once per row**. A row that already has a
+    /// parent keeps it, and a row adoption has already placed is left alone
+    /// even after it comes back to nil, because the only thing that returns it
+    /// there is the user un-nesting it (`tbd worktree move <lane> --root`).
+    /// Nil-ness alone cannot tell that apart from "no parent was ever
+    /// knowable", and the stamp cannot arbitrate either: it is static from
+    /// create time, so it is present on every later poll and a nil-only guard
+    /// would revert the user's gesture inside one poll interval — with a
+    /// `.worktreeMoved` nobody asked for, so the lane visibly jumps back.
+    /// `Worktree.remoteParentAssigned` is the fact that discriminates, written
+    /// by whichever adoption write assigned the parent.
+    ///
+    /// `assignParentIfUnset` enforces both conditions again inside its write
+    /// transaction, and holds the late edge to the full parent validation
+    /// `move()` uses — including the two guards a fresh row could not need,
+    /// since a brand-new row can be neither its own parent nor an ancestor of
+    /// one. A refused edge assigns nothing and therefore marks nothing: the row
+    /// can still be healed by a later stamp that does validate.
     private func nestIfParentless(
         existing: Worktree, session: RemoteSessionPayload, provider: String,
         parentOverride: UUID? = nil
     ) async -> Outcome {
-        guard existing.parentWorktreeID == nil else { return Outcome() }
+        guard existing.parentWorktreeID == nil, !existing.remoteParentAssigned else {
+            return Outcome()
+        }
         do {
             guard let parentID = try await resolveParentID(
                 session: session, provider: provider, parentOverride: parentOverride,
