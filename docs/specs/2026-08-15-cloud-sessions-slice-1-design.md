@@ -11,7 +11,10 @@ lane when it is done.
 Everything here is downstream of that document and contradicts none of it.
 **Also depends on:**
 [`2026-08-10-remote-sessions-in-worktree-tree-design.md`](2026-08-10-remote-sessions-in-worktree-tree-design.md)
-(adoption, the local/remote boundary, archive composition),
+(adoption, the local/remote boundary),
+[`2026-08-16-remote-lane-archive-design.md`](2026-08-16-remote-lane-archive-design.md)
+(how archiving and reviving a remote lane compose over what its provider
+declares — the authority for every rule §7 defers to),
 [`../remote-provider-contract.md`](../remote-provider-contract.md) (contract v2),
 [`../theory-placement.md`](../theory-placement.md) (the placement battery).
 
@@ -298,6 +301,19 @@ ground that a session filtered out of successive snapshots is indistinguishable
 from a deleted one and would be silently marked gone. So archiving a session
 flags its ledger row and never removes it, and every later `list` keeps
 reporting that id with `archived: true`.
+
+**`archived` is emitted on every session, `false` included.** The field is
+optional on the wire, and a caller reads an absent one as `false` for display —
+but the filing sync that carries a provider's decision back onto a row treats
+the two differently, moving a row only on a claim that is actually present,
+because absent means no claim was made
+([`2026-08-16-remote-lane-archive-design.md`](2026-08-16-remote-lane-archive-design.md)).
+Omitting the field while a session is active would therefore be contract-legal
+and still wrong here: TBD would never observe the transition back from `true` to
+`false`, so a session unarchived on the provider's side would leave its lane
+filed away with nothing to return it. The ledger has the flag for every row it
+holds, so writing it into every payload costs nothing and is the only form that
+says what the provider means.
 
 **That is safe by construction rather than by care.** The contract's rule for an
 incomplete snapshot is that a caller may add, update and adopt on the strength of
@@ -1083,9 +1099,9 @@ Landing is always a user gesture and is never triggered by session state.
 **Landing archives the session it came from, and never stops it.** `land`
 reports `forks: true`, so the landed checkout and the session diverge from this
 moment: the work is on this machine now, and a session nobody will return to
-should not sit in the working inventory. The parent design's rule is to retire it
-where the provider declares `archive`, and cloud declares it (§3), so landing
-calls that verb — one invocation, on the same in-process ledger path §7
+should not sit in the working inventory. A session is retired through the
+`archive` verb where its provider declares one, and cloud declares it (§3), so
+landing calls that verb — one invocation, on the same in-process ledger path §7
 specifies, marking the ledger row archived. TBD never *stops* a session on
 landing whatever a provider declares: landing is a "bring this home" gesture,
 not a teardown, and the remote box may still hold work that was never pushed.
@@ -1125,8 +1141,10 @@ section of every non-scratch, non-main row's menu, gated only on
 `hasActiveChildren`, so an adopted remote row shows it; `run(.archive)`
 (`Sources/TBDApp/Sidebar/RowActionMenuActions.swift`:184-186) calls
 `AppState.archiveWorktree`, which calls `worktree.archive`, which refuses. The
-menu item is not the defect and does not change: what changes is that the daemon
-stops refusing.
+menu item is not the defect: what changes is that the daemon stops refusing. How
+the item presents for a provider that cannot archive is the 08-16 design's; a
+cloud lane's provider declares the capability, so for a cloud lane the item is
+live exactly as it looks today.
 
 ### The fences, and why lifting them is not enough
 
@@ -1176,37 +1194,39 @@ lifecycle entry that shares only what is genuinely about the row:
    remote lane with an active child is refused exactly as a local one is — and a
    remote lane can have children, since adoption nests rows on
    `parentWorktreeID`.
-4. Compose over the provider's declared capabilities (next subsection), then flip
-   the row through `WorktreeStore.archive(id:)`.
+4. Compose over the provider's declared capabilities as the 08-16 design
+   specifies (next subsection places cloud within it), then flip the row through
+   `WorktreeStore.archive(id:)`.
 
 No tmux, no scrollback capture, no git, no phase 2, no archive hook. The hook is
 worth naming: it runs with the worktree's path as its working directory, and a
 remote lane has no directory to run it in.
 
-### The composition, and which branch `claude-cloud` takes
+### Where `claude-cloud` lands in the archive composition
 
-What archive does to the session behind the row is the three-way composition the
-08-10 design specifies, and this document does not restate the rule beyond naming
-its branches: a provider declaring `archive` has the verb called and then the row
-marked; one declaring only `stop` has the session stopped and then the row
-marked; one declaring neither has the row marked and nothing else, with the
-session left running and the UI saying so.
+How archive composes over a provider's declared capabilities — which branch a
+gesture takes, the `gone` exemption, the termination guards, the refusal, and the
+revive cases — is specified by
+[`2026-08-16-remote-lane-archive-design.md`](2026-08-16-remote-lane-archive-design.md),
+and this document does not restate any of it. What follows is only what is
+particular to this provider.
 
-**`claude-cloud` takes the first branch.** It declares `archive` and `unarchive`
-(§3), so archiving a cloud lane calls the verb and then marks the row. The verb
-is implemented against the provider's own ledger: it sets the archived flag on
-the `claude_cloud_session` row, and every subsequent `list` reports that session
-with `archived: true`. Nothing is sent to Anthropic. `unarchive` clears the flag.
+**`claude-cloud` takes the verb path.** It declares `archive` and `unarchive`
+(§3), so archiving a cloud lane invokes `archive` and then marks the row, and
+reviving one invokes `unarchive` and then flips the row back. It reaches neither
+of the other branches: the `gone` exemption is for a session the provider has
+stopped enumerating, which a cloud session never becomes (§3), and the refusal is
+for a provider that declares no `archive`, which this one always does — the
+declaration is a compiled constant rather than a runtime answer.
 
-Four properties make that a real retirement rather than a costume:
+**Both verbs run against the provider's own ledger and send nothing to
+Anthropic.** `archive` sets the archived flag on the `claude_cloud_session` row;
+`unarchive` clears it. Every later `list` returns that session carrying the flag
+it now holds — `archived: true` after an archive, `archived: false` after an
+unarchive (§3).
 
-- **`archived` is defined as retirement from the working inventory.** The
-  contract states it as a filing axis orthogonal to liveness — a session may be
-  archived while its machine is still winding down, and may never become archived
-  implicitly because it exited, went idle, or aged out. So a provider that
-  archives without touching liveness is doing precisely what the field means, and
-  a caller is forbidden from reading `archived: true` as "stopped" in the first
-  place.
+Three properties make that a real retirement rather than a costume:
+
 - **The row is flagged, never removed.** Contract v2 requires archived sessions
   to stay enumerated by `list` and in the `events` snapshot, because a session
   filtered out of successive snapshots is indistinguishable from a deleted one
@@ -1218,12 +1238,14 @@ Four properties make that a real retirement rather than a costume:
   ever holds — which is why `list` is permanently `complete: false` (§3). The
   retirement is therefore real within the only inventory that exists for it, and
   no layer contradicts another: `list` says `archived: true`, the worktree row
-  says archived, and the two agree.
+  says archived, and the two agree. The contract defines `archived` as retirement
+  from the working inventory rather than as a claim about liveness, so a provider
+  that files without touching liveness is doing exactly what the field means.
 - **The capability is already the right shape for more.** If a supported endpoint
   for retiring a cloud session appears, the same declared capability calls it
-  instead and nothing else in this design moves — not the composition, not the
-  row, not revive. That is why the contract is capability-gated rather than
-  assuming every provider can do everything.
+  instead and nothing else moves — not the branch cloud takes, not the row, not
+  revive. That is why the contract is capability-gated rather than assuming every
+  provider can do everything.
 
 **What it does not do, stated plainly.** It does not archive the session on
 Anthropic's side. The cloud session keeps running there, keeps whatever work it
@@ -1243,24 +1265,25 @@ earns: nothing was stopped, closed, torn down, or cleaned up, and a user is neve
 left believing the cloud session was retired or halted. The one sentence a user
 needs is that TBD filed the lane away and Anthropic did not stop the session.
 
-**The termination guards do not apply.** The 08-10 design scopes the `working`
-guard and the dirty-remote-checkout guard to the paths that actually end a
-session — the `stop` path always, and the `archive`-verb path where the same
-provider also declares `stop` — because destroying unpushed work is the only
-thing they defend against. A provider declaring `archive` without `stop` is taken
-at its word: it has said it cannot terminate a session, so archiving through it
-is a filing change and is not guarded. `claude-cloud` is exactly that provider,
-and its archive destroys nothing. Nothing here relaxes a guard; the guarded
-branches are simply not the branch cloud takes.
+**The termination guards are live on this path and never trip.** They guard the
+verb path, which is the path a cloud lane takes, so archiving a cloud lane is
+checked exactly as archiving any other lane through a declared `archive` is —
+nothing here is exempt, and no `--force` is a normal part of the gesture. Neither
+guard has anything to fire on, for a reason that is a property of the provider
+rather than a coincidence: a cloud lane's `agent_state` is permanently `unknown`
+(§3), which is not `working`, and the dirty-remote-checkout guard reads an
+optional well-known `meta` key that this provider has no supported way to learn
+and therefore never sets. The practical consequence is that the guards are
+unobservable for cloud — but they sit in the path, so the day a supported
+interface lets this provider report either fact, they start refusing without
+anything in this design moving.
 
-**Which branches write an actuation row.** `.worktreeArchive` maps to the
+**A cloud archive writes an actuation row.** `.worktreeArchive` maps to the
 `dispose` kind (`Sources/TBDDaemon/Actuation/ActuationSurface.swift`:150-151), and
-the record may only claim acts that were attempted. The branches that call a
-provider verb record theirs as they would for any other actuated act, cloud
-included — its `archive` was invoked and it acted on the inventory it owns. The
-branch that calls nothing writes nothing: the precedent is the 08-10 design's
-forced `repo.remove`, which cascades local worktrees and writes no actuation row
-for the remote lanes it drops, because none of their sessions were touched.
+the record may only claim acts that were attempted. Cloud's archive invokes a
+provider verb that acts on the inventory it owns, so it records its request and
+its outcome as any other actuated act does. Which of the composition's other
+branches write a row is the 08-16 design's.
 
 ### What happens to the mirror row, and to the next `list`
 
@@ -1278,17 +1301,15 @@ any session that already has a row — "created once, never re-derived, whatever
 the payload now says" — so a session that keeps appearing in every `list` after
 its lane was archived mints nothing and changes nothing.
 
-**Nor does it un-archive it.** The parent design's mirroring of a payload's
-`archived` flag onto the row is not in this slice. When it does land it carries a
-provider's own filing state, and for a cloud lane that is still remote the two
-sides agree by construction: the archive gesture wrote the ledger flag, so every
-later `list` reports `archived: true` for a lane whose row is archived, and
-`archived: false` for one whose row is active. Mirroring reaches remote rows only,
-which is what keeps the session archived by a landing (§6) from filing away the
-local lane the user is about to work in. A provider that could not hold the filing
-state — one declaring no `archive` — is the case mirroring must leave alone,
-because it would report `archived: false` forever about a lane a person
-deliberately filed.
+**Nor does it un-archive it.** The filing sync that carries a payload's
+`archived` flag back onto a row — its rules, and the stale-response protection it
+needs — is the 08-16 design's, and it is not in this slice. When it lands, the
+two sides agree for a cloud lane by construction: the archive gesture wrote the
+ledger flag, so every later `list` reports `archived: true` for a lane whose row
+is archived and `archived: false` for one whose row is active, which is why `list`
+emits the field on every session rather than only when it is set (§3). The sync
+reaches remote rows only, which is what keeps the session archived by a landing
+(§6) from filing away the local lane the user is about to work in.
 
 `remote.dismiss`'s `dismissed` column stays a separate axis: it hides a bare
 session row from the Provider Desk and says nothing about a lane. Archiving a
@@ -1313,12 +1334,11 @@ unconditionally, the way an in-flight revive already does. The filter's premise 
 "no conversations means nothing to come back to" — is a statement about local
 sessions, and it is simply not true of a lane whose conversation is on a server.
 
-### Unarchive is the same branch, run backwards
+### Reviving a cloud lane is the same path, run backwards
 
-Reviving a cloud lane calls `unarchive` and then flips the row back to `active`,
-which is the 08-10 design's `unarchive` revive case: the retirement was a fact on
-the provider's inventory, and lifting it there is what makes both sides agree
-again. `WorktreeStore.revive(id:)`
+Reviving a cloud lane calls `unarchive` and then flips the row back to `active`.
+The retirement was a fact on the provider's inventory, and lifting it there is
+what makes both sides agree again. `WorktreeStore.revive(id:)`
 (`Sources/TBDDaemon/Database/WorktreeStore.swift`:709-721) is location-blind and
 does the flip; `beginReviveWorktree` is not — it resolves through `getLocal` and
 then materializes a directory — so revive branches on location exactly as archive
@@ -1328,10 +1348,9 @@ directory to materialize.
 The lane comes back saying what it knew before: its state is `unknown`, its name
 is whatever it was minted with — the parsed title or the session id fallback
 (§3) — and whether the session is still there is what the mirror row answers.
-Nothing had to be restarted, because nothing was ever stopped. The 08-10 design's
-other revive cases — a provider that retired nothing, a terminated session, a
-retirement TBD cannot lift — describe providers cloud is not, and they arrive
-with the providers that declare those capability shapes.
+Nothing had to be restarted, because nothing was ever stopped. The 08-16 design's
+other revive cases describe providers cloud is not, and they arrive with the
+providers that declare those capability shapes.
 
 ### `worktree.forget` stays refused
 
@@ -1340,29 +1359,27 @@ remote lane has no checkout here to leave alone. That is a category error rather
 than an unimplemented feature, and it is how the 08-10 design classifies forget,
 alongside hibernate, relocate, scratch promote and adopt-existing-directory:
 operations with no remote meaning, kept unreachable through `LocalWorktree`. The
-fence stays exactly as it is, comment included — it already states that ground
-rather than a missing capability. Archive is the retirement gesture for a lane,
-and archive is the one this section makes work on a remote row.
+fence stays, on the ground the 08-16 design states for it: retiring a lane is
+archive's job. Archive is the retirement gesture for a lane, and archive is the
+one this section makes work on a remote row.
 
-### The auto-archive-on-merge rail does not take remote lanes
+### The auto-archive-on-merge rail reaches a cloud lane
 
-The rail's guard stays, and a remote lane does not participate.
+Whether the merged-transition rail retires a remote lane is the 08-16 design's:
+the coordinator's location guard becomes a branch into the same remote path the
+manual gesture takes, and the rail participates under the per-worktree opt-in it
+already has. A cloud lane is reachable by it — PR polling is keyed on the branch
+and runs `git` and `gh` in the repository's own checkout, so a remote row carries
+a PR badge like any other (`RPCRouter.pollableWorktrees`,
+`Sources/TBDDaemon/Server/RPCRouter.swift`:946) — and its provider declares
+`archive`, so nothing declines on cloud's behalf.
 
-Two reasons, and the second is the one that would still hold if the first were
-fixed. First, the rail has no signal for a remote lane: it fires on a merged PR
-transition, and PR polling is fenced away from remote rows because everything
-below it is keyed on the worktree's path — `git` and `gh` both run inside a
-directory that does not exist for a remote lane. The 08-10 design's answer is to
-re-key that poll on the branch rather than to relax the fence, and until that
-lands a remote lane carries no PR status and reaches no merged transition.
-
-Second, when the badge does come back, an automatic archive of a lane whose
-session keeps running is a background mutation with no user gesture behind it —
-filing away a lane whose agent may still be working, and for a cloud lane whose
-`agent_state` is permanently `unknown` (§3), TBD cannot even ask what state it is
-in. That is the shape the repository's default-off rule exists for, and the
-honest row state ("archived here, still running there") is one a person should be
-choosing. The guard's comment changes to say this; the guard does not.
+**The arming gesture is therefore the whole of what stands between a merged PR
+and a filed cloud lane.** Neither termination guard fires for a cloud lane
+(above), so the opt-in is the only judgement in the path — which is the right
+place for it, because it is a deliberate per-worktree choice made with the honest
+row state in view: archived here, still running there. A cloud lane the user has
+not armed is filed by a person or not at all.
 
 ## 8. The flag
 
@@ -1552,18 +1569,15 @@ elapsed backoff window, admits a transient one under the same conditions, and
 Reattach clears either. A provider with no block behaves exactly as it does now,
 reconnect included.
 
-**Archive's three branches.** A provider declaring `archive` has the verb called
-and then its row marked `archived`; one declaring only `stop` has `stop` called
-and then its row marked; one declaring neither has its row marked with **no**
-provider invocation at all, asserted against a fake invoker that records every
-verb it was asked for. Each branch ends with the row `archived`. The branch that
-calls nothing writes no actuation row, while the two verb branches write theirs.
-The `working` and dirty-checkout guards refuse the `stop` branch and the
-`archive`-with-`stop` branch, and never refuse either unguarded branch — the
-provider declaring `archive` without `stop`, which is cloud's shape, and the
-provider declaring neither. That is asserted against a lane whose `agent_state`
-is `working`, which is the case that would fail if the guards were applied to a
-path that ends nothing.
+**A cloud lane archives through the verb.** Archiving one invokes `archive` and
+then marks the row, asserted against a fake invoker that records every verb it
+was asked for — so a `stop`, which this provider does not declare, fails the
+test — and the archive writes its actuation row. A cloud lane whose `agent_state`
+is `unknown`, which is every cloud lane, is not refused by the `working` guard,
+while a lane reporting `working` through the same code path still is, so the
+assertion discriminates between "the guard is inert for cloud" and "the guard was
+removed". The composition's other branches belong to the 08-16 design and are
+tested there.
 
 **The cloud ledger's archive round trip.** Archiving a cloud lane invokes
 `archive` on the built-in provider, the ledger row's archived flag is set, and
@@ -1573,7 +1587,11 @@ enumeration rule needs and the one whose failure would drive the session toward
 `gone`. `unarchive` clears the flag and the following `list` reports
 `archived: false`. Both verbs are idempotent: a second `archive` and a second
 `unarchive` each exit 0 and leave the flag where it was. Neither verb invokes the
-vendor CLI, asserted against the injected spawn seam.
+vendor CLI, asserted against the injected spawn seam. Every session the ledger
+returns carries an **explicit** `archived`, `false` included — asserted on the
+encoded payload rather than on the decoded value, since what the filing sync
+distinguishes is presence rather than truth, and a decoded `false` looks the same
+either way.
 
 **The cloud archive is honest on screen.** The archived cloud lane's copy, and
 the confirmation copy shown before the gesture, both name the session as still
@@ -1583,16 +1601,16 @@ substring blacklist, so a rewording that reintroduces the claim fails.
 
 **Unarchiving a cloud lane.** Revive on that lane invokes `unarchive` and flips
 the row back to `active`, and the lane returns with the same id, origin, branch,
-parent edge and children. Revive on a lane whose provider declares no `unarchive`
-flips the row and invokes nothing. Revive on a local worktree still runs the whole
-local path, so the branch did not swallow it.
+parent edge and children. Revive on a local worktree still runs the whole local
+path, so the branch did not swallow it.
 
-**Each fence, after.** `worktree.archive` on a remote row archives it instead of
+**Each fence, after.** `worktree.archive` on a cloud row archives it instead of
 returning its refusal string; on a local row it behaves exactly as today. A
 remote row with an active child is refused by `assertArchivable` in both the
 local and remote arms alike. `worktree.forget` on a remote row still refuses.
-`AutoArchiveOnMergeCoordinator.handleMergedTransition` still returns `false` for
-a remote row and still archives a local one.
+`AutoArchiveOnMergeCoordinator.handleMergedTransition` archives an armed cloud
+lane whose PR merged, leaves an unarmed one alone, and still archives a local
+one.
 
 **`visibleWorktrees` drops an archived remote row.** A remote row flipped to
 `archived` leaves the visible set, and the same row while `active` stays in it —
@@ -1691,8 +1709,8 @@ provider with no flag to gate it.
    together because they share that lookup.
 10. **Archive (§7).** The built-in provider's `archive` and `unarchive` verbs
     over the ledger column from step 6, the remote arm of `worktree.archive` and of
-    revive, the capability composition, the row copy, the Archived list's filter,
-    and the two fences that stay. It precedes Land because Land calls `archive`
+    revive on the 08-16 design's composition, the row copy, the Archived list's
+    filter, and the `worktree.forget` fence that stays. It precedes Land because Land calls `archive`
     on the session it just landed and states the same thing about the surviving
     cloud session that this step has to get right, and because a lane created in
     step 6 is otherwise stuck in the tree for the rest of the build.
