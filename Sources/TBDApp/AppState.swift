@@ -819,6 +819,11 @@ final class AppState: ObservableObject {
     /// Global free-form env overrides (config scope). Loaded from the daemon
     /// alongside `defaultProfileID` via `loadModelProfiles()`.
     @Published var globalEnvOverrides: [String: String] = [:]
+    /// Machine-wide remote create-param defaults (config scope), keyed by the
+    /// provider's own `create_params` field names. The fall-through level
+    /// beneath `Repo.remoteCreateDefaults`. Loaded from the daemon alongside
+    /// `globalEnvOverrides` via `loadModelProfiles()`.
+    @Published var globalRemoteCreateDefaults: [String: String] = [:]
     /// Global default for auto-archive-on-PR-merge. Loaded from the daemon
     /// alongside `globalEnvOverrides` via `loadModelProfiles()`.
     @Published var autoArchiveOnMergeDefault: Bool = false

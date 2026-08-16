@@ -25,6 +25,16 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
     public var expanded: Bool
     /// Free-form env-var overrides applied to spawned sessions (repo scope).
     public var envOverrides: [String: String]
+    /// Remote create-param defaults for this repo, keyed by the **provider's
+    /// own** `create_params` field names. TBD stores and replays these values
+    /// without interpreting what any of them mean — keying on the provider's
+    /// vocabulary is what keeps a provider concept (`permission_mode`, say)
+    /// out of TBD's schema.
+    ///
+    /// An absent key means "no opinion at this level": resolution falls
+    /// through to the global map, then to the field's provider-declared
+    /// `default` (see `RemoteCreateFormLogic.plan`).
+    public var remoteCreateDefaults: [String: String]
 
     public init(id: UUID = UUID(), path: String, remoteURL: String? = nil,
                 displayName: String, defaultBranch: String = "main", createdAt: Date = Date(),
@@ -33,7 +43,8 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
                 worktreeSlot: String? = nil, worktreeRoot: String? = nil,
                 status: RepoStatus = .ok, hidden: Bool = false,
                 expanded: Bool = true,
-                envOverrides: [String: String] = [:]) {
+                envOverrides: [String: String] = [:],
+                remoteCreateDefaults: [String: String] = [:]) {
         self.id = id
         self.path = path
         self.remoteURL = remoteURL
@@ -49,13 +60,14 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
         self.hidden = hidden
         self.expanded = expanded
         self.envOverrides = envOverrides
+        self.remoteCreateDefaults = remoteCreateDefaults
     }
 
     enum CodingKeys: String, CodingKey {
         case id, path, remoteURL, displayName, defaultBranch, createdAt
         case renamePrompt, customInstructions, profileOverrideID
         case worktreeSlot, worktreeRoot, status, hidden, expanded
-        case envOverrides
+        case envOverrides, remoteCreateDefaults
     }
 
     public init(from decoder: Decoder) throws {
@@ -76,6 +88,11 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
         expanded = try c.decodeIfPresent(Bool.self, forKey: .expanded) ?? true
         envOverrides = try c.decodeIfPresent(
             [String: String].self, forKey: .envOverrides) ?? [:]
+        // Absent (older daemon, older persisted JSON) means the sender knew
+        // nothing about repo-scoped create defaults, which is the same state
+        // as an empty map: no opinion, defer to the global map.
+        remoteCreateDefaults = try c.decodeIfPresent(
+            [String: String].self, forKey: .remoteCreateDefaults) ?? [:]
     }
 }
 
@@ -1359,6 +1376,12 @@ public struct Config: Codable, Sendable, Equatable {
     /// NULL means "never chose" and follows the shipped default wherever it
     /// goes; `0`/`1` is an explicit gesture and is honored forever.
     public var gcOrphanProcessesEnabled: Bool
+    /// Machine-wide remote create-param defaults, keyed by the **provider's
+    /// own** `create_params` field names — the fall-through level beneath
+    /// `Repo.remoteCreateDefaults`. TBD stores and replays these values
+    /// without interpreting them; see `Repo.remoteCreateDefaults` for why the
+    /// map is keyed generically rather than given a column per concept.
+    public var remoteCreateDefaults: [String: String]
 
     /// Default idle-timeout for auto-hibernation, in minutes.
     public static let defaultHibernateIdleMinutes = 30
@@ -1432,7 +1455,8 @@ public struct Config: Codable, Sendable, Equatable {
                 supervisionEnabled: Bool = Config.supervisionEnabledDefault,
                 gcProfileDirsEnabled: Bool = Config.gcProfileDirsEnabledDefault,
                 claudeCloudEnabled: Bool = Config.claudeCloudEnabledDefault,
-                gcOrphanProcessesEnabled: Bool = Config.gcOrphanProcessesEnabledDefault) {
+                gcOrphanProcessesEnabled: Bool = Config.gcOrphanProcessesEnabledDefault,
+                remoteCreateDefaults: [String: String] = [:]) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
         self.envSettingOverrides = envSettingOverrides
@@ -1464,6 +1488,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.gcProfileDirsEnabled = gcProfileDirsEnabled
         self.claudeCloudEnabled = claudeCloudEnabled
         self.gcOrphanProcessesEnabled = gcOrphanProcessesEnabled
+        self.remoteCreateDefaults = remoteCreateDefaults
     }
 
     public init(from decoder: Decoder) throws {
@@ -1541,6 +1566,11 @@ public struct Config: Codable, Sendable, Equatable {
         // default rather than hardcoding `false`.
         gcOrphanProcessesEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .gcOrphanProcessesEnabled) ?? Config.gcOrphanProcessesEnabledDefault
+        // Absent means the sender knew nothing about global create defaults —
+        // the same state as an empty map: no opinion at this level, so every
+        // field falls through to its provider-declared `default`.
+        remoteCreateDefaults = try c.decodeIfPresent(
+            [String: String].self, forKey: .remoteCreateDefaults) ?? [:]
     }
 }
 
