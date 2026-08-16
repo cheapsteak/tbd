@@ -221,6 +221,42 @@ struct PRBindingTests {
             branchCandidates: ["feature-1"], provenancePRNumber: 1))
     }
 
+    /// The shared-model half of the migration rule: a row or payload written
+    /// before `title` existed carries no such key, and it must still decode —
+    /// as "never observed", which is what an absent title means everywhere.
+    @Test("a binding encoded before the title column existed still decodes, with no title")
+    func decodesWithoutATitle() throws {
+        let legacy = """
+        {
+          "id": "\(UUID().uuidString)",
+          "worktreeID": "\(UUID().uuidString)",
+          "host": "github.com",
+          "owner": "acme",
+          "repo": "acme-prod",
+          "number": 412,
+          "url": "https://github.com/acme/acme-prod/pull/412",
+          "source": "hook",
+          "detached": false,
+          "boundAt": 745200000
+        }
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(PRBinding.self, from: legacy)
+        #expect(decoded.number == 412)
+        #expect(decoded.title == nil)
+    }
+
+    @Test("a title survives an encode/decode round trip")
+    func titleRoundTripsThroughJSON() throws {
+        let original = PRBinding(
+            worktreeID: UUID(), owner: "acme", repo: "acme-prod", number: 412,
+            url: "https://github.com/acme/acme-prod/pull/412",
+            title: "Fix the login timeout", source: .manual)
+        let decoded = try JSONDecoder().decode(
+            PRBinding.self, from: try JSONEncoder().encode(original))
+        #expect(decoded.title == "Fix the login timeout")
+        #expect(decoded == original)
+    }
+
     @Test("a binding with no observed status is not resolved")
     func unknownStatusBlocksResolution() {
         var unknown = binding(2, .mergeable)

@@ -412,10 +412,47 @@ struct PRBindingRPCTests {
         #expect(all.worktrees.map(\.worktreeID) == [harness.worktreeID])
     }
 
-    @Test("pr.detach of an unbound PR reports false rather than erroring")
-    func detachUnknown() async throws {
+    /// The last leg of the title's round trip: the column reaches the app as a
+    /// field on the binding `pr.bindings` returns, so the status bar can say
+    /// what `#412` actually is.
+    @Test("pr.bindings carries a stored title")
+    func bindingsCarryTitle() async throws {
         let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod", "github.com"))
-        #expect(try await harness.detach(number: 999) == false)
+        let attached = try await harness.attach(number: 412)
+        let bindingID = try #require(attached.binding?.id)
+        #expect(attached.binding?.title == nil)
+
+        try await harness.db.prBindings.updateObservation(
+            bindingID: bindingID,
+            status: PRStatus(number: 412, url: "https://github.com/acme/acme-prod/pull/412",
+                             state: .mergeable),
+            title: "Fix the login timeout")
+
+        #expect(try await harness.bindings().bindings.first?.title == "Fix the login timeout")
+    }
+
+    /// A worktree with no bindings but a cached `Worktree.prStatus` renders a
+    /// synthetic chip, and the app's untrack gesture detaches it by number. If
+    /// that matched no row and reported failure, `detachedCount` would stay
+    /// zero, the legacy-status fallback would keep the chip on screen, and the
+    /// control would silently decline. So the detach records the tombstone —
+    /// and the non-zero count is the signal the app reads.
+    @Test("pr.detach of an unbound PR tombstones it and raises detachedCount")
+    func detachUnbound() async throws {
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod", "github.com"))
+        #expect(try await harness.detach(number: 999))
+
+        let listed = try await harness.bindings()
+        #expect(listed.bindings.isEmpty)
+        #expect(listed.detachedCount == 1)
+
+        // Durable, exactly like any other tombstone: an automatic source may
+        // not bring the PR back on the next poll or hook fire.
+        let rebind = try await harness.attach(number: 999, source: PRBindingSource.branch.rawValue)
+        #expect(rebind.outcome == "tombstoned")
+        // And a manual attach still reverses it.
+        #expect(try await harness.attach(number: 999).outcome == "bound")
+        #expect(try await harness.bindings().detachedCount == 0)
     }
 
     @Test("pr.attach with neither url nor number is an RPC error")

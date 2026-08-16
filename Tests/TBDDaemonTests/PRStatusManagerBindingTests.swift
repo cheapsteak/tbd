@@ -1527,14 +1527,15 @@ struct WorktreePRStatusFromBindingsTests {
         #expect(updates.first { $0.worktreeID == b }?.status.state == .blocked)
     }
 
-    @Test("withObservation carries the observed refs and never clears a stored one")
+    @Test("withObservation carries the observed refs and title, and never clears a stored one")
     func withObservationCarriesRefs() {
         let wt = UUID()
         let original = binding(7, worktreeID: wt, state: nil)
         let fresh = PRStatus(number: 7, url: original.url, state: .merged)
 
         let observed = original.withObservation(
-            status: fresh, headBranch: "tbd/feature", baseRef: "main")
+            status: fresh, headBranch: "tbd/feature", baseRef: "main",
+            title: "Fix the login timeout")
         #expect(observed.id == original.id)
         #expect(observed.identityKey == original.identityKey)
         #expect(observed.source == original.source)
@@ -1542,11 +1543,20 @@ struct WorktreePRStatusFromBindingsTests {
         #expect(observed.status == fresh)
         #expect(observed.headBranch == "tbd/feature")
         #expect(observed.baseRef == "main")
+        #expect(observed.title == "Fix the login timeout")
 
-        // A nil ref means "not observed this pass", never "cleared".
-        let unobserved = observed.withObservation(status: fresh, headBranch: nil, baseRef: nil)
+        // A nil ref or title means "not observed this pass", never "cleared" —
+        // a `gh` outage must not blank the title the status bar has on screen.
+        let unobserved = observed.withObservation(status: fresh, headBranch: nil,
+                                                  baseRef: nil, title: nil)
         #expect(unobserved.headBranch == "tbd/feature")
         #expect(unobserved.baseRef == "main")
+        #expect(unobserved.title == "Fix the login timeout")
+
+        // A retitled PR does replace it — "not observed" is nil, not a lock.
+        let retitled = observed.withObservation(status: fresh, headBranch: nil,
+                                                baseRef: nil, title: "Fix the login timeout, again")
+        #expect(retitled.title == "Fix the login timeout, again")
     }
 
     /// The fold the poll applies before judging the merge rule: an absent
@@ -1560,9 +1570,61 @@ struct WorktreePRStatusFromBindingsTests {
 
         let fresh = PRStatus(number: 7, url: original.url, state: .merged)
         let folded = RPCRouter.folding(original, onto: PRStatusManager.PRBindingObservation(
-            status: fresh, headBranch: "tbd/feature", baseRef: "main"))
+            status: fresh, headBranch: "tbd/feature", baseRef: "main",
+            title: "Fix the login timeout"))
         #expect(folded.status == fresh)
         #expect(folded.headBranch == "tbd/feature")
         #expect(folded.baseRef == "main")
+        #expect(folded.title == "Fix the login timeout")
+    }
+
+    /// The fold is the only place the poll can lose a title, and the pass that
+    /// keeps a previous status (a failed check query) is the one that would do
+    /// it: it reports refs and title from the node it DID resolve, and folding
+    /// must carry them rather than dropping back to what the row held.
+    @Test("folding an observation with no title keeps the stored one")
+    func foldingKeepsAStoredTitle() {
+        let wt = UUID()
+        let stored = PRBinding(
+            worktreeID: wt, owner: "acme", repo: "acme-prod", number: 7,
+            url: "https://github.com/acme/acme-prod/pull/7",
+            title: "Fix the login timeout", source: .hook)
+        let fresh = PRStatus(number: 7, url: stored.url, state: .mergeable)
+
+        let folded = RPCRouter.folding(stored, onto: PRStatusManager.PRBindingObservation(
+            status: fresh, headBranch: nil, baseRef: nil, title: nil))
+        #expect(folded.title == "Fix the login timeout")
+
+        // And an absent observation leaves the binding wholly alone.
+        #expect(RPCRouter.folding(stored, onto: nil).title == "Fix the login timeout")
+    }
+
+    /// Persist-on-change reads `sameValue`, so a title has to be inside it or a
+    /// renamed PR would never reach the row — and `observedAt` has to stay
+    /// outside it or every idle poll would write every binding.
+    @Test("a changed title is a change, a fresh stamp on an identical title is not")
+    func titleParticipatesInChangeDetection() {
+        let wt = UUID()
+        // One id and one boundAt across every variant: `sameValue` compares
+        // whole bindings, so two independently minted rows differ on identity
+        // alone and would prove nothing about the title.
+        let id = UUID()
+        let boundAt = Date(timeIntervalSince1970: 0)
+        let url = "https://github.com/acme/acme-prod/pull/7"
+        func stamped(_ title: String?, at date: Date) -> PRBinding {
+            PRBinding(id: id, worktreeID: wt, owner: "acme", repo: "acme-prod",
+                      number: 7, url: url, title: title,
+                      status: PRStatus(number: 7, url: url, state: .mergeable,
+                                       observedAt: date),
+                      source: .hook, boundAt: boundAt)
+        }
+        let early = Date(timeIntervalSince1970: 1_000)
+        let later = Date(timeIntervalSince1970: 2_000)
+
+        #expect(stamped("Fix the login timeout", at: early)
+            .sameValue(as: stamped("Fix the login timeout", at: later)))
+        #expect(!stamped("Fix the login timeout", at: early)
+            .sameValue(as: stamped("Fix the login timeout, again", at: early)))
+        #expect(!stamped(nil, at: early).sameValue(as: stamped("Fix the login timeout", at: early)))
     }
 }

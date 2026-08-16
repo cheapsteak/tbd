@@ -171,7 +171,10 @@ struct PRDetachCommand: AsyncParsableCommand {
         if result.detached {
             print("Detached.")
         } else {
-            print("Not bound; nothing to detach.")
+            // A detach now records a tombstone even for a PR nothing had bound,
+            // so the only way to change nothing is for the PR to be detached
+            // already.
+            print("Already detached; nothing to do.")
         }
     }
 }

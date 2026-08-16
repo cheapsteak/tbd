@@ -199,6 +199,120 @@ struct PRBindingStoreTests {
         #expect(kept?.baseRef == "main")
     }
 
+    @Test("updateObservation round-trips a title and never blanks a stored one")
+    func updateObservationStoresTitle() async throws {
+        let fixture = try await Fixture()
+        let wt = try await fixture.newWorktree()
+        let stored = try #require(try await fixture.store.upsert(binding(1, worktreeID: wt)))
+        #expect(stored.title == nil)
+
+        let status = PRStatus(number: 1, url: stored.url, state: .mergeable)
+        try await fixture.store.updateObservation(
+            bindingID: stored.id, status: status, title: "Fix the login timeout")
+        #expect(try await fixture.store.list(worktreeID: wt).first?.title == "Fix the login timeout")
+
+        // A pass that resolved no title (transient failure) must not blank the
+        // one the status bar has on screen.
+        try await fixture.store.updateObservation(bindingID: stored.id, status: status)
+        #expect(try await fixture.store.list(worktreeID: wt).first?.title == "Fix the login timeout")
+
+        // A retitled PR does move it.
+        try await fixture.store.updateObservation(
+            bindingID: stored.id, status: status, title: "Fix the login timeout, again")
+        #expect(try await fixture.store.list(worktreeID: wt).first?.title
+            == "Fix the login timeout, again")
+    }
+
+    /// The migration rule's real test: a row written before the `title` column
+    /// existed holds SQL NULL there, and must still decode — as nil, meaning
+    /// "never observed", rather than failing the whole row.
+    @Test("a row written without a title decodes as nil rather than failing")
+    func preTitleRowDecodes() async throws {
+        let fixture = try await Fixture()
+        let wt = try await fixture.newWorktree()
+        let id = UUID().uuidString
+        try await fixture.store.writer.write { db in
+            try db.execute(
+                sql: """
+                INSERT INTO worktree_pull_request
+                  (id, worktreeID, host, owner, repo, number, url, source, detached, boundAt)
+                VALUES (?, ?, 'github.com', 'acme', 'acme-prod', 7,
+                        'https://github.com/acme/acme-prod/pull/7', 'hook', 0,
+                        '2026-08-01 00:00:00.000')
+                """,
+                arguments: [id, wt.uuidString])
+        }
+        let listed = try await fixture.store.list(worktreeID: wt)
+        #expect(listed.count == 1)
+        #expect(listed.first?.number == 7)
+        #expect(listed.first?.title == nil)
+    }
+
+    // MARK: - Tombstoning a PR that was never bound
+
+    @Test("insertTombstone records a PR this worktree never bound")
+    func insertTombstoneRecordsUnboundPR() async throws {
+        let fixture = try await Fixture()
+        let wt = try await fixture.newWorktree()
+        let candidate = binding(9, worktreeID: wt, source: .manual)
+
+        #expect(try await fixture.store.insertTombstone(candidate))
+
+        #expect(try await fixture.store.list(worktreeID: wt).isEmpty)
+        let all = try await fixture.store.list(worktreeID: wt, includeDetached: true)
+        #expect(all.count == 1)
+        #expect(all.first?.detached == true)
+        #expect(all.first?.source == .manual)
+    }
+
+    @Test("insertTombstone is idempotent against the unique index")
+    func insertTombstoneIsIdempotent() async throws {
+        let fixture = try await Fixture()
+        let wt = try await fixture.newWorktree()
+        let candidate = binding(9, worktreeID: wt, source: .manual)
+        #expect(try await fixture.store.insertTombstone(candidate))
+        // Second call: no duplicate row, no unique-constraint error, and it says
+        // it changed nothing.
+        #expect(try await fixture.store.insertTombstone(candidate) == false)
+        #expect(try await fixture.store.list(worktreeID: wt, includeDetached: true).count == 1)
+    }
+
+    @Test("insertTombstone leaves an existing live binding alone")
+    func insertTombstoneDoesNotDetachALiveRow() async throws {
+        let fixture = try await Fixture()
+        let wt = try await fixture.newWorktree()
+        _ = try await fixture.store.upsert(binding(9, worktreeID: wt, source: .hook))
+        #expect(try await fixture.store.insertTombstone(
+            binding(9, worktreeID: wt, source: .manual)) == false)
+        let listed = try await fixture.store.list(worktreeID: wt)
+        #expect(listed.count == 1)
+        #expect(listed.first?.source == .hook)
+    }
+
+    /// The cap counts non-detached rows, so a tombstone occupies none of the
+    /// budget — and must not be able to spend any of it either. `upsert` checks
+    /// the cap before writing anything, so a tombstone routed through it would
+    /// evict a live terminal binding to make room for a row that takes up no
+    /// room.
+    @Test("a tombstone insert at a full worktree evicts nothing and still records")
+    func insertTombstoneIgnoresTheCap() async throws {
+        let fixture = try await Fixture()
+        let wt = try await fixture.newWorktree()
+        for n in 1...19 {
+            _ = try await fixture.store.upsert(binding(n, worktreeID: wt, state: .mergeable))
+        }
+        _ = try await fixture.store.upsert(binding(20, worktreeID: wt, state: .merged))
+        #expect(try await fixture.store.list(worktreeID: wt).count == 20)
+
+        #expect(try await fixture.store.insertTombstone(
+            binding(21, worktreeID: wt, source: .manual)))
+
+        let live = try await fixture.store.list(worktreeID: wt)
+        #expect(live.count == 20)
+        #expect(live.contains { $0.number == 20 })   // the evictable one survived
+        #expect(try await fixture.store.list(worktreeID: wt, includeDetached: true).count == 21)
+    }
+
     @Test("setDetached reports false when the state did not actually change")
     func setDetachedReportsRealChange() async throws {
         // `updateAll` counts MATCHED rows, so the naive `> 0` made `tbd pr

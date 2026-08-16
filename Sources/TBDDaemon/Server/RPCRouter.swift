@@ -875,7 +875,8 @@ public final class RPCRouter: Sendable {
             if !updated.sameValue(as: binding) {
                 try? await db.prBindings.updateObservation(
                     bindingID: binding.id, status: updated.status,
-                    headBranch: updated.headBranch, baseRef: updated.baseRef)
+                    headBranch: updated.headBranch, baseRef: updated.baseRef,
+                    title: updated.title)
             }
             refreshed.append(updated)
         }
@@ -933,7 +934,8 @@ public final class RPCRouter: Sendable {
         guard let observed else { return binding }
         return binding.withObservation(status: observed.status,
                                        headBranch: observed.headBranch,
-                                       baseRef: observed.baseRef)
+                                       baseRef: observed.baseRef,
+                                       title: observed.title)
     }
 
     /// The `Worktree.prStatus` write implied by a worktree's bindings: the worst

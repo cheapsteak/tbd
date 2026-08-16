@@ -1494,6 +1494,47 @@ struct PRStatusManagerTests {
         #expect(matches.first?.node.mergeQueuePosition == 3)
     }
 
+    /// The title is what turns a bare `#454` on a status-bar chip into
+    /// something a person can decide about, so the by-number parse has to carry
+    /// it — and has to report a response that omitted it as nil, not "", since
+    /// the caller reads nil as "not observed" and keeps the stored title.
+    @Test("parseNumberedPRNodes carries the PR title, and reports an absent one as nil")
+    func parseNumberedPRNodesCarriesTitle() {
+        func response(titleLine: String) -> Data {
+            """
+            {
+              "data": {
+                "repository": {
+                  "pr0": {
+                    "number": 454,
+                    "url": "https://github.com/acme/acme/pull/454",
+            \(titleLine)
+                    "state": "OPEN",
+                    "mergeStateStatus": "CLEAN",
+                    "reviewDecision": "APPROVED",
+                    "headRefName": "show-weekly-reset",
+                    "createdAt": "2026-07-10T00:00:00Z",
+                    "isDraft": false,
+                    "statusCheckRollup": { "state": "SUCCESS" }
+                  }
+                }
+              }
+            }
+            """.data(using: .utf8)!
+        }
+        let wt = UUID()
+        let titled = PRStatusManager.parseNumberedPRNodes(
+            from: response(titleLine: #"        "title": "Fix the login timeout","#),
+            aliases: [(alias: "pr0", worktreeID: wt)])
+        #expect(titled.first?.node.title == "Fix the login timeout")
+
+        let untitled = PRStatusManager.parseNumberedPRNodes(
+            from: response(titleLine: ""), aliases: [(alias: "pr0", worktreeID: wt)])
+        // The node still parses — a title is descriptive, never a parse gate.
+        #expect(untitled.count == 1)
+        #expect(untitled.first?.node.title == nil)
+    }
+
     @Test("parseNumberedPRNodes skips a null pullRequest (deleted/inaccessible PR) without crashing")
     func parseNumberedPRNodesSkipsNullPullRequest() {
         let wt = UUID()
@@ -2255,6 +2296,9 @@ struct PRStatusManagerTests {
         #expect(query.contains("pr0: pullRequest(number: 454)"))
         #expect(query.contains("pr1: pullRequest(number: 12)"))
         #expect(query.contains("repository(owner: $owner, name: $name)"))
+        // A title nothing asks for is a title no response can carry, and the
+        // parse would then look correct while the column stayed empty forever.
+        #expect(query.contains("title"))
     }
 }
 

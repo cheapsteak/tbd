@@ -18,6 +18,7 @@ struct PRBindingRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var url: String
     var headBranch: String?
     var baseRef: String?
+    var title: String?
     var prStatus: String?
     var source: String
     var detached: Bool
@@ -33,6 +34,7 @@ struct PRBindingRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.url = binding.url
         self.headBranch = binding.headBranch
         self.baseRef = binding.baseRef
+        self.title = binding.title
         self.prStatus = binding.status.flatMap { status in
             (try? JSONEncoder().encode(status)).flatMap { String(data: $0, encoding: .utf8) }
         }
@@ -61,7 +63,8 @@ struct PRBindingRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             .flatMap { try? JSONDecoder().decode(PRStatus.self, from: $0) }
         return PRBinding(id: uuid, worktreeID: wtID, host: host, owner: owner,
                          repo: repo, number: number, url: url,
-                         headBranch: headBranch, baseRef: baseRef, status: status,
+                         headBranch: headBranch, baseRef: baseRef, title: title,
+                         status: status,
                          source: bindingSource, detached: detached, boundAt: boundAt)
     }
 }
@@ -202,6 +205,33 @@ public struct PRBindingStore: Sendable {
         }
     }
 
+    /// Record a tombstone for a PR this worktree has no row for at all, so a
+    /// detach can assert "this does not belong here" about a PR nothing ever
+    /// bound — a chip synthesized from the cached `Worktree.prStatus`, or a
+    /// `tbd pr detach` issued before discovery got there.
+    ///
+    /// Insert-if-missing inside ONE write transaction, so it is idempotent
+    /// against the table's unique `(worktreeID, host, owner, repo, number)`
+    /// index rather than racing it. Returns true when a row was inserted, and
+    /// false when the identity was already on record — in which case that row
+    /// is left exactly as it stands, tombstone or not.
+    ///
+    /// Deliberately NOT routed through `upsert`. The cap counts only
+    /// non-detached rows, so a tombstone can never breach it, but `upsert`
+    /// checks that count before writing anything and would evict a live
+    /// terminal binding — or drop the write entirely — to make room for a row
+    /// that occupies none of the budget.
+    @discardableResult
+    public func insertTombstone(_ binding: PRBinding) async throws -> Bool {
+        try await writer.write { db in
+            var record = PRBindingRecord(from: binding)
+            record.detached = true
+            guard try Self.fetchIdentity(db, record: record) == nil else { return false }
+            try record.insert(db)
+            return true
+        }
+    }
+
     /// Hard-delete a `branch`-sourced binding — the poll's heal path.
     ///
     /// A **delete, not a tombstone**, and only for `branch`. A tombstone records
@@ -228,12 +258,14 @@ public struct PRBindingStore: Sendable {
     }
 
     /// Persist what a refresh observed for one binding: its status, and the
-    /// descriptive `headBranch` / `baseRef` the same response carried. A nil ref
-    /// means "not observed this pass" and leaves that column alone — a `gh`
-    /// outage must not blank a branch name the CLI renders.
+    /// descriptive `headBranch` / `baseRef` / `title` the same response carried.
+    /// A nil one of those means "not observed this pass" and leaves that column
+    /// alone — a `gh` outage must not blank a branch name the CLI renders or a
+    /// title the status bar has on screen.
     public func updateObservation(bindingID: UUID, status: PRStatus?,
                                   headBranch: String? = nil,
-                                  baseRef: String? = nil) async throws {
+                                  baseRef: String? = nil,
+                                  title: String? = nil) async throws {
         let encoded = status.flatMap { value in
             (try? JSONEncoder().encode(value)).flatMap { String(data: $0, encoding: .utf8) }
         }
@@ -243,6 +275,7 @@ public struct PRBindingStore: Sendable {
             var assignments: [ColumnAssignment] = [Column("prStatus").set(to: encoded)]
             if let headBranch { assignments.append(Column("headBranch").set(to: headBranch)) }
             if let baseRef { assignments.append(Column("baseRef").set(to: baseRef)) }
+            if let title { assignments.append(Column("title").set(to: title)) }
             return try PRBindingRecord
                 .filter(key: bindingID.uuidString)
                 .updateAll(db, assignments)

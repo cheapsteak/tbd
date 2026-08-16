@@ -282,6 +282,82 @@ struct PRBindingCoordinatorTests {
         #expect(try await fixture.store.list(worktreeID: wt).count == 1)
     }
 
+    // MARK: - Detach
+
+    /// The status bar renders a chip for a worktree whose only PR evidence is
+    /// the cached `Worktree.prStatus` — a synthetic binding that by design never
+    /// reaches the database. A detach that only ever UPDATEd would match no row
+    /// there, leave `detachedCount` at zero, and the chip would come straight
+    /// back. So detach asserts rather than edits: with nothing on record it
+    /// writes the tombstone itself.
+    @Test("detaching a PR nothing ever bound inserts a manual tombstone")
+    func detachInsertsTombstoneOnMiss() async throws {
+        let fixture = try await Fixture()
+        let wt = try await fixture.newWorktree()
+        #expect(try await fixture.store.list(worktreeID: wt, includeDetached: true).isEmpty)
+
+        #expect(try await fixture.coordinator.detach(worktreeID: wt, parsed: parsed))
+
+        #expect(try await fixture.store.list(worktreeID: wt).isEmpty)
+        let recorded = try await fixture.store.list(worktreeID: wt, includeDetached: true)
+        #expect(recorded.count == 1)
+        #expect(recorded.first?.number == 412)
+        #expect(recorded.first?.detached == true)
+        // A tombstone with no prior row records nothing but a user's decision.
+        #expect(recorded.first?.source == .manual)
+        #expect(recorded.first?.url == parsed.url)
+    }
+
+    @Test("detaching an already-tombstoned PR adds no row and does not error")
+    func detachTwiceIsIdempotent() async throws {
+        let fixture = try await Fixture()
+        let wt = try await fixture.newWorktree()
+        #expect(try await fixture.coordinator.detach(worktreeID: wt, parsed: parsed))
+
+        // Reports "changed nothing" — the PR is already detached — rather than
+        // duplicating the row or tripping the unique index.
+        #expect(try await fixture.coordinator.detach(worktreeID: wt, parsed: parsed) == false)
+        #expect(try await fixture.store.list(worktreeID: wt, includeDetached: true).count == 1)
+    }
+
+    @Test("detaching a live binding still tombstones the row it already has")
+    func detachTombstonesALiveRow() async throws {
+        let fixture = try await Fixture()
+        let wt = try await fixture.newWorktree()
+        _ = await fixture.coordinator.bind(worktreeID: wt, parsed: parsed, source: .hook)
+
+        #expect(try await fixture.coordinator.detach(worktreeID: wt, parsed: parsed))
+
+        let recorded = try await fixture.store.list(worktreeID: wt, includeDetached: true)
+        #expect(recorded.count == 1)
+        #expect(recorded.first?.detached == true)
+        // Insert-on-miss must not have fired: the original row is still the
+        // hook's, not a fresh manual one.
+        #expect(recorded.first?.source == .hook)
+    }
+
+    /// The gesture stays reversible whichever way the tombstone got there.
+    @Test("a manual attach clears a tombstone that insert-on-miss created")
+    func attachClearsAnInsertedTombstone() async throws {
+        let fixture = try await Fixture()
+        let wt = try await fixture.newWorktree()
+        #expect(try await fixture.coordinator.detach(worktreeID: wt, parsed: parsed))
+
+        // An automatic source still may not revive it — insert-on-miss creates
+        // a real tombstone, not a weaker one.
+        let auto = await fixture.coordinator.bind(worktreeID: wt, parsed: parsed, source: .branch)
+        guard case .tombstoned = auto else {
+            Issue.record("expected .tombstoned, got \(auto)"); return
+        }
+
+        let outcome = await fixture.coordinator.bind(worktreeID: wt, parsed: parsed, source: .manual)
+        guard case .bound(let revived) = outcome else {
+            Issue.record("expected .bound, got \(outcome)"); return
+        }
+        #expect(!revived.detached)
+        #expect(try await fixture.store.list(worktreeID: wt).map(\.number) == [412])
+    }
+
     // MARK: - Heal
 
     @Test("a heal removes a branch binding and leaves hook and manual ones alone")

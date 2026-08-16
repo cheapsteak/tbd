@@ -173,14 +173,51 @@ public actor PRBindingCoordinator {
         }
     }
 
-    /// Tombstone a binding. Returns false when this worktree has no such PR, or
-    /// when it was already detached.
+    /// Tombstone a PR, whether or not this worktree has a row for it.
+    ///
+    /// A detach is an assertion about the PR's future — "this does not belong
+    /// to this worktree" — not an edit to a row that happens to exist. So when
+    /// nothing matches, this **inserts** the tombstone rather than reporting
+    /// failure. Without that, the status bar's untrack gesture would silently
+    /// do nothing on a chip synthesized from the cached `Worktree.prStatus`
+    /// (the state every worktree is in while `gh` is unauthenticated or offline,
+    /// and before its first successful poll after upgrade): the detach would
+    /// match no row, `detachedCount` would stay zero, the legacy-status
+    /// fallback would keep rendering the chip, and it would return on the next
+    /// pass. It also makes `tbd pr detach` order-independent — detaching a PR
+    /// before anything discovers it pre-empts the binding rather than losing to
+    /// it, because an automatic source may not revive a tombstone.
+    ///
+    /// The inserted row is `.manual`: a tombstone with no prior row records
+    /// nothing but a user's decision. `pr.attach` clears it exactly as it
+    /// clears any other, so the gesture stays reversible.
+    ///
+    /// **Returns whether this call changed the record**, which is the contract
+    /// `tbd pr detach` prints from: true when a live row was tombstoned or a
+    /// tombstone was inserted, false when the PR was already tombstoned. The
+    /// PR ends up detached either way — that half is idempotent — but reporting
+    /// "Detached." for a call that did nothing is the regression
+    /// `PRBindingStore.setDetached` was rewritten to prevent, and inserting on
+    /// miss does not revive it.
     @discardableResult
     public func detach(worktreeID: UUID, parsed: ParsedPRURL) async throws -> Bool {
-        try await store.setDetached(worktreeID: worktreeID,
-                                    identityKey: identityKey(worktreeID: worktreeID,
-                                                             parsed: parsed),
-                                    detached: true)
+        let key = identityKey(worktreeID: worktreeID, parsed: parsed)
+        if try await store.setDetached(worktreeID: worktreeID, identityKey: key,
+                                       detached: true) {
+            return true
+        }
+        // Nothing changed, so either the PR was never bound here or it is
+        // already tombstoned. `insertTombstone` tells those apart inside one
+        // transaction, so a concurrent bind cannot slip between the two.
+        let tombstone = PRBinding(
+            worktreeID: worktreeID, host: parsed.host, owner: parsed.owner,
+            repo: parsed.repo, number: parsed.number, url: parsed.url,
+            source: .manual, detached: true)
+        let inserted = try await store.insertTombstone(tombstone)
+        if inserted {
+            logger.debug("tombstoned unbound PR #\(parsed.number, privacy: .public) for worktree \(worktreeID.uuidString, privacy: .public): detach of a PR nothing had bound")
+        }
+        return inserted
     }
 
     /// The host `PRBindingExtractor`'s GitHub pattern hard-codes. Because that

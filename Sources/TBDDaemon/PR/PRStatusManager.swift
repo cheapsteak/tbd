@@ -1001,20 +1001,23 @@ public actor PRStatusManager {
 
     /// One binding's freshly observed facts.
     ///
-    /// `headBranch` / `baseRef` are nil exactly when this pass did NOT resolve
-    /// the PR — the transient-failure paths that carry the binding's previous
-    /// status forward. A nil there means "not observed", never "the PR has no
-    /// base branch", so the caller keeps whatever it already had rather than
-    /// clearing a column a `gh` outage hid.
+    /// `headBranch` / `baseRef` / `title` are nil exactly when this pass did NOT
+    /// resolve the PR — the transient-failure paths that carry the binding's
+    /// previous status forward. A nil there means "not observed", never "the PR
+    /// has no base branch", so the caller keeps whatever it already had rather
+    /// than clearing a column a `gh` outage hid.
     public struct PRBindingObservation: Sendable, Equatable {
         public let status: PRStatus
         public let headBranch: String?
         public let baseRef: String?
+        public let title: String?
 
-        public init(status: PRStatus, headBranch: String? = nil, baseRef: String? = nil) {
+        public init(status: PRStatus, headBranch: String? = nil, baseRef: String? = nil,
+                    title: String? = nil) {
             self.status = status
             self.headBranch = headBranch
             self.baseRef = baseRef
+            self.title = title
         }
     }
 
@@ -1158,11 +1161,11 @@ public actor PRStatusManager {
                 signals = fetched
             } else if let previous = binding.status {
                 // Transient failure: keep the previous status rather than
-                // guessing. The refs still resolved, so report them — they are
-                // descriptive and independent of the check query that failed.
+                // guessing. The node still resolved, so report its descriptive
+                // fields — they are independent of the check query that failed.
                 observations[binding.id] = PRBindingObservation(
                     status: previous, headBranch: Self.refOrNil(node.headRefName),
-                    baseRef: Self.refOrNil(node.baseRefName))
+                    baseRef: Self.refOrNil(node.baseRefName), title: node.title)
                 continue
             } else {
                 signals = Self.aggregateFallbackSignals(node.statusCheckRollupState)
@@ -1186,7 +1189,8 @@ public actor PRStatusManager {
                                  reason: reason, mergeQueuePosition: node.mergeQueuePosition,
                                  observedAt: now()),
                 headBranch: Self.refOrNil(node.headRefName),
-                baseRef: Self.refOrNil(node.baseRefName))
+                baseRef: Self.refOrNil(node.baseRefName),
+                title: node.title)
         }
         return observations
     }
@@ -2173,6 +2177,11 @@ public actor PRStatusManager {
         /// whole node. Declared late so the memberwise init stays
         /// source-compatible.
         public let baseRefName: String
+        /// The PR's title. Descriptive only, and **optional on purpose**: a
+        /// response that omits it must leave the stored title alone rather than
+        /// clear it, so "absent" has to survive the parse as nil rather than
+        /// collapsing to `""`.
+        public let title: String?
         /// The forge that produced this node. Declared last with a default so
         /// the memberwise init stays source-compatible, the same reason
         /// `baseRefName` is declared where it is.
@@ -2181,7 +2190,7 @@ public actor PRStatusManager {
         init(number: Int, url: String, state: String, mergeVerdictRaw: String,
              reviewVerdictRaw: String, headRefName: String, createdAt: String, isDraft: Bool,
              statusCheckRollupState: String?, mergeQueuePosition: Int?,
-             baseRefName: String = "", forge: Forge = .github) {
+             baseRefName: String = "", title: String? = nil, forge: Forge = .github) {
             self.number = number
             self.url = url
             self.state = state
@@ -2193,6 +2202,7 @@ public actor PRStatusManager {
             self.statusCheckRollupState = statusCheckRollupState
             self.mergeQueuePosition = mergeQueuePosition
             self.baseRefName = baseRefName
+            self.title = title
             self.forge = forge
         }
     }
@@ -2446,8 +2456,12 @@ public actor PRStatusManager {
 
     /// The per-PR field selection shared by the viewer batch and the by-number
     /// aliased query, so the two can't drift and both parse into `PRNode`.
+    /// `title` rides along because it is one short string on a query that
+    /// already runs per PR, and it is what turns a bare `#21156` into something
+    /// a person can decide about. `openPRsQuery` has always selected it; this
+    /// closes the gap rather than opening a new cost.
     static let prNodeFieldSelection =
-        "number url state mergeStateStatus reviewDecision headRefName baseRefName createdAt isDraft "
+        "number url title state mergeStateStatus reviewDecision headRefName baseRefName createdAt isDraft "
         + "statusCheckRollup { state } mergeQueueEntry { position }"
 
     /// One aliased query resolving several worktrees' stored PR numbers in a
@@ -2521,7 +2535,10 @@ public actor PRStatusManager {
                       isDraft: isDraft,
                       statusCheckRollupState: statusCheckRollupState,
                       mergeQueuePosition: mergeQueuePosition,
-                      baseRefName: node["baseRefName"] as? String ?? "")
+                      baseRefName: node["baseRefName"] as? String ?? "",
+                      // Absent stays nil rather than becoming "": the caller
+                      // reads nil as "not observed" and keeps the stored title.
+                      title: node["title"] as? String)
     }
 
     /// Pure parse of the `repo.listOpenPRs` GraphQL response
