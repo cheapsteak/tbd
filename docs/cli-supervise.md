@@ -448,32 +448,50 @@ of stillness TBD never observed. Read a null as *unknown*, which is neither
 
 ### Output
 
-JSON on stdout, `schemaVersion` at top level:
+JSON on stdout, `schemaVersion` at top level. A fact that is unknown is
+present and `null` rather than an absent key, so a reader never has to guess
+whether a value was unknown or the writer was an older build:
 
 ```
 $ tbd supervise readout --project acme-platform
 {
   "schemaVersion": 1,
-  "supervision": { "on": true, "brakeEngaged": false, "mode": "autonomous" },
-  "supervisor": { "arrangement": "hostedDesk", "terminal": "t81",
-                  "state": { "value": "idle", "source": "hook", "observedAt": "2026-08-15T02:13:12.000Z" },
-                  "lastAttestedAct": "2026-08-15T02:04:51.000Z", "unansweredBriefingSince": null },
+  "project": "acme-platform",
+  "generatedAt": "2026-08-15T02:13:41.204Z",
+  "supervision": { "brake": "released", "on": true, "mode": "autonomous",
+                   "declaredModes": ["attended", "autonomous"],
+                   "spanStartedAt": "2026-08-14T22:04:11.000Z",
+                   "lastSweepContactAt": "2026-08-15T02:08:40.000Z" },
+  "supervisor": { "arrangement": { "kind": "hostedDesk", "terminal": null },
+                  "live": false, "state": null, "lastAttestedAct": null,
+                  "contextLoad": null, "unansweredBriefingSince": null },
   "agents": [
-    { "terminal": "t17",
-      "state": { "value": "idle", "source": "hook", "observedAt": "2026-08-15T02:13:40.000Z" },
+    { "terminal": "6D40F3A1-…", "worktree": "1B7E2C90-…", "repo": "9A11C0DE-…",
+      "spawnSource": "claude", "transcriptPath": "…",
+      "state": { "value": { "state": "idle" },
+                 "source": { "kind": "hook", "detail": "Stop" },
+                 "observedAt": "2026-08-15T02:13:40.000Z" },
       "work": { "branch": "tbd/public-surfaces",
                 "hasConflicts": false,
                 "commitsUnchangedSince": "2026-08-15T01:14:02.000Z",
                 "pr": { "outcome": "observed", "observedAt": "2026-08-15T02:09:30.000Z" },
                 "prStatus": { … } },
       "counters": { "turnsInWindow": 12, "hookEventsInWindow": 31,
-                    "windowStart": "2026-08-15T01:13:40.000Z" },
+                    "windowStart": "2026-08-15T01:13:40.000Z",
+                    "observedAt": "2026-08-15T02:13:41.000Z" },
       "pinned": false,
       "notToAct": { "interventionInFlight": false, "recheckPending": false,
                     "rateLimitedUntil": null } }
   ]
 }
 ```
+
+**Read `supervisor.live`, never `supervisor.arrangement`, to learn whether
+anything is standing in the role.** `arrangement` says what *would* supervise
+this project — the operator's appointed session where a binding stands,
+otherwise the hosted desk — and it is always present. It is never a claim that
+a supervisor exists right now. Until briefing delivery ships, `live` is false
+on every readout and the four facts beside it are null.
 
 ### Examples
 
@@ -569,27 +587,61 @@ stdout, `schemaVersion` at top level.
 
 ### How the join is computed
 
-- **Lines pass through verbatim.** Each line is its original JSON object with
-  two fields added: `source`, either `actuation` or `supervision`, and for a
-  verified send a computed `delivery` status. Neither record is re-modelled.
-  The actuation record's field list is documented as growing, and the
-  supervision ledger carries kinds a given build does not write — so
+- **Lines pass through verbatim.** Each entry carries the original JSON object
+  untouched under `line` — every key it had, including the ones this build
+  does not model — beside `source` (`actuation` or `supervision`), the two
+  envelope fields lifted out for filtering and ordering (`kind`, `ts`), and a
+  computed `delivery` status where a verified send is owed one. Neither record
+  is re-modelled. The actuation record's field list is documented as growing,
+  and the supervision ledger carries kinds a given build does not write — so
   re-modelling would make a later build's line, or any field added within a
   schema version, vanish from a query whose entire job is showing you
   everything that touched the fleet.
-- **One merged `lines` array, ascending by timestamp.** The two kind
-  vocabularies are disjoint, so a single array reads correctly and you filter
-  by `kind`. `source` rides every line regardless, so provenance never depends
-  on remembering which vocabulary a kind belongs to.
+- **One merged `lines` array, ascending by `ts`.** The two kind vocabularies
+  are disjoint, so a single array reads correctly and you filter by `kind`.
+  `source` rides every entry regardless, so provenance never depends on
+  remembering which vocabulary a kind belongs to.
 - **A row appears only when it resolves into this project.** An actuation
   row's target is matched by worktree, terminal, or repo, each resolved
   through TBD's own tables to a project. A row that resolves to nothing — a
   target whose row has since been deleted, a remote-provider act with no local
   coordinates — is excluded rather than included on a guess. The failure worth
   preventing is one project's query showing another project's lines.
-- **Unparseable lines are counted, not swallowed.** A hand-edit or a crash
-  fragment is reported as a count beside the array, so damage reads as damage
-  rather than as a quiet absence.
+- **Unparseable lines are counted, not swallowed.** Both records are
+  append-only files a human may hand-edit and a crash may truncate mid-write.
+  A line that cannot be read at all is dropped from `lines` and counted in
+  `skipped`, per record, so damage reads as damage rather than as a quiet
+  absence — a shorter list with no count would read as "the fleet was quiet",
+  which calls for the opposite response. A line whose envelope parses but
+  whose body this build does not model is *not* skipped: it rides in `lines`
+  verbatim.
+
+### Output
+
+```
+$ tbd supervise ledger --project acme-platform --since 2026-08-15T02:10:00Z
+{
+  "schemaVersion": 1,
+  "project": "acme-platform",
+  "since": "2026-08-15T02:10:00.000Z",
+  "generatedAt": "2026-08-15T02:41:12.008Z",
+  "lines": [
+    { "source": "actuation", "kind": "send", "ts": "2026-08-15T02:11:09.412Z",
+      "delivery": "observed:landed-and-acting",
+      "line": { … the row exactly as written … } },
+    { "source": "supervision", "kind": "lifecycle", "ts": "2026-08-15T02:20:00.100Z",
+      "delivery": null,
+      "line": { … } }
+  ],
+  "skipped": { "actuationLines": 0, "supervisionLines": 0 }
+}
+```
+
+`since` is echoed back so a program can confirm the window it got rather than
+assume it. `delivery` is computed at query time and is null for every line
+owed no observation, which is most of them — no row is ever *written* saying
+`unconfirmed`, because that would make the record's claims depend on a sweep
+having run.
 
 ### `--since`
 
@@ -602,6 +654,11 @@ Three shapes are accepted, and anything else is refused naming all three:
   machine's local time zone. The operator's shape: at 02:40, `--since 22:00`
   means last night's 22:00.
 - **A bare relative duration** — `30m`, `2h`, `90s` — meaning that long ago.
+
+All three are resolved to an absolute instant by the CLI before the query
+runs, and that instant is what `since` echoes back. The window's lower bound
+is therefore fixed at the moment you invoked the command, not re-derived while
+it executes.
 
 ### Examples
 

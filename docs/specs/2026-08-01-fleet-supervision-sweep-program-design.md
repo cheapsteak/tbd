@@ -290,9 +290,11 @@ one is a refusal to be clever with somebody else's record:
   as growing — the envelope, the kind set and the never-claims are the
   contract and the rest is implementation detail (design §6) — and the
   supervision ledger is append-only, with kinds a given build does not write.
-  So the query carries each line as its original JSON object with two fields
-  added: `source` (`actuation` or `supervision`) and, for a verified send, a
-  computed `delivery` status. It re-models neither record. Re-modelling would
+  So the query carries each line's original JSON object untouched under
+  `line`, beside `source` (`actuation` or `supervision`), the two envelope
+  fields lifted for filtering and ordering (`kind`, `ts`), and a computed
+  `delivery` status where a verified send is owed one. It re-models neither
+  record. Re-modelling would
   make a later build's line, or any field added within a version, vanish from
   a query whose entire job is showing a program everything that touched the
   fleet.
