@@ -174,4 +174,18 @@ struct WorktreeProfilePickerRemoteLaneTests {
             offer: .chooseProvider([provider(name: "acme"), provider(name: "acme-prod")]))
             == "New worktree or remote session…")
     }
+
+    // MARK: - the row's ellipsis is a promise
+
+    /// A trailing ellipsis says "this opens something". The row now sometimes
+    /// creates outright, so it only makes that promise when it will keep it.
+    @Test func theRowKeepsItsEllipsisWhenSelectingItOpensTheForm() {
+        #expect(WorktreeProfilePickerView.remoteLaneRowTitle(opensForm: true)
+            == "New remote session…")
+    }
+
+    @Test func theRowDropsItsEllipsisWhenSelectingItCreatesOutright() {
+        #expect(WorktreeProfilePickerView.remoteLaneRowTitle(opensForm: false)
+            == "New remote session")
+    }
 }

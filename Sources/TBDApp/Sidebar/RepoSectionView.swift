@@ -303,10 +303,10 @@ struct RepoSectionView: View {
                             repoID: repo.id,
                             highlightDefaultProfile: newWorktreeMenu.isTriggerHovered,
                             onClose: { newWorktreeMenu.closeNow() },
-                            // The picker closes itself first (see
-                            // `startRemoteSession`), so this only has to
-                            // present the sheet this view already owns.
-                            onStartRemoteSession: { openRemoteCreateSheet(for: $0) }
+                            // The picker closes itself first (see its own
+                            // `startRemoteSession`), so this only has to create
+                            // outright or present the sheet this view owns.
+                            onStartRemoteSession: { startRemoteSession(with: $0) }
                         )
                         .environmentObject(appState)
                         .background(.ultraThickMaterial)
@@ -533,8 +533,36 @@ struct RepoSectionView: View {
             // session's `meta["repo"]` back to a repo — so a session created
             // from here round-trips into THIS repo's section instead of
             // landing unmatched.
-            repoPrefill: RemoteCreateFormLogic.repoPrefill(remoteURL: repo.remoteURL)
+            repoPrefill: RemoteCreateFormLogic.repoPrefill(remoteURL: repo.remoteURL),
+            repoDefaults: repo.remoteCreateDefaults
         )
+    }
+
+    /// The `+` menu's remote-lane row: create outright when every required
+    /// answer is already knowable, and fall back to the form when it is not.
+    ///
+    /// Deliberately NOT wired to the repo context menu's "New Remote
+    /// Session…", which keeps opening the form unconditionally — that item is
+    /// how you reach the form to type a prompt or pick a branch, and it stays
+    /// the way to do so.
+    private func startRemoteSession(with provider: RemoteProviderStatus) {
+        let launch = RemoteCreateFormLogic.launch(
+            describe: provider.describe,
+            repoPrefill: RemoteCreateFormLogic.repoPrefill(remoteURL: repo.remoteURL),
+            repoDefaults: repo.remoteCreateDefaults,
+            globalDefaults: appState.globalRemoteCreateDefaults,
+            generatedSlug: NameGenerator.generate())
+        switch launch {
+        case .createNow(let paramsJSON):
+            Task {
+                await appState.createRemoteSession(
+                    provider: provider.config.name, paramsJSON: paramsJSON)
+            }
+        case .openForm:
+            // The sheet re-resolves from the same inputs, so it opens on the
+            // values this decision just computed.
+            openRemoteCreateSheet(for: provider)
+        }
     }
 
     private func handlePlusButton() {
