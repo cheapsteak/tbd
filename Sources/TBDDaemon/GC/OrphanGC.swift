@@ -75,7 +75,7 @@ public actor OrphanGC {
     private let beforeInterruptedArchiveReap: (@Sendable () async -> Void)?
     /// Test-only injection seam, the profile-dir twin of
     /// `beforeInterruptedArchiveReap`: awaited once inside
-    /// `reclaimProfileDirs`, after the candidate list and the row snapshot have
+    /// `reapOrphanProfileDirs`, after the candidate list and the row snapshot have
     /// been taken and before any candidate is reaped. That is the exact window
     /// the pre-reap row re-read closes, and nothing else in that phase is slow
     /// or interruptible enough to land a concurrent profile creation in it
@@ -499,28 +499,57 @@ public actor OrphanGC {
     /// `model_profiles` row is gone, and purges quarantine entries past the
     /// retention window.
     ///
-    /// Gated by its own default-off flag on top of `gcEnabled`: unlike the
-    /// other collectors' targets, these directories hold per-profile
-    /// credentials and user content with no other copy, so reaping quarantines
-    /// rather than deletes and the classifier soaks behind its own switch
-    /// before graduating.
+    /// The two halves answer to different switches, and that split is
+    /// deliberate. **Classifying** an orphan is gated by
+    /// `gcProfileDirsEnabled` on top of `gcEnabled`: unlike the other
+    /// collectors' targets, these directories hold per-profile credentials and
+    /// user content with no other copy, so reaping quarantines rather than
+    /// deletes and the classifier soaks behind its own switch before
+    /// graduating. **Purging** the quarantine is not classification of a user
+    /// resource at all — it is cleanup of GC's own artifacts, of data this
+    /// sweep already moved aside — so it runs whenever the sweep runs, i.e.
+    /// under `gcEnabled` alone. Turning the classifier off ends a soak; it must
+    /// never strand credentials in `.reaped/` indefinitely, since "the same
+    /// sweep expires the quarantine" is the whole basis on which quarantining
+    /// was preferred to deleting outright.
     ///
     /// `dryRun` bypasses the flag exactly as `sweep` lets it bypass
     /// `gcEnabled`: planning is read-only, and someone deciding whether to
     /// enable a default-off flag needs to see what enabling it would reclaim
     /// before flipping it. A NON-dry run still requires the flag.
+    private func reclaimProfileDirs(
+        config: Config, dryRun: Bool, planned: inout [String], reaped: inout Int
+    ) async {
+        if config.gcProfileDirsEnabled || dryRun {
+            await reapOrphanProfileDirs(
+                config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
+            )
+        }
+
+        // Quarantine expiry — the second half of the bargain. Without it the
+        // quarantine grows unboundedly, which is the disease this phase treats.
+        for path in profileDirCollector.expiredQuarantineEntries(
+            retentionDays: config.gcSnapshotRetentionDays
+        ) {
+            planned.append("PURGE quarantine \(path)")
+            guard !dryRun else { continue }
+            _ = profileDirCollector.purge(quarantinePath: path)
+        }
+    }
+
+    /// The classifier arm of the profile-dir phase: enumerate candidates, gate
+    /// them, and quarantine what is eligible. Runs only with
+    /// `gcProfileDirsEnabled` on (or in a dry run, which plans without acting).
     ///
     /// Every DB read lives here rather than in the collector (the same division
-    /// as `DeletionQueueCollector`), and a failed read skips the whole phase —
+    /// as `DeletionQueueCollector`), and a failed read skips the whole arm —
     /// the keep-favoring direction every other gate in this sweep takes.
     /// Directories are enumerated BEFORE the rows are read, so a profile
     /// created mid-sweep is always in the row set and can never be classified
     /// as an orphan.
-    private func reclaimProfileDirs(
+    private func reapOrphanProfileDirs(
         config: Config, dryRun: Bool, planned: inout [String], reaped: inout Int
     ) async {
-        guard config.gcProfileDirsEnabled || dryRun else { return }
-
         let candidates = profileDirCollector.candidates()
         guard let profiles = try? await db.modelProfiles.list(),
               let terminals = try? await db.terminals.list() else {
@@ -547,20 +576,34 @@ public actor OrphanGC {
                 """)
             case .reap:
                 planned.append("REAP profile-dir \(candidate.path)")
-                // The phase guard is `gcProfileDirsEnabled || dryRun`, so every
+                // This arm's guard is `gcProfileDirsEnabled || dryRun`, so every
                 // line below this point runs only with the flag actually on.
                 guard !dryRun else { continue }
                 await beforeProfileDirReap?()
                 // Re-read immediately before acting: the candidate list and the
                 // row snapshot above are exactly that, and a profile recreated
                 // with this UUID in between must not have its directory pulled
-                // out from under it. A read failure reads as "keep".
-                let refreshed = (try? await db.modelProfiles.get(id: candidate.profileID)) ?? nil
-                guard refreshed == nil else {
-                    planned.append("KEEP row-appeared \(candidate.path)")
-                    logger.info("""
-                    gc: keep row-appeared \(candidate.path, privacy: .public) — \
-                    a profile row with this id exists again since this sweep listed it
+                // out from under it. Both non-reap outcomes keep the directory,
+                // and they are kept distinct on purpose — a row that exists
+                // again, and a read that never answered. Collapsing a thrown
+                // read into "no row" would reap on exactly the evidence that
+                // says nothing, inverting this sweep's fail-toward-keeping
+                // direction.
+                do {
+                    if try await db.modelProfiles.get(id: candidate.profileID) != nil {
+                        planned.append("KEEP row-appeared \(candidate.path)")
+                        logger.info("""
+                        gc: keep row-appeared \(candidate.path, privacy: .public) — \
+                        a profile row with this id exists again since this sweep listed it
+                        """)
+                        continue
+                    }
+                } catch {
+                    planned.append("KEEP row-read-failed \(candidate.path)")
+                    logger.warning("""
+                    gc: keep row-read-failed \(candidate.path, privacy: .public) — \
+                    the pre-reap profile-row re-read failed: \
+                    \(String(describing: error), privacy: .public)
                     """)
                     continue
                 }
@@ -583,16 +626,6 @@ public actor OrphanGC {
                 await insertReapRecord(record)
                 reaped += 1
             }
-        }
-
-        // Quarantine expiry — the second half of the bargain. Without it the
-        // quarantine grows unboundedly, which is the disease this phase treats.
-        for path in profileDirCollector.expiredQuarantineEntries(
-            retentionDays: config.gcSnapshotRetentionDays
-        ) {
-            planned.append("PURGE quarantine \(path)")
-            guard !dryRun else { continue }
-            _ = profileDirCollector.purge(quarantinePath: path)
         }
     }
 

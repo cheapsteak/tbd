@@ -150,9 +150,15 @@ and the `.reaped/` quarantine are never candidates. Directories are enumerated *
 the rows are read, so a profile created mid-sweep is always in the row set and can never
 be classified as an orphan.
 
-**Flag: `gc_profile_dirs_enabled`, default off.** The phase reclaims only when `gcEnabled`
-**and** this flag are both on. A dry run bypasses both, exactly as it does for the rest
-of the sweep: `tbd gc sweep --dry-run` prints the `REAP profile-dir` and
+**Flag: `gc_profile_dirs_enabled`, default off.** The flag gates *classification*: a
+directory is enumerated, gated and quarantined only when `gcEnabled` **and** this flag
+are both on. It does **not** gate quarantine expiry, which runs under `gcEnabled` alone —
+purging `.reaped/` is cleanup of GC's own artifacts, of data the sweep already moved
+aside, not a judgement about a user's resource. That split is what makes quarantining
+safer than deleting: an operator who ends a soak by turning the flag off (or backs out
+after a suspected misclassification) must not thereby strand credentials on disk forever,
+well past the retention window. A dry run bypasses both switches, exactly as it does for
+the rest of the sweep: `tbd gc sweep --dry-run` prints the `REAP profile-dir` and
 `PURGE quarantine` lines this phase *would* act on with the flag off, so the decision to
 enable a default-off switch can be made against real candidates rather than blind.
 Planning touches neither disk nor the database. Enable it for a soak with
@@ -176,13 +182,16 @@ each keep is reported in the sweep plan with its reason:
 3. **Grace window** (`grace`) — the directory's creation date is younger than
    `gcGraceSeconds` (default 3600s / 1h). An unreadable creation date keeps too
    (`unknown-age`).
-4. **Pre-reap re-read** (`row-appeared`) — immediately before the rename, `model_profiles`
-   is re-read for the UUID. The candidate list and the row snapshot are both taken at
-   the top of the phase, so a profile recreated with this UUID in between must not have
-   its directory pulled out from under it; a failed read reads as "keep".
+4. **Pre-reap re-read** (`row-appeared`, `row-read-failed`) — immediately before the
+   rename, `model_profiles` is re-read for the UUID. The candidate list and the row
+   snapshot are both taken at the top of the phase, so a profile recreated with this
+   UUID in between must not have its directory pulled out from under it. A row that is
+   found again keeps as `row-appeared`; a read that *throws* keeps as `row-read-failed`,
+   distinct on purpose — "no answer" is not "no row", and collapsing the two would reap
+   on the one piece of evidence that says nothing.
 
-A failed `model_profiles` or `terminal` read skips the whole phase rather than treating
-the empty result as "everything is an orphan".
+A failed `model_profiles` or `terminal` read skips the whole classification arm rather
+than treating the empty result as "everything is an orphan".
 
 **Quarantine, not delete.** A reap renames the directory into
 `~/tbd/profiles/.reaped/<uuid>-<UTC timestamp>/`. The rename is the commit point: a
@@ -209,7 +218,9 @@ recoverable, so reaping parks the data instead of destroying it.
 
 **Quarantine expiry.** The same phase deletes `.reaped/` entries older than
 `gcSnapshotRetentionDays` (default 30), which keeps the quarantine from growing into the
-disease it treats. Age comes from the timestamp this collector stamped into the entry's
+disease it treats. It runs on every sweep `gcEnabled` allows, whatever
+`gc_profile_dirs_enabled` says, so nothing this collector parked can outlive the
+retention window. Age comes from the timestamp this collector stamped into the entry's
 own name; an entry whose name carries no parsable stamp falls back to the newer of its
 own creation and modification dates, and one with no readable date at all is kept rather
 than guessed at. Expiry writes no new reap record — the entry already has one.

@@ -54,11 +54,13 @@ data. That asymmetry drives the quarantine decision below.
 Three questions were put to a human; each answer below is theirs.
 
 - **Own default-off flag, not a rider on `gcEnabled`.** A new config column
-  `gc_profile_dirs_enabled`, shipped default OFF; the collector runs only when
-  `gcEnabled` AND this flag are both on. `gcEnabled` shipped default-ON for
-  reclaims that are restorable or disposable; a new collector over
-  directories holding credentials and user content warrants its own soak.
-  Graduation is a one-line flip of the Swift default constant.
+  `gc_profile_dirs_enabled`, shipped default OFF; the collector *classifies*
+  only when `gcEnabled` AND this flag are both on. `gcEnabled` shipped
+  default-ON for reclaims that are restorable or disposable; a new classifier
+  over directories holding credentials and user content warrants its own soak.
+  Graduation is a one-line flip of the Swift default constant. The flag's scope
+  ends at classification: quarantine expiry answers to `gcEnabled` alone, so
+  ending a soak never strands data the sweep already moved aside.
 - **Quarantine, then expire — not delete outright.** Reaping renames the
   directory into `~/tbd/profiles/.reaped/<uuid>-<timestamp>/` (rename as the
   atomic commit point, the same pattern as `WorktreeDeletionQueue`) and
@@ -148,9 +150,9 @@ legitimate young directory exists before its row.
 
 Every gate fails toward keeping and appends a KEEP reason to the sweep plan:
 
-- **Flag** — skip the whole phase unless `gcEnabled` and
+- **Flag** — skip the classification arm unless `gcEnabled` and
   `gcProfileDirsEnabled` are both on (dry-run plans regardless, like the
-  other arms).
+  other arms). Quarantine expiry sits outside this gate; see below.
 - **Grace** — keep directories whose creation date is younger than
   `gcGraceSeconds` (default 1 h). Belt-and-braces against any future
   creation-order change.
@@ -158,7 +160,11 @@ Every gate fails toward keeping and appends a KEEP reason to the sweep plan:
   the UUID.
 - **Pre-reap re-read** — immediately before renaming, re-check that no
   `model_profiles` row with the UUID exists (the same
-  snapshot-staleness close as the deletion-queue collector's row re-read).
+  snapshot-staleness close as the deletion-queue collector's row re-read). A
+  row that is found again and a read that throws are separate keeps
+  (`row-appeared`, `row-read-failed`): a thrown read is the absence of
+  evidence, not evidence of absence, and reaping on it would invert the
+  fail-toward-keeping direction the rest of the sweep takes.
 
 ### Reap mechanics
 
@@ -193,7 +199,11 @@ Reclaimed section does not show `.profileDir` records.
 
 The same sweep phase deletes `.reaped/` entries older than
 `gcSnapshotRetentionDays` (default 30 d), reusing the retention knob that
-already governs how long reaped state stays recoverable. Age comes from the
+already governs how long reaped state stays recoverable. Expiry runs under
+`gcEnabled` alone, outside the classifier flag: purging the quarantine is
+cleanup of GC's own artifacts rather than a judgement about a user's resource,
+and a flag that could strand credentials in `.reaped/` indefinitely would
+dissolve the very property that made quarantining preferable to deleting. Age comes from the
 timestamp embedded in the entry's name; an unparseable name falls back to the
 directory's own dates, and any read failure keeps the entry. Expiry does not
 write additional ReapRecords — the quarantine entry's record already exists.
@@ -204,11 +214,14 @@ write additional ReapRecords — the quarantine entry's record already exists.
 - Collector: orphan reaped into quarantine; row-matched dir kept; non-UUID
   entry untouched; `.reaped/` never a candidate; grace keeps a young dir;
   terminal-referenced dir kept; pre-reap re-read keeps a just-recreated row;
-  quarantine entry expires after retention and survives before it; dry run
-  plans without touching disk or DB.
-- Flag: both branches (off = a real sweep is a no-op even with orphans
+  a *throwing* pre-reap re-read keeps the directory, writes no record and
+  leaves the keychain item alone; quarantine entry expires after retention and
+  survives before it; dry run plans without touching disk or DB.
+- Flag: both branches (off = a real sweep reaps nothing even with orphans
   present, while a dry run still plans them; on = reaps), plus the three
-  NULL/false/true states.
+  NULL/false/true states. Its scope too: with the flag off a real sweep still
+  purges an expired quarantine entry, while `gcEnabled` off stops that as
+  well.
 - All tests use injection seams (`ClaudeProfileConfigDirManager(baseDirectory:)`,
   `OrphanGC`'s injected `now`/`db`), never the real `~/tbd`.
 

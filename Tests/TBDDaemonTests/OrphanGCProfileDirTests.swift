@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import Security
 import Testing
 @testable import TBDDaemonLib
@@ -169,12 +170,16 @@ struct OrphanGCProfileDirTests: ~Copyable {
         try await db.config.setGCEnabled(false)
         try await db.config.setGCProfileDirsEnabled(true)
         let dir = try makeProfileDir(UUID())
+        // The master switch stops quarantine expiry too — it is the one gate
+        // that governs the whole sweep, unlike the classifier flag.
+        let expired = try makeQuarantineEntry(age: 40 * 86_400)
         let keychain = RecordingKeychain()
 
         let result = await makeGC(db: db, keychain: keychain).sweep()
 
         #expect(result.planned == ["gc disabled"])
         #expect(fm.fileExists(atPath: dir.path))
+        #expect(fm.fileExists(atPath: expired.path))
         #expect(try await db.reapRecords.list(repoPath: nil).isEmpty)
         #expect(keychain.services.isEmpty)
     }
@@ -340,15 +345,60 @@ struct OrphanGCProfileDirTests: ~Copyable {
         #expect(fm.fileExists(atPath: fresh.path))
     }
 
-    @Test("the flag also gates quarantine expiry in a real sweep")
-    func flagOffKeepsExpiredQuarantine() async throws {
+    @Test("quarantine expiry is not gated by the classifier flag")
+    func flagOffStillPurgesExpiredQuarantine() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setGCEnabled(true)
         let expired = try makeQuarantineEntry(age: 40 * 86_400)
+        let fresh = try makeQuarantineEntry(age: 1 * 86_400)
+        // An orphan the classifier would reap if it were on — it must stay put,
+        // proving the flag still gates classification and only classification.
+        let orphan = try makeProfileDir(UUID())
+        let keychain = RecordingKeychain()
 
-        let result = await makeGC(db: db, keychain: RecordingKeychain()).sweep()
+        let result = await makeGC(db: db, keychain: keychain).sweep()
 
-        #expect(!result.planned.contains { $0.hasPrefix("PURGE quarantine ") })
-        #expect(fm.fileExists(atPath: expired.path))
+        // Purging `.reaped/` is cleanup of GC's own artifacts, not a
+        // classification of a user resource: an operator who ends a soak by
+        // turning the flag off must not strand credentials in quarantine past
+        // the retention window.
+        #expect(result.planned.contains("PURGE quarantine \(expired.path)"))
+        #expect(!fm.fileExists(atPath: expired.path))
+        #expect(fm.fileExists(atPath: fresh.path))
+
+        #expect(!result.planned.contains { $0.hasPrefix("REAP profile-dir ") })
+        #expect(fm.fileExists(atPath: orphan.path))
+        #expect(try await db.reapRecords.list(repoPath: nil).isEmpty)
+        #expect(keychain.services.isEmpty)
+    }
+
+    // MARK: - Pre-reap re-read failures
+
+    @Test("a throwing pre-reap re-read keeps the directory")
+    func preReapReadFailureKeepsDirectory() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCProfileDirsEnabled(true)
+        let dir = try makeProfileDir(UUID())
+        let keychain = RecordingKeychain()
+
+        // Close the connection inside the pre-reap window, so the re-read
+        // *throws* rather than returning nil. No production error-injection
+        // seam: the store genuinely has no connection left, which is the same
+        // shape a real read failure takes.
+        let gc = makeGC(db: db, keychain: keychain, beforeProfileDirReap: {
+            try? db.writerForTests.close()
+        })
+        let result = await gc.sweep()
+
+        #expect(result.planned.contains("KEEP row-read-failed \(dir.path)"))
+        #expect(result.reaped == 0)
+        #expect(fm.fileExists(atPath: dir.path))
+        #expect(fm.fileExists(atPath: dir.path + "/claude"))
+        // Nothing was moved aside, and the path-keyed credentials item — which
+        // only the rename makes unreachable — was left alone.
+        let quarantined = (try? fm.contentsOfDirectory(atPath: quarantineBase.path)) ?? []
+        #expect(quarantined.isEmpty)
+        #expect(keychain.services.isEmpty)
     }
 }
