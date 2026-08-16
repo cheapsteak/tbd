@@ -120,6 +120,27 @@ struct BoundedProcessRunnerTests {
         #expect(status == 7)
     }
 
+    /// Every other `.pseudoTerminal` test in this file drives a child that
+    /// exits 0, so none of them can tell a correctly-read exit status from one
+    /// hardcoded to zero. `childExitingBeforeReadingLargeStdinFailsTheCallNotTheProcess`
+    /// above proves status 7 survives under `.pipes`; this is its `.pseudoTerminal`
+    /// twin, closing the one gap that shape leaves — a status-reading bug
+    /// (e.g. reading the wrong process, or a stray `status == 0` fallback)
+    /// specific to the pty branch would pass every existing pty test here and
+    /// only show up on a nonzero exit.
+    @Test func pseudoTerminalModePreservesTheChildsNonzeroExitStatus() async throws {
+        let outcome = try await runBoundedProcess(
+            executable: "/bin/sh", arguments: ["-c", "echo hello; exit 7"],
+            currentDirectory: nil, timeout: .seconds(10), stdio: .pseudoTerminal)
+        guard case .completed(let status, let stdout, let stderr) = outcome else {
+            Issue.record("expected .completed under .pseudoTerminal, got \(outcome)")
+            return
+        }
+        #expect(status == 7)
+        #expect((String(data: stdout, encoding: .utf8) ?? "").contains("hello"))
+        #expect(stderr.isEmpty)
+    }
+
     /// The whole point of the mode. The vendor CLI refuses `--cloud` creation
     /// when stdout is not a terminal, so a probe that reports what it sees is
     /// the only assertion that proves the child got one. Both arms run the SAME
