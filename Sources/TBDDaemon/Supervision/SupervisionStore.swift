@@ -926,10 +926,12 @@ public actor SupervisionStore {
     ///    the one signal reserved for "nobody looked".
     /// 4. *An empty submission stops here*, answering `delivered`.
     /// 5. *Size bound*, on bytes.
-    /// 6. *Pace*, identity-blind, on timestamps alone.
+    /// 6. *Pace*, identity-blind, on timestamps alone — the window is *tested*
+    ///    here and *spent* in step 7.
     /// 7. *Deliver* — one full attempt, never a retry. Persistence is the
     ///    submitting program's concern; TBD's job is an honest synchronous
-    ///    result.
+    ///    result. A briefing that reached a supervisor spends the pacing slot;
+    ///    one that reached nobody leaves it for the resubmission.
     ///
     /// **`refused-off` wins when a project is off and the brake is engaged.**
     /// Off is a standing state: releasing the brake would change nothing, so
@@ -1008,10 +1010,10 @@ public actor SupervisionStore {
                 """)
         }
 
-        // 6. Pace. Timestamps and the project name, and nothing else: the
-        // moment this consults who is submitting or what the text says, pacing
-        // stops being a mechanism and becomes a policy, and policy is
-        // user-land's.
+        // 6. Pace — the window is tested here and spent in step 7. Timestamps
+        // and the project name, and nothing else: the moment this consults who
+        // is submitting or what the text says, pacing stops being a mechanism
+        // and becomes a policy, and policy is user-land's.
         if let spent = lastPacedBriefing[project],
            at.timeIntervalSince(spent) < SupervisionBriefing.rateLimitInterval {
             let opensAt = spent.addingTimeInterval(SupervisionBriefing.rateLimitInterval)
@@ -1025,20 +1027,33 @@ public actor SupervisionStore {
                     The contact was recorded.
                     """)
         }
-        // The slot is spent when a submission reaches the delivery attempt, not
-        // at the moment of the check above — ordinary rate-limiter shape (test
-        // the window, spend the token when the action proceeds). The
-        // consequence is worth stating: a submission refused as paused, off or
-        // oversize never burns the slot, so a program is not silently penalised
-        // for a refusal it did not cause.
-        lastPacedBriefing[project] = at
-
         // 7. One full attempt, never a retry — adapter fallback included. What
         // happens next is the submitting program's continuation policy, which
         // is why the result stays specific instead of collapsing into a generic
         // failure.
         let outcome = await deliverer.deliver(project: project, text: text)
         if outcome == .delivered {
+            // The slot is spent only for a briefing that actually reached a
+            // supervisor — the pipe paces *delivered* briefings, which is what
+            // both §3 and §10 say and what the rate limit is for. A submission
+            // refused as paused, off or oversize therefore never burns it, and
+            // neither does one that reached nobody: `no-live-supervisor` is the
+            // answer whose documented remedy is to run `on` and resubmit in the
+            // same run, and a slot spent on a briefing nobody received would
+            // refuse that resubmission for two minutes.
+            //
+            // Guarded on `outcome` — the deliverer's verdict — rather than on
+            // the result this function returns. The two differ: a quiet contact
+            // also answers `delivered`, in the wider sense the outcome's own
+            // doc comment states, and it returns at step 4 without ever
+            // reaching a deliverer. Keying the commit here is what keeps
+            // "pacing never applies to quiet contact" true.
+            //
+            // Accepted residual: the stamp is `at`, taken at step 1, so the
+            // window is measured from when the submission was taken rather than
+            // from when delivery completed. That matches "enforced on
+            // timestamps alone" and the difference is sub-second in practice.
+            lastPacedBriefing[project] = at
             noteBriefingDelivered(project: project)
             // Slice 5, which ships delivery, owes the ledger's `delivery` line
             // here: written request-first, carrying the delivered text's hash

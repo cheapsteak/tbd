@@ -250,11 +250,15 @@ text:
    that needs no identity. The per-target reasons not to act live inside the
    identified send's preconditions (design §3), where the target is explicit
    in the call (`--terminal <id>`) — the same check-at-the-act pattern that
-   makes the off switch bind. **The slot is committed when a submission
-   reaches the delivery attempt, not at the moment of the check** — ordinary
-   rate-limiter shape, test the window and spend the token when the action
-   proceeds — so a submission refused as paused, off or oversize never burns
-   it, and a program is not silently penalised for a refusal it did not cause.
+   makes the off switch bind. **The slot is committed when a briefing reaches
+   a supervisor, not at the moment of the check** — the limit is one briefing
+   *delivered* per project per interval, so the token is spent by the delivery
+   that happened rather than by the attempt. A submission refused as paused,
+   off or oversize never burns it, and neither does one answered
+   `no-live-supervisor` or `transport-failed`: a program is not silently
+   penalised for a refusal it did not cause, and the `no-live-supervisor`
+   continuation this document prescribes — run `on` (ensure) and resubmit in
+   the same run — depends on the resubmission finding the window open.
 5. **Deliver.** A surviving briefing goes to the project's supervisor: the
    daemon
    prepends the compiled **header** — the active mode's name and any pending

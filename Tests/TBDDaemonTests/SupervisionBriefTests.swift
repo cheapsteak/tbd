@@ -139,7 +139,9 @@ struct SupervisionBriefTests {
         // refused-rate-limit — a second submission inside the window.
         let paced = try Self.makeFixture(repos: ["acme-alpha"])
         try await Self.turnOn(paced, "acme-alpha")
-        let pacedDeliverer = RecordingDeliverer(.noLiveSupervisor)
+        // Delivered, because only a delivered briefing spends the slot the
+        // second submission is refused for.
+        let pacedDeliverer = RecordingDeliverer(.delivered)
         _ = try await paced.store.submitBriefing(
             project: "acme-alpha", text: "first", brake: .released, deliverer: pacedDeliverer)
         paced.dates.advance(by: SupervisionBriefing.rateLimitInterval - 1)
@@ -317,7 +319,7 @@ struct SupervisionBriefTests {
     func rateLimitedStillRecordsContact() async throws {
         let fixture = try Self.makeFixture(repos: ["acme-alpha"])
         try await Self.turnOn(fixture, "acme-alpha")
-        let deliverer = RecordingDeliverer(.noLiveSupervisor)
+        let deliverer = RecordingDeliverer(.delivered)
         _ = try await fixture.store.submitBriefing(
             project: "acme-alpha", text: "first", brake: .released, deliverer: deliverer)
 
@@ -388,13 +390,15 @@ struct SupervisionBriefTests {
         #expect(deliverer.deliveredTexts == ["\n\n\n"], "verbatim, unparsed and untrimmed")
     }
 
-    /// …and it burns the pacing slot like any other non-empty submission,
-    /// because it reached the delivery attempt.
-    @Test("A whitespace-only submission paces the next one")
+    /// …and once delivered it burns the pacing slot like any other non-empty
+    /// briefing. Whitespace gets no special treatment in either direction: TBD
+    /// does not read the text, so it cannot be the reason a slot is or is not
+    /// spent — delivery is.
+    @Test("A whitespace-only submission paces the next one once it is delivered")
     func whitespaceBurnsTheSlot() async throws {
         let fixture = try Self.makeFixture(repos: ["acme-alpha"])
         try await Self.turnOn(fixture, "acme-alpha")
-        let deliverer = RecordingDeliverer(.noLiveSupervisor)
+        let deliverer = RecordingDeliverer(.delivered)
         _ = try await fixture.store.submitBriefing(
             project: "acme-alpha", text: " ", brake: .released, deliverer: deliverer)
 
@@ -412,16 +416,16 @@ struct SupervisionBriefTests {
         let fixture = try Self.makeFixture(repos: ["acme-alpha", "acme-beta"])
         try await Self.turnOn(fixture, "acme-alpha")
         try await Self.turnOn(fixture, "acme-beta")
-        let deliverer = RecordingDeliverer(.noLiveSupervisor)
+        let deliverer = RecordingDeliverer(.delivered)
 
         let first = try await fixture.store.submitBriefing(
             project: "acme-alpha", text: "findings", brake: .released, deliverer: deliverer)
-        #expect(first.result == .noLiveSupervisor)
+        #expect(first.result == .delivered)
 
         fixture.dates.advance(by: 1)
         let other = try await fixture.store.submitBriefing(
             project: "acme-beta", text: "findings", brake: .released, deliverer: deliverer)
-        #expect(other.result == .noLiveSupervisor, "pacing acme-alpha must not pace acme-beta")
+        #expect(other.result == .delivered, "pacing acme-alpha must not pace acme-beta")
 
         let again = try await fixture.store.submitBriefing(
             project: "acme-alpha", text: "findings", brake: .released, deliverer: deliverer)
@@ -432,7 +436,7 @@ struct SupervisionBriefTests {
     func windowLiftsAfterTheInterval() async throws {
         let fixture = try Self.makeFixture(repos: ["acme-alpha"])
         try await Self.turnOn(fixture, "acme-alpha")
-        let deliverer = RecordingDeliverer(.noLiveSupervisor)
+        let deliverer = RecordingDeliverer(.delivered)
         let spentAt = fixture.dates.now
         _ = try await fixture.store.submitBriefing(
             project: "acme-alpha", text: "findings", brake: .released, deliverer: deliverer)
@@ -448,7 +452,7 @@ struct SupervisionBriefTests {
         fixture.dates.advance(by: 0.5)
         let atTheBoundary = try await fixture.store.submitBriefing(
             project: "acme-alpha", text: "findings", brake: .released, deliverer: deliverer)
-        #expect(atTheBoundary.result == .noLiveSupervisor, "the interval is exclusive at its end")
+        #expect(atTheBoundary.result == .delivered, "the interval is exclusive at its end")
     }
 
     /// Pacing is identity-blind, structurally: the submission carries no
@@ -471,7 +475,7 @@ struct SupervisionBriefTests {
         try await Self.turnOn(first, "acme-alpha")
         let second = try Self.makeFixture(repos: ["acme-alpha"])
         try await Self.turnOn(second, "acme-alpha")
-        let deliverer = RecordingDeliverer(.noLiveSupervisor)
+        let deliverer = RecordingDeliverer(.delivered)
 
         _ = try await first.store.submitBriefing(
             project: "acme-alpha", text: "desk-a: one line", brake: .released,
@@ -497,64 +501,137 @@ struct SupervisionBriefTests {
     /// Pacing never applies to an empty submission, and an empty submission
     /// never spends the slot a later briefing needs — throttling the heartbeat
     /// would make a healthy sweep look like a dead one.
+    ///
+    /// **Both halves need a slot that is really spent, which is why every
+    /// submission here goes to a deliverer that delivers.** The slot is spent
+    /// only on delivery, so against a deliverer that never delivers no window
+    /// is ever open, an empty submission could not be refused even if pacing
+    /// did apply to it, and the follow-up could not be refused even if empties
+    /// did burn the slot — both assertions would hold for the wrong reason.
     @Test("Pacing never applies to an empty submission, and empties do not burn the slot")
     func emptySubmissionsAreNeverPaced() async throws {
         let fixture = try Self.makeFixture(repos: ["acme-alpha"])
         try await Self.turnOn(fixture, "acme-alpha")
-        let deliverer = RecordingDeliverer(.noLiveSupervisor)
+        let deliverer = RecordingDeliverer(.delivered)
 
+        // A real briefing, delivered: from here the project's window is shut,
+        // which is the state the first half needs to say anything.
+        #expect(try await fixture.store.submitBriefing(
+            project: "acme-alpha", text: "findings", brake: .released,
+            deliverer: deliverer).result == .delivered)
+
+        // Half one: the heartbeat goes on beating inside a shut window.
+        // Throttling it would make a healthy sweep look like a dead one.
         for index in 0..<10 {
+            fixture.dates.advance(by: 1)
             let result = try await fixture.store.submitBriefing(
                 project: "acme-alpha", text: "", brake: .released, deliverer: deliverer)
-            #expect(result.result == .delivered, "empty submission \(index) inside one window")
+            #expect(result.result == .delivered, "empty submission \(index) inside a shut window")
             #expect(result.retryAfter == nil)
         }
-        #expect(deliverer.callCount == 0, "an empty submission never reaches the deliverer")
+        #expect(deliverer.callCount == 1, "an empty submission never reaches the deliverer")
 
+        // Half two: with that window lapsed, ten more empties must leave the
+        // slot alone, so the briefing that follows them a second later gets
+        // through. If an empty spent the slot, this is where it shows.
+        fixture.dates.advance(by: SupervisionBriefing.rateLimitInterval)
+        for _ in 0..<10 {
+            #expect(try await fixture.store.submitBriefing(
+                project: "acme-alpha", text: "", brake: .released,
+                deliverer: deliverer).result == .delivered)
+        }
+        fixture.dates.advance(by: 1)
         let real = try await fixture.store.submitBriefing(
             project: "acme-alpha", text: "findings", brake: .released, deliverer: deliverer)
-        #expect(real.result == .noLiveSupervisor, "ten empties must not have burned the slot")
-        #expect(deliverer.callCount == 1)
+        #expect(real.result == .delivered, "twenty empties must not have burned the slot")
+        #expect(deliverer.callCount == 2)
     }
 
     /// A refusal the program did not cause must not cost it the window.
+    ///
+    /// Each arm's deliverer answers `delivered` for the same reason as the test
+    /// above: only a delivered briefing spends the slot, so a follow-up sent to
+    /// a deliverer that never delivers could never be rate-limited and the
+    /// assertion would hold no matter what the refusals did.
     @Test("A refusal for paused, off or size does not burn the pacing slot")
     func refusalsDoNotBurnTheSlot() async throws {
         // Paused, then released: the very next submission must get through.
         let paused = try Self.makeFixture(repos: ["acme-alpha"])
         try await Self.turnOn(paused, "acme-alpha")
-        let pausedDeliverer = RecordingDeliverer(.noLiveSupervisor)
+        let pausedDeliverer = RecordingDeliverer(.delivered)
         #expect(try await paused.store.submitBriefing(
             project: "acme-alpha", text: "findings", brake: .engaged,
             deliverer: pausedDeliverer).result == .refusedPaused)
         #expect(try await paused.store.submitBriefing(
             project: "acme-alpha", text: "findings", brake: .released,
-            deliverer: pausedDeliverer).result == .noLiveSupervisor,
+            deliverer: pausedDeliverer).result == .delivered,
                 "a brake refusal must not have spent the slot")
 
         // Off, then on.
         let off = try Self.makeFixture(repos: ["acme-alpha"])
-        let offDeliverer = RecordingDeliverer(.noLiveSupervisor)
+        let offDeliverer = RecordingDeliverer(.delivered)
         #expect(try await off.store.submitBriefing(
             project: "acme-alpha", text: "findings", brake: .released,
             deliverer: offDeliverer).result == .refusedOff)
         try await Self.turnOn(off, "acme-alpha")
         #expect(try await off.store.submitBriefing(
             project: "acme-alpha", text: "findings", brake: .released,
-            deliverer: offDeliverer).result == .noLiveSupervisor,
+            deliverer: offDeliverer).result == .delivered,
                 "an off refusal must not have spent the slot")
 
         // Oversize, then a briefing that fits.
         let big = try Self.makeFixture(repos: ["acme-alpha"])
         try await Self.turnOn(big, "acme-alpha")
-        let bigDeliverer = RecordingDeliverer(.noLiveSupervisor)
+        let bigDeliverer = RecordingDeliverer(.delivered)
         #expect(try await big.store.submitBriefing(
             project: "acme-alpha", text: Self.oversizeText, brake: .released,
             deliverer: bigDeliverer).result == .refusedSize)
         #expect(try await big.store.submitBriefing(
             project: "acme-alpha", text: "findings", brake: .released,
-            deliverer: bigDeliverer).result == .noLiveSupervisor,
+            deliverer: bigDeliverer).result == .delivered,
                 "an oversize refusal must not have spent the slot")
+    }
+
+    /// A briefing that reached nobody must leave the window open, because the
+    /// documented continuation for `no-live-supervisor` is to run `on` (ensure)
+    /// and resubmit **in the same run**. A slot spent on a briefing no
+    /// supervisor received would refuse that resubmission for two minutes and
+    /// break the whole workflow — and since the shipped deliverer answers
+    /// `no-live-supervisor` for every non-empty briefing today, it would break
+    /// every one of them.
+    @Test("A briefing that reached no supervisor does not burn the pacing slot")
+    func aBriefingDeliveredToNobodyDoesNotBurnTheSlot() async throws {
+        let fixture = try Self.makeFixture(repos: ["acme-alpha"])
+        try await Self.turnOn(fixture, "acme-alpha")
+
+        let first = try await fixture.store.submitBriefing(
+            project: "acme-alpha", text: "findings", brake: .released,
+            deliverer: SupervisorBriefingDeliverer())
+        #expect(first.result == .noLiveSupervisor)
+
+        // Immediately — same instant, well inside the window — the program
+        // establishes a supervisor and resubmits.
+        let resubmitted = try await fixture.store.submitBriefing(
+            project: "acme-alpha", text: "findings", brake: .released,
+            deliverer: RecordingDeliverer(.delivered))
+        #expect(resubmitted.result == .delivered,
+                "the resubmission the contract prescribes must not meet refused-rate-limit")
+        #expect(resubmitted.retryAfter == nil)
+    }
+
+    /// The same exemption for the other failed-delivery outcome: a send that
+    /// was attempted and failed leaves the window open too.
+    @Test("A transport failure does not burn the pacing slot")
+    func aTransportFailureDoesNotBurnTheSlot() async throws {
+        let fixture = try Self.makeFixture(repos: ["acme-alpha"])
+        try await Self.turnOn(fixture, "acme-alpha")
+        #expect(try await fixture.store.submitBriefing(
+            project: "acme-alpha", text: "findings", brake: .released,
+            deliverer: RecordingDeliverer(.transportFailed)).result == .transportFailed)
+        #expect(try await fixture.store.submitBriefing(
+            project: "acme-alpha", text: "findings", brake: .released,
+            deliverer: RecordingDeliverer(.delivered)).result == .delivered,
+                "a failed send must not have spent the slot")
     }
 
     // MARK: - One attempt, never a retry
