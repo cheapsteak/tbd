@@ -195,4 +195,22 @@ struct StatusBarViewChipsTests {
                 == "Open PR #412 — \(PRMergeableState.checksFailed.displayReason)")
         #expect(StatusBarView.openLabel(chip(state: nil)) == "Open PR #412")
     }
+
+    /// The icon slot draws a status dot at rest and an xmark while hovered, and
+    /// `onHover` is not guaranteed to have arrived — a chip can be inserted or
+    /// reflowed under a stationary cursor. So the slot's meaning is derived from
+    /// the same flag as its glyph: a click can never destroy an association the
+    /// slot is not currently offering to remove.
+    @Test("the icon slot means untrack only while hovered, and open otherwise")
+    func iconSlotMeaningFollowsTheGlyph() {
+        let one = chip(state: .checksFailed)
+        #expect(StatusBarView.iconSlotLabel(one, isHovering: true)
+                == StatusBarView.untrackLabel(one))
+        // Not hovering: the slot is a status dot, and clicking a status dot
+        // opens the PR exactly as it did before the untrack gesture existed.
+        #expect(StatusBarView.iconSlotLabel(one, isHovering: false)
+                == StatusBarView.openLabel(one))
+        #expect(StatusBarView.iconSlotLabel(one, isHovering: true)
+                != StatusBarView.iconSlotLabel(one, isHovering: false))
+    }
 }

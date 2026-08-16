@@ -212,6 +212,19 @@ struct StatusBarView: View {
         return "Open \(chip.refLabel) — \(state.displayReason)"
     }
 
+    /// What the leading icon slot's tooltip says, and therefore what clicking it
+    /// does — the two are one function of `isHovering` on purpose.
+    ///
+    /// The slot draws a status dot at rest and an xmark while hovered, and
+    /// `onHover` is not guaranteed to have arrived: chips are inserted and
+    /// reflowed under a stationary cursor whenever the selection changes or a
+    /// poll adds one. Deriving the meaning from the same flag as the glyph is
+    /// what stops a click on a drawn dot from untracking a PR the user meant to
+    /// open.
+    nonisolated static func iconSlotLabel(_ chip: PRChip, isHovering: Bool) -> String {
+        isHovering ? untrackLabel(chip) : openLabel(chip)
+    }
+
     private var footerLabel: (text: String, tooltip: String?) {
         let version = "v\(TBDConstants.version)"
         guard let sourcePath = Self.sourceWorktreePath,
@@ -357,11 +370,15 @@ private struct PRChipCluster: View {
 /// underline plus pointing-hand cursor are the whole affordance.
 ///
 /// Two click targets, deliberately laid out as **siblings** rather than as a
-/// control nested inside a tappable row: the leading icon slot untracks the PR,
-/// and everything else opens it. An `.onTapGesture` on a common ancestor is
-/// exactly the shape that swallows a child's gesture in this codebase, so there
-/// is no ancestor gesture to swallow anything — each target owns its own tap,
-/// its own tooltip and its own accessibility element.
+/// control nested inside a tappable row: the leading icon slot untracks the PR
+/// while the chip is hovered, and everything else opens it. An `.onTapGesture`
+/// on a common ancestor is exactly the shape that swallows a child's gesture in
+/// this codebase, so there is no ancestor gesture to swallow anything — each
+/// target owns its own tap, its own tooltip and its own accessibility element.
+///
+/// The slot's *action* is gated on the same `isHovering` that chooses its
+/// *glyph*, so a click always does what the slot is drawing: an xmark untracks,
+/// a status dot opens the PR exactly as it did before this control existed.
 private struct PRChipView: View {
     @EnvironmentObject var appState: AppState
     let chip: StatusBarView.PRChip
@@ -423,10 +440,7 @@ private struct PRChipView: View {
                 // indicator and shells out. Not drift — the status bar is an
                 // at-a-glance strip, and a click there is a "take me to GitHub"
                 // gesture rather than a request to park a tab in the worktree.
-                .onTapGesture {
-                    guard let url = chip.url else { return }
-                    NSWorkspace.shared.open(url)
-                }
+                .onTapGesture { open() }
                 .accessibilityElement()
                 .accessibilityLabel("PR \(chip.label)")
                 .accessibilityHint(StatusBarView.openLabel(chip))
@@ -463,17 +477,38 @@ private struct PRChipView: View {
             Color.clear
                 .frame(width: Self.untrackHitSide, height: Self.untrackHitSide)
                 .contentShape(Rectangle())
-                .help(StatusBarView.untrackLabel(chip))
-                .onTapGesture { detach() }
+                // Pointer behaviour follows the SAME `isHovering` that chooses
+                // the glyph, so the click can never mean something other than
+                // what the slot is drawing — see `iconSlotLabel`.
+                .help(StatusBarView.iconSlotLabel(chip, isHovering: isHovering))
+                .onTapGesture {
+                    if isHovering { detach() } else { open() }
+                }
+                // Accessibility does not hover, so this element keeps the
+                // untrack identity unconditionally and carries its own action —
+                // otherwise the gesture would exist for pointer users only.
                 .accessibilityElement()
                 .accessibilityLabel(StatusBarView.untrackLabel(chip))
                 .accessibilityAddTraits(.isButton)
+                .accessibilityAction { detach() }
         }
     }
 
-    private func detach() {
+    private func open() {
         guard let url = chip.url else { return }
-        Task { await appState.detachPR(worktreeID: chip.worktreeID, url: url.absoluteString) }
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Untrack by url when the chip has one and by number when it does not — a
+    /// legacy cached status can carry a url that will not parse, and the daemon
+    /// resolves a bare number against the worktree's own repo. Silently
+    /// declining there is the failure this control was added to remove.
+    private func detach() {
+        Task {
+            await appState.detachPR(worktreeID: chip.worktreeID,
+                                    url: chip.url?.absoluteString,
+                                    number: chip.number)
+        }
     }
 }
 

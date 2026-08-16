@@ -199,25 +199,23 @@ public actor PRBindingCoordinator {
     /// "Detached." for a call that did nothing is the regression
     /// `PRBindingStore.setDetached` was rewritten to prevent, and inserting on
     /// miss does not revive it.
+    ///
+    /// Both arms are ONE call into the store, and so one write transaction.
+    /// This actor is reentrant — every `await` here is a point a concurrent
+    /// `bind` can run at — so a "tombstone the row, else insert one" written as
+    /// two store calls would let the poll's branch matcher insert a live row in
+    /// the gap and turn the user's click into a silent no-op.
     @discardableResult
     public func detach(worktreeID: UUID, parsed: ParsedPRURL) async throws -> Bool {
-        let key = identityKey(worktreeID: worktreeID, parsed: parsed)
-        if try await store.setDetached(worktreeID: worktreeID, identityKey: key,
-                                       detached: true) {
-            return true
-        }
-        // Nothing changed, so either the PR was never bound here or it is
-        // already tombstoned. `insertTombstone` tells those apart inside one
-        // transaction, so a concurrent bind cannot slip between the two.
         let tombstone = PRBinding(
             worktreeID: worktreeID, host: parsed.host, owner: parsed.owner,
             repo: parsed.repo, number: parsed.number, url: parsed.url,
             source: .manual, detached: true)
-        let inserted = try await store.insertTombstone(tombstone)
-        if inserted {
-            logger.debug("tombstoned unbound PR #\(parsed.number, privacy: .public) for worktree \(worktreeID.uuidString, privacy: .public): detach of a PR nothing had bound")
+        let changed = try await store.tombstone(tombstone)
+        if changed {
+            logger.debug("tombstoned PR #\(parsed.number, privacy: .public) for worktree \(worktreeID.uuidString, privacy: .public)")
         }
-        return inserted
+        return changed
     }
 
     /// The host `PRBindingExtractor`'s GitHub pattern hard-codes. Because that

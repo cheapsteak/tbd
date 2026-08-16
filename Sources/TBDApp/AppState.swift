@@ -3044,12 +3044,16 @@ final class AppState: ObservableObject {
     /// double-clicking the same xmark. The user asked for the PR to be gone and
     /// it is. Only a thrown error is a failure, and that one is worth a toast:
     /// the chip would otherwise stay put with nothing said.
-    func detachPR(worktreeID: UUID, url: String) async {
+    ///
+    /// `url` is optional and `number` is not: a chip lifted from a legacy
+    /// cached status can carry a url that will not parse, and the daemon
+    /// resolves a bare number against the worktree's own repo.
+    func detachPR(worktreeID: UUID, url: String?, number: Int) async {
         do {
-            _ = try await daemonClient.detachPR(worktreeID: worktreeID, url: url)
+            _ = try await daemonClient.detachPR(worktreeID: worktreeID, url: url, number: number)
         } catch {
             logger.error("""
-                Failed to detach PR \(url, privacy: .public) from worktree \
+                Failed to detach PR #\(number, privacy: .public) from worktree \
                 \(worktreeID, privacy: .public): \
                 \(String(describing: error), privacy: .public)
                 """)

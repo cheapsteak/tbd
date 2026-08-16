@@ -824,22 +824,30 @@ actor DaemonClient {
     /// performs, so the app inherits its durability rather than inventing one:
     /// a delete would be undone by the next poll or hook fire.
     ///
-    /// The PR is named by **URL**. A status-bar chip can be synthetic — lifted
-    /// from a cached `Worktree.prStatus` with no row behind it — so there is no
-    /// binding id to name, and the daemon tombstones by identity whether or not
-    /// a row matched.
+    /// The PR is named by **URL, with its number as the fallback**. A status-bar
+    /// chip can be synthetic — lifted from a cached `Worktree.prStatus` with no
+    /// row behind it — so there is no binding id to name, and the daemon
+    /// tombstones by identity whether or not a row matched.
+    ///
+    /// Both are sent because a legacy cached status can carry a url that does
+    /// not parse (or none at all), and a control that quietly declines is the
+    /// thing this gesture exists to replace. `resolvePRRef` prefers a non-empty
+    /// url and resolves a bare number against the worktree's own repo, so the
+    /// pair costs nothing when the url is good and saves the click when it is
+    /// not.
     ///
     /// `source` is `manual` because the gesture records nothing but a user's
     /// decision, and that is what makes `pr.attach` able to reverse it.
     ///
     /// `detached: false` in the result is NOT a failure: it means the PR was
     /// already tombstoned. Only a thrown error is.
-    func detachPR(worktreeID: UUID, url: String) async throws -> PRDetachResult {
+    func detachPR(worktreeID: UUID, url: String?, number: Int) async throws -> PRDetachResult {
         try await callAsync(
             method: RPCMethod.prDetach,
             params: PRBindingRefParams(
                 worktreeID: worktreeID,
                 url: url,
+                number: number,
                 source: PRBindingSource.manual.rawValue
             ),
             resultType: PRDetachResult.self

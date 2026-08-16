@@ -248,15 +248,15 @@ struct PRBindingStoreTests {
         #expect(listed.first?.title == nil)
     }
 
-    // MARK: - Tombstoning a PR that was never bound
+    // MARK: - Tombstoning, bound or not
 
-    @Test("insertTombstone records a PR this worktree never bound")
-    func insertTombstoneRecordsUnboundPR() async throws {
+    @Test("tombstone records a PR this worktree never bound")
+    func tombstoneRecordsUnboundPR() async throws {
         let fixture = try await Fixture()
         let wt = try await fixture.newWorktree()
         let candidate = binding(9, worktreeID: wt, source: .manual)
 
-        #expect(try await fixture.store.insertTombstone(candidate))
+        #expect(try await fixture.store.tombstone(candidate))
 
         #expect(try await fixture.store.list(worktreeID: wt).isEmpty)
         let all = try await fixture.store.list(worktreeID: wt, includeDetached: true)
@@ -265,28 +265,40 @@ struct PRBindingStoreTests {
         #expect(all.first?.source == .manual)
     }
 
-    @Test("insertTombstone is idempotent against the unique index")
-    func insertTombstoneIsIdempotent() async throws {
+    @Test("tombstone is idempotent against the unique index")
+    func tombstoneIsIdempotent() async throws {
         let fixture = try await Fixture()
         let wt = try await fixture.newWorktree()
         let candidate = binding(9, worktreeID: wt, source: .manual)
-        #expect(try await fixture.store.insertTombstone(candidate))
+        #expect(try await fixture.store.tombstone(candidate))
         // Second call: no duplicate row, no unique-constraint error, and it says
         // it changed nothing.
-        #expect(try await fixture.store.insertTombstone(candidate) == false)
+        #expect(try await fixture.store.tombstone(candidate) == false)
         #expect(try await fixture.store.list(worktreeID: wt, includeDetached: true).count == 1)
     }
 
-    @Test("insertTombstone leaves an existing live binding alone")
-    func insertTombstoneDoesNotDetachALiveRow() async throws {
+    /// The arm that makes the two-transaction version of this unsafe: a row
+    /// that exists when the write runs must be tombstoned by the SAME call that
+    /// would otherwise have inserted one. A concurrent bind is exactly how a
+    /// live row appears between a caller's look and its write, and leaving it
+    /// live would turn the user's untrack into a silent no-op.
+    @Test("tombstone detaches an existing live binding in place, keeping its source")
+    func tombstoneDetachesALiveRowInPlace() async throws {
         let fixture = try await Fixture()
         let wt = try await fixture.newWorktree()
-        _ = try await fixture.store.upsert(binding(9, worktreeID: wt, source: .hook))
-        #expect(try await fixture.store.insertTombstone(
-            binding(9, worktreeID: wt, source: .manual)) == false)
-        let listed = try await fixture.store.list(worktreeID: wt)
-        #expect(listed.count == 1)
-        #expect(listed.first?.source == .hook)
+        let live = try #require(
+            try await fixture.store.upsert(binding(9, worktreeID: wt, source: .hook)))
+
+        #expect(try await fixture.store.tombstone(binding(9, worktreeID: wt, source: .manual)))
+
+        #expect(try await fixture.store.list(worktreeID: wt).isEmpty)
+        let all = try await fixture.store.list(worktreeID: wt, includeDetached: true)
+        #expect(all.count == 1)
+        #expect(all.first?.detached == true)
+        // The row that was already there is the row that got tombstoned — its
+        // identity and provenance survive; only `detached` moved.
+        #expect(all.first?.id == live.id)
+        #expect(all.first?.source == .hook)
     }
 
     /// The cap counts non-detached rows, so a tombstone occupies none of the
@@ -295,7 +307,7 @@ struct PRBindingStoreTests {
     /// evict a live terminal binding to make room for a row that takes up no
     /// room.
     @Test("a tombstone insert at a full worktree evicts nothing and still records")
-    func insertTombstoneIgnoresTheCap() async throws {
+    func tombstoneIgnoresTheCap() async throws {
         let fixture = try await Fixture()
         let wt = try await fixture.newWorktree()
         for n in 1...19 {
@@ -304,7 +316,7 @@ struct PRBindingStoreTests {
         _ = try await fixture.store.upsert(binding(20, worktreeID: wt, state: .merged))
         #expect(try await fixture.store.list(worktreeID: wt).count == 20)
 
-        #expect(try await fixture.store.insertTombstone(
+        #expect(try await fixture.store.tombstone(
             binding(21, worktreeID: wt, source: .manual)))
 
         let live = try await fixture.store.list(worktreeID: wt)

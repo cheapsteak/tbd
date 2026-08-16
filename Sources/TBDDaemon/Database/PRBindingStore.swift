@@ -205,16 +205,26 @@ public struct PRBindingStore: Sendable {
         }
     }
 
-    /// Record a tombstone for a PR this worktree has no row for at all, so a
-    /// detach can assert "this does not belong here" about a PR nothing ever
-    /// bound — a chip synthesized from the cached `Worktree.prStatus`, or a
-    /// `tbd pr detach` issued before discovery got there.
+    /// Tombstone a PR whether or not this worktree has a row for it: mark the
+    /// existing row detached, or insert the tombstone when there is none.
     ///
-    /// Insert-if-missing inside ONE write transaction, so it is idempotent
-    /// against the table's unique `(worktreeID, host, owner, repo, number)`
-    /// index rather than racing it. Returns true when a row was inserted, and
-    /// false when the identity was already on record — in which case that row
-    /// is left exactly as it stands, tombstone or not.
+    /// The insert arm is what lets a detach assert "this does not belong here"
+    /// about a PR nothing ever bound — a chip synthesized from the cached
+    /// `Worktree.prStatus`, or a `tbd pr detach` issued before discovery got
+    /// there.
+    ///
+    /// **One write transaction covers both arms**, and that is the point of
+    /// having a single method rather than a `setDetached` call followed by an
+    /// insert-on-miss. Split across two transactions, a concurrent bind — the
+    /// poll's branch matcher or a hook's `pr attach`, both of which run while
+    /// the user is clicking — can insert a live row in the gap; the insert then
+    /// finds an identity already on record, declines, and the untrack silently
+    /// does nothing, which is the exact failure this gesture exists to remove.
+    ///
+    /// Returns whether the record **changed**: true when a live row was
+    /// tombstoned or a tombstone was inserted, false when the PR was already
+    /// tombstoned. An existing row keeps its own `source` and `boundAt` — only
+    /// a tombstone with no prior row records nothing but the caller's decision.
     ///
     /// Deliberately NOT routed through `upsert`. The cap counts only
     /// non-detached rows, so a tombstone can never breach it, but `upsert`
@@ -222,11 +232,17 @@ public struct PRBindingStore: Sendable {
     /// terminal binding — or drop the write entirely — to make room for a row
     /// that occupies none of the budget.
     @discardableResult
-    public func insertTombstone(_ binding: PRBinding) async throws -> Bool {
+    public func tombstone(_ binding: PRBinding) async throws -> Bool {
         try await writer.write { db in
             var record = PRBindingRecord(from: binding)
             record.detached = true
-            guard try Self.fetchIdentity(db, record: record) == nil else { return false }
+            if let existing = try Self.fetchIdentity(db, record: record) {
+                guard !existing.detached else { return false }
+                try PRBindingRecord
+                    .filter(key: existing.id)
+                    .updateAll(db, Column("detached").set(to: true))
+                return true
+            }
             try record.insert(db)
             return true
         }

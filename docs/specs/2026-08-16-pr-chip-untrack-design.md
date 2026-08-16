@@ -54,6 +54,16 @@ Two constraints govern the implementation:
   cannot push its siblings. At 12pt centred on a 6pt dot the region extends 3pt
   past the dot on each side, which stays inside the 6pt gap between chips, so no
   chip can steal a click from its neighbour.
+- **The slot's action is derived from the same flag as its glyph.** Hover state
+  is not a fact the view can rely on having received: chips are inserted and
+  reflowed under a stationary cursor every time the selection changes or a poll
+  adds one, and `onHover` need not have fired. An untrack target that stayed
+  live under a *drawn status dot* would turn "open this PR" into "stop tracking
+  it" on a click the user read correctly. So while the slot draws a dot it
+  behaves as a dot did before this gesture existed — it opens the PR — and it
+  untracks only while it is drawing the xmark. Accessibility does not hover, so
+  that element keeps the untrack identity unconditionally and carries its own
+  action; the gesture must not be reachable by pointer only.
 
 Detaching is **tombstoning**, which is what `pr.detach` already does — a delete
 would be undone by the next poll or hook fire. The status bar therefore inherits
@@ -86,6 +96,40 @@ that happens to exist. Three consequences follow, all wanted:
 The inserted row is `source = manual`, because a tombstone with no prior row
 records nothing but a user's decision. `pr.attach` clears it exactly as it
 clears any other tombstone, so the gesture stays reversible.
+
+**Both arms are one write transaction**, not a tombstone-the-row call followed
+by an insert-on-miss call. `PRBindingCoordinator` is a reentrant actor, so every
+`await` in a detach is a point at which a concurrent bind — the poll's branch
+matcher, or a hook's `pr attach` — can run. Split in two, that bind lands a live
+row in the gap; the insert then finds an identity already on record, declines,
+and the click becomes the silent no-op this whole section exists to remove. The
+store therefore exposes a single `tombstone` that detaches an existing row or
+inserts one, and reports whether the record changed.
+
+The app names the PR by **URL with its number as a fallback**, sending both. A
+chip lifted from a legacy cached status can carry a URL that does not parse, and
+a control that quietly declines on such a chip is the same failure in a
+different disguise; `pr.detach` already resolves a bare number against the
+worktree's own repo.
+
+#### What insert-on-miss costs, and why the cost is accepted here
+
+`detachedCount` is a per-worktree scalar, and the legacy fallback reads any
+non-zero count as "this worktree's PR evidence was deliberately removed". Before
+insert-on-miss that implication held, because a tombstone could only come from a
+row the worktree really had. It no longer does: on a worktree whose only PR
+evidence is a cached `Worktree.prStatus` for one PR, `tbd pr detach <some other
+number>` now records a tombstone for a PR nobody was tracking, and the count it
+raises suppresses the *cached* PR's chip along with it.
+
+That is worth stating rather than hiding, and it is still the right trade. The
+gesture the chips need cannot work without insert-on-miss; the mismatch is
+unreachable from the chips themselves, since a chip always names its own PR; it
+requires a hand-typed number on a worktree that has never successfully polled;
+and it suppresses a display-tier cache rather than unbinding anything, so the
+first successful poll restores the chip. Making it impossible means reporting
+which PRs are tombstoned instead of how many — a change to the `pr.bindings`
+payload, and a decision for its own spec rather than a detail of this one.
 
 ### Identifying a chip: the hover overlay
 
@@ -131,6 +175,11 @@ earlier. Every surface that renders it must render its age with it.
 - Detach with no matching row inserts a `manual` tombstone; a second detach of
   the same PR is a no-op rather than a duplicate row; `pr.attach` afterwards
   clears it.
+- The same store call that would insert a tombstone detaches an existing live
+  row in place instead, keeping that row's id and `source` — the arm that makes
+  a concurrent bind harmless.
+- The icon slot means untrack while hovered and open while not, so a click can
+  never destroy an association the slot is not offering to remove.
 - Detaching the last chip of a worktree whose bindings were synthetic leaves the
   cluster empty, because `detachedCount` suppresses the legacy fallback.
 - Title parse — a by-number GraphQL response carrying `title` populates it; one
