@@ -42,13 +42,32 @@ final class StubClaudeUsageFetcher: ClaudeUsageFetcher, @unchecked Sendable {
 final class ProfileRowPresenceProbe: ClaudeCredentialsKeychainDeleting, @unchecked Sendable {
     private let lock = NSLock()
     private var _rowPresentAtKeychainDelete: Bool?
+    private var _dirPresentAtKeychainDelete: Bool?
     private var _probe: (@Sendable () -> Bool)?
+    private var _directoryPath: String?
 
     /// `nil` when the handler never reached the Keychain cleanup at all.
     var rowPresentAtKeychainDelete: Bool? {
         lock.lock()
         defer { lock.unlock() }
         return _rowPresentAtKeychainDelete
+    }
+
+    /// The other half of the ordering: the directory removal is the step whose
+    /// crash-safety the reorder exists for, and it runs *after* this one. If it
+    /// had already happened, the sampled row presence would say nothing about
+    /// it.
+    var directoryPresentAtKeychainDelete: Bool? {
+        lock.lock()
+        defer { lock.unlock() }
+        return _dirPresentAtKeychainDelete
+    }
+
+    /// Sampled alongside the row at Keychain-delete time.
+    func watchDirectory(_ path: String) {
+        lock.lock()
+        _directoryPath = path
+        lock.unlock()
     }
 
     /// Installed after the router is built, because the sample reads the very
@@ -62,10 +81,13 @@ final class ProfileRowPresenceProbe: ClaudeCredentialsKeychainDeleting, @uncheck
     func deleteGenericPassword(service: String) -> OSStatus {
         lock.lock()
         let probe = _probe
+        let directoryPath = _directoryPath
         lock.unlock()
         let present = probe?()
+        let directoryPresent = directoryPath.map { FileManager.default.fileExists(atPath: $0) }
         lock.lock()
         _rowPresentAtKeychainDelete = present
+        _dirPresentAtKeychainDelete = directoryPresent
         lock.unlock()
         // Nothing was ever stored for a temp-dir profile; the handler treats
         // this as success.
@@ -513,6 +535,7 @@ struct ModelProfileRPCTests {
         // writer directly rather than awaiting a store call.
         let writer = db.writerForTests
         let idString = profile.id.uuidString
+        probe.watchDirectory(profileDir.path)
         probe.onDelete {
             let count = try? writer.read { db in
                 try Int.fetchOne(
@@ -533,8 +556,58 @@ struct ModelProfileRPCTests {
         // Row-keyed cleanup must happen while the row still exists; otherwise a
         // crash mid-handler leaves a profile directory nothing points at.
         #expect(probe.rowPresentAtKeychainDelete == true)
+        // And the sample has to precede the directory removal for that to mean
+        // anything — otherwise the observed "row present" could be true of a
+        // handler that had already unlinked the directory.
+        #expect(probe.directoryPresentAtKeychainDelete == true)
         // The reorder must not weaken the outcome: both artifacts still go.
         #expect(!FileManager.default.fileExists(atPath: profileDir.path))
+        #expect(try await db.modelProfiles.get(id: profile.id) == nil)
+    }
+
+    /// The other half of the reorder's contract, and the reason a collector is
+    /// needed at all: a directory removal that fails is log-only and must NOT
+    /// abort the delete. The user asked for the profile to be gone, so the row
+    /// still goes — and the leftover directory becomes `ProfileDirCollector`'s
+    /// problem rather than the RPC's.
+    @Test("delete: a failed directory removal still deletes the profile row")
+    func deleteSurvivesAFailedDirectoryRemoval() async throws {
+        let tempBaseDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("profile-delete-rmfail-\(UUID().uuidString)", isDirectory: true)
+        let tempHostDir = tempBaseDir.appendingPathComponent("host-claude", isDirectory: true)
+        let profilesDir = tempBaseDir.appendingPathComponent("profiles", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempHostDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: profilesDir, withIntermediateDirectories: true)
+        defer {
+            // Restore write permission first, or the teardown cannot remove the
+            // tree it just made unwritable.
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o755], ofItemAtPath: profilesDir.path)
+            try? FileManager.default.removeItem(at: tempBaseDir)
+        }
+
+        let manager = ClaudeProfileConfigDirManager(
+            baseDirectory: profilesDir, hostBaseDirectory: tempHostDir)
+        let (router, db, _) = makeRouter(
+            configDirManager: manager, claudeCredentialsKeychain: ProfileRowPresenceProbe())
+
+        let profile = try await db.modelProfiles.create(name: "RmFailCanary", kind: .oauth)
+        _ = try manager.ensureOAuthDir(forProfileID: profile.id)
+        let profileDir = manager.profileDirectory(forProfileID: profile.id)
+
+        // Unlinking a child needs write permission on the parent, so this makes
+        // the handler's `removeItem` fail without touching the child itself.
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o555], ofItemAtPath: profilesDir.path)
+
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.modelProfileDelete,
+            params: ModelProfileDeleteParams(id: profile.id)
+        ))
+
+        #expect(resp.success, "a best-effort cleanup failure must not fail the RPC")
+        #expect(FileManager.default.fileExists(atPath: profileDir.path),
+                "the removal really did fail — otherwise this test proves nothing")
         #expect(try await db.modelProfiles.get(id: profile.id) == nil)
     }
 

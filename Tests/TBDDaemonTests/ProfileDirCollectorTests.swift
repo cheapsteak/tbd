@@ -169,6 +169,45 @@ struct ProfileDirCollectorTests: ~Copyable {
         #expect(fm.fileExists(atPath: candidate.path), "a failed reap must leave the candidate untouched")
     }
 
+    @Test("reap refuses a candidate that does not live directly under the base")
+    func reapRefusesUnanchoredCandidate() async throws {
+        let victim = sandbox.appendingPathComponent("victim", isDirectory: true)
+        try fm.createDirectory(at: victim, withIntermediateDirectories: true)
+        let candidate = ProfileDirCandidate(
+            profileID: UUID(), path: victim.path, createdAt: Date(timeIntervalSince1970: 0))
+
+        #expect(await ProfileDirCollector(base: base).reap(candidate) == nil)
+        #expect(fm.fileExists(atPath: victim.path), "a rename is destructive at the source path too")
+        #expect(!fm.fileExists(atPath: quarantineBase.path), "nothing should have been created")
+    }
+
+    @Test("reap refuses a candidate nested below the base rather than directly under it")
+    func reapRefusesNestedCandidate() async throws {
+        // The shape a bare `hasPrefix(base)` guard would wave through: already
+        // quarantined, and re-quarantining it would bury it a level deeper and
+        // restamp its age.
+        let id = UUID()
+        let nested = quarantineBase.appendingPathComponent(
+            id.uuidString.lowercased(), isDirectory: true)
+        try fm.createDirectory(at: nested, withIntermediateDirectories: true)
+        let candidate = ProfileDirCandidate(
+            profileID: id, path: nested.path, createdAt: Date(timeIntervalSince1970: 0))
+
+        #expect(await ProfileDirCollector(base: base).reap(candidate) == nil)
+        #expect(fm.fileExists(atPath: nested.path))
+    }
+
+    @Test("reap refuses a candidate whose path does not match its own profile id")
+    func reapRefusesMismatchedName() async throws {
+        let dir = base.appendingPathComponent("not-a-uuid", isDirectory: true)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let candidate = ProfileDirCandidate(
+            profileID: UUID(), path: dir.path, createdAt: Date(timeIntervalSince1970: 0))
+
+        #expect(await ProfileDirCollector(base: base).reap(candidate) == nil)
+        #expect(fm.fileExists(atPath: dir.path))
+    }
+
     // MARK: - Quarantine expiry
 
     @Test("quarantine entries expire only after the retention window")
@@ -201,13 +240,22 @@ struct ProfileDirCollectorTests: ~Copyable {
         try fm.createDirectory(at: quarantineBase, withIntermediateDirectories: true)
         let stale = quarantineBase.appendingPathComponent("no-stamp-here", isDirectory: true)
         let fresh = quarantineBase.appendingPathComponent("also-unparseable", isDirectory: true)
-        try fm.createDirectory(at: stale, withIntermediateDirectories: true)
-        try fm.createDirectory(at: fresh, withIntermediateDirectories: true)
+        // Old creation, recent modification: the fallback takes the NEWER of the
+        // two, so this one is kept. Reading only `creationDate` — or the older
+        // of the pair — would expire a directory somebody touched yesterday,
+        // which is the wrong direction for a fallback that exists because the
+        // real reap timestamp is unavailable.
+        let touched = quarantineBase.appendingPathComponent("touched-recently", isDirectory: true)
+        for url in [stale, fresh, touched] {
+            try fm.createDirectory(at: url, withIntermediateDirectories: true)
+        }
 
         let now = Date(timeIntervalSince1970: 1_760_000_000)
         let old = now.addingTimeInterval(-90 * 86_400)
         try fm.setAttributes([.creationDate: old, .modificationDate: old], ofItemAtPath: stale.path)
         try fm.setAttributes([.creationDate: now, .modificationDate: now], ofItemAtPath: fresh.path)
+        try fm.setAttributes(
+            [.creationDate: old, .modificationDate: now], ofItemAtPath: touched.path)
 
         let collector = ProfileDirCollector(base: base, now: { now })
 

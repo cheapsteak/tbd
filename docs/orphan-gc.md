@@ -187,7 +187,11 @@ the empty result as "everything is an orphan".
 **Quarantine, not delete.** A reap renames the directory into
 `~/tbd/profiles/.reaped/<uuid>-<UTC timestamp>/`. The rename is the commit point: a
 failure leaves the candidate exactly where it was for the next sweep to reconsider
-(`quarantine-failed`). Apparent size is measured just before the rename, while it is
+(`quarantine-failed`). Both destructive filesystem calls are anchored first, and to the
+collector's own base rather than to whatever the caller passed: a reap refuses any
+candidate that is not a UUID-named *immediate* child of `~/tbd/profiles/` (so an
+already-quarantined entry can never be re-quarantined a level deeper), and a purge
+refuses any path not strictly under `.reaped/`. Apparent size is measured just before the rename, while it is
 still readable at the original path. Immediately after, the path-keyed Claude Code
 login-keychain item for the *original* config dir (`<uuid>/claude`) is deleted — the
 rename invalidated the path its service name is derived from, so it is unreachable
@@ -208,8 +212,7 @@ recoverable, so reaping parks the data instead of destroying it.
 disease it treats. Age comes from the timestamp this collector stamped into the entry's
 own name; an entry whose name carries no parsable stamp falls back to the newer of its
 own creation and modification dates, and one with no readable date at all is kept rather
-than guessed at. A purge refuses any path not strictly under `.reaped/`. Expiry writes
-no new reap record — the entry already has one.
+than guessed at. Expiry writes no new reap record — the entry already has one.
 
 **No restore path, recovery by hand.** `tbd gc restore` accepts `.agentWorktree` records
 only and rejects `.profileDir`. By the time the collector runs, the profile row — its

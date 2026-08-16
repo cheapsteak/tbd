@@ -104,7 +104,21 @@ public struct ProfileDirCollector: Sendable {
     /// Renames the candidate into `.reaped/<uuid>-<timestamp>/`. The rename is
     /// the commit point; a failure leaves the candidate untouched for the next
     /// sweep and returns `nil`.
+    ///
+    /// Anchored first, the twin of `purge`'s guard and for the same reason: a
+    /// rename is destructive at the source path, so never trust the caller's
+    /// path blindly this close to it. `candidates()` only ever produces
+    /// anchored candidates, but `ProfileDirCandidate` is a public value type
+    /// anyone can construct, so the invariant is checked rather than assumed.
     public func reap(_ candidate: ProfileDirCandidate) async -> ReapRecord? {
+        guard isAnchored(candidate) else {
+            logger.warning("""
+            gc: refusing to quarantine \(candidate.path, privacy: .public) — not a \
+            \(candidate.profileID.uuidString, privacy: .public)-named immediate child of \
+            \(self.base.path, privacy: .public)
+            """)
+            return nil
+        }
         let reapedAt = now()
         // Measure before the rename — the last moment the size is readable at
         // the original path, which is the path the record names.
@@ -183,6 +197,22 @@ public struct ProfileDirCollector: Sendable {
         }
         logger.info("gc: purged expired quarantine \(quarantinePath, privacy: .public)")
         return true
+    }
+
+    /// The candidate names an immediate child of `base` whose own name parses
+    /// as the candidate's `profileID` — exactly what `candidates()` produces.
+    ///
+    /// Stricter than `purge`'s prefix check on purpose, and it has to be: a
+    /// bare prefix test would also accept `<base>/.reaped/<entry>` (already
+    /// quarantined) and `<base>/a/b` (something nested), neither of which this
+    /// collector owns. Requiring the parent to *equal* `base` rejects both,
+    /// along with any `..` in the path, which no longer resolves to `base`
+    /// once the last component is dropped. Matching the name back to the
+    /// candidate's UUID is what keeps `.reaped` itself out.
+    private func isAnchored(_ candidate: ProfileDirCandidate) -> Bool {
+        let url = URL(fileURLWithPath: candidate.path)
+        guard url.deletingLastPathComponent().path == base.path else { return false }
+        return UUID(uuidString: url.lastPathComponent) == candidate.profileID
     }
 
     // MARK: - Quarantine naming
