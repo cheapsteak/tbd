@@ -141,6 +141,19 @@ Guard these with `Bundle.main.bundleIdentifier != nil` checks.
 ### NIO thread safety
 All `ChannelHandlerContext` property access (`context.channel`, `context.pipeline`) must happen on the channel's event loop. Accessing from any other thread triggers a precondition crash. Always wrap in `context.eventLoop.execute { ... }` — never use `context.channel.isActive` as a pre-check outside the event loop.
 
+### Every durable external resource needs a named reconciler
+Creation against git, tmux, the process table, or the filesystem cannot be transactional — the external system commits before TBD records the intent, and a crash, a cancellation, or a partial failure in between leaves a resource nobody owns. Creation-time rollback is therefore best-effort everywhere; the standing guarantee is a background sweep that compares ground truth against intent and reclaims the difference. Three reconcilers carry that load:
+
+- **`OrphanGC`** (`Sources/TBDDaemon/GC/OrphanGC.swift`) – hourly when `gcEnabled` (the default), over agent worktrees, scratchpads, the deletion queue, and stale git registrations.
+- **`AgentReaper`** (`Sources/TBDDaemon/Process/AgentReaper.swift`) – every 60 seconds, over orphaned agent processes.
+- **`WorktreeLifecycle+Reconcile`** (`Sources/TBDDaemon/Lifecycle/WorktreeLifecycle+Reconcile.swift`) – at startup and on demand, reconciling DB rows against git worktrees and tmux windows and servers.
+
+There is deliberately no transactional or saga abstraction; the sweeps are the mechanism, and we are not adding one.
+
+A PR that introduces a new *kind* of durable resource, or a new creation path for one — a git ref or worktree, a tmux server or window, a spawned process, a file or directory that outlives the request that created it — must answer who reclaims its orphans, in one of three ways: name the reconciler that covers it (usually by extending one of the three), state in the PR description why an orphan cannot arise, or point to a committed spec that deliberately chose create-time cleanup instead — [`docs/specs/2026-08-14-worktree-add-failure-cleanup-design.md`](docs/specs/2026-08-14-worktree-add-failure-cleanup-design.md) withdraws a branch its own failed `git worktree add` created from the failing call itself, and from no sweep, timer, or background pass. A sweep is not mandatory; answering the question explicitly is. Routine call sites that create a resource through a path an existing reconciler already covers need no answer — they are covered already.
+
+The field evidence is why the question gets asked: every unbounded leak found in the wild sat on a resource no sweep covered — 2,804 leaked git branches, and ~7,100 dead tmux socket files that no teardown can unlink — while every resource a reconciler does cover has stayed healthy regardless of how good its rollback path was. Ad-hoc `try?` cleanup on the deletion path is still worth writing, but it has never been sufficient on its own. Full rationale, the judgment calibration for "new kind" versus routine call site, and the rejected alternatives: [`docs/specs/2026-08-15-named-reconciler-doctrine-design.md`](docs/specs/2026-08-15-named-reconciler-doctrine-design.md).
+
 ### No `print()` in `Sources/`
 Applies to `TBDShared`, `TBDDaemonLib`, `TBDDaemon`, and `TBDApp`. **`TBDCLI` is intentionally excluded** — its `print()` calls are user-facing CLI output (stdout for human consumption + scripting), not diagnostic logging.
 
