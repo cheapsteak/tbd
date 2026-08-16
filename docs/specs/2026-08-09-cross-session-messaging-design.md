@@ -87,9 +87,10 @@ session answers to its spawn-time name. This staleness is accepted,
 because respawns are frequent in TBD (wake, swap, fresh spawns) and
 renames are rare, so a mismatched row is short-lived.
 
-It is not harmless while it lasts. A listing row carries the name, a
+It is not harmless while it lasts. A row in the `ListAgents` tool
+result — the listing a session itself receives — carries the name, a
 per-session `[ref]`, the kind, the status, the tmux
-`server:window.pane`, and how long ago the session started — and no
+`server:window.pane`, and how long ago the session started, and no
 working directory, so nothing in a stale row spells out the lane a
 sender is looking for. Field use showed the failure mode: a send
 addressed to a renamed lane's current display name returned a flat
