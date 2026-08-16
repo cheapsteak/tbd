@@ -2236,18 +2236,26 @@ the one way to send a desk substance.
   construction — which is why the route and not the desk is the durable
   home for anything needing a human.
 - **An orphaned desk is reclaimed by a named reconciler.** A spawn creates a
-  scratch space and a process before either can be recorded (§7), so a crash
-  or a failed spawn in between leaves a desk nobody owns — and TBD's existing
-  sweeps do not cover it, because the agent-worktree pass only walks
-  repo-backed worktrees and the archived passes only touch rows already
-  archived. A **supervision-desk collector**, run as a leg of the hourly orphan
-  sweep, closes that: it drops the record and hands the scratch worktree to the
-  archive path the sweep already runs. Its reap decision is **liveness and
-  nothing else** — a desk with a process running in its directory is kept
-  whatever its project or its rows say, because a sweep must never kill a
-  running agent, and a project that stopped resolving is closed through the
-  recycle path above rather than by garbage collection. Reclaiming is
-  destructive enough to soak behind its own default-off switch first.
+  scratch space and a process before either can be recorded (§7), and TBD's
+  existing sweeps cover neither: the agent-worktree pass only walks repo-backed
+  worktrees and the archived passes only touch rows already archived. The
+  orphan has two shapes and each gets its own answer.
+  - *A desk that was recorded and then died* is the **supervision-desk
+    collector**'s, run as a leg of the hourly orphan sweep: it drops the record
+    and hands the scratch worktree to the archive path the sweep already runs.
+    Its reap decision is **liveness and nothing else** — a desk with a process
+    running in its directory is kept whatever its project or its rows say,
+    because a sweep must never kill a running agent. A project that stopped
+    resolving therefore never triggers a reap on its own: the topology gesture
+    took that project's mark, mode and binding, and no coverage gesture
+    disposes a desk, so the desk is reclaimed when it dies and not before.
+    Reclaiming is destructive enough to soak behind its own default-off switch
+    first.
+  - *A spawn that failed before the record was written* leaves nothing for that
+    collector to enumerate, so the **spawn path archives the scratch row
+    itself** on every failing exit, which puts the directory under the sweep's
+    deletion-queue pass. Best-effort, as create-time cleanup always is; the
+    standing guarantee remains a sweep, not the rollback.
 - **`off <project>` stands the desk down; it does not dispose of it.** The
   mark is a delivery precondition rechecked at act time (§3, §8), so a
   stood-down desk simply receives nothing — an idle session holding its

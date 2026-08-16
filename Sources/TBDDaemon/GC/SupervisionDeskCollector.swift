@@ -10,15 +10,17 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "gc")
 ///
 /// **Why this exists** (repo `CLAUDE.md`, "Every durable external resource needs
 /// a named reconciler"). A hosted desk is a scratch worktree plus a spawned
-/// process, created before either can be recorded — `SupervisionDeskManager`
-/// makes the directory, makes the row, spawns the session, and only then writes
-/// `desks.json`. A crash, a cancellation, or a failed spawn anywhere in that
-/// sequence leaves a resource nobody owns, and `OrphanGC`'s existing legs do not
-/// cover it: the agent-worktree leg iterates `db.repos.list()` and so only sees
-/// repo-backed worktrees, while the archived legs only touch rows that are
-/// already `.archived`. A live desk is therefore never at risk from those legs,
-/// which is right — and an orphaned one was reclaimed by nothing, which is what
-/// this closes.
+/// process, and `OrphanGC`'s existing legs cover neither: the agent-worktree leg
+/// iterates `db.repos.list()` and so only sees repo-backed worktrees, while the
+/// archived legs only touch rows that are already `.archived`. A live desk is
+/// therefore never at risk from those legs, which is right — and a desk that
+/// died was reclaimed by nothing, which is what this closes.
+///
+/// **Its subject is a desk that got recorded and then died**, which is the only
+/// orphan shape it can see: it enumerates `desks.json`, so a spawn that failed
+/// before writing an entry is not here at all. That half is
+/// `SupervisionDeskManager`'s own, which archives the scratch row on every
+/// failing exit and so hands it to the deletion-queue leg.
 ///
 /// **Every failure direction is toward keeping.** A read that does not answer,
 /// a row that cannot be fetched, a path that does not look like a desk's: all
@@ -30,11 +32,12 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "gc")
 /// longer resolving — and the first two are the same fact from two angles,
 /// while the third turned out to change no outcome. A desk whose project stopped
 /// resolving but whose session is *running* must not be reclaimed: killing a
-/// live agent is exactly what the doctrine forbids, and closing that project's
-/// coverage is the supervision path's job (design §9's recycle), never a
-/// sweep's. Once the desk is not live, it is reclaimed regardless of whether the
-/// project still resolves — so adding the project check would gate nothing and
-/// would need a second reader of `supervision.json`.
+/// live agent is exactly what the doctrine forbids, and design §9 is explicit
+/// that a topology gesture ending a project takes its mark, its mode selection
+/// and its supervisor binding — not the desk, because **no coverage gesture
+/// disposes a desk**. Once the desk is not live, it is reclaimed regardless of
+/// whether the project still resolves — so adding the project check would gate
+/// nothing and would need a second reader of `supervision.json`.
 public struct SupervisionDeskCollector: Sendable {
     let desks: SupervisionDesksStore
     /// Where a desk's scratch space is allowed to live. A recorded worktree

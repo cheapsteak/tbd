@@ -55,13 +55,15 @@ the daemon, not by you.
 
 ```bash
 tbd supervise readout --project "$TBD_PROJECT"
-tbd supervise readout --project "$TBD_PROJECT" --json
+tbd supervise readout --project "$TBD_PROJECT" | jq '.agents[] | {terminal, state}'
 ```
 
 The readout is the project's whole current picture in one call: its agents,
 their session state, what each is waiting on, and the machinery facts
 (mark, mode, brake). Read it before deciding anything — it is free, it makes no
-decision, and it starts nothing.
+decision, and it starts nothing. It prints JSON and only JSON — there is no
+`--json` flag to pass, and no other rendering — so reach for `jq` when you want
+one fact out of it.
 
 Two habits worth keeping:
 

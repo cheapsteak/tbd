@@ -100,12 +100,17 @@ public enum SupervisionDeskError: Error, CustomStringConvertible, LocalizedError
 /// opening material rides the first briefing, so a quiet project's desk idles at
 /// zero token cost. That is a property this type is tested for, not a detail.
 ///
-/// **Who reclaims an orphan** (repo `CLAUDE.md`): `SupervisionDeskCollector`,
-/// run as a leg of `OrphanGC`. A desk is a scratch worktree plus a live process,
-/// and this type creates both before it can record either — so a crash between
-/// the spawn and the `desks.json` write leaves a scratch space nobody owns. The
-/// collector prunes the record and hands the worktree to the archive path the
-/// sweep already runs, and never touches a live desk.
+/// **Who reclaims an orphan** (repo `CLAUDE.md`), in two halves, because a desk
+/// is a scratch worktree plus a live process and this type creates both before
+/// it can record either.
+///
+/// - *A recorded desk that died* is `SupervisionDeskCollector`'s, run as a leg
+///   of `OrphanGC`: it prunes the `desks.json` entry and hands the worktree to
+///   the archive path the sweep already runs, and never touches a live desk.
+/// - *A spawn that failed before the record was written* is invisible to that
+///   collector, which walks `desks.json` and finds no entry — so this type
+///   archives the scratch row itself on every such exit (`abandon`), which puts
+///   it under `OrphanGC`'s deletion-queue leg instead.
 public actor SupervisionDeskManager {
     private let db: TBDDatabase
     private let lifecycle: WorktreeLifecycle
@@ -189,11 +194,11 @@ public actor SupervisionDeskManager {
             // A desk that died while stood down — a death nothing was watching
             // for, because a stood-down project's sweep is not running — is
             // detected exactly here and nowhere else.
-            let successor = try await spawn(inputs: inputs, file: file, predecessor: entry)
+            let successor = try await spawn(inputs: inputs, predecessor: entry)
             return .replaced(successor: successor, predecessor: entry)
         }
 
-        let entry = try await spawn(inputs: inputs, file: file, predecessor: nil)
+        let entry = try await spawn(inputs: inputs, predecessor: nil)
         return .spawned(entry)
     }
 
@@ -308,14 +313,36 @@ public actor SupervisionDeskManager {
     ///
     /// The order is deliberate and matches the store's: the external resource is
     /// created first because it cannot be created transactionally, then the
-    /// record, then the line. A crash in the middle leaves a scratch space with
-    /// no desk entry — which is precisely what `SupervisionDeskCollector`
-    /// reclaims.
+    /// record, then the line.
+    ///
+    /// **Every exit between the scratch space and the record hands the space
+    /// back.** `SupervisionDeskCollector` walks `desks.json`, so a failure
+    /// before the entry is written is invisible to it — and to every other leg
+    /// of the sweep, because a scratch row has no repo and the archived legs
+    /// only touch rows already archived. `abandon` archives the row, which is
+    /// exactly the shape `OrphanGC`'s deletion-queue leg reclaims. A crash
+    /// (rather than a thrown error) in the same window still leaves an
+    /// unreferenced scratch space, and that one nothing reclaims; the doctrine's
+    /// answer is that a crash there is not silent — the row is `.active` and
+    /// visible in the sidebar.
     private func spawn(
-        inputs: SupervisionDeskInputs, file: SupervisionDesksFile,
-        predecessor: SupervisionDeskEntry?
+        inputs: SupervisionDeskInputs, predecessor: SupervisionDeskEntry?
     ) async throws -> SupervisionDeskEntry {
         let worktree = try await createScratchSpace(project: inputs.project)
+
+        // Say so when the desk's forced adapter is not the operator's pick.
+        // A Codex-preferring fleet would otherwise discover its supervisors are
+        // Claude sessions only by reading a tab label.
+        if let preference = try? await db.config.get().primaryAgentPreference,
+           preference != .claude {
+            deskLogger.notice(
+                """
+                The hosted desk for "\(inputs.project, privacy: .public)" launches Claude, not \
+                \(preference.rawValue, privacy: .public): a supervisor's standing conduct rides \
+                --append-system-prompt, which only the Claude spawn path carries. The fleet's \
+                primary-agent preference is unchanged and still applies to every other session.
+                """)
+        }
 
         // The rail spawns an agent session with nobody having asked for a
         // session by name, so it writes its own row: one naming the scratch
@@ -349,12 +376,15 @@ public actor SupervisionDeskManager {
         } catch {
             await actuationLog.appendOutcome(
                 confirms: actuationID, result: .transportFailed, error: "\(error)")
+            await abandon(worktree, project: inputs.project, because: "its session never started")
             throw SupervisionDeskError.spawnFailed(
                 project: inputs.project, detail: String(describing: error))
         }
         await actuationLog.appendOutcome(confirms: actuationID, result: .dispatched)
 
         guard let primary = created.first else {
+            await abandon(
+                worktree, project: inputs.project, because: "the spawn created no terminal")
             throw SupervisionDeskError.spawnFailed(
                 project: inputs.project, detail: "the spawn created no terminal")
         }
@@ -364,7 +394,17 @@ public actor SupervisionDeskManager {
             terminal: primary.id, worktree: worktree.id,
             spawnedAt: SupervisionInstant(at), conductHash: inputs.playbook.conductHash)
         do {
-            try desks.save(file.recording(entry, for: inputs.project))
+            // **Re-read, never write back the copy read before the spawn.**
+            // Spawning a session takes seconds, and `SupervisionDeskCollector`
+            // rewrites this same file per reap while the hourly sweep runs. A
+            // save built on the pre-spawn copy would resurrect an entry the
+            // sweep had just dropped — and a resurrected entry whose worktree
+            // the sweep already archived is kept by every later sweep
+            // (`desk-already-archived`), so it would never be reclaimed again.
+            // `SupervisionStore` guards the identical shape by re-reading
+            // before it commits.
+            let latest = try desks.load()
+            try desks.save(latest.recording(entry, for: inputs.project))
         } catch {
             throw SupervisionDeskError.recordFailed(
                 project: inputs.project, detail: String(describing: error))
@@ -452,6 +492,40 @@ public actor SupervisionDeskManager {
             // standing guarantee is the collector, not this line.
             try? fm.removeItem(at: deskPath)
             throw error
+        }
+    }
+
+    /// Hand a scratch space back when the desk that was to live in it never
+    /// started.
+    ///
+    /// Archiving the row is the whole act, and it is deliberately not a
+    /// delete: an archived scratch row is exactly the shape `OrphanGC`'s
+    /// deletion-queue leg already reclaims, so this moves the directory from
+    /// "covered by no reconciler" to "covered by one that has run hourly for
+    /// months". Nothing here removes the directory itself — that sweep does,
+    /// after its own grace and liveness gates.
+    ///
+    /// Best-effort, as creation-time cleanup always is (repo `CLAUDE.md`): if
+    /// the archive does not land, the row stays `.active` and an operator sees
+    /// a stray scratch space, which is the visible failure rather than the
+    /// silent one.
+    private func abandon(_ worktree: Worktree, project: String, because reason: String) async {
+        do {
+            try await db.worktrees.archive(id: worktree.id)
+            deskLogger.notice(
+                """
+                Handed back the scratch space for "\(project, privacy: .public)"'s hosted desk at \
+                \(worktree.localPath, privacy: .public) — \(reason, privacy: .public). It is \
+                archived, and the orphan sweep reclaims it from there.
+                """)
+        } catch {
+            deskLogger.error(
+                """
+                The hosted desk for "\(project, privacy: .public)" could not be spawned \
+                (\(reason, privacy: .public)) and its scratch space at \
+                \(worktree.localPath, privacy: .public) could not be archived either: \
+                \(String(describing: error), privacy: .public). It is left for a human.
+                """)
         }
     }
 
