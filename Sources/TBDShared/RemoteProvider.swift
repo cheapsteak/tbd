@@ -1,4 +1,7 @@
 import Foundation
+import os
+
+private let registryLogger = Logger(subsystem: "com.tbd.daemon", category: "remote")
 
 // MARK: - Remote provider contract types (docs/remote-provider-contract.md, v1)
 
@@ -421,20 +424,66 @@ public struct RemoteProviderStatus: Codable, Sendable, Identifiable {
 /// Loads `agent-providers.json`. Missing file = no providers (not an error);
 /// duplicate names or empty exec = configuration error.
 public enum RemoteProviderRegistry {
-    public static func load(from url: URL) throws -> [RemoteProviderConfig] {
-        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+    /// Names TBD's own compiled providers answer to. Reserved
+    /// **unconditionally** and not behind the cloud flag: a name that became
+    /// available when a feature was off and unavailable when it was turned on
+    /// would change which providers load as a side effect of a toggle.
+    public static let reservedProviderNames: Set<String> = [ClaudeCloudProvider.name]
+
+    public static func isReserved(_ name: String) -> Bool {
+        reservedProviderNames.contains(name)
+    }
+
+    /// What one registry file yielded: the entries TBD will use, and the
+    /// reserved-name entries it stepped over.
+    public struct RegistryLoad: Sendable, Equatable {
+        public let configs: [RemoteProviderConfig]
+        public let skippedReservedNames: [String]
+
+        public init(configs: [RemoteProviderConfig], skippedReservedNames: [String]) {
+            self.configs = configs
+            self.skippedReservedNames = skippedReservedNames
+        }
+    }
+
+    /// A reserved entry is SKIPPED, never a reason to reject the file. The
+    /// skip is deliberately checked BEFORE the duplicate rule so two reserved
+    /// entries are two skips rather than a whole-file failure — this function
+    /// throws for the entire registry on a duplicate, and two of its three
+    /// call sites swallow that with `try?`, so one bad entry would otherwise
+    /// silently remove every provider the user registered. Each skip is
+    /// logged here (rather than left for callers to notice) so it is
+    /// surfaced regardless of which of the three call sites triggered it.
+    public static func loadEntries(from url: URL) throws -> RegistryLoad {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return RegistryLoad(configs: [], skippedReservedNames: [])
+        }
         let data = try Data(contentsOf: url)
-        let configs = try JSONDecoder().decode([RemoteProviderConfig].self, from: data)
+        let decoded = try JSONDecoder().decode([RemoteProviderConfig].self, from: data)
+        var configs: [RemoteProviderConfig] = []
+        var skipped: [String] = []
         var seen = Set<String>()
-        for c in configs {
+        for c in decoded {
             guard !c.name.isEmpty, !c.exec.isEmpty else {
                 throw RegistryError.invalidEntry(c.name)
+            }
+            if isReserved(c.name) {
+                registryLogger.warning(
+                    "skipping registry entry for reserved provider name \(c.name, privacy: .public): reserved for TBD's compiled provider"
+                )
+                skipped.append(c.name)
+                continue
             }
             guard seen.insert(c.name).inserted else {
                 throw RegistryError.duplicateName(c.name)
             }
+            configs.append(c)
         }
-        return configs
+        return RegistryLoad(configs: configs, skippedReservedNames: skipped)
+    }
+
+    public static func load(from url: URL) throws -> [RemoteProviderConfig] {
+        try loadEntries(from: url).configs
     }
 
     public enum RegistryError: LocalizedError, Equatable {
