@@ -92,4 +92,45 @@ struct ContractVersionNegotiationTests {
         #expect(status.errorMessage?.contains("no common contract version") == true)
         #expect(status.describe == nil)
     }
+
+    // MARK: - The negotiated value reaches the wire DTO
+
+    /// The path that crosses a process boundary. The app spawns `attach`
+    /// itself, directly on the pane's PTY, and never passes through
+    /// `RemoteProviderInvoking` — so unless the negotiated major rides
+    /// `remote.providers`, the app has no way to learn it and goes on
+    /// announcing `1` forever.
+    @Test func theNegotiatedMajorReachesTheProviderStatus() async throws {
+        let invoker = FakeProviderInvoker(script: [providerOK(describeJSON([1, 2]))])
+        let (manager, registry) = try makeManager(invoker)
+        defer { try? FileManager.default.removeItem(at: registry) }
+
+        await manager.describeAllForTests()
+        let status = try #require(await manager.providerStatuses().first { $0.config.name == "p" })
+        #expect(status.contractVersion == 2)
+    }
+
+    /// Before `describe` lands there is nothing negotiated, and saying so is
+    /// what lets the app apply its own conservative fallback rather than
+    /// trusting a fabricated number.
+    @Test func statusCarriesNoMajorBeforeDescribeSucceeds() async throws {
+        let invoker = FakeProviderInvoker(script: [providerOK(describeJSON([3]))])
+        let (manager, registry) = try makeManager(invoker)
+        defer { try? FileManager.default.removeItem(at: registry) }
+
+        await manager.describeAllForTests()
+        let status = try #require(await manager.providerStatuses().first { $0.config.name == "p" })
+        #expect(status.contractVersion == nil)
+    }
+
+    /// A status encoded by a daemon that predates the field decodes with nil
+    /// rather than failing the whole payload.
+    @Test func statusFromAnOlderDaemonDecodesWithNoMajor() throws {
+        let json = """
+        {"config":{"name":"p","exec":"/bin/true"},"health":"ok","freshnessUnreadable":false}
+        """
+        let decoded = try JSONDecoder().decode(RemoteProviderStatus.self, from: Data(json.utf8))
+        #expect(decoded.contractVersion == nil)
+        #expect(decoded.config.name == "p")
+    }
 }

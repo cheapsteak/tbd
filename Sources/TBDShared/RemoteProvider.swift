@@ -319,19 +319,27 @@ public struct RemoteProviderStatus: Codable, Sendable, Identifiable {
     /// disagreeing is how cached rows once kept rendering as confidently
     /// running in exactly the case the daemon knew the least.
     public let freshnessUnreadable: Bool
+    /// The contract major the daemon negotiated for this provider — the highest
+    /// version both sides declare. Nil when `describe` has not succeeded, and
+    /// nil in a payload from a daemon that predates negotiation; a reader with
+    /// no value falls back to `1`, which is what every emitter announced
+    /// unconditionally before.
+    public let contractVersion: Int?
     public init(config: RemoteProviderConfig, describe: ProviderDescribe?, health: ProviderHealth,
                 errorMessage: String?, remediationLabel: String?, remediationCommand: String?,
-                lastSuccessfulSnapshotAt: Date? = nil, freshnessUnreadable: Bool = false) {
+                lastSuccessfulSnapshotAt: Date? = nil, freshnessUnreadable: Bool = false,
+                contractVersion: Int? = nil) {
         self.config = config; self.describe = describe; self.health = health
         self.errorMessage = errorMessage
         self.remediationLabel = remediationLabel; self.remediationCommand = remediationCommand
         self.lastSuccessfulSnapshotAt = lastSuccessfulSnapshotAt
         self.freshnessUnreadable = freshnessUnreadable
+        self.contractVersion = contractVersion
     }
 
     private enum CodingKeys: String, CodingKey {
         case config, describe, health, errorMessage, remediationLabel, remediationCommand
-        case lastSuccessfulSnapshotAt, freshnessUnreadable
+        case lastSuccessfulSnapshotAt, freshnessUnreadable, contractVersion
     }
 
     /// Hand-written so `freshnessUnreadable` can default when absent: a
@@ -347,6 +355,7 @@ public struct RemoteProviderStatus: Codable, Sendable, Identifiable {
         remediationCommand = try c.decodeIfPresent(String.self, forKey: .remediationCommand)
         lastSuccessfulSnapshotAt = try c.decodeIfPresent(Date.self, forKey: .lastSuccessfulSnapshotAt)
         freshnessUnreadable = try c.decodeIfPresent(Bool.self, forKey: .freshnessUnreadable) ?? false
+        contractVersion = try c.decodeIfPresent(Int.self, forKey: .contractVersion)
     }
 
     /// True when there is cached state on screen that must stop being

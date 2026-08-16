@@ -940,7 +940,8 @@ public actor RemoteProviderManager {
                 remediationLabel: h.remediation?.label,
                 remediationCommand: h.remediation?.command,
                 lastSuccessfulSnapshotAt: lastSuccessfulSnapshotAt[config.name],
-                freshnessUnreadable: snapshotFreshnessUnreadable.contains(config.name))
+                freshnessUnreadable: snapshotFreshnessUnreadable.contains(config.name),
+                contractVersion: negotiatedMajors[config.name])
         }
     }
 
