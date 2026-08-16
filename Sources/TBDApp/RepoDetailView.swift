@@ -112,6 +112,16 @@ struct RepoSettingsView: View {
                         Divider()
                             .padding(.vertical, 4)
 
+                        RemoteCreateDefaultsEditor(
+                            scope: .repo,
+                            providers: appState.remoteProviders,
+                            initial: repo.remoteCreateDefaults,
+                            inheritedDefaults: appState.globalRemoteCreateDefaults
+                        ) { await appState.setRepoRemoteCreateDefaults(repoID: repo.id, defaults: $0) }
+
+                        Divider()
+                            .padding(.vertical, 4)
+
                         ClaudeSettingsOverlayEditor(repoID: repo.id)
 
                         Divider()
