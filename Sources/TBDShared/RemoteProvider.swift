@@ -8,6 +8,27 @@ private let registryLogger = Logger(subsystem: "com.tbd.daemon", category: "remo
 /// to read back — but only ever the shape of the damage, never the payload.
 private let contractLogger = Logger(subsystem: "com.tbd.daemon", category: "remote.contract")
 
+extension CodingUserInfoKey {
+    /// Which provider's output is being decoded, so a decode diagnostic can
+    /// name it. Nothing about the contract types depends on the value — it is
+    /// carried purely so that "some provider is emitting garbage", repeated
+    /// once a minute forever, says *which* one when several are registered.
+    /// Set it with `JSONDecoder.forRemoteProvider(_:)`; a decoder without it
+    /// still decodes, and simply logs an unnamed provider.
+    public static let remoteProviderName = CodingUserInfoKey(rawValue: "com.tbd.remote.providerName")!
+}
+
+extension JSONDecoder {
+    /// A decoder that tells the contract types whose output they are reading.
+    public static func forRemoteProvider(_ provider: String?) -> JSONDecoder {
+        let decoder = JSONDecoder()
+        if let provider {
+            decoder.userInfo[.remoteProviderName] = provider
+        }
+        return decoder
+    }
+}
+
 // MARK: - Remote provider contract types (docs/remote-provider-contract.md, v1)
 
 /// One registered provider from `~/tbd/agent-providers.json`.
@@ -154,18 +175,68 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
         self.agentStateAt = agentStateAt; self.meta = meta; self.archived = archived
     }
 
+    /// Decoded leniently, field by field, and fatal on exactly one thing.
+    ///
+    /// The contract calls the whole Session object untrusted input a caller
+    /// must degrade gracefully on, and the failure that motivated this was a
+    /// provider using the wrong JSON type. So a wrong-typed OPTIONAL field
+    /// reads as absent — the same value a provider that simply omitted it would
+    /// have produced — and `state`/`agent_state` fall back to `.unknown`, which
+    /// is already what a missing value means.
+    ///
+    /// `id` alone is fatal, because without it the session has no identity:
+    /// nothing to mirror it under, adopt it as, or attach to. Dropping any
+    /// other field costs one fact; dropping the session costs its place in the
+    /// inventory, and two absences later the mirror tombstones it as `gone` —
+    /// dimming a live row and closing attach on a session that is perfectly
+    /// healthy.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
-        title = try c.decodeIfPresent(String.self, forKey: .title)
-        createdAt = try c.decodeIfPresent(String.self, forKey: .createdAt)
-        state = try c.decodeIfPresent(RemoteProcessState.self, forKey: .state) ?? .unknown
-        exitCode = try c.decodeIfPresent(Int.self, forKey: .exitCode)
-        agentState = try c.decodeIfPresent(RemoteAgentState.self, forKey: .agentState) ?? .unknown
-        agentStateReason = try c.decodeIfPresent(String.self, forKey: .agentStateReason)
-        agentStateAt = try c.decodeIfPresent(String.self, forKey: .agentStateAt)
-        meta = Self.decodeMeta(from: c, sessionID: id)
-        archived = try c.decodeIfPresent(Bool.self, forKey: .archived)
+        var dropped: [String] = []
+        func lenient<T: Decodable>(_ type: T.Type, _ key: CodingKeys) -> T? {
+            do {
+                return try c.decodeIfPresent(T.self, forKey: key)
+            } catch {
+                dropped.append(key.stringValue)
+                return nil
+            }
+        }
+        title = lenient(String.self, .title)
+        createdAt = lenient(String.self, .createdAt)
+        state = lenient(RemoteProcessState.self, .state) ?? .unknown
+        exitCode = lenient(Int.self, .exitCode)
+        agentState = lenient(RemoteAgentState.self, .agentState) ?? .unknown
+        agentStateReason = lenient(String.self, .agentStateReason)
+        agentStateAt = lenient(String.self, .agentStateAt)
+        archived = lenient(Bool.self, .archived)
+        let provider = decoder.userInfo[.remoteProviderName] as? String
+        meta = Self.decodeMeta(from: c, sessionID: id, provider: provider)
+        if !dropped.isEmpty {
+            // Bound to a local first: `id` is a stored property of a value type
+            // still being initialized here, which the logger's autoclosure may
+            // not capture.
+            let sessionID = id
+            // Field NAMES only, on the same terms as the dropped `meta` keys
+            // below: a provider's values are its own. `.debug` rather than
+            // `.error` because the cost is now one fact rather than a session,
+            // and a provider with a type bug repeats it on every poll forever.
+            contractLogger.debug(
+                """
+                \(Self.providerLabel(provider), privacy: .public) session \
+                \(sessionID, privacy: .public): dropped \(dropped.count, privacy: .public) \
+                wrong-typed field(s), each read as absent: \
+                \(dropped.joined(separator: ", "), privacy: .public)
+                """
+            )
+        }
+    }
+
+    /// How a provider is named in a decode diagnostic when the decoder was told
+    /// which one it is reading — and when it was not, which is what a bare
+    /// `JSONDecoder()` in a test or a future call site produces.
+    static func providerLabel(_ provider: String?) -> String {
+        provider.map { "provider \($0)" } ?? "unnamed provider"
     }
 
     /// `meta` decoded leniently, and never fatally.
@@ -181,12 +252,28 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
     /// because there is no one right way to render them and inventing one would
     /// put a caller-chosen string where a provider-chosen one belongs.
     private static func decodeMeta(
-        from c: KeyedDecodingContainer<CodingKeys>, sessionID: String
+        from c: KeyedDecodingContainer<CodingKeys>, sessionID: String, provider: String?
     ) -> [String: String]? {
-        // `meta` absent, null, or not an object at all: no map, still a session.
-        guard let raw = try? c.decodeIfPresent([String: MetaValue].self, forKey: .meta) else {
+        let raw: [String: MetaValue]?
+        do {
+            raw = try c.decodeIfPresent([String: MetaValue].self, forKey: .meta)
+        } catch {
+            // `meta` present but not an object — the one case that costs the
+            // WHOLE map rather than a key, including `repo`, which is what
+            // resolves the session to a registered repository. Without this the
+            // session would quietly never get a worktree row and nothing would
+            // say why, while the loop below logs every individually dropped key.
+            contractLogger.debug(
+                """
+                \(providerLabel(provider), privacy: .public) session \
+                \(sessionID, privacy: .public): meta is present but not an object; \
+                the whole map is dropped, including any well-known key such as repo
+                """
+            )
             return nil
         }
+        // `meta` absent or null: no map, still a session, nothing to report.
+        guard let raw else { return nil }
         var kept: [String: String] = [:]
         var dropped: [String] = []
         for (key, value) in raw {
@@ -201,7 +288,8 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
             // values never reach the log.
             contractLogger.debug(
                 """
-                session \(sessionID, privacy: .public): dropped \(dropped.count, privacy: .public) \
+                \(providerLabel(provider), privacy: .public) session \
+                \(sessionID, privacy: .public): dropped \(dropped.count, privacy: .public) \
                 non-scalar meta key(s): \(dropped.sorted().joined(separator: ", "), privacy: .public)
                 """
             )
@@ -306,7 +394,10 @@ public struct RemoteSessionListEnvelope: Codable, Sendable {
 /// A skipped session is simply absent from the snapshot, so the mirror's
 /// absence bookkeeping starts counting it missing and may eventually mark it
 /// gone. That is the honest reading of the only evidence there is: the provider
-/// said nothing this caller could understand about that session.
+/// said nothing this caller could understand about that session. It is also why
+/// `RemoteSessionPayload` degrades every field it can rather than throwing —
+/// after that, the only element still skipped here is one with no usable `id`,
+/// which has no identity to go missing under in the first place.
 public struct LenientSessionArray: Decodable, Sendable {
     public let sessions: [RemoteSessionPayload]
 
@@ -319,10 +410,12 @@ public struct LenientSessionArray: Decodable, Sendable {
             // significant, and the id is what makes it actionable when the
             // element was intact enough to carry one.
             let named = skipped.compactMap(\.id).sorted()
+            let provider = decoder.userInfo[.remoteProviderName] as? String
             contractLogger.error(
                 """
-                skipped \(skipped.count, privacy: .public) undecodable session(s) in a provider \
-                inventory; ids: \(named.isEmpty ? "none recoverable" : named.joined(separator: ", "), privacy: .public)
+                skipped \(skipped.count, privacy: .public) undecodable session(s) in the \
+                \(RemoteSessionPayload.providerLabel(provider), privacy: .public) inventory; \
+                ids: \(named.isEmpty ? "none recoverable" : named.joined(separator: ", "), privacy: .public)
                 """
             )
         }

@@ -38,11 +38,15 @@ enum RemoteEventParser {
         }
     }
 
-    static func parse(line: String) -> RemoteEvent? {
+    /// `provider` names whose stream this line came from, for the contract
+    /// diagnostics the session types emit while decoding; it has no effect on
+    /// what parses.
+    static func parse(line: String, provider: String? = nil) -> RemoteEvent? {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty,
               let data = trimmed.data(using: .utf8),
-              let envelope = try? JSONDecoder().decode(Envelope.self, from: data) else { return nil }
+              let envelope = try? JSONDecoder.forRemoteProvider(provider)
+                  .decode(Envelope.self, from: data) else { return nil }
         switch envelope.event {
         case "hello": return .hello(contractVersion: envelope.contractVersion ?? 1)
         case "snapshot":

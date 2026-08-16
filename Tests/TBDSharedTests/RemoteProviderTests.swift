@@ -158,21 +158,86 @@ struct RemoteProviderTests {
         #expect(s.meta == nil)
     }
 
-    /// One malformed element must not blind the caller to the whole fleet: the
-    /// rest of the inventory decodes, so only the offending session goes
-    /// missing instead of every session at once.
-    @Test func oneUndecodableSessionDoesNotLoseTheOthers() throws {
+    // MARK: - Every optional field degrades, and only `id` is fatal (tier 1)
+
+    /// The motivating field failure for all of this was a provider using the
+    /// wrong JSON type, and `meta` was never the only place it could happen. A
+    /// wrong-typed optional reads as absent — the same value a provider that
+    /// omitted it would have produced — so the session survives with one fact
+    /// missing instead of vanishing from the inventory and, two polls later,
+    /// being tombstoned as `gone` while it is alive and healthy.
+    @Test func aWrongTypedOptionalFieldCostsItsOwnFieldNotTheSession() throws {
+        let json = """
+        {"id": "s-1", "title": {"text": "fix CI"}, "created_at": 1700000000,
+         "state": 7, "exit_code": "not-a-number", "agent_state": ["working"],
+         "agent_state_reason": 3, "agent_state_at": false, "archived": "yes",
+         "meta": {"repo": "acme/api"}}
+        """.data(using: .utf8)!
+
+        let s = try JSONDecoder().decode(RemoteSessionPayload.self, from: json)
+
+        #expect(s.id == "s-1")
+        #expect(s.title == nil)
+        #expect(s.createdAt == nil)
+        #expect(s.state == .unknown)
+        #expect(s.exitCode == nil)
+        #expect(s.agentState == .unknown)
+        #expect(s.agentStateReason == nil)
+        #expect(s.agentStateAt == nil)
+        // A wrong-typed `archived` costs its own field too: absent means the
+        // provider made no filing claim, which is what a caller that cannot
+        // read one must assume.
+        #expect(s.archived == nil)
+        // The rest of the object is untouched by one field's failure.
+        #expect(s.meta?["repo"] == "acme/api")
+    }
+
+    /// `id` is the exception, and the only one: without it the session has no
+    /// identity, so there is nothing to mirror, adopt, or attach to.
+    @Test func aSessionWithNoUsableIDIsStillSkipped() throws {
         let json = """
         {"sessions": [
           {"id": "good-1", "state": "running"},
-          {"id": "broken", "state": "running", "exit_code": "not-a-number"},
           {"state": "running"},
+          {"id": 7, "state": "running"},
           {"id": "good-2", "state": "exited", "exit_code": 0}]}
         """.data(using: .utf8)!
 
         let envelope = try JSONDecoder().decode(RemoteSessionListEnvelope.self, from: json)
 
         #expect(envelope.sessions.map(\.id) == ["good-1", "good-2"])
+    }
+
+    /// An element that is not an object at all cannot be a session, and costs
+    /// only itself — the array-level leniency this pairs with.
+    @Test func oneUndecodableElementDoesNotLoseTheOthers() throws {
+        let json = """
+        {"sessions": [
+          {"id": "good-1", "state": "running"},
+          42,
+          {"id": "good-2", "state": "exited", "exit_code": 0}]}
+        """.data(using: .utf8)!
+
+        let envelope = try JSONDecoder().decode(RemoteSessionListEnvelope.self, from: json)
+
+        #expect(envelope.sessions.map(\.id) == ["good-1", "good-2"])
+    }
+
+    /// The whole point of extending the leniency past `meta`: a session with a
+    /// wrong-typed field stays IN the inventory, so the mirror never starts
+    /// counting it absent and never marks a live session `gone`.
+    @Test func aWrongTypedFieldNoLongerCostsASessionItsPlaceInTheInventory() throws {
+        let json = """
+        {"sessions": [
+          {"id": "good-1", "state": "running"},
+          {"id": "typo", "state": "running", "exit_code": "not-a-number"}]}
+        """.data(using: .utf8)!
+
+        let envelope = try JSONDecoder().decode(RemoteSessionListEnvelope.self, from: json)
+
+        #expect(envelope.sessions.map(\.id) == ["good-1", "typo"])
+        #expect(envelope.sessions.last?.state == .running)
+        #expect(envelope.sessions.last?.exitCode == nil)
     }
 
     @Test func staleProjectionDemotesActiveStateWithoutMutatingTheSnapshot() {
