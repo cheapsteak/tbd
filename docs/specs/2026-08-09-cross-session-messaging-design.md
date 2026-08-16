@@ -83,11 +83,29 @@ one.
 
 The display name is mutable and `--name` is fixed at spawn, so a rename
 applies at the session's next respawn or resume; until then the running
-session answers to its spawn-time name. This staleness is accepted:
-respawns are frequent in TBD (wake, swap, fresh spawns), renames are
-rare, and the listing carries the working directory and a per-session
-identifier next to the name, so a stale name misleads no one who reads
-the row.
+session answers to its spawn-time name. This staleness is accepted,
+because respawns are frequent in TBD (wake, swap, fresh spawns) and
+renames are rare, so a mismatched row is short-lived.
+
+It is not harmless while it lasts. A row in the `ListAgents` tool
+result — the listing a session itself receives — carries the name, a
+per-session `[ref]`, the kind, the status, the tmux
+`server:window.pane`, and how long ago the session started, and no
+working directory, so nothing in a stale row spells out the lane a
+sender is looking for. Field use showed the failure mode: a send
+addressed to a renamed lane's current display name returned a flat
+`No agent named 'acme-worker' is reachable.`, the row still listed under
+that session's spawn-time slug went unrecognized, and the sender twice
+concluded that a live session had exited.
+
+The mitigation is the pane, not the name. The `[ref]` addresses a row
+unambiguously once it has been found, and the tmux pane is what finds
+it: `tbd terminal list <worktree-id>` prints the same window and pane
+coordinates from TBD's side, so a TBD-spawned row joins back to its
+worktree whatever name it happens to carry. A stale name therefore costs
+a lookup rather than a peer — for a reader who knows to make it, which
+is why `docs/cross-session-messaging.md` documents the not-found refusal
+and that join.
 
 #### The name is a label; the ref is the address
 

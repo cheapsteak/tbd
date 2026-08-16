@@ -51,7 +51,7 @@ TBD spawns each Claude session with `--name` set to the worktree's
 names in `/list-agents` are the ones you already know from the sidebar.
 
 Without that flag a session names itself after its working-directory
-folder: a slug plus a random suffix, which never matches a name you chose
+folder: a slug plus a short suffix, which never matches a name you chose
 in the app.
 
 `--name` is fixed at spawn. Renaming a worktree therefore applies at that
@@ -59,12 +59,60 @@ session's **next respawn or resume**; until then the running session
 still answers to its spawn-time name. Nothing breaks in the meantime —
 the listing tells the two apart, as described next.
 
+A running session is not stuck with that name, though: Claude Code's
+documentation states that a session answers to the name set with the
+`/rename` command as well as the one given by `--name`, so a drifted
+name can be corrected from inside the session without a respawn.
+
+**A stale daemon binary produces the slug fallback fleet-wide.** The flag
+is passed by the daemon, and `scripts/restart.sh` from any worktree
+replaces the one live daemon for the whole machine. Restarting from a
+branch cut before naming shipped therefore reverts *every* subsequent
+spawn — in every worktree, not just that one — to the self-chosen slug
+name, silently, until the daemon is restarted from a tree that has the
+feature. Sessions spawned during such a window keep their slug name for
+as long as they run, because the name is fixed at spawn.
+
+So a listing can mix named and slug-named rows for reasons that have
+nothing to do with a session's health. Expect it, and address rows by
+what the listing shows rather than by what you expect it to show.
+
 ## Addressing a peer
 
-Addressing starts at the listing. Run `/list-agents` — or call the
-`ListAgents` tool — and each row carries the session's name and a short
-`[ref]`, an identifier unique to that live session, alongside its working
-directory and status.
+Addressing starts at the listing a session itself receives — the
+**`ListAgents` tool result**, which is the form that matters when a
+session is trying to reach a peer. A row in it looks like this:
+
+```
+acme-worker [455f3e]  ·  interactive  ·  busy  ·  tmux main:@388.%388  ·  started 5d ago
+```
+
+The fields are the session's name, a short `[ref]` unique to that live
+session, its kind, its status, its tmux server, window and pane, and how
+long ago it started. **The tool result does not carry a working
+directory** — the tmux pane is the field that ties a row to a specific
+terminal, and the one to reach for whenever the name is not enough. (The
+on-disk registry record described under [The peer
+registry](#the-peer-registry) does hold one; the tool result does not
+print it.)
+
+What a human sees in the TUI is a separate surface with its own field
+set. Claude Code's documentation states that the `/list-agents`
+slash-command view shows each local session's working directory, so do
+not assume the two render the same fields. Everything below — the pane
+join especially — is written for the session-facing tool result.
+
+The tmux field is there only for a session running inside tmux, which
+every TBD session is. A plain-terminal `claude` started outside tmux, and
+rows of other kinds (`cloud`, remote control), carry no tmux coordinates,
+and the pane matching described below does not reach them.
+
+The row layout above, and the not-found refusal in
+[When a name is not reachable](#when-a-name-is-not-reachable), were read
+off the `ListAgents` tool result on CLI 2.1.233; the slash-command
+layout is Claude Code's documented behavior rather than anything
+measured here. The wording is Claude Code's rather than TBD's, so treat
+the field set as the durable part and the exact text as version-bound.
 
 **Address a peer you have not messaged before as `name [ref]`.** A bare
 name may be refused even when exactly one row answers to it, and nothing
@@ -92,12 +140,44 @@ sessions ordinary:
 - **Two worktrees, one name.** Display names are yours to choose and
   nothing stops you reusing one.
 
-The working directory and status in the row are how you tell which is
-which; the `[ref]` is how you say which one you meant.
+The tmux pane in the row is how you tell which is which — it names one
+terminal exactly — and the `[ref]` is how you say which one you meant.
+Status narrows the field but does not identify a row on its own.
 
 Pull a fresh listing rather than reusing one from earlier in a long
 conversation — refs belong to live sessions, and the pool changes as
 sessions spawn, respawn, and exit.
+
+### When a name is not reachable
+
+A send to a name that no row carries fails differently from the
+ambiguity refusal above:
+
+```
+No agent named 'acme-worker' is reachable.
+```
+
+This one is a flat not-found: nothing in the listing answers to that
+name. **It usually does not mean the session died.** Far more often the
+session is alive and listed under a different name — the drift described
+in [Naming](#naming). A session spawned before the running daemon
+supported `--name` carries the working-directory slug instead; one whose
+worktree was renamed after it started still answers to its spawn-time
+name. Reading the refusal as a death notice — and giving up on a peer
+that is sitting there working — is the mistake to avoid.
+
+Find the row by its tmux pane instead of by its name. Every TBD-spawned
+row prints its pane as `tmux <server>:<window>.<pane>`, and TBD prints the
+same coordinates from its own side:
+
+```sh
+tbd worktree list --json          # worktree id, displayName, directory name, path
+tbd terminal list <worktree-id>   # WINDOW and PANE columns for that worktree
+```
+
+Join the two on the window and pane (`@388` / `%388` above): the row that
+matches is the lane you meant, whatever it happens to be called. Address
+it as `name [ref]` with the name the listing actually shows.
 
 ## Reach
 

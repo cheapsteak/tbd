@@ -43,9 +43,28 @@ import Foundation
     // both names must survive an edit of this section.
     #expect(body.contains("ListAgents"))
     #expect(body.contains("SendMessage"))
-    #expect(body.contains("worktree display name"))
+    #expect(body.contains("worktree display name at spawn"))
     #expect(body.contains("tbd terminal send"))
     #expect(body.contains("tbd terminal output"))
+    // The display-name correspondence is a default, not a guarantee: a session
+    // spawned by a daemon without naming carries the cwd slug instead, and one
+    // that outlived a rename keeps its spawn-time name. Pin the qualifier, so a
+    // rewrite that restores the unconditional claim reds.
+    #expect(body.contains("working-directory slug plus a short suffix"))
+    // The consequence is the part sessions get wrong in the field: a flat
+    // not-found reads as "the peer is dead" unless the text says otherwise.
+    #expect(body.contains("No agent named 'X' is reachable."))
+    #expect(body.contains("listed under a different name, not that it is dead"))
+    // The recovery is a mechanical join between the row's tmux pane and TBD's
+    // own terminal listing, plus the worktree listing that yields the id the
+    // second one needs; all three legs have to survive.
+    #expect(body.contains("tmux <server>:<window>.<pane>"))
+    #expect(body.contains("tbd terminal list <worktree-id>"))
+    #expect(body.contains("tbd worktree list --json"))
+    // Only rows for sessions running under tmux carry that pane — `cloud` and
+    // remote-control rows do not — so the join is scoped to what TBD spawns.
+    // Pin the scope, so a rewrite that promises it of every row reds.
+    #expect(body.contains("every TBD-spawned row prints"))
     // The `[ref]` is the address, not merely a tiebreak for ambiguous names:
     // a peer that has not been messaged before must be addressed `name [ref]`,
     // and a bare name is refused even where exactly one row answers to it.
