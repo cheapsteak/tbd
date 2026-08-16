@@ -78,6 +78,87 @@ extension RPCRouter {
         return try RPCResponse(result: await store.projectMove(
             repo: params.repo, to: SupervisionMoveTarget(argument: params.to)))
     }
+
+    // MARK: - The read-only surfaces
+    //
+    // Neither makes a decision, sends anything, or starts anything. They are
+    // free to call: the readout is a sweep program's opening move on every
+    // tick, and the ledger query closes its loop.
+    //
+    // Read-only about *decisions*, not about bytes on disk. Both resolve the
+    // project through `SupervisionStore.projectFacts`, which reads through the
+    // store's reconciliation — so a coverage span an operator ended by
+    // hand-editing the supervision file gets closed here, appending a
+    // `projectOff` line. That append records a decision the **operator** made,
+    // observed at the first read that noticed it; the readout authored nothing.
+    // Skipping the reconciliation to keep the file untouched would be the worse
+    // trade: the surface would report a mark it already knows is stale.
+
+    /// `supervise.readout` — the project's whole current picture (sweep-program
+    /// design §3). An unknown project is refused by
+    /// `SupervisionStore.projectFacts`, because an empty readout would read as
+    /// "this project has no agents".
+    func handleSuperviseReadout(_ paramsData: Data) async throws -> RPCResponse {
+        let store = try requireSupervision()
+        let params = try decoder.decode(SuperviseReadoutParams.self, from: paramsData)
+        let facts = try await store.projectFacts(
+            project: params.project, brake: try await supervisionBrake())
+        let builder = SupervisionReadoutBuilder(
+            db: db,
+            fleet: DatabaseSupervisionFleetReader(db: db),
+            sessionCounters: sessionCounters,
+            branchTips: lifecycle.branchTipTracker,
+            actuationRecord: ActuationRecordReader(activePath: actuationLog.path),
+            now: now)
+        return try RPCResponse(result: await builder.build(facts: facts))
+    }
+
+    /// `supervise.ledger` — the joined per-project view of both records since an
+    /// instant (sweep-program design §3).
+    ///
+    /// The project is resolved through the store first, for the scoping repo
+    /// set and so an unknown name is refused here exactly as the readout
+    /// refuses it — an empty `lines` array would otherwise read as "nothing
+    /// happened".
+    func handleSuperviseLedger(_ paramsData: Data) async throws -> RPCResponse {
+        let store = try requireSupervision()
+        let params = try decoder.decode(SuperviseLedgerParams.self, from: paramsData)
+        let facts = try await store.projectFacts(
+            project: params.project, brake: try await supervisionBrake())
+        let query = SupervisionLedgerQuery(
+            db: db,
+            supervisionLedgerPath: store.ledgerPath,
+            actuationRecord: ActuationRecordReader(activePath: actuationLog.path),
+            now: now)
+        return try RPCResponse(result: await query.view(
+            project: params.project,
+            projectRepos: Set(facts.project.repos),
+            since: params.since))
+    }
+
+    // MARK: - The brief pipe
+
+    /// `supervise.brief` — one briefing submission, answered synchronously
+    /// (sweep-program design §3).
+    ///
+    /// A shell like the rest: the whole pipeline — the standing-state refusals,
+    /// the liveness contact, the size bound, the identity-blind pacing and the
+    /// single delivery attempt — lives in `SupervisionStore.submitBriefing`,
+    /// where the state it reads and writes already lives. The brake is read
+    /// here, once, and handed down, so the refusal and the record are computed
+    /// from one value taken at one moment.
+    ///
+    /// **The CLI performs no local size check**, so every submission reaches
+    /// this handler, including an oversize one: refusing locally would move no
+    /// liveness record, and a broken composer would then read as a silent one.
+    func handleSuperviseBrief(_ paramsData: Data) async throws -> RPCResponse {
+        let store = try requireSupervision()
+        let params = try decoder.decode(SuperviseBriefParams.self, from: paramsData)
+        let brake = try await supervisionBrake()
+        return try RPCResponse(result: await store.submitBriefing(
+            project: params.project, text: params.text, brake: brake,
+            deliverer: supervisionBriefingDeliverer))
+    }
 }
 
 /// The refusal a `supervise.*` call gets when the daemon has no supervision

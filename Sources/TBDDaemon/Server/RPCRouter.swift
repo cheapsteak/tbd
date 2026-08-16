@@ -48,6 +48,15 @@ public final class RPCRouter: Sendable {
     /// mode and in tests, where the brake still moves and simply publishes
     /// nothing.
     public nonisolated(unsafe) var supervisionHeartbeat: SupervisionHeartbeat?
+    /// The last leg of the brief pipe — the seam briefing delivery plugs into
+    /// in slice 5. Overridable post-construction like `supervision`, but not an
+    /// optional: the shipped deliverer resolves the project's supervisor, finds
+    /// none, and answers `no-live-supervisor`, which is the honest answer today
+    /// and safe in mock mode and in every test that never touches it. A test
+    /// injects its own to reach `transport-failed`, which nothing else can
+    /// produce.
+    public nonisolated(unsafe) var supervisionBriefingDeliverer:
+        any SupervisionBriefingDelivering = SupervisorBriefingDeliverer()
     /// Orphan-GC actor. `nil` in mock mode / unit tests that don't need it;
     /// set post-construction by `Daemon.swift` (mirrors `claudeUsagePoller`).
     /// The `gc.*` handlers return an error response rather than crashing when
@@ -626,6 +635,12 @@ public final class RPCRouter: Sendable {
                 return try await handleSuperviseProjectDelete(request.paramsData)
             case RPCMethod.superviseProjectMove:
                 return try await handleSuperviseProjectMove(request.paramsData)
+            case RPCMethod.superviseReadout:
+                return try await handleSuperviseReadout(request.paramsData)
+            case RPCMethod.superviseLedger:
+                return try await handleSuperviseLedger(request.paramsData)
+            case RPCMethod.superviseBrief:
+                return try await handleSuperviseBrief(request.paramsData)
             case RPCMethod.panelGet:
                 return try await handlePanelGet(request.paramsData)
             case RPCMethod.panelApply:

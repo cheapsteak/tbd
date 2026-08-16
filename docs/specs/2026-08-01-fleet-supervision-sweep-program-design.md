@@ -137,12 +137,44 @@ tbd supervise brief   --project <name>               # briefing text on stdin
 tbd supervise ledger  --project <name> --since <t>   # JSON on stdout, schema-versioned
 ```
 
+**The schema-version contract, stated once for all three.** The readout and
+the ledger query each print a JSON object carrying a top-level
+`schemaVersion`, value `1`. The brief pipe carries no schema on the way *in* —
+its reader is a desk, and representation follows consumer (§1) — but its
+synchronous *result* is machine-readable, and it is versioned on the same
+terms. Those terms are the ones `tbd profile list --json` already states
+([`2026-08-14-capacity-facts-contract-design.md`](2026-08-14-capacity-facts-contract-design.md)),
+and they are three:
+
+- **Additive within a version.** Fields may be added at any level, and a
+  consumer must tolerate keys it does not recognize. A ledger kind a later
+  build writes, or a fact the readout grows, is not a breaking change and
+  arrives without a version bump.
+- **Meanings are fixed within a version.** A field TBD computes keeps
+  computing the same thing, timestamps stay ISO 8601, and an enum value
+  already emitted keeps its sense.
+- **Removal, or a change of meaning, requires a bump.** So a program
+  branching on `schemaVersion == 1` is never silently surprised.
+
+The version sits on the **envelope**, never per line or per agent entry. One
+binary emits one shape: every entry in one printed object came from the same
+build, so a per-entry version could never legitimately differ — it would be
+either always redundant or always a bug. And the rules being versioned have
+the whole object as their subject: the ledger's projection rule (below) is a
+statement about which lines the array contains, and the readout's
+absence-means-unestablished rule is a statement about every fact in it, so a
+version scoped to one entry could not carry either. The stamp goes where a
+program reads bytes — the CLI's stdout — rather than on the daemon's RPC
+result, which is an internal seam between two binaries shipped together and
+observed by no external consumer. Saying all of this is the point: **a version
+whose guarantees nobody stated is decoration.**
+
 **The readout** is the fact surface. An instrument readout: read-only, the
 current values printed for whoever is consuming them, implying no action. It
 prints the project's live-agent facts — session state with source and
-observed-at, work facts, runaway counters, worktree pin state, and the
-per-target not-to-act facts (an intervention in flight, a pending re-check, a
-rate limit) — plus the supervision machinery's own state: the brake, the
+observed-at, the work facts named below, runaway counters, worktree pin state,
+and the per-target not-to-act facts (an intervention in flight, a pending
+re-check, a rate limit) — plus the supervision machinery's own state: the brake, the
 project's mark (design §3, §8), and the project's active mode. It also
 carries the **supervisor section**, because the supervisor is a session in
 this program's perimeter (design §9): the desk's session state, its last
@@ -154,30 +186,80 @@ open-cases section: what has already been briefed is the program's own memory
 (§7), not TBD's. An operator or any other script may read the readout freely
 at any time.
 
+**The work facts are the ones the sweep already resolves**, and no others:
+each agent carries its branch, whether that branch has conflicts, since when
+its commits stopped moving, and the PR observation and status TBD already
+keeps beside the worktree. All of it falls out of the single
+`git for-each-ref` per repo the conflict sweep runs regardless. A
+working-tree fact — a count of uncommitted files, a diff summary — is
+deliberately absent: the sweep resolves refs, not worktree status, and
+answering the working-tree half would mean a `git status` subprocess per
+worktree per cycle, which is exactly the per-agent cost the readout exists to
+avoid. That is the same refusal `BranchTipTracker` states one layer down
+(`Sources/TBDDaemon/Supervision/BranchTipTracker.swift`). A project whose
+theory of work needs the working tree runs `git status` itself, over the
+worktrees its own judgment cares about — the placement split (§2) working as
+intended, with the cost borne where the interest is.
+
+**An unestablished fact is `null`, never a fabricated zero.** "Commits
+unchanged since" is null until the sweep has seen the same branch tip twice,
+because one sample measures no duration; a zero or a stamp taken at first
+sighting would be a claim of stillness TBD never observed, and it would read
+as freshly-still every branch in the fleet after each daemon restart. The rule
+generalizes across the readout: it reports what it established, and says null
+where it established nothing, so a program can tell ignorance from a
+measurement.
+
 **The brief pipe** takes a composed briefing as text on stdin. There is no
 schema — representation follows consumer (§1): the briefing's only reader is
 a desk, a model reading prose, so no parser exists for a schema to serve. The
 daemon takes the text as given; it never parses, edits, or ranks it. What it
-does, synchronously:
+does, synchronously, in this order — no step of which reads the briefing
+text:
 
-1. **Timestamp and attribute.** Every submission updates the project's
-   liveness record — last contact, evaluation count (§6).
-2. **Pace.** One identity-blind check: the per-project briefing rate limit
+1. **Refuse for a standing state**, before anything is recorded. A project
+   whose mark is off gets the `refused-off` result (design §8) — the "not
+   covered" answer rather than the "not now" one; with the brake engaged the
+   pipe refuses with a distinct machine-readable paused result and its pinned
+   exit code (§10), so a program can tell "not now" from "broken". **When both
+   stand, `refused-off` wins.** Off is a standing state: releasing the brake
+   would change nothing while the mark is off, so "retry when supervision
+   resumes" would send the program back forever, and `refused-off` — stop
+   submitting — is the advice that holds. Neither refusal feeds the watchdog
+   (§6), neither records contact (the contact window is disarmed while
+   coverage is closed, so no contact is owed and none is counted), and nothing
+   is delivered.
+2. **Timestamp and attribute.** Every submission that gets past step 1 updates
+   the project's liveness record — last contact, evaluation count (§6) —
+   empty or not, and ahead of the two refusals below. That ordering is the
+   point: a sweep program whose composer has a runaway bug and submits 300 KiB
+   every tick must read as *broken*, not as *silent*. Silence is the one
+   signal reserved for "nobody looked".
+3. **Bound the size.** A submission over the §10 bound is refused
+   `refused-size`, counted in bytes. Its contact is already recorded by then,
+   which is the whole reason step 2 precedes this.
+4. **Pace.** One identity-blind check: the per-project briefing rate limit
    (§10) — at most one briefing delivered per project per interval, enforced
    on timestamps alone. A submission inside the window is refused with a
-   machine-readable result; the refusal still counts as contact. This is the
-   whole of the pipe's not-to-act checking, because pacing is the one check
+   machine-readable result; the refusal still counts as contact. **Pacing must
+   not consult who is submitting.** The moment it reads an identity it stops
+   being a mechanism and becomes a policy — some submitters worth more of the
+   window than others — and policy is the project's, authored in its own
+   program. Timestamps are all a floor needs. This is also the whole of the
+   pipe's not-to-act checking, because pacing is the one check
    that needs no identity. The per-target reasons not to act live inside the
    identified send's preconditions (design §3), where the target is explicit
    in the call (`--terminal <id>`) — the same check-at-the-act pattern that
-   makes the off switch bind.
-3. **Refuse while paused.** With the brake engaged, the pipe
-   refuses with a distinct machine-readable paused result — a pinned exit
-   code (§10) — so a program can tell "not now" from "broken"; a project
-   whose mark is off gets the `refused-off` result instead (design §8),
-   the "not covered" answer rather than the "not now" one. Refusals
-   while paused do not feed the watchdog (§6), and nothing is delivered.
-4. **Deliver.** A surviving briefing goes to the project's supervisor: the
+   makes the off switch bind. **The slot is committed when a briefing reaches
+   a supervisor, not at the moment of the check** — the limit is one briefing
+   *delivered* per project per interval, so the token is spent by the delivery
+   that happened rather than by the attempt. A submission refused as paused,
+   off or oversize never burns it, and neither does one answered
+   `no-live-supervisor` or `transport-failed`: a program is not silently
+   penalised for a refusal it did not cause, and the `no-live-supervisor`
+   continuation this document prescribes — run `on` (ensure) and resubmit in
+   the same run — depends on the resubmission finding the window open.
+5. **Deliver.** A surviving briefing goes to the project's supervisor: the
    daemon
    prepends the compiled **header** — the active mode's name and any pending
    conduct delta (§8) — resolves the supervisor (the operator's appointed
@@ -186,11 +268,11 @@ does, synchronously:
    delivers through the agent-kind adapter, and writes the ledger's
    delivery line request-first, carrying the delivered text's hash and the
    conduct hash (design §4 steps 3–4, §6, §12). The synchronous result is
-   machine-readable and pinned as contract (§10): delivered,
+   machine-readable and its **seven values are contract** (§10): delivered,
    refused-paused, refused-off, refused-rate-limit, refused-size,
-   transport-failed, or no-live-supervisor. TBD makes one full attempt —
-   adapter fallback included (design §12) — and never retries a briefing;
-   persistence is the program's, closing the loop through the result and
+   transport-failed, no-live-supervisor. TBD makes **one full attempt and
+   never retries** — adapter fallback included (design §12) — so continuation
+   is the submitting program's policy, closing the loop through the result and
    the ledger (§7, design §9).
 
 **An empty submission is still a submission.** A `brief` call with nothing on
@@ -201,6 +283,14 @@ hour); its durable trace is the coverage summary on the lifecycle line that
 ends the project's coverage span (§6, design §9). It
 is not a courtesy: it is what makes a quiet fleet distinguishable from a dead
 sensor. Pacing applies only to delivered briefings, never to quiet contact.
+
+**Its result is `delivered`**, in that value's wider sense: the submission was
+accepted and everything it required happened, which for a quiet contact is the
+liveness update alone. Any refusal there would tell a program that something
+went wrong when nothing did, and the result's `detail` sentence says plainly
+which of the two happened. **Empty means zero bytes**, and nothing else: a
+briefing of three newlines takes the ordinary path, because deciding that it
+"says nothing" would mean reading it — which no step of this pipe does.
 
 The pipe takes **pure text and nothing else**, bounded in size (§10). A
 structured evaluation report
@@ -221,6 +311,43 @@ came of the acts, and interventions supervision did not make. It is TBD's
 half of the program's case memory (§7): the program's files say what it has
 raised; the record says what the machinery did about it, whoever asked.
 Read-only, schema-versioned, free to call.
+
+**How the join is computed, and what it refuses to do.** Four rules, and each
+one is a refusal to be clever with somebody else's record:
+
+- **Lines pass through verbatim.** An actuation row's field list is documented
+  as growing — the envelope, the kind set and the never-claims are the
+  contract and the rest is implementation detail (design §6) — and the
+  supervision ledger is append-only, with kinds a given build does not write.
+  So the query carries each line's original JSON object untouched under
+  `line`, beside `source` (`actuation` or `supervision`), the two envelope
+  fields lifted for filtering and ordering (`kind`, `ts`), and a computed
+  `delivery` status where a verified send is owed one. It re-models neither
+  record. Re-modelling would
+  make a later build's line, or any field added within a version, vanish from
+  a query whose entire job is showing a program everything that touched the
+  fleet.
+- **One merged, timestamp-ascending `lines` array.** The two kind vocabularies
+  are disjoint, so one array reads correctly and a consumer filters by `kind`
+  the way the design's views do. `source` rides every line regardless, so
+  provenance never rests on remembering which kind set a name belongs to.
+- **A row is in the project's view only when it resolves into the project.**
+  An actuation row's target is matched by worktree, terminal, or repo, each
+  resolved through TBD's own tables to a project. A row that resolves to
+  nothing — a target whose row has since been deleted, a remote-provider act
+  with no local coordinates — is **excluded**, not included by default. The
+  failure that matters here is one project's query showing another project's
+  lines, so an unresolvable row is dropped rather than passed through on a
+  guess.
+- **Unparseable lines are counted, not swallowed.** A hand-edit or a crash
+  fragment is reported as a count alongside the array, so damage reads as
+  damage rather than as a quiet absence.
+
+`--since` accepts three shapes and refuses anything else naming all three: a
+full ISO-8601 timestamp with offset or `Z` (the form a program computing
+"since my last evaluation" uses), a bare `HH:MM` resolved to the most recent
+past occurrence in the machine's local time zone (the operator's shape), or a
+bare relative duration — `30m`, `2h`, `90s` — meaning that long ago.
 
 ## 4. Triggers and the default tick
 
@@ -755,10 +882,22 @@ refusal means.
   refusal is logged (design §3); an unidentified send passes none of these
   gates and is logged as anonymous; a send to a target with one mid-flight
   queues behind it (transport serialization).
+- **Readout facts** — each agent carries the branch, the conflict flag, the
+  commits-unchanged-since stamp, and the PR observation and status; the stamp
+  is null on a first sighting of a tip and set on the second unchanged one, so
+  ignorance never renders as stillness; no per-worktree `git status` runs.
+  Both the readout and the ledger query print `schemaVersion` at the top level
+  of their object.
 - **Ledger query** — returns exactly the joined per-project view since the
   timestamp: the actuation rows touching the project's sessions — any
   identified caller's included — with their outcomes, plus its deliveries,
   lifecycle and enrollment lines, and anomalies; other projects' lines never appear.
+  A line the query does not model — an unfamiliar kind, an unrecognized field —
+  still appears verbatim with its `source` added; a row that resolves to no
+  project is excluded rather than passed through; unparseable lines are
+  reported as a count. `--since` accepts all three shapes (ISO-8601 instant,
+  bare `HH:MM` resolved backwards in local time, bare relative duration) and
+  refuses a fourth naming them.
 - **Watchdog** — a missed window writes the anomaly line; the configured
   consecutive count raises the operator notification; contact resets the
   count; the window is disarmed while the project's mark is off or the
