@@ -1,11 +1,28 @@
 import Foundation
 
-/// Pure decision functions for retiring and reviving a remote lane
-/// (`docs/specs/2026-08-16-remote-lane-archive-design.md`, "Archive" and
-/// "Revive"). No I/O, no actor, no provider calls, no DB access — this type
-/// only turns a provider's declared capabilities (and the row's current
-/// status) into a plan. Callers wire the plan to an actuation.
-enum RemoteLaneLifecycle {
+/// The remote half of retiring and reviving a lane
+/// (`docs/specs/2026-08-16-remote-lane-archive-design.md`, "Archive",
+/// "Revive", and "Where the branches live"). Two layers, deliberately split:
+///
+/// - The **static** members below are pure decisions. No I/O, no actor, no
+///   provider calls, no DB access — they only turn a provider's declared
+///   capabilities (and the row's current status) into a plan, so the routing
+///   rules are testable without a provider process.
+/// - The **instance** members, in `RemoteLaneLifecycle+Actuate.swift`, hold
+///   the provider manager and the worktree store and carry a plan out. The
+///   archive and revive handlers and the merge rail branch into them on
+///   location; the local path beneath `getLocal` is untouched.
+struct RemoteLaneLifecycle: Sendable {
+    let db: TBDDatabase
+    let subscriptions: StateSubscriptionManager
+    let manager: RemoteProviderManager
+
+    init(db: TBDDatabase, subscriptions: StateSubscriptionManager, manager: RemoteProviderManager) {
+        self.db = db
+        self.subscriptions = subscriptions
+        self.manager = manager
+    }
+
     /// What `worktree.archive` should do with a remote row, decided purely
     /// from the provider's declared capabilities and whether the row is
     /// currently `gone`.
@@ -81,5 +98,49 @@ enum RemoteLaneLifecycle {
             )
         }
         return .rowOnly
+    }
+
+    // MARK: - Guards on the verb path
+
+    /// The optional well-known `meta` key through which a provider reports
+    /// that the session's checkout has work that is not committed or not
+    /// pushed (`docs/remote-provider-contract.md` § Session object).
+    ///
+    /// TBD cannot see a remote working tree, and the `working` guard does
+    /// not cover this case: an idle agent sitting on unpushed work looks
+    /// safe to retire. A provider that knows its checkout is dirty says so
+    /// here; one that says nothing degrades to the `working` guard alone.
+    /// **The guard is therefore inert until a provider adopts the key, and
+    /// TBD never fabricates the fact.**
+    static let dirtyWorkspaceMetaKey = "workspace_dirty"
+
+    /// Reads the dirty-checkout claim out of a session's `meta`.
+    ///
+    /// `meta` is a flat string-to-string map, so the claim arrives as text.
+    /// Only `"true"` and `"1"` (trimmed, case-insensitively) are read as a
+    /// claim; an absent key, an empty value, and anything unrecognized all
+    /// mean "no claim was made" and leave the guard inert. Deliberately not
+    /// a permissive truthiness test: this value decides whether a user's
+    /// archive is refused, and inventing a claim out of a value a provider
+    /// meant for display would refuse a gesture nobody asked to block.
+    static func metaReportsDirtyWorkspace(_ meta: [String: String]?) -> Bool {
+        guard let raw = meta?[dirtyWorkspaceMetaKey] else { return false }
+        switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "true", "1": return true
+        default: return false
+        }
+    }
+
+    /// The refusal for a lane whose agent is mid-task. Parallels how local
+    /// archive refuses on uncommitted changes: do not retire a session
+    /// mid-task by accident.
+    static func workingGuardRefusal(_ name: String) -> String {
+        "Cannot archive \(name): its agent is still working. Re-run with --force to retire it anyway."
+    }
+
+    /// The refusal for a lane whose provider reports an unclean checkout.
+    static func dirtyWorkspaceGuardRefusal(_ name: String) -> String {
+        "Cannot archive \(name): its provider reports the session's checkout has uncommitted work " +
+        "(meta.\(dirtyWorkspaceMetaKey)). Re-run with --force to retire it anyway."
     }
 }

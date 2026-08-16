@@ -83,13 +83,21 @@ The `gone` exemption is the only route out for a lane whose provider cannot
 archive, and it is deliberately narrow. A lane whose session is still enumerated
 stays in the active list until its provider implements the capability.
 
+A declared `archive` wins over the exemption, so a `gone` lane on a capable
+provider still takes the verb path — and a `not_found` response there degrades
+to the same row-only filing rather than an error. A session the provider no
+longer knows is exactly the case the exemption covers, and treating it as a
+failure would leave a lane unretireable on a provider that declares *more* than
+one whose lane files cleanly. Revive has the mirror-image degradation.
+
 ### Guards
 
 Where archive invokes the verb, it refuses on an unsafe lane unless forced,
 paralleling how local archive refuses on uncommitted changes:
 
 - `agentState == .working` — do not retire a session mid-task by accident.
-- A dirty remote checkout, reported through an optional well-known `meta` key.
+- A dirty remote checkout, reported through the optional well-known `meta` key
+  `workspace_dirty`.
 
 The second guard exists because TBD cannot see a remote working tree, and the
 `working` guard does not cover it: an idle agent sitting on unpushed work looks
@@ -97,6 +105,14 @@ safe to retire. A provider that knows its checkout is dirty reports it; one that
 reports nothing degrades to the `working` guard alone, so the guard is inert
 until a provider adopts it and TBD never fabricates the fact. It is additive at
 either contract major.
+
+`meta` is a flat string-to-string map, so the claim arrives as text, and only
+`"true"` and `"1"` — trimmed, case-insensitively — are read as one. An absent
+key, an empty value, and any unrecognized value all mean no claim was made.
+The reading is deliberately narrow rather than a permissive truthiness test:
+this value decides whether a user's archive is refused, and inventing a claim
+out of a string a provider meant for display would block a gesture nobody asked
+to block.
 
 Both guards apply to the verb path alone. The `gone` path touches nothing on the
 provider and has nothing to defend. `--force` overrides both.

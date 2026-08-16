@@ -62,6 +62,10 @@ Other fields:
 
 The condition worth notifying a human about is an **edge** in `agent_state` — a transition into `waiting_input` or `exited` — not the value in isolation.
 
+### Unclean-checkout key (optional)
+
+One further `meta` key is well-known, on the same terms as the keys above: `workspace_dirty`. A provider that knows the session's checkout carries work which is not committed or not pushed sets it to `"true"`; anything else, including an absent key, means no claim was made. A caller MAY refuse a destructive gesture — retiring the session, say — on a session that claims it, and MUST degrade to its ordinary behavior when the key is absent, since most providers cannot see that fact and none is required to report it. Only `"true"` and `"1"` are read as a claim, trimmed and case-insensitively; a caller MUST NOT read an arbitrary value as one. Optional and purely additive at either contract major, like the identity keys below.
+
 ### Worktree identity keys (optional)
 
 Two further `meta` keys are well-known, on the same terms as `repo`, `branch`, and `profile`: `tbd_worktree_id` and `tbd_parent_worktree_id`. They are how a session tells TBD which lane it *is* and which lane spawned it. Both are optional and purely additive — a provider that sets neither is fully conformant and behaves exactly as it does without them — and both are readable at either contract major. They ride inside `meta`, which is a provider-defined map at every major, and a caller with no handling for a key simply renders it as an opaque detail row, so populating them is not a v2 feature and needs no change to a provider's declared `contract_versions`.

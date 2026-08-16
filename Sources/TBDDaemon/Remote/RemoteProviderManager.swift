@@ -650,6 +650,20 @@ public actor RemoteProviderManager {
         if health[config.name] == nil { health[config.name] = (.ok, nil, nil) }
     }
 
+    /// The capability set a provider declared in its cached `describe`
+    /// response, or the empty set when no describe was ever recorded for that
+    /// name (an unknown provider, or one whose describe failed).
+    ///
+    /// A caller MUST NOT invoke a verb whose capability a provider has not
+    /// declared (`docs/remote-provider-contract.md`), so this is the one read
+    /// every capability gate goes through — the router's `remote.*` handlers
+    /// and the remote lane's archive/revive routing alike. Failing closed on
+    /// an absent describe is deliberate: an unknown capability set is not
+    /// permission to try the verb and see.
+    func declaredCapabilities(provider: String) -> Set<String> {
+        Set(describes[provider]?.capabilities ?? [])
+    }
+
     func providerStatuses() async -> [RemoteProviderStatus] {
         for name in providers.keys {
             await recoverLastSuccessfulSnapshotAtIfNeeded(provider: name, markStale: true)

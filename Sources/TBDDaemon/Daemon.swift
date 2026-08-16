@@ -584,7 +584,8 @@ public final class Daemon: Sendable {
         // merged move. `PRPoller` is the only thing that calls into that funnel
         // on a timer; `pr.list` serves the snapshot and never fetches.
         let autoArchiveCoordinator = AutoArchiveOnMergeCoordinator(
-            db: database, lifecycle: lifecycle, subscriptions: subs, actuationLog: actuationLog)
+            db: database, lifecycle: lifecycle, subscriptions: subs, actuationLog: actuationLog,
+            remoteManager: remoteManager)
         let autoHibernateCoordinator = AutoHibernateOnMergeCoordinator(
             db: database, hibernation: rpcRouter.hibernationCoordinator, subscriptions: subs)
         let mergedTransitionDispatcher = MergedTransitionDispatcher(

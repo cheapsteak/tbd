@@ -16,13 +16,18 @@ extension RPCRouter {
     /// a single shared value (rather than re-typed at each call site) so the
     /// exact string — which tests assert equality against — can't drift if
     /// one call site is edited and the others aren't.
-    private static let remoteBackendsDisabledResponse = RPCResponse(error: "remote backends disabled")
+    /// Internal rather than private because `worktree.archive` /
+    /// `worktree.revive` branch into the remote path too and must refuse with
+    /// the same words when the subsystem is off.
+    static let remoteBackendsDisabledResponse = RPCResponse(error: "remote backends disabled")
 
     private static func staleSnapshotMutationResponse(provider: String) -> RPCResponse {
         RPCResponse(error: "provider '\(provider)' inventory is stale; refresh must recover before changing remote sessions")
     }
 
-    private func remoteGate() async throws -> RemoteProviderManager? {
+    /// Internal for the same reason as `remoteBackendsDisabledResponse` above:
+    /// the worktree handlers' remote branches pass through the same gate.
+    func remoteGate() async throws -> RemoteProviderManager? {
         guard try await db.config.get().remoteBackendsEnabled else { return nil }
         return remoteManager
     }
@@ -187,14 +192,15 @@ extension RPCRouter {
     }
 
     /// The provider's declared capability set, read from the cached
-    /// `describe` response `providerStatuses()` already exposes — the same
-    /// data the app reads client-side via
+    /// `describe` response — the same data the app reads client-side via
     /// `remoteProviders.first { ... }?.describe?.capabilities`
-    /// (`AppState+Remote.swift`). No new manager surface: this is a read of
-    /// existing state, not a probe.
+    /// (`AppState+Remote.swift`). A read of existing state, not a probe.
+    ///
+    /// Delegates to the manager rather than deriving it a second time, so
+    /// this gate and the remote lane's archive/revive routing can never
+    /// disagree about what a provider declared.
     private func declaredCapabilities(_ manager: RemoteProviderManager, provider: String) async -> Set<String> {
-        let status = await manager.providerStatuses().first { $0.config.name == provider }
-        return Set(status?.describe?.capabilities ?? [])
+        await manager.declaredCapabilities(provider: provider)
     }
 
     private static func missingCapabilityResponse(provider: String, capability: String) -> RPCResponse {
