@@ -173,18 +173,21 @@ Every gate fails toward keeping and appends a KEEP reason to the sweep plan:
 4. Persist a `ReapRecord` with a new `ReapKind.profileDir`, `repoPath: ""`,
    `worktreePath` = the original directory path, and the quarantine location
    in a new optional `quarantine_path` column on `reap_records` (migration +
-   GRDB record + shared model, one commit; the app's kind rendering gains the
-   new case — daemon and app ship together via `scripts/restart.sh`).
+   GRDB record + shared model, one commit). The record's audience is
+   `tbd gc list`: the app's Reclaimed section fetches records per repo and
+   summarizes only the kinds it knows, and a profile directory belongs to no
+   repo, so `.profileDir` records deliberately do not surface there.
 
 ### No restore path
 
 `OrphanGC.restore` stays unsupported for `.profileDir`, like scratchpads. By
 the time the collector runs, the profile row — the name, kind, endpoint —
 is already gone, so renaming the directory back would only recreate an orphan
-for the next sweep. Recovery is manual: the quarantine path is visible in the
-reap history (`tbd gc list` and the History UI), and the user retrieves
-whatever they need (or recreates a profile and moves the directory into its
-UUID) by hand within the retention window.
+for the next sweep. Recovery is manual: `tbd gc list` prints the quarantine
+path next to each record, and the user retrieves whatever they need (or
+recreates a profile and moves the directory into its UUID) by hand within the
+retention window. The CLI is the recovery surface — the app's per-repo
+Reclaimed section does not show `.profileDir` records.
 
 ### Quarantine expiry
 
@@ -203,8 +206,9 @@ write additional ReapRecords — the quarantine entry's record already exists.
   terminal-referenced dir kept; pre-reap re-read keeps a just-recreated row;
   quarantine entry expires after retention and survives before it; dry run
   plans without touching disk or DB.
-- Flag: both branches (off = no-op even with orphans present, on = reaps),
-  plus the three NULL/false/true states.
+- Flag: both branches (off = a real sweep is a no-op even with orphans
+  present, while a dry run still plans them; on = reaps), plus the three
+  NULL/false/true states.
 - All tests use injection seams (`ClaudeProfileConfigDirManager(baseDirectory:)`,
   `OrphanGC`'s injected `now`/`db`), never the real `~/tbd`.
 

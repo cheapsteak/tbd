@@ -150,10 +150,13 @@ and the `.reaped/` quarantine are never candidates. Directories are enumerated *
 the rows are read, so a profile created mid-sweep is always in the row set and can never
 be classified as an orphan.
 
-**Flag: `gc_profile_dirs_enabled`, default off.** The phase runs only when `gcEnabled`
-**and** this flag are both on; with the flag off it is skipped entirely, dry run
-included (a dry run bypasses `gcEnabled` as it does for the rest of the sweep, but never
-this flag). Enable it for a soak with `tbd gc profile-dirs on` (RPC
+**Flag: `gc_profile_dirs_enabled`, default off.** The phase reclaims only when `gcEnabled`
+**and** this flag are both on. A dry run bypasses both, exactly as it does for the rest
+of the sweep: `tbd gc sweep --dry-run` prints the `REAP profile-dir` and
+`PURGE quarantine` lines this phase *would* act on with the flag off, so the decision to
+enable a default-off switch can be made against real candidates rather than blind.
+Planning touches neither disk nor the database. Enable it for a soak with
+`tbd gc profile-dirs on` (RPC
 `config.setGCProfileDirsEnabled`); there is no Settings toggle. The column carries no SQL
 default, so an install nobody has touched reads NULL and resolves through
 `Config.gcProfileDirsEnabledDefault` — graduation is a one-line change to that constant,
@@ -255,11 +258,11 @@ The sweep itself runs:
 
 For an ad-hoc look without waiting for the clock, use `tbd gc sweep --dry-run` — it
 computes and prints the identical plan without touching disk or the DB, regardless of
-`gcEnabled`. One under-report to know about: a companion scratchpad reap for an
-agent worktree that's only *planned* (not actually reaped) in a dry run isn't planned
-either, since it's only computed once the agent worktree itself has actually been
-removed — a real (non-dry) sweep will report more scratchpad reaps than the preceding
-dry run predicted.
+`gcEnabled` or `gc_profile_dirs_enabled`. One under-report to know about: a companion
+scratchpad reap for an agent worktree that's only *planned* (not actually reaped) in a
+dry run isn't planned either, since it's only computed once the agent worktree itself
+has actually been removed — a real (non-dry) sweep will report more scratchpad reaps
+than the preceding dry run predicted.
 
 ## Config knobs
 

@@ -126,7 +126,7 @@ struct OrphanGCProfileDirTests: ~Copyable {
 
     // MARK: - Flag gates
 
-    @Test("the profile-dir flag ships off: an aged orphan is untouched")
+    @Test("the profile-dir flag ships off: a real sweep leaves an aged orphan untouched")
     func flagOffIsNoOp() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setGCEnabled(true)
@@ -138,6 +138,27 @@ struct OrphanGCProfileDirTests: ~Copyable {
         #expect(fm.fileExists(atPath: dir.path))
         #expect(!result.planned.contains { $0.hasPrefix("REAP profile-dir ") })
         #expect(!result.planned.contains { $0.contains(dir.path) })
+        #expect(try await db.reapRecords.list(repoPath: nil).isEmpty)
+        #expect(keychain.services.isEmpty)
+    }
+
+    @Test("with the flag off a dry run still plans what enabling it would reclaim")
+    func flagOffDryRunStillPlans() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        let dir = try makeProfileDir(UUID())
+        let expired = try makeQuarantineEntry(age: 40 * 86_400)
+        let keychain = RecordingKeychain()
+
+        let result = await makeGC(db: db, keychain: keychain).sweep(dryRun: true)
+
+        // The whole point of the bypass: a user deciding whether to flip a
+        // default-off flag can preview exactly what it would reclaim.
+        #expect(result.planned.contains("REAP profile-dir \(dir.path)"))
+        #expect(result.planned.contains("PURGE quarantine \(expired.path)"))
+        #expect(result.reaped == 0)
+        #expect(fm.fileExists(atPath: dir.path))
+        #expect(fm.fileExists(atPath: expired.path))
         #expect(try await db.reapRecords.list(repoPath: nil).isEmpty)
         #expect(keychain.services.isEmpty)
     }
@@ -319,7 +340,7 @@ struct OrphanGCProfileDirTests: ~Copyable {
         #expect(fm.fileExists(atPath: fresh.path))
     }
 
-    @Test("the flag also gates quarantine expiry")
+    @Test("the flag also gates quarantine expiry in a real sweep")
     func flagOffKeepsExpiredQuarantine() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setGCEnabled(true)

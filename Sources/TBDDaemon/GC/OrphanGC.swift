@@ -505,6 +505,11 @@ public actor OrphanGC {
     /// rather than deletes and the classifier soaks behind its own switch
     /// before graduating.
     ///
+    /// `dryRun` bypasses the flag exactly as `sweep` lets it bypass
+    /// `gcEnabled`: planning is read-only, and someone deciding whether to
+    /// enable a default-off flag needs to see what enabling it would reclaim
+    /// before flipping it. A NON-dry run still requires the flag.
+    ///
     /// Every DB read lives here rather than in the collector (the same division
     /// as `DeletionQueueCollector`), and a failed read skips the whole phase —
     /// the keep-favoring direction every other gate in this sweep takes.
@@ -514,7 +519,7 @@ public actor OrphanGC {
     private func reclaimProfileDirs(
         config: Config, dryRun: Bool, planned: inout [String], reaped: inout Int
     ) async {
-        guard config.gcProfileDirsEnabled else { return }
+        guard config.gcProfileDirsEnabled || dryRun else { return }
 
         let candidates = profileDirCollector.candidates()
         guard let profiles = try? await db.modelProfiles.list(),
@@ -542,6 +547,8 @@ public actor OrphanGC {
                 """)
             case .reap:
                 planned.append("REAP profile-dir \(candidate.path)")
+                // The phase guard is `gcProfileDirsEnabled || dryRun`, so every
+                // line below this point runs only with the flag actually on.
                 guard !dryRun else { continue }
                 await beforeProfileDirReap?()
                 // Re-read immediately before acting: the candidate list and the
