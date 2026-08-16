@@ -29,6 +29,7 @@ public final class TBDDatabase: Sendable {
     public let remoteSessions: RemoteSessionStore
     public let watchDeskLeases: WatchDeskLeaseStore
     public let prBindings: PRBindingStore
+    public let claudeCloudSessions: ClaudeCloudSessionStore
 
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "migrations")
 
@@ -70,6 +71,7 @@ public final class TBDDatabase: Sendable {
         self.remoteSessions = RemoteSessionStore(writer: pool)
         self.watchDeskLeases = WatchDeskLeaseStore(writer: pool)
         self.prBindings = PRBindingStore(writer: pool)
+        self.claudeCloudSessions = ClaudeCloudSessionStore(writer: pool)
 
         let migrator = Self.buildMigrator()
         if fileExisted {
@@ -111,6 +113,7 @@ public final class TBDDatabase: Sendable {
         self.remoteSessions = RemoteSessionStore(writer: queue)
         self.watchDeskLeases = WatchDeskLeaseStore(writer: queue)
         self.prBindings = PRBindingStore(writer: queue)
+        self.claudeCloudSessions = ClaudeCloudSessionStore(writer: queue)
         try Self.buildMigrator().migrate(queue)
     }
 
@@ -1474,6 +1477,39 @@ public final class TBDDatabase: Sendable {
         migrator.registerMigration("v81_config_claude_cloud") { db in
             try db.addColumnIfMissing(
                 table: "config", column: "claude_cloud_enabled", type: .boolean)
+        }
+
+        // The cloud create ledger: what THIS machine started, as distinct
+        // from `remote_session`, which is what the manager last observed.
+        // Daemon-internal, so it has no wire model.
+        //
+        // `archived` carries a SQL default deliberately, and the house
+        // no-SQL-default rule does not apply: that rule is about `config`
+        // feature toggles, where "unset" must stay a third state so a shipped
+        // default can be flipped later. This is data with an explicit writer
+        // at every site, and there is no default to graduate.
+        migrator.registerMigration("v81_claude_cloud_session") { db in
+            try db.createTableIfNotExists("claude_cloud_session") { t in
+                t.primaryKey("id", .text).notNull()
+                t.column("idempotencyKey", .text).notNull()
+                t.column("state", .text).notNull()
+                t.column("sessionID", .text)
+                t.column("title", .text)
+                t.column("createdAt", .datetime).notNull()
+                t.column("resolvedAt", .datetime)
+                t.column("repoKey", .text).notNull()
+                t.column("repoPath", .text).notNull()
+                t.column("branch", .text)
+                t.column("environment", .text)
+                t.column("paramsJSON", .text).notNull()
+                t.column("archived", .boolean).notNull().defaults(to: false)
+            }
+            try db.addIndexIfMissing(
+                "idx_claude_cloud_session_key", on: "claude_cloud_session",
+                columns: ["idempotencyKey"], unique: true)
+            try db.addIndexIfMissing(
+                "idx_claude_cloud_session_session", on: "claude_cloud_session",
+                columns: ["sessionID"], where: "sessionID IS NOT NULL")
         }
 
         return migrator
