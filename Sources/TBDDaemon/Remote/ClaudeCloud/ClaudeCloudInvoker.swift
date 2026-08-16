@@ -36,7 +36,7 @@ struct ClaudeCloudInvoker: RemoteProviderInvoking {
         case "describe":
             return ProviderResult(exitCode: 0, stdout: ClaudeCloudDescribe.json, stderr: "")
         case "create":
-            return try await create(stdin: stdin)
+            return try await create(stdin: stdin, timeout: timeout)
         case "archive", "unarchive", "land":
             // Declared by `describe` and implemented by the archive and land
             // steps of this same delivery. Until then this fails loudly as a

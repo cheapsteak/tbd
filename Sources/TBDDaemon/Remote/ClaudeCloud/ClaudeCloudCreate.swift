@@ -12,7 +12,7 @@ extension ClaudeCloudInvoker {
     /// submitted. That row is what keeps an unreadable answer from being
     /// silent: it names what was asked for, and with no discovery to match it
     /// against, it is what the user is shown.
-    func create(stdin: Data?) async throws -> ProviderResult {
+    func create(stdin: Data?, timeout: TimeInterval) async throws -> ProviderResult {
         guard let stdin,
               let body = try? JSONSerialization.jsonObject(with: stdin) as? [String: Any]
         else {
@@ -62,7 +62,7 @@ extension ClaudeCloudInvoker {
             arguments: ["--cloud", prompt],
             workingDirectory: repo.path,
             usesPseudoTerminal: true,
-            timeout: 60)
+            timeout: timeout)
         let outcome = try await spawner.spawn(request)
         switch outcome {
         case .timedOut:
@@ -97,6 +97,7 @@ extension ClaudeCloudInvoker {
                     id: row.id, sessionID: sessionID, title: title, now: resolvedAt)
                 var meta = ["repo": repoKey]
                 if let branch { meta["branch"] = branch }
+                if let environment { meta["environment"] = environment }
                 let payload = ClaudeCloudSessionProjection.payload(
                     sessionID: sessionID, title: title, createdAt: row.createdAt,
                     archived: false, meta: meta)

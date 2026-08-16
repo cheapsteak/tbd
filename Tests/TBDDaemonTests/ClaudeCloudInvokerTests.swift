@@ -207,10 +207,12 @@ struct ClaudeCloudInvokerTests {
 
     private func createBody(
         repo: String = "acme/api", branch: String? = "fix-ci",
+        environment: String? = nil,
         prompt: String = "add a probe", key: String = "tbd-1"
     ) -> Data {
         var params: [String: String] = ["repo": repo, "prompt": prompt]
         if let branch { params["branch"] = branch }
+        if let environment { params["environment"] = environment }
         let body: [String: Any] = ["params": params, "idempotency_key": key]
         return try! JSONSerialization.data(withJSONObject: body)
     }
@@ -356,6 +358,11 @@ struct ClaudeCloudInvokerTests {
         #expect(result.exitCode == 1)
         #expect(result.failureClass == .permanent)
         #expect(result.decodedError?.message.contains("not logged in") == true)
+        // The ledger row written before the spawn is the record of what was
+        // asked for; a permanent vendor failure must leave it exactly where
+        // it was, not resolved and not deleted.
+        #expect(try await db.claudeCloudSessions.rows().first?.state
+            == ClaudeCloudLedgerState.pending.rawValue)
     }
 
     /// A timeout is thrown, not synthesized, because the handler's single
@@ -395,6 +402,9 @@ struct ClaudeCloudInvokerTests {
         #expect(result.exitCode == 2)
         #expect(result.decodedError?.code == "invalid_params")
         #expect(spawner.requestsSnapshot().isEmpty)
+        // A refusal this early must not even write the pending row — nothing
+        // was validated enough yet to be worth recording.
+        #expect(try await db.claudeCloudSessions.rows().isEmpty)
     }
 
     /// The measured CLI surface exposes no flag for either, so they are
@@ -409,5 +419,67 @@ struct ClaudeCloudInvokerTests {
         #expect(!request.arguments.contains("fix-ci"))
         #expect(!request.arguments.contains(where: { $0.hasPrefix("--branch") }))
         #expect(try await db.claudeCloudSessions.rows().first?.branch == "fix-ci")
+    }
+
+    /// `environment` is persisted on the ledger row exactly like `branch`
+    /// (per `ClaudeCloudCreate`'s own doc comment); it must also reach the
+    /// wire payload's `meta`, or a value that safely round-trips through the
+    /// database is invisible to every caller for the rest of this slice —
+    /// `list` answers from the ledger alone and has no discovery to re-supply
+    /// it with later.
+    @Test func createIncludesEnvironmentInMetaWhenSupplied() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await seedRepo(db)
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput)])
+        let result = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["create"],
+            stdin: createBody(environment: "prod"), timeout: 60, contractVersion: 2)
+        let session = try result.decoded(RemoteSessionPayload.self)
+        #expect(session.meta?["environment"] == "prod")
+        #expect(try await db.claudeCloudSessions.rows().first?.environment == "prod")
+    }
+
+    /// The pairing negative: no environment supplied must mean no
+    /// `"environment"` key at all, not an empty-string placeholder — `meta`
+    /// is inspected by presence, mirroring how `branch`'s absence is already
+    /// covered.
+    @Test func createOmitsEnvironmentFromMetaWhenNotSupplied() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await seedRepo(db)
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput)])
+        let result = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["create"], stdin: createBody(), timeout: 60, contractVersion: 2)
+        let session = try result.decoded(RemoteSessionPayload.self)
+        #expect(session.meta?["environment"] == nil)
+    }
+
+    /// The pairing negative for `branch`: an absent branch must produce a
+    /// `meta` with no `"branch"` key, not a stored empty string — the
+    /// omission path in the `meta` construction (`if let branch { … }`) had
+    /// no test exercising `branch == nil` at all.
+    @Test func createOmitsBranchFromMetaWhenNotSupplied() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await seedRepo(db)
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput)])
+        let result = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["create"],
+            stdin: createBody(branch: nil), timeout: 60, contractVersion: 2)
+        let session = try result.decoded(RemoteSessionPayload.self)
+        #expect(session.meta?["branch"] == nil)
+        #expect(try await db.claudeCloudSessions.rows().first?.branch == nil)
+    }
+
+    /// `run`'s `timeout` parameter must actually reach the spawn request —
+    /// today it happens to work only because the sole production caller also
+    /// hardcodes 60, so a caller-supplied value that DIFFERS from 60 is the
+    /// only assertion that discriminates real wiring from that coincidence.
+    @Test func createThreadsTheCallersTimeoutIntoTheSpawnRequest() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await seedRepo(db)
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput)])
+        _ = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["create"], stdin: createBody(), timeout: 137, contractVersion: 2)
+        let request = try #require(spawner.requestsSnapshot().first)
+        #expect(request.timeout == 137)
     }
 }
