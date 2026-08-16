@@ -119,6 +119,14 @@ public enum NightwatchMode: String, Codable, Sendable, CaseIterable {
     case nightwatch
 }
 
+/// The compiled provider's reserved name. Reserved **unconditionally** and not
+/// behind the cloud flag: a name that became available when a feature was off
+/// and unavailable when it was turned on would change which providers load as a
+/// side effect of a toggle.
+public enum ClaudeCloudProvider {
+    public static let name = "claude-cloud"
+}
+
 /// Where a worktree's files live. `.local` means a git worktree on this
 /// machine at the worktree's path. `.remote` means an agent session on a
 /// machine TBD does not manage, reached through a registered provider; there is
@@ -1259,6 +1267,16 @@ public struct Config: Codable, Sendable, Equatable {
     /// means "never chose" and follows the shipped default wherever it goes;
     /// `0`/`1` is an explicit gesture and is honored forever.
     public var gcProfileDirsEnabled: Bool
+    /// The Claude cloud sessions gate
+    /// (`docs/specs/2026-08-15-cloud-sessions-slice-1-design.md` §7). A second
+    /// gate INSIDE `remoteBackendsEnabled`, never a bypass: cloud is reached
+    /// through the `remote.*` verbs, so it requires both.
+    ///
+    /// **Resolved, not stored**, like `queuedPromptEnabled`: the backing column
+    /// carries no SQL default and stays NULL until somebody touches the toggle,
+    /// so this property is
+    /// `claude_cloud_enabled ?? Config.claudeCloudEnabledDefault`.
+    public var claudeCloudEnabled: Bool
 
     /// Default idle-timeout for auto-hibernation, in minutes.
     public static let defaultHibernateIdleMinutes = 30
@@ -1289,6 +1307,10 @@ public struct Config: Codable, Sendable, Equatable {
     /// this constant — no forcing `UPDATE` migration, and an explicit opt-out
     /// is left alone.
     public static let gcProfileDirsEnabledDefault = false
+    /// The shipped default for `claudeCloudEnabled`, and the single place it
+    /// lives. Cloud ships off; graduating it is a change to this constant — no
+    /// forcing `UPDATE` migration, and an explicit opt-out is left alone.
+    public static let claudeCloudEnabledDefault = false
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -1317,7 +1339,8 @@ public struct Config: Codable, Sendable, Equatable {
                 deliveryVerificationEnabled: Bool = false,
                 queuedPromptEnabled: Bool = Config.queuedPromptDefault,
                 supervisionEnabled: Bool = Config.supervisionEnabledDefault,
-                gcProfileDirsEnabled: Bool = Config.gcProfileDirsEnabledDefault) {
+                gcProfileDirsEnabled: Bool = Config.gcProfileDirsEnabledDefault,
+                claudeCloudEnabled: Bool = Config.claudeCloudEnabledDefault) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
         self.envSettingOverrides = envSettingOverrides
@@ -1346,6 +1369,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.queuedPromptEnabled = queuedPromptEnabled
         self.supervisionEnabled = supervisionEnabled
         self.gcProfileDirsEnabled = gcProfileDirsEnabled
+        self.claudeCloudEnabled = claudeCloudEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -1414,6 +1438,8 @@ public struct Config: Codable, Sendable, Equatable {
         // default rather than hardcoding `false`.
         gcProfileDirsEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .gcProfileDirsEnabled) ?? Config.gcProfileDirsEnabledDefault
+        claudeCloudEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .claudeCloudEnabled) ?? Config.claudeCloudEnabledDefault
     }
 }
 

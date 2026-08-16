@@ -1,0 +1,110 @@
+import Foundation
+import GRDB
+import Testing
+
+@testable import TBDDaemonLib
+@testable import TBDShared
+
+/// Schema guards for `config.claude_cloud_enabled`
+/// (`docs/specs/2026-08-15-cloud-sessions-slice-1-design.md` §7).
+///
+/// The column is added with **no SQL default**, so "never chose" (NULL) stays
+/// distinguishable from "explicitly off" (0). If someone adds `defaults: false`
+/// to `v80_config_claude_cloud`, `claudeCloudIsNullBeforeAnyGesture` goes red —
+/// that is its only job. The distinction matters more here than for most flags:
+/// this feature calls a network service on a schedule, so somebody who turned it
+/// off did so deliberately.
+@Suite("ClaudeCloudFlagSchema")
+struct ClaudeCloudFlagSchemaTests {
+
+    private func fetchConfigRecord(_ db: TBDDatabase) async throws -> ConfigRecord? {
+        try await db.writerForTests.read { conn in
+            try ConfigRecord.fetchOne(conn, key: ConfigStore.singletonID)
+        }
+    }
+
+    /// **The load-bearing test.** The `config` singleton row is inserted by v1,
+    /// so every install has a row that predates v80. After v80 its
+    /// `claude_cloud_enabled` must read NULL, not `0`.
+    @Test func claudeCloudIsNullBeforeAnyGesture() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let record = try #require(try await fetchConfigRecord(db))
+        #expect(
+            record.claude_cloud_enabled == nil,
+            """
+            config.claude_cloud_enabled must be NULL until the toggle is \
+            touched — read back \(String(describing: record.claude_cloud_enabled)). \
+            A non-nil value here means v80_config_claude_cloud grew a \
+            `defaults:` argument; remove it.
+            """)
+    }
+
+    /// The same guard against a row written by a real pre-v80 daemon: migrate
+    /// only through v77, write to the config row, then finish migrating.
+    @Test func rowWrittenBeforeV78StillReadsNull() throws {
+        let queue = try DatabaseQueue()
+        let migrator = TBDDatabase.buildMigratorForTests()
+        try migrator.migrate(queue, upTo: "v77_config_supervision_enabled")
+
+        try queue.write { db in
+            try db.execute(
+                sql: "UPDATE config SET supervision_enabled = 1 WHERE id = ?",
+                arguments: [ConfigStore.singletonID])
+        }
+
+        try migrator.migrate(queue)
+
+        try queue.read { db in
+            let row = try #require(try Row.fetchOne(
+                db, sql: "SELECT * FROM config WHERE id = ?",
+                arguments: [ConfigStore.singletonID]))
+            let raw: DatabaseValue = row["claude_cloud_enabled"]
+            #expect(raw.isNull, "a config row written before v80 must read NULL, not \(raw)")
+            // The pre-existing write survived — v80 is purely additive.
+            #expect(row["supervision_enabled"] == true)
+        }
+    }
+
+    /// NULL follows `Config.claudeCloudEnabledDefault` wherever it goes; an
+    /// explicit `false` does not. This is the property that makes graduation a
+    /// one-line constant change with no forcing `UPDATE` migration.
+    @Test func explicitFalseSurvivesADefaultFlipWhileNullFollowsIt() async throws {
+        let db = try TBDDatabase(inMemory: true)
+
+        let untouched = try #require(try await fetchConfigRecord(db))
+        #expect(untouched.claude_cloud_enabled == nil)
+        #expect(untouched.toModel(claudeCloudEnabledDefault: false).claudeCloudEnabled == false)
+        #expect(
+            untouched.toModel(claudeCloudEnabledDefault: true).claudeCloudEnabled == true,
+            "a never-chosen row must pick up a changed shipped default")
+
+        try await db.config.setClaudeCloud(false)
+        let explicitlyOff = try #require(try await fetchConfigRecord(db))
+        #expect(explicitlyOff.claude_cloud_enabled == false)
+        #expect(explicitlyOff.toModel(claudeCloudEnabledDefault: false).claudeCloudEnabled == false)
+        #expect(
+            explicitlyOff.toModel(claudeCloudEnabledDefault: true).claudeCloudEnabled == false,
+            "an explicit opt-out must be honored forever, whatever the shipped default becomes")
+    }
+
+    /// The shipped default today. Graduation edits this constant and nothing else.
+    @Test func shippedDefaultIsOff() async throws {
+        #expect(Config.claudeCloudEnabledDefault == false)
+        let db = try TBDDatabase(inMemory: true)
+        #expect(try await db.config.get().claudeCloudEnabled == false)
+    }
+
+    @Test func setClaudeCloudRoundtrips() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setClaudeCloud(true)
+        #expect(try await db.config.get().claudeCloudEnabled == true)
+        try await db.config.setClaudeCloud(false)
+        #expect(try await db.config.get().claudeCloudEnabled == false)
+    }
+
+    /// The reserved name is a shared constant so the dispatcher, the registry
+    /// loader and the app all spell it the same way.
+    @Test func theReservedProviderNameIsClaudeCloud() {
+        #expect(ClaudeCloudProvider.name == "claude-cloud")
+    }
+}

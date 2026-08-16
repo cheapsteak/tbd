@@ -1459,6 +1459,21 @@ public final class TBDDatabase: Sendable {
         migrator.registerMigration("v80_clear_scratch_pr_observation") { db in
             try db.execute(
                 sql: "UPDATE worktree SET prObservation = NULL WHERE repoID IS NULL")
+        // Claude cloud sessions (design 2026-08-15 §7): the second, inner gate
+        // for the compiled `claude-cloud` provider. Shipped OFF per the house
+        // default-off-flag rule — the behavior is autonomous background polling
+        // against a network service.
+        //
+        // Tri-state like `v73_config_queued_prompt` and
+        // `v77_config_supervision_enabled`: **no SQL default**, so a
+        // pre-migration row reads NULL ("never chose") rather than 0. NULL
+        // resolves through `Config.claudeCloudEnabledDefault` in
+        // `ConfigRecord.toModel()` — the single place graduation changes, which
+        // matters more here than for most flags because somebody who turned a
+        // scheduled network call off did so deliberately.
+        migrator.registerMigration("v81_config_claude_cloud") { db in
+            try db.addColumnIfMissing(
+                table: "config", column: "claude_cloud_enabled", type: .boolean)
         }
 
         return migrator
