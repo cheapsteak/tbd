@@ -174,6 +174,9 @@ struct RemoteSessionAdopter: Sendable {
             adoptionLogger.debug(
                 "adopted \(provider, privacy: .public)/\(session.id, privacy: .public) as worktree \(created.id.uuidString, privacy: .public) in repo \(repoID.uuidString, privacy: .public)"
             )
+            if let parentWorktreeID {
+                await disarmAutoArchive(parentID: parentWorktreeID)
+            }
             return Outcome(created: [created])
         } catch {
             adoptionLogger.error(
@@ -228,6 +231,7 @@ struct RemoteSessionAdopter: Sendable {
             adoptionLogger.debug(
                 "nested \(provider, privacy: .public)/\(session.id, privacy: .public) (worktree \(existing.id.uuidString, privacy: .public)) under parent \(parentID.uuidString, privacy: .public) named by a later sighting"
             )
+            await disarmAutoArchive(parentID: parentID)
             return Outcome(
                 nested: [
                     Nesting(worktreeID: existing.id, parentID: parentID, sortOrder: sortOrder)
@@ -237,6 +241,26 @@ struct RemoteSessionAdopter: Sendable {
                 "not nesting \(provider, privacy: .public)/\(session.id, privacy: .public): \(String(describing: error), privacy: .public)"
             )
             return Outcome()
+        }
+    }
+
+    /// A worktree with active children is not auto-archivable, so acquiring one
+    /// disarms the parent's auto-archive-on-merge. Every other reparent already
+    /// does this — `handleWorktreeMove` and `beginCreateWorktree` — and adoption
+    /// files children by both of its paths, at mint time and late. Without it a
+    /// local lane silently acquires a remote child, its PR merges, and the
+    /// coordinator declines to archive with only an `.info` log while the
+    /// toolbar toggle still reads as armed.
+    ///
+    /// Best-effort, like the other two: the edge is already written, and losing
+    /// the disarm costs a skipped archive, not a misfiled lane.
+    private func disarmAutoArchive(parentID: UUID) async {
+        do {
+            try await db.worktrees.setAutoArchiveOnMerge(id: parentID, value: false)
+        } catch {
+            adoptionLogger.warning(
+                "failed to disarm auto-archive for adopted lane's parent \(parentID.uuidString, privacy: .public): \(String(describing: error), privacy: .public)"
+            )
         }
     }
 

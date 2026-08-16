@@ -787,6 +787,79 @@ struct RemoteSessionAdoptionTests {
         #expect(try await remoteRows().first?.parentWorktreeID == parent.id)
     }
 
+    // MARK: - A lane that acquires a child stops being auto-archivable
+
+    /// Every other reparent disarms the new parent's auto-archive-on-merge —
+    /// `handleWorktreeMove` and `beginCreateWorktree` both do — because a
+    /// worktree with active children is not auto-archivable. Adoption files
+    /// children too, so it owes the same disarm: otherwise a local worktree
+    /// silently acquires a remote child, its PR merges, and the coordinator
+    /// skips the archive with only an `.info` log while the toolbar toggle
+    /// still reads as armed.
+    ///
+    /// The armed bystander is the control: disarming is scoped to the parent
+    /// adoption actually used, not applied to the repo at large.
+    @Test func adoptingUnderAParentDisarmsThatParentsAutoArchive() async throws {
+        let repo = try await makeRepo()
+        let parent = try await db.worktrees.create(
+            repoID: repo.id, name: "lane", branch: "lane",
+            path: "/tmp/lane-\(UUID().uuidString)", tmuxServer: "t")
+        let bystander = try await db.worktrees.create(
+            repoID: repo.id, name: "other", branch: "other",
+            path: "/tmp/other-\(UUID().uuidString)", tmuxServer: "t")
+        try await db.worktrees.setAutoArchiveOnMerge(id: parent.id, value: true)
+        try await db.worktrees.setAutoArchiveOnMerge(id: bystander.id, value: true)
+        let m = manager()
+
+        try await m.apply(
+            snapshot: [session("s-1", meta: ["repo": "acme/api",
+                                             "tbd_parent_worktree_id": parent.id.uuidString])],
+            provider: "fake")
+
+        #expect(try await db.worktrees.get(id: parent.id)?.autoArchiveOnMerge == false)
+        #expect(try await db.worktrees.get(id: bystander.id)?.autoArchiveOnMerge == true)
+    }
+
+    /// The late-nesting path acquires a child just as much as the create path
+    /// does, and it is the one the reviewer found undefended.
+    @Test func nestingLateAlsoDisarmsTheParentsAutoArchive() async throws {
+        let repo = try await makeRepo()
+        let m = manager()
+
+        try await m.apply(snapshot: [session("s-1")], provider: "fake")
+        let parent = try await db.worktrees.create(
+            repoID: repo.id, name: "lane", branch: "lane",
+            path: "/tmp/lane-\(UUID().uuidString)", tmuxServer: "t")
+        try await db.worktrees.setAutoArchiveOnMerge(id: parent.id, value: true)
+
+        try await m.apply(
+            snapshot: [session("s-1", meta: ["repo": "acme/api",
+                                             "tbd_parent_worktree_id": parent.id.uuidString])],
+            provider: "fake")
+
+        #expect(try await db.worktrees.get(id: parent.id)?.autoArchiveOnMerge == false)
+    }
+
+    /// The other branch: a stamp the parent rules refuse assigns no child, so
+    /// nothing may be disarmed on the strength of it.
+    @Test func aRefusedParentKeepsItsAutoArchiveArmed() async throws {
+        let repo = try await makeRepo()
+        let archived = try await db.worktrees.create(
+            repoID: repo.id, name: "arch", branch: "arch",
+            path: "/tmp/arch-\(UUID().uuidString)", tmuxServer: "t")
+        try await db.worktrees.setAutoArchiveOnMerge(id: archived.id, value: true)
+        try await db.worktrees.archive(id: archived.id)
+        let m = manager()
+
+        try await m.apply(
+            snapshot: [session("s-1", meta: ["repo": "acme/api",
+                                             "tbd_parent_worktree_id": archived.id.uuidString])],
+            provider: "fake")
+
+        #expect(try await remoteRows().first?.parentWorktreeID == nil)
+        #expect(try await db.worktrees.get(id: archived.id)?.autoArchiveOnMerge == true)
+    }
+
     /// The binding lookup adoption tests on every poll must find the row it
     /// created, and must not answer for a different provider's session of the
     /// same name.
