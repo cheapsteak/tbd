@@ -1393,6 +1393,21 @@ public final class TBDDatabase: Sendable {
                 table: "worktree", column: "prObservation", type: .text)
         }
 
+        // The fleet supervision brake (design 2026-07-26 §3, §7): one
+        // fleet-wide on/off switch, shipped OFF per the house
+        // default-off-flag rule. Numbered v77 because main took v75 and v76 while this branch
+        // was open; renumbering is safe for the same reason theirs was —
+        // `addColumnIfMissing` re-runs as a no-op on a machine that already
+        // applied it under the old id. Tri-state like `v73_config_queued_prompt`,
+        // not `v69_config_delivery_verification`: no SQL default, so a
+        // pre-migration row reads NULL ("never chose") rather than 0. NULL
+        // resolves through `Config.supervisionEnabledDefault` in
+        // `ConfigRecord.toModel()` — the single place graduation changes.
+        migrator.registerMigration("v77_config_supervision_enabled") { db in
+            try db.addColumnIfMissing(
+                table: "config", column: "supervision_enabled", type: .boolean)
+        }
+
         return migrator
     }
 }

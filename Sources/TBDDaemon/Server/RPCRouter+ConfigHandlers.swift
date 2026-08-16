@@ -172,6 +172,55 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the fleet supervision brake (design 2026-07-26 §3, §7) — the
+    /// fleet-wide on/off switch for supervision. Shipped OFF; nothing in the
+    /// daemon reads this column to gate an actuation yet, because the acting
+    /// half of supervision (the sweep, deliveries, actuation preconditions)
+    /// lands in later slices. What the column already does is decide what
+    /// `supervise.status` reports and what the heartbeat publishes.
+    ///
+    /// The change is recorded in the supervision ledger, and **the line carries
+    /// no project and no mode**: the brake is one bit over the whole fleet, so
+    /// naming a project on its line would be a lie. That holds by construction
+    /// — the factories behind `applyBrakeChange` take no project.
+    ///
+    /// The column is written on every call, because writing either value is the
+    /// explicit gesture that lifts it out of NULL forever after. The *ledger*
+    /// line is written only when the resolved brake actually moved: sending
+    /// `false` while the brake already stands engaged is a gesture on the
+    /// column but no change to what the brake means, and a gesture that changes
+    /// nothing is not a decision.
+    func handleConfigSetSupervisionEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConfigSetSupervisionEnabledParams.self, from: paramsData)
+        // One serialized region per transition: the store holds a gate across
+        // the commit *and* the line it justifies, so two overlapping toggles
+        // cannot commit in one order and reach the record in the other. The
+        // transaction inside `commit` makes the column atomic; the gate is what
+        // keeps the record's order from contradicting it.
+        let commit: @Sendable () async throws -> Bool = { [db] in
+            try await db.config.setSupervisionEnabled(enabled: params.enabled)
+        }
+        if let supervision {
+            // The transition's ordering token travels with the edge, so the
+            // heartbeat can discard a toggle that lost its race in the gate.
+            // Notifying from out here rather than from inside the gate is
+            // deliberate: publishing performs a file write, and every brake
+            // gesture would otherwise pay for it inside the serialized region.
+            let transition = try await supervision.applyBrakeChange(
+                released: params.enabled, commit: commit)
+            await supervisionHeartbeat?.applyBrake(
+                released: params.enabled, sequence: transition.sequence)
+        } else {
+            // Nothing to keep in step with, so the column moves on its own. The
+            // brake is a daemon-wide switch and must not depend on supervision
+            // being wired — see `brakeWorksWithoutAStore`.
+            _ = try await commit()
+        }
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the remote-backends master switch. Takes effect for polling
     /// on the NEXT daemon start — the manager is constructed at boot only
     /// when the flag was already on (see `Daemon.swift`), so flipping this

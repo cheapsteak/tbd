@@ -942,6 +942,17 @@ actor DaemonClient {
         )
     }
 
+    /// Persist supervision's fleet-wide authority switch (design 2026-07-26
+    /// §3, §7). `enabled: true` releases the fleet brake; `false` engages it.
+    /// Shipped OFF (braked); for now inert, since the rest of the supervision
+    /// subsystem is landing in the same series of changes.
+    func setSupervisionEnabled(_ enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetSupervisionEnabled,
+            params: ConfigSetSupervisionEnabledParams(enabled: enabled)
+        )
+    }
+
     /// Persist the tmux control-mode opt-in (M5). Applies to newly created
     /// panes; a truthy TBD_TMUX_CONTROL_MODE in the daemon's env still forces
     /// the gate on regardless of this flag.

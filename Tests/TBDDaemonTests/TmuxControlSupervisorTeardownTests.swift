@@ -53,7 +53,7 @@ struct TmuxControlSupervisorTeardownTests {
         // teardown. (Reachable in production from any untolerated %error too.)
         await client.handle(.commandSucceeded(number: 1, fromClient: true, lines: []))
         #expect(await waitUntil(
-            { stopStarted.count == 1 }, timeout: .seconds(60)), "teardown never reached stop()")
+            { stopStarted.count == 1 }, timeout: ciSafeDeadline), "teardown never reached stop()")
 
         // While the stop is STILL blocked, unrelated supervisor calls must
         // complete. Bounded by a generous CI-safe deadline: pre-fix, the
@@ -65,7 +65,7 @@ struct TmuxControlSupervisorTeardownTests {
             _ = await supervisor.command(server: "srv-unrelated")
             unrelatedDone.increment()
         }
-        let unrelatedCompleted = await waitUntil({ unrelatedDone.count == 1 }, timeout: .seconds(60))
+        let unrelatedCompleted = await waitUntil({ unrelatedDone.count == 1 }, timeout: ciSafeDeadline)
         #expect(unrelatedCompleted, "supervisor actor is blocked by a mid-stop teardown")
         // Pre-fix the actor stays wedged until the gate opens — unwedge so the
         // remaining assertions (and cleanup) can run instead of hanging.
@@ -118,7 +118,7 @@ struct TmuxControlSupervisorTeardownTests {
         // Fatal correlator violation → teardown; eviction runs, stop is held.
         await client.handle(.commandSucceeded(number: 1, fromClient: true, lines: []))
         #expect(await waitUntil(
-            { stopStarted.count == 1 }, timeout: .seconds(60)), "teardown never reached stop()")
+            { stopStarted.count == 1 }, timeout: ciSafeDeadline), "teardown never reached stop()")
 
         // A re-attach's ensureConnection lands while the old tmux client
         // process is still dying. It must SUSPEND: `PaneFanout.route` keys by
@@ -139,7 +139,7 @@ struct TmuxControlSupervisorTeardownTests {
         // The held stop completes → the parked ensureConnection resumes and
         // creates exactly one successor.
         stopGate.signal()
-        #expect(await waitUntil({ ensured.count == 1 }, timeout: .seconds(60)),
+        #expect(await waitUntil({ ensured.count == 1 }, timeout: ciSafeDeadline),
                 "ensureConnection must resume once the stop completed")
         #expect(stopFinished.count == 1)
         #expect(created.count == 2, "exactly one successor after the teardown finished")
@@ -176,7 +176,7 @@ struct TmuxControlSupervisorTeardownTests {
         // stopAll must route through the injectable stop seam (pre-fix it
         // called connection.stop() directly ON the actor).
         #expect(await waitUntil(
-            { stopStarted.count == 2 }, timeout: .seconds(60)), "stopAll never reached the stop seam")
+            { stopStarted.count == 2 }, timeout: ciSafeDeadline), "stopAll never reached the stop seam")
 
         // While BOTH stops are still held open, an unrelated actor call must
         // complete promptly — pre-fix the actor is wedged inside the stops.
@@ -186,7 +186,7 @@ struct TmuxControlSupervisorTeardownTests {
             _ = await supervisor.command(server: "srv-third")
             unrelatedDone.increment()
         }
-        #expect(await waitUntil({ unrelatedDone.count == 1 }, timeout: .seconds(60)),
+        #expect(await waitUntil({ unrelatedDone.count == 1 }, timeout: ciSafeDeadline),
                 "supervisor actor is blocked by a mid-stop stopAll")
 
         // Bookkeeping ran BEFORE the stops: both clients already evicted.
@@ -207,12 +207,12 @@ struct TmuxControlSupervisorTeardownTests {
 
         stopGate.signal()
         stopGate.signal()
-        #expect(await waitUntil({ stopAllDone.count == 1 }, timeout: .seconds(60)),
+        #expect(await waitUntil({ stopAllDone.count == 1 }, timeout: ciSafeDeadline),
                 "stopAll must return once its stops complete")
         // The parked ensureConnection resumes and creates a fresh connection:
         // the supervisor stays usable after stopAll (the reconnect-after-
         // stopAll contract in TmuxControlCommandClientIntegrationTests).
-        #expect(await waitUntil({ ensured.count == 1 }, timeout: .seconds(60)),
+        #expect(await waitUntil({ ensured.count == 1 }, timeout: ciSafeDeadline),
                 "parked ensureConnection must resume after stopAll finishes")
         #expect(await supervisor.command(server: "srv-a") != nil)
 
@@ -244,7 +244,7 @@ struct TmuxControlSupervisorTeardownTests {
         let client = try #require(await supervisor.command(server: "srv-pool"))
         await client.handle(.commandSucceeded(number: 1, fromClient: true, lines: []))
 
-        #expect(await waitUntil({ stopSeen.count >= 1 }, timeout: .seconds(60)),
+        #expect(await waitUntil({ stopSeen.count >= 1 }, timeout: ciSafeDeadline),
                 "fatal teardown never reached stop()")
         let label = labelBox.get() ?? ""
         #expect(!label.contains("cooperative"),
@@ -275,7 +275,7 @@ struct TmuxControlSupervisorTeardownTests {
             })
 
         await supervisor.ensureConnection(serverName: "srv-natural")
-        #expect(await waitUntil({ stopSeen.count == 1 }, timeout: .seconds(60)),
+        #expect(await waitUntil({ stopSeen.count == 1 }, timeout: ciSafeDeadline),
                 "natural stream end must stop() the connection to release its pty fd")
         // The map entry is gone too (drain owned it at stream end).
         #expect(await supervisor.command(server: "srv-natural") == nil)

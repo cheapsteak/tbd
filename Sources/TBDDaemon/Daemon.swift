@@ -94,6 +94,13 @@ public final class Daemon: Sendable {
     /// on shutdown; `nil` in mock mode.
     public nonisolated(unsafe) var limitResumeScheduler: LimitResumeScheduler?
     public nonisolated(unsafe) var daywatchRunner: DaywatchRunner?
+    /// Fleet supervision's single writer of `~/tbd/supervision/`. Owned here so
+    /// the heartbeat below can read through it; also handed to the router.
+    public nonisolated(unsafe) var supervision: SupervisionStore?
+    /// The out-of-band `status.json` heartbeat (design §14). Owned here so it
+    /// can be stopped on shutdown; `nil` in mock mode, where the daemon must
+    /// not write into the real supervision directory.
+    public nonisolated(unsafe) var supervisionHeartbeat: SupervisionHeartbeat?
     /// Per-daemon tmux control-mode supervisor. Owned here so it can be stopped
     /// on shutdown; the gate (`ControlModeGate.shouldEnable`) keeps it dormant
     /// unless `TBD_TMUX_CONTROL_MODE` is opted in and tmux is ≥ 3.2.
@@ -612,6 +619,44 @@ public final class Daemon: Sendable {
         let appForeground = AppForegroundState()
         rpcRouter.appForegroundState = appForeground
 
+        // 8a-supervision. Fleet supervision's single writer of
+        // `~/tbd/supervision/` (design §7). Wired BEFORE the socket server
+        // starts serving (step 9): a `tbd supervise` call arriving on a router
+        // with no store is refused, and the boot window is exactly when the
+        // operator's first gesture of the day tends to land.
+        //
+        // Reading the two files at boot is deliberate and is only reading. It
+        // makes a malformed `supervision.json` loud here rather than at
+        // whichever gesture happens to hit it first, and it recovers each on
+        // project's coverage span from the ledger. **It writes no ledger line,
+        // sends nothing, and starts nothing** — a restart resumes coverage from
+        // the two files and never replays a decision.
+        // Skipped in mock mode like every other rail: a fixture render must not
+        // read the operator's real supervision file, and `supervise.*` refuses
+        // with a named condition there rather than answering from it.
+        let supervisionStore: SupervisionStore? = mockMode == nil
+            ? SupervisionStore(
+                files: SupervisionFileStore(),
+                ledger: SupervisionLedgerWriter(path: TBDConstants.supervisionLedgerPath),
+                fleet: DatabaseSupervisionFleetReader(db: database))
+            : nil
+        if let supervisionStore {
+            self.supervision = supervisionStore
+            rpcRouter.supervision = supervisionStore
+            do {
+                try await supervisionStore.load()
+            } catch {
+                // A file the operator can hand-edit into an unloadable state
+                // must not stop the daemon from booting, and everything else
+                // TBD does is unaffected. The store stays unloaded, so each
+                // later gesture retries the read and refuses with whatever the
+                // file says at that moment — which means fixing the file makes
+                // the next gesture work with no restart.
+                let detail = String(describing: error)
+                daemonLogger.error("Could not load supervision state: \(detail, privacy: .public)")
+            }
+        }
+
         // 8b. Migrate legacy per-repo claude_settings_overlay column values
         // (v53, PR #452) to their file-backed home under
         // `~/tbd/repos/<repoID>/claude-settings.json`. Idempotent; converges
@@ -893,6 +938,46 @@ public final class Daemon: Sendable {
                 reconcileLogger.error("Failed to restore daywatch mode on boot: \(String(describing: error), privacy: .public)")
             }
 
+            // 12f. Out-of-band supervision heartbeat (design §14). Publishes
+            // `status.json` at every brake edge, and runs its periodic timer
+            // only while the brake is released — the brake is the one switch,
+            // and a braked daemon runs no background loop. See the type's own
+            // doc for why that costs the watchdog nothing.
+            //
+            // The snapshot closure reads the brake per tick rather than
+            // capturing it: the app's toggle and the CLI's bare `on`/`off`
+            // both write that column, and the file must not go on publishing a
+            // brake that moved a minute ago. A tick that cannot read the state
+            // publishes nothing and lets the file go stale — which, while the
+            // brake is released, is precisely the signal the watchdog exists
+            // to notice.
+            if let supervisionStore {
+                let heartbeat = SupervisionHeartbeat(
+                    path: TBDConstants.supervisionStatusPath,
+                    snapshot: { [database, supervisionStore] in
+                        // Errors propagate rather than collapsing to "no
+                        // snapshot": a heartbeat that goes quiet looks exactly
+                        // like a dead daemon to the watchdog, so the reason has
+                        // to reach the log even though the tick is skipped.
+                        let config = try await database.config.get()
+                        let brake: SupervisionBrakeState =
+                            config.supervisionEnabled ? .released : .engaged
+                        return try await supervisionStore.statusFileSnapshot(brake: brake)
+                    })
+                self.supervisionHeartbeat = heartbeat
+                rpcRouter.supervisionHeartbeat = heartbeat
+                // Publish once at boot and arm the timer only if the brake is
+                // already released. A braked daemon therefore starts no loop —
+                // the brake is the switch — and still leaves behind a file
+                // saying `engaged`, which the watchdog reads as "nothing is
+                // effectively on" and never alarms about.
+                let brakeReleased = (try? await database.config.get())?.supervisionEnabled
+                    ?? Config.supervisionEnabledDefault
+                // Sequence 0: boot orders against nothing, and every real
+                // transition the store hands out starts at 1.
+                await heartbeat.applyBrake(released: brakeReleased, sequence: 0)
+            }
+
             // 13. Periodic git status refresh (branch sync, conflict detection).
             // 10s foreground, 60s background (GitPollCadence.statusInterval);
             // per-worktree conflict checks are additionally dirty-gated inside
@@ -1032,6 +1117,13 @@ public final class Daemon: Sendable {
         // Stop the daemon-clock PR poll (no-op when it was never started).
         if let router = self.router {
             await router.prPoller.stop()
+        }
+
+        // Stop the supervision heartbeat. `status.json` is left exactly as the
+        // last tick wrote it: a stopped heartbeat says nothing, and its going
+        // stale is the fact a watchdog reads.
+        if let heartbeat = supervisionHeartbeat {
+            await heartbeat.stop()
         }
 
         // Stop any tmux control-mode connections (no-op when the gate is off).

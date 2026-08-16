@@ -684,10 +684,11 @@ carried for a hypothetical.
 
 ### The switch: supervision is on, or off (P0-2)
 
-One configuration column in the daemon, on or off — added by migration and
-**shipped off**, which is the house default-off-flag rule satisfied by the
-switch itself: no second flag hides behind it, and the soak is opt-in
-coverage. (Two §12 mechanisms carry default-off flags of their own beside
+One configuration column in the daemon, on or off — added by migration with no
+SQL default, so an install where nobody has chosen stays distinguishable from
+one that chose (§7) — and **shipped off**, which is the house
+default-off-flag rule satisfied by the switch itself: no second flag hides
+behind it, and the soak is opt-in coverage. (Two §12 mechanisms carry default-off flags of their own beside
 it: the delivery-verification re-check, which the public send offers every
 caller and supervision only shares, and the Channels delivery adapter.)
 Settable from the app and the
@@ -697,8 +698,11 @@ substance: one gesture, one ledger, one account. The switch is
 the fleet **brake**, and only that: supervising anything also takes the
 per-project gesture (§8) — `tbd supervise on <project>` — because every
 project starts off and there is no default stance. A fleet switched on with
-no projects on supervises nothing, and `status` and the account must say so
-loudly rather than render it as a calm night. The bare bit is ANDed over the
+no projects on supervises nothing, and so does a fleet whose marks all stand
+under an engaged brake; `status`, the switching gestures themselves, and the
+account must say each of those loudly rather than render it as a calm night.
+The conditions are enumerated and distinguishable, never inferred from one
+boolean (§8). The bare bit is ANDed over the
 per-project marks and never writes them, so pulling the brake disturbs no
 configuration and releasing it restores exactly the coverage that stood.
 
@@ -1108,6 +1112,68 @@ degenerate case is that arrangement exactly. Any behavior that differs
 between "no projects declared" and the plain per-repo arrangement is a bug, not
 a feature.
 
+**Every name identifies exactly one project, and a name that identifies none
+is reported rather than repaired.** Because a repo declared nowhere is a
+project named by that repo, a name can be claimed twice — and where the claim
+came from decides what happens:
+
+- **A declared project whose name is also a repo's display name**, where that
+  repo is not one of its members, is **refused whole**, no partial resolution
+  served. That repo's own singleton would claim the same name, and a silent
+  repair — picking a winner, suffixing a name — would hand an operator
+  coverage on a policy they never declared. The name came out of the
+  operator's own file, so the refusal points at a line they can fix: rename
+  the project, or move the repo into it.
+- **Two undeclared repos sharing a display name** resolve to **no project**
+  each, reported as a warning, while the rest of the fleet resolves normally.
+  A name with two candidates identifies nothing, so neither repo can be
+  addressed — but nothing about a coincidence between those two says anything
+  about the others. A mark previously set for that name is not cleared: it
+  stops applying while the name is ambiguous and applies again if the
+  ambiguity is resolved, which is the boundary §9 states plainly.
+
+The second is not leniency, and the asymmetry is the point: nothing in TBD
+constrains repo display names, so two clones of one upstream under different
+parents is an ordinary state an operator reaches without thinking about
+supervision at all. Refusing resolution there would take down `status`, the
+project list, every mark and mode gesture — and, decisively, the `status.json`
+heartbeat (§14), the one artifact that distinguishes a paused fleet from a
+dead daemon. A watchdog cannot tell a heartbeat stopped by a naming
+coincidence from a daemon that died, so failing whole in that direction
+silently disables the out-of-band safety net for a reason having nothing to do
+with supervision. Where this design does still refuse whole — a declared
+collision, the loader's rejections (§8) — the offending input came from the
+file the operator was editing.
+
+**A declared project naming a repo that is no longer registered keeps
+working**, the phantom member resolving into the project and contributing no
+sessions. A declared collision leaves the operator's intent genuinely
+ambiguous, while an unregistered repo leaves it perfectly clear, so taking a
+project's supervision offline over a stale name would cost real coverage to
+fix nothing.
+
+**A project's name must be usable as a single path component**, because §6 puts
+that project's journal and proposals in a directory named by it. Where the
+requirement bites depends on where the name came from, and the asymmetry is
+deliberate:
+
+- **A declared name that fails is a loader rejection** (§8). That name came out
+  of the supervision file, so refusing the file refuses the operator's own
+  edit, and the fix is one line away in the document they were already editing.
+- **A singleton's name is its repo's display name**, which came from nowhere
+  near that file. Refusing there would take the whole fleet's coverage offline
+  over a repo renamed for unrelated reasons, with the remedy sitting in a file
+  the operator never touched. So resolution keeps the project — its mark, its
+  mode and its place in `status` intact — and reports the condition; what such
+  a project cannot have is a per-project directory until the repo is renamed.
+  The path helper itself refuses to compose a name it cannot safely use, so no
+  caller reopens the hole by building the path by hand.
+
+One principle runs through all of these: a naming problem costs the fleet
+nothing beyond the projects the name actually touches. It is why a phantom
+member resolves, why an ambiguous display name stops at the repos that share
+it, and why a project that cannot have a directory is still supervised.
+
 **Each desk is addressed to its own project.** The daemon refuses a desk's send
 when the target lies outside that project — addressing correctness, not
 authority (§3). How the daemon knows the caller's project is deliberately
@@ -1176,6 +1242,15 @@ offered: with "every repo belongs to exactly one project" as the invariant, a
 `remove` leaves a repo belonging to nothing and an `add` can put it in a second
 place, so the pair can express states the model forbids and every caller would
 have to sequence them correctly. `move` cannot express them at all.
+
+Two rules govern the edges of a move. **`--to singleton` deletes a declaration
+the move empties**, and that project's mark, mode entry and supervisor binding
+go with it — one instance of the general rule that a project which stops
+resolving has its coverage closed, whatever made it stop (§9). And **a move is
+refused, naming the condition, when it would take a surviving project's
+designated policy source out from under it**: a project whose policy repo has
+left is a project with no resolvable playbook, so the operator designates
+another member's policy first.
 
 **Project mutations take effect on the next tick.** A definition edited
 while its desk is live is legal; it just does not retroactively change a desk that is already
@@ -1558,6 +1633,17 @@ account, not a wrong action. The third category is **human-authored process**.
   the purpose of the shared configuration object. Mode selections are *not*
   here; they are per-project operator choices in `supervision.json` (§8), which
   keeps this column a single fleet-wide gesture (P0-2).
+
+  **The column carries no SQL default, so it holds three states rather than
+  two**: NULL means nobody has chosen, `0` and `1` mean somebody did. The
+  shipped default — engaged — then lives in exactly one place, the fallback
+  applied when the column reads NULL, and graduating the brake to
+  shipped-released is a one-line change to that constant: it reaches every
+  install whose operator never touched the toggle and preserves every explicit
+  opt-out, with no forcing migration to overwrite either. Adding the column
+  with a SQL default would have destroyed that distinction on write, backfilling
+  every existing row and making the code-side default unreachable; root
+  `CLAUDE.md` carries the rule and the precedent that produced it.
 - **The actuation log** (`~/tbd/actuations.jsonl`): TBD's general
   append-only actuation record (§3, §6) — deliberately *not* supervision
   storage, because it exists for every caller; supervision's views read
@@ -1578,8 +1664,11 @@ account, not a wrong action. The third category is **human-authored process**.
     per-project sweep selections (§8). Atomically
     rewritten after each operator action; the daemon
     reloads it after a change and holds it in memory for lookups. Every change
-    appends a ledger line, so the current selections and the history of how they
-    came about live in the appropriate places.
+    appends a ledger line — a gesture that changes nothing is not a change and
+    writes none (§9) — so the current selections and the history of how they
+    came about live in the appropriate places. Selections are all it holds:
+    nothing derived lives here, and a coverage span's start is read back from
+    the ledger rather than stored beside the mark (§9).
   - `~/tbd/supervision/projects/<name>/sweep.py` — a project's customized
     sweep program, written exactly once by the "Customize sweep…" gesture and
     never touched by the tool after (sweep-program sub-document §7). Absent
@@ -1772,7 +1861,12 @@ most one project; the loader rejects the file if one appears twice, because
 "exactly one" is the property the whole grouping rests on.
 
 `supervised` is the list of projects turned on — TBD's own attention covers
-exactly these, and an absent name is off (below). `modes` holds two things on the default-props chain: the **declared
+exactly these, and an absent name is off (below). A name here matching no
+current project is kept rather than pruned, because a project may be declared
+later; until one is, the name resolves to nothing. That is also how a mark
+survives its project ceasing to resolve for a reason no supervision gesture
+caused — a repo renamed or unregistered — and how it can apply again if the
+name resolves once more (§5, §9). `modes` holds two things on the default-props chain: the **declared
 mode list** — the names a project's operator may select, defaulting to the
 built-in pair `attended`/`autonomous` when absent — and the operator's
 **selection** per project, defaulting to `attended` (§3). The map's value
@@ -1802,6 +1896,37 @@ by hand names a session whose process was never relaunched into the role —
 no standing layer, no injected identity — so the daemon reports it as an
 anomaly rather than honoring it silently; the appoint gesture is the way to
 make a binding real.
+
+**What the loader rejects, and why it rejects whole.** The file is
+hand-editable and its project names become directories, so the loader refuses
+anything no consumer should act on, naming the offending repo, project, or
+condition on stderr. Nothing is repaired and nothing is partially loaded: a
+half-loaded topology would silently supervise a shape the operator did not
+declare, which is worse than an install that says plainly why it stopped.
+Beyond a version this build does not read, the refusals are:
+
+- **A repo in two projects, or listed twice in one** — "exactly one project" is
+  the property the whole grouping rests on (§5).
+- **A policy source that is not a member** of the project designating it —
+  a project has to be able to resolve its own playbook.
+- **A project declaring no repos** — an empty project names no work, resolves
+  to no sessions, and can only be an editing accident.
+- **A project name that cannot name a directory** under
+  `~/tbd/supervision/projects/` — the name is a path component holding that
+  project's playbook, journal, proposals and programs (§7), so emptiness, `.`
+  and `..`, and any name containing a slash are refused at the door rather
+  than discovered as a broken path later. The test is path safety and nothing
+  more: a singleton's name is a repo display name, so spaces, inner dots,
+  leading dots and non-ASCII all pass, and an over-tight rule would start
+  refusing ordinary repos for taste.
+- **A project named `singleton`** — that word is what `move --to` takes to
+  mean "back to being its own project", resolved before any project is looked
+  up, so a project holding the name could be created and then never be a move
+  destination. Reserving it is what keeps the sentinel unambiguous.
+- **An empty declared mode list** — no mode could be selected, so the project
+  could run no conduct at all.
+- **A selection outside the declared list** — the lookup this section already
+  requires, failing loudly instead of falling back to a mode nobody picked.
 
 **What this file never holds.** There is no `rules` array: no verbs, no scopes,
 no stances, no lifetimes, no origins. Nothing is gated (§3), so there is no
@@ -1861,6 +1986,31 @@ A project that is off gets none of TBD's own attention — no
 tick, no prompt cases, no desk. It still appears in the readout and the account —
 observability is never withheld, and "project X needed attention but is out of
 supervision" is the honest report.
+
+**The loud conditions are enumerated, not inferred.** A state that would
+otherwise render as a calm night carries a warning with a stable code beside
+the human sentence, so a program branches on the code and a person reads the
+words. Four exist:
+
+- **`noProjectsOn`** — the brake is released and not one project is marked.
+  Supervision is on and watching nothing.
+- **`brakeEngagedWithProjectsOn`** — the brake is engaged while at least one
+  mark stands, so nothing is watching projects the operator believes are
+  covered. It is emitted **only when a mark actually stands**: an engaged
+  brake over an unmarked fleet is a deliberately quiet system, and warning
+  there would train an operator to ignore the line, which costs more than it
+  buys.
+- **`ambiguousRepoName`** — two or more undeclared repos share a display name,
+  so none of them resolves to a project (§5). The message names them.
+- **`unusableProjectName`** — a project's name cannot be a directory name, so
+  nothing can be written beside it (§5). It is supervised regardless.
+
+The first two are why the loud case is a set of codes rather than a single
+"is anything covered" bit. A derived `effectivelySupervising` — the brake
+released *and* some mark standing — is false in both, and cannot tell them
+apart; yet they call for opposite gestures, releasing the brake in one case
+and marking a project in the other. A surface that reported only the bit would
+be telling an operator that something is wrong while withholding which thing.
 
 Coverage is also a recorded event, not only a resolved fact. Because
 membership derives — agent → repo → project → mark — a new agent spawned
@@ -1924,6 +2074,46 @@ do not survive a pause — anything still true reappears in a fresh briefing
 derived from current state — and a briefing left unanswered across a pause
 is the system's doing, not a dead desk, which any continuation policy sees
 plainly because the pause is on the record beside it (§6, below).
+
+**A span's start is recovered from the record, never stored as a field.** It is
+the most recent `projectOn` line for that project with no `projectOff` after
+it, so the closing line computes the span it summarizes by reading backward.
+That is what makes "a restart resumes coverage from two files" literally true:
+`supervision.json` and the config column say what is covered *now*, the ledger
+says *since when*, and `supervision.json` keeps holding selections only, with
+no derived "covered since" to drift out of step with the lines that record
+coverage. A span opened while nothing was recording has no `projectOn` to pair
+with, and its closing line reports the start as unknown rather than inventing
+one.
+
+**A topology gesture that ends a project closes its coverage.** Deleting a
+declared project, emptying one by a `move`, absorbing a marked singleton into
+a declared project: whichever gesture it was, the record sees one event — the
+span ends with that project's `projectOff` line, and its mark, mode selection
+and supervisor binding go with it. Binding this to the gestures as a class,
+rather than to each verb separately, is what keeps it true of topology
+gestures added later. A mark outliving its project would silently turn a
+later project of the same name on with no operator gesture — coverage nobody
+asked for, which is the failure per-project marks exist to prevent (§5, §8).
+
+**Coverage is not closed when a project stops resolving because the repo
+table changed underneath it.** Supervision reconciles resolution against edits
+to its own file; a repo renamed or unregistered is not a supervision gesture,
+so nothing notices. The consequence is a mark that outlives the resolution it
+was set against, and that can take effect again later: mark a singleton on,
+let a second repo be renamed to the same display name, and the project stops
+resolving with the mark still standing (§5, §8) — rename either repo again and
+it comes back on with no gesture, on whichever repo now holds the name, which
+with two candidates was never determined to be the one the operator meant.
+This is the mechanism's boundary and not an oversight in it: closing the gap
+means the daemon reconciling resolution against the repo table as well as
+against the file, on repo events it does not watch today.
+
+**A no-op writes no line.** Turning on a project already on, turning off one
+already off, selecting the mode already selected, moving a repo to where it
+already is: none of these is a decision, so none reaches the record. A ledger
+padded with lines that changed nothing would make the one thing the record
+exists for — reading back what actually happened — harder for no gain.
 
 ### The transition ceremony: edges are compiled, ceremony is authored
 
@@ -2864,9 +3054,10 @@ overrides (§15).
 
 ## 14. Out-of-band heartbeat (P3-1)
 
-On a fixed cadence of its own, the daemon writes a small `status.json` file
-under `~/tbd/supervision/`. It contains the brake, each project's mark and
-active mode, and each project's last sweep contact. The watchdog is an
+The daemon writes a small `status.json` file under `~/tbd/supervision/` at
+start, at every fleet brake edge, and then on a fixed cadence of its own **for
+as long as the brake is released**. It contains the brake, each project's mark
+and active mode, and each project's last sweep contact. The watchdog is an
 optional `launchd` job with one rule: *if any project claims to be
 effectively on and the
 status file has not changed in about 10 minutes, raise a notification.* It
@@ -2875,6 +3066,19 @@ watchdog unavailable. The watchdog never acts on the fleet. It can only alert
 the operator; it cannot pretend to be the supervisor. A down daemon therefore
 means silence plus an alarm. This applies the rule that uncertainty must lead
 to inaction at the largest scale.
+
+Gating the cadence on the brake costs the watchdog nothing, which is what
+makes the brake the single switch here rather than something the heartbeat
+sits outside of. Effectively on means a project's mark **and** a released
+brake, so a status file reading `engaged` claims that nothing is effectively
+on and cannot trip the rule however old it grows; the freshness requirement
+binds exactly while the brake is released, which is exactly when the cadence
+runs. Writing at the edges is what carries that across the transition itself —
+the moment the brake moves, the file says so, before the cadence starts or
+stops. The consequence to state plainly for whoever builds the watchdog:
+**staleness is a liveness signal only while the file reads `released`.** Under
+an engaged brake a file untouched for hours means a paused fleet, not a dead
+daemon.
 
 ## 15. Deliberately not built
 
