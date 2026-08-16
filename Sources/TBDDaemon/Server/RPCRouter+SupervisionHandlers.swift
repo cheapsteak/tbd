@@ -78,6 +78,54 @@ extension RPCRouter {
         return try RPCResponse(result: await store.projectMove(
             repo: params.repo, to: SupervisionMoveTarget(argument: params.to)))
     }
+
+    // MARK: - The read-only surfaces
+    //
+    // Both write nothing, append no ledger line, and start nothing. They are
+    // free to call: the readout is a sweep program's opening move on every
+    // tick, and the ledger query closes its loop.
+
+    /// `supervise.readout` — the project's whole current picture (sweep-program
+    /// design §3). An unknown project is refused by
+    /// `SupervisionStore.projectFacts`, because an empty readout would read as
+    /// "this project has no agents".
+    func handleSuperviseReadout(_ paramsData: Data) async throws -> RPCResponse {
+        let store = try requireSupervision()
+        let params = try decoder.decode(SuperviseReadoutParams.self, from: paramsData)
+        let facts = try await store.projectFacts(
+            project: params.project, brake: try await supervisionBrake())
+        let builder = SupervisionReadoutBuilder(
+            db: db,
+            fleet: DatabaseSupervisionFleetReader(db: db),
+            sessionCounters: sessionCounters,
+            branchTips: lifecycle.branchTipTracker,
+            actuationRecord: ActuationRecordReader(activePath: actuationLog.path),
+            now: now)
+        return try RPCResponse(result: await builder.build(facts: facts))
+    }
+
+    /// `supervise.ledger` — the joined per-project view of both records since an
+    /// instant (sweep-program design §3).
+    ///
+    /// The project is resolved through the store first, for the scoping repo
+    /// set and so an unknown name is refused here exactly as the readout
+    /// refuses it — an empty `lines` array would otherwise read as "nothing
+    /// happened".
+    func handleSuperviseLedger(_ paramsData: Data) async throws -> RPCResponse {
+        let store = try requireSupervision()
+        let params = try decoder.decode(SuperviseLedgerParams.self, from: paramsData)
+        let facts = try await store.projectFacts(
+            project: params.project, brake: try await supervisionBrake())
+        let query = SupervisionLedgerQuery(
+            db: db,
+            supervisionLedgerPath: store.ledgerPath,
+            actuationRecord: ActuationRecordReader(activePath: actuationLog.path),
+            now: now)
+        return try RPCResponse(result: await query.view(
+            project: params.project,
+            projectRepos: Set(facts.project.repos),
+            since: params.since))
+    }
 }
 
 /// The refusal a `supervise.*` call gets when the daemon has no supervision

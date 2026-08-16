@@ -82,6 +82,52 @@ struct ActuationRecordReader: Sendable {
         segmentPaths().flatMap { rows(inFileAt: $0) }
     }
 
+    /// The segments that can still contain a row at or after `since`, oldest
+    /// first.
+    ///
+    /// Walks `segmentPaths()` **newest-first**, taking whole segments, and
+    /// stops after the first segment whose oldest parseable row predates
+    /// `since` — **that segment is included**, because a request row can
+    /// precede the cutoff while the outcome that settles it lands after, and a
+    /// join that dropped the request would report a settled act as owing an
+    /// observation forever.
+    ///
+    /// **A segment with no parseable row does not terminate the walk.** Ending
+    /// there would let one corrupt or hand-emptied file silently truncate the
+    /// whole record — the same failure `rows(inLinesOf:)` refuses one level
+    /// down, where one bad line costs one row and never the file.
+    ///
+    /// Whole segments rather than a row-level cutoff: rotation writes no header
+    /// or marker, so a segment is the record's own unit, and a caller that
+    /// wants a row-level window applies it to the rows this returns.
+    func segmentPaths(since: Date) -> [String] {
+        var covering: [String] = []
+        for path in segmentPaths().reversed() {
+            covering.append(path)
+            let oldest = rows(inFileAt: path)
+                .compactMap { DeliveryRecord.parseTimestamp($0.ts) }
+                .min()
+            if let oldest, oldest < since { break }
+        }
+        return covering.reversed()
+    }
+
+    /// Rows from the segments that can still contain a row at or after `since`,
+    /// oldest first.
+    ///
+    /// Oldest-first is contract, not convenience: `DeliveryRecord.statuses`
+    /// walks rows in record order and a retried send shares its original act's
+    /// id, so reversing them would leave a stale observation standing as an
+    /// act's final word.
+    ///
+    /// The covering segments are parsed twice — once by `segmentPaths(since:)`
+    /// to find the cutoff and once here. That is deliberate: the alternative is
+    /// a second walk implementation, and the lookbacks this serves span one or
+    /// two day-segments.
+    func readRows(since: Date) -> [ActuationRow] {
+        segmentPaths(since: since).flatMap { rows(inFileAt: $0) }
+    }
+
     /// Every parseable row in one segment.
     func rows(inFileAt path: String) -> [ActuationRow] {
         guard let data = fileManager.contents(atPath: path) else {

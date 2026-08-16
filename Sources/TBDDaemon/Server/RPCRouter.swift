@@ -624,6 +624,10 @@ public final class RPCRouter: Sendable {
                 return try await handleSuperviseProjectDelete(request.paramsData)
             case RPCMethod.superviseProjectMove:
                 return try await handleSuperviseProjectMove(request.paramsData)
+            case RPCMethod.superviseReadout:
+                return try await handleSuperviseReadout(request.paramsData)
+            case RPCMethod.superviseLedger:
+                return try await handleSuperviseLedger(request.paramsData)
             case RPCMethod.panelGet:
                 return try await handlePanelGet(request.paramsData)
             case RPCMethod.panelApply:

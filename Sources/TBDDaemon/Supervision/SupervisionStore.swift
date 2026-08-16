@@ -40,6 +40,38 @@ public enum SupervisionStoreError: Error, Equatable, CustomStringConvertible, Lo
     public var errorDescription: String? { description }
 }
 
+/// The machinery facts one project's readout carries, resolved through the same
+/// topology every other gesture uses.
+///
+/// Daemon-internal rather than a wire type: `SupervisionReadoutBuilder` composes
+/// `SupervisionReadoutMachinery` and the supervisor section out of it, and
+/// `SupervisionLedgerQuery` takes the project's repo set from it. Both exist so
+/// that neither resolves topology itself — `SupervisionStore` is the single
+/// reader of `supervision.json`, and a second resolution would be a second
+/// answer to a question with one.
+public struct SupervisionProjectFacts: Sendable, Equatable {
+    /// The resolved project: its repos, mark, declared and active modes, and
+    /// supervisor arrangement.
+    public let project: SupervisionProject
+    /// The fleet brake as the caller read it, carried through so the readout's
+    /// machinery section is built from one value taken at one moment rather
+    /// than from two reads that can disagree.
+    public let brake: SupervisionBrakeState
+    /// When the current coverage span opened, or nil when the project is off or
+    /// the record holds no opening line to pair with.
+    public let spanStartedAt: SupervisionInstant?
+    /// When a sweep program last made contact, or nil when it never has.
+    public let lastSweepContactAt: SupervisionInstant?
+
+    public init(project: SupervisionProject, brake: SupervisionBrakeState,
+                spanStartedAt: SupervisionInstant?, lastSweepContactAt: SupervisionInstant?) {
+        self.project = project
+        self.brake = brake
+        self.spanStartedAt = spanStartedAt
+        self.lastSweepContactAt = lastSweepContactAt
+    }
+}
+
 /// What one brake transition did, and where it sits in the order they were
 /// committed.
 ///
@@ -480,6 +512,41 @@ public actor SupervisionStore {
             project naming them.
             """
     }
+
+    /// The machinery facts one project's readout carries, resolved through the
+    /// same topology every other gesture uses.
+    ///
+    /// Goes through `prepare()` like every other entry point, so an edit made
+    /// to `supervision.json` in a text editor is noticed and its orphaned
+    /// coverage reconciled before the facts are read — a readout computed from
+    /// stale bytes would report a mark the operator cleared minutes ago.
+    ///
+    /// **An unknown project is refused, never answered with an empty readout.**
+    /// A readout carrying no agents reads as "this project has no agents", and
+    /// a program that mistook "there is no such project" for that would report
+    /// a quiet fleet where it should have reported a typo.
+    public func projectFacts(project: String, brake: SupervisionBrakeState) async throws
+        -> SupervisionProjectFacts {
+        let repos = try await prepare()
+        let file = try freshFile()
+        let projects = try SupervisionTopology.resolve(file: file, repos: repos)
+        guard let resolved = projects.first(where: { $0.name == project }) else {
+            throw SupervisionStoreError.unknownProject(project)
+        }
+        return SupervisionProjectFacts(
+            project: resolved,
+            brake: brake,
+            // An off project has no span, exactly as `status` renders it: a
+            // third rendering here would imply a third state that does not
+            // exist.
+            spanStartedAt: resolved.mark ? spanStarts[project] : nil,
+            lastSweepContactAt: lastSweepContact[project])
+    }
+
+    /// The supervision ledger this store appends to. Exposed so the read-only
+    /// `supervise.ledger` query reads the same file the writer writes, through
+    /// the path its caller injected — never one derived from `$HOME`.
+    public nonisolated var ledgerPath: String { ledger.path }
 
     /// The heartbeat's view of the same facts (design §14).
     public func statusFileSnapshot(brake: SupervisionBrakeState) async throws
