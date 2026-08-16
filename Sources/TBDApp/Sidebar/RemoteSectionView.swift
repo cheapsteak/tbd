@@ -455,7 +455,9 @@ struct RemoteSessionRowView: View {
                 .foregroundStyle(Color.secondary.opacity(0.55))
                 .frame(width: 12, height: 12)
                 .help("Remote session")
-        case .prStatus, nil:
+        // Neither can occur here — a remote row passes `hasPRStatus: false` and
+        // never supplies a PR observation — but the switch must stay exhaustive.
+        case .prStatus, .prUnknown, nil:
             EmptyView()
         }
     }

@@ -1351,6 +1351,63 @@ public final class TBDDatabase: Sendable {
                 type: .boolean, defaults: true)
         }
 
+        // Provenance for `terminal.activityState` (fleet-supervision design
+        // §2): a fact TBD reports about a session is the value, the source it
+        // came from, and when it was observed — never a bare enumeration.
+        //
+        // All four columns are deliberately nullable WITHOUT a default. There
+        // is no honest default for "where did this come from": a backfilled
+        // `derived` or `database` would attach manufactured provenance to
+        // rows nobody observed, which is precisely the laundering the state
+        // model exists to prevent. NULL means "not yet observed", and
+        // `Terminal.observedActivity` reads a half-stamped row as no fact at
+        // all rather than as a fact with a guessed source.
+        //
+        // Numbered v75/v76 because main took v70 through v74 while this branch
+        // was open. Renumbering is safe only because both bodies go through
+        // `addColumnIfMissing`: a machine that already applied them under the
+        // old ids re-runs the bodies, finds every column present, and logs a
+        // no-op instead of throwing.
+        migrator.registerMigration("v75_terminal_state_provenance") { db in
+            try db.addColumnIfMissing(
+                table: "terminal", column: "activityStateSource", type: .text)
+            try db.addColumnIfMissing(
+                table: "terminal", column: "activityStateObservedAt", type: .datetime)
+            try db.addColumnIfMissing(
+                table: "terminal", column: "awaitingInputReason", type: .text)
+            try db.addColumnIfMissing(
+                table: "terminal", column: "awaitingInputObservedAt", type: .datetime)
+        }
+
+        // The outcome of the last attempt to learn a worktree's PR state, as
+        // distinct from the value that attempt found (`worktree.prStatus`).
+        // A nil `prStatus` cannot tell "the forge answered; no PR" from "the
+        // query failed", and treating an outage as a fleet with no pull
+        // requests looks exactly like a calm night.
+        //
+        // Nullable without a default for the same reason as v75: NULL means no
+        // attempt is on record, which is a third thing again from a recorded
+        // `.none` or `.undetermined`.
+        migrator.registerMigration("v76_worktree_pr_observation") { db in
+            try db.addColumnIfMissing(
+                table: "worktree", column: "prObservation", type: .text)
+        }
+
+        // The fleet supervision brake (design 2026-07-26 §3, §7): one
+        // fleet-wide on/off switch, shipped OFF per the house
+        // default-off-flag rule. Numbered v77 because main took v75 and v76 while this branch
+        // was open; renumbering is safe for the same reason theirs was —
+        // `addColumnIfMissing` re-runs as a no-op on a machine that already
+        // applied it under the old id. Tri-state like `v73_config_queued_prompt`,
+        // not `v69_config_delivery_verification`: no SQL default, so a
+        // pre-migration row reads NULL ("never chose") rather than 0. NULL
+        // resolves through `Config.supervisionEnabledDefault` in
+        // `ConfigRecord.toModel()` — the single place graduation changes.
+        migrator.registerMigration("v77_config_supervision_enabled") { db in
+            try db.addColumnIfMissing(
+                table: "config", column: "supervision_enabled", type: .boolean)
+        }
+
         return migrator
     }
 }

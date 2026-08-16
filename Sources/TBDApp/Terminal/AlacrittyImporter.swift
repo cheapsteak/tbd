@@ -3,12 +3,27 @@ import TOMLKit
 
 struct AlacrittyImporter {
 
-    enum ImportError: Error, Equatable {
+    enum ImportError: LocalizedError, Equatable {
         case fileUnreadable(String)
         case tomlParseFailed(String)
         case missingSection(String)
         case missingKey(section: String, key: String)
         case invalidHex(section: String, key: String, value: String)
+
+        var errorDescription: String? {
+            switch self {
+            case .fileUnreadable(let reason):
+                return "Couldn't read the theme file: \(reason)"
+            case .tomlParseFailed(let reason):
+                return "The file isn't valid TOML: \(reason)"
+            case .missingSection(let path):
+                return "Alacritty theme is missing the [\(path)] section"
+            case .missingKey(let section, let key):
+                return "Alacritty theme is missing \"\(key)\" in [\(section)]"
+            case .invalidHex(let section, let key, let value):
+                return "[\(section)] \"\(key)\" is \"\(value)\", which isn't a hex color — use a form like #1a1b26"
+            }
+        }
     }
 
     func importFile(_ url: URL) throws -> UserTerminalTheme {

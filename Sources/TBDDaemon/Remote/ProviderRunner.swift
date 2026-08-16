@@ -28,8 +28,15 @@ public struct ProviderResult: Sendable {
     }
 }
 
-public enum ProviderRunError: Error, Sendable {
+public enum ProviderRunError: LocalizedError, Sendable {
     case timeout(verb: String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .timeout(let verb):
+            return "remote provider verb '\(verb)' did not finish before its deadline"
+        }
+    }
 }
 
 public protocol RemoteProviderInvoking: Sendable {

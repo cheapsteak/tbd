@@ -5,7 +5,7 @@ import os
 /// failure — the RPC layer detaches the pane and returns an error so the app
 /// falls back to grouped sessions (addendum §5). The one NON-error outcome
 /// that isn't a success (`superseded`) is an `Outcome`, not an error.
-enum AttachReplayError: Error, Equatable {
+enum AttachReplayError: LocalizedError, Equatable {
     /// No sink for the pane at attach.ready time (detached, timed out, or
     /// never attached) — there is nothing to replay into.
     case notAttached
@@ -19,6 +19,19 @@ enum AttachReplayError: Error, Equatable {
     case captureFailed(command: String)
     /// The `list-panes` reply did not include the pane being attached.
     case paneStateMissing
+
+    var errorDescription: String? {
+        switch self {
+        case .notAttached:
+            return "Attach replay failed: no sink for the pane at attach.ready time"
+        case .noCommandClient:
+            return "Attach replay failed: no control-mode correlator exists for the server"
+        case .captureFailed(let command):
+            return "Attach replay capture command failed: \(command)"
+        case .paneStateMissing:
+            return "Attach replay failed: the list-panes reply did not include the attached pane"
+        }
+    }
 }
 
 /// A replay-sequence failure tagged with the generation of the attach the
@@ -32,12 +45,16 @@ enum AttachReplayError: Error, Equatable {
 /// occurs before any generation exists (no sink at acknowledge time), and it
 /// needs no cleanup: the sink either doesn't exist or belongs to a different
 /// attach, so the caller must not detach anything.
-struct AttachReplayFailure: Error {
+struct AttachReplayFailure: LocalizedError {
     /// Generation of the attach whose sequence failed.
     let generation: UInt64
     /// The actual failure (`AttachReplayError` / `PaneStateCaptureError` /
     /// `ReplayWriterError` / `PaneReplayWriteError`).
     let underlying: any Error
+
+    var errorDescription: String? {
+        "Attach replay failed at generation \(generation): \(underlying.localizedDescription)"
+    }
 }
 
 /// The attach orchestration v2 (M4.3, addendum §3) with the Phase B M2

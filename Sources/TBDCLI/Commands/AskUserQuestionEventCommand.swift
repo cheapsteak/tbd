@@ -108,7 +108,19 @@ enum AskUserQuestionPayloadParser {
         let transcriptPath: String?
     }
 
-    enum ParseError: Error { case invalidJSON, missingToolUseID }
+    enum ParseError: LocalizedError {
+        case invalidJSON
+        case missingToolUseID
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidJSON:
+                return "hook payload is not a JSON object"
+            case .missingToolUseID:
+                return "hook payload has no non-empty tool_use_id"
+            }
+        }
+    }
 
     static func parse(_ data: Data) throws -> Parsed {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {

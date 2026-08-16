@@ -63,14 +63,27 @@ invalidates any measurement they are midway through.
 Every invocation in this file, in `test.yml` and in the pre-push hook goes
 through `scripts/test.sh`, which forwards its arguments to `swift test` behind a
 scratch `TBD_HOME` / `TBD_SOCKET_PATH` / `TBD_CLAUDE_HOST_HOME` /
-`TBD_TEST_CODEX_HOME`. Bare `swift test` writes into the developer's real
-`~/tbd`, `~/.claude` and `~/.codex` — 18k orphan profile dirs and ~2.9k fake
-worktrees accumulated that way before anyone noticed. Read `swift test …` below
+`TBD_TEST_CODEX_HOME` / `TMUX_TMPDIR`. Bare `swift test` writes into the
+developer's real `~/tbd`, `~/.claude`, `~/.codex` and `/tmp/tmux-<uid>` — 18k
+orphan profile dirs, ~2.9k fake worktrees and ~7,100 dead tmux sockets
+accumulated that way before anyone noticed. Read `swift test …` below
 as `scripts/test.sh …`.
 
-Those four variables only fence code that *asks* where home is. The wrapper
-also sets `HOME` and `CFFIXED_USER_HOME` at a **separate** scratch home whose
-`tbd`, `.claude` and `.codex` entries are pre-created mode `000`. That covers
+The tmux leg is the one with no teardown remedy: **tmux never unlinks its
+socket file when a server exits.** It unlinks a stale socket lazily instead, at
+bind time, when a new server claims that exact path — and every test mints a
+fresh UUID-suffixed name, so nothing ever reclaims one. Killing your server in
+a `defer` is still worth doing (it stops the orphan *process*, which the
+wrapper also sweeps on exit) but it cannot remove the file. If you spawn tmux
+through a `Process` whose `environment` you build from scratch, propagate
+`TMUX_TMPDIR` into it or every socket that run creates lands outside the fence,
+permanently; `TestSupport.shell(_:at:)` already does.
+
+Four of those five variables only fence code that *asks* where home is, and
+`TMUX_TMPDIR` is the odd one out — it fences a store that has nothing to do
+with `$HOME`, and tmux consults it without anyone in this tree asking. The
+wrapper also sets `HOME` and `CFFIXED_USER_HOME` at a **separate** scratch home
+whose `tbd`, `.claude` and `.codex` entries are pre-created mode `000`. That covers
 the code that assembles a path out of the home directory instead of asking: it
 gets `EACCES` at the call site, inside the failing test, with the offending path
 in the error.
@@ -124,7 +137,7 @@ before trusting it: the home value has to be visible near the append, so a path
 built from a `home` that arrived as a parameter matches nothing. It narrows the
 shape rather than closing it.
 
-The wrapper's last layer, a before/after fingerprint of the three real
+The wrapper's last layer, a before/after fingerprint of the four real
 directories, is on when `$CI` is set and off otherwise; `--fingerprint` opts in
 locally and `--no-fingerprint` forces it off. The default follows the argument
 rather than contradicting it: a live daemon and sibling worktrees write to
@@ -138,7 +151,9 @@ Full rationale is in the wrapper's header.
 
 The wrapper's own guards are regression-tested by `scripts/test.test.sh`, which
 runs in the `lint` CI job: it drives the symlink and ownership refusals on the
-fake home, the post-run mode-000 recheck, the fingerprint's four arms and the
+fake home, the post-run mode-000 recheck, the fingerprint's six arms (four
+roots, two of which are read twice), the tmux socket fence (its `sun_path`
+budget and its kill-server sweep) and the
 shared-lock pin against fixture directories with a stub `swift`, so it takes
 ~11 s, builds nothing, and touches no real store. **Every case there is
 mutation-checked** — the assertion is shown going red against a deliberately
@@ -221,7 +236,7 @@ rate on `main` with **zero** logic assertions failing.
 `.timeLimit(.minutes(4))` = 240 s. The suite limit and the two wait deadlines
 race each other for real: `AttachRPCOrchestrationTests` and
 `PaneRepairCoordinatorTests` are both `.clockDriven` **and** consume
-`ciSafeDeadline`, across 48 `waitFor` call sites. Every one of those sites is
+`ciSafeDeadline`, across 44 `waitFor` call sites. Every one of those sites is
 unguarded — `waitFor` is `@discardableResult` and non-throwing on timeout, so
 the test continues and chained waits are real (the `try` covers only the inner
 `Task.sleep`).
@@ -247,7 +262,24 @@ are worth knowing before someone reaches for a raise.**
 **Count `advanceWhenSuspended` as a `waitForSuspension`** — it opens with one
 (`await waitForSuspension(...)`, then `advance`), so it pays the full 45 s
 guard. Grepping only for the literal `waitForSuspension(` undercounts every
-chain below, which is exactly the miscount a PR #547 reviewer made.
+chain below, which is exactly the miscount a PR #547 reviewer made. Count
+`advanceUntil` as **one** guard (45 s) too — it replaces an
+`advanceWhenSuspended` plus the `waitFor` that used to follow it, so converting
+a site takes 135 s off that test's paper worst case.
+
+**A single advance is the wrong instrument for a poll-and-re-arm loop, and the
+failure it produces is a hang, not a red.** `advanceWhenSuspended` proves a
+sleeper was armed when it advanced; it cannot prove the loop *observes* the
+state the test just created on the probe that follows. Where the code under test
+probes external state and re-arms if it is not there yet, one advance stakes the
+run on one probe, and a probe that reads "keep waiting" re-arms a sleep nothing
+will ever advance again. `PaneRepairCoordinatorTests`' broken-pipe test wedged
+in CI that way for its full 240 s limit — one write, `repairing` still set —
+and had already done so once before, on a diff that touched only
+`Sources/TBDCLI`. Drive those with `advanceUntil` (`Tests/TestSupport/ClockTestSupport.swift`),
+which advances for as long as the code keeps re-arming and fails with a named
+diagnostic carrying the advance count. Keep explicit single advances where the
+*number* of advances is the property under test.
 
 On that basis, the deepest chains in the tree are the poller tests, and their
 paper tallies do not all fit under the ceiling:
@@ -270,7 +302,7 @@ cannot happen. That is a property of these chains' *shape*, not of strictness
 alone: put a `next()` mid-chain and its 45 s becomes payable on top of whatever
 follows. Suites on the predecessor helpers have no such property at all and pay
 the full tally. And counting `waitFor` at 90 s plus
-each clock wait at 45 s, **9 of the 13** `PaneRepairCoordinatorTests` have a
+each clock wait at 45 s, **6 of the 13** `PaneRepairCoordinatorTests` have a
 worst case above 240 s — not just the 6-deep chain (540 s) usually cited. Every one of those is still consistent with
 the invariant, because only an already-failing test walks a full chain of
 timeouts and the first diagnostic is already recorded by then.

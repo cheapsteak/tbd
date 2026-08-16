@@ -3,7 +3,7 @@ import Foundation
 /// Errors from `ReplayWriter`. A capture that can't be decoded must abort the
 /// replay, not degrade it (same philosophy as `PaneStateCaptureError` — a
 /// half-decoded replay corrupts the attached terminal worse than no replay).
-enum ReplayWriterError: Error, Equatable {
+enum ReplayWriterError: LocalizedError, Equatable {
     /// A pending-output line (from `capture-pane -p -P -C`) contained a `\`
     /// not followed by exactly three octal digits ≤ `\377`. tmux 3.2's `-C`
     /// (cmd-capture-pane.c, `cmd_capture_pane_pending`) escapes every byte
@@ -11,6 +11,13 @@ enum ReplayWriterError: Error, Equatable {
     /// digits (`xsnprintf "\\%03hho"`) — so anything else means the response
     /// isn't the capture we think it is.
     case malformedPendingEscape(line: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .malformedPendingEscape(let line):
+            return "Pending-output capture contained a backslash that wasn't followed by three octal digits: \(line)"
+        }
+    }
 }
 
 /// Pure byte assembler for the attach replay (addendum §3, base spec

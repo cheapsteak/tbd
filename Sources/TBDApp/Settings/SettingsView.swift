@@ -245,6 +245,7 @@ struct GeneralSettingsTab: View {
                 hibernateInputVetoToggle
                 autoCloseSetupToggle
                 queuedPromptToggle
+                supervisionEnabledToggle
             }
         }
         .formStyle(.grouped)
@@ -287,6 +288,26 @@ struct GeneralSettingsTab: View {
             set: { newValue in Task { await appState.setQueuedPromptEnabled(newValue) } }
         ))
         .help("Opens a prompt sheet right after creation starts, and hands the text to the agent whenever it comes up — so you don't wait out a preSession hook before saying what you want. While it's on, the inline rename field no longer opens on create. Off by default (soaking).")
+    }
+
+    /// Supervision's fleet-wide authority switch (design 2026-07-26 §3, §7).
+    /// Reads/writes straight from `Config` via `loadSupervisionConfig()`/
+    /// `getConfig()`, not `daemon.capabilities` — the one soak flag here that
+    /// isn't mirrored there yet. Off by default. The toggle's sense matches
+    /// `Config.supervisionEnabled` directly (on == enabled == the fleet brake
+    /// released) rather than reading as the brake itself, so it can't invert
+    /// against the underlying boolean the way a "brake" label switched ON
+    /// would. Turning it on has no visible effect by itself yet: nothing in
+    /// the daemon acts on this column yet, since the rest of supervision
+    /// (which projects are on, what conduct they run) is shipping in the
+    /// same series of changes as this switch.
+    @ViewBuilder
+    private var supervisionEnabledToggle: some View {
+        Toggle("Supervision enabled", isOn: Binding(
+            get: { appState.supervisionEnabled },
+            set: { newValue in Task { await appState.setSupervisionEnabled(newValue) } }
+        ))
+        .help("The fleet-wide switch for supervision. On releases TBD's autonomous processes to act on sessions it supervises; off engages the fleet brake and pauses that authority, leaving every per-project mark untouched. Off by default. Turning it on has no visible effect by itself yet — the rest of supervision (turning projects on, choosing their conduct) is shipping in the same series of changes, and nothing acts on this column until that lands.")
     }
 
     /// Pending-input veto for auto-hibernate. Reads the persisted flag from

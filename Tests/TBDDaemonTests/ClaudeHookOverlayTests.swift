@@ -676,6 +676,71 @@ extension TBDHomeSerialized {
         #expect(parsed?.keys.sorted() == ["hooks"])
     }
 
+    // MARK: - Notification hook
+
+    /// Renders the composed overlay body's `hooks` dict as one sorted line per
+    /// registered command: `event|matcher|command`, with `matcher` rendered as
+    /// `<none>` when the entry omits the key entirely. Comparing the whole
+    /// rendering — rather than probing one field — is what makes a test that
+    /// adds an event also prove the others are untouched.
+    private func renderHookEntries(_ data: Data) throws -> [String] {
+        let parsed = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let hooks = try #require(parsed["hooks"] as? [String: Any])
+        var lines: [String] = []
+        for (event, value) in hooks {
+            let entries = try #require(value as? [[String: Any]])
+            for entry in entries {
+                let matcher = entry["matcher"] as? String ?? "<none>"
+                let inner = try #require(entry["hooks"] as? [[String: Any]])
+                for hook in inner {
+                    let command = try #require(hook["command"] as? String)
+                    lines.append("\(event)|\(matcher)|\(command)")
+                }
+            }
+        }
+        return lines.sorted()
+    }
+
+    @Test func registersNotificationHookWithoutAMatcherAndLeavesTheOthersUntouched() throws {
+        let rendered = try renderHookEntries(try ClaudeHookOverlay.generateBody())
+        let expected = [
+            // The new entry: no matcher key at all, so Claude Code runs it for
+            // EVERY notification type and the hook decides nothing.
+            "Notification|<none>|\(ClaudeHookOverlay.notificationCommand)",
+            "PostToolUse|AskUserQuestion|\(ClaudeHookOverlay.askUserQuestionPostCommand)",
+            "PostToolUse|Bash|\(ClaudeHookOverlay.prBindCommand)",
+            "PreToolUse|AskUserQuestion|\(ClaudeHookOverlay.askUserQuestionPreCommand)",
+            "SessionStart|*|\(ClaudeHookOverlay.sessionStartCommand)",
+            "Stop|<none>|\(ClaudeHookOverlay.stopCommand)",
+            "Stop|<none>|\(ClaudeHookOverlay.stopRenameCheckCommand)",
+            "StopFailure|<none>|\(ClaudeHookOverlay.stopFailureCommand)",
+            "UserPromptSubmit|<none>|\(ClaudeHookOverlay.workingCommand)"
+        ].sorted()
+        #expect(rendered == expected)
+    }
+
+    @Test func notificationCommandInvokesTheHookBridgeAndNeverFails() throws {
+        let rendered = try renderHookEntries(try ClaudeHookOverlay.generateBody())
+        let notification = try #require(rendered.first { $0.hasPrefix("Notification|") })
+        #expect(notification.contains("tbd hooks notification"))
+        // Silent + never-fail, like every other entry: a hook must not wedge
+        // the agent when `tbd` is missing or the daemon is down.
+        #expect(notification.hasSuffix("2>/dev/null || true"))
+    }
+
+    @Test func notificationHookSurvivesFragmentMergeAndFallbackModels() throws {
+        // The new event must ride the same merge paths as the rest, not just
+        // the default body.
+        let data = try ClaudeHookOverlay.generateBody(
+            fallbackModels: ["claude-haiku-4-5-20251001"],
+            extraSettings: ["skillOverrides": ["x": "off"]])
+        let rendered = try renderHookEntries(data)
+        #expect(rendered.contains("Notification|<none>|\(ClaudeHookOverlay.notificationCommand)"))
+        let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        #expect((parsed?["fallbackModel"] as? [String]) == ["claude-haiku-4-5-20251001"])
+    }
+
     @Test func roundtripsAsValidJSON() throws {
         let data = try ClaudeHookOverlay.generateBody()
         // Must round-trip — a malformed overlay file would crash Claude

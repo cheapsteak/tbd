@@ -7,6 +7,12 @@ import TBDShared
 enum LeadingRowIndicator: Equatable {
     case pending
     case prStatus
+    /// No cached PR, and the last attempt to learn whether there is one came
+    /// back `.undetermined`. Distinct from showing nothing, which is what a
+    /// worktree with a settled "no pull request" gets: a forge outage that
+    /// rendered identically to a quiet fleet is the exact failure
+    /// `PRObservation` exists to make visible.
+    case prUnknown
     /// Tucked-away marker that a row's session runs on a remote-agent
     /// backend rather than a local worktree. Deliberately the lowest
     /// priority in the slot — see `RowStatusIndicator.leading(isPending:hasPRStatus:isRemote:)`.
@@ -75,11 +81,23 @@ enum RowStatusIndicator {
     /// status and the starting spinner both take the slot first when
     /// present. Defaults to `false` so existing local-row callers are
     /// unaffected.
-    static func leading(isPending: Bool, hasPRStatus: Bool, isRemote: Bool = false) -> LeadingRowIndicator? {
+    /// `hasUndeterminedPR` sits below `.pending` — a row still being created
+    /// has nothing to have a pull request *for* yet, so its spinner is the more
+    /// informative glyph — and above `.remote`, because "we could not find out"
+    /// is an active-state signal while the remote marker is not. Defaults to
+    /// `false` so existing callers are unaffected.
+    static func leading(
+        isPending: Bool,
+        hasPRStatus: Bool,
+        isRemote: Bool = false,
+        hasUndeterminedPR: Bool = false
+    ) -> LeadingRowIndicator? {
         if hasPRStatus {
             return .prStatus
         } else if isPending {
             return .pending
+        } else if hasUndeterminedPR {
+            return .prUnknown
         } else if isRemote {
             return .remote
         }

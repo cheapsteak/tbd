@@ -24,9 +24,11 @@ public protocol ClaudeOAuthTokenReading: Sendable {
     func accessToken(forConfigDirPath path: String) async throws -> String?
 }
 
-public struct ClaudeOAuthTokenReadError: Error, CustomStringConvertible {
+public struct ClaudeOAuthTokenReadError: LocalizedError, CustomStringConvertible {
     public let description: String
     public init(_ description: String) { self.description = description }
+
+    public var errorDescription: String? { description }
 }
 
 /// Parse the `claudeAiOauth.accessToken` field out of a Claude Code
@@ -342,8 +344,10 @@ public struct LiveProfileUsageFetcher: ProfileUsageFetching {
 /// flow through, absent buckets simply don't appear.
 public enum ClaudeUsagePayloadParser {
 
-    public struct ParseError: Error, CustomStringConvertible {
+    public struct ParseError: LocalizedError, CustomStringConvertible {
         public let description: String
+
+        public var errorDescription: String? { description }
     }
 
     public static func parseBuckets(from data: Data) throws -> [ClaudeUsageLimitBucket] {

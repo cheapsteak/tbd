@@ -52,7 +52,7 @@ struct NightwatchDeskPromptsTests {
     @Test("The only context-ceiling remedy offered is the handoff relay", arguments: liveModes)
     func ceilingRemedyIsTheRelay(mode: NightwatchMode) {
         for (label, text) in prompts(mode: mode, skillDir: "/skill") {
-            let mentionsCeiling = text.contains("600k") || text.lowercased().contains("context ceiling")
+            let mentionsCeiling = text.lowercased().contains("context ceiling")
             #expect(mentionsCeiling, "\(mode) \(label) never states the context ceiling")
 
             #expect(
@@ -316,33 +316,54 @@ struct NightwatchDeskPromptsTests {
             }
         }
 
-        /// The ceiling is the one number in this skill that both prompts quote in
-        /// prose, so a change to `DEFAULT_THRESHOLD` that misses the prose leaves
-        /// the judge acting on a figure the script disagrees with.
+        /// The ceiling is a per-session figure, and the prose must not pretend
+        /// otherwise.
         ///
-        /// The literal fixture is also pinned. `handoff.py --selftest` asserted
-        /// "over ceiling exits 10" against a hardcoded 250_000, which the raise to
-        /// 600k turned into an *under*-ceiling case — the selftest would have kept
-        /// passing while testing the opposite of its label, so the fixture is now
-        /// derived from `DEFAULT_THRESHOLD` and that derivation is what's checked.
-        @Test("The context ceiling is 600k in the script and in every prompt")
+        /// Two properties. The script resolves the ceiling from the window this
+        /// session actually reported through its statusline capture, falling
+        /// back to a fixed guess only when there is nothing to read — so a
+        /// prompt that names a token count is naming a number it cannot know,
+        /// and a desk on a different window is then told to act on someone
+        /// else's ceiling. The prompts therefore point at the script instead.
+        ///
+        /// The fallback is pinned as a literal on purpose: it is the value the
+        /// desk has been running, and a 200k-derived guess below it was measured
+        /// to force a relay roughly every two hours.
+        ///
+        /// The selftest's own fixture is pinned as a derivation for the same
+        /// reason: "over ceiling exits 10" was once written against a hardcoded
+        /// 250_000, and a ceiling that moved past it turned the case into an
+        /// *under*-ceiling one that kept passing while asserting the opposite of
+        /// its label.
+        @Test("The context ceiling is resolved per session, and no prose quotes a fixed one")
         func ceilingIsConsistent() {
-            #expect(NightwatchSkillContent.handoffPy.contains("DEFAULT_THRESHOLD = 600_000"),
-                    "handoff.py's ceiling moved off 600k")
-            #expect(NightwatchSkillContent.handoffPy.contains("over_total = DEFAULT_THRESHOLD + 50_000"),
+            let handoff = NightwatchSkillContent.handoffPy
+            #expect(handoff.contains("CEILING_FRACTION = 0.75"),
+                    "handoff.py's ceiling is no longer three quarters of the window")
+            #expect(handoff.contains("FALLBACK_THRESHOLD = 600_000"),
+                    "handoff.py's no-capture fallback moved off the value the desk has been running")
+            #expect(handoff.contains("window = observed_window(terminal_id)"),
+                    "handoff.py's ceiling stopped reading this session's own reported window")
+            #expect(handoff.contains("over_total = FALLBACK_THRESHOLD + 50_000"),
                     "the selftest's over-ceiling fixture is a literal again; it will rot on the next raise")
-            #expect(NightwatchSkillContent.skillMd.contains("~600k tokens"),
-                    "SKILL.md quotes a ceiling other than the script's")
+            #expect(NightwatchSkillContent.skillMd.contains("handoff.py --check"),
+                    "SKILL.md no longer points at the script as the ceiling's authority")
 
             for mode in NightwatchDeskPromptsTests.liveModes {
                 for (label, text) in [
                     ("initialPrompt", NightwatchDeskPrompts.initialPrompt(mode: mode, skillDir: "/skill")),
                     ("judgePrompt", NightwatchDeskPrompts.judgePrompt(mode: mode, skillDir: "/skill"))
                 ] {
-                    #expect(!text.contains("200k"),
-                            "\(mode) \(label) still quotes the retired 200k ceiling as current")
-                    #expect(text.contains("600k"),
-                            "\(mode) \(label) does not state the 600k ceiling")
+                    // Any k-suffixed token count in the ceiling prose is a number
+                    // the prompt cannot know. Asserted against every plausible
+                    // spelling rather than the one that was there, since the
+                    // failure is "a figure got written down", not "600k did".
+                    for figure in ["150k", "200k", "600k", "750k", "1000k"] {
+                        #expect(!text.contains(figure),
+                                "\(mode) \(label) quotes a fixed ceiling (\(figure)) the script resolves per session")
+                    }
+                    #expect(text.contains("handoff.py --check"),
+                            "\(mode) \(label) does not point at the script for the ceiling")
                 }
             }
         }

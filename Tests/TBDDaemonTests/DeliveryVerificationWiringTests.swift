@@ -230,7 +230,7 @@ struct DeliveryVerificationWiringTests {
             id: fixture.terminal.id, sessionID: UUID().uuidString,
             transcriptPath: transcriptPath)
         try await fixture.db.terminals.setActivityState(
-            id: fixture.terminal.id, activityState: .working)
+            id: fixture.terminal.id, activityState: .working, source: .derived)
         let clock = TestClock()
         let verifier = DeliveryVerifier(
             log: fixture.log,

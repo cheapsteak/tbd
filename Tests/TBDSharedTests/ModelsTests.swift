@@ -571,3 +571,142 @@ import Testing
     let decoded = try JSONDecoder().decode(PRStatus.self, from: data)
     #expect(decoded.mergeQueuePosition == 2)
 }
+
+// MARK: - `sameValue(as:)` — change detection without the freshness stamp
+
+/// The rule this method exists to enforce: a fact *about* a reading may never
+/// decide whether the reading changed. `observedAt` advances every poll, so an
+/// "on change" test built on `==` fires every poll — which is exactly how
+/// persist-on-change became persist-every-poll on a forty-worktree fleet.
+@Test func prStatusSameValueIgnoresOnlyTheObservedAtStamp() {
+    let base = PRStatus(number: 7, url: "https://github.com/acme/acme-prod/pull/7",
+                        state: .mergeable, reason: "Ready to merge",
+                        mergeQueuePosition: nil,
+                        observedAt: Date(timeIntervalSince1970: 1_700_000_000))
+    let reRead = PRStatus(number: 7, url: "https://github.com/acme/acme-prod/pull/7",
+                          state: .mergeable, reason: "Ready to merge",
+                          mergeQueuePosition: nil,
+                          observedAt: Date(timeIntervalSince1970: 1_700_000_600))
+
+    #expect(base != reRead, "Equatable deliberately keeps the stamp")
+    #expect(base.sameValue(as: reRead))
+}
+
+@Test func prStatusSameValueSeesEveryValueField() {
+    let stamp = Date(timeIntervalSince1970: 1_700_000_000)
+    let base = PRStatus(number: 7, url: "https://github.com/acme/acme-prod/pull/7",
+                        state: .mergeable, reason: "Ready to merge",
+                        files: ["a.swift"], commits: 3,
+                        authorWorktreeID: UUID(uuidString: "00000000-0000-0000-0000-0000000000AA"),
+                        mergeQueuePosition: 1, observedAt: stamp)
+    // Each field, one at a time — a `sameValue` that forgot one would let a
+    // real change go unpersisted, which is the opposite and worse failure.
+    let variants: [PRStatus] = [
+        PRStatus(number: 8, url: base.url, state: base.state, reason: base.reason,
+                 files: base.files, commits: base.commits,
+                 authorWorktreeID: base.authorWorktreeID,
+                 mergeQueuePosition: base.mergeQueuePosition, observedAt: stamp),
+        PRStatus(number: base.number, url: "https://github.com/acme/acme-prod/pull/8",
+                 state: base.state, reason: base.reason, files: base.files,
+                 commits: base.commits, authorWorktreeID: base.authorWorktreeID,
+                 mergeQueuePosition: base.mergeQueuePosition, observedAt: stamp),
+        PRStatus(number: base.number, url: base.url, state: .closed, reason: base.reason,
+                 files: base.files, commits: base.commits,
+                 authorWorktreeID: base.authorWorktreeID,
+                 mergeQueuePosition: base.mergeQueuePosition, observedAt: stamp),
+        PRStatus(number: base.number, url: base.url, state: base.state, reason: "Blocked",
+                 files: base.files, commits: base.commits,
+                 authorWorktreeID: base.authorWorktreeID,
+                 mergeQueuePosition: base.mergeQueuePosition, observedAt: stamp),
+        PRStatus(number: base.number, url: base.url, state: base.state, reason: base.reason,
+                 files: ["b.swift"], commits: base.commits,
+                 authorWorktreeID: base.authorWorktreeID,
+                 mergeQueuePosition: base.mergeQueuePosition, observedAt: stamp),
+        PRStatus(number: base.number, url: base.url, state: base.state, reason: base.reason,
+                 files: base.files, commits: 4, authorWorktreeID: base.authorWorktreeID,
+                 mergeQueuePosition: base.mergeQueuePosition, observedAt: stamp),
+        PRStatus(number: base.number, url: base.url, state: base.state, reason: base.reason,
+                 files: base.files, commits: base.commits, authorWorktreeID: UUID(),
+                 mergeQueuePosition: base.mergeQueuePosition, observedAt: stamp),
+        PRStatus(number: base.number, url: base.url, state: base.state, reason: base.reason,
+                 files: base.files, commits: base.commits,
+                 authorWorktreeID: base.authorWorktreeID,
+                 mergeQueuePosition: 2, observedAt: stamp)
+    ]
+    for variant in variants {
+        #expect(!base.sameValue(as: variant), "sameValue missed a changed field: \(variant)")
+    }
+}
+
+// MARK: - The structural half: a ninth field cannot be forgotten
+
+/// `sameValue` must not be a hand-written field list, because a list has to be
+/// remembered. This pins the two halves that together make it structural.
+///
+/// **Half one — `sameValue` is exactly `==` modulo the stamp.** Asserted as an
+/// equivalence over a matrix, so a `sameValue` rewritten as a hand list that
+/// omits any field disagrees with `==` on the pair that differs in it, and this
+/// reds naming the pair.
+@Test func prStatusSameValueAgreesWithEqualityOnStampStrippedValues() {
+    let stamp = Date(timeIntervalSince1970: 1_700_000_000)
+    let later = Date(timeIntervalSince1970: 1_700_000_600)
+    let base = PRStatus(number: 7, url: "https://github.com/acme/acme-prod/pull/7",
+                        state: .mergeable, reason: "Ready to merge",
+                        files: ["a.swift"], commits: 3,
+                        authorWorktreeID: UUID(uuidString: "00000000-0000-0000-0000-0000000000AA"),
+                        mergeQueuePosition: 1, observedAt: stamp)
+    let matrix: [PRStatus] = [
+        base,
+        base.withObservedAt(later),
+        base.withObservedAt(nil),
+        PRStatus(number: 8, url: base.url, state: base.state, reason: base.reason,
+                 files: base.files, commits: base.commits,
+                 authorWorktreeID: base.authorWorktreeID,
+                 mergeQueuePosition: base.mergeQueuePosition, observedAt: later),
+        PRStatus(number: base.number, url: base.url, state: .closed, reason: nil,
+                 files: nil, commits: nil, authorWorktreeID: nil,
+                 mergeQueuePosition: nil, observedAt: stamp),
+        PRStatus(number: base.number, url: base.url, state: base.state, reason: base.reason,
+                 files: base.files, commits: base.commits,
+                 authorWorktreeID: base.authorWorktreeID,
+                 mergeQueuePosition: 2, observedAt: stamp)
+    ]
+    for a in matrix {
+        for b in matrix {
+            #expect(a.sameValue(as: b) == (a.withObservedAt(nil) == b.withObservedAt(nil)),
+                    "sameValue disagreed with stamp-stripped equality for \(a) vs \(b)")
+        }
+    }
+}
+
+/// **Half two — `withObservedAt` carries every field.** A copy written with the
+/// memberwise initializer would compile with a new field omitted (every
+/// parameter past `reason` has a default) and silently drop it, which would put
+/// the hole straight back. Asserted against the type's own encoding, so the
+/// field roster comes from `PRStatus` rather than from this test.
+@Test func prStatusWithObservedAtChangesTheStampAndNothingElse() throws {
+    let base = PRStatus(number: 7, url: "https://github.com/acme/acme-prod/pull/7",
+                        state: .mergeable, reason: "Ready to merge",
+                        files: ["a.swift"], commits: 3,
+                        authorWorktreeID: UUID(uuidString: "00000000-0000-0000-0000-0000000000AA"),
+                        mergeQueuePosition: 1,
+                        observedAt: Date(timeIntervalSince1970: 1_700_000_000))
+    let restamped = base.withObservedAt(Date(timeIntervalSince1970: 1_700_000_600))
+
+    func fields(_ status: PRStatus) throws -> [String: String] {
+        let data = try JSONEncoder().encode(status)
+        let object = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        return object
+            .filter { $0.key != "observedAt" }
+            .mapValues { String(describing: $0) }
+    }
+
+    let before = try fields(base)
+    #expect(!before.isEmpty)
+    #expect(before == (try fields(restamped)),
+            "withObservedAt dropped or altered a field other than the stamp")
+    #expect(restamped.observedAt == Date(timeIntervalSince1970: 1_700_000_600))
+    // …and putting the original stamp back yields the original value, whole.
+    #expect(restamped.withObservedAt(base.observedAt) == base)
+}

@@ -17,11 +17,24 @@ import Foundation
 ///    write can't leave a half-written file.
 public enum SettingsJSONSafety {
 
-    public enum Error: Swift.Error, Equatable, Sendable {
+    public enum Error: LocalizedError, Equatable, Sendable {
         case backupFailed(String)
         case roundtripFailed(String)
         case writeFailed(String)
         case invariantFailed(String)
+
+        public var errorDescription: String? {
+            switch self {
+            case .backupFailed(let reason):
+                return "settings.json pristine backup failed: \(reason)"
+            case .roundtripFailed(let reason):
+                return "settings.json roundtrip validation failed: \(reason)"
+            case .writeFailed(let reason):
+                return "settings.json atomic write failed: \(reason)"
+            case .invariantFailed(let reason):
+                return "settings.json invariant check failed: \(reason)"
+            }
+        }
     }
 
     /// Suffix appended to settings.json paths to derive the backup path.

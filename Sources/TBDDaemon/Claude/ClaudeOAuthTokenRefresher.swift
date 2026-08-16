@@ -95,7 +95,7 @@ public struct RefreshedOAuthToken: Sendable, Equatable {
     public let expiresAtMillis: Double
 }
 
-public enum ClaudeOAuthRefreshError: Error, CustomStringConvertible, Equatable {
+public enum ClaudeOAuthRefreshError: LocalizedError, CustomStringConvertible, Equatable {
     /// The refresh token itself is dead (400 invalid_grant) — only a re-login
     /// recovers. Distinct from transient failures so callers can surface
     /// "needs re-login" rather than retrying forever.
@@ -114,6 +114,8 @@ public enum ClaudeOAuthRefreshError: Error, CustomStringConvertible, Equatable {
         case .badResponse(let msg): return "refresh bad response: \(msg)"
         }
     }
+
+    public var errorDescription: String? { description }
 }
 
 /// Performs the Anthropic OAuth `refresh_token` grant. Isolated behind a

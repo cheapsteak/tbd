@@ -47,6 +47,11 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     // `queued_prompt_enabled` flag) because it is data, not a gate; nil only on
     // rows the record type wrote explicitly, and resolves to true.
     var pending_prompt_submit: Bool?
+    // JSON-encoded PRObservation: the OUTCOME of the last attempt to learn this
+    // worktree's PR state, as opposed to `prStatus`, the value it found. nil =
+    // no attempt on record, which is a third thing again from a recorded
+    // `.none` ("the forge answered; no PR") or `.undetermined`.
+    var prObservation: String?
 
     init(from wt: Worktree) {
         self.id = wt.id.uuidString
@@ -90,6 +95,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         }
         self.pending_prompt = wt.pendingPrompt
         self.pending_prompt_submit = wt.pendingPromptSubmit
+        self.prObservation = FactColumnJSON.encode(wt.prObservation)
     }
 
     /// Failable decode: skips (returns nil after a logged warning) only when the
@@ -162,8 +168,33 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             pinSortOrder: pinSortOrder,
             location: worktreeLocation,
             pendingPrompt: pending_prompt,
-            pendingPromptSubmit: pending_prompt_submit
+            pendingPromptSubmit: pending_prompt_submit,
+            prObservation: Self.decodePRObservation(prObservation)
         )
+    }
+
+    /// Decode the recorded PR-attempt outcome, keeping "no attempt was ever
+    /// made" apart from "an attempt was recorded and the record is unreadable".
+    ///
+    /// `FactColumnJSON.decode` collapses both into nil, which is right for the
+    /// provenance columns — there, nil means "no fact", and a fact that will not
+    /// decode is no fact. It is wrong here. nil on this column is a **third**
+    /// value, distinct from `.none` and `.undetermined`, and it asserts that the
+    /// forge was never asked about this worktree. A truncated blob asserts that
+    /// too, and it has no business doing so: bytes are on the row, so an attempt
+    /// happened, and the only thing lost is what it concluded — which is exactly
+    /// what `.undetermined` says.
+    ///
+    /// The stamp is `.distantPast` because nothing on hand says when the attempt
+    /// was, and that is the safe direction to be wrong in: it can only make the
+    /// record read as older than it is. A stamp of "now" would present a reading
+    /// nobody took as the freshest one anybody has.
+    private static func decodePRObservation(_ json: String?) -> PRObservation? {
+        guard let json, !json.isEmpty else { return nil }
+        if let decoded = FactColumnJSON.decode(PRObservation.self, from: json) { return decoded }
+        return PRObservation(
+            outcome: .undetermined(cause: PRUndeterminedCause.unreadableRecord),
+            observedAt: .distantPast)
     }
 }
 
@@ -173,7 +204,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
 /// validation rules (`parentNotFound`, `parentIsMain`, `parentIsArchived`)
 /// apply identically at both call sites. The `selfReference` and `cycle`
 /// cases are move-only by construction (a brand-new row has no descendants).
-public enum WorktreeMoveError: Error, CustomStringConvertible {
+public enum WorktreeMoveError: LocalizedError, CustomStringConvertible {
     case selfReference
     case cycle
     case parentNotFound
@@ -191,14 +222,18 @@ public enum WorktreeMoveError: Error, CustomStringConvertible {
         case .worktreeNotFound: return "Worktree not found."
         }
     }
+
+    public var errorDescription: String? { description }
 }
 
-public enum WorktreeArchiveError: Error, CustomStringConvertible {
+public enum WorktreeArchiveError: LocalizedError, CustomStringConvertible {
     case hasActiveChildren
 
     public var description: String {
         "Archive nested worktrees first."
     }
+
+    public var errorDescription: String? { description }
 }
 
 /// Provides CRUD operations for worktrees.
@@ -1162,15 +1197,64 @@ public struct WorktreeStore: Sendable {
         }
     }
 
+    /// Persist (or clear with nil) the outcome of the last attempt to learn
+    /// this worktree's PR state.
+    ///
+    /// Separate from `setPRStatus` because the two answer different questions
+    /// and can disagree: a failed query leaves the previous `prStatus` in place
+    /// (it is the newest value anyone has) while recording `.undetermined`
+    /// here, so a reader can see that the value it is holding is not confirmed.
+    public func setPRObservation(id: UUID, observation: PRObservation?) async throws {
+        let json = FactColumnJSON.encode(observation)
+        try await writer.write { db in
+            try db.execute(sql: "UPDATE worktree SET prObservation = ? WHERE id = ?",
+                           arguments: [json, id.uuidString])
+        }
+    }
 
-    /// All persisted PR statuses, keyed by worktree id. Used to hydrate the
-    /// in-memory PR cache at daemon startup so icons survive restart.
+    /// Persisted PR observations for every **unarchived** worktree, keyed by
+    /// worktree id. Used to hydrate the in-memory observation map at daemon
+    /// startup, so an `.undetermined` recorded before a restart is not
+    /// downgraded to "no attempt on record".
+    ///
+    /// Archived rows are excluded because the map is handed out whole in every
+    /// `pr.list` — a payload on a thirty-second cadence — and "every worktree
+    /// ever created" is not a set that stops growing. An archived worktree has
+    /// no pull request anyone is watching: the poller enumerates
+    /// `list(status: .active)` and would never refresh those entries anyway, so
+    /// carrying them is carrying a value nothing can correct. A revived
+    /// worktree starts from "no attempt on record", which is the truth about it.
+    ///
+    /// **Only archived rows, not "active rows only".** `.main`, `.creating` and
+    /// `.failed` are outside the poller's scope too, but they are bounded (one
+    /// main checkout per repo, the others transient) and `pr.refresh` accepts
+    /// any worktree id, so a status or outcome recorded directly on one of them
+    /// is a real value that must survive a restart. Narrowing to `.active`
+    /// silently dropped those at startup.
+    public func allPRObservations() async throws -> [UUID: PRObservation] {
+        try await unarchivedWorktreeRecords { $0.prObservation }
+    }
+
+    /// Persisted PR statuses for every **unarchived** worktree, keyed by
+    /// worktree id. Used to hydrate the in-memory PR cache at daemon startup so
+    /// icons survive restart. Scoped for the same reason `allPRObservations` is.
     public func allPRStatuses() async throws -> [UUID: PRStatus] {
+        try await unarchivedWorktreeRecords { $0.prStatus }
+    }
+
+    /// One field of every unarchived worktree, keyed by id, skipping the rows
+    /// where it is absent.
+    private func unarchivedWorktreeRecords<Value: Sendable>(
+        _ field: @Sendable @escaping (Worktree) -> Value?
+    ) async throws -> [UUID: Value] {
         try await writer.read { db in
-            var result: [UUID: PRStatus] = [:]
-            for record in try WorktreeRecord.fetchAll(db) {
+            var result: [UUID: Value] = [:]
+            let records = try WorktreeRecord
+                .filter(Column("status") != WorktreeStatus.archived.rawValue)
+                .fetchAll(db)
+            for record in records {
                 guard let wtID = UUID(uuidString: record.id),
-                      let model = record.toModel()?.prStatus else { continue }
+                      let model = record.toModel().flatMap(field) else { continue }
                 result[wtID] = model
             }
             return result

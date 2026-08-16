@@ -189,7 +189,7 @@ struct PRPollRemoteLaneTests {
     /// three rows of one repo, three open PRs on three branches, one `gh` stub.
     /// Each row must end up with ITS OWN PR number, and no `gh` invocation may
     /// ever have run in a `remote://` directory.
-    @Test("pr.list gives each of three rows its own PR and never runs gh in a remote:// path")
+    @Test("the poll gives each of three rows its own PR and never runs gh in a remote:// path")
     func prListDistinguishesThreeRowsOfOneRepo() async throws {
         let (tempDir, repoDir) = try await createTestRepo()
         defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -215,6 +215,9 @@ struct PRPollRemoteLaneTests {
         ])
         let router = Self.makeRouter(db: db, gh: gh)
 
+        // The poll pass, not `pr.list`: the RPC serves the snapshot the
+        // daemon's own clock produced and never fetches.
+        try await router.runPollPass()
         let response = await router.handle(RPCRequest(method: RPCMethod.prList))
         #expect(response.success)
         let result = try response.decodeResult(PRListResult.self)

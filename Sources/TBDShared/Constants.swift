@@ -251,4 +251,151 @@ public enum TBDConstants {
     public static var actuationLogPath: String {
         actuationLogPath(environment: ProcessInfo.processInfo.environment)
     }
+
+    /// Directory holding daemon-managed runtime files — the Claude settings
+    /// overlays, the statusline tee and its captures: `~/tbd/runtime`.
+    public static func runtimeDir(environment: [String: String]) -> URL {
+        configDir(environment: environment).appendingPathComponent("runtime")
+    }
+    public static var runtimeDir: URL { runtimeDir(environment: ProcessInfo.processInfo.environment) }
+
+    /// The one shared statusline tee script: `~/tbd/runtime/statusline-tee.sh`.
+    ///
+    /// One file for the whole fleet rather than one per session — the script
+    /// takes its capture path and its delegate command as arguments, so nothing
+    /// session-specific is baked into it.
+    public static func statuslineTeeScriptPath(environment: [String: String]) -> String {
+        runtimeDir(environment: environment)
+            .appendingPathComponent("statusline-tee.sh")
+            .path
+    }
+    public static var statuslineTeeScriptPath: String {
+        statuslineTeeScriptPath(environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// Filename prefix/suffix for a session's statusline capture file. Shared
+    /// between the path builder and the orphan-prune sweep so the two can't
+    /// drift, exactly as the per-session overlay's pair is.
+    public static let statuslineCapturePrefix = "statusline-capture-"
+    public static let statuslineCaptureSuffix = ".json"
+
+    /// Where the tee publishes one session's statusline stdin JSON:
+    /// `~/tbd/runtime/statusline-capture-<sessionKey>.json`.
+    ///
+    /// The payload carries the session's cwd and repo paths, so the tee writes
+    /// it under a restrictive umask; the path itself is only an opaque terminal
+    /// id.
+    public static func statuslineCapturePath(
+        sessionKey: String,
+        environment: [String: String]
+    ) -> String {
+        runtimeDir(environment: environment)
+            .appendingPathComponent(
+                "\(statuslineCapturePrefix)\(sanitizedSessionKey(sessionKey))\(statuslineCaptureSuffix)")
+            .path
+    }
+    public static func statuslineCapturePath(sessionKey: String) -> String {
+        statuslineCapturePath(sessionKey: sessionKey, environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// Filesystem-safe rendering of a session key (non-`[A-Za-z0-9_-]` → `_`).
+    ///
+    /// Callers MUST pass a unique opaque id (the terminal UUID): the mapping is
+    /// only collision-safe for such inputs, since two distinct human-readable
+    /// strings could sanitize to the same filename while distinct UUIDs never
+    /// do. Lives here so the overlay files and the capture files sanitize
+    /// identically — a second implementation is how the prune sweep and the
+    /// path builder drift apart.
+    public static func sanitizedSessionKey(_ sessionKey: String) -> String {
+        String(sessionKey.unicodeScalars.map { scalar -> Character in
+            let isSafe = scalar == "-" || scalar == "_"
+                || (scalar >= "0" && scalar <= "9")
+                || (scalar >= "a" && scalar <= "z")
+                || (scalar >= "A" && scalar <= "Z")
+            return isSafe ? Character(scalar) : "_"
+        })
+    }
+
+    /// Directory holding everything fleet supervision persists outside the DB:
+    /// the operator's `supervision.json`, the continuous `ledger.jsonl`, the
+    /// out-of-band `status.json` heartbeat, and one directory per declared
+    /// project. Honors `TBD_HOME` like every other derived path — never
+    /// hand-build it from `$HOME`.
+    public static func supervisionDir(environment: [String: String]) -> URL {
+        configDir(environment: environment).appendingPathComponent("supervision")
+    }
+    public static var supervisionDir: URL {
+        supervisionDir(environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// The operator's supervision file: `~/tbd/supervision/supervision.json`.
+    /// Project topology, per-project marks, mode declarations and selections,
+    /// supervisor bindings, sweep selection. Hand-editable; the daemon is its
+    /// only programmatic writer.
+    public static func supervisionFilePath(environment: [String: String]) -> String {
+        supervisionDir(environment: environment).appendingPathComponent("supervision.json").path
+    }
+    public static var supervisionFilePath: String {
+        supervisionFilePath(environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// The continuous supervision record: `~/tbd/supervision/ledger.jsonl`.
+    /// Append-only, one JSON object per line, whole-line writes.
+    public static func supervisionLedgerPath(environment: [String: String]) -> String {
+        supervisionDir(environment: environment).appendingPathComponent("ledger.jsonl").path
+    }
+    public static var supervisionLedgerPath: String {
+        supervisionLedgerPath(environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// The out-of-band heartbeat: `~/tbd/supervision/status.json`, rewritten
+    /// atomically at boot, at every brake edge, and on a fixed cadence while
+    /// the brake is released — so a watchdog that cannot reach the socket or
+    /// the DB can still tell whether the daemon is alive. See
+    /// `SupervisionStatusFile` for the full contract, including why staleness
+    /// under an engaged brake is expected rather than a liveness signal.
+    public static func supervisionStatusPath(environment: [String: String]) -> String {
+        supervisionDir(environment: environment).appendingPathComponent("status.json").path
+    }
+    public static var supervisionStatusPath: String {
+        supervisionStatusPath(environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// A project's own directory: `~/tbd/supervision/projects/<name>`. Holds
+    /// the operator-level playbook, the journal, the proposals doc, and any
+    /// customized sweep or transition program.
+    ///
+    /// **Returns nil when the name is not one safe path component, and the
+    /// optional return is the guarantee — do not make it non-optional.** A
+    /// helper that accepts an unvalidated name and hands back a path outside
+    /// its own directory *is* the vulnerability; refusing to compose one is how
+    /// this closes, and it closes for every caller at once, including callers
+    /// not yet written.
+    ///
+    /// Validating at the call site instead would be the same bug with more
+    /// steps: not every project name arrives through `supervision.json`, where
+    /// `SupervisionFile.validate()` already refuses an unusable name. A
+    /// singleton project is named by its repo's **display name**, which an
+    /// operator may edit to anything at all — `acme/web` yields
+    /// `…/supervision/projects/acme/web`, and `..` walks straight out of the
+    /// supervision directory. Those names never pass through the file's
+    /// validation, so the only place that can be relied on to check them is
+    /// here.
+    ///
+    /// A nil is not an error condition to escalate: the project is supervised
+    /// normally and only its directory is unavailable
+    /// (`SupervisionProject.hasUsableDirectory`,
+    /// `SupervisionWarningCode.unusableProjectName`). The operator's fix is to
+    /// rename the repo.
+    public static func supervisionProjectDir(
+        project: String, environment: [String: String]
+    ) -> URL? {
+        guard SupervisionFile.isSafeProjectName(project) else { return nil }
+        return supervisionDir(environment: environment)
+            .appendingPathComponent("projects")
+            .appendingPathComponent(project)
+    }
+    public static func supervisionProjectDir(project: String) -> URL? {
+        supervisionProjectDir(project: project, environment: ProcessInfo.processInfo.environment)
+    }
 }

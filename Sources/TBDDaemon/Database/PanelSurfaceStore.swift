@@ -129,7 +129,7 @@ public struct PanelOperationReceiptRecord: Codable, FetchableRecord, Persistable
     }
 }
 
-public enum PanelSurfaceStoreError: Error, Equatable, Sendable {
+public enum PanelSurfaceStoreError: LocalizedError, Equatable, Sendable {
     /// A commit tried to write a panelID whose `panel_history` row already
     /// belongs to a different tab. `panel_history.panelID` is a table-wide
     /// primary key, so a blind upsert would silently steal the row (flip its
@@ -143,6 +143,16 @@ public enum PanelSurfaceStoreError: Error, Equatable, Sendable {
     /// has already been imported (or is mid-import from a concurrent call),
     /// and must not be silently overwritten.
     case alreadyImported
+
+    public var errorDescription: String? {
+        switch self {
+        case .panelHistoryOwnedByOtherTab(let panelID, let existingTabID, let incomingTabID):
+            return "panel history for panel \(panelID.uuidString) already belongs to tab "
+                + "\(existingTabID.uuidString); refusing a write from tab \(incomingTabID.uuidString)"
+        case .alreadyImported:
+            return "this worktree's panel surface was already imported"
+        }
+    }
 }
 
 /// Store for the panel-surface schema (workspace tab layouts, panel history,

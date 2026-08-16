@@ -37,6 +37,7 @@ struct PRButtonLabelTests {
         hibernateArmed: Bool = false,
         blocked: Bool = false,
         prStatus: PRStatus,
+        freshnessClauses: [String] = ["checked just now"],
         colorScheme: ColorScheme = .light
     ) -> String {
         PRButtonLabel.prSplitButtonID(
@@ -46,6 +47,7 @@ struct PRButtonLabelTests {
             hibernateArmed: hibernateArmed,
             blocked: blocked,
             bindings: [makeBinding(prStatus)],
+            freshnessClauses: freshnessClauses,
             colorScheme: colorScheme
         )
     }
@@ -277,8 +279,12 @@ struct PRButtonLabelTests {
         // position badge), plus the nightwatch gate metadata (files, commits,
         // authorWorktreeID), which it does NOT render — deliberately excluded,
         // else every metadata fetch would force a spurious item rebuild.
+        // 9 adds observedAt — when the forge was last asked. The RAW stamp is
+        // deliberately not keyed; the bucketed words it produces are, as
+        // `freshnessClauses`, so a re-confirmation that changes no displayed
+        // text rebuilds nothing while an age that visibly moved does.
         let status = Self.makeStatus()
-        #expect(Mirror(reflecting: status).children.count == 8)
+        #expect(Mirror(reflecting: status).children.count == 9)
     }
 
     @Test("id key differs by merge-queue position so a queue move rebuilds the item")

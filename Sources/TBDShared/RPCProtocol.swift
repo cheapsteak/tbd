@@ -92,8 +92,15 @@ public struct RPCResponse: Codable, Sendable {
     }
 }
 
-public enum RPCError: Error, Sendable {
+public enum RPCError: LocalizedError, Sendable {
     case noResultData
+
+    public var errorDescription: String? {
+        switch self {
+        case .noResultData:
+            return "RPC response carried no result payload to decode"
+        }
+    }
 }
 
 /// Machine-readable code carried alongside `RPCResponse.error`'s human string,
@@ -196,6 +203,7 @@ public enum RPCMethod {
     public static let terminalSwapProfile = "terminal.swapProfile"
     public static let terminalSessionEvent = "terminal.sessionEvent"
     public static let terminalActivityEvent = "terminal.activityEvent"
+    public static let terminalNotificationEvent = "terminal.notificationEvent"
     public static let terminalAskUserQuestionPending = "terminal.askUserQuestionPending"
     public static let terminalAskUserQuestionCleared = "terminal.askUserQuestionCleared"
     public static let appSetForegroundState = "app.setForegroundState"
@@ -205,6 +213,7 @@ public enum RPCMethod {
     public static let repoSetExpanded = "repo.setExpanded"
     public static let sessionList = "session.list"
     public static let sessionMessages = "session.messages"
+    public static let sessionStates = "session.states"
     public static let setMainAreaSize = "app.setMainAreaSize"
     public static let daemonLegacyHooksStatus = "daemon.legacyHooksStatus"
     public static let daemonRemoveLegacyGlobalHooks = "daemon.removeLegacyGlobalHooks"
@@ -251,6 +260,14 @@ public enum RPCMethod {
     public static let configSetHibernateInputVeto = "config.setHibernateInputVeto"
     public static let configSetDeliveryVerification = "config.setDeliveryVerification"
     public static let configSetQueuedPrompt = "config.setQueuedPrompt"
+    public static let configSetSupervisionEnabled = "config.setSupervisionEnabled"
+    public static let superviseStatus = "supervise.status"
+    public static let superviseSetProjectMark = "supervise.setProjectMark"
+    public static let superviseSetMode = "supervise.setMode"
+    public static let superviseProjectList = "supervise.projectList"
+    public static let superviseProjectCreate = "supervise.projectCreate"
+    public static let superviseProjectDelete = "supervise.projectDelete"
+    public static let superviseProjectMove = "supervise.projectMove"
     public static let worktreeSetPendingPrompt = "worktree.setPendingPrompt"
     public static let configSetAutoCloseSetup = "config.setAutoCloseSetup"
     public static let configSetAutoTrustWorktrees = "config.setAutoTrustWorktrees"
@@ -842,7 +859,36 @@ public struct NotificationsMarkReadParams: Codable, Sendable {
 
 public struct PRListResult: Codable, Sendable {
     public let statuses: [UUID: PRStatus]
-    public init(statuses: [UUID: PRStatus]) { self.statuses = statuses }
+
+    /// The outcome of the last attempt to learn each worktree's PR state.
+    ///
+    /// Carried beside `statuses` rather than folded into it, because the two
+    /// answer different questions and routinely disagree: a worktree absent
+    /// from `statuses` may have no PR (`.none`) or may be one nobody could ask
+    /// about (`.undetermined`), and a worktree *present* in `statuses` may be
+    /// holding a value the last attempt failed to reconfirm. Collapsing them
+    /// is the bug this field exists to prevent — an outage that reads as a
+    /// fleet with no pull requests looks exactly like a calm night.
+    ///
+    /// Empty when the daemon predates the field; a missing entry means no
+    /// attempt is on record, which is a third thing again from either outcome.
+    public let observations: [UUID: PRObservation]
+
+    public init(statuses: [UUID: PRStatus], observations: [UUID: PRObservation] = [:]) {
+        self.statuses = statuses
+        self.observations = observations
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case statuses
+        case observations
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        statuses = try c.decode([UUID: PRStatus].self, forKey: .statuses)
+        observations = try c.decodeIfPresent([UUID: PRObservation].self, forKey: .observations) ?? [:]
+    }
 }
 
 public struct PRRefreshParams: Codable, Sendable {
@@ -850,11 +896,39 @@ public struct PRRefreshParams: Codable, Sendable {
     public init(worktreeID: UUID) { self.worktreeID = worktreeID }
 }
 
-// PRRefreshResult wraps an optional PRStatus.
-// nil means no PR found for this worktree's branch.
+/// The result of an on-demand `pr.refresh`.
+///
+/// `status` is the newest value anyone holds for the worktree — which is not
+/// the same as the value this refresh found. A refresh that could not reach the
+/// forge deliberately returns the *previous cached* status rather than guessing,
+/// so a non-nil `status` does not mean "confirmed just now", and a nil `status`
+/// does not mean "no PR": it means nothing is cached, whether because the forge
+/// said there is no PR or because nobody ever got an answer.
+///
+/// `observation` is what disambiguates. It reports the outcome of *this*
+/// attempt — `.observed`, `.none`, or `.undetermined(cause:)` — with the moment
+/// it was made. nil only when the attempt could not be made at all (the
+/// worktree is no longer known), or when talking to a daemon that predates the
+/// field.
 public struct PRRefreshResult: Codable, Sendable {
     public let status: PRStatus?
-    public init(status: PRStatus?) { self.status = status }
+    public let observation: PRObservation?
+
+    public init(status: PRStatus?, observation: PRObservation? = nil) {
+        self.status = status
+        self.observation = observation
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case status
+        case observation
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        status = try c.decodeIfPresent(PRStatus.self, forKey: .status)
+        observation = try c.decodeIfPresent(PRObservation.self, forKey: .observation)
+    }
 }
 
 // MARK: - PR bindings (multi-PR per worktree)
@@ -1617,6 +1691,24 @@ public struct TerminalListParams: Codable, Sendable {
     public init(worktreeID: UUID? = nil) { self.worktreeID = worktreeID }
 }
 
+/// Which terminals `session.states` should report on. Absent `worktreeID` means
+/// the whole fleet — the ordinary call, since the point of the method is asking
+/// about every agent every cycle.
+public struct SessionStatesParams: Codable, Sendable {
+    public let worktreeID: UUID?
+    public init(worktreeID: UUID? = nil) { self.worktreeID = worktreeID }
+}
+
+/// One `session.states` answer: a `SessionStateReport` per terminal.
+///
+/// A wrapper rather than a bare array so a later slice can add a fleet-level
+/// field (a pass timestamp, a count of terminals skipped) without changing the
+/// shape every existing reader decodes.
+public struct SessionStatesResult: Codable, Sendable {
+    public let reports: [SessionStateReport]
+    public init(reports: [SessionStateReport]) { self.reports = reports }
+}
+
 /// One `terminal.send` request. Exactly one payload kind per call — `text` or
 /// `keys`, never both and never neither (design §3, "Payloads, not verbs").
 ///
@@ -1967,6 +2059,332 @@ public struct ConfigSetDeliveryVerificationParams: Codable, Sendable {
 public struct ConfigSetQueuedPromptParams: Codable, Sendable {
     public let enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
+}
+
+// MARK: - Supervision
+
+/// Params for `config.setSupervisionEnabled` — the fleet brake
+/// (`docs/specs/2026-07-26-fleet-supervision-design.md` §3, §8). `true`
+/// releases the brake, `false` engages it; either way the per-project marks are
+/// untouched, so releasing restores exactly the coverage that stood.
+///
+/// Sending either value is an explicit gesture: the backing column is NULL
+/// until this verb writes to it, and a written `false` stays engaged even after
+/// the shipped default graduates.
+public struct ConfigSetSupervisionEnabledParams: Codable, Sendable, Equatable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// A stable code a program may branch on, carried in `SupervisionStatus`.
+public enum SupervisionWarningCode: String, Codable, Sendable {
+    /// The brake is released and not one project is marked on — supervision is
+    /// on but nothing is being supervised. The loud case: the CLI says so in
+    /// words a human reads, and this code is the same fact for a program.
+    case noProjectsOn
+    /// One or more projects have a name that cannot be a directory, so nothing
+    /// can be written beside them — no playbook, journal, proposals, or
+    /// programs (`SupervisionTopology.projectsWithoutUsableDirectory(in:)`).
+    /// Supervision covers them regardless; the fix is renaming the repo, and
+    /// the message names which ones.
+    case unusableProjectName
+    /// Two or more repos share a display name, so none of them resolves to a
+    /// project and none is supervised — a project is identified by its name,
+    /// and two candidates for one name identify nothing
+    /// (`SupervisionTopology.ambiguousRepoNames(file:repos:)`). The rest of the
+    /// fleet is unaffected. The message names the repos; the operator's fix is
+    /// to rename one, or to declare a project naming them.
+    case ambiguousRepoName
+    /// The brake is engaged while at least one project's mark stands — the
+    /// exact mirror of `noProjectsOn`. An operator who runs
+    /// `tbd supervise on acme` against an engaged brake sees `on: acme` and
+    /// forms the belief that supervision is running; nothing is watching.
+    ///
+    /// **Emitted only when a mark actually stands.** An engaged brake over a
+    /// fleet with nothing marked is a deliberately quiet system, not a warning,
+    /// and warning there would train an operator to ignore the line — which
+    /// costs more than it buys.
+    ///
+    /// `SupervisionStatus.effectivelySupervising` is false in this state and in
+    /// `noProjectsOn` alike, and cannot tell them apart; they call for opposite
+    /// actions — release the brake, or mark a project — so the code is what a
+    /// program branches on.
+    case brakeEngagedWithProjectsOn
+}
+
+/// One warning on the status readout: a stable code, and the sentence a human
+/// gets.
+public struct SupervisionWarning: Codable, Sendable, Equatable {
+    public let code: SupervisionWarningCode
+    public let message: String
+    public init(code: SupervisionWarningCode, message: String) {
+        self.code = code
+        self.message = message
+    }
+}
+
+/// Result of `supervise.status`: the brake, then one entry per resolved project
+/// (declared and singleton alike — nothing here distinguishes them).
+public struct SupervisionStatus: Codable, Sendable, Equatable {
+    public static let currentSchemaVersion = 1
+
+    public let schemaVersion: Int
+    public let brake: SupervisionBrakeState
+    /// Whether TBD's own attention actually covers anything right now: the
+    /// brake released AND at least one project marked on.
+    public let effectivelySupervising: Bool
+    public let projects: [SupervisionStatusProject]
+    public let warnings: [SupervisionWarning]
+
+    public init(brake: SupervisionBrakeState, effectivelySupervising: Bool,
+                projects: [SupervisionStatusProject], warnings: [SupervisionWarning],
+                schemaVersion: Int = SupervisionStatus.currentSchemaVersion) {
+        self.schemaVersion = schemaVersion
+        self.brake = brake
+        self.effectivelySupervising = effectivelySupervising
+        self.projects = projects
+        self.warnings = warnings
+    }
+}
+
+/// One project's row on the status readout.
+public struct SupervisionStatusProject: Codable, Sendable, Equatable {
+    public let name: String
+    /// The project's mark. Effectively on is this AND a released brake.
+    public let on: Bool
+    public let mode: String
+    public let declaredModes: [String]
+    public let supervisor: SupervisionSupervisorArrangement
+    /// When the current coverage span opened, or null when the project is off
+    /// or the record holds no opening line.
+    public let spanStartedAt: SupervisionInstant?
+    /// When a sweep program last made contact, or null when it never has.
+    public let lastSweepContactAt: SupervisionInstant?
+    /// The project's declared contact window, or null when it declares none —
+    /// which is what the readout's "coverage unknown" reports. Null is the
+    /// honest not-yet value; nothing here invents a coverage claim.
+    public let coverageWindow: String?
+
+    public init(name: String, on: Bool, mode: String, declaredModes: [String],
+                supervisor: SupervisionSupervisorArrangement,
+                spanStartedAt: SupervisionInstant?, lastSweepContactAt: SupervisionInstant?,
+                coverageWindow: String?) {
+        self.name = name
+        self.on = on
+        self.mode = mode
+        self.declaredModes = declaredModes
+        self.supervisor = supervisor
+        self.spanStartedAt = spanStartedAt
+        self.lastSweepContactAt = lastSweepContactAt
+        self.coverageWindow = coverageWindow
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, on, mode, declaredModes, supervisor
+        case spanStartedAt, lastSweepContactAt, coverageWindow
+    }
+
+    /// Written by hand because synthesized `Codable` *omits* a nil optional.
+    /// The honest not-yet values are the point of these three fields, so they
+    /// are present and null rather than absent.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(name, forKey: .name)
+        try container.encode(on, forKey: .on)
+        try container.encode(mode, forKey: .mode)
+        try container.encode(declaredModes, forKey: .declaredModes)
+        try container.encode(supervisor, forKey: .supervisor)
+        try container.encode(spanStartedAt, forKey: .spanStartedAt)
+        try container.encode(lastSweepContactAt, forKey: .lastSweepContactAt)
+        try container.encode(coverageWindow, forKey: .coverageWindow)
+    }
+}
+
+/// Params for `supervise.setProjectMark` — `tbd supervise on|off <project>`.
+/// The mark is coverage, never protection: it binds TBD's own hand and builds
+/// no wall around a terminal.
+public struct SuperviseSetProjectMarkParams: Codable, Sendable, Equatable {
+    public let project: String
+    public let on: Bool
+    public init(project: String, on: Bool) {
+        self.project = project
+        self.on = on
+    }
+}
+
+/// Result of `supervise.setProjectMark`. `changed` is false when the mark
+/// already stood as asked — a no-op is not a decision, and no ledger line is
+/// written for one.
+public struct SuperviseSetProjectMarkResult: Codable, Sendable, Equatable {
+    public static let currentSchemaVersion = 1
+
+    public let schemaVersion: Int
+    public let project: String
+    public let on: Bool
+    public let changed: Bool
+
+    public init(project: String, on: Bool, changed: Bool,
+                schemaVersion: Int = SuperviseSetProjectMarkResult.currentSchemaVersion) {
+        self.schemaVersion = schemaVersion
+        self.project = project
+        self.on = on
+        self.changed = changed
+    }
+}
+
+/// Params for `supervise.setMode` — the per-project selection, validated
+/// against the project's declared list (a lookup within `supervision.json`;
+/// TBD never parses the playbook to derive one).
+public struct SuperviseSetModeParams: Codable, Sendable, Equatable {
+    public let project: String
+    public let mode: String
+    public init(project: String, mode: String) {
+        self.project = project
+        self.mode = mode
+    }
+}
+
+/// Result of `supervise.setMode`, carrying the choices so the CLI can show them
+/// without a second call. `changed` is false when the mode already stood.
+public struct SuperviseSetModeResult: Codable, Sendable, Equatable {
+    public static let currentSchemaVersion = 1
+
+    public let schemaVersion: Int
+    public let project: String
+    public let mode: String
+    public let declaredModes: [String]
+    public let changed: Bool
+
+    public init(project: String, mode: String, declaredModes: [String], changed: Bool,
+                schemaVersion: Int = SuperviseSetModeResult.currentSchemaVersion) {
+        self.schemaVersion = schemaVersion
+        self.project = project
+        self.mode = mode
+        self.declaredModes = declaredModes
+        self.changed = changed
+    }
+}
+
+/// A member repo on the topology readout: the id the file holds, and the name a
+/// human typed or reads.
+public struct SupervisionProjectRepoRef: Codable, Sendable, Equatable {
+    public let id: UUID
+    public let name: String
+    public init(id: UUID, name: String) {
+        self.id = id
+        self.name = name
+    }
+}
+
+/// One project on the topology readout.
+///
+/// Declared projects and singletons appear alike, and no field distinguishes
+/// them: a reader sees a project with its repos and its policy, which is all
+/// there is to see (design §5).
+public struct SupervisionProjectTopologyEntry: Codable, Sendable, Equatable {
+    public let name: String
+    public let repos: [SupervisionProjectRepoRef]
+    public let policy: SupervisionPolicySource
+    /// The project's own sweep program, when one has been customized.
+    public let sweepScript: String?
+
+    public init(name: String, repos: [SupervisionProjectRepoRef],
+                policy: SupervisionPolicySource, sweepScript: String?) {
+        self.name = name
+        self.repos = repos
+        self.policy = policy
+        self.sweepScript = sweepScript
+    }
+}
+
+/// Result of `supervise.projectList`, and of every project mutation — a
+/// mutation answers with the topology it produced.
+public struct SuperviseProjectListResult: Codable, Sendable, Equatable {
+    public static let currentSchemaVersion = 1
+
+    public let schemaVersion: Int
+    public let projects: [SupervisionProjectTopologyEntry]
+
+    public init(projects: [SupervisionProjectTopologyEntry],
+                schemaVersion: Int = SuperviseProjectListResult.currentSchemaVersion) {
+        self.schemaVersion = schemaVersion
+        self.projects = projects
+    }
+}
+
+/// The policy source as a caller names it: `--policy repo:<id>` or
+/// `--policy operator`. The repo arrives as a string because the CLI accepts a
+/// repo UUID or a repo display name; resolving it to a `UUID` is the daemon's
+/// job.
+public enum SupervisionPolicyRequest: Codable, Sendable, Equatable {
+    case repo(String)
+    case `operator`
+
+    private enum CodingKeys: String, CodingKey {
+        case repo
+        case `operator`
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if let repo = try container.decodeIfPresent(String.self, forKey: .repo) {
+            self = .repo(repo)
+            return
+        }
+        if let isOperator = try container.decodeIfPresent(Bool.self, forKey: .operator), isOperator {
+            self = .operator
+            return
+        }
+        throw DecodingError.dataCorruptedError(
+            forKey: .repo, in: container,
+            debugDescription: "a policy must be {\"repo\": \"<repo>\"} or {\"operator\": true}")
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .repo(let repo): try container.encode(repo, forKey: .repo)
+        case .operator: try container.encode(true, forKey: .operator)
+        }
+    }
+}
+
+/// Params for `supervise.projectCreate`. `repos` entries are repo UUIDs or repo
+/// display names, as typed.
+public struct SuperviseProjectCreateParams: Codable, Sendable, Equatable {
+    public let name: String
+    public let repos: [String]
+    public let policy: SupervisionPolicyRequest
+
+    public init(name: String, repos: [String], policy: SupervisionPolicyRequest) {
+        self.name = name
+        self.repos = repos
+        self.policy = policy
+    }
+}
+
+/// Params for `supervise.projectDelete`. Deleting a declaration returns its
+/// member repos to being their own projects.
+public struct SuperviseProjectDeleteParams: Codable, Sendable, Equatable {
+    public let name: String
+    public init(name: String) { self.name = name }
+}
+
+/// Params for `supervise.projectMove` — the only membership verb, because an
+/// add/remove pair can express states the "exactly one project" model forbids.
+/// `repo` is a repo UUID or display name; `to` is a project name or the
+/// documented `"singleton"` sentinel.
+public struct SuperviseProjectMoveParams: Codable, Sendable, Equatable {
+    /// The value of `to` that returns a repo to being its own project.
+    public static let singletonTarget = SupervisionMoveTarget.singletonArgument
+
+    public let repo: String
+    public let to: String
+
+    public init(repo: String, to: String) {
+        self.repo = repo
+        self.to = to
+    }
 }
 
 /// Params for `worktree.setPendingPrompt` — park the text the operator composed
@@ -2622,6 +3040,54 @@ public struct TerminalActivityEventParams: Codable, Sendable {
     public init(terminalID: UUID, activityState: TerminalActivityState) {
         self.terminalID = terminalID
         self.activityState = activityState
+    }
+}
+
+/// Params for `terminal.notificationEvent` — sent by `tbd hooks notification`
+/// for EVERY Claude Code `Notification` event, whatever its type.
+///
+/// The CLI interprets nothing: it lifts the fields it can name, carries the
+/// whole payload in `rawPayload`, and lets the daemon do the only classifying
+/// there is. Keeping the fork daemon-side is deliberate — the hook entry lives
+/// in a file an operator can edit, so a matcher or a branch out there would be
+/// a policy decision TBD could not rely on.
+public struct TerminalNotificationEventParams: Codable, Sendable, Equatable {
+    public let terminalID: UUID
+    /// `notification_type` verbatim, or nil when the payload carried none.
+    /// Never normalized, never defaulted to a known type.
+    public let notificationType: String?
+    /// The notification text, verbatim.
+    public let message: String
+    /// The notification title, when the payload carried one. Reported rather
+    /// than persisted in a column of its own: `AwaitingInputReason` models the
+    /// message and the type, and the title survives inside `rawPayload` for a
+    /// consumer that wants it. Carried on the wire anyway so the daemon can
+    /// start using it without a CLI release — an older CLI is the thing that
+    /// cannot be fixed retroactively.
+    public let title: String?
+    /// The entire stdin payload as it arrived, so a later consumer can read a
+    /// field this build does not model.
+    public let rawPayload: String?
+    /// Claude's reported working directory, used only for the same
+    /// foreign-session guard `terminal.sessionEvent` applies: a hook fired by a
+    /// session living in another worktree must not write to this terminal.
+    /// Optional for backward compatibility with older CLIs.
+    public let cwd: String?
+
+    public init(
+        terminalID: UUID,
+        notificationType: String?,
+        message: String,
+        title: String? = nil,
+        rawPayload: String? = nil,
+        cwd: String? = nil
+    ) {
+        self.terminalID = terminalID
+        self.notificationType = notificationType
+        self.message = message
+        self.title = title
+        self.rawPayload = rawPayload
+        self.cwd = cwd
     }
 }
 

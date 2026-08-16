@@ -147,6 +147,27 @@ struct ContentView: View {
                         // state, url, queue position, detached, and the reason
                         // + head branch every menu row's title carries), and
                         // colorScheme (baked icon colors).
+                        // Composed once and used in BOTH the help string and the
+                        // `.id` key: they must agree, or the item stops
+                        // rebuilding when the words it renders change. The
+                        // status it ages is the icon binding's — the same
+                        // selection rule the sidebar dot uses — so the two
+                        // surfaces never disagree about which PR they describe.
+                        //
+                        // `now: Date()` in the body is deliberate. Both facts it
+                        // ages come from `AppState`, and `prObservations` is
+                        // republished on every poll (its `observedAt` advances
+                        // each attempt), so this body re-evaluates on the same
+                        // ~30 s cadence as the facts — a coarse ticker driven by
+                        // the data instead of one running beside it, and much
+                        // finer than the five-minute buckets `checkedLabel`
+                        // renders. **If that republication is ever made
+                        // value-only, these clauses freeze and need a real
+                        // ticker.**
+                        let prFreshnessClauses = PRFreshness.clauses(
+                            status: PRBindingPresentation.iconBinding(bindings)?.status,
+                            observation: appState.prObservations[worktreeID],
+                            now: Date())
                         let splitButtonID = PRButtonLabel.prSplitButtonID(
                             worktreeID: worktreeID,
                             worktreeFound: worktree != nil,
@@ -154,11 +175,13 @@ struct ContentView: View {
                             hibernateArmed: hibernateArmed,
                             blocked: blocked,
                             bindings: bindings,
+                            freshnessClauses: prFreshnessClauses,
                             colorScheme: colorScheme
                         )
                         let helpText = Self.prSplitButtonHelp(
                             bindings: bindings, armed: armed,
-                            hibernateArmed: hibernateArmed, blocked: blocked)
+                            hibernateArmed: hibernateArmed, blocked: blocked,
+                            freshnessClauses: prFreshnessClauses)
 
                         // Exactly one PR whose URL parses keeps the split button
                         // it has always been: the label is the primary click
@@ -450,7 +473,8 @@ struct ContentView: View {
         bindings: [PRBinding],
         armed: Bool,
         hibernateArmed: Bool,
-        blocked: Bool
+        blocked: Bool,
+        freshnessClauses: [String] = []
     ) -> String {
         var clauses: [String] = []
         switch bindings.count {
@@ -470,6 +494,11 @@ struct ContentView: View {
             clauses.append("auto-archives on merge")
         }
         if hibernateArmed { clauses.append("auto-hibernates on merge") }
+        // The cache states its own age here, and says when its last re-read
+        // failed. This string is materialized once by AppKit, so the freshness
+        // clauses are also part of the `.id` key — otherwise the age would
+        // freeze at whatever it was when the item was first built.
+        clauses += freshnessClauses
         clauses.append("more options")
         return clauses.joined(separator: " · ")
     }
@@ -929,6 +958,13 @@ struct PRButtonLabel: View {
     /// failing" under an unchanged `.checksFailed`, or a re-pushed head branch,
     /// would otherwise leave the materialized menu showing the stale text.
     ///
+    /// `freshnessClauses` is in the key for the same reason: the help string
+    /// renders the cache's age and any unresolved last check, so an item built
+    /// before those words changed would keep promising a freshness it no longer
+    /// has. Note it is the *rendered clauses*, not the raw `observedAt` — the
+    /// clauses are bucketed (see `PRFreshness`), so a re-confirmation that does
+    /// not change the displayed words rebuilds nothing.
+    ///
     /// This key MUST stay a String. The macOS 26 toolbar bridge only honors
     /// `.id` identity changes for String values here — a custom Hashable
     /// struct key was observed NOT to trigger NSMenuToolbarItem recreation
@@ -941,6 +977,7 @@ struct PRButtonLabel: View {
         hibernateArmed: Bool,
         blocked: Bool,
         bindings: [PRBinding],
+        freshnessClauses: [String] = [],
         colorScheme: ColorScheme
     ) -> String {
         let rendered = bindings.map { binding in
@@ -953,6 +990,7 @@ struct PRButtonLabel: View {
         }.joined(separator: "|")
         return "pr-split-\(worktreeID)-\(worktreeFound)-\(armed)-\(hibernateArmed)-\(blocked)"
             + "-[\(rendered)]"
+            + "-[\(freshnessClauses.map(escapedIDField).joined(separator: "|"))]"
             + "-\(colorScheme)"
     }
 

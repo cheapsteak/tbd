@@ -46,8 +46,15 @@ enum CodexUsageParser {
         return [result.rateLimits]
     }
 }
-enum CodexUsageFetchError: Error {
+enum CodexUsageFetchError: LocalizedError {
     case appServer(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .appServer(let message):
+            return "Codex app-server returned an error while reading usage: \(message)"
+        }
+    }
 }
 
 /// Runs a short-lived Codex app-server session and performs the documented

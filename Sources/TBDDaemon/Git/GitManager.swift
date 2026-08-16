@@ -260,14 +260,14 @@ public struct GitManager: Sendable {
     }
 
     /// True if `refs/heads/<name>` exists locally. Used to pick a
-    /// non-clobbering local branch name before force-fetching a pull ref.
+    /// non-clobbering local branch name before fetching a pull ref into it.
     ///
     /// Fails closed, unlike the read-only `refExists`: this result gates
-    /// whether `fetchPullRequestHead`'s `+refs/pull/<n>/head:refs/heads/<name>`
-    /// force-refspec is safe to run against `name`. Only the benign "ref
-    /// missing" case (`show-ref --quiet` exits 1) is treated as absent — any
-    /// other failure (timeout, spawn failure, other exit codes) is rethrown so
-    /// a bad answer here can't let the force-fetch silently clobber a branch.
+    /// whether `fetchPullRequestHead`'s `refs/pull/<n>/head:refs/heads/<name>`
+    /// refspec is safe to run against `name`. Only the benign "ref missing"
+    /// case (`show-ref --quiet` exits 1) is treated as absent — any other
+    /// failure (timeout, spawn failure, other exit codes) is rethrown so a bad
+    /// answer here can't let the fetch move a branch it should have left alone.
     public func localBranchExists(repoPath: String, name: String) async throws -> Bool {
         do {
             _ = try await run(arguments: ["show-ref", "--verify", "--quiet", "refs/heads/\(name)"], at: repoPath)
@@ -278,12 +278,31 @@ public struct GitManager: Sendable {
     }
 
     /// Fetches a PR head (same-repo or fork — `refs/pull/<n>/head` exists for
-    /// both) into a local branch. The `+` force-updates, so callers MUST pass a
-    /// branch name verified free via `localBranchExists` / uniquification, or an
-    /// unrelated same-named branch is silently rewritten.
+    /// both) into a local branch.
+    ///
+    /// The refspec is deliberately **not** forced. Git therefore refuses to
+    /// rewrite an existing `refs/heads/<localBranch>` whose tip the pull head
+    /// does not contain: it exits 1 with `! [rejected] refs/pull/<n>/head ->
+    /// <localBranch> (non-fast-forward)` and leaves the branch where it stood.
+    /// A name that became taken after the caller's `localBranchExists` probe
+    /// then costs an attempt instead of a user's commits, and the failure
+    /// carries git's own word that this attempt did not create the branch —
+    /// which is what `WorktreeLifecycle.gitRefusedToCreateBranch` reads to keep
+    /// cleanup from deleting it.
+    ///
+    /// Two residuals, both verified against git 2.50, and both reasons callers
+    /// still pass a name verified free via `localBranchExists` /
+    /// uniquification rather than leaning on git to refuse:
+    ///
+    /// - A colliding branch the pull head *does* contain fast-forwards rather
+    ///   than being refused. No commits are lost (the old tip stays reachable
+    ///   from the new one), but the ref moves.
+    /// - A colliding branch checked out in another worktree fails differently,
+    ///   exit 128 with `fatal: refusing to fetch into branch '<ref>' checked
+    ///   out at '<path>'`, whether or not the update would fast-forward.
     public func fetchPullRequestHead(repoPath: String, number: Int, localBranch: String) async throws {
         _ = try await run(
-            arguments: ["fetch", "origin", "+refs/pull/\(number)/head:refs/heads/\(localBranch)"],
+            arguments: ["fetch", "origin", "refs/pull/\(number)/head:refs/heads/\(localBranch)"],
             at: repoPath
         )
     }
@@ -725,6 +744,18 @@ public struct GitManager: Sendable {
         _ = try await run(arguments: ["update-ref", "-d", ref], at: repoPath)
     }
 
+    /// Deletes the local branch `name`.
+    ///
+    /// `git branch -D` rather than `deleteRef`'s plumbing `update-ref -d`
+    /// deliberately: git refuses to delete a branch that is checked out in a
+    /// live worktree, and that refusal is a genuine safety net for the
+    /// failed-create cleanup path — plumbing would happily unhook a branch
+    /// somebody is working in. Run `worktreePrune` first so a stale
+    /// registration can't manufacture that refusal.
+    public func deleteLocalBranch(repoPath: String, name: String) async throws {
+        _ = try await run(arguments: ["branch", "-D", name], at: repoPath)
+    }
+
     /// Lists all ref names under `prefix` (e.g. `refs/tbd/snapshots`).
     public func listRefs(repoPath: String, prefix: String) async throws -> [String] {
         let output = try await run(
@@ -767,6 +798,30 @@ public struct GitManager: Sendable {
 
     // MARK: - Private
 
+    /// The environment every git subprocess runs with: the daemon's own
+    /// environment, with the locale pinned to `C`.
+    ///
+    /// Git's stderr is the only signal several callers have for *why* a command
+    /// failed, and one of those decisions is destructive: `WorktreeLifecycle`'s
+    /// failed-create cleanup decides whether it may `branch -D` off "a branch
+    /// named … already exists". Git localizes those messages when the ambient
+    /// locale asks it to, so without this pin the matching is only as stable as
+    /// whatever `LANG` the daemon happened to launch with — and a miss there
+    /// re-opens the "delete a branch we don't own" hazard the gate exists to
+    /// close.
+    ///
+    /// It **merges onto** the inherited environment rather than replacing it: a
+    /// bare dict would drop `PATH`, `HOME`, `SSH_AUTH_SOCK` and friends from
+    /// every git call the daemon makes. (Same mistake, different subsystem:
+    /// commit 56fa912f had to restore the launch `PATH` for tmux.)
+    static func gitEnvironment(
+        inheriting base: [String: String] = ProcessInfo.processInfo.environment
+    ) -> [String: String] {
+        // `LC_ALL` is the one git actually obeys last; `LANG` is pinned too so
+        // the child's own subprocesses don't see a mixed locale.
+        return base.merging(["LC_ALL": "C", "LANG": "C"]) { _, pinned in pinned }
+    }
+
     /// Runs a git command with the given arguments at the given directory and returns stdout.
     /// Throws `GitError` on non-zero exit.
     /// Package-internal test seam: drives `run()`'s timeout/kill wrapper against
@@ -797,6 +852,7 @@ public struct GitManager: Sendable {
             executable: executable,
             arguments: arguments,
             currentDirectory: directory,
+            environment: Self.gitEnvironment(),
             timeout: resolvedTimeout,
             clock: clock
         ) {

@@ -651,6 +651,13 @@ public actor RemoteProviderManager {
     }
 }
 
-enum RemoteProviderError: Error {
+enum RemoteProviderError: LocalizedError {
     case unknownProvider(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .unknownProvider(let id):
+            return "no remote provider is configured with id '\(id)'"
+        }
+    }
 }

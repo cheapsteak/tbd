@@ -416,6 +416,45 @@ import TBDShared
         #expect(try await db.worktrees.allPRStatuses()[wt.id] == nil)
     }
 
+    /// The hydration scope, asserted per status rather than as "active only".
+    ///
+    /// The maps these two feed are handed out whole in every `pr.list`, so
+    /// archived rows — the set that never stops growing, and that the poller
+    /// (`list(status: .active)`) would never refresh — must stay out. `.main`,
+    /// `.creating` and `.failed` are outside the poller's scope too, but they
+    /// are bounded and `pr.refresh` accepts any worktree id, so a value recorded
+    /// on one of them is real and must survive a restart. Narrowing to `.active`
+    /// dropped their icons at startup.
+    @Test func prHydrationCoversEveryUnarchivedStatusAndNoArchivedOne() async throws {
+        let db = try makeDB()
+        let repo = try await createRepo(db: db)
+        let status = PRStatus(number: 7, url: "https://example.com/pr/7", state: .mergeable)
+        let observation = PRObservation(outcome: .observed, observedAt: Date())
+
+        var ids: [WorktreeStatus: UUID] = [:]
+        for wtStatus in [WorktreeStatus.active, .main, .creating, .failed, .archived] {
+            let wt = try await db.worktrees.create(
+                repoID: repo.id, name: "wt-\(wtStatus.rawValue)", branch: "b-\(wtStatus.rawValue)",
+                path: "/tmp/pr-scope-\(UUID())", tmuxServer: "srv", status: wtStatus)
+            try await db.worktrees.setPRStatus(id: wt.id, status: status)
+            try await db.worktrees.setPRObservation(id: wt.id, observation: observation)
+            ids[wtStatus] = wt.id
+        }
+
+        let statuses = try await db.worktrees.allPRStatuses()
+        let observations = try await db.worktrees.allPRObservations()
+
+        for wtStatus in [WorktreeStatus.active, .main, .creating, .failed] {
+            let id = try #require(ids[wtStatus])
+            #expect(statuses[id] == status, "\(wtStatus.rawValue) lost its PR status at hydration")
+            #expect(observations[id] != nil,
+                    "\(wtStatus.rawValue) lost its PR observation at hydration")
+        }
+        let archived = try #require(ids[.archived])
+        #expect(statuses[archived] == nil)
+        #expect(observations[archived] == nil)
+    }
+
     // MARK: - scratchOnly filter
 
     /// `scratchOnly: true` + `status: .archived` must return exactly the

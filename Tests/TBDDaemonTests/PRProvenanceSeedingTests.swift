@@ -170,13 +170,21 @@ struct PRProvenanceSeedingTests {
                 prNumber: prNumber).id
         }
 
+        /// One poll pass, driven the way the daemon drives it. `pr.list` is
+        /// serve-only — `PRPoller` owns the clock and the pass — so a test that
+        /// polled through the RPC would seed nothing.
         @discardableResult
         func poll() async -> Bool {
-            await router.handle(RPCRequest(method: RPCMethod.prList)).success
+            do {
+                try await router.runPollPass()
+                return true
+            } catch {
+                return false
+            }
         }
     }
 
-    @Test("the pr.list poll seeds a binding from Worktree.prNumber")
+    @Test("the poll pass seeds a binding from Worktree.prNumber")
     func pollSeedsFromStoredNumber() async throws {
         let harness = try await PollHarness()
         let wt = try await harness.newWorktree(prNumber: 412)

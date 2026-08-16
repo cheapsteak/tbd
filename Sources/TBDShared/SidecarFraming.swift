@@ -28,9 +28,18 @@ public struct SidecarInputHeader: Codable, Sendable, Equatable {
 }
 
 /// Errors from decoding an input frame payload.
-public enum SidecarFramingError: Error, Equatable {
+public enum SidecarFramingError: LocalizedError, Equatable {
     case truncatedPayload      // payload ended before the declared header/bytes
     case undecodableHeader     // header sub-region wasn't valid JSON
+
+    public var errorDescription: String? {
+        switch self {
+        case .truncatedPayload:
+            return "sidecar frame payload was truncated: it ended before the declared header length or byte count"
+        case .undecodableHeader:
+            return "sidecar frame header sub-region was not valid JSON"
+        }
+    }
 }
 
 /// Read a little-endian `UInt32` at `offset` bytes past `data.startIndex`.

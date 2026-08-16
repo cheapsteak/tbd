@@ -7,12 +7,14 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "mock")
 /// Wraps a lower-level failure with the identity of the fixture item that
 /// triggered it, so a partial-seed abort names the exact repo/worktree/terminal
 /// the operator needs to fix — instead of a bare GRDB constraint error.
-public struct MockSeedError: Error, CustomStringConvertible {
+public struct MockSeedError: LocalizedError, CustomStringConvertible {
     /// Human-readable identifier, e.g. `repo 'acme'`,
     /// `worktree 'feature-x' in repo 'acme'`, `terminal[2] in worktree 'feature-x'`.
     public let item: String
     public let underlying: Error
     public var description: String { "Mock seeding failed for \(item): \(underlying)" }
+
+    public var errorDescription: String? { description }
 }
 
 /// A worktree's `parentName` referenced a name not seeded earlier in the same repo.
@@ -20,11 +22,13 @@ public struct MockSeedError: Error, CustomStringConvertible {
 /// `parentName` must name a worktree listed EARLIER in the same repo's array
 /// (see `WorktreeSeed.parentName`). A typo, wrong case, or forward-reference
 /// leaves it unresolvable — surfaced here rather than silently dropped.
-private struct UnresolvedParentError: Error, CustomStringConvertible {
+private struct UnresolvedParentError: LocalizedError, CustomStringConvertible {
     let parentName: String
     var description: String {
         "parentName '\(parentName)' does not match any worktree seeded earlier in this repo"
     }
+
+    var errorDescription: String? { description }
 }
 
 /// Seeds an in-memory (or isolated) `TBDDatabase` from a `MockScenario`.
@@ -170,7 +174,11 @@ public struct MockSeeder: Sendable {
             )
 
             if let state = tSeed.activityState {
-                try await db.terminals.setActivityState(id: terminal.id, activityState: state)
+                // Mock fixtures are composed by TBD, not observed from any
+                // machine interface — `.derived` is the honest source, and the
+                // seeded row carries it like every other.
+                try await db.terminals.setActivityState(
+                    id: terminal.id, activityState: state, source: .derived)
             }
 
             if let fixture = tSeed.transcriptFixture {

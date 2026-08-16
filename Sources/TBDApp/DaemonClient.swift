@@ -56,9 +56,14 @@ enum DaemonClientError: Error, CustomStringConvertible, LocalizedError, Sendable
 /// and can kill a healthy racing re-attach's fresh sink (the 56029f5b class,
 /// from a different throw site). `generation` is nil only when an older
 /// daemon minted none.
-struct AttachFDVendError: Error {
+struct AttachFDVendError: LocalizedError {
     let generation: UInt64?
     let underlying: any Error
+
+    var errorDescription: String? {
+        let gen = generation.map(String.init) ?? "none"
+        return "Attach fd vend failed (generation: \(gen)): \(underlying.localizedDescription)"
+    }
 }
 
 /// Actor that communicates with the TBD daemon over a Unix domain socket.
@@ -778,10 +783,14 @@ actor DaemonClient {
         )
     }
 
-    /// Fetch all cached PR statuses from the daemon.
-    func listPRStatuses() async throws -> [UUID: PRStatus] {
+    /// Fetch the daemon's PR snapshot: the cached values, and the outcome of
+    /// the last attempt to learn each. Both halves are returned because they
+    /// disagree — a value the last attempt failed to reconfirm is still the
+    /// newest anyone has, and a worktree with no value may have no PR or may be
+    /// one nobody could ask about.
+    func listPRStatuses() async throws -> (statuses: [UUID: PRStatus], observations: [UUID: PRObservation]) {
         let result = try await callNoParamsAsync(method: RPCMethod.prList, resultType: PRListResult.self)
-        return result.statuses
+        return (result.statuses, result.observations)
     }
 
     /// Fetch EVERY worktree's live PR bindings (tombstoned ones are excluded by
@@ -930,6 +939,17 @@ actor DaemonClient {
         try await callVoidAsync(
             method: RPCMethod.configSetGCEnabled,
             params: ConfigSetGCEnabledParams(enabled: enabled)
+        )
+    }
+
+    /// Persist supervision's fleet-wide authority switch (design 2026-07-26
+    /// §3, §7). `enabled: true` releases the fleet brake; `false` engages it.
+    /// Shipped OFF (braked); for now inert, since the rest of the supervision
+    /// subsystem is landing in the same series of changes.
+    func setSupervisionEnabled(_ enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetSupervisionEnabled,
+            params: ConfigSetSupervisionEnabledParams(enabled: enabled)
         )
     }
 
@@ -1323,14 +1343,17 @@ actor DaemonClient {
     }
 
     /// Trigger an immediate PR status refresh for one worktree.
-    /// Returns nil if no PR exists for the worktree's branch.
-    func refreshPRStatus(worktreeID: UUID) async throws -> PRStatus? {
+    ///
+    /// A nil `status` is not "no PR": it means nothing is cached, which the
+    /// accompanying `observation` disambiguates (the forge said there is none,
+    /// versus nobody could get an answer).
+    func refreshPRStatus(worktreeID: UUID) async throws -> (status: PRStatus?, observation: PRObservation?) {
         let result = try await callAsync(
             method: RPCMethod.prRefresh,
             params: PRRefreshParams(worktreeID: worktreeID),
             resultType: PRRefreshResult.self
         )
-        return result.status
+        return (result.status, result.observation)
     }
 
     // MARK: - State Subscription

@@ -49,12 +49,26 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// default, so `nil` here means "never chose" rather than "off". Resolve it
     /// through `Config.queuedPromptDefault`, never through `?? false`.
     var queued_prompt_enabled: Bool?
+    /// The fleet supervision brake (design 2026-07-26 §3, §7). **Genuinely
+    /// tri-state**, same shape as `queued_prompt_enabled`: the
+    /// `v75_config_supervision_enabled` column carries no SQL default, so
+    /// `nil` here means "never chose" rather than "off". Resolve it through
+    /// `Config.supervisionEnabledDefault`, never through `?? false`.
+    var supervision_enabled: Bool?
 
     /// - Parameter queuedPromptDefault: the shipped default a NULL
     ///   `queued_prompt_enabled` resolves to. Defaulted to the real constant;
     ///   the parameter exists so tests can prove that NULL *follows* a changed
     ///   default while an explicit `false` does not.
-    func toModel(queuedPromptDefault: Bool = Config.queuedPromptDefault) -> Config {
+    /// - Parameter supervisionEnabledDefault: same shape, for
+    ///   `supervision_enabled` — the parameter exists so tests can prove the
+    ///   same NULL-follows/explicit-sticks property for the fleet brake
+    ///   without waiting for the real `Config.supervisionEnabledDefault`
+    ///   constant to change.
+    func toModel(
+        queuedPromptDefault: Bool = Config.queuedPromptDefault,
+        supervisionEnabledDefault: Bool = Config.supervisionEnabledDefault
+    ) -> Config {
         Config(
             defaultProfileID: default_profile_id.flatMap(UUID.init(uuidString:)),
             primaryAgentPreference: primary_agent_preference
@@ -96,7 +110,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             // NOT `?? false`. The column has no SQL default, so NULL really
             // means "never chose" and must resolve to the shipped default —
             // that is the whole point of v70_config_queued_prompt.
-            queuedPromptEnabled: queued_prompt_enabled ?? queuedPromptDefault
+            queuedPromptEnabled: queued_prompt_enabled ?? queuedPromptDefault,
+            // Same reasoning, for the fleet supervision brake — NOT `?? false`.
+            supervisionEnabled: supervision_enabled ?? supervisionEnabledDefault
         )
     }
 }
@@ -342,6 +358,40 @@ public struct ConfigStore: Sendable {
                 sql: "UPDATE config SET queued_prompt_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
+        }
+    }
+
+    /// Persist the fleet supervision brake (design 2026-07-26 §3, §7). Off is
+    /// the shipped default; releasing it hands TBD's autonomous processes the
+    /// authority to act, but nothing in the daemon reads this column to
+    /// actually act yet — the rest of the supervision subsystem lands in the
+    /// same series of changes. Writing either value is an explicit gesture
+    /// that leaves the column non-NULL forever after — including `false`,
+    /// which is the point: an operator who pulls the brake stays braked when
+    /// the shipped default eventually graduates.
+    ///
+    /// The read and the write share one transaction on purpose. Read-then-write
+    /// across two calls lets two concurrent toggles observe the same previous
+    /// value, and each then believes it caused the transition: the supervision
+    /// ledger gets two identical brake lines for one change, and the record
+    /// claims something happened twice. Serializing them here is what makes
+    /// "did this call move the brake" answerable at all.
+    ///
+    /// - Returns: the **resolved** brake as it stood immediately before this
+    ///   write — the column when it was set, the shipped default when it was
+    ///   NULL — so a caller can tell a real transition from a gesture that
+    ///   changed nothing.
+    @discardableResult
+    public func setSupervisionEnabled(enabled: Bool) async throws -> Bool {
+        try await writer.write { db -> Bool in
+            let previous = try Bool.fetchOne(
+                db, sql: "SELECT supervision_enabled FROM config WHERE id = ?",
+                arguments: [Self.singletonID])
+            try db.execute(
+                sql: "UPDATE config SET supervision_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+            return previous ?? Config.supervisionEnabledDefault
         }
     }
 

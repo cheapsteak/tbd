@@ -161,6 +161,112 @@ custom_rules:
     message: "Don't hand-build a path into ~/tbd, ~/.claude or ~/.codex out of the home directory — it ignores TBD_HOME / TBD_CLAUDE_HOST_HOME / TBD_TEST_CODEX_HOME and writes into the developer's real store under scripts/test.sh. Use TBDConstants (configDir, reposDir, worktreesDir, …), TBDConstants.claudeHostHome / ClaudeProfileConfigDirManager.resolveHostBaseDirectory, or CodexHomeManager. Suppress with `// swiftlint:disable:next no_home_relative_store_path - <reason>` only with a reason."
     severity: error
 
+  error_types_must_be_localized:
+    name: "Error types must conform to LocalizedError"
+    # included/excluded HERE take REGEX (not glob), matched against file path.
+    # `Sources/TBDCLI` is deliberately absent and CANNOT be added here: the
+    # global `excluded:` list at the top of this file drops it, and a custom
+    # rule only runs on files already inside the global lint scope — the same
+    # fact the test-target note up there records. So TBDCLI's error types were
+    # converted by hand and carry no regression guard. The fix is not to remove
+    # `Sources/TBDCLI` from the global list: that would drag every default rule
+    # onto the CLI target, which is a separate change.
+    included:
+      - "Sources/(TBDShared|TBDDaemon|TBDApp|IconBaker)/.*\\.swift"
+    excluded:
+      # `GitManager.swift` — its two error types take their conformance from
+      # `Git/GitErrorLocalizedDescriptions.swift`, and the rule cannot see an
+      # extension conformance, so without this line it would fire on types that
+      # are already fixed. Excluding it therefore costs no coverage today. When
+      # the branch that owns `GitManager.swift` lands, move `LocalizedError`
+      # onto the declarations, delete the sidecar, and delete this entry.
+      - "Sources/TBDDaemon/Git/GitManager\\.swift"
+      # `TmuxManager.swift` — `TmuxError` is genuinely unconverted, and its fix
+      # belongs to the branch that owns the file rather than being duplicated
+      # here. This exclusion is real lost coverage, not a formality: it hides a
+      # type the rule would rightly fire on. Delete the entry when that branch
+      # lands with the conformance on the declaration.
+      - "Sources/TBDDaemon/Tmux/TmuxManager\\.swift"
+    # THE DEFECT THIS FENCES, because the failure is silent and reads as a
+    # framework bug rather than a missing conformance. A bare `Error` bridges to
+    # NSError, and `localizedDescription` on that bridge renders
+    # "The operation couldn't be completed. (Module.Type error 3.)" — the case
+    # name is gone, and every payload the case was carrying (path, errno,
+    # command, exit status, UUID) is gone with it. That string is what lands in
+    # the os.Logger error line and in the user-facing alert, so a throw that had
+    # everything needed to diagnose it arrives with nothing.
+    #
+    # THE TRAP, and the reason a `description` is not the fix: the bridge
+    # consults `LocalizedError.errorDescription` and nothing else.
+    # `CustomStringConvertible` is not consulted, so a type with a perfect
+    # `description` still logs the bridge string. Conform to `LocalizedError`
+    # and forward — `var errorDescription: String? { description }` — rather
+    # than duplicating the text.
+    #
+    # WHAT THE REGEX CAN AND CANNOT SEE. It reads the whole inheritance clause —
+    # everything between the declaration's colon and its opening brace. The
+    # negative lookahead clears the type when `LocalizedError` appears anywhere
+    # in that clause, in either order (`Error, LocalizedError` and
+    # `LocalizedError, Error` both pass), and `[^{]*` bounds both halves at the
+    # brace so neither can run into the body. Bounding on the brace rather than
+    # on the newline is deliberate: a conformance list wrapped across lines is
+    # otherwise invisible in BOTH directions — the rule would neither see the
+    # bare `Error` that needs fixing nor the `LocalizedError` that already fixed
+    # it. `(?:<[^>]*>)?` lets a generic type (`enum Box<T>: Error`) match too;
+    # without it the name and the colon are separated and the whole declaration
+    # slips through. Generic *constraints* (`func f<E: Error>(…)`) still don't
+    # fire, because the rule matches a type-declaration keyword ahead of the
+    # name.
+    #
+    # WHY THE LOOKAHEAD STOPS AT `/` AND THE MATCH DOES NOT. `match_kinds`
+    # filters the characters a match CONSUMES, and a lookahead is zero-width —
+    # its scan is not part of the match, so kind filtering does not reach it.
+    # Without the `/`, a comment sitting between the colon and the brace that
+    # merely NAMES the protocol — `enum Foo: Error // TODO: add LocalizedError`
+    # — satisfied the lookahead and silently retired the rule for that
+    # declaration. That is the single most likely thing to be written on a type
+    # someone has not converted yet, so it has to keep firing. Excluding `/`
+    # from the lookahead stops the scan at the comment; a real conformance
+    # clause never contains one. The cost is a false POSITIVE on
+    # `struct X: /* the fix */ LocalizedError` — loud, and fixed by moving the
+    # comment, which is the direction to fail in.
+    #
+    # WHAT IT STILL CANNOT SEE. None of these is exploited in the tree today;
+    # they are listed so nobody mistakes the rule for exhaustive.
+    #
+    #   - A conformance in a separate `extension X: LocalizedError` — declare it
+    #     on the type itself. The sidecar file named under `excluded:` above is
+    #     the sanctioned exception and is excluded by path.
+    #   - A bare `Error` reached through a refining protocol
+    #     (`protocol AppError: Error`, then `enum X: AppError`), or through
+    #     `CustomNSError`: the clause names no word-bounded `Error` token.
+    #   - A NESTED generic clause (`struct Box<T, U: Collection<Int>>: Error`):
+    #     `[^>]*` stops at the inner `>`. Single-level generics do match. The
+    #     fix would be to let the colon float, which costs a false positive on
+    #     every `struct Wrapper<E: Error>` — a constraint, not an error type —
+    #     so the miss is the better trade.
+    #   - A comment between the colon and the `Error` token: the match consumes
+    #     it, and `comment` is deliberately not in `match_kinds`, so the whole
+    #     match is dropped. Adding `comment` there would let a doc comment that
+    #     merely quotes `enum Foo: Error` fire on its own.
+    #
+    # It also over-fires in two shapes, both loud and both suppressible with a
+    # reasoned `swiftlint:disable:next`: a conformance to someone else's nested
+    # type named `Error` (`: MyModule.Error`), and `LocalizedError` reached
+    # through a typealias or a refining protocol (`: AppLocalizedError`), which
+    # the lookahead's literal token match cannot recognize.
+    #
+    # `match_kinds` keeps the match itself out of prose: a doc comment or string
+    # literal containing `enum Foo: Error` is not a declaration and does not
+    # fire.
+    regex: '\b(?:enum|struct|class|actor|extension)\s+\w+\s*(?:<[^>]*>)?\s*:(?![^{/]*\bLocalizedError\b)[^{]*\bError\b'
+    match_kinds:
+      - keyword
+      - identifier
+      - typeidentifier
+    message: "Error types must declare LocalizedError on the type itself, with an errorDescription that renders the case's full payload. Without it, localizedDescription returns the NSError bridge string (\"The operation couldn't be completed. (Module.Type error N.)\") and the payload is lost from logs and alerts. A CustomStringConvertible `description` does NOT fix this — localizedDescription consults errorDescription only; forward to it with `var errorDescription: String? { description }`. A conformance in a separate extension is invisible to this rule and must move onto the declaration. Reference pattern: Sources/TBDShared/CLIInstaller.swift. Suppress with `// swiftlint:disable:next error_types_must_be_localized - <reason>` only with a reason."
+    severity: error
+
   no_scrollview_in_transcript_cards:
     name: "No direct ScrollView in transcript row cards"
     # included/excluded HERE take REGEX (not glob), matched against file path.

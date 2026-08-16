@@ -55,9 +55,32 @@ struct WorktreeRowView: View {
         RowStatusIndicator.shouldBoldName(notification)
     }
 
+    private var prObservation: PRObservation? {
+        appState.prObservations[worktree.id]
+    }
+
     private var prPresentation: PRStatusPresentation? {
         guard !isMain else { return nil }
         return PRStatusPresentation.make(for: prStatus)
+    }
+
+    /// Tooltip for the "nobody could find out" indicator: shown only when there
+    /// is no cached PR at all AND the last attempt came back `.undetermined`.
+    /// Without it that row renders exactly like a row with no pull request,
+    /// which is the collapse `PRObservation` exists to undo — a forge outage
+    /// would look like a fleet with nothing open.
+    ///
+    /// `Date()` inside the body is deliberate rather than overlooked. The age it
+    /// renders is the age of `prObservation`, and `AppState.prObservations` is
+    /// republished on every poll — the observation's own `observedAt` advances
+    /// each attempt, so the dictionary differs and this body re-evaluates on the
+    /// same ~30 s cadence as the fact it is describing. That is already a coarse
+    /// shared ticker, driven by the data rather than beside it, and it is far
+    /// finer than `checkedLabel`'s five-minute buckets. **If that republication
+    /// is ever made value-only, this string freezes and needs a real ticker.**
+    private var prUnknownTooltip: String? {
+        guard !isMain, prStatus == nil else { return nil }
+        return PRFreshness.unknownIndicatorTooltip(prObservation, now: Date())
     }
 
     /// Any PARKED terminal — hibernated (authoritative) or legacy-suspended.
@@ -158,12 +181,14 @@ struct WorktreeRowView: View {
     nonisolated static func leadingIndicator(
         worktree: Worktree,
         isPending: Bool,
-        hasPRStatus: Bool
+        hasPRStatus: Bool,
+        hasUndeterminedPR: Bool = false
     ) -> LeadingRowIndicator? {
         RowStatusIndicator.leading(
             isPending: isPending,
             hasPRStatus: hasPRStatus,
-            isRemote: !worktree.location.isLocal
+            isRemote: !worktree.location.isLocal,
+            hasUndeterminedPR: hasUndeterminedPR
         )
     }
 
@@ -172,7 +197,8 @@ struct WorktreeRowView: View {
         switch Self.leadingIndicator(
             worktree: worktree,
             isPending: isPending && !isEditing,
-            hasPRStatus: prPresentation != nil
+            hasPRStatus: prPresentation != nil,
+            hasUndeterminedPR: prUnknownTooltip != nil
         ) {
         case .prStatus:
             if let presentation = prPresentation, let status = prStatus {
@@ -180,6 +206,12 @@ struct WorktreeRowView: View {
                 // underlying (UNKNOWN→pending) check reason.
                 let detail = presentation.badge.map { "in merge queue, position \($0)" }
                     ?? (status.reason ?? status.state.displayReason)
+                // The cache never speaks without saying how old it is, and
+                // never hides that its last re-read failed.
+                let freshness = PRFreshness.clauses(
+                    status: status, observation: prObservation, now: Date())
+                let tooltip = (["PR #\(status.number)", detail] + freshness)
+                    .joined(separator: " · ")
                 Button(action: openPR) {
                     prGlyph(presentation)
                         .frame(width: 12, height: 12)
@@ -187,12 +219,23 @@ struct WorktreeRowView: View {
                 }
                 .buttonStyle(.plain)
                 .onHover { isPRIconHovered = $0 }
-                .accessibilityLabel("PR #\(status.number): \(detail)")
+                .accessibilityLabel(
+                    "PR #\(status.number): \(([detail] + freshness).joined(separator: ", "))")
                 .anchorPreference(key: RowTooltipPreferenceKey.self, value: .bounds) { anchor in
-                    isPRIconHovered
-                        ? RowTooltipPreference(text: "PR #\(status.number) · \(detail)", anchor: anchor)
-                        : nil
+                    isPRIconHovered ? RowTooltipPreference(text: tooltip, anchor: anchor) : nil
                 }
+            }
+        case .prUnknown:
+            if let tooltip = prUnknownTooltip {
+                Image(systemName: "questionmark.circle")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 12, height: 12)
+                    .onHover { isPRIconHovered = $0 }
+                    .accessibilityLabel(tooltip)
+                    .anchorPreference(key: RowTooltipPreferenceKey.self, value: .bounds) { anchor in
+                        isPRIconHovered ? RowTooltipPreference(text: tooltip, anchor: anchor) : nil
+                    }
             }
         case .pending:
             Image(systemName: "circle.dotted")

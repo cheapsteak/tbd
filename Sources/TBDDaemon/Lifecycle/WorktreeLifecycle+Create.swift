@@ -194,11 +194,13 @@ extension WorktreeLifecycle {
 
     /// Returns `base`, or `base-2`, `base-3`, … — the first name for which no
     /// local `refs/heads/<name>` exists. Mirrors `uniqueFolderName`'s loop but
-    /// probes git refs instead of paths: the PR-head fetch uses a `+` force
-    /// refspec, so a colliding name would silently rewrite an unrelated branch;
-    /// this picks a free name first. Caps at -1000; if every candidate through
-    /// `base-1000` is taken it THROWS rather than returning the taken `base` —
-    /// returning it would let the force refspec clobber that existing branch.
+    /// probes git refs instead of paths: the PR-head fetch writes
+    /// `refs/heads/<name>` directly, so aiming it at a colliding name either
+    /// fails the create outright or — when the pull head contains that branch —
+    /// fast-forwards someone else's ref; this picks a free name first. Caps at
+    /// -1000; if every candidate through `base-1000` is taken it THROWS rather
+    /// than returning the taken `base`, which would aim the fetch at a branch
+    /// this attempt does not own.
     private func uniqueLocalBranchName(repoPath: String, base: String) async throws -> String {
         if try await git.localBranchExists(repoPath: repoPath, name: base) == false {
             return base
@@ -210,7 +212,7 @@ extension WorktreeLifecycle {
             }
         }
         throw WorktreeLifecycleError.createFailed(
-            "no free local branch name for '\(base)' after 1000 attempts; refusing to reuse it (the force-fetch refspec would clobber the existing branch)")
+            "no free local branch name for '\(base)' after 1000 attempts; refusing to reuse it (the pull-head fetch would write over the existing branch)")
     }
 
     /// Phase 2: Async. Performs git fetch, git worktree add, tmux setup,
@@ -281,13 +283,32 @@ extension WorktreeLifecycle {
                 // get `git worktree add <path> <branch>`; remote refs get
                 // `--track -b <localName> <path> origin/<name>` to create a
                 // local tracking branch.
+                //
+                // Two of the three legs below CREATE a local branch before the
+                // step that can fail, and git fails *after* creating it in the
+                // ordinary case — a stale `.git/config.lock` makes the upstream
+                // config write fail while the branch stands (verified against
+                // git 2.50). Those two record what they made here so the `catch`
+                // can hand it to the same `cleanUpFailedWorktreeAdd` the
+                // fresh-create path uses, with the same gates.
+                //
+                // The plain `worktreeAddExisting` leg creates NOTHING and checks
+                // out a branch the caller owns, so it leaves this nil and the
+                // catch only removes the directory. Deleting there would destroy
+                // a user's branch — the worst outcome this path has.
+                var attemptedBranch: AttemptedBranch?
+                // Set by the fork-PR leg once its checkout has succeeded: the
+                // local branch the fetch wrote, which `uniqueLocalBranchName`
+                // may have moved off the row's own branch name. Carried out of
+                // the protected scope because the DB bookkeeping it implies
+                // belongs *after* the git work, not inside the `catch` that
+                // deletes what that work produced.
+                var fetchedPullHeadBranch: String?
                 do {
                     if checkoutPRHead, let prNumber = worktree.prNumber {
                         // Fork-PR checkout: the PR head has no local ref, so
                         // fetch refs/pull/<n>/head into a collision-free local
-                        // branch (the `+` refspec force-updates, so reusing an
-                        // existing ref name would silently rewrite an unrelated
-                        // branch), then check it out via the plain
+                        // branch, then check it out via the plain
                         // existing-branch path. No fork remote is ever added.
                         //
                         // Decorated same-repo rows (prNumber set, checkoutPRHead
@@ -297,22 +318,79 @@ extension WorktreeLifecycle {
                         let localBranch = try await uniqueLocalBranchName(
                             repoPath: repo.path, base: worktree.branch
                         )
+                        // Re-probe the chosen name immediately before the fetch,
+                        // and keep the tri-state, for the same reason the other
+                        // legs do: cleanup must be able to tell a branch this
+                        // attempt made from one that was already standing. It
+                        // closes the two states we can observe — a branch
+                        // already standing under this name (`true`) and a probe
+                        // that did not answer (`nil`) both block the delete —
+                        // and keeps the answer honest if
+                        // `uniqueLocalBranchName`'s contract ever loosens.
+                        //
+                        // The probe→fetch window is not its job to close, and it
+                        // cannot: a branch an external actor creates inside that
+                        // gap is invisible to a probe taken before it. Gates 1
+                        // and 4 cover that window instead, and gate 1 works here
+                        // because `fetchPullRequestHead`'s refspec is unforced —
+                        // git rejects the update instead of rewriting the branch,
+                        // and `gitRefusedToCreateBranch` reads the rejection.
+                        // The residual is a collision the pull head *contains*,
+                        // which fast-forwards silently; see that method.
+                        let prBranchPreExisted = try? await git.localBranchExists(
+                            repoPath: repo.path, name: localBranch
+                        )
+                        // Recorded before the fetch so a fetch that dies with the
+                        // ref half-written still reaches cleanup — carrying no
+                        // expected tip, which blocks the delete. That is the
+                        // right answer for this leg: the fetch is the only step
+                        // that writes the ref, so a fetch that did not report
+                        // success never created the branch standing there.
+                        attemptedBranch = AttemptedBranch(
+                            name: localBranch, preExisted: prBranchPreExisted
+                        )
                         try await git.fetchPullRequestHead(
                             repoPath: repo.path, number: prNumber, localBranch: localBranch
+                        )
+                        // Only now is there a tip to speak of, and this is the
+                        // moment it becomes meaningful: the step that can still
+                        // fail with the branch standing is the checkout below,
+                        // not the fetch. Sampling the remote's `refs/pull/<n>/head`
+                        // beforehand would cost a second network round trip to
+                        // learn what the unforced refspec has just settled —
+                        // it either wrote that tip or refused outright.
+                        attemptedBranch?.expectedTip = try? await git.headSHA(
+                            repoPath: repo.path, ref: "refs/heads/\(localBranch)"
                         )
                         try await git.worktreeAddExisting(
                             repoPath: repo.path,
                             worktreePath: worktree.path,
                             branch: localBranch
                         )
-                        if localBranch != worktree.branch {
-                            try await db.worktrees.updateBranch(id: worktreeID, branch: localBranch)
-                        }
-                        // TBD made this directory but not its contents: stamp
-                        // the row so folder-trust is never pre-answered for it.
-                        checkedOutForeignHead = true
-                        try await db.worktrees.markForeignHead(id: worktreeID)
+                        fetchedPullHeadBranch = localBranch
                     } else if ref.hasPrefix("origin/") {
+                        // `--track -b <localBranch>` creates the branch. Probe
+                        // first so cleanup can tell a branch this attempt made
+                        // from one that was already standing; the tri-state is
+                        // kept (`nil` = the probe itself failed) for the same
+                        // reason the fresh-create path keeps it.
+                        //
+                        // The expected tip is the remote ref's, sampled BEFORE
+                        // the add for the same reason the fresh-create legs
+                        // sample the base tip before theirs: `-b <local>
+                        // <remoteRef>` copies whatever that ref held when the add
+                        // ran, and reading it afterwards would describe a ref
+                        // another fetch may have moved in between.
+                        let trackedBranchPreExisted = try? await git.localBranchExists(
+                            repoPath: repo.path, name: worktree.branch
+                        )
+                        attemptedBranch = AttemptedBranch(
+                            name: worktree.branch,
+                            preExisted: trackedBranchPreExisted,
+                            expectedTip: try? await git.headSHA(
+                                repoPath: repo.path, ref: ref
+                            )
+                        )
                         try await git.worktreeAddTrackingRemote(
                             repoPath: repo.path,
                             worktreePath: worktree.path,
@@ -326,13 +404,46 @@ extension WorktreeLifecycle {
                             branch: worktree.branch
                         )
                     }
-                    resultPath = worktree.path
                 } catch {
-                    // Clean up any partially-created directory before bubbling.
-                    try? FileManager.default.removeItem(atPath: worktree.path)
+                    if let attemptedBranch {
+                        // Removes the partially-created directory too, then
+                        // deletes the branch only if all four gates hold.
+                        await cleanUpFailedWorktreeAdd(
+                            repoPath: repo.path,
+                            worktreePath: worktree.path,
+                            attempted: attemptedBranch,
+                            branchNameWasAlreadyTaken: gitRefusedToCreateBranch(error)
+                        )
+                    } else {
+                        // Nothing was created; only the partially-written
+                        // directory needs removing.
+                        try? FileManager.default.removeItem(atPath: worktree.path)
+                    }
                     throw WorktreeLifecycleError.createFailed(
                         "git worktree add failed for existing branch '\(ref)': \(error)"
                     )
+                }
+                // The protected scope ends at the git work's success, matching
+                // the other two legs. What follows is bookkeeping about a
+                // checkout that already exists on disk, so it must not run where
+                // `cleanUpFailedWorktreeAdd` can reach it. A successful fetch is
+                // exactly the state that clears that helper's gates — the branch
+                // was probed absent, git raised no refusal, and it now stands at
+                // the tip the fetch wrote — so a throw from either write below
+                // would hand it a correctly-fetched branch and a valid directory
+                // to destroy. Failing the create is still right (the outer catch
+                // drops the row); destroying the checkout is not.
+                resultPath = worktree.path
+                if let fetchedPullHeadBranch {
+                    if fetchedPullHeadBranch != worktree.branch {
+                        try await db.worktrees.updateBranch(
+                            id: worktreeID, branch: fetchedPullHeadBranch
+                        )
+                    }
+                    // TBD made this directory but not its contents: stamp
+                    // the row so folder-trust is never pre-answered for it.
+                    checkedOutForeignHead = true
+                    try await db.worktrees.markForeignHead(id: worktreeID)
                 }
             } else {
                 let result = try await attemptWorktreeAdd(
@@ -522,8 +633,12 @@ extension WorktreeLifecycle {
         //
         // A failed existence probe falls through to the old path rather than
         // failing creation: not knowing is not the same as knowing it's absent.
-        let branchExistsLocally = (try? await git.localBranchExists(repoPath: repoPath, name: branch)) ?? false
-        if userSpecifiedBranch && branchExistsLocally {
+        //
+        // The tri-state is kept (rather than collapsed with `?? false`) because
+        // failure cleanup needs it: `nil` means the probe itself failed, and a
+        // branch we cannot prove was absent beforehand must never be deleted.
+        let branchPreExisted: Bool? = try? await git.localBranchExists(repoPath: repoPath, name: branch)
+        if userSpecifiedBranch && branchPreExisted == true {
             do {
                 try await git.worktreeAddExisting(
                     repoPath: repoPath,
@@ -544,7 +659,21 @@ extension WorktreeLifecycle {
             }
         }
 
+        var lastKind: WorktreeAddFailureKind = .baseUnresolvable
+
         for baseBranch in baseBranches {
+            // Sampled per base and BEFORE the add, which is what makes it
+            // evidence: `-b <branch> <baseBranch>` points the new ref at
+            // whatever this base resolved to at that moment, so a tip read
+            // afterwards would describe a base a concurrent fetch may have
+            // moved — and would say nothing about what this attempt's own `-b`
+            // would have produced. An unresolvable base yields `nil`, which
+            // blocks the delete.
+            let attempted = AttemptedBranch(
+                name: branch,
+                preExisted: branchPreExisted,
+                expectedTip: try? await git.headSHA(repoPath: repoPath, ref: baseBranch)
+            )
             do {
                 try await git.worktreeAdd(
                     repoPath: repoPath,
@@ -555,18 +684,79 @@ extension WorktreeLifecycle {
                 return (name: name, branch: branch, path: worktreePath)
             } catch {
                 lastError = error
+                lastKind = classifyWorktreeAddFailure(error)
                 logger.warning("Failed to add worktree with base branch \(baseBranch, privacy: .public): \(String(describing: error), privacy: .public)")
-                // Clean up the directory if it was partially created
-                try? FileManager.default.removeItem(atPath: worktreePath)
+                await cleanUpFailedWorktreeAdd(
+                    repoPath: repoPath, worktreePath: worktreePath,
+                    attempted: attempted,
+                    branchNameWasAlreadyTaken: gitRefusedToCreateBranch(error)
+                )
+                if lastKind == .gitUnusable {
+                    // git returned no verdict at all, so nothing was learned
+                    // about the base or the name — and every further attempt
+                    // costs another full `GitManager.commandTimeout` (120 s).
+                    // Continuing here would make a wedged git report after
+                    // 240 s, and after 480 s once the rename retry ran too.
+                    throw WorktreeLifecycleError.createFailed(
+                        "git worktree add did not complete\(formatErrorForMessage(error))"
+                    )
+                }
+                if lastKind == .nameCollision {
+                    // The name collides regardless of base, so the second base
+                    // would fail identically. A fresh name is the only remedy.
+                    break
+                }
             }
         }
 
+        // A repo-level cause that survived both bases. `.repoLevel` deliberately
+        // does NOT break out of the loop above, because the two bases are not
+        // interchangeable: base 1 is a remote-tracking ref, so `-b` writes
+        // upstream configuration, while base 2 is a plain local ref and writes
+        // none. Verified against git 2.50, the local base recovers from causes
+        // the remote base cannot survive — a stale `.git/config.lock` fails only
+        // the config write (and the cleanup above clears the branch it left, so
+        // the second attempt starts clean), and a local branch literally named
+        // `origin/main` makes base 1 fatal on `ambiguous object name` while base
+        // 2 resolves. A *fresh name* still cannot help, though, so this throws
+        // rather than falling through to the rename retry. Surface git's own
+        // words instead of guessing.
+        if lastKind == .repoLevel, let lastError {
+            throw WorktreeLifecycleError.createFailed(
+                "git worktree add failed\(repoLevelHint(lastError))\(formatErrorForMessage(lastError))"
+            )
+        }
+
+        // Both bases are spent. When the caller NAMED the branch, the retry
+        // below keeps that name and changes only the folder — so if the branch
+        // name is what stands in the way, the retry re-attempts the identical
+        // name against both bases, fails identically twice, and lands on the
+        // generic "after all attempts" with the real cause buried. Say what
+        // collided instead.
+        //
+        // Deliberately narrower than the whole `.nameCollision` case: an
+        // occupied worktree *path* is also a collision, and there a fresh folder
+        // is exactly the remedy.
+        if lastKind == .nameCollision, userSpecifiedBranch,
+           let lastError, gitSaysBranchNameIsTaken(lastError) {
+            throw WorktreeLifecycleError.createFailed(
+                "could not create branch '\(branch)' — the name is already taken\(formatErrorForMessage(lastError))"
+            )
+        }
+
+        // A fresh name is the only remaining move, and it
+        // is worth making only for a collision — `.baseUnresolvable` means no
+        // ref resolved, which no folder or branch name changes, so retrying
+        // would burn two more identical failures and then report the generic
+        // "after all attempts" instead of naming the bases that were tried.
+        // (`.repoLevel` and `.gitUnusable` never reach here; both already threw.)
+        //
         // Explicit folders and identity-sensitive callers cannot silently
-        // switch to a different generated folder and branch.
-        if userSpecifiedFolder || !retryGeneratedNameOnCollision {
+        // switch to a different generated folder and branch either.
+        if lastKind == .baseUnresolvable || userSpecifiedFolder || !retryGeneratedNameOnCollision {
             let errorDetail = lastError.flatMap { formatErrorForMessage($0) } ?? ""
             throw WorktreeLifecycleError.createFailed(
-                "git worktree add failed — the folder or branch may already exist\(errorDetail)"
+                "\(describeExhaustedBases(lastKind, baseBranches: baseBranches))\(errorDetail)"
             )
         }
 
@@ -580,7 +770,26 @@ extension WorktreeLifecycle {
             withIntermediateDirectories: true
         )
 
+        // The retry leg usually uses a DIFFERENT branch name, so it needs its
+        // own pre-existence answer: a freshly generated name that happens to
+        // collide with somebody's branch is exactly the case where deleting on
+        // failure would destroy work we did not create. When the name is
+        // unchanged (a user-specified branch is kept across the retry) the
+        // original probe still holds — the loop above only ever *attempted* to
+        // delete a branch it had created, so reusing the answer can leave a
+        // leaked branch standing but can never widen what is eligible for
+        // deletion.
+        let retryBranchPreExisted: Bool? = retryBranch == branch
+            ? branchPreExisted
+            : (try? await git.localBranchExists(repoPath: repoPath, name: retryBranch))
+
         for baseBranch in baseBranches {
+            // Sampled per base and before the add, exactly as in the first loop.
+            let attempted = AttemptedBranch(
+                name: retryBranch,
+                preExisted: retryBranchPreExisted,
+                expectedTip: try? await git.headSHA(repoPath: repoPath, ref: baseBranch)
+            )
             do {
                 try await git.worktreeAdd(
                     repoPath: repoPath,
@@ -591,9 +800,37 @@ extension WorktreeLifecycle {
                 return (name: retryName, branch: retryBranch, path: retryPath)
             } catch {
                 lastError = error
+                lastKind = classifyWorktreeAddFailure(error)
                 logger.warning("Failed to add worktree with retry path and base branch \(baseBranch, privacy: .public): \(String(describing: error), privacy: .public)")
-                try? FileManager.default.removeItem(atPath: retryPath)
+                await cleanUpFailedWorktreeAdd(
+                    repoPath: repoPath, worktreePath: retryPath,
+                    attempted: attempted,
+                    branchNameWasAlreadyTaken: gitRefusedToCreateBranch(error)
+                )
+                if lastKind == .gitUnusable {
+                    // Fail fast for the same reason as in the first loop: git
+                    // said nothing, and another base costs another full
+                    // subprocess timeout.
+                    throw WorktreeLifecycleError.createFailed(
+                        "git worktree add did not complete\(formatErrorForMessage(error))"
+                    )
+                }
+                if lastKind == .nameCollision {
+                    // Base-independent here for the same reason as in the first
+                    // loop: the second base would fail identically.
+                    break
+                }
             }
+        }
+
+        // Mirrors the first loop: `.repoLevel` is worth the other base, whose
+        // plain local ref skips the upstream-config write the remote base
+        // performs, but is never worth a further name. "Spent" here means this
+        // loop's bases — the first loop already spent its own.
+        if lastKind == .repoLevel, let lastError {
+            throw WorktreeLifecycleError.createFailed(
+                "git worktree add failed\(repoLevelHint(lastError))\(formatErrorForMessage(lastError))"
+            )
         }
 
         let errorDetail = lastError.flatMap { formatErrorForMessage($0) } ?? ""
@@ -602,12 +839,304 @@ extension WorktreeLifecycle {
         )
     }
 
+    /// Why a `git worktree add` failed — and therefore which of the two
+    /// retries above can possibly help.
+    ///
+    /// Classification is a whitelist of known-recoverable stderr shapes;
+    /// anything unrecognized is `.repoLevel`, which never earns a fresh name.
+    /// That direction is the safe one: an unclassifiable error retried under a
+    /// second *name* manufactures orphan branches, while a recoverable error
+    /// misread as fatal merely surfaces git's real message.
+    enum WorktreeAddFailureKind {
+        /// The base ref did not resolve. The *next base branch* may — this is
+        /// exactly what the two-base loop exists for.
+        case baseUnresolvable
+        /// The branch name, the folder path, or the checkout is already taken.
+        /// Every base fails identically; only a *fresh name* can help.
+        case nameCollision
+        /// Anything else git reported: a stale `.git/config.lock`, a corrupt
+        /// repo, a full disk, a local branch shadowing `origin/<default>`.
+        /// No *name* changes the outcome, but the *other base* still can —
+        /// the two are not interchangeable, since only the remote-tracking one
+        /// makes `-b` write upstream configuration. So the loop continues and
+        /// this only becomes fatal once both bases are spent.
+        case repoLevel
+        /// git returned no verdict at all — the subprocess timed out or could
+        /// not be spawned. Nothing was learned about the base or the name, and
+        /// unlike `.repoLevel` there is no cheap second opinion to buy: another
+        /// base costs another full `GitManager.commandTimeout`. Fails fast.
+        case gitUnusable
+    }
+
+    /// Classifies a `worktreeAdd` failure off `GitError.stderr`. A non-`GitError`
+    /// (spawn failure, timeout) is `.gitUnusable` — git never got far enough to
+    /// say anything about the base or the name.
+    private func classifyWorktreeAddFailure(_ error: Error) -> WorktreeAddFailureKind {
+        guard let gitError = error as? GitError else { return .gitUnusable }
+        let stderr = gitError.stderr.lowercased()
+
+        // "fatal: invalid reference: origin/main"
+        // "fatal: not a valid object name: 'origin/main'"
+        // "fatal: ambiguous argument 'origin/main': unknown revision or path
+        //  not in the working tree."
+        if stderr.contains("invalid reference")
+            || stderr.contains("not a valid object name")
+            || stderr.contains("unknown revision") {
+            return .baseUnresolvable
+        }
+
+        // "fatal: a branch named 'tbd/quiet-fox' already exists"
+        // "fatal: '../w3' already exists"
+        // "fatal: 'main' is already used by worktree at '/path/to/wt'"
+        if stderr.contains("already exists")
+            || stderr.contains("is already used by worktree at") {
+            return .nameCollision
+        }
+
+        return .repoLevel
+    }
+
+    /// The branch a single create attempt is on the hook for, and everything
+    /// that attempt knows about it that `cleanUpFailedWorktreeAdd` cannot
+    /// reconstruct after the fact.
+    ///
+    /// Both facts are measurements with an expiry, which is why they are
+    /// captured here rather than gathered inside the cleanup: read after the
+    /// failure, "was the name free?" answers about a world the attempt has
+    /// already changed, and "where does this base point?" answers about a ref
+    /// anything else may have moved since.
+    ///
+    /// The per-leg timing for `expectedTip`, which is the whole substance of
+    /// the value:
+    ///
+    /// - **Fresh create** (`worktreeAdd(… baseBranch:)`) — the resolved tip of
+    ///   the base this attempt is about to use, sampled per base, before the
+    ///   add.
+    /// - **Remote-tracking checkout** (`worktreeAddTrackingRemote`) — the tip
+    ///   of the remote ref, before the add, for the same reason.
+    /// - **Revive from an archived SHA** (`worktreeAddNewBranch(… sha:)`) — that
+    ///   SHA. It is the argument `-b` copies, so it needs no sampling and cannot
+    ///   go stale.
+    /// - **Fork-PR checkout** — the tip the unforced
+    ///   `refs/pull/<n>/head:refs/heads/<name>` refspec wrote, read once the
+    ///   fetch reports success. Left `nil` until then: the fetch is the only
+    ///   step on that leg that writes the ref, so a fetch that failed created
+    ///   nothing, and `nil` correctly refuses to authorize a delete.
+    struct AttemptedBranch: Sendable {
+        /// The local branch name this attempt aims at — which is not always the
+        /// worktree row's branch (the fork-PR leg uniquifies it).
+        let name: String
+        /// Whether `name` was already standing when this attempt started.
+        /// `nil` means the probe itself failed.
+        let preExisted: Bool?
+        /// The SHA this attempt would have pointed `name` at. `nil` means it
+        /// could not be established, which blocks the delete.
+        var expectedTip: String?
+
+        init(name: String, preExisted: Bool?, expectedTip: String? = nil) {
+            self.name = name
+            self.preExisted = preExisted
+            self.expectedTip = expectedTip
+        }
+    }
+
+    /// Positive evidence for the one question `cleanUpFailedWorktreeAdd` cannot
+    /// answer from its own bookkeeping: whether the branch standing there now is
+    /// one this attempt created. Git refusing to write it settles that — it
+    /// isn't.
+    ///
+    /// Three phrasings mean that refusal, all verified against git 2.50 — the
+    /// first from `worktree add -b`, the other two from the fork-PR leg's
+    /// `fetch refs/pull/<n>/head:refs/heads/<name>`. Each of them says the
+    /// name was already taken:
+    ///
+    /// - `fatal: a branch named 'x' already exists`
+    /// - ` ! [rejected]  refs/pull/7/head -> x  (non-fast-forward)` — a fetch
+    ///   only ever rejects a destination ref that already exists, so the line
+    ///   says the same thing the `fatal:` one does.
+    /// - `fatal: refusing to fetch into branch 'refs/heads/x' checked out at
+    ///   '<path>'` — a ref cannot be checked out unless it exists.
+    ///
+    /// Matched loosely (any branch name, not just ours) on purpose, and the
+    /// direction of that looseness is what makes widening it safe: every extra
+    /// match returns `true`, and `true` is the answer that *keeps* the branch.
+    /// The two ways to be wrong are not symmetric — failing to delete a branch
+    /// we made leaves a visible, recoverable `tbd/<name>`, while deleting one
+    /// we did not destroys work.
+    ///
+    /// **`false` is an abstention, not a finding.** An unrecognized phrasing —
+    /// a future git, a non-standard build, a wrapper reformatting stderr —
+    /// produces `false`, the same value a genuine "the branch is ours" failure
+    /// produces, so this gate alone cannot carry the decision. What keeps that
+    /// abstention from *authorizing* a delete is gate 4, which asks a question
+    /// no wording can garble: does the branch point where this attempt would
+    /// have put it? Read the two together — this one narrows the window
+    /// positively when git says the words, and gate 4 corroborates whenever it
+    /// does not.
+    ///
+    /// Not `private`: the revive path's archived-SHA recreate (`-b <branch>
+    /// <sha>` in `WorktreeLifecycle+Archive`) is the fourth `-b` call site and
+    /// feeds the same gate to the same cleanup.
+    func gitRefusedToCreateBranch(_ error: Error) -> Bool {
+        guard let gitError = error as? GitError else { return false }
+        let stderr = gitError.stderr.lowercased()
+        return stderr.contains("a branch named")
+            || stderr.contains("[rejected]")
+            || stderr.contains("refusing to fetch into branch")
+    }
+
+    /// True when git's stderr says the *branch name* is what is taken, as
+    /// opposed to the worktree path. Two phrasings mean it, both verified
+    /// against git 2.50:
+    ///
+    /// - `fatal: a branch named 'x' already exists` — the ref is there.
+    /// - `fatal: 'x' is already used by worktree at '<path>'` — the ref is
+    ///   checked out elsewhere, or a registration claims it is (an unborn
+    ///   orphan branch in the main checkout produces exactly this while
+    ///   `refs/heads/x` does not yet exist, which is why the pre-existence
+    ///   probe alone cannot answer this question).
+    ///
+    /// An occupied path says `fatal: '<path>' already exists` instead — no
+    /// overlap, so a fresh folder name stays the remedy for that one.
+    ///
+    /// Distinct from `gitRefusedToCreateBranch`, which gates branch *deletion*
+    /// and stays narrower on purpose: this one only decides whether to keep
+    /// retrying, where being wrong costs an attempt rather than a branch.
+    private func gitSaysBranchNameIsTaken(_ error: Error) -> Bool {
+        guard let gitError = error as? GitError else { return false }
+        let stderr = gitError.stderr.lowercased()
+        return stderr.contains("a branch named")
+            || stderr.contains("is already used by worktree at")
+    }
+
+    /// Cleans up whatever a single failed `worktreeAdd` attempt left behind:
+    /// the partially-written directory always, and — only when this attempt is
+    /// the one that can have created it — the branch `-b` made. Git can fail
+    /// *after* creating the branch (a stale `.git/config.lock` makes the
+    /// upstream-config write fail while the branch stands), which is how a
+    /// failed create used to leak a `tbd/<name>` branch and then mask the real
+    /// cause behind "a branch named … already exists" on the next attempt.
+    ///
+    /// **Four independent gates stand between a failure and `branch -D`, and
+    /// deleting a branch the user owns is the worst outcome this path has.
+    /// Gates 2, 3 and 4 fail closed — an answer they cannot establish keeps the
+    /// branch. Gate 1 does not: reading stderr can only ever *add* evidence, so
+    /// its `false` is an abstention rather than a finding. That asymmetry is
+    /// what gate 4 exists to cover.**
+    ///
+    /// 1. `branchNameWasAlreadyTaken == false`. When git says "a branch named
+    ///    … already exists" — or rejects the fork-PR leg's fetch, the same
+    ///    statement in that leg's vocabulary — it is telling us it *refused to
+    ///    write* the ref, which is positive evidence the branch predates this
+    ///    attempt, whoever made it. Read stderr, so it can only ever *add*
+    ///    evidence: `false` means git did not say the words, which includes
+    ///    "git said them in a phrasing this build does not recognize". It
+    ///    narrows the probe→attempt window rather than closing it, and gate 4
+    ///    is what covers the abstention.
+    /// 2. `AttemptedBranch.preExisted == false`. `nil` means the probe itself
+    ///    failed — not knowing is not the same as knowing it's absent. Sampled
+    ///    before the attempt, so a branch created by anything else in between
+    ///    is invisible to it.
+    /// 3. The branch is present *now*. Nothing to do otherwise.
+    /// 4. The branch points at `AttemptedBranch.expectedTip` — the SHA this
+    ///    attempt's own `-b` or fetch would have written, sampled by the caller
+    ///    (see that type for the per-leg timing). This is the gate that does not
+    ///    depend on git's wording: a branch some other actor created in the
+    ///    probe→attempt window is a branch *they* chose the starting point for,
+    ///    and it does not match. `nil`, an unreadable current tip, and a
+    ///    mismatch all block the delete — a tip we cannot establish is never a
+    ///    licence to destroy a ref.
+    ///
+    ///    Its residual, stated plainly because overclaiming here is what let
+    ///    gate 1 look sufficient: an external actor branching from the *same*
+    ///    base inside that window lands on the same SHA, so the check passes and
+    ///    their branch is deleted. This narrows the window to a coincidence of
+    ///    name *and* starting commit; it does not eliminate it.
+    ///
+    /// Gate 1 is deliberately narrower than the `.nameCollision` classification,
+    /// which also covers an occupied worktree *path*. Those two are not
+    /// interchangeable here: verified against git 2.50, `git worktree add
+    /// <occupied-path> -b X <base>` creates `X`, *then* discovers the path is
+    /// taken and fails — leaving a branch we really did make. Widening gate 1 to
+    /// the whole `.nameCollision` case would reintroduce exactly the leak this
+    /// function exists to stop.
+    ///
+    /// `worktreePrune` runs only once all four gates hold, immediately before
+    /// the delete it exists to serve: git refuses to delete a branch checked out
+    /// in a live worktree, and a stale registration would manufacture that
+    /// refusal (see `GitManager.deleteLocalBranch`). Pruning is repo-wide and
+    /// unconditionally drops any registration whose directory is missing —
+    /// including a legitimate worktree on an unmounted volume — so it stays
+    /// scoped to the one case that needs it rather than firing on every failed
+    /// attempt.
+    func cleanUpFailedWorktreeAdd(
+        repoPath: String,
+        worktreePath: String,
+        attempted: AttemptedBranch,
+        branchNameWasAlreadyTaken: Bool
+    ) async {
+        try? FileManager.default.removeItem(atPath: worktreePath)
+
+        let branch = attempted.name
+        guard !branchNameWasAlreadyTaken else { return }
+        guard attempted.preExisted == false else { return }
+        guard (try? await git.localBranchExists(repoPath: repoPath, name: branch)) == true else {
+            return
+        }
+        guard let expectedTip = attempted.expectedTip else { return }
+        let currentTip = try? await git.headSHA(
+            repoPath: repoPath, ref: "refs/heads/\(branch)"
+        )
+        guard let currentTip, currentTip == expectedTip else {
+            logger.info("Kept branch \(branch, privacy: .public) after a failed worktree add: it does not point where this attempt would have put it (expected \(expectedTip, privacy: .public), found \(currentTip ?? "unreadable", privacy: .public))")
+            return
+        }
+        try? await git.worktreePrune(repoPath: repoPath)
+        do {
+            try await git.deleteLocalBranch(repoPath: repoPath, name: branch)
+            logger.info("Deleted branch \(branch, privacy: .public) left behind by a failed worktree add")
+        } catch {
+            logger.warning("Failed to delete branch \(branch, privacy: .public) left behind by a failed worktree add: \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    /// Message for "both base branches were tried and none worked", worded to
+    /// match what actually went wrong rather than always guessing collision.
+    ///
+    /// Only `.baseUnresolvable` and `.nameCollision` reach it; `.repoLevel` and
+    /// `.gitUnusable` throw git's own words earlier and are covered here only
+    /// for exhaustiveness.
+    private func describeExhaustedBases(
+        _ kind: WorktreeAddFailureKind, baseBranches: [String]
+    ) -> String {
+        switch kind {
+        case .baseUnresolvable:
+            return "git worktree add failed — no usable base branch (tried \(baseBranches.joined(separator: ", ")))"
+        case .nameCollision, .repoLevel, .gitUnusable:
+            return "git worktree add failed — the folder or branch may already exist"
+        }
+    }
+
+    /// A hint for the one repo-level failure a user can clear themselves.
+    private func repoLevelHint(_ error: Error) -> String {
+        guard let gitError = error as? GitError,
+              gitError.stderr.lowercased().contains("could not lock config file") else {
+            return ""
+        }
+        return " — a stale .git/config.lock in the repo can be deleted once no git process is holding it"
+    }
+
     /// Formats an error for inclusion in a user-facing message, truncated to ~500 chars.
     private func formatErrorForMessage(_ error: Error) -> String {
         var detail = ""
         if let gitError = error as? GitError {
             let stderr = gitError.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
             detail = stderr
+        } else if let timeout = error as? GitTimeoutError {
+            // `localizedDescription` on a bare `Error` struct renders as
+            // "The operation couldn't be completed. (… error 1.)", which names
+            // neither the timeout nor the command. Its own description does.
+            detail = timeout.description
         } else {
             detail = error.localizedDescription
         }
@@ -673,7 +1202,14 @@ extension WorktreeLifecycle {
         primaryAgentPreference: PrimaryAgentPreference? = nil,
         claudeSettingsOverlay: String? = nil,
         carryover: ConversationCarryover? = nil,
-        preparedCodexLaunch: CodexLaunchPreparation? = nil
+        preparedCodexLaunch: CodexLaunchPreparation? = nil,
+        /// Non-nil when this spawn is a Watch Desk session, and the only thing
+        /// that installs the statusline tee (`StatuslineTee`). The desk spawn
+        /// path passes `.readOnlyCoordinator` — the role a desk terminal holds
+        /// until the lease store promotes one of them to `.judge` — because at
+        /// spawn time no lease has been acquired yet. Every other caller leaves
+        /// it nil and gets exactly the overlay it got before the tee existed.
+        watchDeskRole: WatchDeskRole? = nil
     ) async throws -> [(id: UUID, label: String)] {
         let worktreeID = worktree.id
         let tmuxServer = worktree.tmuxServer
@@ -870,7 +1406,13 @@ extension WorktreeLifecycle {
                     // an archived-session resume must not reapply it. Hooks
                     // overlay still resolves for resumes — only
                     // extraSettingsJSON goes nil.
-                    extraSettingsJSON: isResume ? nil : claudeSettingsOverlay
+                    extraSettingsJSON: isResume ? nil : claudeSettingsOverlay,
+                    // Desk sessions only — see the parameter's doc comment.
+                    watchDeskRole: watchDeskRole,
+                    worktreePath: worktreePath,
+                    // The same config dir this spawn runs with, so the tee
+                    // delegates to the user-scope statusline THIS session reads.
+                    profileConfigDir: profileConfigDir
                 ),
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides,
@@ -905,7 +1447,11 @@ extension WorktreeLifecycle {
             label: primaryLabel,
             claudeSessionID: primarySessionID,
             profileID: primaryProfileID,
-            kind: primaryTerminalKind
+            kind: primaryTerminalKind,
+            // Same value the overlay above was built from, written to the row
+            // so the fact outlives this call. A desk woken from hibernation
+            // reuses this row, and the wake site has nothing else to read.
+            watchDeskRole: watchDeskRole
         )
         if carryover != nil {
             SessionRecaptureScheduler(db: db, tmux: tmux).schedule(

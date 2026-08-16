@@ -87,6 +87,16 @@ public enum TerminalKind: String, Codable, Sendable {
     case shell
     case claude
     case codex
+
+    /// Whether a terminal of this kind hosts an agent session — one with a
+    /// transcript, a context window, and hooks that report state.
+    ///
+    /// A plain shell has none of those, so a surface that describes agent
+    /// sessions must not describe it: a report explaining that a shell's
+    /// context window is unknown because no statusline tee fired is a true
+    /// sentence about a session that was never going to have one, and the stat
+    /// and transcript-tail attempt behind it are paid every cycle for nothing.
+    public var isAgentBearing: Bool { self != .shell }
 }
 
 public enum PrimaryAgentPreference: String, Codable, Sendable, Equatable, CaseIterable {
@@ -205,6 +215,14 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     /// PR poll; the app seeds from this only when it has no fresher live value.
     public var prStatus: PRStatus?
 
+    /// The outcome of the last attempt to learn this worktree's PR state,
+    /// separate from `prStatus` (the value that attempt found, if any).
+    ///
+    /// `prStatus == nil` cannot distinguish "the forge answered; no PR on this
+    /// branch" from "the query failed"; this can. `nil` here means no attempt
+    /// has been recorded since the column existed.
+    public var prObservation: PRObservation?
+
     /// Set only on promoted scratch rows: the repo created by `tbd scratch promote`.
     public var promotedToRepoID: UUID?
 
@@ -300,7 +318,8 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
                 pinSortOrder: Int? = nil,
                 location: WorktreeLocation = .local,
                 pendingPrompt: String? = nil,
-                pendingPromptSubmit: Bool? = nil) {
+                pendingPromptSubmit: Bool? = nil,
+                prObservation: PRObservation? = nil) {
         self.id = id
         self.repoID = repoID
         self.name = name
@@ -328,6 +347,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         self.location = location
         self.pendingPrompt = pendingPrompt
         self.pendingPromptSubmit = pendingPromptSubmit
+        self.prObservation = prObservation
     }
 
     enum CodingKeys: String, CodingKey {
@@ -338,6 +358,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         case autoHibernateOnMerge
         case promotedToRepoID, prStatus, prNumber, foreignHead, pinnedAt, pinSortOrder
         case locationKind, providerName, providerSessionID, pendingPrompt, pendingPromptSubmit
+        case prObservation
     }
 
     public init(from decoder: Decoder) throws {
@@ -384,6 +405,9 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         // `nil` submit resolves to the shipped `true`.
         pendingPrompt = try c.decodeIfPresent(String.self, forKey: .pendingPrompt)
         pendingPromptSubmit = try c.decodeIfPresent(Bool.self, forKey: .pendingPromptSubmit)
+        // Absent in JSON written before the PR-observation column: no attempt
+        // is on record, which is itself distinct from a recorded `.none`.
+        prObservation = try c.decodeIfPresent(PRObservation.self, forKey: .prObservation)
     }
 
     /// Hand-written because `location` is an enum with an associated value that
@@ -427,6 +451,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         }
         try c.encodeIfPresent(pendingPrompt, forKey: .pendingPrompt)
         try c.encodeIfPresent(pendingPromptSubmit, forKey: .pendingPromptSubmit)
+        try c.encodeIfPresent(prObservation, forKey: .prObservation)
     }
 }
 
@@ -527,6 +552,56 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     /// Explicit Watch Desk authority. Nil means an ordinary terminal.
     /// The lease row, not this display marker, is authoritative for mutation.
     public var watchDeskRole: WatchDeskRole?
+    /// Where `activityState` came from. `nil` on rows written before the
+    /// provenance columns existed, and on rows a future writer forgets to
+    /// stamp — which is why `observedActivity` refuses to build a fact out of
+    /// half a triple.
+    public var activityStateSource: FactSource?
+    /// When `activityState` was observed — the moment the machine fact was
+    /// read, not the moment the row was written.
+    public var activityStateObservedAt: Date?
+    /// The structured reason this session is waiting, carried verbatim from
+    /// Claude Code's `Notification` hook. Superseded by the next activity
+    /// observation, so it describes the *current* wait or nothing at all.
+    public var awaitingInputReason: AwaitingInputReason?
+    /// When `awaitingInputReason` was observed.
+    public var awaitingInputObservedAt: Date?
+
+    /// `activityState` as a fact — value, source, observed-at — or nil.
+    ///
+    /// Nil whenever either provenance column is missing, deliberately: a bare
+    /// value with no source and no age must not be able to masquerade as an
+    /// observation. Callers that want the raw enumeration can still read
+    /// `activityState`; callers that want to *reason* about it get the triple
+    /// or nothing.
+    public var observedActivity: ObservedFact<TerminalActivityState>? {
+        guard let activityStateSource, let activityStateObservedAt else { return nil }
+        return ObservedFact(
+            value: activityState, source: activityStateSource, observedAt: activityStateObservedAt)
+    }
+
+    /// The recorded wait reason as a fact — value, source, observed-at — or nil.
+    ///
+    /// The source is not a column of its own: a wait reason is only ever
+    /// recorded from a hook event, and the event's name is already carried on
+    /// the reason, so `.hookEvent(name)` IS the provenance rather than a second
+    /// copy of it. A reason with no event name — or with an empty one, which
+    /// names a source just as poorly — is therefore half a triple and reports
+    /// no fact, on the same rule `observedActivity` follows.
+    ///
+    /// This is a *recorded reason*, not a claim about what the session is doing
+    /// now — nothing here asserts `activityState`. Composing the two into a
+    /// session state is the resolver's job.
+    public var observedAwaitingInput: ObservedFact<AwaitingInputReason>? {
+        guard let awaitingInputReason,
+              let awaitingInputObservedAt,
+              let hookEventName = awaitingInputReason.hookEventName,
+              !hookEventName.isEmpty else { return nil }
+        return ObservedFact(
+            value: awaitingInputReason,
+            source: .hookEvent(hookEventName),
+            observedAt: awaitingInputObservedAt)
+    }
 
     public init(id: UUID = UUID(), worktreeID: UUID, tmuxWindowID: String,
                 tmuxPaneID: String, label: String? = nil, createdAt: Date = Date(),
@@ -540,7 +615,11 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
                 hibernateReason: HibernateReason? = nil,
                 keepWarm: Bool = false,
                 pendingResumeAt: Date? = nil,
-                watchDeskRole: WatchDeskRole? = nil) {
+                watchDeskRole: WatchDeskRole? = nil,
+                activityStateSource: FactSource? = nil,
+                activityStateObservedAt: Date? = nil,
+                awaitingInputReason: AwaitingInputReason? = nil,
+                awaitingInputObservedAt: Date? = nil) {
         self.id = id
         self.worktreeID = worktreeID
         self.tmuxWindowID = tmuxWindowID
@@ -560,6 +639,10 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         self.keepWarm = keepWarm
         self.pendingResumeAt = pendingResumeAt
         self.watchDeskRole = watchDeskRole
+        self.activityStateSource = activityStateSource
+        self.activityStateObservedAt = activityStateObservedAt
+        self.awaitingInputReason = awaitingInputReason
+        self.awaitingInputObservedAt = awaitingInputObservedAt
     }
 
     enum CodingKeys: String, CodingKey {
@@ -567,6 +650,8 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         case pinnedAt, claudeSessionID, suspendedAt, suspendedSnapshot, profileID, transcriptPath, kind
         case activityState
         case hibernatedAt, hibernateReason, keepWarm, pendingResumeAt, watchDeskRole
+        case activityStateSource, activityStateObservedAt
+        case awaitingInputReason, awaitingInputObservedAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -590,6 +675,13 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         keepWarm = try c.decodeIfPresent(Bool.self, forKey: .keepWarm) ?? false
         pendingResumeAt = try c.decodeIfPresent(Date.self, forKey: .pendingResumeAt)
         watchDeskRole = try c.decodeIfPresent(WatchDeskRole.self, forKey: .watchDeskRole)
+        // Absent in JSON written before the state model's provenance columns.
+        // Such a row carries a value with no source and no age, and
+        // `observedActivity` reports exactly that by returning nil.
+        activityStateSource = try c.decodeIfPresent(FactSource.self, forKey: .activityStateSource)
+        activityStateObservedAt = try c.decodeIfPresent(Date.self, forKey: .activityStateObservedAt)
+        awaitingInputReason = try c.decodeIfPresent(AwaitingInputReason.self, forKey: .awaitingInputReason)
+        awaitingInputObservedAt = try c.decodeIfPresent(Date.self, forKey: .awaitingInputObservedAt)
     }
 }
 
@@ -1074,6 +1166,20 @@ public struct Config: Codable, Sendable, Equatable {
     /// chose" and follows the shipped default wherever it goes; `0`/`1` is an
     /// explicit gesture and is honored forever.
     public var queuedPromptEnabled: Bool
+    /// The fleet brake for supervision
+    /// (`docs/specs/2026-07-26-fleet-supervision-design.md` §3, §8): one bit,
+    /// fleet-wide, ANDed over every project's mark and writing none of them.
+    /// Released (`true`) means TBD may act where a mark stands; engaged
+    /// (`false`, the shipped state) means TBD's authority is paused everywhere,
+    /// with the marks left exactly as they were.
+    ///
+    /// **Resolved, not stored**, like `queuedPromptEnabled`: the backing column
+    /// carries no SQL default and stays NULL until somebody touches the toggle,
+    /// so this property is
+    /// `supervision_enabled ?? Config.supervisionEnabledDefault`. NULL means
+    /// "never chose" and follows the shipped default wherever it goes; `0`/`1`
+    /// is an explicit gesture and is honored forever.
+    public var supervisionEnabled: Bool
 
     /// Default idle-timeout for auto-hibernation, in minutes.
     public static let defaultHibernateIdleMinutes = 30
@@ -1094,6 +1200,11 @@ public struct Config: Codable, Sendable, Equatable {
     /// the feature is a change to this constant — no forcing `UPDATE`
     /// migration, and an explicit opt-out is left alone.
     public static let queuedPromptDefault = false
+    /// The shipped default for `supervisionEnabled`, and the single place it
+    /// lives. Supervision ships with the brake engaged; graduating it is a
+    /// change to this constant — no forcing `UPDATE` migration, and an explicit
+    /// opt-out is left alone.
+    public static let supervisionEnabledDefault = false
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -1120,7 +1231,8 @@ public struct Config: Codable, Sendable, Equatable {
                 agentPanelControlEnabled: Bool = false,
                 remoteBackendsEnabled: Bool = false,
                 deliveryVerificationEnabled: Bool = false,
-                queuedPromptEnabled: Bool = Config.queuedPromptDefault) {
+                queuedPromptEnabled: Bool = Config.queuedPromptDefault,
+                supervisionEnabled: Bool = Config.supervisionEnabledDefault) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
         self.envSettingOverrides = envSettingOverrides
@@ -1147,6 +1259,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.remoteBackendsEnabled = remoteBackendsEnabled
         self.deliveryVerificationEnabled = deliveryVerificationEnabled
         self.queuedPromptEnabled = queuedPromptEnabled
+        self.supervisionEnabled = supervisionEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -1205,6 +1318,11 @@ public struct Config: Codable, Sendable, Equatable {
         // fall through to the shipped default rather than hardcoding `false`.
         queuedPromptEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .queuedPromptEnabled) ?? Config.queuedPromptDefault
+        // Same tri-state as above: absent means the sender knew nothing about
+        // the flag, which is the NULL column's situation — follow the shipped
+        // default rather than hardcoding `false` here as well.
+        supervisionEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .supervisionEnabled) ?? Config.supervisionEnabledDefault
     }
 }
 
@@ -1486,9 +1604,23 @@ public struct PRStatus: Codable, Sendable, Equatable {
     /// so no new migration is required.
     public let mergeQueuePosition: Int?
 
+    /// When this status was read from the forge.
+    ///
+    /// The persisted `PRStatus` is display-tier and must be labeled as such:
+    /// this cache was measured showing "Ready to merge" for pull requests
+    /// merged days earlier, so no surface may render it as current truth
+    /// without its age. Optional with a nil default so JSON persisted before
+    /// this field existed still decodes — it rides in the existing
+    /// `worktree.prStatus` TEXT column (migration v34), exactly as
+    /// `mergeQueuePosition` does, so **no migration is required**.
+    ///
+    /// `var`, unlike every field beside it, so `withObservedAt(_:)` can restamp
+    /// a whole value without re-listing the others — see `sameValue(as:)`.
+    public var observedAt: Date?
+
     public init(number: Int, url: String, state: PRMergeableState, reason: String? = nil,
                 files: [String]? = nil, commits: Int? = nil, authorWorktreeID: UUID? = nil,
-                mergeQueuePosition: Int? = nil) {
+                mergeQueuePosition: Int? = nil, observedAt: Date? = nil) {
         self.number = number
         self.url = url
         self.state = state
@@ -1497,6 +1629,46 @@ public struct PRStatus: Codable, Sendable, Equatable {
         self.commits = commits
         self.authorWorktreeID = authorWorktreeID
         self.mergeQueuePosition = mergeQueuePosition
+        self.observedAt = observedAt
+    }
+
+    /// Whether two readings describe the **same pull request state**, ignoring
+    /// when each was read.
+    ///
+    /// **Change detection uses this; `==` does not.** `observedAt` advances on
+    /// every poll, so an equality that includes it answers "different" every
+    /// cadence — which turns any "on change" rule built on it into "every
+    /// time". That is not hypothetical: including the stamp in `Equatable` once
+    /// turned `PRStatusManager.apply`'s persist-on-change into one SQLite write
+    /// transaction per worktree per poll, forever, on a fleet whose steady
+    /// state had been zero. A freshness stamp is a fact *about* a reading, and
+    /// a fact about a reading may never decide whether the reading changed.
+    ///
+    /// `Equatable` itself deliberately keeps the stamp: two `PRStatus` values
+    /// read at different moments really are different values, and a persisted
+    /// round trip has to be able to prove the stamp survived.
+    ///
+    /// **Structural, not a hand-written field list**, and that is the whole
+    /// point of the shape. A list has to be remembered: a ninth property added
+    /// to this type and forgotten here would silently stop persisting on change,
+    /// with nothing red to say so. Stamping both sides to the same `observedAt`
+    /// and deferring to synthesized `Equatable` covers every field this type
+    /// will ever have, because the compiler writes that comparison.
+    public func sameValue(as other: PRStatus) -> Bool {
+        withObservedAt(nil) == other.withObservedAt(nil)
+    }
+
+    /// This reading with its freshness stamp replaced.
+    ///
+    /// A whole-value copy (`var copy = self`), deliberately, rather than a call
+    /// to the memberwise initializer: every parameter there past `reason` has a
+    /// default, so a field added to the struct and omitted from such a call
+    /// would compile and be silently dropped. Copying carries fields this code
+    /// has never heard of.
+    public func withObservedAt(_ date: Date?) -> PRStatus {
+        var copy = self
+        copy.observedAt = date
+        return copy
     }
 }
 

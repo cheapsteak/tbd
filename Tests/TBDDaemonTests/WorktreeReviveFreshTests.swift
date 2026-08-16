@@ -202,6 +202,19 @@ struct WorktreeReviveFreshTests {
         #expect(createdPaths.isEmpty)
     }
 
+    /// An ordinary create whose generated `tbd/<name>` collides still lands,
+    /// under a fresh name — the collision safety net the revive path above
+    /// relies on.
+    ///
+    /// The collision is real: the name is reserved first, then a branch is
+    /// planted on it, so git answers `fatal: a branch named 'tbd/…' already
+    /// exists`. It used to be simulated with the `reference-transaction` hook
+    /// the revive test still uses, which declines the first two
+    /// `refs/heads/tbd/` updates. That stands in for a collision only while
+    /// *every* git failure is retried blindly — the behavior that manufactured
+    /// orphan branches. A hook decline is a repo-level policy that no second
+    /// base and no second name can satisfy, so the create now fails fast on it
+    /// and surfaces git's own words.
     @Test func ordinaryCreateStillRetriesGeneratedNameCollision() async throws {
         let (tempDir, repoDir) = try await createTestRepo()
         defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -210,27 +223,34 @@ struct WorktreeReviveFreshTests {
         try await shell("git init --bare -b main", at: remoteDir)
         try await shell("git remote add origin '\(remoteDir.path)'", at: repoDir)
         try await shell("git push -u origin main", at: repoDir)
-        let rejectionCount = try installGeneratedBranchCollisionHook(
-            repoDir: repoDir,
-            rejections: 2
-        )
 
         let db = try TBDDatabase(inMemory: true)
         let lifecycle = makeReviveFreshLifecycle(db: db)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
-        let created = try await lifecycle.createWorktree(
-            repoID: repo.id,
-            skipClaude: true
-        )
+        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id, skipClaude: true)
+        try await shell("git branch '\(pending.branch)'", at: repoDir)
 
-        #expect(created.status == .active)
-        #expect(
-            try String(contentsOf: rejectionCount, encoding: .utf8)
-                .trimmingCharacters(in: .whitespacesAndNewlines) == "2"
+        let completion = try await lifecycle.completeCreateWorktree(
+            worktreeID: pending.id, skipClaude: true
         )
+        if case .preSessionPending(let phase3) = completion {
+            await phase3.value
+        }
+
+        let created = try #require(try await db.worktrees.get(id: pending.id))
+        #expect(created.status == .active)
         let worktreeRoot = try #require(repo.worktreeRoot)
         #expect(try FileManager.default.contentsOfDirectory(atPath: worktreeRoot).count == 1)
+
+        // Checked out on a DIFFERENT generated branch, and the branch that
+        // caused the collision is untouched.
+        let listed = try await GitManager().worktreeList(repoPath: repoDir.path)
+        let tbdWorktrees = listed.filter { $0.branch.hasPrefix("tbd/") }
+        #expect(tbdWorktrees.count == 1)
+        #expect(tbdWorktrees.first?.branch != pending.branch)
+        let refs = try await GitManager().listRefs(repoPath: repoDir.path, prefix: "refs/heads")
+        #expect(refs.contains("refs/heads/\(pending.branch)"))
     }
 
     @Test func successfulFetchCarriesOnlySelectedConversationAndSeedsProvenance() async throws {
@@ -918,6 +938,19 @@ struct WorktreeReviveFreshTests {
             .write(to: source, atomically: true, encoding: .utf8)
     }
 
+    /// Declines the first `rejections` updates to a `refs/heads/tbd/` ref, and
+    /// declines them *in git's own collision vocabulary*.
+    ///
+    /// The echoed line is what makes this a collision rather than an arbitrary
+    /// hook veto: `worktreeAdd` failures are classified off `GitError.stderr`,
+    /// and a hook's stderr is git's stderr, so this reaches the classifier as
+    /// `.nameCollision` — the failure kind whose only remedy is a fresh name.
+    /// Without it the decline reads as a repo-level veto that fails fast, the
+    /// caller never reaches its `retryGeneratedNameOnCollision` decision, and a
+    /// test asserting that decision passes no matter which way the flag is set.
+    /// (Measured: flipping `WorktreeLifecycle+ReviveFresh`'s
+    /// `retryGeneratedNameOnCollision` to `true` left the veto-only version of
+    /// this suite green.)
     private func installGeneratedBranchCollisionHook(
         repoDir: URL,
         rejections: Int
@@ -936,6 +969,7 @@ struct WorktreeReviveFreshTests {
             if [ "$count" -lt \(rejections) ]; then
                 count=$((count + 1))
                 echo "$count" > "\(rejectionCount.path)"
+                echo "fatal: a branch named 'tbd/simulated-collision' already exists" >&2
                 exit 1
             fi
         fi

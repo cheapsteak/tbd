@@ -5,7 +5,7 @@ import os
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "reaper")
 
 /// Errors that can occur during worktree lifecycle operations.
-public enum WorktreeLifecycleError: Error, CustomStringConvertible, LocalizedError {
+public enum WorktreeLifecycleError: LocalizedError, CustomStringConvertible {
     case repoNotFound(UUID)
     case worktreeNotFound(UUID)
     case worktreeNotArchived(UUID)
@@ -80,6 +80,11 @@ public struct WorktreeLifecycle: Sendable {
     /// Dirty gate for the periodic conflict sweep (see `refreshGitStatuses`).
     /// An actor reference, so every copy of this struct shares one cache.
     public let conflictSweepCache = ConflictSweepCache()
+    /// Since when each worktree's commits have stood still — §13's third
+    /// runaway input, filled from the branch tips `refreshGitStatuses` already
+    /// resolves for the gate above, at no extra subprocess cost. An actor
+    /// reference for the same reason `conflictSweepCache` is one.
+    public let branchTipTracker = BranchTipTracker()
     /// In-flight `preSession` runs, keyed by worktree ID. An actor reference,
     /// so every copy of this struct shares one registry (same rationale as
     /// `conflictSweepCache`).
@@ -129,6 +134,15 @@ public struct WorktreeLifecycle: Sendable {
         ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
     }
 
+    /// Date seam for stamps this type produces that are **persisted or
+    /// compared** — today, the observation instant the git sweep hands
+    /// `BranchTipTracker`, which is reported as `commitsUnchangedSince` and
+    /// compared against by whatever reads it. `Duration` is behavior and takes
+    /// a clock; `Date` is data and takes this. A bare `Date()` at the call site
+    /// would defeat the tracker's own seam and leave no way to pin the fact
+    /// end to end.
+    let now: @Sendable () -> Date
+
     public init(
         db: TBDDatabase,
         git: GitManager,
@@ -144,8 +158,10 @@ public struct WorktreeLifecycle: Sendable {
         reaperGraceAttempts: Int = 30,
         reaperPollInterval: Duration = .milliseconds(100),
         codexExecutableResolver: (@Sendable () throws -> String)? = nil,
-        codexHomeEnsurer: (@Sendable () throws -> URL)? = nil
+        codexHomeEnsurer: (@Sendable () throws -> URL)? = nil,
+        now: @escaping @Sendable () -> Date = { Date() }
     ) {
+        self.now = now
         self.db = db
         self.git = git
         self.tmux = tmux

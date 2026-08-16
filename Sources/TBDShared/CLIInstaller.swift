@@ -92,15 +92,13 @@ public struct CLIInstallResult: Equatable, Sendable {
     }
 }
 
-public enum CLIInstallerError: Error, Equatable {
+public enum CLIInstallerError: LocalizedError, Equatable {
     case linkCreationFailed(String)
     /// link(2) returned EXDEV — source and install path are on different
     /// filesystems. Hard links can't span volumes, so the only fixes are
     /// moving the project or changing the install location.
     case crossDeviceLink(target: String, installPath: String)
-}
 
-extension CLIInstallerError: LocalizedError {
     // Without this, error.localizedDescription returns the NSError bridge
     // string ("The operation couldn't be completed…") and the actual reason
     // (e.g. "create parent: …", "remove existing: …") is lost in both the

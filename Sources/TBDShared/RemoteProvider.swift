@@ -376,8 +376,17 @@ public enum RemoteProviderRegistry {
         return configs
     }
 
-    public enum RegistryError: Error, Equatable {
+    public enum RegistryError: LocalizedError, Equatable {
         case invalidEntry(String)
         case duplicateName(String)
+
+        public var errorDescription: String? {
+            switch self {
+            case .invalidEntry(let name):
+                return "invalid remote provider registry entry (name and exec must both be non-empty): name \"\(name)\""
+            case .duplicateName(let name):
+                return "duplicate remote provider name in registry: \(name)"
+            }
+        }
     }
 }

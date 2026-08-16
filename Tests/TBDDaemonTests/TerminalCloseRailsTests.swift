@@ -31,7 +31,7 @@ struct TerminalCloseRailsTests {
         var terminal = try await db.terminals.create(
             worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
             label: "Build", claudeSessionID: claudeSessionID, kind: .claude)
-        try await db.terminals.setActivityState(id: terminal.id, activityState: activityState)
+        try await db.terminals.setActivityState(id: terminal.id, activityState: activityState, source: .derived)
         terminal = try #require(try await db.terminals.get(id: terminal.id))
         return Fixture(db: db, worktree: wt, terminal: terminal)
     }

@@ -14,9 +14,11 @@ import TBDAppIcon
 // runtime NSApp.applicationIconImage path still draws the per-worktree
 // ribbon variant for the Dock + app switcher.
 
-struct BakerError: Error, CustomStringConvertible {
+struct BakerError: LocalizedError, CustomStringConvertible {
     let description: String
     init(_ message: String) { self.description = message }
+
+    var errorDescription: String? { description }
 }
 
 // .icns expects PNGs at these (logical size, scale) pairs.
