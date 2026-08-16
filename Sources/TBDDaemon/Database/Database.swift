@@ -1422,6 +1422,15 @@ public final class TBDDatabase: Sendable {
                 table: "config", column: "gc_profile_dirs_enabled", type: .boolean)
         }
 
+        // Where a quarantined `.profileDir` reap parked the directory. Nullable
+        // and left NULL by every other kind, which deletes outright. camelCase
+        // to match the columns this table already has (`repoPath`,
+        // `worktreePath`, `snapshotRef`).
+        migrator.registerMigration("v79_reap_records_quarantine_path") { db in
+            try db.addColumnIfMissing(
+                table: "reap_records", column: "quarantinePath", type: .text)
+        }
+
         return migrator
     }
 }

@@ -1468,6 +1468,17 @@ public enum ReapKind: String, Codable, Sendable {
     /// A TBD worktree directory reclaimed after its archive failed to remove
     /// it, or drained from a pool's `.deleting/` queue.
     case archivedWorktree
+    /// A per-profile config directory under `~/tbd/profiles/<uuid>/` whose
+    /// `model_profiles` row is gone.
+    ///
+    /// Reaped by **quarantine**, not deletion: the directory is renamed into
+    /// `.reaped/` and `quarantinePath` records where, so its credentials and
+    /// user content stay hand-recoverable until the retention window expires.
+    /// It is **not restorable** — `OrphanGC.restore` accepts `.agentWorktree`
+    /// only, and must keep doing so: the profile row this directory depends on
+    /// is already gone, so renaming it back would just recreate an orphan for
+    /// the next sweep.
+    case profileDir
 }
 
 /// Record of a directory the daemon-owned orphan GC swept and (optionally)
@@ -1488,12 +1499,18 @@ public struct ReapRecord: Codable, Sendable, Identifiable, Equatable {
     public var snapshotRef: String?
     /// `du -sk` * 1024 at reap time.
     public var apparentBytes: Int64?
+    /// Where a quarantined reap parked the directory (`profileDir` only).
+    /// `nil` for kinds that delete outright. Not a restore pointer —
+    /// `OrphanGC.restore` rejects `.profileDir` — but the path a user needs to
+    /// retrieve anything by hand before the retention window expires.
+    public var quarantinePath: String?
     public var reapedAt: Date
     public var restoredAt: Date?
 
     public init(id: UUID = UUID(), kind: ReapKind, repoPath: String, worktreePath: String,
                 branch: String? = nil, headSHA: String? = nil, snapshotRef: String? = nil,
-                apparentBytes: Int64? = nil, reapedAt: Date = Date(), restoredAt: Date? = nil) {
+                apparentBytes: Int64? = nil, quarantinePath: String? = nil,
+                reapedAt: Date = Date(), restoredAt: Date? = nil) {
         self.id = id
         self.kind = kind
         self.repoPath = repoPath
@@ -1502,6 +1519,7 @@ public struct ReapRecord: Codable, Sendable, Identifiable, Equatable {
         self.headSHA = headSHA
         self.snapshotRef = snapshotRef
         self.apparentBytes = apparentBytes
+        self.quarantinePath = quarantinePath
         self.reapedAt = reapedAt
         self.restoredAt = restoredAt
     }

@@ -46,7 +46,10 @@ struct GCList: AsyncParsableCommand {
             let size = r.apparentBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "?"
             let snap = r.snapshotRef != nil ? "snapshot ✓" : "clean"
             let restored = r.restoredAt != nil ? " (restored)" : ""
-            print("\(r.id)  \(r.kind.rawValue)  \(r.worktreePath)  \(size)  \(snap)\(restored)")
+            // A quarantined reap has no restore path, so this is the only
+            // handle a user has on the data before retention expires — print it.
+            let quarantine = r.quarantinePath.map { "  quarantined→ \($0)" } ?? ""
+            print("\(r.id)  \(r.kind.rawValue)  \(r.worktreePath)  \(size)  \(snap)\(restored)\(quarantine)")
         }
     }
 }

@@ -17,6 +17,9 @@ struct ReapRecordRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var headSHA: String?
     var snapshotRef: String?
     var apparentBytes: Int64?
+    /// Set by quarantining reaps (`profileDir`) only; NULL for kinds that
+    /// delete outright.
+    var quarantinePath: String?
     var reapedAt: Date
     var restoredAt: Date?
 
@@ -29,6 +32,7 @@ struct ReapRecordRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.headSHA = record.headSHA
         self.snapshotRef = record.snapshotRef
         self.apparentBytes = record.apparentBytes
+        self.quarantinePath = record.quarantinePath
         self.reapedAt = record.reapedAt
         self.restoredAt = record.restoredAt
     }
@@ -55,6 +59,7 @@ struct ReapRecordRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             headSHA: headSHA,
             snapshotRef: snapshotRef,
             apparentBytes: apparentBytes,
+            quarantinePath: quarantinePath,
             reapedAt: reapedAt,
             restoredAt: restoredAt
         )
