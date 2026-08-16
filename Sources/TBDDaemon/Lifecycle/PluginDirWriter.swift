@@ -79,7 +79,29 @@ struct PluginDirWriter {
         // out of the box. Dormant until its description matches a babysitting task.
         try writeNightwatch(pluginDir: pluginDir)
 
+        // Bundled `supervision` skill: how a supervisor reads a project's
+        // readout, acts through `tbd terminal send`, submits briefings and
+        // reads the ledger back. Written here rather than into a desk's own
+        // directory because this plugin dir is what every TBD Claude spawn
+        // already loads — so the skill is fleet-visible, exactly as the
+        // Nightwatch one is. That is deliberate and not a leak: what makes a
+        // desk a desk is its standing conduct layer and its injected
+        // `TBD_PROJECT`, not exclusive access to a reference file, and every
+        // command the skill names is a public surface.
+        try writeSupervision(pluginDir: pluginDir)
+
         Self.logger.info("Wrote TBD plugin at \(pluginDir, privacy: .public)")
+    }
+
+    /// Install the `supervision` skill. One file, no scripts and no config
+    /// tree — it is reference prose, and the conduct that varies per project
+    /// lives in that project's playbook, never here.
+    private func writeSupervision(pluginDir: String) throws {
+        let root = pluginDir + "/skills/supervision"
+        try FileManager.default.createDirectory(
+            atPath: root, withIntermediateDirectories: true)
+        try SupervisionSkillContent.body.write(
+            toFile: root + "/SKILL.md", atomically: true, encoding: .utf8)
     }
 
     /// Install the `nightwatch` skill into the plugin's skills dir. `tick.py`
