@@ -1,11 +1,12 @@
-# Claude cloud sessions, slice 1 — create, watch, land
+# Claude cloud sessions, slice 1 — create, send, land, archive
 
 **Date:** 2026-08-15
 **Status:** Design, not yet implemented.
 **Scope:** The first end-to-end path through the cloud-sessions design: create a
-cloud session from a repo's `+` menu, see it as a row in that repo's tree, watch
-it through a structured transcript (with an attach terminal beside it where the
-account is entitled to one), and land it into a local worktree.
+cloud session from a repo's `+` menu, see it as a row in that repo's tree, steer
+it by sending it messages (with an attach terminal beside the send field where
+the account is entitled to one), land it into a local worktree, and archive the
+lane when it is done.
 **Parent design:** [`2026-08-07-claude-cloud-sessions-design.md`](2026-08-07-claude-cloud-sessions-design.md).
 Everything here is downstream of that document and contradicts none of it.
 **Also depends on:**
@@ -29,45 +30,84 @@ This slice builds the shortest path that is genuinely useful, end to end:
   a flag that ships off.
 - **Appear.** The session is adopted as a worktree row in that repository's
   tree, nested and sorted like every other lane.
-- **Watch.** Selecting that row shows a structured transcript of the
-  conversation — the same renderer a local lane gets, tool cards and all —
-  with an attach terminal beside it.
+- **Send.** Selecting that row shows the remote session detail surface, whose
+  send field posts a message to the session — the same field every other remote
+  provider gets, over the provider's `send` verb. Where the account is entitled
+  to it, an attach terminal sits beside it.
 - **Land.** A row action converts the lane in place from remote to local:
   the branch is checked out on this machine, the row keeps its identity, and
   the conversation resumes in the first pane.
+- **Archive.** A row action retires the lane from the working set, composing over
+  what the provider declares, and says honestly what it did and did not do to the
+  session behind it (§7).
 
-**Done is create → transcript → land.** Attach is implemented and declared, but
-whether a given account may attach to a running cloud session is an entitlement
-the vendor grants server-side, and it is off by default (§10). On an account
-without it the Attach segment is present and shows a call to action naming the
-condition, rather than a terminal that dies on connect; on an account with it,
-attach works. The slice is complete either way, because the transcript — not
-the attach pane — is the watch surface, and it depends on nothing attach needs.
+**Done is create → send → land → archive.** Attach is implemented and declared,
+but whether a given account may attach to a running cloud session is an
+entitlement the vendor grants server-side, and it is off by default (§11). On an
+account without it the Attach pane shows a call to action naming the condition,
+rather than a terminal that dies on connect; on an account with it, attach works.
+The slice is complete either way — each of those four gestures works without
+attach — with one honest consequence: on an unentitled account TBD shows no reply
+to a send, because the reply is on Anthropic's servers and nothing supported
+reads it back (below).
 
-Four things the parent design specifies are deliberately **out of scope here**,
-each for a reason that is about sequencing rather than doubt:
+### What the platform exposes, and what TBD builds against
 
+Three facts about the vendor's surface decide the shape of this slice, and they
+are the reason the watch surface is not in it.
+
+- **No supported interface enumerates an account's cloud sessions or reads a
+  cloud session's conversation.** The Compliance API's remote-session endpoints
+  return Cowork sessions and exclude Claude Code on the web by name. The
+  documented `/v1/claude_code/` namespace has a single endpoint, whose token
+  grants no read access and no access to account data. Managed Agents is a
+  separate product with its own session identifiers rather than a view onto
+  these sessions.
+- **Undocumented claude.ai endpoints exist, and TBD does not build against
+  them.** Anthropic's Consumer Terms bar automated access to the Services
+  outside the carve-out for use of an Anthropic API key, and a cloud session
+  requires subscription login — so there is no API-key-shaped route to the same
+  data, and no arrangement in which such a client is inside the terms. Driving
+  those endpoints would put TBD's users outside the terms of the account they
+  are signed into, for a feature they can already reach in a browser. This is a
+  design constraint rather than a gap awaiting an implementation: `list` is
+  ledger-only (§3) because of it, and adding a scraper is not the fix.
+- **Interactive attach is gated per account.** The vendor CLI branches on a
+  server-side flag (`tengu_remote_backend`) that defaults off and carries no
+  local override; the documented remedy is to ask the account team to enable it
+  (§11).
+
+What is left is exactly the documented CLI — create, send, resume by teleport,
+and attach where the account is entitled — and that is enough for create → send
+→ land → archive.
+
+Five things the parent design specifies are deliberately **out of scope here**:
+
+- **The watch surface.** Reading a cloud session's conversation needs an
+  interface that does not exist (above), so a lane's transcript is not TBD's to
+  render. The parent design's `transcript` verb, the TBD-owned transcript root
+  it spools into, and the single-choke-point path resolver that must precede
+  admitting a second permitted root all arrive together, with a supported way to
+  read a conversation. Until then a cloud lane is watched through the attach
+  terminal where the account is entitled to one, and on claude.ai otherwise.
 - **`.tbd-remotes.json` and its trust-on-first-use gate** (parent design Part 4).
   Repository-declared remotes are a second, independent decision surface with its
-  own approval flow; nothing in create-watch-land needs it, because slice 1's
-  create is always an explicit per-creation choice.
+  own approval flow; nothing here needs it, because slice 1's create is always an
+  explicit per-creation choice.
 - **Resolution ladder tiers 2 through 4** (the repository declaration, the user's
   global default, provider `describe` defaults). Tier 1 — the explicit choice in
   the create sheet — always wins and is always available, so the ladder's lower
   tiers add convenience to a surface that already works without them.
-- **Archive and unarchive for remote lanes.** `worktree.archive`, `worktree.forget`
-  and the auto-archive-on-merge rail each refuse a remote row today, and teaching
-  all three the capability composition from the 08-10 design is a self-contained
-  piece of work that a lane can live without while it is being watched and landed.
-  The one exception is the retirement that follows a successful land, specified
-  in §6.
+- **Reviving a landed lane onto a fresh branch.** Land plus TBD's existing
+  revive-fresh composes into it, and composing them is a second gesture rather
+  than a second mechanism.
 - **Retiring the flat Remote section** (`RemoteSectionView`). It stays as it is.
   Removing it is a sidebar change whose risk is unrelated to anything here, and
   keeping it costs a duplicate surface for sessions that resolve to no registered
   repository — which is what it is for anyway.
 
 **Delivery is one branch and one pull request, opened when the whole path works
-end to end.** §9 orders the work to minimize rework, not to produce a sequence of
+end to end.** §10 orders the work to minimize rework, not to produce a sequence of
 independently shippable increments; several of the steps below are unobservable
 on their own, and splitting them would mean shipping code paths with nothing
 behind them.
@@ -155,7 +195,7 @@ and the origin rides those same two keys. A landed row encodes as
 reads a local row today.
 
 Per the shared-model rule, the record change, the `TBDShared` model change, and
-the flag's migration (§7) land in one commit, with `origin` optional so existing
+the flag's migration (§8) land in one commit, with `origin` optional so existing
 rows and existing JSON still decode.
 
 `WorktreeStore.findRemote(provider:sessionID:)` (`WorktreeStore.swift`:579-587)
@@ -177,11 +217,22 @@ test). Mechanisms compile.
 
 **What `describe` declares.** `contract_versions: [2]` only — nothing exposed
 terminates a running cloud session, so the provider cannot implement `stop`, and
-major 1 requires it. Capabilities are `send`, `attach`, `transcript`, `land`,
-`archive` and `unarchive`; neither `stop` nor `log` is declared. `create_params`
-are `repo`, `branch`, `prompt` and `environment`, the last typed `string` because
-`describe` answers offline and the set of configured cloud environments is
-knowable only from the account.
+major 1 requires it. Capabilities are `send`, `attach` and `land`. Five
+capability names are deliberately **not** declared, and each absence is a fact
+about the surface rather than an unimplemented verb:
+
+- **`stop`** — nothing exposed terminates a running cloud session.
+- **`log`** — a cloud session has no terminal to scroll.
+- **`transcript`** — no supported interface reads a cloud session's conversation
+  (§1).
+- **`archive` and `unarchive`** — the account's archive operation lives on the
+  undocumented surface TBD does not use (§1). Archiving a cloud lane is
+  therefore a filing change in TBD alone, which is exactly the third branch of
+  the archive composition and is specified in §7.
+
+`create_params` are `repo`, `branch`, `prompt` and `environment`, the last typed
+`string` because `describe` answers offline and the set of configured cloud
+environments is knowable only from the account.
 
 `describe` is **static and offline**, exactly as the parent design fixes it. It
 answers from compiled constants, touches no network, and its answer does not vary
@@ -191,36 +242,130 @@ separate, runtime question, and §5 is where that is answered.
 
 **Verbs.** `create` runs `claude --cloud "<prompt>"` from the repository
 checkout, on a pseudo-terminal, and reads the session id out of what it prints
-(below). `list` returns the union of a `claude_cloud_session` ledger (what this
-machine started) with discovered sessions, under the parent design's three union
-rules: two consecutive complete snapshots retire a resolved ledger row, a
-ledger-only row carries `state: "unknown"` rather than a fabricated `running`,
-and a discovered row always wins over a ledger row for the same id. `send` posts
-one message through `claude -p "<msg>" --cloud <id> --output-format json`,
-stripping a single trailing `\r` or `\n` as the submit gesture it is and
-preserving interior newlines; the response is
+(below). `list` returns the `claude_cloud_session` ledger — what this machine
+started — and nothing else; it is always `complete: false`, which the next
+subsection specifies. `send` posts one message through
+`claude -p "<msg>" --cloud <id> --output-format json`; the response is
 `{"ok": true, "session_id": "…", "url": "…"}`, and `ok` plus a `session_id`
 matching the id sent is the success condition. `attach` runs
-`claude --cloud <id>` on the pane's PTY. `transcript` reads the server-stored
-conversation, cursor-tailed. `land` reports the session's repository and branch
-with a `resume_command` of `claude --teleport <id>` and `forks: true`. Create
-idempotency is the parent design's: the key and its state are written to the
-ledger before the invocation, a pending row is expected during the daemon's
-single same-key retry, and a pending row is resolved by the next complete
-discovery.
+`claude --cloud <id>` on the pane's PTY. `land` reports the session's repository
+and branch with a `resume_command` of `claude --teleport <id>` and `forks: true`.
+
+**`send` implements the contract's byte interface on top of that call.** The
+contract's `send` takes stdin bytes destined for a terminal and requires the
+caller to append `\r` when it means Enter, and TBD sends a cloud session exactly
+the bytes it sends any provider. The provider decodes them as UTF-8, strips a
+single trailing `\r` or `\n` as the submit gesture it is, and passes the
+remainder as one message — so a byte stream carrying interior newlines becomes
+one multi-line message rather than several. What the contract fixes is the
+caller's side of the wire; how a provider delivers those bytes to a session with
+no terminal is the provider's business, and here it means enqueuing a message.
+Exit 0 keeps its contract meaning: handed to the transport, not acted upon.
+
+Create idempotency is the parent design's: the key and its state are written to
+the ledger before the invocation, and a pending row is expected during the
+daemon's single same-key retry rather than a reason to refuse it. What resolves a
+pending row here is the create that wrote it, since the parent design's
+discovery-driven resolution has no discovery to run against in this slice: a row
+whose create returned a readable session id resolves immediately, and one whose
+create failed both attempts stays `pending`, transitions to `failed` after ten
+minutes, and is surfaced as an unresolved create the user can act on. The row is
+retained rather than deleted on that transition, so the record of a create that
+may have started a real session outlives the judgement that it did not.
+
+### `list` is the ledger, and is permanently incomplete
+
+No supported interface enumerates an account's cloud sessions (§1), so `list`
+answers from the `claude_cloud_session` ledger alone: one row per session this
+machine created, carrying the session id, the idempotency key and its state, the
+creation time, the repository path, the branch, and the parameters used. Every
+snapshot it returns declares **`complete: false`**, permanently and by
+construction, because the ledger is a record of what TBD started and never a
+claim about the account's inventory.
+
+**That is safe by construction rather than by care.** The contract's rule for an
+incomplete snapshot is that a caller may add, update and adopt on the strength of
+it, and must not retire anything on it: no session may be advanced toward `gone`,
+and freshness must not be refreshed. A provider that never claims completeness
+therefore cannot cause a false retirement however wrong its view is — and a view
+consisting only of what this machine started is exactly the case that rule exists
+for. The parent design's ledger-retirement rule keys on two consecutive
+**complete** snapshots, so it is inert here; a cloud lane leaves the working set
+by the user archiving it (§7), which is the gesture that replaces the retirement
+discovery would otherwise have driven.
+
+**Honoring `complete` is a prerequisite of this slice, not a later refinement.**
+`RemoteSessionStore.applySnapshot`
+(`Sources/TBDDaemon/Database/RemoteSessionStore.swift`:176-223) increments
+`missingCount` for every row absent from a snapshot (:205-210) and writes the
+per-provider freshness key (:216-220) unconditionally, neither of which is
+conditioned on completeness today. With a provider whose snapshots are always
+incomplete, applying it as written would mark every cloud lane `gone` two polls
+after it stopped being the only row returned. So `complete` reaches the store and
+splits the three things a snapshot does, per the parent design: an incomplete
+snapshot still **adopts** the sessions it sighted and still **clears degraded
+health** — the provider answered — while advancing neither `missingCount` nor
+freshness in either store.
+
+**Mutations stay available against a provider that never completes a snapshot**,
+which the freshness gate already gets right for its own reasons.
+`RemoteProviderStatus.isStaleSnapshot`
+(`Sources/TBDShared/RemoteProvider.swift`:344-348) is
+`health != .ok && (lastSuccessfulSnapshotAt != nil || freshnessUnreadable)`, so a
+provider confirmed never to have held a complete inventory is not stale: there
+are no cached rows being projected as current, which is the thing staleness
+suppresses. Send therefore renders for a cloud lane, and the send gate needs no
+cloud-shaped exception.
+
+### What a cloud lane cannot know about itself
+
+Three degradations follow from a ledger-only `list`. Each is stated on screen
+rather than papered over, because the alternative in every case is a cheerier
+fiction the user would act on.
+
+- **A lane's display name is its session id.** A title only ever arrives from
+  discovery, and `RemoteSessionAdopter.displayName(session:)`
+  (`Sources/TBDDaemon/Remote/RemoteSessionAdopter.swift`:228-232) already falls
+  back to the session id when the provider reports none — which is short, stable
+  and honest. The submitted `prompt` is never used as a name (below), so a cloud
+  row reads as `session_01…` until the user renames it. Rename is TBD's own
+  display name and works on a cloud row exactly as on any other.
+- **`agent_state` is always `unknown`, and so is `state`.** The ledger knows a
+  session was created; it does not know whether it lives, and the contract is
+  explicit that `unknown` means only that no machine-readable state is available
+  — never healthy, idle, or finished. The row must therefore not render like an
+  idle local lane, and today it would: `RowStatusIndicator.suffix`
+  (`Sources/TBDApp/Sidebar/RowStatusIndicator.swift`:125-143) has no case for
+  "cannot vouch", and `WorktreeRowView.suffixIcon()`
+  (`Sources/TBDApp/Sidebar/WorktreeRowView.swift`:287-313) derives `isWorking`
+  from `hasWorkingTerminal`, which a row with no terminals answers `false`. A
+  row with no suffix already means "idle, nothing happening" to every local
+  sibling beside it. So this slice implements the uncertainty indicator the
+  08-10 design specifies — a `SuffixRowIndicator` case rendered whenever TBD
+  cannot vouch for a row's state, sitting in the attention slot — because for a
+  cloud lane that is the steady state rather than an edge. The leading `.remote`
+  marker (`LeadingRowIndicator.remote`, already rendered via
+  `RowStatusIndicator.leading(isRemote:)`) keeps saying *where*; the suffix says
+  *we do not know what*.
+- **Sessions created outside TBD are invisible to it.** A session started on
+  claude.ai, from the mobile app, or by `claude --cloud` in a terminal TBD did
+  not spawn has no ledger row, so it is never listed, never adopted, and has no
+  lane. There is no partial rendering of it to get wrong: it is simply absent,
+  and the Settings caption for the flag says so in one sentence, so the absence
+  reads as a property of the feature rather than as a bug.
 
 ### `create` needs a pseudo-terminal; nothing else does
 
 This is the one place the built-in provider cannot be a plain subprocess. The
 vendor CLI refuses `--cloud` creation when stdout is not a terminal, by design
-and loudly (§10), so the obvious implementation — spawn `claude`, capture the
+and loudly (§11), so the obvious implementation — spawn `claude`, capture the
 pipe, read the id — does not merely degrade, it never works.
 
 The asymmetry is worth stating because it decides where the complexity goes:
-**`send`, `land`, `transcript`, `archive` and `unarchive` need no terminal**;
-`send`'s `--print` form is explicitly a non-interactive invocation and returns
-JSON on an ordinary pipe. Only `create` needs a PTY, and only on the daemon
-side — `attach` runs on the pane's own PTY, which the app already allocates.
+**`send`, `list` and `land` need no terminal**; `send`'s `--print` form is
+explicitly a non-interactive invocation and returns JSON on an ordinary pipe.
+Only `create` needs a PTY, and only on the daemon side — `attach` runs on the
+pane's own PTY, which the app already allocates.
 
 **The provider allocates the PTY through the engine that already bounds every
 other spawn.** `runBoundedProcess`
@@ -243,18 +388,19 @@ suite to get right, and a PTY-shaped copy of it would be a second place for that
 to rot.
 
 **PTY mode is create-only, and the reason is a real loss.** A pseudo-terminal is
-one file descriptor, so the child's stdout and stderr merge on it. `transcript`
-returns its continuation cursor in a stderr envelope precisely so a control
-record never mixes into the JSONL data stream, and that separation cannot
-survive a PTY. So the mode is opt-in per invocation rather than a property of
-the provider, and `create` — which returns no envelope — is the only verb that
-sets it.
+one file descriptor, so the child's stdout and stderr merge on it. The contract
+keeps those channels distinct deliberately — stdout carries the records or the
+JSON envelope a verb answers with, stderr carries diagnostics and, for
+`transcript`, the continuation cursor that must never mix into the data stream —
+and none of that separation survives a PTY. So the mode is opt-in per invocation
+rather than a property of the provider, and `create`, whose whole answer is three
+lines of prose on stdout, is the only verb that sets it.
 
 ### Reading the session id out of `create`'s output
 
 `create` is fire-and-forget: it exits 0 immediately without attaching, having
 printed three lines naming the created session, its web URL, and the command
-that would resume it (§10). There is no JSON form — `--print` is refused
+that would resume it (§11). There is no JSON form — `--print` is refused
 alongside `--cloud` — so those lines are the only channel the id travels on.
 
 The provider strips ANSI control sequences from the captured output and takes
@@ -266,8 +412,9 @@ distinct id is the healthy case and disagreement is a signal, not noise.
 forbids inferring an agent's state from a rendered terminal screen; this reads
 the result line of a non-interactive command TBD itself invoked, which is the
 same category as parsing `git`'s output. Nothing here reads a TUI, and nothing
-here infers state — liveness and agent state come from `list`, exactly as the
-contract requires.
+here infers state — liveness and agent state are whatever `list`'s payload
+reports, which for a ledger row is `unknown` (above), exactly as the contract
+requires.
 
 **A parse that finds nothing fails loudly and is classified.** Zero matches, or
 more than one distinct id, is a `create` failure: the provider synthesizes exit
@@ -278,28 +425,32 @@ reads as `contractBug` and `RemoteProviderManager.recordFailure` turns into
 the built-in provider could not satisfy the contract, and the remedy is a fix to
 TBD rather than a retry or a re-authentication.
 
-The ledger is what makes that failure safe. The idempotency key and its state
-are written **before** the invocation, so a create whose output could not be
-read leaves a `pending` row rather than nothing — and the session, which very
-likely exists, is adopted by the next complete discovery through the parent
-design's pending-row matching. An unreadable answer costs the provenance link,
-never the session.
+The ledger is what keeps that failure from being silent. The idempotency key and
+its state are written **before** the invocation, so a create whose output could
+not be read leaves a `pending` row rather than nothing, carrying the repository,
+the branch and the prompt that were submitted. With no discovery to match such a
+row against, nothing adopts the session later, so the row is what the user is
+shown: a create that may well have started a real session TBD cannot name. It
+names what was asked for and links to claude.ai, where the session — if it
+exists — is listed. An unreadable answer costs the lane, not silently but
+visibly, and the parent design's pending-row adoption arrives with discovery.
 
-### The session title comes from discovery, never from what was submitted
+### The lane's name is never what was submitted
 
 The vendor derives a session's title server-side; it is a summary of the opening
-instruction, not that instruction's text (§10 records the measured pair). So
+instruction, not that instruction's text (§11 records the measured pair). So
 nothing in TBD may treat the submitted `prompt` as the lane's name.
 
-Nothing does, and this slice must not change that. Adoption already reads the
-title off the provider's own payload:
-`RemoteSessionAdopter.displayName(session:)`
+Nothing does, and this slice must not change that. Adoption reads the title off
+the provider's own payload: `RemoteSessionAdopter.displayName(session:)`
 (`Sources/TBDDaemon/Remote/RemoteSessionAdopter.swift`:228-232) takes
 `session.title` when the provider reports one and falls back to the session id,
 and `claude-cloud`'s `create_params` are `repo`, `branch`, `prompt` and
 `environment` — no `title` among them, so there is nothing for TBD to have
-submitted and nothing to reconcile. The create surface (§9, step 7) therefore
-writes no display name of its own; the row's name arrives with the row.
+submitted and nothing to reconcile. A ledger row reports no title at all, so the
+fallback is what every cloud lane wears until the user renames it (above). The
+create surface (§10, step 7) writes no display name of its own; the row's name
+arrives with the row.
 
 **Create asks for one out-of-band `list`.** Because the row arrives by adoption
 rather than being minted by the create call, and the poll loop's interval is 60
@@ -317,7 +468,7 @@ skipped with a visible flag rather than rejecting the whole file — the loader
 currently throws for the entire registry on a duplicate name (:372-374), and two of
 its three call sites swallow that, so one bad entry silently removes every
 provider. The
-reservation is unconditional and does not depend on the flag in §7: a name that
+reservation is unconditional and does not depend on the flag in §8: a name that
 became available when a feature was off, and unavailable when it was turned on,
 would change which providers load as a side effect of a toggle.
 
@@ -526,242 +677,60 @@ Nothing here adds a tab, removes one, reassigns a host's `rootView`, or
 holds; `targetTab` is a pure function of that value and already routes correctly
 once it is set, and its unit tests extend to the new case without new machinery.
 
-## 5. The watch surface
+## 5. Steering, and getting attach ready
 
-`RemoteSessionDetailView` gains a **Transcript** segment beside Attach and Log.
+Selecting an adopted cloud row shows `RemoteSessionDetailView` (§4). Two things
+render there in this slice: the **send field**, which is how a user steers the
+session, and the **Attach** pane, which works where the account is entitled to
+it and explains itself where it is not.
 
-`RemoteSessionDetailTab` (`Sources/TBDApp/Remote/RemoteSessionDetailView.swift`:11-14)
-is a two-case enum today (`attach`, `log`) and gains `transcript`. The four pure
-gates that decide what renders live in
-`Sources/TBDApp/Remote/RemoteSessionDetailGates.swift` and are unit-tested in
-`Tests/TBDAppTests/RemoteSessionDetailGatesTests.swift`:
+### The send field is the steering path
 
-- `available(capabilities:gone:)` (:40-46) builds the ordered tab list. It gains
-  a `transcript` arm, placed **first** — ahead of attach and log — so a provider
-  that offers a structured conversation lands the user there rather than in a
-  terminal. **Attach is dropped when the session is `gone`; transcript is not** —
-  reading a retired session's conversation is still useful, which is exactly the
-  reasoning that already keeps `log` available for a tombstoned row.
-- `initialTab(available:requested:)` (:55-62) honors a one-shot navigation hint
-  when it names an available tab and otherwise takes the list's first entry. It
-  needs no change; the new case flows through it, and the ordering above is what
-  makes Transcript the landing tab.
-- `showsPicker(available:)` (:66-68) renders the segmented control only when there
-  is a real choice — `available.count > 1`. No change.
-- `showsSendField(capabilities:gone:snapshotFresh:)` (:75-79) is independent of
-  the tab list. No change; cloud declares `send`, so the send field renders for a
-  live cloud lane with a fresh snapshot.
+`showsSendField(capabilities:gone:snapshotFresh:)`
+(`Sources/TBDApp/Remote/RemoteSessionDetailGates.swift`:75-79) gates the field on
+three things — the provider declaring `send`, the session not being `gone`, and
+the provider's snapshot not being stale — and the view renders it from that gate
+at `Sources/TBDApp/Remote/RemoteSessionDetailView.swift`:186-192. All three hold
+for a cloud lane: cloud declares `send`; a cloud lane is never `gone`, because
+retiring a session takes a complete snapshot and there is never one; and a
+provider that has never held a complete inventory is not stale (§3 argues both).
+So the field renders for every live cloud lane, and the gate needs no
+cloud-shaped exception.
 
-The picker itself is at `RemoteSessionDetailView.swift`:173-182, the send field
-is gated just below it at :186-192, and `RemoteLogTabView` (:607-659) is the
-existing read-only scrollback pane the new tab sits beside.
+What the field posts travels the ordinary path. The app sends the same bytes it
+sends any provider through `remote.send`
+(`Sources/TBDDaemon/Server/RPCRouter+RemoteHandlers.swift`:189); the provider
+implements the contract's byte interface on top of
+`claude -p "<msg>" --cloud <id> --output-format json` (§3 specifies the byte
+handling, §11 records the measured call and its response).
 
-Ordering `transcript` first changes nothing for any provider registered today,
-because `transcript` is a v2 capability and no external provider declares it —
-the first provider to reach that arm is the built-in one.
+**What happens after a send is the honest limit of this slice.** There is no
+reply for TBD to render: the conversation lives on Anthropic's servers and no
+supported interface reads it (§1). So a successful send confirms the message was
+accepted and says where the answer will appear — in the attach terminal on an
+entitled account, and on claude.ai otherwise, at the session URL the send
+response itself returns (§11). It never implies TBD will show the answer, and the
+send field is not styled as one half of a conversation view.
 
-**The view's placeholder tab has to stop naming a real tab, or the ordering
-above means nothing.** `selectedTab` is `@State` defaulting to `.attach` (:112),
-reset to `.attach` on every selection change (:230), and `effectiveTab` (:159-161)
-passes it to `initialTab` as `requested` — which honors a requested tab whenever
-it is available. So a placeholder that names `.attach` beats the list's own first
-entry for any provider that declares attach. It works today only because the
-one provider shape that exercises the fallback is `log`-only, where `.attach` is
-absent from the list by luck rather than by design, and the doc comment at
-:152-158 says as much. `selectedTab` therefore becomes optional with `nil` as the
-placeholder, reset to `nil` rather than `.attach`, and the Picker binds through a
-computed binding over `effectiveTab`. "No tab has been chosen yet" then has a
-representation, and `available`'s ordering decides the landing tab for every
-provider rather than for one shape of provider.
+### What the tab list comes to for a cloud lane
 
-**What a cloud lane's picker shows.** Cloud declares `transcript` and `attach`
-but not `log`, so `available` returns `[.transcript, .attach]`, `showsPicker` is
-true, and the segmented control offers exactly those two, in that order, with
-Transcript selected by default. A **gone** cloud lane returns `[.transcript]`
-alone — one tab, so no picker renders and the transcript content fills the pane
-unconditionally, which is the shape a single-tab provider already gets. A provider
-declaring none of the three still reaches the existing empty state.
+`RemoteSessionDetailTab`
+(`Sources/TBDApp/Remote/RemoteSessionDetailView.swift`:11-14) is `attach` and
+`log`, and `available(capabilities:gone:)`
+(`Sources/TBDApp/Remote/RemoteSessionDetailGates.swift`:40-45) builds the tab
+list from the provider's declared capabilities. Cloud declares `attach` and not
+`log`, so the list is `[.attach]` — a single entry, so `showsPicker` (:66-68) is
+false and the attach content fills the pane with no segmented control, which is
+the shape a single-tab provider already gets. None of the four gates changes
+here; the cloud provider is a third capability shape flowing through them
+unmodified.
 
-### The `transcript` data path
-
-`remote.transcript` does not exist. `RPCRouter+RemoteHandlers.swift` has
-handlers for providers, sessions, create, stop, send, log, rename, dismiss,
-setPin and reportAttachExit (:57, :64, :86, :152, :189, :225, :263, :293, :315,
-:341) and nothing else. A new `handleRemoteTranscript` joins them, gated by the
-same `remoteGate()` (:25-28) as every sibling.
-
-**The Transcript segment renders through the real structured renderer — the same
-tool cards, the same row-height cache, the same overlay a local lane gets.** A
-cloud lane has no attach guarantee and no `log`, so the transcript is not a
-secondary view of the conversation; it is the *only* watch surface. A degraded
-renderer would therefore not be a lesser second opinion, it would be the whole
-experience — a wall of prose where a local lane shows an Edit card with a diff, a
-Bash card with its command and output, an Agent card that drills into a subagent
-thread. That is the argument for paying the seam's cost rather than the simpler
-view's.
-
-**The seam already exists one layer down, which is what makes this affordable.**
-The renderer proper — `TableTranscriptView`, the view-based `NSTableView` that
-hosts one `SelectableTranscriptRow` per cell behind an explicit height cache —
-takes render nodes and a `TranscriptCardContext`, and neither mentions a terminal
-or a worktree. It already has a **second, non-terminal caller**:
-`HistoryPaneView` (`Sources/TBDApp/Panes/HistoryPaneView.swift`:452-471) builds
-the same `TranscriptPresentation` and hosts the same table with
-`TranscriptCardContext(terminalID: nil, …)`, over messages it fetched by file
-path rather than from a terminal. So the cards, the presentation build, the
-height cache and the workbench index are already source-agnostic in production,
-not merely in principle.
-
-What is terminal-keyed is the pane *above* it.
-`TableTranscriptPaneView` (`Sources/TBDApp/Panes/Transcript/Table/TableTranscriptPaneView.swift`:12-14)
-takes a `terminalID` and a `worktreeID` and resolves content along one fixed
-chain: `appState.terminals[worktreeID]` → the terminal with that id (:67-69) →
-`terminal.claudeSessionID` (:71-73) → `appState.sessionTranscripts[sessionID]`
-(:75-78). Its poll loop (:264-275) fetches through `terminal.transcript`, keyed on
-the same terminal id (:294-295). It is hosted from exactly one place,
-`PanePlaceholder.swift`:352, and `PanePlaceholder` takes a `LocalWorktree` (:49).
-A cloud lane has no terminal row, no Claude session id, and no `LocalWorktree`,
-so that chain cannot serve it.
-
-### The transcript source
-
-`TableTranscriptPaneView` is keyed on a **source** rather than on a terminal:
-
-```swift
-enum TranscriptSource: Equatable, Hashable {
-    case terminal(terminalID: UUID, worktreeID: UUID)
-    case remote(provider: String, sessionID: String)
-}
-```
-
-Exactly three things in that view are a function of the source, and everything
-else in it is untouched:
-
-- **The store key.** `.terminal` walks today's chain to `claudeSessionID`;
-  `.remote` is the provider session id verbatim. Both answer with a `String?`,
-  and `AppState.sessionTranscripts` is already `[String: [TranscriptItem]]`
-  (`AppState.swift`:788) with an LRU eviction keyed the same way (:1068-1087).
-  So the remote path is a **third writer into one store**, beside the live pane
-  and `AppState+History.swift`:147-152 — not a second store. Every downstream
-  consumer of that key — the rollover guard, the LRU touch, the `PaneIdentity`
-  the table is `.id()`-keyed on — keeps working unchanged. The two id spaces do
-  not overlap (a Claude session id is a UUID, a cloud session id is
-  `session_`-prefixed), so one key space stays one key space; the store's
-  fifty-entry LRU is shared, which is correct — a cloud transcript the user is
-  reading deserves the same residency as a local one.
-- **The fetch.** `.terminal` calls `terminal.transcript` with its tail-first
-  two-phase open as it does now. `.remote` calls `remote.transcript` with the
-  continuation cursor the daemon returned last time, and the daemon answers with
-  the full accumulated item list plus the next cursor. The cursor lives daemon-side
-  beside the spooled JSONL, not in the view, so it survives the pane being closed
-  and reopened and survives a daemon restart.
-- **The card terminal.** `TranscriptCardContext.terminalID` is already `UUID?`
-  (`TranscriptCardContext.swift`:8). `.remote` supplies `nil`, which is exactly
-  what `HistoryPaneView` supplies, and the cards already do the right thing with
-  it: the truncation footers that would fetch a longer body over
-  `terminal.transcriptItemFullBody` are gated on `terminalID != nil` and simply
-  do not render (`GenericToolCardBody.swift`:30 and :47, with the fetches
-  guarding again at :72 and :79).
-
-**Hosting needs no new machinery, and `PanePlaceholder`'s `LocalWorktree`
-constraint never binds**, because the remote path does not go through
-`PanePlaceholder` at all. The Transcript tab hosts `TableTranscriptPaneView`
-directly, which is precisely how `HistoryPaneView` hosts the table today. Two
-environment values `PanePlaceholder` injects need answers at the new host, and
-both are answered by what a remote transcript honestly is:
-
-- **`\.openFilePreview` is not injected.** The Write, Edit and Read cards already
-  gate their preview affordance on `openFilePreview != nil`
-  (`WriteCardBody.swift`:42 and :45, `EditCardBody.swift`:74 and :77), so a path
-  naming a file on another machine offers no button rather than a broken one.
-- **`\.openTranscriptOverlay` is injected**, opening
-  `overlayCoordinator.open(terminalID: nil, itemID:, sessionID: <session id>)`.
-  `TranscriptOverlayView.lookupItem()` already has a second resolution path for
-  exactly that shape — no terminal, a session id, items read from
-  `AppState.sessionTranscripts` (:321-332) — so drilling into a tool card works
-  with no new resolution. The parameter is called `historySessionID` today, which
-  names its first caller rather than its meaning: it is the *session-keyed* path,
-  and any non-terminal source uses it. It is renamed `sessionID` in this edit
-  across its three sites (`TranscriptOverlayCoordinator.swift`:8-18 and :47,
-  `TranscriptOverlayView.swift`:329, `HistoryPaneView.swift`:523-529).
-
-**Local file links are suppressed for a remote transcript, and suppressed means
-inert.** `overlayFileLinkAction`
-(`Sources/TBDApp/Panes/Transcript/OverlayFileLinkAction.swift`:12-24) turns
-`tbd-file:` and `file:` URLs into overlay file frames and lets everything else
-fall through to the system handler. For a remote transcript both of those
-outcomes are wrong — one opens an unrelated local file in the overlay, the other
-hands it to Finder — so the action takes an `allowsLocalFiles` flag and returns
-`.discarded` for both schemes when it is false. A path that names another
-machine's disk does nothing when clicked, which is the only honest behavior
-available.
-
-### What the pane shows while it is not yet complete
-
-Three states, and none of them may be silent:
-
-- **Before the first page arrives**, the pane shows the same
-  "Waiting for Claude to start the conversation…" empty state the live pane
-  already renders before its first fetch (:140-152), so a fresh cloud lane reads
-  as loading rather than as empty.
-- **When the provider returns an incomplete stream** — a cursor came back and the
-  provider has more to give — the pane renders what it has and keeps fetching. It
-  never blocks on completeness, because a long conversation's first page is
-  useful immediately and the tail is what the user is usually reading anyway.
-- **When a fetch fails**, the pane shows the existing error state with a Retry
-  button (`TableTranscriptPaneView.swift`:154-175) rather than an empty list. An
-  empty transcript and an unreachable provider look identical otherwise, and the
-  cloud lane has no second surface to disambiguate them.
-
-**Every delay in this path takes an injected clock.** The pane's poll loop sleeps
-through a bare `Task.sleep` carrying a legacy `swiftlint:disable no_raw_task_sleep`
-suppression (:272-273); adding a second cadence for the remote source behind that
-same suppression would be adding a new violation under cover of an old one. The
-loop moves onto `clock: any Clock<Duration> = ContinuousClock()` as the view's
-last initializer parameter, defaulted so no call site changes, and the
-suppression is deleted rather than duplicated.
-
-**The renderer's existing performance constraints hold unchanged**, and nothing
-here relaxes them. Row cards must have no direct `ScrollView` child — the rule
-that outlived the original renderer and is enforced by the
-`no_scrollview_in_transcript_cards` SwiftLint rule
-(`Sources/TBDApp/Panes/Transcript/CLAUDE.md`,
-`docs/superpowers/specs/2026-05-23-transcript-card-rework-design.md`) — and the
-remote path adds no card of its own, so there is nothing new to violate it. The
-height cache measures each row once through `NSHostingController.sizeThatFits`,
-and because the remote path feeds the same `TranscriptRenderNode`s through the
-same `TranscriptPresentation.build`, it measures cloud rows on exactly the terms
-it measures local ones.
-
-**What this costs relative to a second, simpler view.** More of the pane view
-changes: a source enum, three branch points inside it, one renamed overlay
-parameter, one flag on the file-link action. What it does not cost is a second
-renderer — no duplicate row cards to keep in step, no second height-cache story,
-no surface where an improvement to a tool card lands in one place and not the
-other. The daemon work, the RPC, the cursor and the store writes are identical
-under either choice; they are not what the two options differ on.
-
-### Daemon side
-
-`handleRemoteTranscript` invokes the verb, appends stdout to the TBD-owned
-transcript root `~/tbd/remote-transcripts/<provider>/<sessionID>/` (path helper in
-`TBDConstants`, honoring `TBD_HOME`), stores the cursor returned in the stderr
-envelope for the next call, and parses the accumulated file through
-`TranscriptParser`. Parsing stays daemon-side, as `session.messages` already does.
-
-`handleSessionMessages` (`RPCRouter+SessionHandlers.swift`:24) is not the model
-for this handler and cannot be extended into it: it takes a **file path** from the
-caller and constrains it to the Claude projects store (:49-55). A cloud session
-has no local file and no Claude session id, so `remote.transcript` takes
-`(provider, sessionID)` and resolves the path itself — the caller never names one.
-
-**The parent design's single-choke-point resolver is a prerequisite of this
-slice**, not a follow-up. `TranscriptParser` is reached from several handlers that
-are not guarded alike, and admitting a second permitted root is only safe where
-the boundary is actually checked. The resolver — one function taking an untrusted
-path and returning either a validated path under one of the two permitted roots or
-a refusal, with `TranscriptParser`'s entry points reachable only through it —
-ships before the TBD-owned root is admitted to it.
+The one case worth naming is a **gone** cloud lane, which drops attach and leaves
+the tab list empty, reaching the view's existing "doesn't support attach or a log
+view" empty state. That state is not reachable in practice, since nothing retires
+a cloud session (§3), and it is the right answer if it ever is: with attach gone
+there is genuinely nothing to put in the content area, while the row itself goes
+on saying what it knows.
 
 ### Must fix in this slice: attach announces contract major 1
 
@@ -821,7 +790,7 @@ crosses a process boundary and is the one that would otherwise go on announcing
 ### Attach is an entitlement question, not a capability question
 
 Attaching to an existing cloud session is gated per account by the vendor, and
-the gate is off by default (§10). The distinction that decides where this lands
+the gate is off by default (§11). The distinction that decides where this lands
 in TBD's model:
 
 - **A capability is what a provider implements.** `describe` answers it
@@ -872,10 +841,10 @@ records an **attach-scoped block** against that provider.
 says the provider itself cannot authenticate, and it has consequences — it
 suppresses auto-attach for every session and blocks reconnect
 (`AppState+RemoteAttach.swift`:48-59, `RemoteReconnectPolicy.isBlocked`:76-79).
-A cloud provider whose `create`, `send`, `list` and `transcript` all work
-perfectly is not in that state, and saying so would be a lie that also disables
-nothing useful. The block is scoped to attach; the other tabs, the send field
-and every non-attach verb are untouched.
+A cloud provider whose `create`, `send`, `list` and `land` all work perfectly is
+not in that state, and saying so would be a lie that also disables nothing
+useful. The block is scoped to attach; the send field and every non-attach verb
+are untouched.
 
 `RemoteProviderStatus` therefore gains a third field beside the two above, read
 at the same one lookup:
@@ -902,11 +871,11 @@ renders its label as plain text rather than a button, which it already does
 
 #### What renders, and what does not get spawned
 
-- **The Attach segment stays in the picker.** The capability is declared and the
-  tab list is a function of capabilities, so the segment is present and
-  selecting it explains the condition. Removing the segment would leave the user
-  wondering why a documented feature is absent.
-- **Selecting it shows the CTA in place of the attach slot.** `contentArea`
+- **Attach stays in the tab list.** The capability is declared and the tab list
+  is a function of capabilities, so the tab is present — for a cloud lane it is
+  the only one, rendered without a picker — and it explains the condition.
+  Dropping it would leave the user wondering why a documented feature is absent.
+- **The pane shows the CTA in place of the attach slot.** `contentArea`
   already controls attach visibility through `showsAttachSlot` while keeping
   `RemoteAttachPager` itself mounted unconditionally — the invariant its comment
   at :419-437 exists to protect — so the block makes `showsAttachSlot` (:485)
@@ -953,17 +922,17 @@ trade: the contract gives a provider exit 3 to say "transient, retry me", and
 retrying forever on the class that means the opposite is the defect. Both
 branches are asserted.
 
-#### What is not in this slice
+#### The exit-driven path is the whole of what is available
 
-The parent design also specifies a **cached eligibility preflight** — one check
-against the undocumented surface at describe time, reflected by disabling the
-affordance before anything is spawned, failing open when it cannot run. That
-would remove the single doomed attach the exit-driven path spends to learn the
-condition. It is not in this slice, because it needs an undocumented endpoint the
-rest of slice 1 does not, and its whole benefit is one wasted process per account
-per daemon lifetime. The exit-driven path is the floor and needs nothing
-undocumented; the preflight is the improvement on top, and the evidence for
-promoting it is a user meeting the dead terminal more than once.
+The parent design also describes a **cached eligibility preflight** — one check
+at describe time, reflected by disabling the affordance before anything is
+spawned, failing open when it cannot run — which would save the single doomed
+attach the exit-driven path spends to learn the condition. That check has no
+supported interface behind it: the only surface that answers it is the
+undocumented one TBD does not build against (§1). So the exit-driven path is not
+a floor beneath a planned improvement; it is what a supported interface allows,
+and it costs one process per account per daemon lifetime to learn a fact the
+vendor exposes no other way.
 
 ## 6. Land
 
@@ -1050,7 +1019,7 @@ still yields an empty menu rather than a partial one.
    `claude --teleport <id>`.
 
    **That first pane opens on Claude Code's folder-trust prompt**, because a
-   freshly materialized worktree is a directory it has never seen (§10). The user
+   freshly materialized worktree is a directory it has never seen (§11). The user
    answers it. TBD does not suppress it, pre-answer it, or type into the pane:
    trusting a checkout just pulled from a remote branch is a security decision,
    and this is the moment to ask. Land is complete when the pane is spawned with
@@ -1067,21 +1036,225 @@ a half-converted row, and the lane is exactly as it was.
 
 Landing is always a user gesture and is never triggered by session state.
 
-**After the conversion, the provider session is archived** — one verb call,
-because `claude-cloud` declares `archive` and reports `forks: true`, so the work
-has moved to this machine and a session nobody will return to should not sit in
-the working set. It is never *stopped*, whatever a provider declares: landing is
-a "bring this home" gesture, not a teardown, and the remote box may still hold
-work that was never pushed. This is the only archive path slice 1 wires; the
-row-level archive composition stays out of scope per §1. The archive runs after
-the row has already converted and is best-effort: its failure is reported and does
-not un-land the lane.
+**After the conversion, the cloud session keeps running, and the lane says so.**
+`land` reports `forks: true`, so the landed checkout and the session diverge from
+this moment; the parent design's answer to that is to retire the session where
+the provider can, and to leave it running and say so where it cannot. Cloud
+cannot: it declares neither `archive` nor `stop` (§3), so there is nothing to
+call. The landed row therefore carries its origin (§2) and states plainly that
+the session it came from is still in the account's working set, where the user
+can archive it on claude.ai. TBD never *stops* a session on landing whatever a
+provider declares — landing is a "bring this home" gesture, not a teardown, and
+the remote box may still hold work that was never pushed.
 
-That archive does not travel back to the row. Mirroring a provider's `archived`
-flag onto a row's status applies while the row is remote, and the lane is local
-now — its filing state is TBD's own from that point.
+Nothing about the session travels back to the row after the conversion. A row
+whose files are on this machine takes its status from TBD alone, whatever a
+provider later reports about the session that row once ran on.
 
-## 7. The flag
+## 7. Archiving a remote lane
+
+Archive retires a lane from the working set, and a cloud lane needs the gesture
+more than a local one does: nothing else takes it out of the tree. Retirement
+driven by the provider needs a complete snapshot and there is never one (§3), so
+a cloud lane that has been landed, abandoned, or answered stays in the active
+tree until a person files it away.
+
+**TBD offers that gesture today and refuses it.** `RowActionMenu.regularItems`
+(`Sources/TBDApp/Helpers/RowActionMenu.swift`:357-390) puts Archive in the first
+section of every non-scratch, non-main row's menu, gated only on
+`hasActiveChildren`, so an adopted remote row shows it; `run(.archive)`
+(`Sources/TBDApp/Sidebar/RowActionMenuActions.swift`:184-186) calls
+`AppState.archiveWorktree`, which calls `worktree.archive`, which refuses. The
+menu item is not the defect and does not change: what changes is that the daemon
+stops refusing.
+
+### The fences, and why lifting them is not enough
+
+Three explicit fences refuse a remote row, each deliberate and each placed above
+the row so the actuation record never claims an act that could not be attempted:
+
+- **`worktree.archive`**
+  (`Sources/TBDDaemon/Server/RPCRouter+WorktreeHandlers.swift`:217-221) — refuses
+  loudly, with a message naming the lane, because it answers a user gesture.
+- **`worktree.forget`** (same file, :324-328) — the same shape, on the stated
+  ground that a remote lane has no checkout here to leave alone.
+- **`AutoArchiveOnMergeCoordinator.handleMergedTransition`**
+  (`Sources/TBDDaemon/PR/AutoArchiveOnMergeCoordinator.swift`:54-57) — skips
+  silently rather than loudly, because it is a background rail rather than a
+  gesture.
+
+Underneath them the refusal is structural rather than conditional.
+`beginArchiveWorktree`
+(`Sources/TBDDaemon/Lifecycle/WorktreeLifecycle+Archive.swift`:47-49),
+`forgetWorktree` (`.../WorktreeLifecycle+Forget.swift`:38) and
+`beginReviveWorktree` (`.../WorktreeLifecycle+Archive.swift`:292-295) all resolve
+their row through `WorktreeStore.getLocal`, and `LocalWorktree.init?`
+(`Sources/TBDShared/LocalWorktree.swift`:34-39) returns nil for a remote row. So
+deleting a fence would convert a clear refusal into `worktreeNotFound`, and
+nothing more.
+
+That is the right structure, because the local archive path is local all the way
+down: it syncs the branch from `git worktree list`, captures HEAD from the
+directory, captures each terminal's scrollback into Closed Terminals, kills the
+tmux windows, deletes the terminal and tab rows, and — in phase 2 — runs the
+archive hook and removes the git worktree. Not one of those has a meaning for a
+lane whose files are on another machine.
+
+### A remote lane archives through its own path
+
+`handleWorktreeArchive` branches on location instead of refusing on it. The
+`.local` arm is today's path, untouched. The `.remote` arm calls a second
+lifecycle entry that shares only what is genuinely about the row:
+
+1. Load the row through `WorktreeStore.get` — not `getLocal`, which is the whole
+   point of a separate path.
+2. Refuse `.main` and `.creating`, which `WorktreeStore.archive`
+   (`Sources/TBDDaemon/Database/WorktreeStore.swift`:646-672) already enforces in
+   the same transaction that flips the status.
+3. Honor `assertArchivable` (:686-703) unless forced. Its SQL counts direct
+   children with status `.active` or `.creating` and is location-blind, so a
+   remote lane with an active child is refused exactly as a local one is — and a
+   remote lane can have children, since adoption nests rows on
+   `parentWorktreeID`.
+4. Compose over the provider's declared capabilities (next subsection), then flip
+   the row through `WorktreeStore.archive(id:)`.
+
+No tmux, no scrollback capture, no git, no phase 2, no archive hook. The hook is
+worth naming: it runs with the worktree's path as its working directory, and a
+remote lane has no directory to run it in.
+
+### The composition, and which branch `claude-cloud` takes
+
+What archive does to the session behind the row is the three-way composition the
+08-10 design specifies, and this document does not restate the rule beyond naming
+its branches: a provider declaring `archive` has the verb called and then the row
+marked; one declaring only `stop` has the session stopped and then the row
+marked; one declaring neither has the row marked and nothing else, with the
+session left running and the UI saying so.
+
+**`claude-cloud` takes the third branch, and takes it permanently.** It declares
+neither `archive` nor `unarchive` — the account's archive operation lives on the
+undocumented surface TBD does not build against (§1) — and it declares no `stop`,
+because nothing exposed terminates a running cloud session. So archiving a cloud
+lane calls nothing at all: it is a filing change inside TBD, and the session goes
+on existing exactly as it did.
+
+**What the row shows, so nobody reads it as a teardown.** An archived cloud lane
+says, in the Archived list and in its detail header, that it was filed away here
+and that the cloud session is still in the account's working set, naming
+claude.ai as where to retire it for real. The words to avoid are the ones the
+local path earns: nothing was stopped, closed, torn down, or cleaned up. The one
+sentence a user needs is that TBD stopped showing the lane and Anthropic did not
+stop the session.
+
+**The termination guards do not apply.** The 08-10 design scopes the `working`
+guard and the dirty-remote-checkout guard to the paths that actually end a
+session — the `stop` path always, and the `archive`-verb path where the same
+provider also declares `stop` — because destroying unpushed work is the only
+thing they defend against. A row-only archive destroys nothing, so it is never
+refused on those grounds. Nothing here relaxes a guard; the guarded branches are
+simply not the branch cloud takes.
+
+**No actuation row is written for a row-only archive.** `.worktreeArchive` maps
+to the `dispose` kind (`Sources/TBDDaemon/Actuation/ActuationSurface.swift`:150-151),
+and this branch disposes of nothing: it kills no process and ends no session. The
+precedent is the 08-10 design's forced `repo.remove`, which cascades local
+worktrees and writes no actuation row for the remote lanes it drops, because none
+of their sessions were torn down and the record may only claim acts that were
+attempted. The branches that do call a provider verb record theirs as they would
+for any other actuated act.
+
+### What happens to the mirror row, and to the next `list`
+
+**The `remote_session` mirror row is untouched.** It is provider-owned liveness —
+what the manager last observed — while `worktree.status` is TBD's own filing
+decision, and archiving a lane is the second of those. Keeping the mirror is what
+lets an archived lane still say whether its session is still being listed.
+
+**The next snapshot does not resurrect the lane.** `RemoteSessionAdopter.adoptOne`
+(`Sources/TBDDaemon/Remote/RemoteSessionAdopter.swift`:98-102) ends adoption for
+any session that already has a row — "created once, never re-derived, whatever
+the payload now says" — so a session that keeps appearing in every `list` after
+its lane was archived mints nothing and changes nothing.
+
+**Nor does it un-archive it.** The parent design's mirroring of a payload's
+`archived` flag onto the row is not in this slice, and could not act here if it
+were: the ledger reports no such flag, and a provider that never learns TBD filed
+a lane away would report `archived: false` forever. When that mirroring does land
+with discovery, it carries a provider's own filing state and therefore applies
+only where the provider holds one — which is to say, where it declares `archive`.
+
+`remote.dismiss`'s `dismissed` column stays a separate axis: it hides a bare
+session row from the Provider Desk and says nothing about a lane. Archiving a
+lane does not set it, and dismissing a session does not archive a lane.
+
+### Where an archived remote lane shows up
+
+`AppState.visibleWorktrees`
+(`Sources/TBDApp/AppState+ArchiveTombstones.swift`:39-44) filters on
+`status != .archived` and the tombstone set alone — no reference to location — so
+an archived remote row leaves the tree the moment its status flips, with no
+change to that function. It is confirmed rather than modified.
+
+**The Archived list needs one change, and without it the lane would vanish
+entirely.** `ArchivedWorktreesView` hides rows with no conversations by default
+(`Sources/TBDApp/ArchivedWorktreesView.swift`:136, filter at :251-256), where
+"conversations" means `liveClaudeSessionCount ?? archivedClaudeSessions?.count`
+(:677-679) — local Claude sessions, of which a remote lane has none. A cloud lane
+would therefore leave the tree and not appear in the list that is supposed to
+have received it. So a row with a provider origin passes that filter
+unconditionally, the way an in-flight revive already does. The filter's premise —
+"no conversations means nothing to come back to" — is a statement about local
+sessions, and it is simply not true of a lane whose conversation is on a server.
+
+### Unarchive is the same branch, run backwards
+
+Reviving a lane archived by the row-only branch flips the row back and calls
+nothing, which is the 08-10 design's first revive case: nothing was retired on
+the provider, so there is nothing to undo there. `WorktreeStore.revive(id:)`
+(`Sources/TBDDaemon/Database/WorktreeStore.swift`:709-721) is location-blind and
+does the flip; `beginReviveWorktree` is not — it resolves through `getLocal` and
+then materializes a directory — so revive branches on location exactly as archive
+does, and the remote arm is the row flip alone.
+
+The lane comes back saying what it knew before: its state is `unknown`, its name
+is its session id, and whether the session is still there is what the mirror row
+answers. The 08-10 design's other revive cases — an `unarchive` verb, a
+terminated session, a retirement TBD cannot lift — describe providers cloud is
+not, and they arrive with the providers that declare those capabilities.
+
+### `worktree.forget` stays refused
+
+Forget means "stop tracking this checkout but leave its files alone", and a
+remote lane has no checkout here to leave alone. That is a category error rather
+than an unimplemented feature, and it is how the 08-10 design classifies forget,
+alongside hibernate, relocate, scratch promote and adopt-existing-directory:
+operations with no remote meaning, kept unreachable through `LocalWorktree`. The
+fence stays exactly as it is, comment included — it already states that ground
+rather than a missing capability. Archive is the retirement gesture for a lane,
+and archive is the one this section makes work on a remote row.
+
+### The auto-archive-on-merge rail does not take remote lanes
+
+The rail's guard stays, and a remote lane does not participate.
+
+Two reasons, and the second is the one that would still hold if the first were
+fixed. First, the rail has no signal for a remote lane: it fires on a merged PR
+transition, and PR polling is fenced away from remote rows because everything
+below it is keyed on the worktree's path — `git` and `gh` both run inside a
+directory that does not exist for a remote lane. The 08-10 design's answer is to
+re-key that poll on the branch rather than to relax the fence, and until that
+lands a remote lane carries no PR status and reaches no merged transition.
+
+Second, when the badge does come back, an automatic archive of a lane whose
+session keeps running is a background mutation with no user gesture behind it —
+filing away a lane whose agent may still be working, in the one branch of the
+composition where TBD cannot even ask the provider what state it is in. That is
+the shape the repository's default-off rule exists for, and the honest row state
+("archived here, still running there") is one a person should be choosing. The
+guard's comment changes to say this; the guard does not.
+
+## 8. The flag
 
 `claude_cloud_enabled` — a new `config` column, **default OFF**. The behavior is
 autonomous background polling against a network service, squarely inside the
@@ -1167,7 +1340,7 @@ external-provider path ungated as the v1 rollout intends — and that deletion
 migration leaves `claude_cloud_enabled` untouched, so turning the outer flag off
 by deleting it cannot turn cloud on for anyone.
 
-## 8. Testing
+## 9. Testing
 
 Every gated conditional gets a test per branch. All tests run under
 `scripts/test.sh`, use the `TBD_HOME` isolation seams, and reach neither the
@@ -1203,15 +1376,34 @@ intervening state in which a local row is showing a remote detail view. A
 multi-selection including the row derives `nil`. Deselecting derives `nil`. A
 disconnect routes to `.other` regardless of the derived value.
 
-**The picker's shape for a `transcript`-without-`log` provider.** `available`
-returns `[.transcript, .attach]` for a live cloud lane and `[.transcript]` for a
-gone one; `showsPicker` is true in the first case and false in the second;
-`initialTab` lands on Transcript in both, with no tab requested — the assertion
-that would fail against the `.attach` placeholder, since `.attach` is available
-in the first case and would win. A one-shot Log hint against a provider that
-does not declare `log` is discarded rather than producing a blank pane, and an
-explicit Attach hint is honored. A provider declaring `log` and not `transcript`
-behaves exactly as it does now, on both the tab list and the landing tab.
+**The detail surface's shape for an `attach`-only provider.** `available`
+returns `[.attach]` for a live cloud lane and `[]` for a gone one; `showsPicker`
+is false in both, so the attach content fills the pane in the first case and the
+empty state fills it in the second. `showsSendField` is true for a live cloud
+lane whose provider has never recorded a complete snapshot — the case that would
+regress if freshness were conflated with "has answered" — and false once the
+session is `gone`. A one-shot Log hint against a provider that does not declare
+`log` is discarded rather than producing a blank pane. A provider declaring `log`
+and not `attach` behaves exactly as it does now, on both the tab list and the
+landing tab.
+
+**The row states its uncertainty.** A row whose agent state is `unknown` renders
+the uncertainty suffix rather than nothing, and a local row with an idle session
+still renders nothing — the pair that discriminates, since the defect being fixed
+is the two looking identical. A row whose agent state is `working` still renders
+the working indicator, so the new case did not take the slot from an existing
+one.
+
+**The ledger's snapshots never retire anything.** An always-`complete: false`
+provider whose `list` omits a session it sighted on an earlier poll leaves that
+row's `missingCount` where it was, never marks it `gone` however many polls it
+takes, and never
+advances freshness in either the in-memory stamp or the persisted `tbd_meta` key
+— asserted across a manager restart, so the recovered value is still absent.
+The same snapshot still adopts a session it has not seen before and still clears
+a degraded health state, so a provider whose steady state is incomplete recovers
+from a transport failure and keeps Send available. A `complete: true` snapshot
+from any other provider retires on the existing two-absence rule, unchanged.
 
 **`create` on a pseudo-terminal.** The bounded runner's PTY mode hands the child
 a terminal — asserted by spawning a probe that reports whether its stdout is a
@@ -1226,13 +1418,14 @@ Output carrying ANSI control sequences around the same three lines yields the
 same id. Output naming two different session ids, and output naming none, each
 produce a `create` failure classified as `contractBug` with the received text in
 the message — never a success with an empty id — and each leaves the ledger row
-`pending` so a later complete snapshot can still adopt the session. A create
-whose response carries a title unlike the submitted prompt still names the row
-from the provider's `title`, and a create never writes a display name of its own.
+`pending` and surfaced as an unresolved create rather than silently dropped. A
+create never writes a display name of its own, so the row is named from the
+provider's payload — the session id, for a ledger row — and never from the
+submitted prompt.
 
 **The entitlement path.** A permanent attach exit reported to the daemon records
 an attach block on that provider and leaves its health untouched, so the send
-field, the transcript tab and every non-attach verb stay available. The block
+field and every non-attach verb stay available. The block
 suppresses `showsAttachSlot` for that selection and renders the CTA in its place
 while `RemoteAttachPager` stays mounted. `attachEligibleRemoteSelections` drops
 a session whose provider carries a block and keeps one whose provider does not.
@@ -1243,20 +1436,39 @@ elapsed backoff window, admits a transient one under the same conditions, and
 Reattach clears either. A provider with no block behaves exactly as it does now,
 reconnect included.
 
-**The provider-fed renderer.** A `.remote` source resolves its store key to the
-provider session id and renders the same nodes the local source renders from the
-same items, asserted by building both presentations from one fixture and
-comparing them. The remote source supplies `terminalID: nil` to the card
-context, so no truncation footer renders and no item-full-body RPC is issued
-even for an item marked truncated. Opening an item from a remote transcript
-resolves through the session-keyed overlay path and finds the item, including one
-nested in a subagent thread. A `file:` link in a remote transcript is discarded
-rather than pushing a file frame or reaching the system handler, while the same
-link in a local transcript still pushes a frame. The first fetch renders the
-loading state rather than an empty list, an incomplete stream renders what
-arrived and fetches again from the returned cursor, and a failed fetch renders
-the error state with Retry rather than an empty list. The poll cadence is driven
-through the injected clock in virtual time, with no wall-clock sleep in the test.
+**Archive's three branches.** A provider declaring `archive` has the verb called
+and then its row marked `archived`; one declaring only `stop` has `stop` called
+and then its row marked; one declaring neither has its row marked with **no**
+provider invocation at all, asserted against a fake invoker that records every
+verb it was asked for. Each branch ends with the row `archived`. The row-only
+branch writes no actuation row, while the two verb branches write theirs. The
+`working` and dirty-checkout guards refuse the `stop` branch and the
+`archive`-with-`stop` branch, and never refuse the row-only branch — including
+against a lane whose `agent_state` is `working`, which is the assertion that
+would fail if the guards were applied to the path that ends nothing.
+
+**The row-only branch is honest on screen.** The archived cloud lane's copy names
+the session as still running and never claims a stop, a teardown or a
+provider-side retirement — asserted on the composed string rather than on a
+substring blacklist, so a rewording that reintroduces the claim fails.
+
+**Unarchiving a row-only archive.** Revive on that lane flips the row back to
+`active` and invokes nothing on the provider, and the lane returns with the same
+id, origin, branch, parent edge and children. Revive on a local worktree still
+runs the whole local path, so the branch did not swallow it.
+
+**Each fence, after.** `worktree.archive` on a remote row archives it instead of
+returning its refusal string; on a local row it behaves exactly as today. A
+remote row with an active child is refused by `assertArchivable` in both the
+local and remote arms alike. `worktree.forget` on a remote row still refuses.
+`AutoArchiveOnMergeCoordinator.handleMergedTransition` still returns `false` for
+a remote row and still archives a local one.
+
+**`visibleWorktrees` drops an archived remote row.** A remote row flipped to
+`archived` leaves the visible set, and the same row while `active` stays in it —
+the assertion that the location-blind filter needed no change. The archived
+lane then appears in the Archived list under the default `hideEmpty` filter,
+which it would not under the filter as written today.
 
 **Land's precondition failures each leave the row unchanged.** A remote mismatch,
 a branch missing on the remote, an occupied target path, and a branch already
@@ -1265,8 +1477,9 @@ each leaves the row `.remote` at its synthetic path with its origin, display nam
 parent edge and children intact. A `branch` beginning with `-` and an
 `ext::`-style `remote_url` are both rejected before reaching git. On success the
 same row id comes back `.local` at a real path with everything else preserved and
-no second row for the session; the provider session is archived and never stopped;
-a failed archive after a successful conversion leaves the row landed and reports.
+no second row for the session. No provider verb is invoked by the landing at
+all — asserted against a fake invoker — since cloud declares neither `archive`
+nor `stop`, and the landed row states that its session is still running.
 
 **Version negotiation.** A provider declaring `[1, 2]` negotiates 2, one declaring
 `[1]` negotiates 1, one declaring `[2]` alone negotiates 2 rather than being
@@ -1289,13 +1502,7 @@ for it; a verb naming a registered provider still goes through the runner; a
 registry entry claiming the reserved name is skipped and flagged while every other
 entry in the file still loads, with and without the cloud flag on.
 
-**The transcript boundary.** Every read reaches `TranscriptParser` through the one
-resolver; a path under the Claude projects store and a path under the TBD-owned
-root are both accepted; anything else is refused, including a traversal that
-escapes either root after normalization; the refusal holds for every entry point
-alike, so one added later cannot be reached unguarded.
-
-## 9. Work order
+## 10. Work order
 
 **Nothing opens a pull request until the whole path works end to end.** The order
 below minimizes rework; it is not a sequence of independently shippable
@@ -1305,28 +1512,30 @@ provider with no flag to gate it.
 
 1. **The shared model change (§2).** Origin field, record mapping, round-trip
    tests. Everything downstream reads provenance, and every later step written
-   against the current erasing mapping would have to be rewritten.
+   against the erasing mapping would have to be rewritten.
 2. **Contract v2 negotiation (§3).** Accept a `[2]`-only provider, store the
    negotiated major, thread it to the runner and the events supervisor, publish it
    on `RemoteProviderStatus`. The cloud provider cannot be described at all until
    this lands, so writing it first means writing it against a guard that rejects
    it.
-3. **Pseudo-terminal mode in the bounded process runner (§3).** One opt-in stdio
+3. **Snapshot completeness (§3).** `complete` on the `list` envelope, honored in
+   `RemoteSessionStore.applySnapshot`: no `missingCount`, no freshness in either
+   store, adoption and health unchanged. The built-in provider's snapshots are
+   always incomplete, so a provider written before this lands would mark its own
+   lanes `gone` two polls after creating them.
+4. **Pseudo-terminal mode in the bounded process runner (§3).** One opt-in stdio
    mode on `runBoundedProcess`, with its deadline, drain and single-resume
    properties re-asserted under it. `create` cannot be written against a pipe at
    all, so writing the provider first would mean writing it against a spawn that
    refuses every invocation.
-4. **The transcript-root choke point (§5).** One resolver, every `TranscriptParser`
-   entry point behind it. The TBD-owned root cannot be admitted safely before the
-   boundary is actually checked.
-5. **The flag and its capabilities plumbing (§7).** Migration, record, model,
+5. **The flag and its capabilities plumbing (§8).** Migration, record, model,
    `DaemonCapabilitiesResult`, Settings toggle. The provider is constructed behind
    this flag, so the flag exists first or the construction has to be rewired.
-6. **The dispatcher and the provider's `describe`, `create` and `list` (§3).**
-   Including the ledger table, its union rules, the create-output parse and the
-   one out-of-band `list` a successful create triggers. Until a cloud session can
-   be created and enumerated there is no row to route, watch or land, so this is
-   the step that makes every later one testable by hand.
+6. **The dispatcher and the provider's `describe`, `create`, `list` and `send`
+   (§3).** Including the ledger table, the create-output parse and the one
+   out-of-band `list` a successful create triggers. Until a cloud session can be
+   created and enumerated there is no row to route, steer, land or archive, so
+   this is the step that makes every later one testable by hand.
 7. **The create surface.** A repository already has a remote-create entry point:
    `RepoSectionView.newRemoteSessionMenuItem`
    (`Sources/TBDApp/Sidebar/RepoSectionView.swift`:430-444) enumerates
@@ -1337,29 +1546,29 @@ provider with no flag to gate it.
    — the affordance a user already reaches for to start a lane. Both entries are
    omitted, not disabled, when the flag is off, matching how capability-gated
    remote items are already omitted rather than grayed out.
-8. **Routing (§4).** The derived remote selection and its two call sites. Only
-   observable once a cloud row exists, which is why it follows step 6.
-9. **The transcript source seam (§5).** Re-key `TableTranscriptPaneView` on a
-   `TranscriptSource`, rename the overlay's session parameter, add the
-   file-link flag, move the poll loop onto an injected clock — all with the
-   local source as the only case that exists. This is a change to a load-bearing
-   local rendering path, so it lands and is proven against the path it already
-   serves *before* a second source can be blamed for a regression in it.
-10. **The watch surface (§5).** The `transcript` verb, the `remote.transcript`
-    handler, the remote source arm, the new tab with its gate arm and the
-    placeholder-tab change, and — in the same pass, because they share the one
-    `RemoteProviderStatus` lookup — the negotiated major, the attach argv and the
-    attach block reaching the app, alongside the attach exit-class correction the
-    block depends on.
-11. **Land (§6).** The `Context` plumbing with the filesystem fix in the same edit,
-    the `worktree.land` RPC, preconditions, in-place conversion, and the follow-up
-    archive.
+8. **Routing, and the row's uncertainty indicator (§4, §3).** The derived remote
+   selection and its two call sites, plus the suffix indicator that keeps a
+   permanently `unknown` lane from rendering as an idle one. Only observable once
+   a cloud row exists, which is why it follows step 6 — and the send field needs
+   nothing beyond the routing, since its gate already passes for this provider.
+9. **Attach readiness (§5).** The negotiated major, the attach argv and the
+   attach block reaching the app through the one `RemoteProviderStatus` lookup,
+   alongside the attach exit-class correction the block depends on. They land
+   together because they share that lookup.
+10. **Archive (§7).** The remote arm of `worktree.archive` and of revive, the
+    capability composition, the row copy, the Archived list's filter, and the two
+    fences that stay. It precedes Land because Land's honesty about the surviving
+    cloud session is the same statement this step has to get right, and because a
+    lane created in step 6 is otherwise stuck in the tree for the rest of the
+    build.
+11. **Land (§6).** The `Context` plumbing with the filesystem fix in the same
+    edit, the `worktree.land` RPC, preconditions, and the in-place conversion.
 
 Step 11 last because it is the only step that mutates a row's location, so every
 earlier step is exercised against a stable lane before the conversion is
 introduced into the mix.
 
-## 10. The vendor CLI surface, as measured
+## 11. The vendor CLI surface, as measured
 
 Everything in this section is measured behavior of `claude` 2.1.233 on macOS.
 The rest of this document is written to it, and each finding's consequence is
@@ -1395,11 +1604,16 @@ those lines are the only channel the session id travels on. §3 specifies the
 parse and what a change in that format costs.
 
 **The title is derived server-side, not echoed back.** A description of
-"transcript persistence probe: reply with the single word pong" comes back
-titled "Add probe pong reply". A
-cloud session's name is the vendor's summary of the instruction, not the
-instruction, so TBD reads it from `list`/discovery and never assumes it matches
-what was sent (§3).
+"transcript persistence probe: reply with the single word pong" comes back titled
+"Add probe pong reply", and that title is on the created-session line rather than
+in any structured field TBD can read. A cloud session's name is the vendor's
+summary of the instruction rather than the instruction, so TBD takes a name only
+from a provider payload that carries one and never from what was sent — which in
+this slice means every cloud lane wears its session id (§3). Taking the
+title out of that line instead is a format dependency with no cross-check: the id
+has a strict shape and appears three times, so a parse that finds none or finds
+two different ones is detectable, while a display string lifted out of prose is
+wrong silently the first time the sentence is reworded.
 
 ### `send` behaves exactly as the parent design specifies
 
@@ -1450,27 +1664,28 @@ the host store (`~/.claude/projects`) and the profile store
 (`$CLAUDE_CONFIG_DIR/projects`) are two different places a session could have
 landed.
 
-So **the `transcript` verb carries the entire watch story.** Nothing is seeded
-locally for free, and nothing has to be redirected to keep a cloud conversation
-out of the local session store. That is why §5's transcript path is the only
-source of conversation data, and why the Transcript tab is the watch surface
-rather than a convenience beside attach.
+So **nothing about a cloud conversation reaches this machine on its own.**
+Nothing is seeded locally for free, and nothing has to be redirected to keep a
+cloud conversation out of the local session store. That is the other half of why
+there is no watch surface in this slice (§1): not only is there no supported
+interface to read the conversation from, there is no local artifact of it either.
 
 Whether a *successful* attach would write one is untested rather than refuted —
 attach could not run at all under the account gate above. It is moot for the
 default state, since an account without the entitlement never attaches and so
 never writes. If the entitlement is granted and an attach does write locally, the
-consequence is the parent design's: the attach process must be pointed at the
+consequence is the parent design's: the attach process must be pointed at a
 TBD-owned root, or a cloud conversation surfaces as a local session of whichever
 worktree the pane ran in. `handleSessionList`
 (`Sources/TBDDaemon/Server/RPCRouter+SessionHandlers.swift`:9-22) resolves a
 projects directory from the worktree's path (:16) and hands it to
 `ClaudeSessionScanner.listSessions(projectDir:)` (:20), so anything written under
 that resolved root is indistinguishable from a local session of that lane.
-Pointing attach elsewhere is one environment entry on the attach spawn, and the
-TBD-owned root already exists for the verb's output.
+Pointing attach elsewhere is one environment entry on the attach spawn, and it
+is the first thing to check on an entitled account rather than something to
+discover from a stray session row.
 
-## 11. Rejected alternatives
+## 12. Rejected alternatives
 
 **Provenance as a payload on `WorktreeLocation.local`.** The same fact expressed
 in the same enum, which is superficially tidier — one value answers both
@@ -1510,23 +1725,29 @@ worth building when the resolution ladder's lower tiers land and there is
 something for it to resolve; until then it would be a second surface with one
 option on it.
 
-**A second, simpler transcript view for remote lanes.** A `RemoteTranscriptTabView`
-beside `RemoteLogTabView` — call `remote.transcript`, receive parsed
-`TranscriptItem`s, render them in a plain scroll view — touches none of the local
-rendering path and would ship sooner. Rejected on what the cloud lane would then
-be: a session with no `log`, no attach guarantee, and a transcript that is its
-entire watch surface, shown through a renderer with no tool cards. A local lane's
-Edit card carries a diff, its Bash card a command and its output, its Agent card a
-drill-in to the subagent thread; a cloud lane would get prose in place of every
-one of those, which would not read as a lesser second view — it would read as the
-feature. Two renderers over one record format is also a standing tax: every tool
-card improvement lands in one of them, and the other decays quietly until someone
-notices. The cost that made this look attractive is smaller than it appears —
-`TableTranscriptView` and its height cache are already source-agnostic and already
-serve a non-terminal caller in `HistoryPaneView`, so what has to change is the
-resolution above the renderer, not the renderer. The field evidence that would
-reopen it: the source seam proving unable to express a provider that reports
-something the local path cannot, which would mean the two paths were never one.
+**Building against the undocumented claude.ai endpoints.** They are there, the
+web client uses them, and they would answer every question this slice has to do
+without: which sessions the account has, what each one is called, what its agent
+is doing, what the conversation says, and whether attach is permitted. Taking
+them would turn a ledger into an inventory and a blank pane into a transcript.
+
+Rejected on terms rather than on taste. Anthropic's Consumer Terms bar automated
+access to the Services outside the carve-out for use of an Anthropic API key, and
+a cloud session is reachable only under a subscription login — so there is no
+key-shaped route to the same data and no configuration in which such a client is
+inside the terms. A tool that quietly puts its users outside the terms of the
+account they are signed into is not a tool this repository ships, and the cost
+falls on the user rather than on TBD.
+
+Two lesser reasons agree with the first without being needed by it. An
+undocumented endpoint has no compatibility promise, so the feature would break on
+a deployment nobody announced, in a way the user would read as TBD being broken.
+And the boundary is the load-bearing part of the design: the whole point of
+`describe` being static, `list` being ledger-only and attach being learned from
+an exit code is that every one of them holds against a supported interface. What
+would reopen this is a supported interface — a documented endpoint, an
+API-key-authenticated route, or a stated permission — not a smaller or more
+careful scraper. Anything short of that changes the risk's size, not its kind.
 
 **Making `describe` dynamic so `attach` is declared only when the account is
 entitled.** The capability list would then tell the exact truth about what is
@@ -1538,13 +1759,6 @@ the Attach segment appear and vanish rather than explain itself. Capability
 answers what a provider implements; entitlement answers whether this account may
 use it, which is the same shape as a credential having expired and belongs on the
 same runtime path.
-
-**A per-provider streaming transcript follow instead of cursor polling.** A live
-stream would remove the refresh latency the tab has. Rejected on supervision
-shape: a per-session stream is one process per session rather than one per
-provider, which the contract's `events` design already declined for the same
-reason. Cursor polling first; the evidence that would justify a stream is the
-polling interval being visibly wrong in use.
 
 **Synthesizing a `RemoteProviderConfig.exec` that composes into the right attach
 command.** Setting `exec` to the resolved `claude` path and `args` to `["--cloud"]`
