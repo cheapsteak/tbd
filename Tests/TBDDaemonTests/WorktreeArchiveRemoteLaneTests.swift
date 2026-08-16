@@ -344,6 +344,27 @@ struct WorktreeArchiveRemoteLaneTests {
         #expect(try await fixture.status(of: lane) == .archived)
     }
 
+    /// The gate defends the verb path, and only that. The `gone` path makes no
+    /// provider call and reads nothing out of the mirror it could be wrong
+    /// about — it consults the row's own `gone` flag, which a stale inventory
+    /// does not put in doubt. Gating it would leave a lane whose provider
+    /// cannot archive unretireable for as long as that provider is unhealthy,
+    /// with `--force` the only way out and the row menu never sending one.
+    @Test("a stale inventory does not gate the gone path")
+    func staleInventoryDoesNotGateTheGonePath() async throws {
+        let fixture = try await RemoteLaneFixture.make(
+            capabilities: [], verbs: [RemoteLaneFixture.failingList], tag: "archive-stale-gone")
+        defer { fixture.cleanup() }
+        let lane = try await fixture.seedLane(gone: true)
+        try await fixture.markSnapshotStale()
+
+        let response = try await archive(fixture.router(), lane)
+
+        #expect(response.success, "the gone path was gated on staleness: \(response.error ?? "")")
+        #expect(try await fixture.status(of: lane) == .archived)
+        #expect(!fixture.invoker.calls.contains { $0.first == "archive" })
+    }
+
     // MARK: - Guards on the verb path
 
     @Test("a lane whose agent is working is refused, and the verb never runs")

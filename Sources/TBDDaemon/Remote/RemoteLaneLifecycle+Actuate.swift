@@ -56,15 +56,19 @@ extension RemoteLaneLifecycle {
     ///
     /// The capability routing is `archivePlan`'s, unchanged — this only adds
     /// the guards, and only on the verb path. The `gone` path touches nothing
-    /// on the provider and so has nothing to defend, which is why the guards
-    /// sit inside the `.invokeVerb` arm rather than ahead of the switch.
-    /// `force` overrides both.
+    /// on the provider and so has nothing to defend, which is why all three
+    /// guards sit inside the `.invokeVerb` arm rather than ahead of the switch.
+    /// `force` overrides all three.
+    ///
+    /// The stale-snapshot guard belongs with the other two for the same
+    /// reason: it exists because `agentState` and `meta.workspace_dirty` are
+    /// read out of a mirror a stale inventory makes untrustworthy. The `gone`
+    /// path reads neither, so there is nothing for staleness to make wrong —
+    /// and gating it would leave a lane on a provider that cannot archive
+    /// unretireable for as long as that provider stays unhealthy.
     func archiveDecision(for worktree: Worktree, force: Bool) async throws -> ArchiveDecision {
         guard case .remote(let provider, let sessionID) = worktree.location else {
             return .refused("Cannot archive \(worktree.name) through the remote path: it is a local worktree.")
-        }
-        if !force, await manager.hasStaleSnapshot(provider: provider) {
-            return .refused(Self.staleSnapshotRefusal(worktree.name, provider: provider))
         }
         let row = try await db.remoteSessions.row(provider: provider, sessionID: sessionID)
         let payload = row?.decodedPayload
@@ -76,6 +80,9 @@ extension RemoteLaneLifecycle {
             return .proceed(.rowOnly)
         case .invokeVerb:
             if !force {
+                if await manager.hasStaleSnapshot(provider: provider) {
+                    return .refused(Self.staleSnapshotRefusal(worktree.name, provider: provider))
+                }
                 if payload?.agentState == .working {
                     return .refused(Self.workingGuardRefusal(worktree.name))
                 }
@@ -99,13 +106,6 @@ extension RemoteLaneLifecycle {
         guard case .remote(let provider, let sessionID) = worktree.location else {
             return .refused("Cannot revive \(worktree.name) through the remote path: it is a local worktree.")
         }
-        // Same gate as archive's, and there is no `--force` to lift it:
-        // `worktree.revive` carries no force flag, and neither does the
-        // `remote.unarchive` handler this parallels. The recovery is the
-        // provider's next successful poll.
-        if await manager.hasStaleSnapshot(provider: provider) {
-            return .refused(Self.staleSnapshotRefusal(worktree.name, provider: provider))
-        }
         let row = try await db.remoteSessions.row(provider: provider, sessionID: sessionID)
         let capabilities = await manager.declaredCapabilities(provider: provider)
         switch Self.revivePlan(
@@ -115,8 +115,19 @@ extension RemoteLaneLifecycle {
         case .refusedNoUnarchive(let message):
             return .refused("Cannot revive \(worktree.name): \(message)")
         case .rowOnly:
+            // Not gated on staleness: this path calls nothing and consults
+            // nothing a stale inventory could make wrong. It is also the only
+            // way back for a lane filed under the `gone` exemption, and revive
+            // has no `--force` to lift a refusal with.
             return .proceed(.rowOnly)
         case .invokeUnarchive:
+            // Same gate as archive's verb path, and there is no `--force` to
+            // lift it: `worktree.revive` carries no force flag, and neither
+            // does the `remote.unarchive` handler this parallels. The recovery
+            // is the provider's next successful poll.
+            if await manager.hasStaleSnapshot(provider: provider) {
+                return .refused(Self.staleSnapshotRefusal(worktree.name, provider: provider))
+            }
             return .proceed(.invokeUnarchive(provider: provider, sessionID: sessionID))
         }
     }
@@ -128,12 +139,14 @@ extension RemoteLaneLifecycle {
     /// row is left alone, because a retirement TBD did not perform is not one
     /// it may claim.
     ///
-    /// `date` is the filing decision's timestamp and is **compared**, not
-    /// displayed: `noteFilingDecision` is what stops a `list` response
-    /// composed before this moment from undoing it on arrival. Skipping that
-    /// call would leave the whole stale-snapshot watermark dead code.
+    /// `now` supplies the filing decision's timestamps, which are **compared**,
+    /// not displayed — the date seam rather than the clock seam
+    /// (`Tests/CLAUDE.md`, "Clock and date seams"). `noteFilingDecision` is
+    /// what stops a `list` response composed before this gesture from undoing
+    /// it on arrival; skipping it would leave the whole stale-snapshot
+    /// watermark dead code.
     ///
-    /// **The order of the three writes is load bearing, not incidental.** The
+    /// **The order of the four writes is load bearing, not incidental.** The
     /// contract mandates that `archive` return the updated Session, so a
     /// conforming provider's response carries `archived: true` — and mirroring
     /// it runs the filing sync. Were that mirror to land before the row is
@@ -145,27 +158,52 @@ extension RemoteLaneLifecycle {
     /// 1. record the filing decision, **before** the verb is invoked, so a
     ///    poll already in flight cannot act on the row while the verb runs;
     /// 2. invoke the verb, holding whatever Session came back;
-    /// 3. write the row, and only then mirror the held response — by which
-    ///    time the sync observes a row already in its target state and
-    ///    correctly does nothing.
+    /// 3. write the row, and **stamp the watermark again** — a verb takes real
+    ///    time, and a poll launched after step 1 but before the row landed
+    ///    carries the provider's pre-gesture word while passing a watermark
+    ///    that only covers step 1. Without the second stamp the sync would
+    ///    reverse the row about (verb duration / poll interval) of the time;
+    /// 4. mirror the held response, by which time the sync observes a row
+    ///    already in its target state and correctly does nothing.
     func performArchive(
-        _ step: ArchiveStep, worktree: Worktree, date: Date = Date()
+        _ step: ArchiveStep, worktree: Worktree, now: @Sendable () -> Date = { Date() }
     ) async throws -> String? {
-        await manager.noteFilingDecision(worktreeID: worktree.id, at: date)
+        let decidedAt = now()
+        let prior = await manager.noteFilingDecision(worktreeID: worktree.id, at: decidedAt)
         var mirrored: (session: RemoteSessionPayload, provider: String)?
         if case .invokeVerb(let provider, let sessionID) = step {
             switch await invokeRetirementVerb(
                 "archive", provider: provider, sessionID: sessionID) {
             case .failed(let message):
-                await manager.forgetFilingDecision(worktreeID: worktree.id)
+                await manager.withdrawFilingDecision(
+                    worktreeID: worktree.id, restoring: prior, ifStillAt: decidedAt)
                 return message
             case .succeeded(let session):
                 mirrored = session.map { ($0, provider) }
             }
         }
-        try await db.worktrees.archive(id: worktree.id)
+        do {
+            try await db.worktrees.archive(id: worktree.id)
+        } catch {
+            // The row write is as capable of failing as the verb was, and the
+            // watermark recorded for it is as wrong afterwards. Same treatment.
+            await manager.withdrawFilingDecision(
+                worktreeID: worktree.id, restoring: prior, ifStillAt: decidedAt)
+            throw error
+        }
+        await manager.noteFilingDecision(worktreeID: worktree.id, at: now())
         if let mirrored {
-            await manager.applyUpsert(mirrored.session, provider: mirrored.provider)
+            // A conforming provider's response says `archived: true`, and the
+            // sync reading it against a row already `.archived` does nothing.
+            // A provider that returns `archived: false` from its own `archive`
+            // is contradicting the contract, and the sync will take it at its
+            // word and return the row while this RPC reports success. That is
+            // the deliberate trade: mirroring the provider's current report is
+            // what makes the filing sync authoritative in the first place, and
+            // suppressing it for this one row would mean trusting the response
+            // exactly as far as it agrees with us.
+            await manager.applyUpsert(
+                mirrored.session, provider: mirrored.provider, date: now())
         }
         subscriptions.broadcast(delta: .worktreeArchived(WorktreeIDDelta(worktreeID: worktree.id)))
         return nil
@@ -180,29 +218,42 @@ extension RemoteLaneLifecycle {
     /// carrying the provider's current word on it rather than the stale
     /// payload it was archived with.
     ///
-    /// Same three-step order as `performArchive`, and for the mirror-image
+    /// Same four-step order as `performArchive`, and for the mirror-image
     /// reason: `unarchive` returns `archived: false`, so mirroring it before
     /// the row is written would hand the filing sync an `.archived` row beside
     /// a fresh `archived: false` and earn a second, daemon-rail `.spawn` pair
-    /// for a gesture the user made once.
+    /// for a gesture the user made once. The re-stamp after the row write
+    /// closes the same window on this side: a poll launched while the verb ran
+    /// carries a pre-revive `archived: true` that would otherwise re-file the
+    /// row the user just returned.
     func performRevive(
-        _ step: ReviveStep, worktree: Worktree, date: Date = Date()
+        _ step: ReviveStep, worktree: Worktree, now: @Sendable () -> Date = { Date() }
     ) async throws -> String? {
-        await manager.noteFilingDecision(worktreeID: worktree.id, at: date)
+        let decidedAt = now()
+        let prior = await manager.noteFilingDecision(worktreeID: worktree.id, at: decidedAt)
         var mirrored: (session: RemoteSessionPayload, provider: String)?
         if case .invokeUnarchive(let provider, let sessionID) = step {
             switch await invokeRetirementVerb(
                 "unarchive", provider: provider, sessionID: sessionID) {
             case .failed(let message):
-                await manager.forgetFilingDecision(worktreeID: worktree.id)
+                await manager.withdrawFilingDecision(
+                    worktreeID: worktree.id, restoring: prior, ifStillAt: decidedAt)
                 return message
             case .succeeded(let session):
                 mirrored = session.map { ($0, provider) }
             }
         }
-        try await db.worktrees.revive(id: worktree.id)
+        do {
+            try await db.worktrees.revive(id: worktree.id)
+        } catch {
+            await manager.withdrawFilingDecision(
+                worktreeID: worktree.id, restoring: prior, ifStillAt: decidedAt)
+            throw error
+        }
+        await manager.noteFilingDecision(worktreeID: worktree.id, at: now())
         if let mirrored {
-            await manager.applyUpsert(mirrored.session, provider: mirrored.provider)
+            await manager.applyUpsert(
+                mirrored.session, provider: mirrored.provider, date: now())
         }
         subscriptions.broadcast(delta: .worktreeRevived(WorktreeDelta(
             worktreeID: worktree.id, repoID: worktree.repoID,

@@ -278,6 +278,25 @@ struct WorktreeReviveRemoteLaneTests {
         #expect(try await fixture.status(of: lane) == .active)
     }
 
+    /// The gate defends the verb path alone. A lane filed under the `gone`
+    /// exemption takes the row-only flip, which calls nothing and asks the
+    /// mirror nothing — and there is no `--force` on revive, so gating it
+    /// would strand the lane for as long as its provider stays unhealthy.
+    @Test("a stale inventory does not gate the row-only revive")
+    func staleInventoryDoesNotGateTheRowOnlyPath() async throws {
+        let fixture = try await RemoteLaneFixture.make(
+            capabilities: [], verbs: [RemoteLaneFixture.failingList], tag: "revive-stale-rowonly")
+        defer { fixture.cleanup() }
+        let lane = try await fixture.seedLane(status: .archived, gone: true)
+        try await fixture.markSnapshotStale()
+
+        let response = try await revive(fixture.router(), lane)
+
+        #expect(response.success, "the row-only path was gated on staleness: \(response.error ?? "")")
+        #expect(try await fixture.status(of: lane) == .active)
+        #expect(!fixture.invoker.calls.contains { $0.first == "unarchive" })
+    }
+
     // MARK: - The local path, unchanged
 
     /// A local worktree still resolves through the lifecycle, which rejects

@@ -444,16 +444,49 @@ public actor RemoteProviderManager {
     /// every place TBD makes a filing decision of its own about a remote lane.
     /// The sync is not exempt from its own rule: a row it files is as
     /// reversible by a poll still in flight as one a gesture filed.
-    func noteFilingDecision(worktreeID: UUID, at date: Date) {
+    /// **The map only ever moves forward.** The instants arriving here are not
+    /// ordered by the order of the calls: the sync stamps a snapshot's
+    /// *arrival*, which precedes its own write by an adoption and an actuation
+    /// append, so a sync that started before a gesture can finish after it
+    /// carrying the older instant. A blind assignment would then hand a
+    /// still-outstanding poll a watermark it predates, which is exactly the
+    /// window this map exists to close. Keeping the later of the two is always
+    /// sound: every recorded instant belongs to a decision that really was
+    /// made, and the newest one bounds them all.
+    ///
+    /// Returns whatever was on file before, so a caller whose decision then
+    /// fails can put it back through `withdrawFilingDecision`.
+    @discardableResult
+    func noteFilingDecision(worktreeID: UUID, at date: Date) -> Date? {
+        let prior = filingDecisions[worktreeID]
+        if let prior, prior >= date { return prior }
         filingDecisions[worktreeID] = date
+        return prior
     }
 
-    /// Drops a watermark recorded in anticipation of a decision that then did
-    /// not happen — a retirement verb that failed, leaving the row untouched.
-    /// Keeping it would suppress a legitimate snapshot-driven flip for two
-    /// poll intervals over a decision TBD never made.
-    func forgetFilingDecision(worktreeID: UUID) {
-        filingDecisions.removeValue(forKey: worktreeID)
+    /// Takes back a watermark recorded in anticipation of a decision that then
+    /// did not happen — a retirement verb that failed, or a row write that
+    /// threw — leaving the row untouched. Keeping it would suppress a
+    /// legitimate snapshot-driven flip for two poll intervals over a decision
+    /// TBD never made.
+    ///
+    /// **Restoring, not deleting.** A row can carry a watermark from an
+    /// earlier decision that did happen, and that decision's window is still
+    /// open; dropping the entry outright would reopen it because a later
+    /// gesture failed, which has nothing to do with it.
+    ///
+    /// **And only while the map still holds what this caller wrote.** If
+    /// another path has recorded its own decision in the meantime, that
+    /// decision is newer than both and its watermark is the one that must
+    /// survive — including the case where `noteFilingDecision` declined to
+    /// write at all because a newer instant was already there.
+    func withdrawFilingDecision(worktreeID: UUID, restoring prior: Date?, ifStillAt written: Date) {
+        guard filingDecisions[worktreeID] == written else { return }
+        if let prior {
+            filingDecisions[worktreeID] = prior
+        } else {
+            filingDecisions.removeValue(forKey: worktreeID)
+        }
     }
 
     /// Whether a response whose request began at `requestStartedAt` may still
@@ -554,8 +587,8 @@ public actor RemoteProviderManager {
         case unreadable(any Error)
     }
 
-    /// Closes the check-then-act window between `syncFilingDecisions` reading a
-    /// row and one of the two filing paths writing it.
+    /// Narrows the check-then-act window between `syncFilingDecisions` reading
+    /// a row and one of the two filing paths writing it.
     ///
     /// Between those two moments the sync suspends twice — once resolving the
     /// row, once appending the request row to the record — and a user gesture
@@ -564,10 +597,21 @@ public actor RemoteProviderManager {
     /// both facts are read again here, immediately before the write, and a flip
     /// that no longer holds is abandoned.
     ///
-    /// `expecting` is the status the flip was decided against: still holding it
-    /// means nobody else has filed this row in the meantime.
+    /// **It narrows the window rather than closing it.** `db.worktrees.archive`
+    /// is itself a suspension point on this actor, so a gesture can still land
+    /// between this re-read and that write — what shrinks is the exposure, from
+    /// two awaits plus a record append down to one DB write. The watermark is
+    /// what makes the remainder safe: a gesture landing in that last sliver
+    /// stamps a decision later than this response's request start, and the poll
+    /// carrying the reversal is refused at the outer gate on its next arrival.
+    ///
+    /// `expecting` is the status the flip was decided against — still holding
+    /// it means nobody else has filed this row in the meantime — and `becoming`
+    /// is the status it was going to write, which is what tells an idempotent
+    /// no-op apart from a row this act may not touch at all.
     private func recheckBeforeFiling(
-        _ worktreeID: UUID, expecting expected: WorktreeStatus, requestStartedAt: Date
+        _ worktreeID: UUID, expecting expected: WorktreeStatus, becoming target: WorktreeStatus,
+        requestStartedAt: Date
     ) async -> FlipRecheck {
         let current: Worktree?
         do {
@@ -579,7 +623,16 @@ public actor RemoteProviderManager {
             return .abandon(.notFound, "the worktree row no longer exists")
         }
         guard current.status == expected else {
-            return .abandon(.noop, "the row is already \(current.status)")
+            // Only the flip's own target is a genuine no-op — somebody else
+            // did exactly what this flip was about to do. `main`, `creating`
+            // and `failed` are not that: they are states the sync may not file
+            // at all, and recording them as `noop` would put "already done" in
+            // the record over a row that was never eligible.
+            guard current.status == target else {
+                return .abandon(
+                    .notEligible, "the row is \(current.status.rawValue), which the sync may not file")
+            }
+            return .abandon(.noop, "the row is already \(current.status.rawValue)")
         }
         guard filingDecisionAllowsFlip(worktreeID, requestStartedAt: requestStartedAt) else {
             return .abandon(
@@ -614,7 +667,8 @@ public actor RemoteProviderManager {
             return
         }
         switch await recheckBeforeFiling(
-            row.id, expecting: .active, requestStartedAt: requestStartedAt) {
+            row.id, expecting: .active, becoming: .archived,
+            requestStartedAt: requestStartedAt) {
         case .proceed:
             break
         case .abandon(let reason, let detail):
@@ -691,7 +745,8 @@ public actor RemoteProviderManager {
             return
         }
         switch await recheckBeforeFiling(
-            row.id, expecting: .archived, requestStartedAt: requestStartedAt) {
+            row.id, expecting: .archived, becoming: .active,
+            requestStartedAt: requestStartedAt) {
         case .proceed:
             break
         case .abandon(let reason, let detail):

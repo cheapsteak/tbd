@@ -114,8 +114,44 @@ this value decides whether a user's archive is refused, and inventing a claim
 out of a string a provider meant for display would block a gesture nobody asked
 to block.
 
-Both guards apply to the verb path alone. The `gone` path touches nothing on the
-provider and has nothing to defend. `--force` overrides both.
+A third refusal joins them, on the same path and for the same reason: **a
+provider whose cached inventory has gone stale refuses the verb.** Both guards
+above are read out of the mirror, and a stale mirror is one TBD already knows it
+cannot trust — a session idle at the last good poll and working now reads as
+safe, both guards pass, and a mid-task session is retired, which is the outcome
+the guards exist to prevent. Refusing keeps a provider call from resting on an
+inventory that may be wrong about exactly the facts being consulted. It is the
+same gate every `remote.*` mutation passes.
+
+All three apply to the verb path alone. The `gone` archive and the row-only
+revive touch nothing on the provider, consult nothing but the row's own `gone`
+flag, and so have nothing to defend. Gating them would be worse than useless: the
+`gone` exemption is the only route out for a lane whose provider cannot archive,
+and revive has no `--force` at all, so a lane could be stranded in the archived
+list for as long as its provider stayed unhealthy. `--force` overrides all three
+where they apply.
+
+The row-only revive does carry a residual, stated rather than defended away: its
+branch is chosen from the provider's `archived` claim as the mirror last saw it,
+so a stale mirror can route a lane the provider still holds archived down the
+row-only flip instead of the refusal. The next good snapshot re-files it, which
+is a visible correction rather than a lost gesture, and that is the better half
+of the trade against stranding the exemption.
+
+### The rail declines on a stale inventory, and that edge is lost
+
+`AutoArchiveOnMergeCoordinator` reaches a remote lane through the same routing
+and inherits the same refusal, with no `--force` to reach for. That is the right
+default — autonomously retiring a possibly-working session on the strength of an
+inventory known to be wrong is worse than not retiring it — but the cost is worth
+recording, because the trigger it declines is not one it will see again.
+
+The merged transition is edge-triggered and unpersisted: the dispatcher re-arms
+only when a worktree returns to unresolved, so a provider hiccup at the moment a
+merge is observed drops that lane's auto-archive for the rest of the daemon run.
+The recovery is a manual archive. Persisting the pending edge would fix it, and
+is deliberately not done here: it is a change to the rail's own trigger model
+rather than to remote archiving, and it belongs with the rail.
 
 Guarding the verb unconditionally, rather than inferring from a provider's other
 capabilities whether its archive might end compute, keeps one rule for both
@@ -230,6 +266,31 @@ suppresses a snapshot-driven flip whose request began earlier:
   entries older than two poll intervals.
 - A flip applies only when the row's recorded decision is no later than the
   request start.
+
+Three properties of that map are what make it hold, and each closes a way the
+window reopens.
+
+- **The decision is stamped after the row is written, not only before it.** A
+  gesture that invokes a provider verb stamps twice: once before the call, so a
+  poll already outstanding cannot act on the row while the verb runs, and again
+  once the row lands. Only the second covers the verb's own duration — a `list`
+  launched after the gesture began but before the row was written carries the
+  provider's pre-gesture word and would otherwise pass the gate, reversing the
+  row roughly (verb duration / poll interval) of the time. The sync's own two
+  writing paths stamp after their write for the same reason.
+- **The map only moves forward.** Instants do not arrive in the order the calls
+  are made: the sync stamps a snapshot's *arrival*, which precedes its own write
+  by an adoption and a record append, so a sync that began before a gesture can
+  finish after it holding the older instant. Keeping the later of the two is
+  always sound, since every recorded instant belongs to a decision that really
+  was made and the newest bounds them all.
+- **A decision that fails restores what was there, rather than deleting.** A
+  verb that fails, or a row write that throws, leaves a watermark recorded for a
+  filing that never happened, and it has to come back off — but the row may
+  carry an earlier watermark from a decision that did happen, whose window is
+  still open. The withdrawal puts that one back, and stands down entirely if
+  another path has recorded its own decision in the meantime, since that one is
+  newer than both.
 
 This is exact rather than a tuned window: a response to a request sent before a
 decision provably could not have accounted for it. It covers both directions,
@@ -411,12 +472,27 @@ Filing sync:
 - A response whose request began before a local filing decision does not reverse
   it, in both the archive and the revive direction; one whose request began after
   does apply.
+- A poll launched *while a gesture's verb was running* reverses neither an
+  archive nor a revive, which is the case only the post-write stamp covers.
+- An older instant does not displace a newer watermark, and a withdrawal
+  restores the previous one rather than dropping the entry.
+- A row that became ineligible while a flip was being recorded is refused as
+  `not-eligible`, and one already at the flip's own target as `noop`.
 - A local worktree's status is never moved by any provider report.
+
+Guards:
+
+- The stale-inventory refusal covers the verb paths and leaves the `gone`
+  archive and the row-only revive alone, so a lane on an unhealthy provider is
+  still retireable and revivable by the path that calls nothing.
 
 Surfaces and record:
 
 - The row menu disables Archive with a reason for a lane whose provider cannot
   archive, and enables it where the capability is declared.
+- Those menu assertions run through the app's own context builder rather than a
+  hand-built context, so a field the running app never populates — as `isGone`
+  once was not — fails the suite instead of passing it.
 - An archived remote lane appears in the archived list with the hide-empty
   filter at its default, alongside a local archived worktree with no
   conversations that the filter still hides — so a run that showed everything

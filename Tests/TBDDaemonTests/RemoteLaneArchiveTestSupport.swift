@@ -81,6 +81,13 @@ struct RemoteLaneFixture {
             actuationLog: actuationLog)
     }
 
+    /// The lane lifecycle the router and the merge rail both build, for tests
+    /// that need to drive `performArchive`/`performRevive` with an injected
+    /// clock rather than through an RPC that supplies its own.
+    func lanes() -> RemoteLaneLifecycle {
+        RemoteLaneLifecycle(db: db, subscriptions: subscriptions, manager: manager)
+    }
+
     func coordinator() -> AutoArchiveOnMergeCoordinator {
         AutoArchiveOnMergeCoordinator(
             db: db,

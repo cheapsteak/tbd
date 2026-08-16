@@ -442,6 +442,83 @@ struct RemoteFilingSyncTests {
             "the sync carried out a decision that had gone stale: \(outcome)")
     }
 
+    /// The recheck's vocabulary has to stay faithful. A row that reached the
+    /// flip's own target is an idempotent no-op — somebody did exactly this.
+    /// A row that moved to `failed` (or `main`, or `creating`) is not: the
+    /// sync may not file it at all, and `noop` would put "already done" in the
+    /// record over a row that was never eligible.
+    @Test("a row that became ineligible mid-sync is recorded not-eligible, not noop")
+    func ineligibleRowMidSyncIsNotRecordedAsANoop() async throws {
+        let handshake = MidAppendHandshake()
+        let log = ActuationLog(
+            path: logPath, now: { Date() },
+            syscalls: ActuationLogSyscalls(
+                write: { descriptor, buffer, count in
+                    handshake.pauseOnFirstWrite()
+                    return Foundation.write(descriptor, buffer, count)
+                },
+                fsync: { Foundation.fsync($0) }))
+        let m = await manager(declaring: ["archive", "unarchive"], log: log)
+        let row = try await adoptedRow(m)
+
+        let gesture = Task { [db] in
+            await handshake.awaitSyncAtRecord()
+            try? await db.worktrees.updateStatus(id: row.id, status: .failed)
+            handshake.releaseSync()
+        }
+
+        try await m.apply(
+            snapshot: [session("a", archived: true)], provider: "fake",
+            now: Date(timeIntervalSince1970: 2_001),
+            requestStartedAt: Date(timeIntervalSince1970: 2_000))
+        await gesture.value
+
+        #expect(try await status(row.id) == .failed, "the sync filed a row it may not touch")
+        let rows = try actuationRows()
+        let request = try #require(rows.first { $0["kind"] as? String == "dispose" })
+        let requestID = try #require(request["id"] as? String)
+        let outcome = try #require(rows.first { $0["confirms"] as? String == requestID })
+        #expect(outcome["result"] as? String == "refused")
+        #expect(
+            outcome["reason"] as? String == "not-eligible",
+            "an ineligible row was recorded as an idempotent no-op: \(outcome)")
+    }
+
+    /// The other arm, so the mapping discriminates: a row somebody else filed
+    /// to the flip's own target really is a no-op.
+    @Test("a row already at the flip's target is recorded noop")
+    func alreadyFiledRowIsRecordedNoop() async throws {
+        let handshake = MidAppendHandshake()
+        let log = ActuationLog(
+            path: logPath, now: { Date() },
+            syscalls: ActuationLogSyscalls(
+                write: { descriptor, buffer, count in
+                    handshake.pauseOnFirstWrite()
+                    return Foundation.write(descriptor, buffer, count)
+                },
+                fsync: { Foundation.fsync($0) }))
+        let m = await manager(declaring: ["archive", "unarchive"], log: log)
+        let row = try await adoptedRow(m)
+
+        let gesture = Task { [db] in
+            await handshake.awaitSyncAtRecord()
+            try? await db.worktrees.archive(id: row.id)
+            handshake.releaseSync()
+        }
+
+        try await m.apply(
+            snapshot: [session("a", archived: true)], provider: "fake",
+            now: Date(timeIntervalSince1970: 2_001),
+            requestStartedAt: Date(timeIntervalSince1970: 2_000))
+        await gesture.value
+
+        let rows = try actuationRows()
+        let request = try #require(rows.first { $0["kind"] as? String == "dispose" })
+        let requestID = try #require(request["id"] as? String)
+        let outcome = try #require(rows.first { $0["confirms"] as? String == requestID })
+        #expect(outcome["reason"] as? String == "noop", "\(outcome)")
+    }
+
     // MARK: - The two events paths
 
     /// A pushed `session` line is fresh by construction — the provider wrote it

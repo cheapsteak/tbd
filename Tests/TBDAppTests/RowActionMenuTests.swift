@@ -651,3 +651,127 @@ struct RowActionMenuPinTests {
         #expect(!kinds(items).contains(.unpin))
     }
 }
+
+// MARK: - The real call site
+
+/// Every suite above hands `RowActionMenu.items` a hand-built `Context`, which
+/// says what the pure function does with the inputs it is given and nothing at
+/// all about what the app actually gives it. These tests go through
+/// `RowActionMenuActions.context()` — the ONE place in `Sources/` that builds a
+/// `Context` — so a field the production call site never populates fails here
+/// rather than passing everywhere.
+///
+/// The gap this closes was live: `isGone` defaulted to `false` at the call
+/// site, so the `gone` exemption's whole surface half was unreachable in the
+/// running app while three tests over a hand-built `Context` stayed green.
+@MainActor
+@Suite("RowActionMenu — built from live AppState")
+struct RowActionMenuCallSiteTests {
+
+    private func withState(_ body: (AppState) -> Void) {
+        let suiteName = "TBDAppTests.RowActionMenuCallSite.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        body(AppState(userDefaults: defaults))
+    }
+
+    private func remoteWorktree(sessionID: String = "s1") -> Worktree {
+        Worktree(
+            repoID: UUID(), name: "acme-lane", displayName: "acme lane",
+            branch: "acme-branch", path: "remote://fake/\(sessionID)",
+            tmuxServer: "unused",
+            location: .remote(provider: "fake", sessionID: sessionID))
+    }
+
+    private func session(_ sessionID: String, gone: Bool) -> RemoteSessionInfo {
+        RemoteSessionInfo(
+            provider: "fake",
+            payload: RemoteSessionPayload(id: sessionID, state: .running),
+            gone: gone, dismissed: false, lastSeen: Date())
+    }
+
+    private func provider(capabilities: [String]) -> RemoteProviderStatus {
+        RemoteProviderStatus(
+            config: RemoteProviderConfig(name: "fake", exec: "/nonexistent"),
+            describe: ProviderDescribe(
+                contractVersions: [1], name: "fake", capabilities: capabilities),
+            health: .ok, errorMessage: nil,
+            remediationLabel: nil, remediationCommand: nil)
+    }
+
+    private func actions(_ state: AppState, _ worktree: Worktree) -> RowActionMenuActions {
+        RowActionMenuActions(appState: state, worktree: worktree, onRename: {})
+    }
+
+    @Test("the built context carries the mirror's `gone` flag")
+    func contextCarriesGone() {
+        withState { state in
+            let worktree = remoteWorktree()
+            state.remoteProviders = [provider(capabilities: ["stop"])]
+            state.remoteSessions = [session("s1", gone: true)]
+            #expect(actions(state, worktree).context().isGone)
+        }
+    }
+
+    /// The bug the `gone` exemption's menu half exists to prevent, asserted
+    /// end-to-end from `AppState`: the daemon WILL archive this lane through
+    /// `.rowOnlyGone`, so the menu must not be the thing that blocks it.
+    @Test("a gone lane on a provider that cannot archive still offers Archive")
+    func goneLaneOffersArchiveThroughTheCallSite() {
+        withState { state in
+            let worktree = remoteWorktree()
+            state.remoteProviders = [provider(capabilities: ["stop"])]
+            state.remoteSessions = [session("s1", gone: true)]
+            let archive = actions(state, worktree).items()
+                .compactMap(\.action).first { $0.kind == .archive }
+            #expect(archive?.title == "Archive")
+            #expect(archive?.isEnabled == true)
+        }
+    }
+
+    /// The discriminating half: the same wiring with the mirror reporting the
+    /// session still enumerated must stay disabled, so a call site that
+    /// hardcoded `isGone: true` could not pass either.
+    @Test("a lane the provider still enumerates stays disabled through the call site")
+    func enumeratedLaneStaysDisabledThroughTheCallSite() {
+        withState { state in
+            let worktree = remoteWorktree()
+            state.remoteProviders = [provider(capabilities: ["stop"])]
+            state.remoteSessions = [session("s1", gone: false)]
+            let built = actions(state, worktree).context()
+            #expect(!built.isGone)
+            let archive = actions(state, worktree).items()
+                .compactMap(\.action).first { $0.kind == .archive }
+            #expect(archive?.title == RowActionMenu.archiveProviderCannotArchiveLabel)
+            #expect(archive?.isEnabled == false)
+        }
+    }
+
+    /// A local row has no mirror entry to consult and must read `false`
+    /// regardless of what the mirror holds for some other session.
+    @Test("a local row is never gone")
+    func localRowIsNeverGone() {
+        withState { state in
+            let local = Worktree(
+                repoID: UUID(), name: "local", displayName: "local",
+                branch: "b", path: "/tmp/x", tmuxServer: "t")
+            state.remoteSessions = [session("s1", gone: true)]
+            #expect(!actions(state, local).context().isGone)
+        }
+    }
+
+    /// The other two remote fields the call site populates, pinned here for the
+    /// same reason `isGone` is: nothing else proves they are wired.
+    @Test("the built context carries the row's provider and its capabilities")
+    func contextCarriesProviderAndCapabilities() {
+        withState { state in
+            let worktree = remoteWorktree()
+            state.remoteProviders = [provider(capabilities: ["archive", "stop"])]
+            state.remoteSessions = [session("s1", gone: false)]
+            let built = actions(state, worktree).context()
+            #expect(built.provider == "fake")
+            #expect(built.providerCapabilities == ["archive", "stop"])
+            #expect(built.location == .remote(provider: "fake", sessionID: "s1"))
+        }
+    }
+}
