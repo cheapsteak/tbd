@@ -877,12 +877,13 @@ struct RemoteProviderManagerTests {
 
     @Test func versionMismatchNeverPolls() async throws {
         // describe negotiates no common contract version (provider only
-        // speaks v2) — start() must surface a health error and must never
-        // spawn a poll loop for this provider, so no `list` call is ever
-        // recorded, not even after start() returns and would otherwise have
-        // spawned loops for every successfully-described provider.
+        // speaks v3, which TBD does not support) — start() must surface a
+        // health error and must never spawn a poll loop for this provider, so
+        // no `list` call is ever recorded, not even after start() returns and
+        // would otherwise have spawned loops for every successfully-described
+        // provider.
         let invoker = FakeProviderInvoker(script: [
-            providerOK(#"{"contract_versions": [2], "name": "fake"}"#)
+            providerOK(#"{"contract_versions": [3], "name": "fake"}"#)
         ])
         let m = manager(invoker)
         await m.start()

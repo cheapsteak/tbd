@@ -29,6 +29,10 @@ public actor RemoteProviderManager {
 
     private var providers: [String: RemoteProviderConfig] = [:]
     private var describes: [String: ProviderDescribe] = [:]
+    /// The contract major negotiated per provider — the highest version both
+    /// TBD and the provider declare. Absent until `describe` has succeeded,
+    /// which is why `contractMajor(for:)` falls back rather than trapping.
+    private var negotiatedMajors: [String: Int] = [:]
     private var health:
         [String: (state: ProviderHealth, message: String?, remediation: ProviderRemediation?)] = [:]
     /// Most recent complete inventory accepted for each provider. Kept
@@ -160,11 +164,25 @@ public actor RemoteProviderManager {
                 provider: config.name, to: (.error, "describe returned an unparseable response", nil))
             return
         }
-        guard describe.contractVersions.contains(1) else {
+        // An INTERSECTION with TBD's own supported set, not a hard requirement
+        // on major 1. A provider is free to declare only the versions it can
+        // actually serve — `claude-cloud` declares `[2]` alone because nothing
+        // exposed terminates a running cloud session, so it cannot implement
+        // `stop`, which major 1 requires.
+        guard let negotiated = Self.negotiate(declared: describe.contractVersions) else {
             setHealth(provider: config.name, to: (.error, "no common contract version", nil))
             return
         }
+        negotiatedMajors[config.name] = negotiated
         describes[config.name] = describe
+    }
+
+    /// Contract majors this build of TBD can speak.
+    static let supportedContractMajors: Set<Int> = [1, 2]
+
+    /// The highest major both sides declare, or nil when they share none.
+    static func negotiate(declared: [Int]) -> Int? {
+        declared.filter { supportedContractMajors.contains($0) }.max()
     }
 
     /// Spawns/re-spawns the 60s poll loop for every provider with a valid
@@ -826,6 +844,16 @@ public actor RemoteProviderManager {
         supervisors[name] != nil
     }
 
+    /// Runs `describe` for every registered provider without arming poll loops
+    /// or event supervisors. Exists so the negotiation rule is testable without
+    /// a running actor's background tasks — the same reason `hasSupervisor`
+    /// exists.
+    func describeAllForTests() async {
+        for config in providers.values.sorted(by: { $0.name < $1.name }) {
+            await describeProvider(config)
+        }
+    }
+
     func invoke(
         providerName: String, verb: [String], stdin: Data?,
         timeout: TimeInterval
@@ -875,10 +903,20 @@ public actor RemoteProviderManager {
         Set(describes[provider]?.capabilities ?? [])
     }
 
-    /// The contract major to announce for one provider. Task 4 backs this with
-    /// the negotiated value; until then every provider gets the fallback, which
-    /// is the constant the runner used to hardcode.
-    func contractMajor(for provider: String) -> Int { Self.fallbackContractMajor }
+    /// The contract major to announce for one provider: the negotiated value
+    /// once `describe` has landed, and the conservative fallback before that —
+    /// `describe` itself is the one invocation that necessarily precedes
+    /// negotiation.
+    func contractMajor(for provider: String) -> Int {
+        negotiatedMajors[provider] ?? Self.fallbackContractMajor
+    }
+
+    /// The negotiated major, or nil when this provider has no valid `describe`
+    /// on file. Exposed so `providerStatuses()` and tests read one value rather
+    /// than re-deriving the rule.
+    func negotiatedContractMajor(for provider: String) -> Int? {
+        negotiatedMajors[provider]
+    }
 
     /// What TBD announces before it has negotiated anything — the conservative
     /// reading, and the value the runner emitted unconditionally before.
