@@ -241,8 +241,8 @@ provider implements it. Whether a given account is permitted to use it is a
 separate, runtime question, and §5 is where that is answered.
 
 **Verbs.** `create` runs `claude --cloud "<prompt>"` from the repository
-checkout, on a pseudo-terminal, and reads the session id out of what it prints
-(below). `list` returns the `claude_cloud_session` ledger — what this machine
+checkout, on a pseudo-terminal, and reads the session id and its title out of
+what it prints (below). `list` returns the `claude_cloud_session` ledger — what this machine
 started — and nothing else; it is always `complete: false`, which the next
 subsection specifies. `send` posts one message through
 `claude -p "<msg>" --cloud <id> --output-format json`; the response is
@@ -277,8 +277,9 @@ may have started a real session outlives the judgement that it did not.
 
 No supported interface enumerates an account's cloud sessions (§1), so `list`
 answers from the `claude_cloud_session` ledger alone: one row per session this
-machine created, carrying the session id, the idempotency key and its state, the
-creation time, the repository path, the branch, and the parameters used. Every
+machine created, carrying the session id, the title parsed at create time
+(below), the idempotency key and its state, the creation time, the repository
+path, the branch, and the parameters used. Every
 snapshot it returns declares **`complete: false`**, permanently and by
 construction, because the ledger is a record of what TBD started and never a
 claim about the account's inventory.
@@ -319,17 +320,10 @@ cloud-shaped exception.
 
 ### What a cloud lane cannot know about itself
 
-Three degradations follow from a ledger-only `list`. Each is stated on screen
+Two degradations follow from a ledger-only `list`. Each is stated on screen
 rather than papered over, because the alternative in every case is a cheerier
 fiction the user would act on.
 
-- **A lane's display name is its session id.** A title only ever arrives from
-  discovery, and `RemoteSessionAdopter.displayName(session:)`
-  (`Sources/TBDDaemon/Remote/RemoteSessionAdopter.swift`:228-232) already falls
-  back to the session id when the provider reports none — which is short, stable
-  and honest. The submitted `prompt` is never used as a name (below), so a cloud
-  row reads as `session_01…` until the user renames it. Rename is TBD's own
-  display name and works on a cloud row exactly as on any other.
 - **`agent_state` is always `unknown`, and so is `state`.** The ledger knows a
   session was created; it does not know whether it lives, and the contract is
   explicit that `unknown` means only that no machine-readable state is available
@@ -396,17 +390,26 @@ and none of that separation survives a PTY. So the mode is opt-in per invocation
 rather than a property of the provider, and `create`, whose whole answer is three
 lines of prose on stdout, is the only verb that sets it.
 
-### Reading the session id out of `create`'s output
+### Reading the session id and the title out of `create`'s output
 
 `create` is fire-and-forget: it exits 0 immediately without attaching, having
 printed three lines naming the created session, its web URL, and the command
 that would resume it (§11). There is no JSON form — `--print` is refused
-alongside `--cloud` — so those lines are the only channel the id travels on.
+alongside `--cloud` — so those lines are the only channel either the id or the
+title travels on.
 
 The provider strips ANSI control sequences from the captured output and takes
 the first token matching `session_[A-Za-z0-9]+`, requiring that every match in
 the output name the **same** id. All three printed lines carry it, so a single
 distinct id is the healthy case and disagreement is a signal, not noise.
+
+The same parse reads the title off the first line: everything after its
+`Created cloud session: ` prefix, trimmed. That line is prose, not a value with
+a shape to check, so the title parse cannot tell a reworded sentence from a
+missing one — it can only tell whether *this* prefix matched. Where the id parse
+protects itself with a strict shape checked three times over, the title parse
+has no such cross-check, and it does not need one: below is why the two failure
+postures diverge instead of both failing loud.
 
 **Reading a command's own stdout is not screen-scraping.** The repository's rule
 forbids inferring an agent's state from a rendered terminal screen; this reads
@@ -416,16 +419,23 @@ here infers state — liveness and agent state are whatever `list`'s payload
 reports, which for a ledger row is `unknown` (above), exactly as the contract
 requires.
 
-**A parse that finds nothing fails loudly and is classified.** Zero matches, or
-more than one distinct id, is a `create` failure: the provider synthesizes exit
-code 2 with an error object whose message quotes what it received, which
-`ProviderFailureClass.classify` (`Sources/TBDShared/RemoteProvider.swift`:99-103)
-reads as `contractBug` and `RemoteProviderManager.recordFailure` turns into
-`.error` health with that message on screen. `contractBug` is the honest class:
-the built-in provider could not satisfy the contract, and the remedy is a fix to
-TBD rather than a retry or a re-authentication.
+**The id and the title fail in opposite directions, because losing each costs a
+different thing.** Zero matches, or more than one distinct id, is a `create`
+failure: the provider synthesizes exit code 2 with an error object whose message
+quotes what it received, which `ProviderFailureClass.classify`
+(`Sources/TBDShared/RemoteProvider.swift`:99-103) reads as `contractBug` and
+`RemoteProviderManager.recordFailure` turns into `.error` health with that
+message on screen. `contractBug` is the honest class: the built-in provider
+could not satisfy the contract, and the remedy is a fix to TBD rather than a
+retry or a re-authentication. An unreadable id costs the lane its identity —
+there is no session to record — so it must fail loudly. A missing or empty
+title costs nothing but friendliness: the row still gets named, just from its
+id instead (below), so parsing it is never a reason to fail a create that
+otherwise succeeded. The prefix not matching, the line being absent, and the
+remainder being empty or whitespace after trimming are the same outcome —
+silently take the fallback — not three cases to distinguish on screen.
 
-The ledger is what keeps that failure from being silent. The idempotency key and
+The ledger is what keeps an id failure from being silent. The idempotency key and
 its state are written **before** the invocation, so a create whose output could
 not be read leaves a `pending` row rather than nothing, carrying the repository,
 the branch and the prompt that were submitted. With no discovery to match such a
@@ -435,22 +445,39 @@ names what was asked for and links to claude.ai, where the session — if it
 exists — is listed. An unreadable answer costs the lane, not silently but
 visibly, and the parent design's pending-row adoption arrives with discovery.
 
-### The lane's name is never what was submitted
+### The lane's name is the title `create` prints, falling back to its id
 
 The vendor derives a session's title server-side; it is a summary of the opening
 instruction, not that instruction's text (§11 records the measured pair). So
-nothing in TBD may treat the submitted `prompt` as the lane's name.
+nothing in TBD may treat the submitted `prompt` as the lane's name — the title
+has to come from the vendor, never from what was sent.
 
-Nothing does, and this slice must not change that. Adoption reads the title off
-the provider's own payload: `RemoteSessionAdopter.displayName(session:)`
-(`Sources/TBDDaemon/Remote/RemoteSessionAdopter.swift`:228-232) takes
-`session.title` when the provider reports one and falls back to the session id,
-and `claude-cloud`'s `create_params` are `repo`, `branch`, `prompt` and
-`environment` — no `title` among them, so there is nothing for TBD to have
-submitted and nothing to reconcile. A ledger row reports no title at all, so the
-fallback is what every cloud lane wears until the user renames it (above). The
-create surface (§10, step 7) writes no display name of its own; the row's name
-arrives with the row.
+`create`'s own output is where that title is available in this slice: the
+ledger row records the parsed title alongside the session id and the other
+create parameters, and the built-in provider's `list` reports it as that row's
+`title` field. `RemoteSessionAdopter.displayName(session:)`
+(`Sources/TBDDaemon/Remote/RemoteSessionAdopter.swift`:228-232) already
+implements exactly the rule this needs — `session.title` when the provider
+reports a non-empty one, the session id otherwise — so no change to adoption is
+required; the built-in provider only has to start putting a title in the
+payload it already returns. A create whose output carried no readable title
+reports none, and the row is named from its id exactly as it would be with no
+title logic at all: the degradation is silent and cosmetic, never a reason to
+mark the create a failure. `claude-cloud`'s `create_params` remain `repo`,
+`branch`, `prompt` and `environment` — the title travels from the vendor's
+output back to the ledger, never from what TBD submitted.
+
+**The name, once set, is the user's to change.** `RemoteSessionAdopter` mints a
+worktree row for a session exactly once and skips adoption whole for a session
+that already owns one — reparenting, renaming and rebranching a row on a later
+poll are explicitly not adoption's to do, because those are the user's choices
+to make. A row named from the parsed title, or from the id fallback, is named at
+that one minting and never renamed by anything TBD does afterward — the same
+rule an ordinary worktree row's display name already follows, and Rename is
+still how the user changes it, exactly as on any other row. The create surface
+(§10, step 7) itself writes no display name — the row is minted by adoption,
+and the title reaches it through the ledger and the payload as described
+above, not by the create surface setting a field directly.
 
 **Create asks for one out-of-band `list`.** Because the row arrives by adoption
 rather than being minted by the create call, and the poll loop's interval is 60
@@ -1218,7 +1245,8 @@ then materializes a directory — so revive branches on location exactly as arch
 does, and the remote arm is the row flip alone.
 
 The lane comes back saying what it knew before: its state is `unknown`, its name
-is its session id, and whether the session is still there is what the mirror row
+is whatever it was minted with — the parsed title or the session id fallback
+(§3) — and whether the session is still there is what the mirror row
 answers. The 08-10 design's other revive cases — an `unarchive` verb, a
 terminated session, a retirement TBD cannot lift — describe providers cloud is
 not, and they arrive with the providers that declare those capabilities.
@@ -1418,10 +1446,16 @@ Output carrying ANSI control sequences around the same three lines yields the
 same id. Output naming two different session ids, and output naming none, each
 produce a `create` failure classified as `contractBug` with the received text in
 the message — never a success with an empty id — and each leaves the ledger row
-`pending` and surfaced as an unresolved create rather than silently dropped. A
-create never writes a display name of its own, so the row is named from the
-provider's payload — the session id, for a ledger row — and never from the
-submitted prompt.
+`pending` and surfaced as an unresolved create rather than silently dropped.
+
+**Naming the row from `create`'s output.** The three-line success form yields
+the title after the `Created cloud session: ` prefix, and the row `list` later
+adopts is named from it. Output whose first line lacks that prefix, or lacks a
+first line at all, still produces a successful create — the session id parse is
+what governs success — and the row is named from the id instead. A title line
+present but whitespace-only falls back the same way, so trimming to empty is
+handled identically to the line being absent. No case exercised here treats the
+submitted prompt as a name.
 
 **The entitlement path.** A permanent attach exit reported to the daemon records
 an attach block on that provider and leaves its health untouched, so the send
@@ -1600,20 +1634,26 @@ Resume with: claude --teleport session_01AAAAAAAAAAAAAAAAAAAAAA
 ```
 
 There is no structured form — `--print` is refused alongside `--cloud` — so
-those lines are the only channel the session id travels on. §3 specifies the
-parse and what a change in that format costs.
+those lines are the only channel either the session id or the title travels on.
+§3 specifies the parse and what a change in that format costs.
 
 **The title is derived server-side, not echoed back.** A description of
 "transcript persistence probe: reply with the single word pong" comes back titled
 "Add probe pong reply", and that title is on the created-session line rather than
 in any structured field TBD can read. A cloud session's name is the vendor's
 summary of the instruction rather than the instruction, so TBD takes a name only
-from a provider payload that carries one and never from what was sent — which in
-this slice means every cloud lane wears its session id (§3). Taking the
-title out of that line instead is a format dependency with no cross-check: the id
-has a strict shape and appears three times, so a parse that finds none or finds
-two different ones is detectable, while a display string lifted out of prose is
-wrong silently the first time the sentence is reworded.
+from a provider payload that carries one and never from what was sent (§3) — the
+first line's `Created cloud session: ` prefix is that payload in this slice, and
+what follows it, trimmed, is the lane's name. The id parse and the title parse
+read the same three lines but answer to different stakes: the id has a strict
+shape and appears three times, so a parse that finds none or finds two
+different ones is detectable and is treated as a `create` failure, while the
+title is a display string lifted out of prose with no such cross-check — wrong
+silently the first time the sentence is reworded, or absent outright if the
+line is missing. That is exactly why the title parse never fails a create: a
+prefix that does not match, a missing line, or an empty remainder after
+trimming all fall back to the session id — the same name every cloud lane would
+wear if no title were parsed at all.
 
 ### `send` behaves exactly as the parent design specifies
 
