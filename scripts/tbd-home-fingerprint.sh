@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 #
-# Prints a stable fingerprint of the REAL `~/tbd`, `~/.claude` and `~/.codex` —
-# deliberately `$HOME/...`, never `$TBD_HOME` / `$TBD_CLAUDE_HOST_HOME` /
-# `$TBD_TEST_CODEX_HOME`, because the whole point is to observe the directories
-# a test run is supposed to leave alone even while those overrides point
-# somewhere else.
+# Prints a stable fingerprint of the REAL `~/tbd`, `~/.claude`, `~/.codex` and
+# tmux socket directory — deliberately `$HOME/...` and the CALLER's
+# `$TMUX_TMPDIR`, never `$TBD_HOME` / `$TBD_CLAUDE_HOST_HOME` /
+# `$TBD_TEST_CODEX_HOME` or the fenced socket dir, because the whole point is
+# to observe the directories a test run is supposed to leave alone even while
+# those overrides point somewhere else.
 #
 # Bracket a test run with two calls and diff them: any added or removed entry
 # means something wrote into a real store the run should not have touched, which
@@ -34,6 +35,13 @@ set -euo pipefail
 real_home="${HOME}/tbd"
 real_claude="${HOME}/.claude"
 real_codex="${HOME}/.codex"
+# The shared tmux socket directory, resolved exactly as tmux resolves it for a
+# `-L <name>` invocation. Read from the CALLER's environment, the same
+# deliberate choice as `$HOME` above: `scripts/test.sh` applies its overrides
+# as an `env` prefix on the run rather than exporting them, so this script sees
+# the real directory on both sides of the run while the run itself sees the
+# fenced one.
+real_tmux="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)"
 
 # Written by a live daemon on a developer box while an unrelated test run is in
 # flight, so their churn is noise rather than signal. Each is a name in the
@@ -173,4 +181,35 @@ if [ -d "$real_codex/plugins/cache" ]; then
     | LC_ALL=C sort
 else
   echo "~/.codex/plugins/cache <absent>"
+fi
+
+# The tmux socket directory — the fourth root, and the only one that is not a
+# dot-directory in `$HOME`. It is flat, so depth 1 sees everything: one socket
+# file per server, named after the `-L <name>` it was started with.
+#
+# WHAT IT CATCHES. A run that starts a tmux server with `TMUX_TMPDIR` dropped
+# from its environment leaves a socket file here — and leaves it FOREVER, because
+# tmux does not unlink its socket when the server exits; it unlinks a stale one
+# lazily at bind time, when a new server claims that exact path. Since every
+# test mints a fresh UUID-suffixed name, nothing ever reclaims one. ~7,100 dead
+# files accumulated in one real socket directory over nine days that way, behind
+# 7 live servers. A new name here is therefore permanent litter, which is exactly
+# the shape this detector is good at seeing.
+#
+# WHAT IT CANNOT SEE, and why detection stays CI-only. On a developer box a live
+# daemon and every live TBD session legitimately create `tbd-<hex>` sockets here
+# throughout a run, so this arm reports the machine rather than the run and would
+# be switched off within a week. On a runner nothing else creates them, and any
+# entry appearing between the two snapshots came from the suite. It also cannot
+# attribute: it names the socket, not the code that opened it — that is what
+# `TMUX_TMPDIR` in the fence is for, since a fenced run cannot produce the entry
+# at all.
+if [ -d "$real_tmux" ]; then
+  find "$real_tmux" -maxdepth 1 \
+    \( "${name_args[@]}" -print \) \
+    2>/dev/null \
+    | sed "s|^${real_tmux}|<tmux-sockets>|" \
+    | LC_ALL=C sort
+else
+  echo "<tmux-sockets> <absent>"
 fi
