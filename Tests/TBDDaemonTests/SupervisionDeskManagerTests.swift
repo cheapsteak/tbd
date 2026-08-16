@@ -23,6 +23,24 @@ struct SupervisionDeskManagerTests {
         func isDead(_ windowID: String) -> Bool { lock.withLock { dead.contains(windowID) } }
     }
 
+    /// A `SupervisionDeskCollector` reap, standing by to land mid-spawn. Armed
+    /// after the fixture is built so it fires during one chosen spawn and not
+    /// the one that set the record up.
+    private final class ArmedReap: @unchecked Sendable {
+        private let lock = NSLock()
+        private var target: (store: SupervisionDesksStore, project: String)?
+
+        func arm(store: SupervisionDesksStore, project: String) {
+            lock.withLock { target = (store, project) }
+        }
+
+        func run() {
+            guard let target = lock.withLock({ target }) else { return }
+            guard let file = try? target.store.load() else { return }
+            try? target.store.save(file.forgetting(target.project))
+        }
+    }
+
     private struct Fixture {
         let db: TBDDatabase
         let directory: URL
@@ -34,15 +52,37 @@ struct SupervisionDeskManagerTests {
         let manager: SupervisionDeskManager
     }
 
-    private static func makeFixture() throws -> Fixture {
+    /// - Parameters:
+    ///   - createWindowError: makes the real spawn throw, the way tmux refusing
+    ///     a `new-window` does.
+    ///   - duringSpawn: runs while the spawn is in flight — after `ensureDesk`
+    ///     has read `desks.json` and before the record is written. It stands in
+    ///     for a concurrent `SupervisionDeskCollector` reap, which rewrites that
+    ///     same file per reap while the hourly sweep runs.
+    ///   - spawnSession: replaces the spawn outright, for the one failing exit
+    ///     the real one cannot produce.
+    private static func makeFixture(
+        createWindowError: (@Sendable (String) -> Error?)? = nil,
+        duringSpawn: (@Sendable () -> Void)? = nil,
+        spawnSession: SupervisionDeskSpawn? = nil
+    ) throws -> Fixture {
         let db = try TBDDatabase(inMemory: true)
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-supervision-desk-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
         let deadWindows = DeadWindows()
+        let recorder: (@Sendable ([String]) -> Void)?
+        if let duringSpawn {
+            recorder = { _ in duringSpawn() }
+        } else {
+            recorder = nil
+        }
         let tmux = TmuxManager(
-            dryRun: true, dryRunWindowIsDead: { deadWindows.isDead($0) })
+            dryRun: true,
+            dryRunRecorder: recorder,
+            dryRunWindowIsDead: { deadWindows.isDead($0) },
+            dryRunCreateWindowError: createWindowError)
         let desks = SupervisionDesksStore(
             fileURL: directory.appendingPathComponent("desks.json"))
         let ledgerPath = directory.appendingPathComponent("ledger.jsonl").path
@@ -65,6 +105,7 @@ struct SupervisionDeskManagerTests {
                 desks: desks,
                 ledger: SupervisionLedgerWriter(path: ledgerPath),
                 actuationLog: ActuationLog(path: actuationPath),
+                spawnSession: spawnSession,
                 now: dates.provider))
     }
 
@@ -90,6 +131,10 @@ struct SupervisionDeskManagerTests {
     /// assertion behind "a spawn delivers nothing": a nudge would show up here
     /// as a `send`.
     private static func actuationKinds(_ fixture: Fixture) -> [String] {
+        actuationRows(fixture).compactMap { $0["kind"] as? String }
+    }
+
+    private static func actuationRows(_ fixture: Fixture) -> [[String: Any]] {
         guard let data = FileManager.default.contents(atPath: fixture.actuationPath) else {
             return []
         }
@@ -97,7 +142,16 @@ struct SupervisionDeskManagerTests {
             .compactMap {
                 try? JSONSerialization.jsonObject(with: Data($0)) as? [String: Any]
             }
-            .compactMap { $0["kind"] as? String }
+    }
+
+    /// The one scratch row this fixture's spawn created. Read out of the
+    /// database rather than off `TBDConstants.scratchDir`, whose resolver reads
+    /// `TBD_HOME` — a serialized suite elsewhere in the process can move that
+    /// between the spawn and the assertion.
+    private static func onlyScratchRow(_ fixture: Fixture) async throws -> Worktree {
+        let rows = try await fixture.db.worktrees.listScratch()
+        #expect(rows.count == 1)
+        return try #require(rows.first)
     }
 
     // MARK: - Spawn
@@ -156,6 +210,120 @@ struct SupervisionDeskManagerTests {
             project: Self.inputs(playbook: playbook))
         let entry = try #require(try fixture.desks.load().desk(for: "acme-web"))
         #expect(entry.conductHash == SupervisionPlaybook.hash(of: Data(playbook.utf8)))
+    }
+
+    @Test("A Codex-preferring fleet still gets a Claude desk, and keeps its preference")
+    func codexPreferenceStillSpawnsAClaudeDesk() async throws {
+        let fixture = try Self.makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        // The whole fleet prefers Codex. A supervisor is the one exception:
+        // its standing conduct rides `--append-system-prompt`, which only the
+        // Claude spawn path carries, so a Codex desk would launch with no
+        // conduct at all.
+        try await fixture.db.config.setPrimaryAgentPreference(.codex)
+
+        let outcome = try await fixture.manager.ensureDesk(project: Self.inputs())
+        guard case .spawned(let entry) = outcome else {
+            Issue.record("expected a spawn, got \(outcome)")
+            return
+        }
+        let terminal = try #require(try await fixture.db.terminals.get(id: entry.terminal))
+        #expect(terminal.kind == .claude)
+        #expect(terminal.label == TerminalLabel.claudeCode)
+        // Forcing the adapter for this one session changes nothing about the
+        // fleet: every other spawn still reads Codex out of the config.
+        #expect(try await fixture.db.config.get().primaryAgentPreference == .codex)
+    }
+
+    // MARK: - A spawn that fails hands the scratch space back
+
+    @Test("A spawn that throws archives its scratch row, and still records the outcome")
+    func thrownSpawnArchivesTheScratchSpace() async throws {
+        struct TmuxRefused: Error {}
+        let fixture = try Self.makeFixture(createWindowError: { _ in TmuxRefused() })
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        await #expect(throws: SupervisionDeskError.self) {
+            try await fixture.manager.ensureDesk(project: Self.inputs())
+        }
+
+        // `SupervisionDeskCollector` walks `desks.json`, and no entry was ever
+        // written — so unless the row is archived here, nothing reclaims the
+        // directory. `.archived` is exactly the shape `OrphanGC`'s
+        // deletion-queue leg already takes.
+        #expect(try fixture.desks.load().desk(for: "acme-web") == nil)
+        let scratch = try await Self.onlyScratchRow(fixture)
+        #expect(scratch.status == .archived)
+
+        // The rail still says what it tried and what came back.
+        let rows = Self.actuationRows(fixture)
+        #expect(rows.contains { $0["kind"] as? String == "spawn" })
+        #expect(rows.contains {
+            $0["kind"] as? String == "outcome" && $0["result"] as? String == "transport-failed"
+        })
+    }
+
+    @Test("A spawn that creates no terminal archives its scratch row too")
+    func terminallessSpawnArchivesTheScratchSpace() async throws {
+        // The one failing exit the real spawn cannot produce:
+        // `spawnPrimaryTerminals` always returns the primary terminal, so this
+        // branch is held to its behaviour through the spawn seam.
+        let fixture = try Self.makeFixture(spawnSession: { _, _ in [] })
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        await #expect(throws: SupervisionDeskError.self) {
+            try await fixture.manager.ensureDesk(project: Self.inputs())
+        }
+
+        #expect(try fixture.desks.load().desk(for: "acme-web") == nil)
+        let scratch = try await Self.onlyScratchRow(fixture)
+        #expect(scratch.status == .archived)
+        // The spawn itself reached the transport and reported no failure — the
+        // outcome row says so, and the anomaly is that it produced nothing.
+        let rows = Self.actuationRows(fixture)
+        #expect(rows.contains {
+            $0["kind"] as? String == "outcome" && $0["result"] as? String == "dispatched"
+        })
+    }
+
+    // MARK: - Recording a desk must not resurrect a reaped one
+
+    @Test("A reap that lands mid-spawn survives the record: the desk file is re-read")
+    func recordingRereadsBeforeSaving() async throws {
+        // Seed a second project's desk, then drop it while `acme-web`'s spawn
+        // is in flight — the sweep's read-modify-write per reap, arriving in
+        // the seconds a spawn takes. Nothing here spawns concurrently: the
+        // manager's gate serializes ensures, and the race being reproduced is
+        // with the collector, which does not hold that gate.
+        let armed = ArmedReap()
+        let fixture = try Self.makeFixture(duringSpawn: { armed.run() })
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        let seeded = try await fixture.manager.ensureDesk(
+            project: Self.inputs(project: "seed-project"))
+        guard case .spawned = seeded else {
+            Issue.record("expected a spawn, got \(seeded)")
+            return
+        }
+        #expect(try fixture.desks.load().desk(for: "seed-project") != nil)
+
+        // Arm the reap only now, so it lands during the second spawn.
+        armed.arm(store: fixture.desks, project: "seed-project")
+        let outcome = try await fixture.manager.ensureDesk(project: Self.inputs())
+        guard case .spawned(let entry) = outcome else {
+            Issue.record("expected a spawn, got \(outcome)")
+            return
+        }
+
+        let file = try fixture.desks.load()
+        // The concurrent change survives. Writing back the copy read before
+        // the spawn would resurrect it — and a resurrected entry whose worktree
+        // the sweep already archived is kept by every later sweep
+        // (`desk-already-archived`), so it would never be reclaimed again.
+        #expect(file.desk(for: "seed-project") == nil)
+        // And the new desk is recorded on top of the file as it now stands.
+        #expect(file.desk(for: "acme-web") == entry)
     }
 
     // MARK: - Resume

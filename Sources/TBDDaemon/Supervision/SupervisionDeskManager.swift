@@ -79,6 +79,20 @@ public enum SupervisionDeskError: Error, CustomStringConvertible, LocalizedError
     public var errorDescription: String? { description }
 }
 
+/// How a desk's session comes into being: `WorktreeLifecycle`'s
+/// primary-terminal spawn in production, and an injection seam everywhere else.
+///
+/// It exists as a seam because the two failing exits the spawn path cleans up
+/// after are not both reachable through the real one. A thrown spawn is — tmux
+/// refusing the `new-window` produces it — but `spawnPrimaryTerminals` always
+/// returns at least the primary terminal, so "the spawn created no terminal" is
+/// reachable from no input at all. That branch guards against a future
+/// refactor of the spawn path, and this seam is how it is held to its
+/// behaviour.
+public typealias SupervisionDeskSpawn = @Sendable (
+    _ worktree: Worktree, _ inputs: SupervisionDeskInputs
+) async throws -> [(id: UUID, label: String)]
+
 // MARK: - The manager
 
 /// Ensures each supervised project has a live supervisor, per design §9's
@@ -113,7 +127,7 @@ public enum SupervisionDeskError: Error, CustomStringConvertible, LocalizedError
 ///   it under `OrphanGC`'s deletion-queue leg instead.
 public actor SupervisionDeskManager {
     private let db: TBDDatabase
-    private let lifecycle: WorktreeLifecycle
+    private let spawnSession: SupervisionDeskSpawn
     private let tmux: TmuxManager
     private let desks: SupervisionDesksStore
     private let ledger: SupervisionLedgerWriter
@@ -155,16 +169,45 @@ public actor SupervisionDeskManager {
         ledger: SupervisionLedgerWriter,
         actuationLog: ActuationLog,
         subscriptions: StateSubscriptionManager? = nil,
+        spawnSession: SupervisionDeskSpawn? = nil,
         now: @Sendable @escaping () -> Date = { Date() }
     ) {
         self.db = db
-        self.lifecycle = lifecycle
+        self.spawnSession = spawnSession ?? Self.lifecycleSpawn(lifecycle)
         self.tmux = tmux
         self.desks = desks
         self.ledger = ledger
         self.actuationLog = actuationLog
         self.subscriptions = subscriptions
         self.now = now
+    }
+
+    /// The production spawn: one agent session in the desk's scratch space.
+    private static func lifecycleSpawn(
+        _ lifecycle: WorktreeLifecycle
+    ) -> SupervisionDeskSpawn {
+        { worktree, inputs in
+            try await lifecycle.spawnPrimaryTerminals(
+                worktree: worktree,
+                repo: nil,
+                skipClaude: false,
+                // **Nothing is delivered at spawn.** No opening prompt, no
+                // nudge, no briefing: the opening material rides the first
+                // briefing, so a quiet project's desk costs nothing to have.
+                initialPrompt: nil,
+                preSessionTerminalID: nil,
+                // Forced rather than read from the operator's primary-agent
+                // preference: supervisor capability is a per-adapter
+                // qualification (design §9), and the standing conduct layer
+                // below rides `--append-system-prompt`, which only the Claude
+                // spawn path carries. A Codex desk would launch with no conduct
+                // at all and nothing would say so — `spawn` logs the
+                // substitution so a Codex-preferring fleet is told rather than
+                // left to read a tab label.
+                primaryAgentPreference: .claude,
+                supervisionProject: inputs.project,
+                supervisionPlaybook: inputs.playbook.text)
+        }
     }
 
     // MARK: - Ensure
@@ -355,24 +398,7 @@ public actor SupervisionDeskManager {
 
         let created: [(id: UUID, label: String)]
         do {
-            created = try await lifecycle.spawnPrimaryTerminals(
-                worktree: worktree,
-                repo: nil,
-                skipClaude: false,
-                // **Nothing is delivered at spawn.** No opening prompt, no
-                // nudge, no briefing: the opening material rides the first
-                // briefing, so a quiet project's desk costs nothing to have.
-                initialPrompt: nil,
-                preSessionTerminalID: nil,
-                // Forced rather than read from the operator's primary-agent
-                // preference: supervisor capability is a per-adapter
-                // qualification (design §9), and the standing conduct layer
-                // below rides `--append-system-prompt`, which only the Claude
-                // spawn path carries. A Codex desk would launch with no conduct
-                // at all and nothing would say so.
-                primaryAgentPreference: .claude,
-                supervisionProject: inputs.project,
-                supervisionPlaybook: inputs.playbook.text)
+            created = try await spawnSession(worktree, inputs)
         } catch {
             await actuationLog.appendOutcome(
                 confirms: actuationID, result: .transportFailed, error: "\(error)")
