@@ -43,12 +43,37 @@ struct ClaudeExecutableResolverTests {
         #expect(path == "/second/claude")
     }
 
+    /// `isExecutable` also matches the relative spelling, so this
+    /// discriminates the `hasPrefix("/")` guard itself: an implementation
+    /// that dropped the guard and called `isExecutable("bin/claude")` would
+    /// get `true` here (not a coincidental `false`) and resolve to the wrong
+    /// path, so the test would fail rather than passing for the wrong
+    /// reason.
     @Test func aRelativeOverrideIsIgnoredRatherThanResolved() throws {
         let path = try ClaudeExecutableResolver.resolve(
             configuredOverride: "bin/claude",
             searchPath: "/real",
-            isExecutable: { $0 == "/real/claude" })
+            isExecutable: { $0 == "/real/claude" || $0 == "bin/claude" })
         #expect(path == "/real/claude")
+    }
+
+    /// An absolute override that fails the executable check is a hard
+    /// failure, not a silent fallback to PATH search: someone who set an
+    /// explicit override did so because the wrong binary was being picked
+    /// up, so resolving to a different `claude` on a typo would defeat the
+    /// override's purpose with no diagnostic. `/real/claude` is a valid PATH
+    /// candidate in this same fixture, so a resolver that incorrectly fell
+    /// through would succeed silently instead of throwing — that's the
+    /// discriminating half of this test, not just "it throws something".
+    @Test func anAbsoluteOverrideThatIsNotExecutableThrowsRatherThanFallingThroughToPATH() {
+        #expect(throws: ClaudeExecutableResolver.ResolveError.invalidOverride(
+            environmentKey: ClaudeExecutableResolver.executableOverrideEnvironmentKey,
+            value: "/opt/acme/claude")) {
+            try ClaudeExecutableResolver.resolve(
+                configuredOverride: "/opt/acme/claude",
+                searchPath: "/real",
+                isExecutable: { $0 == "/real/claude" })
+        }
     }
 
     @Test func nothingExecutableAnywhereThrowsNotFound() {
