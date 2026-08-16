@@ -65,6 +65,17 @@ struct RowActionMenuActions {
         ) != nil
     }
 
+    /// Capabilities the row's provider has declared, keyed by provider name —
+    /// the same idiom `AppState.pushRemoteRenameIfSupported` and
+    /// `RemoteSectionView` use. Empty for a local row or one whose provider
+    /// hasn't answered `describe` yet.
+    private var providerCapabilities: Set<String> {
+        guard let provider = worktree.providerBinding?.provider else { return [] }
+        let capabilities = appState.remoteProviders
+            .first { $0.config.name == provider }?.describe?.capabilities ?? []
+        return Set(capabilities)
+    }
+
     /// Build the pure model context from live `AppState`. Mirrors exactly the
     /// inputs the old `SidebarContextMenu` read inline.
     func context() -> RowActionMenu.Context {
@@ -90,7 +101,10 @@ struct RowActionMenuActions {
             isPromoted: worktree.promotedToRepoID != nil,
             branch: worktree.branch,
             claudeSessions: claudeSessions,
-            hasPreSessionHook: hasPreSessionHook
+            hasPreSessionHook: hasPreSessionHook,
+            location: worktree.location,
+            provider: worktree.providerBinding?.provider,
+            providerCapabilities: providerCapabilities
         )
     }
 

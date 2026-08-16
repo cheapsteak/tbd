@@ -229,6 +229,72 @@ struct RowActionMenuRegularTests {
 
 }
 
+// MARK: - Remote lane archive capability
+
+@Suite("RowActionMenu — remote archive capability")
+struct RowActionMenuRemoteArchiveTests {
+    private static let remoteLocation = WorktreeLocation.remote(provider: "acme", sessionID: "s1")
+
+    @Test func archiveDisabledWithReasonWhenProviderLacksArchiveCapability() {
+        let ctx = RowActionMenu.Context(hasRepoID: true, branch: "b",
+                                        location: Self.remoteLocation,
+                                        provider: "acme",
+                                        providerCapabilities: ["stop"])
+        let archive = RowActionMenu.items(context: ctx)
+            .compactMap(\.action).first { $0.kind == .archive }
+        #expect(archive?.title == RowActionMenu.archiveProviderCannotArchiveLabel)
+        #expect(archive?.title == "Archive (provider can't archive)")
+        #expect(archive?.isEnabled == false)
+        #expect(archive?.role == .destructive)
+        #expect(archive?.disabledHelp == RowActionMenu.archiveNeedsProviderCapabilityHelp)
+    }
+
+    @Test func archiveEnabledWhenProviderDeclaresArchiveCapability() {
+        // If the capability gate were dropped, this and the test above would
+        // both show "Archive"/enabled — this is the one that proves the gate
+        // actually discriminates on the declared capability set.
+        let ctx = RowActionMenu.Context(hasRepoID: true, branch: "b",
+                                        location: Self.remoteLocation,
+                                        provider: "acme",
+                                        providerCapabilities: ["archive", "stop"])
+        let archive = RowActionMenu.items(context: ctx)
+            .compactMap(\.action).first { $0.kind == .archive }
+        #expect(archive?.title == "Archive")
+        #expect(archive?.isEnabled == true)
+        #expect(archive?.disabledHelp == nil)
+    }
+
+    @Test func localRowUnaffectedByCapabilitySet() {
+        // Regression guard: a local row (default `.local` location) ignores
+        // `providerCapabilities` entirely — Archive stays enabled even with an
+        // empty capability set, exactly as before this gate existed.
+        let ctx = RowActionMenu.Context(hasRepoID: true, branch: "b")
+        #expect(ctx.location.isLocal)
+        let archive = RowActionMenu.items(context: ctx)
+            .compactMap(\.action).first { $0.kind == .archive }
+        #expect(archive?.title == "Archive")
+        #expect(archive?.isEnabled == true)
+        #expect(archive?.disabledHelp == nil)
+    }
+
+    @Test func activeChildrenTakePrecedenceOverMissingCapabilityOnRemoteLane() {
+        // Both gates apply: a remote lane with active children AND no
+        // `archive` capability. Documented precedence lives in
+        // `RowActionMenu.regularItems`: active children wins the title because
+        // it's the reason the user can act on right now.
+        let ctx = RowActionMenu.Context(hasActiveChildren: true,
+                                        hasRepoID: true, branch: "b",
+                                        location: Self.remoteLocation,
+                                        provider: "acme",
+                                        providerCapabilities: [])
+        let archive = RowActionMenu.items(context: ctx)
+            .compactMap(\.action).first { $0.kind == .archive }
+        #expect(archive?.title == RowActionMenu.archiveHasChildrenLabel)
+        #expect(archive?.disabledHelp == RowActionMenu.archiveNeedsChildrenGoneHelp)
+        #expect(archive?.isEnabled == false)
+    }
+}
+
 // MARK: - Scratch branch
 
 @Suite("RowActionMenu — scratch")
