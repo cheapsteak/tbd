@@ -138,4 +138,62 @@ struct ClaudeCloudFlagSchemaTests {
     @Test func theRPCMethodNameIsStable() {
         #expect(RPCMethod.configSetClaudeCloud == "config.setClaudeCloud")
     }
+
+    /// The flag reaches the app through `daemon.capabilities`, and it needs the
+    /// live/enabled distinction for the same reason `remoteBackendsEnabled`
+    /// does: the daemon wires the built-in provider only at boot, so a flag
+    /// flipped on afterwards is on-but-not-live.
+    @Test func capabilitiesReportEnabledButNotLiveAfterAPostBootFlip() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setClaudeCloud(true)
+        // `claudeCloudLive` defaults to false — this router stands in for a
+        // daemon that booted with the flag off.
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            tmux: TmuxManager(dryRun: true),
+            startTime: Date(),
+            actuationLog: ActuationLog(
+                path: FileManager.default.temporaryDirectory
+                    .appendingPathComponent("cloud-caps-\(UUID().uuidString).jsonl").path))
+
+        let response = try await router.handleDaemonCapabilities()
+        let payload = try #require(response.result)
+        let caps = try JSONDecoder().decode(
+            DaemonCapabilitiesResult.self, from: Data(payload.utf8))
+        #expect(caps.claudeCloudEnabled == true)
+        #expect(caps.claudeCloudLive == false)
+    }
+
+    @Test func capabilitiesReportTheFlagOffWhenNobodyTouchedIt() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            tmux: TmuxManager(dryRun: true),
+            startTime: Date(),
+            actuationLog: ActuationLog(
+                path: FileManager.default.temporaryDirectory
+                    .appendingPathComponent("cloud-caps-\(UUID().uuidString).jsonl").path))
+
+        let response = try await router.handleDaemonCapabilities()
+        let payload = try #require(response.result)
+        let caps = try JSONDecoder().decode(
+            DaemonCapabilitiesResult.self, from: Data(payload.utf8))
+        #expect(caps.claudeCloudEnabled == Config.claudeCloudEnabledDefault)
+        #expect(caps.claudeCloudLive == false)
+    }
+
+    /// A daemon that does not send the field cannot serve the feature either,
+    /// so an absent value falls through to the shipped default rather than a
+    /// hardcoded `false` — the same reading `queuedPromptEnabled` takes.
+    @Test func capabilitiesFromAnOlderDaemonFollowTheShippedDefault() throws {
+        let json = #"{"controlModeEnabled":false}"#
+        let caps = try JSONDecoder().decode(
+            DaemonCapabilitiesResult.self, from: Data(json.utf8))
+        #expect(caps.claudeCloudEnabled == Config.claudeCloudEnabledDefault)
+        #expect(caps.claudeCloudLive == false)
+    }
 }

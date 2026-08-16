@@ -501,13 +501,20 @@ public final class Daemon: Sendable {
         let actuationLog = ActuationLog(path: TBDConstants.actuationLogPath)
 
         var remoteManager: RemoteProviderManager?
-        if mockMode == nil, (try? await database.config.get())?.remoteBackendsEnabled == true {
+        var claudeCloudLive = false
+        let bootConfig = try? await database.config.get()
+        if mockMode == nil, bootConfig?.remoteBackendsEnabled == true {
             let manager = RemoteProviderManager(
                 db: database, subscriptions: subs, runner: ProviderRunner(),
                 registryURL: URL(fileURLWithPath: TBDConstants.agentProvidersPath),
                 actuationLog: actuationLog)
             self.remoteManager = manager
             remoteManager = manager
+            // Cloud requires BOTH gates, and both are read once here: the
+            // built-in provider is registered into the dispatcher at this same
+            // moment, so a manager built while the cloud flag was off has no
+            // `claude-cloud` entry at all.
+            claudeCloudLive = bootConfig?.claudeCloudEnabled == true
         }
 
         let prManager = PRStatusManager()
@@ -542,6 +549,7 @@ public final class Daemon: Sendable {
             modelProfileResolver: modelProfileResolver,
             pendingQuestions: pendingQuestions,
             remoteManager: remoteManager,
+            claudeCloudLive: claudeCloudLive,
             actuationLog: actuationLog
         )
         // Wire the shared input activity tracker to the coordinator

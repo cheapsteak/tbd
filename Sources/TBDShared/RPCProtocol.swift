@@ -2722,6 +2722,19 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// `Config.queuedPromptDefault`, so an install that never touched the
     /// toggle reports whatever the shipped default currently is.
     public let queuedPromptEnabled: Bool
+    /// Whether the Claude cloud sessions gate is currently set (design
+    /// 2026-08-15 §7). Default OFF while it soaks. Resolved through
+    /// `Config.claudeCloudEnabledDefault`, so an install that never touched the
+    /// toggle reports whatever the shipped default currently is.
+    public let claudeCloudEnabled: Bool
+    /// Whether the daemon actually wired the built-in cloud provider at boot.
+    /// `false` when either gate was off at that moment — AND when the flag was
+    /// flipped on afterwards, since the provider manager is constructed only at
+    /// boot and flipping a flag cannot conjure a provider into a running actor.
+    /// Lets the app say "on, but needs a restart" without calling a `remote.*`
+    /// verb and parsing its error string, exactly as `remoteBackendsLive` does
+    /// for the outer flag.
+    public let claudeCloudLive: Bool
 
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
@@ -2733,7 +2746,9 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
                 panelSurfaceEnabled: Bool = false,
                 remoteBackendsEnabled: Bool = false,
                 remoteBackendsLive: Bool = false,
-                queuedPromptEnabled: Bool = Config.queuedPromptDefault) {
+                queuedPromptEnabled: Bool = Config.queuedPromptDefault,
+                claudeCloudEnabled: Bool = Config.claudeCloudEnabledDefault,
+                claudeCloudLive: Bool = false) {
         self.controlModeEnabled = controlModeEnabled
         self.tmuxVersion = tmuxVersion
         self.controlModeSupported = controlModeSupported
@@ -2745,6 +2760,8 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         self.remoteBackendsEnabled = remoteBackendsEnabled
         self.remoteBackendsLive = remoteBackendsLive
         self.queuedPromptEnabled = queuedPromptEnabled
+        self.claudeCloudEnabled = claudeCloudEnabled
+        self.claudeCloudLive = claudeCloudLive
     }
 
     public init(from decoder: Decoder) throws {
@@ -2774,6 +2791,13 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         // default rather than assuming the feature is live.
         queuedPromptEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .queuedPromptEnabled) ?? Config.queuedPromptDefault
+        // New fields for the Claude cloud gate. A daemon that does not send
+        // `claudeCloudEnabled` cannot serve the feature either, so fall through
+        // to the shipped default rather than assuming it is live. `live` is a
+        // fact about THIS daemon's boot, so an absent value is honestly false.
+        claudeCloudEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .claudeCloudEnabled) ?? Config.claudeCloudEnabledDefault
+        claudeCloudLive = try c.decodeIfPresent(Bool.self, forKey: .claudeCloudLive) ?? false
     }
 }
 
