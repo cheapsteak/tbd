@@ -63,6 +63,9 @@ extension RemoteLaneLifecycle {
         guard case .remote(let provider, let sessionID) = worktree.location else {
             return .refused("Cannot archive \(worktree.name) through the remote path: it is a local worktree.")
         }
+        if !force, await manager.hasStaleSnapshot(provider: provider) {
+            return .refused(Self.staleSnapshotRefusal(worktree.name, provider: provider))
+        }
         let row = try await db.remoteSessions.row(provider: provider, sessionID: sessionID)
         let payload = row?.decodedPayload
         let capabilities = await manager.declaredCapabilities(provider: provider)
@@ -96,6 +99,13 @@ extension RemoteLaneLifecycle {
         guard case .remote(let provider, let sessionID) = worktree.location else {
             return .refused("Cannot revive \(worktree.name) through the remote path: it is a local worktree.")
         }
+        // Same gate as archive's, and there is no `--force` to lift it:
+        // `worktree.revive` carries no force flag, and neither does the
+        // `remote.unarchive` handler this parallels. The recovery is the
+        // provider's next successful poll.
+        if await manager.hasStaleSnapshot(provider: provider) {
+            return .refused(Self.staleSnapshotRefusal(worktree.name, provider: provider))
+        }
         let row = try await db.remoteSessions.row(provider: provider, sessionID: sessionID)
         let capabilities = await manager.declaredCapabilities(provider: provider)
         switch Self.revivePlan(
@@ -122,17 +132,41 @@ extension RemoteLaneLifecycle {
     /// displayed: `noteFilingDecision` is what stops a `list` response
     /// composed before this moment from undoing it on arrival. Skipping that
     /// call would leave the whole stale-snapshot watermark dead code.
+    ///
+    /// **The order of the three writes is load bearing, not incidental.** The
+    /// contract mandates that `archive` return the updated Session, so a
+    /// conforming provider's response carries `archived: true` — and mirroring
+    /// it runs the filing sync. Were that mirror to land before the row is
+    /// written, the sync would see a row still `.active` beside a fresh
+    /// `archived: true` and file it a second time, on the daemon's own rail,
+    /// with a notification claiming the *provider* retired a session the
+    /// *user* just retired. So:
+    ///
+    /// 1. record the filing decision, **before** the verb is invoked, so a
+    ///    poll already in flight cannot act on the row while the verb runs;
+    /// 2. invoke the verb, holding whatever Session came back;
+    /// 3. write the row, and only then mirror the held response — by which
+    ///    time the sync observes a row already in its target state and
+    ///    correctly does nothing.
     func performArchive(
         _ step: ArchiveStep, worktree: Worktree, date: Date = Date()
     ) async throws -> String? {
+        await manager.noteFilingDecision(worktreeID: worktree.id, at: date)
+        var mirrored: (session: RemoteSessionPayload, provider: String)?
         if case .invokeVerb(let provider, let sessionID) = step {
-            if let failure = await invokeRetirementVerb(
+            switch await invokeRetirementVerb(
                 "archive", provider: provider, sessionID: sessionID) {
-                return failure
+            case .failed(let message):
+                await manager.forgetFilingDecision(worktreeID: worktree.id)
+                return message
+            case .succeeded(let session):
+                mirrored = session.map { ($0, provider) }
             }
         }
         try await db.worktrees.archive(id: worktree.id)
-        await manager.noteFilingDecision(worktreeID: worktree.id, at: date)
+        if let mirrored {
+            await manager.applyUpsert(mirrored.session, provider: mirrored.provider)
+        }
         subscriptions.broadcast(delta: .worktreeArchived(WorktreeIDDelta(worktreeID: worktree.id)))
         return nil
     }
@@ -142,28 +176,53 @@ extension RemoteLaneLifecycle {
     ///
     /// The session's condition — running, exited, or no longer there — is
     /// reported through the mirror: whatever Session object the provider
-    /// hands back is upserted before the row flips, so the lane returns to
-    /// the active list already carrying the provider's current word on it
-    /// rather than the stale payload it was archived with.
+    /// hands back is upserted, so the lane returns to the active list already
+    /// carrying the provider's current word on it rather than the stale
+    /// payload it was archived with.
+    ///
+    /// Same three-step order as `performArchive`, and for the mirror-image
+    /// reason: `unarchive` returns `archived: false`, so mirroring it before
+    /// the row is written would hand the filing sync an `.archived` row beside
+    /// a fresh `archived: false` and earn a second, daemon-rail `.spawn` pair
+    /// for a gesture the user made once.
     func performRevive(
         _ step: ReviveStep, worktree: Worktree, date: Date = Date()
     ) async throws -> String? {
+        await manager.noteFilingDecision(worktreeID: worktree.id, at: date)
+        var mirrored: (session: RemoteSessionPayload, provider: String)?
         if case .invokeUnarchive(let provider, let sessionID) = step {
-            if let failure = await invokeRetirementVerb(
+            switch await invokeRetirementVerb(
                 "unarchive", provider: provider, sessionID: sessionID) {
-                return failure
+            case .failed(let message):
+                await manager.forgetFilingDecision(worktreeID: worktree.id)
+                return message
+            case .succeeded(let session):
+                mirrored = session.map { ($0, provider) }
             }
         }
         try await db.worktrees.revive(id: worktree.id)
-        await manager.noteFilingDecision(worktreeID: worktree.id, at: date)
+        if let mirrored {
+            await manager.applyUpsert(mirrored.session, provider: mirrored.provider)
+        }
         subscriptions.broadcast(delta: .worktreeRevived(WorktreeDelta(
             worktreeID: worktree.id, repoID: worktree.repoID,
             name: worktree.name, path: worktree.localPath)))
         return nil
     }
 
-    /// Invokes `archive` or `unarchive` and mirrors whatever Session object
-    /// comes back. Returns `nil` when the row may now be filed, or the
+    /// What a retirement verb came back with.
+    ///
+    /// The Session object travels out rather than being mirrored here, so the
+    /// caller can write the row first — see `performArchive`'s ordering note.
+    /// A `.succeeded(nil)` is the `not_found` degradation and the row-only
+    /// paths: the row may be filed, and there is nothing to mirror.
+    private enum VerbOutcome {
+        case failed(String)
+        case succeeded(RemoteSessionPayload?)
+    }
+
+    /// Invokes `archive` or `unarchive` and decodes whatever Session object
+    /// comes back. Returns `.succeeded` when the row may now be filed, or the
     /// message to surface otherwise.
     ///
     /// **`not_found` degrades to a row-only filing rather than an error, in
@@ -181,7 +240,7 @@ extension RemoteLaneLifecycle {
     /// and no path in TBD substitutes one for the other.
     private func invokeRetirementVerb(
         _ verb: String, provider: String, sessionID: String
-    ) async -> String? {
+    ) async -> VerbOutcome {
         let result: ProviderResult
         do {
             result = try await manager.invoke(
@@ -191,27 +250,24 @@ extension RemoteLaneLifecycle {
                 "\(verb, privacy: .public) provider=\(provider, privacy: .public) timed out")
             switch error {
             case .timeout(let timedOutVerb):
-                return "provider '\(provider)' timed out running '\(timedOutVerb)'"
+                return .failed("provider '\(provider)' timed out running '\(timedOutVerb)'")
             }
         } catch {
             remoteLaneLogger.error(
                 "\(verb, privacy: .public) provider=\(provider, privacy: .public) failed: \(String(describing: error), privacy: .public)")
-            return "\(error)"
+            return .failed("\(error)")
         }
         if result.failureClass != nil {
             if result.decodedError?.code == "not_found" {
                 remoteLaneLogger.debug(
                     "\(verb, privacy: .public) on \(provider, privacy: .public)/\(sessionID, privacy: .public) reported not_found; filing the row alone")
-                return nil
+                return .succeeded(nil)
             }
             let message = result.decodedError?.message ?? "\(verb) failed (exit \(result.exitCode))"
             remoteLaneLogger.error(
                 "\(verb, privacy: .public) provider=\(provider, privacy: .public) failed: \(message, privacy: .public)")
-            return message
+            return .failed(message)
         }
-        if let session = try? result.decoded(RemoteSessionPayload.self) {
-            await manager.applyUpsert(session, provider: provider)
-        }
-        return nil
+        return .succeeded(try? result.decoded(RemoteSessionPayload.self))
     }
 }

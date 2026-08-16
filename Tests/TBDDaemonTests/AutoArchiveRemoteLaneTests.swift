@@ -165,6 +165,35 @@ struct AutoArchiveRemoteLaneTests {
         #expect(try fixture.actuationRows().isEmpty)
     }
 
+    /// The rail reads the same guards out of the same mirror, so it inherits
+    /// the same refusal: a stale inventory is no basis for retiring a lane,
+    /// and the rail has no `--force` to reach for. It declines and writes no
+    /// row, exactly as it does for a missing capability.
+    @Test("an armed remote lane is left alone while the provider's inventory is stale")
+    func staleInventoryDeclinesTheRail() async throws {
+        let fixture = try await RemoteLaneFixture.make(
+            capabilities: ["archive"],
+            verbs: [
+                RemoteLaneFixture.failingList,
+                // A spare, so a regressed gate fails by assertion rather than
+                // by exhausting the invoker's script (a `precondition`).
+                providerOK(#"{"id": "sess-1", "state": "running", "archived": true}"#),
+            ],
+            tag: "rail-stale")
+        defer { fixture.cleanup() }
+        let lane = try await fixture.seedLane()
+        try await fixture.db.worktrees.setAutoArchiveOnMerge(id: lane.id, value: true)
+        try await fixture.markSnapshotStale()
+
+        let archived = await fixture.coordinator().handleMergedTransition(
+            worktreeID: lane.id, prNumber: 7)
+
+        #expect(!archived)
+        #expect(!fixture.invoker.calls.contains { $0.first == "archive" })
+        #expect(try await fixture.status(of: lane) == .active)
+        #expect(try fixture.actuationRows().isEmpty)
+    }
+
     // MARK: - The local path, unchanged
 
     @Test("a local worktree armed the same way still auto-archives and records its act")

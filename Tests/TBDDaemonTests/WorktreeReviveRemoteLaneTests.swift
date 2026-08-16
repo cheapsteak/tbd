@@ -49,6 +49,31 @@ struct WorktreeReviveRemoteLaneTests {
         #expect(rows.last?["result"] as? String == "dispatched")
     }
 
+    /// The mirror image of the archive path's re-entrancy: `unarchive` returns
+    /// the updated Session with `archived: false`, and mirroring that before
+    /// the row is written would leave the sync looking at an `.archived` row
+    /// alongside a fresh `archived: false` — a second, daemon-rail `.spawn`
+    /// pair for a gesture the user made once.
+    @Test("the unarchive verb's own response does not re-enter the filing sync")
+    func unarchiveResponseDoesNotReenterTheFilingSync() async throws {
+        let fixture = try await RemoteLaneFixture.make(
+            capabilities: ["archive", "unarchive"],
+            verbs: [providerOK(#"{"id": "sess-1", "state": "running", "archived": false}"#)],
+            tag: "revive-no-resync")
+        defer { fixture.cleanup() }
+        let lane = try await fixture.seedLane(status: .archived, archived: true)
+
+        let response = try await revive(fixture.router(), lane)
+
+        #expect(response.success, "the revive was refused: \(response.error ?? "no error")")
+        #expect(try await fixture.status(of: lane) == .active)
+        let rows = try fixture.actuationRows()
+        #expect(rows.count == 2, "one gesture must write one request and one outcome, got \(rows.count)")
+        #expect(
+            rows.allSatisfy { ($0["actor"] as? [String: Any])?["rail"] as? String != "remote-filing-sync" },
+            "the filing sync wrote a row for a gesture the user made")
+    }
+
     /// The session's condition comes back through the mirror rather than
     /// through a second call: an exited session flips just as cleanly, and
     /// the lane returns to the list already carrying the provider's current
@@ -199,6 +224,58 @@ struct WorktreeReviveRemoteLaneTests {
         #expect(response.error == "remote backends disabled")
         #expect(try await fixture.status(of: lane) == .archived)
         #expect(try fixture.actuationRows().isEmpty)
+    }
+
+    // MARK: - The stale-snapshot gate
+
+    /// The same gate `remote.unarchive` passes. Revive's routing reads what
+    /// the provider reports *right now* out of the mirror, so a stale mirror
+    /// picks the wrong branch: a lane the provider still holds archived can
+    /// read as unarchived and take a row-only flip the next snapshot re-files.
+    /// There is no `--force` on revive anywhere in TBD, here or on the
+    /// `remote.unarchive` handler; the recovery is the provider's next
+    /// successful poll.
+    @Test("a stale provider inventory refuses the revive above the record")
+    func staleInventoryRefusesTheRevive() async throws {
+        let fixture = try await RemoteLaneFixture.make(
+            capabilities: ["archive", "unarchive"],
+            verbs: [
+                RemoteLaneFixture.failingList,
+                // A spare, so a regressed gate fails by assertion rather than
+                // by exhausting the invoker's script (a `precondition`).
+                providerOK(#"{"id": "sess-1", "state": "running", "archived": false}"#),
+            ],
+            tag: "revive-stale")
+        defer { fixture.cleanup() }
+        let lane = try await fixture.seedLane(status: .archived, archived: true)
+        try await fixture.markSnapshotStale()
+
+        let response = try await revive(fixture.router(), lane)
+
+        #expect(!response.success)
+        #expect(response.error?.contains("stale") == true,
+                "the refusal did not say why: \(response.error ?? "no error")")
+        #expect(try await fixture.status(of: lane) == .archived)
+        #expect(!fixture.invoker.calls.contains { $0.first == "unarchive" })
+        #expect(try fixture.actuationRows().isEmpty, "a refusal must write no actuation row")
+    }
+
+    /// The ordinary case still works, so a run that refused everything cannot
+    /// pass the arm above by doing nothing.
+    @Test("a healthy provider inventory does not trip the stale gate")
+    func healthyInventoryRevivesNormally() async throws {
+        let fixture = try await RemoteLaneFixture.make(
+            capabilities: ["archive", "unarchive"],
+            verbs: [providerOK(#"{"id": "sess-1", "state": "running", "archived": false}"#)],
+            tag: "revive-fresh")
+        defer { fixture.cleanup() }
+        let lane = try await fixture.seedLane(status: .archived, archived: true)
+        try await fixture.manager.apply(snapshot: [], provider: "fake")
+
+        let response = try await revive(fixture.router(), lane)
+
+        #expect(response.success, "the revive was refused: \(response.error ?? "no error")")
+        #expect(try await fixture.status(of: lane) == .active)
     }
 
     // MARK: - The local path, unchanged

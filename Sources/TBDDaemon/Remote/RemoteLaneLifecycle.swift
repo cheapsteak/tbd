@@ -138,6 +138,22 @@ struct RemoteLaneLifecycle: Sendable {
         "Cannot archive \(name): its agent is still working. Re-run with --force to retire it anyway."
     }
 
+    /// The refusal for a lane whose provider's cached inventory has gone
+    /// stale — the same gate every `remote.*` mutation passes, and load
+    /// bearing here for a sharper reason than elsewhere.
+    ///
+    /// Both of archive's guards are read out of the mirror (`agentState`, and
+    /// `meta.workspace_dirty`), and the revive routing reads the provider's
+    /// current `archived` claim from it too. On a stale mirror a session that
+    /// was idle at the last good poll and is working now reads as safe, the
+    /// guards pass, and a mid-task session is retired — exactly what the
+    /// guards exist to prevent. Refusing keeps a mutation from resting on an
+    /// inventory TBD already knows it cannot trust.
+    static func staleSnapshotRefusal(_ name: String, provider: String) -> String {
+        "Cannot act on \(name): provider '\(provider)' inventory is stale; refresh must recover " +
+        "before changing remote sessions."
+    }
+
     /// The refusal for a lane whose provider reports an unclean checkout.
     static func dirtyWorkspaceGuardRefusal(_ name: String) -> String {
         "Cannot archive \(name): its provider reports the session's checkout has uncommitted work " +

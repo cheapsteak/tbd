@@ -52,12 +52,13 @@ struct RemoteFilingSyncTests {
     /// A manager whose cached `describe` declares `capabilities`, with a real
     /// actuation log wired in — the sync fails closed without one.
     private func manager(
-        declaring capabilities: [String], runner: (any RemoteProviderInvoking)? = nil
+        declaring capabilities: [String], runner: (any RemoteProviderInvoking)? = nil,
+        log: ActuationLog? = nil
     ) async -> RemoteProviderManager {
         let invoker = runner ?? FakeProviderInvoker(script: [describeDeclaring(capabilities)])
         let m = RemoteProviderManager(
             db: db, subscriptions: subs, runner: invoker, registryURL: registryURL,
-            actuationLog: ActuationLog(path: logPath))
+            actuationLog: log ?? ActuationLog(path: logPath))
         await m.loadRegistryAndDescribe()
         return m
     }
@@ -295,6 +296,233 @@ struct RemoteFilingSyncTests {
         #expect(try await status(row.id) == .archived)
     }
 
+    /// The rule is "no later than the request start", so the boundary belongs
+    /// to the response: a decision taken at the very instant the request began
+    /// is one that request could have accounted for. Both directions are here
+    /// because the comparison is one line and a suite that only pinned the
+    /// strict cases would survive swapping `>` for `>=`.
+    @Test("a decision taken exactly at the request start does not suppress the flip")
+    func watermarkBoundaryIsExclusiveAtEquality() async throws {
+        let m = await manager(declaring: ["archive", "unarchive"])
+        let toFile = try await adoptedRow(m, sessionID: "to-file")
+        let toReturn = try await adoptedRow(m, sessionID: "to-return")
+        try await db.worktrees.archive(id: toReturn.id)
+        let boundary = Date(timeIntervalSince1970: 1_000)
+        await m.noteFilingDecision(worktreeID: toFile.id, at: boundary)
+        await m.noteFilingDecision(worktreeID: toReturn.id, at: boundary)
+
+        try await m.apply(
+            snapshot: [
+                session("to-file", archived: true),
+                session("to-return", archived: false),
+            ],
+            provider: "fake",
+            now: Date(timeIntervalSince1970: 1_002), requestStartedAt: boundary)
+
+        #expect(try await status(toFile.id) == .archived)
+        #expect(try await status(toReturn.id) == .active)
+    }
+
+    /// One second the other side of the same boundary, so the pair pins the
+    /// comparison rather than one of its arms.
+    @Test("a decision taken one instant after the request start does suppress the flip")
+    func watermarkBoundaryIsInclusiveOneInstantLater() async throws {
+        let m = await manager(declaring: ["archive", "unarchive"])
+        let row = try await adoptedRow(m)
+        let boundary = Date(timeIntervalSince1970: 1_000)
+        await m.noteFilingDecision(worktreeID: row.id, at: boundary.addingTimeInterval(0.001))
+
+        try await m.apply(
+            snapshot: [session("a", archived: true)], provider: "fake",
+            now: Date(timeIntervalSince1970: 1_002), requestStartedAt: boundary)
+
+        #expect(try await status(row.id) == .active)
+    }
+
+    // MARK: - Every write to a remote row's status is watermarked
+
+    /// Not only the verb paths. A row filed by the sync itself — which is how
+    /// a Provider-Desk `remote.archive` reaches the worktree row, since that
+    /// handler never touches the row — must leave a watermark too, or a poll
+    /// already in flight carrying the pre-archive `archived: false` un-files it
+    /// moments later.
+    @Test("a sync-driven archive is watermarked, and an in-flight poll cannot undo it")
+    func syncDrivenArchiveIsWatermarked() async throws {
+        let m = await manager(declaring: ["archive", "unarchive"])
+        let row = try await adoptedRow(m)
+
+        try await m.apply(
+            snapshot: [session("a", archived: true)], provider: "fake",
+            now: Date(timeIntervalSince1970: 2_000),
+            requestStartedAt: Date(timeIntervalSince1970: 2_000))
+        #expect(try await status(row.id) == .archived)
+        #expect(await m.filingDecision(for: row.id) != nil, "the sync left no watermark")
+
+        // A `list` launched before that decision lands afterwards, still
+        // carrying the provider's pre-archive word.
+        try await m.apply(
+            snapshot: [session("a", archived: false)], provider: "fake",
+            now: Date(timeIntervalSince1970: 2_002),
+            requestStartedAt: Date(timeIntervalSince1970: 1_999))
+
+        #expect(try await status(row.id) == .archived)
+    }
+
+    @Test("a sync-driven return to active is watermarked, and an in-flight poll cannot undo it")
+    func syncDrivenReturnIsWatermarked() async throws {
+        let m = await manager(declaring: ["archive", "unarchive"])
+        let row = try await adoptedRow(m)
+        try await db.worktrees.archive(id: row.id)
+
+        try await m.apply(
+            snapshot: [session("a", archived: false)], provider: "fake",
+            now: Date(timeIntervalSince1970: 2_000),
+            requestStartedAt: Date(timeIntervalSince1970: 2_000))
+        #expect(try await status(row.id) == .active)
+        #expect(await m.filingDecision(for: row.id) != nil, "the sync left no watermark")
+
+        try await m.apply(
+            snapshot: [session("a", archived: true)], provider: "fake",
+            now: Date(timeIntervalSince1970: 2_002),
+            requestStartedAt: Date(timeIntervalSince1970: 1_999))
+
+        #expect(try await status(row.id) == .active)
+    }
+
+    // MARK: - Check-then-act across the suspensions
+
+    /// The row and the watermark are read once, and then two awaits follow —
+    /// the record append and the status write. A gesture landing in that
+    /// window makes the decision stale before it is carried out, so the sync
+    /// re-reads both and abandons rather than restating an act somebody else
+    /// already performed.
+    ///
+    /// The interleave is exact rather than raced: the actuation log's own
+    /// `write` syscall is the seam. It hands control to the racing gesture and
+    /// blocks until that gesture has finished, so the sync always resumes into
+    /// a world it has not looked at since it decided.
+    @Test("a gesture landing mid-sync abandons the flip instead of restating it")
+    func aGestureLandingMidSyncAbandonsTheFlip() async throws {
+        let handshake = MidAppendHandshake()
+        let log = ActuationLog(
+            path: logPath, now: { Date() },
+            syscalls: ActuationLogSyscalls(
+                write: { descriptor, buffer, count in
+                    handshake.pauseOnFirstWrite()
+                    return Foundation.write(descriptor, buffer, count)
+                },
+                fsync: { Foundation.fsync($0) }))
+        let m = await manager(declaring: ["archive", "unarchive"], log: log)
+        let row = try await adoptedRow(m)
+
+        // The user's own archive, waiting for the sync to reach its record.
+        let gesture = Task { [db] in
+            await handshake.awaitSyncAtRecord()
+            try? await db.worktrees.archive(id: row.id)
+            await m.noteFilingDecision(worktreeID: row.id, at: Date(timeIntervalSince1970: 3_000))
+            handshake.releaseSync()
+        }
+
+        try await m.apply(
+            snapshot: [session("a", archived: true)], provider: "fake",
+            now: Date(timeIntervalSince1970: 2_001),
+            requestStartedAt: Date(timeIntervalSince1970: 2_000))
+        await gesture.value
+
+        #expect(try await status(row.id) == .archived, "the user's own archive stands")
+        // The gesture is the author of this filing, so nothing may say the
+        // provider retired the session.
+        #expect(try await db.notifications.unread(worktreeID: row.id).isEmpty)
+        let rows = try actuationRows()
+        let request = try #require(rows.first { $0["kind"] as? String == "dispose" })
+        let requestID = try #require(request["id"] as? String)
+        let outcome = try #require(rows.first { $0["confirms"] as? String == requestID })
+        #expect(
+            outcome["result"] as? String == "refused",
+            "the sync carried out a decision that had gone stale: \(outcome)")
+    }
+
+    // MARK: - The two events paths
+
+    /// A pushed `session` line is fresh by construction — the provider wrote it
+    /// because something changed just now — so the sync takes its arrival as
+    /// the request start and files the row.
+    @Test("a pushed session line reporting archived: true files its row")
+    func eventsPushedSessionFilesTheRow() async throws {
+        let m = await manager(declaring: ["archive", "unarchive"])
+        let row = try await adoptedRow(m)
+
+        await m.applyUpsert(
+            session("a", archived: true), provider: "fake",
+            date: Date(timeIntervalSince1970: 5_000))
+
+        #expect(try await status(row.id) == .archived)
+        #expect(try await mirrorState("a") == RemoteProcessState.running.rawValue)
+    }
+
+    /// "Fresh by construction" is a claim about the line, not a licence to
+    /// overwrite a decision taken after it arrived. The injected arrival date
+    /// is what the watermark is compared against, so a decision stamped later
+    /// than the line still wins — and the seam is what makes that assertable
+    /// without wall time.
+    @Test("a pushed session line does not reverse a decision taken after it arrived")
+    func eventsPushedSessionRespectsALaterDecision() async throws {
+        let m = await manager(declaring: ["archive", "unarchive"])
+        let row = try await adoptedRow(m)
+        try await db.worktrees.archive(id: row.id)
+        await m.noteFilingDecision(worktreeID: row.id, at: Date(timeIntervalSince1970: 5_001))
+
+        await m.applyUpsert(
+            session("a", archived: false), provider: "fake",
+            date: Date(timeIntervalSince1970: 5_000))
+
+        #expect(try await status(row.id) == .archived)
+    }
+
+    /// The reconnect snapshot arm. The supervisor supplies the moment it opened
+    /// the connection as the request start, because the provider composes that
+    /// snapshot from what it knew when TBD asked — so a snapshot on a
+    /// connection opened before a local decision cannot account for it, and one
+    /// on a connection opened after it can.
+    @Test("an events snapshot is judged by when its connection opened")
+    func eventsSnapshotIsJudgedByConnectionOpenTime() async throws {
+        let m = await manager(declaring: ["archive", "unarchive"])
+        let stale = try await adoptedRow(m, sessionID: "stale-connection")
+        let fresh = try await adoptedRow(m, sessionID: "fresh-connection")
+        try await db.worktrees.archive(id: stale.id)
+        try await db.worktrees.archive(id: fresh.id)
+        await m.noteFilingDecision(worktreeID: stale.id, at: Date(timeIntervalSince1970: 6_000))
+        await m.noteFilingDecision(worktreeID: fresh.id, at: Date(timeIntervalSince1970: 6_000))
+
+        // One connection opened before both decisions, one after.
+        try await m.apply(
+            snapshot: [session("stale-connection", archived: false)], provider: "fake",
+            now: Date(timeIntervalSince1970: 6_002),
+            requestStartedAt: Date(timeIntervalSince1970: 5_999))
+        try await m.apply(
+            snapshot: [session("fresh-connection", archived: false)], provider: "fake",
+            now: Date(timeIntervalSince1970: 6_003),
+            requestStartedAt: Date(timeIntervalSince1970: 6_001))
+
+        #expect(try await status(stale.id) == .archived)
+        #expect(try await status(fresh.id) == .active)
+    }
+
+    /// The supervisor stamps that connection-open time through an injected date
+    /// seam rather than a bare `Date()`, because the value is **compared**
+    /// (Tests/CLAUDE.md, "Clock and date seams": `Duration` is behavior,
+    /// `Date` is data).
+    @Test("the events supervisor stamps its connection-open time through the date seam")
+    func eventsSupervisorTakesADateSeam() async throws {
+        let m = await manager(declaring: ["archive", "unarchive"])
+        let fixed = Date(timeIntervalSince1970: 7_000)
+        let supervisor = ProviderEventsSupervisor(
+            config: RemoteProviderConfig(name: "fake", exec: "/nonexistent"), manager: m,
+            now: { fixed })
+
+        #expect(await supervisor.connectionOpenedAt == fixed)
+    }
+
     // MARK: - The sweep
 
     @Test("the sweep drops watermarks older than two poll intervals")
@@ -312,6 +540,23 @@ struct RemoteFilingSyncTests {
 
         #expect(await m.filingDecision(for: fresh) != nil)
         #expect(await m.filingDecision(for: stale) == nil)
+    }
+
+    /// The cutoff itself is kept. A watermark exactly two poll intervals old is
+    /// still older than nothing in flight, and pinning the boundary is what
+    /// stops the comparison drifting between `>` and `>=` unnoticed.
+    @Test("a watermark exactly at the sweep cutoff survives")
+    func sweepKeepsTheWatermarkOnTheCutoff() async throws {
+        let m = await manager(declaring: ["archive", "unarchive"])
+        let now = Date(timeIntervalSince1970: 10_000)
+        let onTheCutoff = UUID()
+        await m.noteFilingDecision(
+            worktreeID: onTheCutoff,
+            at: now.addingTimeInterval(-2 * RemoteProviderManager.pollInterval))
+
+        try await m.apply(snapshot: [], provider: "fake", now: now, requestStartedAt: now)
+
+        #expect(await m.filingDecision(for: onTheCutoff) != nil)
     }
 
     // MARK: - Never silent
@@ -335,6 +580,48 @@ struct RemoteFilingSyncTests {
         let requestID = try #require(request["id"] as? String)
         let outcome = try #require(rows.first { $0["confirms"] as? String == requestID })
         #expect(outcome["result"] as? String == "dispatched")
+    }
+}
+
+/// Rendezvous between the filing sync — paused inside the actuation log's
+/// first `write` syscall — and a gesture racing it. Two semaphores rather than
+/// one: the gesture must not start before the sync has committed to its
+/// decision, and the sync must not resume before the gesture has landed.
+///
+/// The blocking `wait` on the sync's side parks the actuation log's executor
+/// thread, which is exactly the point; the gesture's side never blocks a
+/// cooperative thread, since it waits on a global dispatch queue and resumes
+/// through a continuation.
+private final class MidAppendHandshake: @unchecked Sendable {
+    private let syncReachedRecord = DispatchSemaphore(value: 0)
+    private let gestureLanded = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var paused = false
+
+    /// Called from the log's `write` syscall. Only the first append pauses:
+    /// the outcome row is written after the decision has been re-confirmed and
+    /// has nothing left to race.
+    func pauseOnFirstWrite() {
+        lock.lock()
+        let alreadyPaused = paused
+        paused = true
+        lock.unlock()
+        guard !alreadyPaused else { return }
+        syncReachedRecord.signal()
+        gestureLanded.wait()
+    }
+
+    func awaitSyncAtRecord() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global().async { [syncReachedRecord] in
+                syncReachedRecord.wait()
+                continuation.resume()
+            }
+        }
+    }
+
+    func releaseSync() {
+        gestureLanded.signal()
     }
 }
 

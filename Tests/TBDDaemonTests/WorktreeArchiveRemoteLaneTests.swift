@@ -53,6 +53,40 @@ struct WorktreeArchiveRemoteLaneTests {
         #expect(rows.last?["result"] as? String == "dispatched")
     }
 
+    /// The contract mandates that `archive` return the updated Session, so
+    /// every conforming provider hands back `archived: true`. Mirroring that
+    /// response before the row is written would hand the filing sync a row
+    /// still `.active` alongside a fresh `archived: true` — and the sync would
+    /// file the row a second time, on the daemon's own rail, with a
+    /// notification claiming the *provider* retired a session the *user* just
+    /// retired.
+    ///
+    /// So the shape is asserted, not just the outcome: exactly the two rows
+    /// this one gesture is entitled to, none of them on the sync's rail, and
+    /// no notification at all.
+    @Test("the verb's own response does not re-enter the filing sync")
+    func verbResponseDoesNotReenterTheFilingSync() async throws {
+        let fixture = try await RemoteLaneFixture.make(
+            capabilities: ["archive", "unarchive"],
+            verbs: [providerOK(#"{"id": "sess-1", "state": "running", "archived": true}"#)],
+            tag: "archive-no-resync")
+        defer { fixture.cleanup() }
+        let lane = try await fixture.seedLane()
+
+        let response = try await archive(fixture.router(), lane)
+
+        #expect(response.success, "the archive was refused: \(response.error ?? "no error")")
+        #expect(try await fixture.status(of: lane) == .archived)
+        let rows = try fixture.actuationRows()
+        #expect(rows.count == 2, "one gesture must write one request and one outcome, got \(rows.count)")
+        #expect(
+            rows.allSatisfy { ($0["actor"] as? [String: Any])?["rail"] as? String != "remote-filing-sync" },
+            "the filing sync wrote a row for a gesture the user made")
+        #expect(
+            try await fixture.notifications(for: lane).isEmpty,
+            "the user archived this lane themselves; nothing may claim the provider did")
+    }
+
     /// The watermark that stops a `list` response composed before this
     /// gesture from undoing it on arrival. Discriminating by construction:
     /// the manager records nothing on its own, so this reads `nil` the moment
@@ -234,6 +268,80 @@ struct WorktreeArchiveRemoteLaneTests {
         #expect(response.error == "remote backends disabled")
         #expect(try await fixture.status(of: lane) == .active)
         #expect(try fixture.actuationRows().isEmpty)
+    }
+
+    // MARK: - The stale-snapshot gate
+
+    /// The same gate every `remote.*` mutation passes, for the same reason and
+    /// with sharper stakes here. Both of archive's guards are read out of the
+    /// mirror — `agentState` and `meta.workspace_dirty` — so on a stale mirror
+    /// a session that was idle at the last good poll and is working now reads
+    /// as safe, the guards pass, and a mid-task session is retired.
+    @Test("a stale provider inventory refuses the archive above the record")
+    func staleInventoryRefusesTheArchive() async throws {
+        let fixture = try await RemoteLaneFixture.make(
+            capabilities: ["archive"],
+            verbs: [
+                RemoteLaneFixture.failingList,
+                // A spare, so a regressed gate fails this test by assertion
+                // rather than by exhausting the invoker's script — which is a
+                // `precondition` and would abort the whole test process.
+                providerOK(#"{"id": "sess-1", "state": "running", "archived": true}"#),
+            ],
+            tag: "archive-stale")
+        defer { fixture.cleanup() }
+        let lane = try await fixture.seedLane()
+        try await fixture.markSnapshotStale()
+
+        let response = try await archive(fixture.router(), lane)
+
+        #expect(!response.success)
+        #expect(response.error?.contains("stale") == true,
+                "the refusal did not say why: \(response.error ?? "no error")")
+        #expect(try await fixture.status(of: lane) == .active)
+        #expect(!fixture.invoker.calls.contains { $0.first == "archive" })
+        #expect(try fixture.actuationRows().isEmpty, "a refusal must write no actuation row")
+    }
+
+    /// `--force` overrides it, exactly as it overrides the two guards: the user
+    /// has been told the inventory is stale and is asking anyway.
+    @Test("force overrides the stale-snapshot gate")
+    func forceOverridesTheStaleGate() async throws {
+        let fixture = try await RemoteLaneFixture.make(
+            capabilities: ["archive"],
+            verbs: [
+                RemoteLaneFixture.failingList,
+                providerOK(#"{"id": "sess-1", "state": "running", "archived": true}"#),
+            ],
+            tag: "archive-stale-force")
+        defer { fixture.cleanup() }
+        let lane = try await fixture.seedLane()
+        try await fixture.markSnapshotStale()
+
+        let response = try await archive(fixture.router(), lane, force: true)
+
+        #expect(response.success, "force did not override the gate: \(response.error ?? "no error")")
+        #expect(try await fixture.status(of: lane) == .archived)
+        #expect(fixture.invoker.calls.last == ["archive", "sess-1"])
+    }
+
+    /// A fresh inventory is the ordinary case, so the gate must not fire when
+    /// nothing is wrong — otherwise a run that refused everything would pass
+    /// the arm above by doing nothing.
+    @Test("a healthy provider inventory does not trip the stale gate")
+    func healthyInventoryArchivesNormally() async throws {
+        let fixture = try await RemoteLaneFixture.make(
+            capabilities: ["archive"],
+            verbs: [providerOK(#"{"id": "sess-1", "state": "running", "archived": true}"#)],
+            tag: "archive-fresh")
+        defer { fixture.cleanup() }
+        let lane = try await fixture.seedLane()
+        try await fixture.manager.apply(snapshot: [], provider: "fake")
+
+        let response = try await archive(fixture.router(), lane)
+
+        #expect(response.success, "the archive was refused: \(response.error ?? "no error")")
+        #expect(try await fixture.status(of: lane) == .archived)
     }
 
     // MARK: - Guards on the verb path

@@ -184,6 +184,40 @@ struct RemoteLaneLifecycleTests {
         #expect(plan == .rowOnly)
     }
 
+    // MARK: - The dirty-checkout claim, read out of `meta`
+
+    /// `meta` is a flat string-to-string map, so the claim arrives as text and
+    /// the contract names exactly two spellings — `"true"` and `"1"`, trimmed
+    /// and case-insensitively. Each arm of that reading is pinned: drop the
+    /// `"1"` case, the trim, or the lowercasing and one of these goes red.
+    @Test("only the contract's two spellings are read as a dirty-checkout claim")
+    func dirtyWorkspaceReadingIsExactlyTheContractsTwoSpellings() {
+        let claims = ["true", "1", "TRUE", "True", " true ", "\t1\n", "  TRUE  "]
+        for raw in claims {
+            #expect(
+                RemoteLaneLifecycle.metaReportsDirtyWorkspace(
+                    [RemoteLaneLifecycle.dirtyWorkspaceMetaKey: raw]),
+                "\(raw.debugDescription) should be read as a claim")
+        }
+    }
+
+    /// Everything else is silence, deliberately: this value decides whether a
+    /// user's archive is refused, and inventing a claim out of a string the
+    /// provider meant for display would block a gesture nobody asked to block.
+    @Test("no other value is read as a dirty-checkout claim")
+    func dirtyWorkspaceReadingRejectsEverythingElse() {
+        let nonClaims = ["", " ", "yes", "y", "on", "0", "false", "dirty", "2", "true-ish", "1.0"]
+        for raw in nonClaims {
+            #expect(
+                !RemoteLaneLifecycle.metaReportsDirtyWorkspace(
+                    [RemoteLaneLifecycle.dirtyWorkspaceMetaKey: raw]),
+                "\(raw.debugDescription) should not be read as a claim")
+        }
+        #expect(!RemoteLaneLifecycle.metaReportsDirtyWorkspace(nil))
+        #expect(!RemoteLaneLifecycle.metaReportsDirtyWorkspace([:]))
+        #expect(!RemoteLaneLifecycle.metaReportsDirtyWorkspace(["repo": "acme/api"]))
+    }
+
     // MARK: - Global negative property
 
     @Test("no plan anywhere ever invokes or references stop")

@@ -277,6 +277,54 @@ struct RowActionMenuRemoteArchiveTests {
         #expect(archive?.disabledHelp == nil)
     }
 
+    /// The `gone` exemption is "the only route out for a lane whose provider
+    /// cannot archive" (spec §"Archive"), and the daemon takes it happily —
+    /// `archivePlan` returns `.rowOnlyGone` for exactly this shape. A menu that
+    /// disabled Archive here would be the surface blocking the one gesture the
+    /// daemon is willing to perform.
+    @Test func archiveEnabledForAGoneLaneWhoseProviderCannotArchive() {
+        let ctx = RowActionMenu.Context(hasRepoID: true, branch: "b",
+                                        location: Self.remoteLocation,
+                                        provider: "acme",
+                                        providerCapabilities: ["stop"],
+                                        isGone: true)
+        let archive = RowActionMenu.items(context: ctx)
+            .compactMap(\.action).first { $0.kind == .archive }
+        #expect(archive?.title == "Archive")
+        #expect(archive?.isEnabled == true)
+        #expect(archive?.disabledHelp == nil)
+    }
+
+    /// `gone` is not a blanket override of the other gate: a lane that is still
+    /// enumerated stays disabled, which is what makes the exemption narrow
+    /// rather than a way around the capability entirely.
+    @Test func archiveStaysDisabledForALaneThatIsNotGone() {
+        let ctx = RowActionMenu.Context(hasRepoID: true, branch: "b",
+                                        location: Self.remoteLocation,
+                                        provider: "acme",
+                                        providerCapabilities: ["stop"],
+                                        isGone: false)
+        let archive = RowActionMenu.items(context: ctx)
+            .compactMap(\.action).first { $0.kind == .archive }
+        #expect(archive?.title == RowActionMenu.archiveProviderCannotArchiveLabel)
+        #expect(archive?.isEnabled == false)
+    }
+
+    /// Active children still win over `gone`: that is a reason the user can act
+    /// on right now, and it is not what the exemption is about.
+    @Test func activeChildrenStillBlockAGoneLane() {
+        let ctx = RowActionMenu.Context(hasActiveChildren: true,
+                                        hasRepoID: true, branch: "b",
+                                        location: Self.remoteLocation,
+                                        provider: "acme",
+                                        providerCapabilities: [],
+                                        isGone: true)
+        let archive = RowActionMenu.items(context: ctx)
+            .compactMap(\.action).first { $0.kind == .archive }
+        #expect(archive?.title == RowActionMenu.archiveHasChildrenLabel)
+        #expect(archive?.isEnabled == false)
+    }
+
     @Test func activeChildrenTakePrecedenceOverMissingCapabilityOnRemoteLane() {
         // Both gates apply: a remote lane with active children AND no
         // `archive` capability. Documented precedence lives in

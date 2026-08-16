@@ -20,6 +20,12 @@ struct RemoteLaneFixture {
     let manager: RemoteProviderManager
     let invoker: FakeProviderInvoker
     let logPath: String
+    /// The ONE actuation log, shared by the manager, the router and the merge
+    /// coordinator exactly as `Daemon.swift` shares it. Wiring it into the
+    /// manager is what makes the filing sync live here: a fixture that left
+    /// the manager's log nil would fail the sync closed and hide every way a
+    /// verb path can re-enter it.
+    let actuationLog: ActuationLog
     let repo: Repo
     private let dir: URL
 
@@ -47,16 +53,18 @@ struct RemoteLaneFixture {
             #"{"contract_versions": [1], "name": "fake", "capabilities": [\#(caps)]}"#)
         let invoker = FakeProviderInvoker(script: [describe] + verbs)
         let subscriptions = StateSubscriptionManager()
+        let logPath = dir.appendingPathComponent("actuations.jsonl").path
+        let actuationLog = ActuationLog(path: logPath)
         let manager = RemoteProviderManager(
-            db: db, subscriptions: subscriptions, runner: invoker, registryURL: registryURL)
+            db: db, subscriptions: subscriptions, runner: invoker, registryURL: registryURL,
+            actuationLog: actuationLog)
         await manager.loadRegistryAndDescribe()
 
         let repo = try await db.repos.create(
             path: "/tmp/acme-\(UUID().uuidString)", displayName: "acme", defaultBranch: "main")
         return RemoteLaneFixture(
             db: db, subscriptions: subscriptions, manager: manager, invoker: invoker,
-            logPath: dir.appendingPathComponent("actuations.jsonl").path,
-            repo: repo, dir: dir)
+            logPath: logPath, actuationLog: actuationLog, repo: repo, dir: dir)
     }
 
     func router() -> RPCRouter {
@@ -70,7 +78,7 @@ struct RemoteLaneFixture {
             startTime: Date(),
             subscriptions: subscriptions,
             remoteManager: manager,
-            actuationLog: ActuationLog(path: logPath))
+            actuationLog: actuationLog)
     }
 
     func coordinator() -> AutoArchiveOnMergeCoordinator {
@@ -80,7 +88,7 @@ struct RemoteLaneFixture {
                 db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
                 hooks: HookResolver(), subscriptions: subscriptions),
             subscriptions: subscriptions,
-            actuationLog: ActuationLog(path: logPath),
+            actuationLog: actuationLog,
             remoteManager: manager)
     }
 
@@ -125,6 +133,32 @@ struct RemoteLaneFixture {
     func status(of worktree: Worktree) async throws -> WorktreeStatus? {
         try await db.worktrees.get(id: worktree.id)?.status
     }
+
+    /// Notifications recorded against this lane. A verb-path archive must
+    /// produce none: the user watched themselves retire it, and a "the
+    /// provider reports this session retired" note would be a false claim.
+    func notifications(for worktree: Worktree) async throws -> [TBDNotification] {
+        try await db.notifications.unread(worktreeID: worktree.id)
+    }
+
+    /// Puts the provider's cached inventory into the state the mutation gate
+    /// reads as stale: one accepted full inventory (which stamps the persisted
+    /// freshness row) followed by a failing poll (which moves health off
+    /// `.ok`). `isStaleSnapshot` needs both, and fails open on either alone.
+    ///
+    /// Consumes ONE scripted verb result — the failing `list` — so callers
+    /// script it. The empty inventory leaves already-seeded mirror rows in
+    /// place: one absence is not two, so nothing is marked gone.
+    func markSnapshotStale() async throws {
+        try await manager.apply(snapshot: [], provider: "fake")
+        await manager.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/nonexistent"))
+    }
+
+    /// A canned failing `list`, for `markSnapshotStale`'s poll.
+    static let failingList = ProviderResult(
+        exitCode: 1,
+        stdout: Data(#"{"error": {"code": "unreachable", "message": "host is down"}}"#.utf8),
+        stderr: "")
 
     func cleanup() {
         try? FileManager.default.removeItem(at: dir)

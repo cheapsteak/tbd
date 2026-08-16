@@ -158,6 +158,14 @@ enum RowActionMenu {
         /// `archive` cannot retire the lane on the backend, so the action stays
         /// disabled until it does.
         var providerCapabilities: Set<String>
+        /// The provider has stopped enumerating this lane's session
+        /// (`RemoteSessionInfo.gone`). The `gone` exemption is the only route
+        /// out for a lane whose provider cannot archive
+        /// (`docs/specs/2026-08-16-remote-lane-archive-design.md` §"Archive"),
+        /// and the daemon takes it — so the menu must not disable the one
+        /// gesture the daemon will still perform. Always `false` for a local
+        /// row.
+        var isGone: Bool
 
         init(hasHibernatableClaude: Bool = false,
              hasHibernatedClaude: Bool = false,
@@ -177,7 +185,8 @@ enum RowActionMenu {
              hasPreSessionHook: Bool = false,
              location: WorktreeLocation = .local,
              provider: String? = nil,
-             providerCapabilities: Set<String> = []) {
+             providerCapabilities: Set<String> = [],
+             isGone: Bool = false) {
             self.hasHibernatableClaude = hasHibernatableClaude
             self.hasHibernatedClaude = hasHibernatedClaude
             self.hasUnpinnedClaude = hasUnpinnedClaude
@@ -197,6 +206,7 @@ enum RowActionMenu {
             self.location = location
             self.provider = provider
             self.providerCapabilities = providerCapabilities
+            self.isGone = isGone
         }
     }
 
@@ -394,7 +404,17 @@ enum RowActionMenu {
         // user can act on right now (archive the children), while a missing
         // provider capability is not something a gesture here can fix. Order
         // in the `if`/`else if` below is the precedence.
+        //
+        // A `gone` lane is exempt from the capability gate entirely. The spec
+        // calls the `gone` exemption "the only route out for a lane whose
+        // provider cannot archive", and the daemon takes it — `archivePlan`
+        // returns `.rowOnlyGone` for exactly this shape and files the row
+        // without invoking any verb. Disabling Archive here would leave the
+        // surface blocking the one gesture the daemon will still perform, with
+        // no other way out. The exemption is narrow: a lane the provider still
+        // enumerates stays disabled, and active children still win above it.
         let missingArchiveCapability = !context.location.isLocal
+            && !context.isGone
             && !context.providerCapabilities.contains("archive")
         let archiveBlocked = context.hasActiveChildren || missingArchiveCapability
         let archiveTitle: String
