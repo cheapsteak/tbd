@@ -49,16 +49,84 @@ enum RemoteCreateFormLogic {
     /// a well-known field name a caller may prefill from ambient context);
     /// every other field falls back to its own `default`; everything else
     /// (including `title`, which has no ambient source) starts blank.
+    ///
+    /// An `enum` field is the one type with a CLOSED value set, so a prefill
+    /// is projected onto that set with `matchAllowedValue` rather than
+    /// written in verbatim — a value outside `values` matches no `.tag(...)`
+    /// in the sheet's `Picker` (the control renders blank even for a required
+    /// field with a default) and the provider rejects it at `create` time.
+    /// When nothing matches, the field falls back to its own `default`, and
+    /// with no default it lands exactly where a prefill-less field would:
+    /// blank. Never an invented selection.
     static func prefillStrings(fields: [ProviderCreateParamField], repoPrefill: String?) -> [String: String] {
         var values: [String: String] = [:]
         for field in fields where field.type != "bool" {
-            if field.name == "repo", let repoPrefill, !repoPrefill.isEmpty {
-                values[field.name] = repoPrefill
-            } else {
+            guard field.name == "repo", let repoPrefill, !repoPrefill.isEmpty else {
                 values[field.name] = field.defaultValue ?? ""
+                continue
+            }
+            if field.type == "enum" {
+                values[field.name] = matchAllowedValue(repoPrefill, in: field.values ?? [])
+                    ?? field.defaultValue ?? ""
+            } else {
+                values[field.name] = repoPrefill
             }
         }
         return values
+    }
+
+    /// Projects `candidate` onto a field's declared `allowed` values, so a
+    /// prefill derived from one naming convention can select the equivalent
+    /// value declared in another. Returns the ALLOWED spelling (the provider
+    /// validates against exactly what it declared), or nil when nothing
+    /// matches.
+    ///
+    /// A deliberately short ladder — exact, then case-insensitive, then the
+    /// last `/`-separated component of both sides. That third rung exists
+    /// because the owner-qualified form is forced on the prefill side:
+    /// `repoPrefill` is `RemoteRepoMatching.displayKey`, which is what a
+    /// created session's `meta["repo"]` must match to resolve back into the
+    /// repo section its `+` was clicked from — while a provider is free to
+    /// declare its repos by short name. Comparing last components bridges it
+    /// in both directions ("acme-org/acme-app" ↔ "acme-app").
+    ///
+    /// It stops there on purpose: no substring, prefix, or fuzzy rung, since
+    /// a wrong guess silently creates the session in the wrong repo. For the
+    /// same reason the last-component rung requires a UNIQUE hit — two
+    /// allowed values sharing a last component are ambiguous, and ambiguity
+    /// resolves to "no match" (the caller then falls back to the declared
+    /// default) rather than to whichever happened to be listed first.
+    static func matchAllowedValue(_ candidate: String, in allowed: [String]) -> String? {
+        if allowed.contains(candidate) { return candidate }
+        if let caseInsensitive = allowed.first(where: { $0.caseInsensitiveCompare(candidate) == .orderedSame }) {
+            return caseInsensitive
+        }
+        let candidateTail = lastPathComponent(candidate)
+        guard !candidateTail.isEmpty else { return nil }
+        let tailMatches = allowed.filter {
+            lastPathComponent($0).caseInsensitiveCompare(candidateTail) == .orderedSame
+        }
+        return tailMatches.count == 1 ? tailMatches[0] : nil
+    }
+
+    /// The segment after the final `/` — "acme-org/acme-app" → "acme-app",
+    /// "acme-app" → "acme-app".
+    private static func lastPathComponent(_ value: String) -> String {
+        value.split(separator: "/").last.map(String.init) ?? ""
+    }
+
+    /// Whether `RemoteCreateSheet` must render a standalone caption above a
+    /// field of this type. `bool` and `enum` lower to a `Toggle`/`Picker`,
+    /// which take a label and display it beside the control; every other
+    /// type lowers to a `TextField`/`TextEditor`, which does not — a
+    /// `TextField`'s title is only its PLACEHOLDER, and macOS hides that the
+    /// moment the field has content. A prefilled `string`/`int` field
+    /// therefore showed no label at all: three identical unlabeled boxes for
+    /// "Session slug", "Branch" and "Command". `text` already had the
+    /// caption; this generalizes it to the other text-shaped types instead
+    /// of leaving it special-cased in one switch arm.
+    static func rendersCaptionLabel(forType type: String) -> Bool {
+        type != "bool" && type != "enum"
     }
 
     /// Seeds initial bool-typed field values from `default` ("true"/"false"

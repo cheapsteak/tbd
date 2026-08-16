@@ -86,22 +86,29 @@ struct RemoteCreateSheet: View {
     /// `field.type` dispatch — deliberately dumb per the contract's own
     /// framing: the most complex widget is an enum dropdown, everything else
     /// (including any future/unknown type) falls back to a plain text field.
+    ///
+    /// Text-shaped controls get the field's label as a caption ABOVE them —
+    /// a `TextField`'s own title argument is only a placeholder, which macOS
+    /// hides as soon as the field has content, so a prefilled field would
+    /// otherwise render as an unlabeled box. `Toggle`/`Picker` display the
+    /// label they're handed, so they carry it themselves and get no caption
+    /// (see `RemoteCreateFormLogic.rendersCaptionLabel(forType:)`). The
+    /// required `*` marker lives in `fieldLabel` alone, so it appears exactly
+    /// once per field either way.
     @ViewBuilder
     private func fieldRow(_ field: ProviderCreateParamField) -> some View {
         VStack(alignment: .leading, spacing: 4) {
+            if RemoteCreateFormLogic.rendersCaptionLabel(forType: field.type) {
+                Text(fieldLabel(field)).font(.caption).foregroundStyle(.secondary)
+            }
             switch field.type {
             case "text":
-                Text(fieldLabel(field)).font(.caption).foregroundStyle(.secondary)
                 TextEditor(text: stringBinding(field.name))
                     .font(.body)
                     .frame(height: 80)
                     .overlay(fieldBorder(field.name))
             case "bool":
                 Toggle(fieldLabel(field), isOn: boolBinding(field.name))
-            case "int":
-                TextField(fieldLabel(field), text: stringBinding(field.name))
-                    .textFieldStyle(.roundedBorder)
-                    .overlay(fieldBorder(field.name))
             case "enum":
                 Picker(fieldLabel(field), selection: stringBinding(field.name)) {
                     if !field.required {
@@ -112,8 +119,11 @@ struct RemoteCreateSheet: View {
                     }
                 }
             default:
-                // "string" and any unrecognized future type.
-                TextField(fieldLabel(field), text: stringBinding(field.name))
+                // "int", "string", and any unrecognized future type. The
+                // caption above is the visible label, so the TextField's own
+                // title stays empty rather than repeating it as a
+                // disappearing placeholder.
+                TextField("", text: stringBinding(field.name))
                     .textFieldStyle(.roundedBorder)
                     .overlay(fieldBorder(field.name))
             }
