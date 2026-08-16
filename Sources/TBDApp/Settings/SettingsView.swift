@@ -214,6 +214,7 @@ struct GeneralSettingsTab: View {
 
             Section("Remote Sessions") {
                 remoteBackendsToggle
+                claudeCloudToggle
                 remoteProvidersRegistryRow
             }
 
@@ -512,6 +513,27 @@ struct GeneralSettingsTab: View {
         ))
         .help("Providers are registered in the file below. The daemon only builds its provider manager at boot, so turning this on requires a daemon restart before polling starts.")
         Text(AppState.remoteBackendsStatusCaption(enabled: enabled, live: live))
+            .font(.caption)
+            .foregroundStyle(.secondary)
+    }
+
+    /// Claude cloud sessions. A second gate INSIDE the remote-sessions switch
+    /// above, never a bypass — cloud is reached through the same `remote.*`
+    /// verbs, so it requires both. Reads the persisted flag from
+    /// `daemon.capabilities` and writes via `config.setClaudeCloud`.
+    @ViewBuilder
+    private var claudeCloudToggle: some View {
+        let capabilities = appState.daemonCapabilities
+        let enabled = capabilities?.claudeCloudEnabled ?? false
+        let live = capabilities?.claudeCloudLive ?? false
+        Toggle("Enable Claude cloud sessions", isOn: Binding(
+            get: { enabled },
+            set: { newValue in Task { await appState.setClaudeCloudEnabled(newValue) } }
+        ))
+        .disabled(!AppState.claudeCloudToggleOperable(
+            remoteBackendsEnabled: capabilities?.remoteBackendsEnabled ?? false))
+        .help("Creates and watches Claude Code sessions running on Anthropic's hosted infrastructure. Requires remote agent sessions above, and a daemon restart before anything is polled. Off by default (soaking).")
+        Text(AppState.claudeCloudStatusCaption(enabled: enabled, live: live))
             .font(.caption)
             .foregroundStyle(.secondary)
     }

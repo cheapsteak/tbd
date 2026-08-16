@@ -281,4 +281,47 @@ extension AppState {
             return "Off, but a poller from before this change is still running in the daemon — restart to fully stop it."
         }
     }
+
+    /// Persist the Claude cloud gate, then re-fetch capabilities so the
+    /// Settings toggle reflects the daemon's persisted state. Cloud requires
+    /// BOTH this flag and the outer remote-backends flag, and neither takes
+    /// effect until the daemon restarts.
+    func setClaudeCloudEnabled(_ enabled: Bool) async {
+        do {
+            try await claudeCloudFlagSetter(enabled)
+            await refreshDaemonCapabilities()
+        } catch {
+            remoteLogger.error("Failed to set Claude cloud sessions: \(error, privacy: .public)")
+            showAlert(
+                "Failed to set Claude cloud sessions: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Caption for the Claude cloud toggle, telling the user which of the four
+    /// `(claudeCloudEnabled, claudeCloudLive)` states they are actually in. The
+    /// daemon registers the built-in provider only at boot, so the persisted
+    /// flag and the live provider disagree in both directions — the same shape
+    /// `remoteBackendsStatusCaption` handles for the outer flag.
+    nonisolated static func claudeCloudStatusCaption(enabled: Bool, live: Bool) -> String {
+        switch (enabled, live) {
+        case (false, false):
+            return "Off. Turning this on requires a daemon restart before cloud sessions appear."
+        case (true, false):
+            return "On, but restart the daemon before cloud sessions appear."
+        case (true, true):
+            return "On and running — cloud sessions are being polled."
+        case (false, true):
+            return "Off, but the provider registered before this change is still live in the daemon — restart to fully stop it."
+        }
+    }
+
+    /// Whether the cloud toggle can be operated at all. Cloud is reached
+    /// through the same `remote.*` verbs as every other provider, so it is a
+    /// second gate INSIDE the remote-sessions switch and never a bypass —
+    /// turning it on while the outer switch is off would promise something no
+    /// verb can deliver. A named function rather than an inline `.disabled(…)`
+    /// expression, so both branches are assertable without a view harness.
+    nonisolated static func claudeCloudToggleOperable(remoteBackendsEnabled: Bool) -> Bool {
+        remoteBackendsEnabled
+    }
 }
