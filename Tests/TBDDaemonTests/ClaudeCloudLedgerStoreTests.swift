@@ -68,4 +68,118 @@ struct ClaudeCloudLedgerStoreTests {
             environment: nil, paramsJSON: "{}", now: Date(timeIntervalSince1970: 100))
         #expect(try await db.claudeCloudSessions.rows().map(\.idempotencyKey) == ["tbd-1", "tbd-2"])
     }
+
+    @Test func resolveStampsTheSessionIDAndTitleAndFlipsTheState() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let row = try await db.claudeCloudSessions.upsertPending(
+            idempotencyKey: "tbd-1", repoKey: "a/b", repoPath: "/a", branch: "fix",
+            environment: nil, paramsJSON: "{}", now: Date(timeIntervalSince1970: 1))
+        try await db.claudeCloudSessions.resolve(
+            id: row.id, sessionID: "session_01AAA", title: "Add probe pong reply",
+            now: Date(timeIntervalSince1970: 2))
+        let stored = try #require(try await db.claudeCloudSessions.rows().first)
+        #expect(stored.state == ClaudeCloudLedgerState.resolved.rawValue)
+        #expect(stored.sessionID == "session_01AAA")
+        #expect(stored.title == "Add probe pong reply")
+        #expect(stored.resolvedAt == Date(timeIntervalSince1970: 2))
+        // Neighbouring columns a naive UPDATE could clobber must survive.
+        #expect(stored.repoKey == "a/b")
+        #expect(stored.repoPath == "/a")
+        #expect(stored.branch == "fix")
+        #expect(stored.createdAt == Date(timeIntervalSince1970: 1))
+    }
+
+    /// A title parse that found nothing is not a failure — the row resolves
+    /// with a null title and the lane is named from its id instead.
+    @Test func resolveAcceptsANilTitleWithoutFailingTheCreate() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let row = try await db.claudeCloudSessions.upsertPending(
+            idempotencyKey: "tbd-1", repoKey: "a/b", repoPath: "/a", branch: nil,
+            environment: nil, paramsJSON: "{}", now: Date(timeIntervalSince1970: 1))
+        try await db.claudeCloudSessions.resolve(
+            id: row.id, sessionID: "session_01AAA", title: nil,
+            now: Date(timeIntervalSince1970: 2))
+        let stored = try #require(try await db.claudeCloudSessions.rows().first)
+        #expect(stored.state == ClaudeCloudLedgerState.resolved.rawValue)
+        #expect(stored.title == nil)
+    }
+
+    /// Resolving a row that does not exist is reachable on a retry path and
+    /// must not throw — there is nothing to update, so it is a silent no-op.
+    @Test func resolvingAnUnknownIDIsANoOp() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.claudeCloudSessions.resolve(
+            id: "does-not-exist", sessionID: "session_01AAA", title: "x",
+            now: Date(timeIntervalSince1970: 2))
+        #expect(try await db.claudeCloudSessions.rows().isEmpty)
+    }
+
+    /// A retry may resolve the same row twice; the second call must remain a
+    /// harmless overwrite rather than erroring or double-applying anything.
+    @Test func resolvingTheSameRowTwiceIsIdempotent() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let row = try await db.claudeCloudSessions.upsertPending(
+            idempotencyKey: "tbd-1", repoKey: "a/b", repoPath: "/a", branch: nil,
+            environment: nil, paramsJSON: "{}", now: Date(timeIntervalSince1970: 1))
+        try await db.claudeCloudSessions.resolve(
+            id: row.id, sessionID: "session_01AAA", title: "first",
+            now: Date(timeIntervalSince1970: 2))
+        try await db.claudeCloudSessions.resolve(
+            id: row.id, sessionID: "session_01AAA", title: "second",
+            now: Date(timeIntervalSince1970: 3))
+        let stored = try #require(try await db.claudeCloudSessions.rows().first)
+        #expect(stored.state == ClaudeCloudLedgerState.resolved.rawValue)
+        #expect(stored.title == "second")
+        #expect(stored.resolvedAt == Date(timeIntervalSince1970: 3))
+        #expect(try await db.claudeCloudSessions.rows().count == 1)
+    }
+
+    @Test func markFailedFlipsOnlyTheNamedRowsAndRetainsThem() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let keep = try await db.claudeCloudSessions.upsertPending(
+            idempotencyKey: "k", repoKey: "a/b", repoPath: "/a", branch: nil,
+            environment: nil, paramsJSON: "{}", now: Date(timeIntervalSince1970: 1))
+        let doomed = try await db.claudeCloudSessions.upsertPending(
+            idempotencyKey: "d", repoKey: "a/b", repoPath: "/a", branch: nil,
+            environment: nil, paramsJSON: "{}", now: Date(timeIntervalSince1970: 2))
+        try await db.claudeCloudSessions.markFailed(ids: [doomed.id])
+        let rows = try await db.claudeCloudSessions.rows()
+        // Retained, not deleted: the record of a create that may have started
+        // a real session outlives the judgement that it did not.
+        #expect(rows.count == 2)
+        #expect(rows.first(where: { $0.id == keep.id })?.state
+            == ClaudeCloudLedgerState.pending.rawValue)
+        #expect(rows.first(where: { $0.id == doomed.id })?.state
+            == ClaudeCloudLedgerState.failed.rawValue)
+        // The row markFailed leaves alone must be untouched, not just
+        // "still pending" — check a neighbouring column too.
+        #expect(rows.first(where: { $0.id == keep.id })?.idempotencyKey == "k")
+    }
+
+    /// The batch takes ids, so an empty batch must be a no-op rather than an
+    /// `IN ()` that matches everything.
+    @Test func anEmptyFailureBatchTouchesNothing() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        _ = try await db.claudeCloudSessions.upsertPending(
+            idempotencyKey: "k", repoKey: "a/b", repoPath: "/a", branch: nil,
+            environment: nil, paramsJSON: "{}", now: Date(timeIntervalSince1970: 1))
+        try await db.claudeCloudSessions.markFailed(ids: [])
+        let rows = try await db.claudeCloudSessions.rows()
+        #expect(rows.count == 1)
+        #expect(rows.first?.state == ClaudeCloudLedgerState.pending.rawValue)
+    }
+
+    /// A failure batch may name a row already marked failed on a retry path;
+    /// re-applying must not error or disturb its neighbours.
+    @Test func markFailedTwiceOnTheSameIDIsIdempotent() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let row = try await db.claudeCloudSessions.upsertPending(
+            idempotencyKey: "k", repoKey: "a/b", repoPath: "/a", branch: nil,
+            environment: nil, paramsJSON: "{}", now: Date(timeIntervalSince1970: 1))
+        try await db.claudeCloudSessions.markFailed(ids: [row.id])
+        try await db.claudeCloudSessions.markFailed(ids: [row.id])
+        let rows = try await db.claudeCloudSessions.rows()
+        #expect(rows.count == 1)
+        #expect(rows.first?.state == ClaudeCloudLedgerState.failed.rawValue)
+    }
 }

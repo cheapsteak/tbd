@@ -89,4 +89,41 @@ public struct ClaudeCloudSessionStore: Sendable {
             return row
         }
     }
+
+    /// A create whose output named a session. The provenance link is written
+    /// here and nowhere else. `title` is the vendor's parsed summary, or nil
+    /// when the title parse found nothing — a cosmetic loss that must never
+    /// fail a create that otherwise succeeded. A retry that resolves the same
+    /// `id` twice, or names an `id` this store has never seen, is a harmless
+    /// no-op: there is nothing to double-apply and nothing to update.
+    public func resolve(id: String, sessionID: String, title: String?, now: Date) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: """
+                UPDATE claude_cloud_session
+                SET state = ?, sessionID = ?, title = ?, resolvedAt = ?
+                WHERE id = ?
+                """,
+                arguments: [
+                    ClaudeCloudLedgerState.resolved.rawValue, sessionID, title, now, id,
+                ])
+        }
+    }
+
+    /// A pending create that produced no readable session id inside the
+    /// failure window. The row stops asking to be treated as in-flight and is
+    /// RETAINED rather than deleted, so a create that may well have started a
+    /// real session TBD cannot name stays visible as an unresolved create.
+    /// `ids` is a batch: an empty batch is a no-op rather than an `IN ()`
+    /// clause GRDB would otherwise turn into a query matching nothing (safe)
+    /// or, via a hand-rolled `IN ()`, a query matching everything (not safe) —
+    /// so the empty case is refused explicitly rather than trusted to SQL.
+    public func markFailed(ids: [String]) async throws {
+        guard !ids.isEmpty else { return }
+        try await writer.write { db in
+            try ClaudeCloudSessionRow
+                .filter(ids.contains(Column("id")))
+                .updateAll(db, Column("state").set(to: ClaudeCloudLedgerState.failed.rawValue))
+        }
+    }
 }
