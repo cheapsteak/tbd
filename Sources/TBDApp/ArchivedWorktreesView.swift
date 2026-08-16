@@ -127,6 +127,33 @@ enum ArchivedSearchDisplay {
     }
 }
 
+/// Whether a row survives the archived list's "Hide worktrees with no
+/// conversations" filter.
+///
+/// A remote lane stores a synthetic `remote://<provider>/<sessionID>` path
+/// rather than a filesystem path, which `ClaudeProjectDirectory.resolve(
+/// worktreePath:)` cannot resolve — so its session count is structurally
+/// zero, always. Left to `effectiveSessionCount` alone, every archived
+/// remote lane would be hidden: archived successfully and then invisible,
+/// indistinguishable from the archive having failed. The remote arm admits a
+/// row on being remote instead of on a count it can never have.
+///
+/// Extracted from the view's `rows` computed property so it is unit-testable
+/// without SwiftUI or `@AppStorage` (same pattern as
+/// `ArchivedWorktreeSearchFilter`) — `hideEmpty` is threaded through as a
+/// parameter rather than read from `UserDefaults.standard` directly.
+enum ArchivedHideEmptyFilter {
+    static func keep(
+        hideEmpty: Bool,
+        location: WorktreeLocation,
+        hasReviveState: Bool,
+        effectiveSessionCount: Int
+    ) -> Bool {
+        guard hideEmpty else { return true }
+        return hasReviveState || !location.isLocal || effectiveSessionCount > 0
+    }
+}
+
 struct ArchivedWorktreesView: View {
     let repoID: UUID
     @EnvironmentObject var appState: AppState
@@ -249,9 +276,13 @@ struct ArchivedWorktreesView: View {
     /// Visible rows after applying every filter. Lingering revives always pass
     /// the `hideEmpty` filter so a just-revived row doesn't vanish mid-flight.
     private var rows: [ArchivedRow] {
-        guard hideEmpty else { return searchedRows }
-        return searchedRows.filter { row in
-            row.reviveState != nil || row.effectiveSessionCount > 0
+        searchedRows.filter { row in
+            ArchivedHideEmptyFilter.keep(
+                hideEmpty: hideEmpty,
+                location: row.worktree.location,
+                hasReviveState: row.reviveState != nil,
+                effectiveSessionCount: row.effectiveSessionCount
+            )
         }
     }
 

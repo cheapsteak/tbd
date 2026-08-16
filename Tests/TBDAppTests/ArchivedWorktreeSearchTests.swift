@@ -62,6 +62,86 @@ struct ArchivedWorktreeSearchFilterTests {
     }
 }
 
+/// Tier 1. The `hideEmpty` predicate behind the archived list's "Hide
+/// worktrees with no conversations" filter.
+///
+/// A remote lane stores a synthetic `remote://<provider>/<sessionID>` path,
+/// which `ClaudeProjectDirectory.resolve(worktreePath:)` cannot resolve, so
+/// its session count is structurally zero — always. Filtering purely on
+/// `effectiveSessionCount` would therefore hide every archived remote lane,
+/// indistinguishable from the archive having failed. The remote arm admits a
+/// row on its location instead of a count it can never have.
+///
+/// Extracted from the view's `rows` computed property (a `@AppStorage`-backed
+/// `View` is not directly unit-testable) so both halves of the fix are
+/// pinned in one assertion: a remote row with zero conversations survives,
+/// and a LOCAL row with zero conversations still does not — a filter that
+/// simply stopped filtering would satisfy only the first half.
+@Suite("Archived hide-empty filter")
+struct ArchivedHideEmptyFilterTests {
+    private struct Candidate {
+        let id: String
+        let location: WorktreeLocation
+        let hasReviveState: Bool
+        let effectiveSessionCount: Int
+    }
+
+    private func keep(_ c: Candidate, hideEmpty: Bool) -> Bool {
+        ArchivedHideEmptyFilter.keep(
+            hideEmpty: hideEmpty,
+            location: c.location,
+            hasReviveState: c.hasReviveState,
+            effectiveSessionCount: c.effectiveSessionCount
+        )
+    }
+
+    /// The critical case: composed-output assertion, not presence-only, so a
+    /// filter that stopped filtering entirely cannot pass this test.
+    @Test("hideEmpty ON keeps an empty remote lane and drops an empty local worktree")
+    func remoteEmptyKeptLocalEmptyDropped() {
+        let remoteEmpty = Candidate(
+            id: "remote", location: .remote(provider: "acme", sessionID: "s1"),
+            hasReviveState: false, effectiveSessionCount: 0
+        )
+        let localEmpty = Candidate(
+            id: "local", location: .local, hasReviveState: false, effectiveSessionCount: 0
+        )
+        let survivors = [remoteEmpty, localEmpty].filter { keep($0, hideEmpty: true) }.map(\.id)
+        #expect(survivors == ["remote"])
+    }
+
+    @Test("hideEmpty OFF keeps everything, remote or local, empty or not")
+    func hideEmptyOffKeepsEverything() {
+        let candidates = [
+            Candidate(id: "remote-empty", location: .remote(provider: "acme", sessionID: "s1"),
+                      hasReviveState: false, effectiveSessionCount: 0),
+            Candidate(id: "local-empty", location: .local, hasReviveState: false, effectiveSessionCount: 0),
+            Candidate(id: "local-nonempty", location: .local, hasReviveState: false, effectiveSessionCount: 3),
+        ]
+        let survivors = candidates.filter { keep($0, hideEmpty: false) }.map(\.id)
+        #expect(Set(survivors) == Set(candidates.map(\.id)))
+    }
+
+    @Test("hideEmpty ON still keeps a local row with conversations")
+    func localWithConversationsSurvives() {
+        let candidate = Candidate(
+            id: "local", location: .local, hasReviveState: false, effectiveSessionCount: 2
+        )
+        #expect(keep(candidate, hideEmpty: true))
+    }
+
+    @Test("hideEmpty ON keeps a row with a revive in flight regardless of location")
+    func reviveInFlightSurvivesRegardlessOfLocation() {
+        let remote = Candidate(
+            id: "remote", location: .remote(provider: "acme", sessionID: "s1"),
+            hasReviveState: true, effectiveSessionCount: 0
+        )
+        let local = Candidate(id: "local", location: .local, hasReviveState: true, effectiveSessionCount: 0)
+        #expect(keep(remote, hideEmpty: true))
+        #expect(keep(local, hideEmpty: true))
+    }
+}
+
 /// Tier 1. Which row set the archived list renders for a given query, given
 /// the query the results in hand actually answer.
 ///
