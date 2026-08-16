@@ -1,10 +1,10 @@
 # Retiring a remote lane
 
 **Date:** 2026-08-16
-**Status:** Approved, unbuilt.
+**Status:** Approved, built.
 **Depends on:** [`docs/remote-provider-contract.md`](../remote-provider-contract.md)
-(the `archive`, `unarchive`, and `stop` capabilities, and the `archived` field
-on the Session object),
+(the `archive` and `unarchive` capabilities, the `archived` field on the Session
+object, and the optional `meta.workspace_dirty` key),
 [`2026-08-10-remote-sessions-in-worktree-tree-design.md`](2026-08-10-remote-sessions-in-worktree-tree-design.md)
 (the local/remote boundary, adoption, and the archive and revive semantics this
 design implements).
@@ -273,10 +273,13 @@ static func revivePlan(capabilities: Set<String>, providerReportsArchived: Bool)
     -> RemoteLaneRevivePlan
 ```
 
-Capabilities are read from the provider manager's cached `describe` response.
-No contract negotiation is involved: `describe.capabilities` already carries
-`archive` and `unarchive`, and a caller must not invoke a verb whose capability
-a provider has not declared.
+Capabilities come from the provider manager's cached `describe` response,
+reached through its public `providerStatuses()` rather than the private
+`describes` map — the same door the app already uses client-side, so daemon and
+app derive a provider's capabilities identically instead of through two paths
+that can drift. No contract negotiation is involved: `describe.capabilities`
+already carries `archive` and `unarchive`, and a caller must not invoke a verb
+whose capability a provider has not declared.
 
 `worktree.forget` keeps its refusal for a remote lane. Forget means "stop
 tracking this checkout but leave its files alone", and a remote lane has no
