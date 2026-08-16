@@ -224,10 +224,23 @@ extension RPCRouter {
         let session = try await actuating(actuationID) {
             try result.decoded(RemoteSessionPayload.self)
         }
-        // Adopt immediately so the sidebar shows `starting` before the next poll.
-        await manager.applyUpsert(session, provider: params.provider)
+        // Adopt immediately so the sidebar shows `starting` before the next
+        // poll — and, when the lane was started from a worktree's nested `+`,
+        // with the parent the user clicked. That override rides the response,
+        // not the provider: nothing about `parentWorktreeID` reached the
+        // create call above.
+        //
+        // Known gap, deliberately unclosed: if BOTH invocations above time out
+        // the create still surfaces, but through a later `list` poll that
+        // carries no override — so the lane lands top-level and the user drags
+        // it once. Closing it would mean persisting pending state for a case
+        // that costs one drag.
+        await manager.applyUpsert(
+            session, provider: params.provider, parentWorktreeID: params.parentWorktreeID)
         // …and ask for one immediate snapshot, because a provider whose rows
-        // arrive by adoption has nothing on screen until one lands.
+        // arrive by adoption has nothing on screen until one lands. The upsert
+        // above has already spent this row's one parent assignment, so the
+        // snapshot cannot move it back to top level.
         await manager.refreshAfterCreate(provider: params.provider)
         await finishActuation(actuationID, .dispatched)
         return try RPCResponse(result: session)

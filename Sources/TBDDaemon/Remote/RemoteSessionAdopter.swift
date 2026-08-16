@@ -27,6 +27,14 @@ private let adoptionLogger = Logger(subsystem: "com.tbd.daemon", category: "remo
 /// **no** parent taking its first one from a later sighting. Nothing is
 /// overwritten there; a fact that was not knowable at adoption time became
 /// knowable, and refusing it would strand the lane at top level forever.
+///
+/// Where the parent comes from is normally the provider's stamp,
+/// `meta["tbd_parent_worktree_id"]`. A TBD-initiated create is the exception:
+/// `remote.create` carries the worktree whose nested `+` was clicked, and that
+/// override is applied here instead. It is deliberately not a contract field —
+/// nothing new reaches the provider's stdin — because the parent edge is TBD's
+/// own policy and a round trip through the provider could only lose or
+/// contradict it.
 struct RemoteSessionAdopter: Sendable {
     /// What one adoption pass changed.
     ///
@@ -96,7 +104,15 @@ struct RemoteSessionAdopter: Sendable {
     /// snapshot path — the events path is a convergence point too, and a
     /// session that first resolves there must not have to wait for the next
     /// full poll to get its row.
-    func adopt(session: RemoteSessionPayload, provider: String) async -> Outcome {
+    ///
+    /// `parentOverride` is where the user clicked, when this sighting is the
+    /// direct result of a TBD-initiated create (`remote.create` from a nested
+    /// `+`). It beats `meta["tbd_parent_worktree_id"]` — TBD knows what was
+    /// clicked, and for a TBD-initiated create the provider stamp is normally
+    /// absent anyway. Nil on every other path, which is all of them.
+    func adopt(
+        session: RemoteSessionPayload, provider: String, parentOverride: UUID? = nil
+    ) async -> Outcome {
         let mirrorRow: RemoteSessionRow?
         do {
             mirrorRow = try await db.remoteSessions.row(provider: provider, sessionID: session.id)
@@ -107,13 +123,15 @@ struct RemoteSessionAdopter: Sendable {
             return Outcome()
         }
         guard let repoID = mirrorRow?.resolvedRepoIDUUID else { return Outcome() }
-        return await adoptOne(session: session, provider: provider, repoID: repoID)
+        return await adoptOne(
+            session: session, provider: provider, repoID: repoID, parentOverride: parentOverride)
     }
 
     // MARK: - One session
 
     private func adoptOne(
-        session: RemoteSessionPayload, provider: String, repoID: UUID
+        session: RemoteSessionPayload, provider: String, repoID: UUID,
+        parentOverride: UUID? = nil
     ) async -> Outcome {
         do {
             // An existing binding ends the creation half of adoption for this
@@ -124,7 +142,8 @@ struct RemoteSessionAdopter: Sendable {
                 provider: provider, sessionID: session.id)
             {
                 return await nestIfParentless(
-                    existing: existing, session: session, provider: provider)
+                    existing: existing, session: session, provider: provider,
+                    parentOverride: parentOverride)
             }
             // The pin outlives the repo it names — nothing clears it when a
             // repo is unregistered. Inserting against a dangling repoID would
@@ -138,7 +157,8 @@ struct RemoteSessionAdopter: Sendable {
             }
 
             let id = try await resolveRowID(session: session, provider: provider)
-            let parentWorktreeID = try await resolveParentID(session: session, provider: provider)
+            let parentWorktreeID = try await resolveParentID(
+                session: session, provider: provider, parentOverride: parentOverride, rowID: id)
             let created = try await db.worktrees.createRemote(
                 id: id,
                 repoID: repoID,
@@ -177,11 +197,14 @@ struct RemoteSessionAdopter: Sendable {
     /// could not need, since a brand-new row can be neither its own parent nor
     /// an ancestor of one.
     private func nestIfParentless(
-        existing: Worktree, session: RemoteSessionPayload, provider: String
+        existing: Worktree, session: RemoteSessionPayload, provider: String,
+        parentOverride: UUID? = nil
     ) async -> Outcome {
         guard existing.parentWorktreeID == nil else { return Outcome() }
         do {
-            guard let parentID = try await resolveParentID(session: session, provider: provider)
+            guard let parentID = try await resolveParentID(
+                session: session, provider: provider, parentOverride: parentOverride,
+                rowID: existing.id)
             else { return Outcome() }
             guard let sortOrder = try await db.worktrees.assignParentIfUnset(
                 worktreeID: existing.id, parentID: parentID)
@@ -235,10 +258,18 @@ struct RemoteSessionAdopter: Sendable {
         return echoed
     }
 
-    /// The parent edge from `tbd_parent_worktree_id`, or nil for a top-level
-    /// row.
+    /// The parent edge for this row: the caller's override when there is one,
+    /// otherwise `meta["tbd_parent_worktree_id"]`, otherwise nil for a
+    /// top-level row.
     ///
-    /// Nil for every degenerate case — absent, unparseable, or naming no row —
+    /// **The override wins outright, and never falls back to the stamp.** TBD
+    /// knows which `+` the user clicked; a stamp that disagrees is at best a
+    /// provider's guess about a lane it did not place, and for a TBD-initiated
+    /// create there is normally no stamp at all. An override that fails
+    /// validation therefore yields a top-level row rather than quietly
+    /// substituting a different parent the user never asked for.
+    ///
+    /// Nil for every degenerate stamp — absent, unparseable, or naming no row —
     /// because a lane with no known parent belongs at the top of its repo,
     /// where the user can see and reparent it.
     ///
@@ -248,7 +279,24 @@ struct RemoteSessionAdopter: Sendable {
     /// parent is refused on the same grounds — `WorktreeMoveError.parentIsMain`
     /// already forbids it for local rows, and the main row has no subtree in
     /// the sidebar either.
-    private func resolveParentID(session: RemoteSessionPayload, provider: String) async throws -> UUID? {
+    private func resolveParentID(
+        session: RemoteSessionPayload, provider: String, parentOverride: UUID?, rowID: UUID
+    ) async throws -> UUID? {
+        if let parentOverride {
+            do {
+                try await db.worktrees.validateParent(
+                    worktreeID: rowID, parentID: parentOverride)
+                return parentOverride
+            } catch {
+                // Never fails the create: the session already exists on the
+                // remote side by the time adoption runs, so losing the row
+                // would cost far more than losing the edge.
+                adoptionLogger.warning(
+                    "\(provider, privacy: .public)/\(session.id, privacy: .public) was started under parent \(parentOverride.uuidString, privacy: .public), which the parent rules refuse (\(String(describing: error), privacy: .public)); the lane stays at top level"
+                )
+                return nil
+            }
+        }
         guard let raw = session.meta?[Self.parentWorktreeIDMetaKey] else { return nil }
         guard let parentID = UUID(uuidString: raw) else {
             adoptionLogger.debug(

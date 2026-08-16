@@ -903,6 +903,28 @@ public struct WorktreeStore: Sendable {
         }
     }
 
+    /// Ask the parent rules about an edge that does not exist yet, throwing the
+    /// same `WorktreeMoveError` a `move()` would.
+    ///
+    /// For the one caller that decides a parent BEFORE the row exists: a remote
+    /// lane the user started from a worktree's nested `+`, whose parent is
+    /// chosen at create time and written by the very insert that mints the row
+    /// (`RemoteSessionAdopter`). Everything else either moves an existing row
+    /// (`move`) or fills a nil on one (`assignParentIfUnset`), and both of those
+    /// validate inside their own write transaction.
+    ///
+    /// `worktreeID` may therefore name a row that is not in the table yet. That
+    /// is sound for every rule: a row nothing points at can close no cycle, and
+    /// the self-check still catches a parent id equal to the id about to be
+    /// minted. The answer is a read, so it can go stale before the insert —
+    /// acceptable because the caller's fallback is a top-level row, not a
+    /// failed create, and the parent's own deletion cascades that edge away.
+    public func validateParent(worktreeID: UUID, parentID: UUID) async throws {
+        try await writer.read { db in
+            try Self.validateParent(db, worktreeID: worktreeID, parentID: parentID)
+        }
+    }
+
     /// Give a row that has no parent its FIRST one, appended to the end of the
     /// destination's child group. Returns the assigned sortOrder, or nil when
     /// the row already had a parent.

@@ -427,4 +427,35 @@ struct RemoteProviderTests {
         #expect(decoded.sessionID == "s1")
         #expect(decoded.pinned)
     }
+
+    // MARK: - `remote.create`'s TBD-local parent
+
+    /// The nested `+` sends the worktree the lane should hang under. It is not
+    /// a provider parameter — it never enters `paramsJSON` — so it survives as
+    /// its own field or not at all.
+    @Test func createParamsRoundTripTheParentWorktreeID() throws {
+        let parent = UUID()
+        let params = RemoteCreateParams(
+            provider: "acme", paramsJSON: #"{"repo":"acme/api"}"#, parentWorktreeID: parent)
+        let decoded = try JSONDecoder().decode(
+            RemoteCreateParams.self, from: try JSONEncoder().encode(params))
+        #expect(decoded.provider == "acme")
+        #expect(decoded.paramsJSON == #"{"repo":"acme/api"}"#)
+        #expect(decoded.parentWorktreeID == parent)
+    }
+
+    /// A top-level create omits it, and so does every set of params an older
+    /// app encoded — neither may fail to decode.
+    @Test func createParamsDecodeWhenTheParentWorktreeIDIsAbsent() throws {
+        let json = #"{"provider": "acme", "paramsJSON": "{}"}"#.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(RemoteCreateParams.self, from: json)
+        #expect(decoded.provider == "acme")
+        #expect(decoded.parentWorktreeID == nil)
+    }
+
+    /// The default keeps every existing call site — the repo header's create,
+    /// the Remote section's — meaning "top level" without saying so.
+    @Test func createParamsDefaultToNoParent() {
+        #expect(RemoteCreateParams(provider: "acme", paramsJSON: "{}").parentWorktreeID == nil)
+    }
 }

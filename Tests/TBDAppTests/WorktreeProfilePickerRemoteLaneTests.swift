@@ -3,12 +3,12 @@ import Foundation
 @testable import TBDApp
 import TBDShared
 
-/// Covers the repo-header `+` menu's remote-lane entry point —
+/// Covers the `+` menu's remote-lane entry point —
 /// `WorktreeProfilePickerView.remoteLaneOffer(providers:parentWorktreeID:)`
 /// and the copy helpers that hang off its result. Every gating branch the row
-/// has (no provider / one / several, nested `+`, stale provider) is decided
-/// here, so it is decided in a place a test can reach without an `AppState` or
-/// a view hierarchy.
+/// has (no provider / one / several, stale provider) is decided here, so it is
+/// decided in a place a test can reach without an `AppState` or a view
+/// hierarchy — including the fact that the nested `+` is no longer a gate.
 @Suite("WorktreeProfilePickerView — remote lane row")
 struct WorktreeProfilePickerRemoteLaneTests {
 
@@ -64,22 +64,40 @@ struct WorktreeProfilePickerRemoteLaneTests {
         #expect(describeOffer(offer) == ("chooseProvider", ["acme", "acme-prod"]))
     }
 
-    // MARK: - nested `+` suppression
+    // MARK: - the nested `+` offers the same row
 
-    /// A remote lane started from the nested `+` would imply nesting under
-    /// that worktree, which the create sheet has no way to express — so the
-    /// row must not appear there, however many providers are registered.
-    @Test func nestedPlusOffersNothingWithOneProvider() {
+    /// The nested `+` promises the new lane nests under that worktree, and the
+    /// create path now keeps that promise (`RemoteCreateParams.parentWorktreeID`
+    /// carries the click through to adoption), so nesting is no longer a gate:
+    /// the row is offered on exactly the same terms as on the repo header.
+    @Test func nestedPlusOffersTheRowForOneProvider() {
         let offer = WorktreeProfilePickerView.remoteLaneOffer(
             providers: [provider(name: "acme")], parentWorktreeID: UUID())
-        #expect(describeOffer(offer).kind == "hidden")
+        #expect(describeOffer(offer) == ("single", ["acme"]))
     }
 
-    @Test func nestedPlusOffersNothingWithSeveralProviders() {
+    @Test func nestedPlusDrillsIntoTheProviderListForSeveralProviders() {
         let offer = WorktreeProfilePickerView.remoteLaneOffer(
             providers: [provider(name: "acme"), provider(name: "acme-prod")],
             parentWorktreeID: UUID())
+        #expect(describeOffer(offer) == ("chooseProvider", ["acme", "acme-prod"]))
+    }
+
+    /// The provider gate is untouched by the change: with nothing registered
+    /// the nested `+` shows no row either.
+    @Test func nestedPlusWithNoRegisteredProviderOffersNothing() {
+        let offer = WorktreeProfilePickerView.remoteLaneOffer(
+            providers: [], parentWorktreeID: UUID())
         #expect(describeOffer(offer).kind == "hidden")
+    }
+
+    /// A stale provider is disabled rather than omitted on the nested `+` too.
+    @Test func nestedPlusStillOffersAStaleProvider() {
+        let stale = provider(name: "acme", health: .error, lastSuccessfulSnapshotAt: Date())
+        #expect(describeOffer(
+            WorktreeProfilePickerView.remoteLaneOffer(
+                providers: [stale], parentWorktreeID: UUID())
+        ) == ("single", ["acme"]))
     }
 
     // MARK: - staleness disables, it does not omit

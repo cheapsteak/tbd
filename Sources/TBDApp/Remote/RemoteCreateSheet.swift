@@ -16,11 +16,18 @@ private let createSheetLogger = Logger(subsystem: "com.tbd.app", category: "remo
 /// repo's `remoteURL` via `RemoteCreateFormLogic.repoPrefill` — the SAME
 /// normalization `RemoteRepoMatching` uses to resolve a session back to a
 /// repo, so a session created this way round-trips into the section its `+`
-/// was clicked from instead of landing unmatched).
+/// was clicked from instead of landing unmatched), or from a worktree row's
+/// nested `+` (`WorktreeRowView`, which adds `parentWorktreeID`).
 struct RemoteCreateSheet: View {
     let provider: RemoteProviderConfig
     let describe: ProviderDescribe?
     var repoPrefill: String?
+    /// The worktree the new lane should nest under — set only when the sheet
+    /// was opened from that worktree's nested `+`. Not a form field and not a
+    /// provider parameter: it rides the `remote.create` RPC as a TBD-local
+    /// request, and the daemon applies it when it adopts the session. A parent
+    /// the parent rules refuse costs the edge, never the session.
+    var parentWorktreeID: UUID?
 
     @EnvironmentObject var appState: AppState
     @Environment(\.dismiss) private var dismiss
@@ -175,7 +182,9 @@ struct RemoteCreateSheet: View {
         isSubmitting = true
         Task {
             do {
-                _ = try await appState.daemonClient.remoteCreate(provider: provider.name, paramsJSON: paramsJSON)
+                _ = try await appState.daemonClient.remoteCreate(
+                    provider: provider.name, paramsJSON: paramsJSON,
+                    parentWorktreeID: parentWorktreeID)
                 isSubmitting = false
                 dismiss()
             } catch {

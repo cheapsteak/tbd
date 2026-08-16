@@ -6,7 +6,7 @@ import TBDShared
 /// `WorktreeProfilePickerView.remoteLaneOffer(providers:parentWorktreeID:)`,
 /// which owns the rules; this type only names the three outcomes.
 enum RemoteLaneOffer {
-    /// No row at all — no provider is registered, or this is the nested `+`.
+    /// No row at all — no provider is registered.
     case hidden
     /// Exactly one provider: the row goes straight to its create sheet.
     case single(RemoteProviderStatus)
@@ -53,10 +53,10 @@ struct WorktreeProfilePickerView: View {
     var onClose: () -> Void = {}
     /// Called with the chosen provider after this menu has closed itself, so
     /// the host can present the remote create sheet. The host owns that sheet
-    /// (`RepoSectionView.remoteCreateSheetProvider`) because this view lives in
-    /// a `FloatingPanel` that is about to be torn down. Defaulted for the
-    /// nested-`+` call site, which never offers the row — see
-    /// `remoteLaneOffer(providers:parentWorktreeID:)`.
+    /// (`RepoSectionView.remoteCreateSheetProvider`,
+    /// `WorktreeRowView.remoteCreateSheetProvider`) because this view lives in
+    /// a `FloatingPanel` that is about to be torn down. Both call sites wire
+    /// it; the default exists only so a preview or a future host can omit it.
     ///
     /// The compiled cloud provider reaches the sheet through this same hook:
     /// it is one registered provider among the others, so it needs no row of
@@ -225,9 +225,8 @@ struct WorktreeProfilePickerView: View {
     }
 
     /// The optional "New remote session…" row. Omitted entirely (never shown
-    /// disabled) when there is no provider or this is the nested `+`; a stale
-    /// provider keeps its row but cannot be selected, matching
-    /// `RepoSectionView.newRemoteSessionMenuItem`.
+    /// disabled) when there is no provider; a stale provider keeps its row but
+    /// cannot be selected, matching `RepoSectionView.newRemoteSessionMenuItem`.
     @ViewBuilder
     private var remoteLaneRow: some View {
         switch remoteLaneOffer {
@@ -339,17 +338,18 @@ struct WorktreeProfilePickerView: View {
 
     /// What the `+` menu offers as its remote-lane entry point.
     ///
-    /// Two gates, both deliberate:
-    ///  - **No provider registered → nothing at all.** Omitting rather than
-    ///    disabling mirrors `RepoSectionView.newRemoteSessionMenuItem` and
-    ///    `RemoteSessionActionMenu`, which omit capability-gated items instead
-    ///    of graying them out.
-    ///  - **The nested `+` (a non-nil `parentWorktreeID`) → nothing at all.**
-    ///    A remote lane started there would imply nesting under that worktree,
-    ///    which the create sheet has no way to express.
+    /// One gate: **no provider registered → nothing at all.** Omitting rather
+    /// than disabling mirrors `RepoSectionView.newRemoteSessionMenuItem` and
+    /// `RemoteSessionActionMenu`, which omit capability-gated items instead of
+    /// graying them out. Exactly one provider goes straight to that provider's
+    /// create sheet; more than one drills into the `.remoteProviders` page
+    /// first.
     ///
-    /// Exactly one provider goes straight to that provider's create sheet;
-    /// more than one drills into the `.remoteProviders` page first.
+    /// `parentWorktreeID` is **not** a gate, and the parameter is kept to say
+    /// so where a test can pin it. The nested `+` promises the new lane nests
+    /// under that worktree; the create path keeps that promise now
+    /// (`RemoteCreateParams.parentWorktreeID` carries the click through to
+    /// adoption), so both `+` buttons offer the row on identical terms.
     ///
     /// `nonisolated` so it's directly testable without an `AppState`/view
     /// hierarchy, for the same reason as `RepoSectionView`'s pure helpers.
@@ -357,7 +357,6 @@ struct WorktreeProfilePickerView: View {
         providers: [RemoteProviderStatus],
         parentWorktreeID: UUID?
     ) -> RemoteLaneOffer {
-        guard parentWorktreeID == nil else { return .hidden }
         if providers.count == 1, let only = providers.first { return .single(only) }
         return providers.isEmpty ? .hidden : .chooseProvider(providers)
     }
