@@ -38,6 +38,25 @@ struct SupervisionDeskManagerTests {
         func run() { lock.withLock { action }?() }
     }
 
+    /// Every delta a spawn broadcast, decoded. The app builds the sidebar out
+    /// of these, so "the desk appears with its tab" is a property of the pair.
+    private final class DeltaSink: @unchecked Sendable {
+        private let lock = NSLock()
+        private var received: [StateDelta] = []
+        let subscriptions = StateSubscriptionManager()
+
+        init() {
+            subscriptions.addSubscriber { [self] data in
+                if let delta = try? JSONDecoder().decode(StateDelta.self, from: data) {
+                    lock.withLock { received.append(delta) }
+                }
+                return true
+            }
+        }
+
+        var deltas: [StateDelta] { lock.withLock { received } }
+    }
+
     private struct Fixture {
         let db: TBDDatabase
         let directory: URL
@@ -61,7 +80,8 @@ struct SupervisionDeskManagerTests {
     private static func makeFixture(
         createWindowError: (@Sendable (String) -> Error?)? = nil,
         duringSpawn: (@Sendable () -> Void)? = nil,
-        spawnSession: SupervisionDeskSpawn? = nil
+        spawnSession: SupervisionDeskSpawn? = nil,
+        subscriptions: StateSubscriptionManager? = nil
     ) throws -> Fixture {
         let db = try TBDDatabase(inMemory: true)
         let directory = FileManager.default.temporaryDirectory
@@ -102,6 +122,7 @@ struct SupervisionDeskManagerTests {
                 desks: desks,
                 ledger: SupervisionLedgerWriter(path: ledgerPath),
                 actuationLog: ActuationLog(path: actuationPath),
+                subscriptions: subscriptions,
                 spawnSession: spawnSession,
                 now: dates.provider))
     }
@@ -195,6 +216,33 @@ struct SupervisionDeskManagerTests {
         let entry = try #require(try fixture.desks.load().desk(for: "acme-web"))
         let worktree = try await fixture.db.worktrees.getLocal(id: entry.worktree)
         #expect(worktree?.worktree.pendingPrompt == nil)
+    }
+
+    @Test("A spawn announces the scratch space AND its terminal")
+    func spawnBroadcastsBothDeltas() async throws {
+        let sink = DeltaSink()
+        let fixture = try Self.makeFixture(subscriptions: sink.subscriptions)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        let outcome = try await fixture.manager.ensureDesk(project: Self.inputs())
+        guard case .spawned(let entry) = outcome else {
+            Issue.record("expected a spawn, got \(outcome)")
+            return
+        }
+
+        // The row delta alone puts the desk in the sidebar with no tabs under
+        // it until the next full state refresh. `scratch.create` sends the
+        // pair for the same reason.
+        #expect(sink.deltas.contains {
+            if case .worktreeCreated(let delta) = $0 { return delta.worktreeID == entry.worktree }
+            return false
+        })
+        #expect(sink.deltas.contains {
+            if case .terminalCreated(let delta) = $0 {
+                return delta.terminalID == entry.terminal && delta.worktreeID == entry.worktree
+            }
+            return false
+        })
     }
 
     @Test("The desk's conduct hash is the resolved playbook's")
