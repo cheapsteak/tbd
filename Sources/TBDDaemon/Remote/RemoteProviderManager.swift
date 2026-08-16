@@ -334,7 +334,8 @@ public actor RemoteProviderManager {
                 await recordPollFailure(provider: provider.name, class: failure, result: result)
                 return
             }
-            let envelope = try result.decoded(RemoteSessionListEnvelope.self)
+            let envelope = try result.decoded(
+                RemoteSessionListEnvelope.self, provider: provider.name)
             let snapshotAt = Date()
             try await apply(
                 snapshot: envelope.sessions, provider: provider.name,

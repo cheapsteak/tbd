@@ -25,14 +25,20 @@ struct RemoteEventParserTests {
         #expect(s.state == .exited)
     }
 
-    /// A `snapshot` line is a whole inventory, so one malformed session in it
-    /// must cost one session — not the line, which would leave every remote
-    /// row frozen at whatever it last said.
+    /// A `snapshot` line is a whole inventory, so a malformed session in it
+    /// must cost at most one session — not the line, which would leave every
+    /// remote row frozen at whatever it last said.
+    ///
+    /// Which sessions survive is the payload's business, not the parser's, and
+    /// after the field-level leniency landed only an element with no usable
+    /// `id` is dropped: a wrong-typed `exit_code` and a nested `meta` value both
+    /// cost their own key and keep their session.
     @Test func aSnapshotSurvivesOneUndecodableSession() throws {
         let line = #"""
         {"event": "snapshot", "sessions": [
           {"id": "a", "state": "running"},
           {"id": "bad", "state": "running", "exit_code": "not-a-number"},
+          {"state": "running"},
           {"id": "c", "state": "running", "meta": {"detail": {"nested": "object"}}}]}
         """#
         let event = RemoteEventParser.parse(line: line.replacingOccurrences(of: "\n", with: " "))
@@ -40,7 +46,9 @@ struct RemoteEventParserTests {
             Issue.record("not a snapshot: \(String(describing: event))")
             return
         }
-        #expect(sessions.map(\.id) == ["a", "c"])
+        #expect(sessions.map(\.id) == ["a", "bad", "c"])
+        #expect(sessions.first { $0.id == "bad" }?.exitCode == nil)
+        #expect(sessions.first { $0.id == "c" }?.meta?["detail"] == nil)
     }
 
     @Test func helloDefaultsContractVersionWhenAbsent() {
