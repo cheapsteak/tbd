@@ -195,7 +195,33 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
 
 public struct RemoteSessionListEnvelope: Codable, Sendable {
     public let sessions: [RemoteSessionPayload]
-    public init(sessions: [RemoteSessionPayload]) { self.sessions = sessions }
+    /// Whether `sessions` is the provider's ENTIRE inventory or only part of
+    /// it (`docs/remote-provider-contract.md` § Snapshot completeness).
+    ///
+    /// An incomplete snapshot is authoritative about **presence only**: a
+    /// caller may adopt and update on it, and MUST NOT retire anything on it
+    /// or treat it as refreshing freshness. Absent reads as `true`, so every
+    /// provider written before this field keeps its exact current meaning.
+    public let complete: Bool
+
+    public init(sessions: [RemoteSessionPayload], complete: Bool = true) {
+        self.sessions = sessions
+        self.complete = complete
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case sessions, complete
+    }
+
+    /// Hand-written so `complete` can default when absent: Swift's
+    /// synthesized `init(from:)` ignores property default values, and the
+    /// contract's absent-means-complete rule is the whole reason a v1
+    /// provider needs no edit.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        sessions = try c.decode([RemoteSessionPayload].self, forKey: .sessions)
+        complete = try c.decodeIfPresent(Bool.self, forKey: .complete) ?? true
+    }
 }
 
 /// `describe` response.
