@@ -153,11 +153,12 @@ reports archived is one TBD retired through the verb; a lane it does not report
 at all, or reports unarchived, is one TBD filed on its own.
 
 Attempting the verb even for a lane that looks dead is worth a call TBD expects
-to fail. `gone` means only that a session missed two consecutive snapshots, and
-a provider may list it again; an exited session may still be a record the
-provider can unarchive. The verb is idempotent, so the attempt costs a round
-trip and never a wrong outcome, and what comes back is better evidence than what
-TBD believed beforehand.
+to fail. `gone` means only that a session stopped being enumerated — it is set
+after two consecutive absences from a snapshot, or at once on an explicit
+`removed` event — and a provider may list it again; an exited session may still
+be a record the provider can unarchive. The verb is idempotent, so the attempt
+costs a round trip and never a wrong outcome, and what comes back is better
+evidence than what TBD believed beforehand.
 
 **The refusal is mechanical rather than a matter of taste.** With no verb to
 call and the provider still reporting `archived: true`, a row-only flip would be
@@ -274,12 +275,12 @@ static func revivePlan(capabilities: Set<String>, providerReportsArchived: Bool)
 ```
 
 Capabilities come from the provider manager's cached `describe` response,
-reached through its public `providerStatuses()` rather than the private
-`describes` map — the same door the app already uses client-side, so daemon and
-app derive a provider's capabilities identically instead of through two paths
-that can drift. No contract negotiation is involved: `describe.capabilities`
-already carries `archive` and `unarchive`, and a caller must not invoke a verb
-whose capability a provider has not declared.
+through a single derivation on the manager itself so the RPC gate and the lane
+routing cannot drift apart. Daemon-side callers are inside the actor and read
+the cached map directly; the app, being outside it, reads the same values off
+the `describe` carried on `providerStatuses()`. No contract negotiation is
+involved: `describe.capabilities` already carries `archive` and `unarchive`, and
+a caller must not invoke a verb whose capability a provider has not declared.
 
 `worktree.forget` keeps its refusal for a remote lane. Forget means "stop
 tracking this checkout but leave its files alone", and a remote lane has no
@@ -311,6 +312,16 @@ public var isArchived: Bool { archived ?? false }
 Both verbs return the updated Session object per contract. Both are idempotent,
 so archiving an already-archived lane or unarchiving one that is not archived
 succeeds and changes nothing.
+
+**These two RPCs are the direct verb surface, and they carry no lane guards.**
+They name a provider and a session, invoke the verb, and mirror the result —
+the shape `remote.stop` already established, where the user asks for an act on a
+session by name. The guarded path is `worktree.archive`, which reasons about a
+lane: it consults capabilities, applies the `working` and dirty-checkout guards,
+honors `--force`, and files the row. A control that means "retire this lane"
+belongs on that path. Wiring such a control to `remote.archive` instead would
+skip every guard this design rests on, which is why the distinction is stated
+here rather than left to be inferred from which surface was closer to hand.
 
 ## Surfaces
 

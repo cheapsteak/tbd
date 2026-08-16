@@ -442,7 +442,8 @@ The discriminator is what the provider reports now, not how the row came to be
 archived, so nothing about the archive has to be persisted to decide it.
 
 **Attempting the verb is worth a call TBD expects to fail.** `gone` means only
-that a session missed two consecutive snapshots, and a provider may list it
+that a session stopped being enumerated — after two consecutive absences from a
+snapshot, or at once on an explicit `removed` event — and a provider may list it
 again; an exited session may still be a record the provider can unarchive. What
 comes back is better evidence than what TBD believed beforehand, and idempotence
 means the attempt costs a round trip and never a wrong outcome.
