@@ -121,6 +121,29 @@ struct WorktreeProfilePickerRemoteLaneTests {
         #expect(WorktreeProfilePickerView.providerRowSubtitle(provider(name: "acme")) == nil)
     }
 
+    // MARK: - the provider list page reads the offer it came from
+
+    /// The drill-in page lists the offer's own providers rather than reaching
+    /// back into `AppState`, so the payload the offer carries is the payload
+    /// the page shows — and the row and the page cannot disagree about which
+    /// providers exist.
+    @Test func theProviderListPageShowsTheOffersProviders() {
+        let offer = WorktreeProfilePickerView.remoteLaneOffer(
+            providers: [provider(name: "acme"), provider(name: "acme-prod")],
+            parentWorktreeID: nil)
+        #expect(WorktreeProfilePickerView.providerList(offer: offer).map(\.config.name)
+            == ["acme", "acme-prod"])
+    }
+
+    @Test func theProviderListOfASingleProviderOfferIsThatProvider() {
+        #expect(WorktreeProfilePickerView.providerList(offer: .single(provider(name: "acme")))
+            .map(\.config.name) == ["acme"])
+    }
+
+    @Test func theProviderListOfAHiddenOfferIsEmpty() {
+        #expect(WorktreeProfilePickerView.providerList(offer: .hidden).isEmpty)
+    }
+
     // MARK: - provider display name
 
     @Test func providerLabelPrefersTheNegotiatedDescribeName() {
