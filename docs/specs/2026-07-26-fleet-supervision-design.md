@@ -1297,6 +1297,14 @@ declared project, the operator's copy lives beside the project's definition
 (`~/tbd/supervision/projects/<name>/supervision.md`) and the repo level is
 whichever member repo the project designated.
 
+**Which of those two operator paths applies is decided by whether the project
+is declared, read from `supervision.json` — the one place declarations live.**
+The collapse property holds for the resolved *value*, not for the path lookup:
+a fresh install and one whose file declares a single-repo project per repo
+resolve to equal playbooks, but the two store the operator's copy in different
+places, so a resolved project carries no "is this a singleton" flag and the
+question is asked of the file instead.
+
 **Every desk stands on exactly one playbook**, because a desk supervises
 exactly one project: the whole file is installed as the desk's standing
 conduct at spawn — at the appointment relaunch for an appointed supervisor
@@ -1702,6 +1710,24 @@ account, not a wrong action. The third category is **human-authored process**.
   is the reclamation path, which is the same standing `notes.md` and the
   per-repo hooks already have under `~/tbd/repos/<id>/`. A project directory
   that outlives its project is therefore expected, not a leak.
+- **Derived state TBD owns**, in its own file beside the operator's:
+  - `~/tbd/supervision/desks.json` — which hosted desk serves which project
+    (§9): the terminal, the scratch worktree, when it was spawned, and the
+    conduct hash of the playbook installed as its standing layer. Written with
+    the same atomic temp-and-rename `supervision.json` gets.
+
+    **Separate from `supervision.json` because it is a different kind of
+    fact.** That file holds what an operator *chose*, and its `supervisors`
+    entry is the appointed binding — a selection. A hosted desk is nobody's
+    choice: TBD spawns one because a project was turned on and no supervisor
+    stood, and it rewrites the record with no gesture behind it. Keeping the
+    two apart means a hand edit to the operator's file is never clobbered by a
+    desk spawn, and a damaged desk record can never take the fleet's topology
+    offline.
+
+    **Tracked by id, never by display string**, which is what makes a desk
+    reclaimable after somebody renames its scratch space. A record whose desk
+    is gone is reclaimed by the reconciler §9 names.
 - **In-memory, deliberately not durable**: active one-minute re-check timers
   and the brief pipe's liveness bookkeeping. Timers may live in memory *because*
   everything they encode derives from the durable record — an actuation
@@ -1718,10 +1744,18 @@ account, not a wrong action. The third category is **human-authored process**.
   query-time rule, not a recovery sweep.
 
 Net property: **supervision adds one column to TBD's database** — the fleet
-brake. Everything else it knows is in files a human can open: under
-`~/tbd/supervision/`, in the general actuation log beside TBD's other
-files, and in the playbooks in the repos
-themselves.
+brake. Everything supervision *knows* is in files a human can open: the
+operator's selections, the record, and TBD's own desk bookkeeping under
+`~/tbd/supervision/`, the general actuation log beside TBD's other files, and
+the playbooks in the repos themselves. The one column is the exception because
+it is live coordination state that has to be read at act time and changed
+atomically from two surfaces at once.
+
+The claim is about *state*, not about every boolean the subsystem touches.
+Reclaiming an orphaned desk is garbage collection, and its soak switch is a
+`gc_*` column in the same family as the other collectors' — a gate on TBD's
+housekeeping, carrying no supervision fact and readable as nothing about what
+is covered.
 
 ## 8. Remembered things: advice, selection, and the question route
 
@@ -2201,6 +2235,19 @@ the one way to send a desk substance.
   and in the sweep program's files (§8), which outlive every desk by
   construction — which is why the route and not the desk is the durable
   home for anything needing a human.
+- **An orphaned desk is reclaimed by a named reconciler.** A spawn creates a
+  scratch space and a process before either can be recorded (§7), so a crash
+  or a failed spawn in between leaves a desk nobody owns — and TBD's existing
+  sweeps do not cover it, because the agent-worktree pass only walks
+  repo-backed worktrees and the archived passes only touch rows already
+  archived. A **supervision-desk collector**, run as a leg of the hourly orphan
+  sweep, closes that: it drops the record and hands the scratch worktree to the
+  archive path the sweep already runs. Its reap decision is **liveness and
+  nothing else** — a desk with a process running in its directory is kept
+  whatever its project or its rows say, because a sweep must never kill a
+  running agent, and a project that stopped resolving is closed through the
+  recycle path above rather than by garbage collection. Reclaiming is
+  destructive enough to soak behind its own default-off switch first.
 - **`off <project>` stands the desk down; it does not dispose of it.** The
   mark is a delivery precondition rechecked at act time (§3, §8), so a
   stood-down desk simply receives nothing — an idle session holding its

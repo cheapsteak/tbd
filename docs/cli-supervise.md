@@ -214,10 +214,36 @@ cannot take never turns a gesture that succeeded into a nonzero exit — but it
 says on stderr that it could not read the state, rather than falling silent
 and letting silence read as a calm night.
 
-What these gestures do today is the mark, the ledger line, the result and
-that warning. The supervisor half described above — ensuring a hosted desk
-live, standing one down — and the transition hook belong with the
-not-yet-built commands, and arrive with them.
+**`on <project>` really does ensure a desk**, and the order is the mark first,
+the supervisor second. Where an appointed binding stands it is left exactly as
+it is — a mark is coverage, a binding is selection — and a binding naming a
+session that has gone is reported loudly rather than quietly replaced by the
+hosted default. Otherwise a live desk resumes as it stands, a desk that died
+while stood down is replaced with a ledger line linking successor to
+predecessor, and a project that never had one gets it spawned. The spawn
+creates a scratch space, installs the project's playbook as the session's
+standing conduct, gives it the supervision skill, and **sends it nothing**: a
+quiet project's desk idles at zero token cost until its first briefing.
+
+A desk that cannot be spawned is an anomaly, never a refusal — the mark is what
+the gesture promises, and it stands. Nothing about the desk reaches stdout
+either way; the result line carries the mark and nothing more.
+
+**`off <project>` stands the desk down and disposes of nothing.** There is no
+disposal on this surface at all: the mark is a delivery precondition rechecked
+at act time, so a stood-down desk simply receives nothing while keeping context
+that cost real tokens to build, and the next `on` re-verifies it is alive rather
+than paying to rebuild it.
+
+**While Nightwatch is running, `on <project>` is refused**, naming the
+condition. The two supervise the same fleet through the same terminals and are
+mutually exclusive until Nightwatch is retired; the refusal in the other
+direction is symmetric — `tbd nightwatch mode` refuses anything but `off` while
+any project is on. **Neither `off` is ever refusable**, in either direction, so
+an operator can always stand either path down.
+
+The transition hook described above belongs with the not-yet-built commands and
+arrives with them.
 
 Bare: the fleet brake. `off` pauses TBD's authority to act everywhere —
 briefings refused, identified supervisor sends refused from that instant —

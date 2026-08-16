@@ -115,9 +115,13 @@ struct SupervisionDeskManagerTests {
         // The record is by id and the terminal really exists.
         let terminal = try await fixture.db.terminals.get(id: entry.terminal)
         #expect(terminal != nil)
+        // A scratch space: a `repoID == nil` row, named for what it is.
+        // Deliberately not asserted against `TBDConstants.scratchDir` — that
+        // resolver reads `TBD_HOME`, which a serialized suite elsewhere in the
+        // process can move between the spawn and the assertion.
         let worktree = try await fixture.db.worktrees.getLocal(id: entry.worktree)
         #expect(worktree?.worktree.repoID == nil)
-        #expect(worktree?.path.hasPrefix(TBDConstants.scratchDir.path) == true)
+        #expect(worktree?.worktree.name.hasPrefix("supervision-desk") == true)
 
         #expect(try fixture.desks.load().desk(for: "acme-web") == entry)
         #expect(Self.ledgerEvents(fixture) == [.deskSpawned])
