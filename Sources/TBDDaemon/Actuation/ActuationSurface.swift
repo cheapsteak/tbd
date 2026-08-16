@@ -230,4 +230,8 @@ enum ActuationRail {
     /// typing the operator's own words into the primary agent once its
     /// `SessionStart` hook has fired.
     static let queuedPrompt = "queued-prompt"
+    /// `RemoteProviderManager`'s filing sync: a provider's own `archived`
+    /// report moving a bound remote worktree row out of — or back into — the
+    /// active list. No RPC carried it, so the sync writes its own row.
+    static let remoteFilingSync = "remote-filing-sync"
 }

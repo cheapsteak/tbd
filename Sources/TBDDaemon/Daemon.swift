@@ -492,11 +492,20 @@ public final class Daemon: Sendable {
         // Assigning only after an awaited `start()` would leave a mid-start
         // shutdown request with nothing to call, orphaning the manager and
         // any provider child processes it spawned.
+        // One `ActuationLog` for the whole daemon: the router hands it to the
+        // hibernation coordinator, and it is passed to every daemon-internal
+        // rail below, so all of them append to the same file through the same
+        // actor (which is what serializes the appends). Constructed here
+        // rather than beside the router because the remote manager's filing
+        // sync is one of those rails and is built first.
+        let actuationLog = ActuationLog(path: TBDConstants.actuationLogPath)
+
         var remoteManager: RemoteProviderManager?
         if mockMode == nil, (try? await database.config.get())?.remoteBackendsEnabled == true {
             let manager = RemoteProviderManager(
                 db: database, subscriptions: subs, runner: ProviderRunner(),
-                registryURL: URL(fileURLWithPath: TBDConstants.agentProvidersPath))
+                registryURL: URL(fileURLWithPath: TBDConstants.agentProvidersPath),
+                actuationLog: actuationLog)
             self.remoteManager = manager
             remoteManager = manager
         }
@@ -522,11 +531,6 @@ public final class Daemon: Sendable {
 
         // 8. Initialize RPC router.
         //
-        // One `ActuationLog` for the whole daemon: the router hands it to the
-        // hibernation coordinator, and it is passed to every daemon-internal
-        // rail below, so all of them append to the same file through the same
-        // actor (which is what serializes the appends).
-        let actuationLog = ActuationLog(path: TBDConstants.actuationLogPath)
         let rpcRouter = RPCRouter(
             db: database,
             lifecycle: lifecycle,

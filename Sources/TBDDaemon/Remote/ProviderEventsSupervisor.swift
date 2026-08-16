@@ -169,6 +169,13 @@ actor ProviderEventsSupervisor {
     /// cycle on the same instance.
     private var generation = 0
     private var lastActivity = Date()
+    /// When the current `events` connection was opened. This is the request
+    /// start for every `snapshot` event that arrives on it: the provider
+    /// composes its reconnect snapshot from what it knew when TBD asked, so a
+    /// snapshot on a connection opened before a local filing decision cannot
+    /// have accounted for that decision. See
+    /// `RemoteProviderManager.syncFilingDecisions`.
+    private var connectionOpenedAt = Date()
 
     /// Injectable timing so the live test runs in seconds, not minutes.
     let silenceLimit: TimeInterval
@@ -274,6 +281,7 @@ actor ProviderEventsSupervisor {
         process.terminationHandler = { _ in exitGate.markExited() }
 
         do {
+            connectionOpenedAt = Date()
             try process.run()
         } catch {
             remoteLogger.error(
@@ -379,7 +387,9 @@ actor ProviderEventsSupervisor {
         case .hello, .ping:
             break   // activity timestamp already updated by the caller
         case .snapshot(let sessions):
-            try? await manager.apply(snapshot: sessions, provider: config.name)
+            try? await manager.apply(
+                snapshot: sessions, provider: config.name,
+                requestStartedAt: connectionOpenedAt)
         case .session(let session):
             await manager.applyUpsert(session, provider: config.name)
         case .removed(let id):
