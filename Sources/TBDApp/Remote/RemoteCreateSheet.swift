@@ -18,10 +18,23 @@ private let createSheetLogger = Logger(subsystem: "com.tbd.app", category: "remo
 /// repo, so a session created this way round-trips into the section its `+`
 /// was clicked from instead of landing unmatched), or from a worktree row's
 /// nested `+` (`WorktreeRowView`, which adds `parentWorktreeID`).
+///
+/// The two `+` menus reach this sheet only when `RemoteCreateFormLogic.launch`
+/// found something it could not answer; when it can answer everything they
+/// create outright and this sheet never appears. The repo context menu's "New
+/// Remote Session…" is the unconditional way in, and is how you get here to
+/// type a prompt or pick a branch on a form that would otherwise have been
+/// skipped.
 struct RemoteCreateSheet: View {
     let provider: RemoteProviderConfig
     let describe: ProviderDescribe?
     var repoPrefill: String?
+    /// The owning repo's stored create-param defaults, or empty when the sheet
+    /// was opened without a repo context. The machine-wide map beneath it is
+    /// read from `appState` rather than passed, since it has no per-call
+    /// variation. Both feed `RemoteCreateFormLogic.plan`, so a form opened
+    /// here starts on exactly the values the one-click path would have sent.
+    var repoDefaults: [String: String] = [:]
     /// The worktree the new lane should nest under — set only when the sheet
     /// was opened from that worktree's nested `+`. Not a form field and not a
     /// provider parameter: it rides the `remote.create` RPC as a TBD-local
@@ -83,8 +96,17 @@ struct RemoteCreateSheet: View {
         .onAppear {
             guard !didInitializeValues else { return }
             didInitializeValues = true
-            stringValues = RemoteCreateFormLogic.prefillStrings(fields: fields, repoPrefill: repoPrefill)
-            boolValues = RemoteCreateFormLogic.prefillBools(fields: fields)
+            // Its OWN slug, not one handed down: a sheet only opens when the
+            // one-click path declined to create, so no lane has claimed that
+            // caller's slug and minting a fresh one costs nothing.
+            let plan = RemoteCreateFormLogic.plan(
+                fields: fields,
+                repoPrefill: repoPrefill,
+                repoDefaults: repoDefaults,
+                globalDefaults: appState.globalRemoteCreateDefaults,
+                generatedSlug: NameGenerator.generate())
+            stringValues = plan.stringValues
+            boolValues = plan.boolValues
         }
     }
 

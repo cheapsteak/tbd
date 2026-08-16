@@ -235,6 +235,30 @@ extension AppState {
         remoteSessions.first { $0.provider == provider && $0.payload.id == sessionID }?.pinnedAt != nil
     }
 
+    // MARK: - Creating a session
+
+    /// Create a remote session with no form in front of it — the one-click
+    /// path, taken only when `RemoteCreateFormLogic.launch` established that
+    /// every required answer was already knowable.
+    ///
+    /// The sheet reports a failure inline, beside the field that caused it;
+    /// with no sheet there is nowhere for a message to live, so a failure
+    /// becomes an error toast. It must never be silent: from the user's side a
+    /// click that creates nothing and says nothing is indistinguishable from a
+    /// click that missed.
+    func createRemoteSession(
+        provider: String, paramsJSON: String, parentWorktreeID: UUID? = nil
+    ) async {
+        do {
+            _ = try await daemonClient.remoteCreate(
+                provider: provider, paramsJSON: paramsJSON, parentWorktreeID: parentWorktreeID)
+        } catch {
+            remoteLogger.error(
+                "one-click remoteCreate failed for provider=\(provider, privacy: .public): \(error, privacy: .public)")
+            showErrorToast("Couldn't start remote session: \(error.localizedDescription)")
+        }
+    }
+
     // MARK: - Settings toggle (Task 11)
 
     /// Persist the remote-backends master switch, then re-fetch capabilities

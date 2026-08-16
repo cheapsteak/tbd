@@ -20,8 +20,9 @@ enum RemoteLaneOffer {
 ///
 /// Three in-place pages (NOT nested popovers — those are fragile on macOS):
 ///  - `.profiles` (default): a fixed "Choose a branch…" drill-in row at the
-///    top, an optional "New remote session…" row beneath it (see
-///    `remoteLaneOffer`), then one row per configured model profile. Selecting
+///    top, an optional "New remote session" row beneath it (see
+///    `remoteLaneOffer`; it carries a trailing ellipsis only when selecting it
+///    will open the create form), then one row per configured model profile. Selecting
 ///    a profile row one-click-creates a worktree pinned to that profile. (A
 ///    plain click on the `+` — without opening this menu — already creates a
 ///    default worktree via repo → scratch → global default precedence, so
@@ -235,12 +236,14 @@ struct WorktreeProfilePickerView: View {
         case .single(let provider):
             remoteProviderRow(
                 provider,
-                title: Self.remoteLaneRowTitle,
+                title: Self.remoteLaneRowTitle(opensForm: !willCreateImmediately(provider)),
                 subtitle: Self.providerRowSubtitle(provider) ?? "Run on \(Self.providerLabel(provider))"
             )
         case .chooseProvider:
             ProfilePickerRow(
-                title: Self.remoteLaneRowTitle,
+                // The provider list always comes first, so this row opens
+                // something whatever the chosen provider then does.
+                title: Self.remoteLaneRowTitle(opensForm: true),
                 subtitle: "Choose a provider",
                 systemImage: Self.remoteLaneSymbol,
                 showsChevron: true
@@ -328,9 +331,28 @@ struct WorktreeProfilePickerView: View {
     // MARK: - Remote lane: pure decision helpers
 
     /// Row title on both the profiles page and (as the page's purpose) the
-    /// provider list. Trailing ellipsis: selecting it opens the create sheet
-    /// rather than starting anything outright.
-    static let remoteLaneRowTitle = "New remote session…"
+    /// provider list.
+    ///
+    /// The trailing ellipsis is a promise, so the row only makes it when it
+    /// will keep it: selecting the row opens the create form when some answer
+    /// is still needed, and creates outright when every required answer is
+    /// already knowable (see `RemoteCreateFormLogic.willCreateImmediately`).
+    nonisolated static func remoteLaneRowTitle(opensForm: Bool) -> String {
+        opensForm ? "New remote session…" : "New remote session"
+    }
+
+    /// Whether selecting this provider's row will create outright — asked with
+    /// the SAME inputs the click itself uses (`RepoSectionView` /
+    /// `WorktreeRowView`'s `startRemoteSession(with:)`), so the label and the
+    /// action cannot disagree.
+    private func willCreateImmediately(_ provider: RemoteProviderStatus) -> Bool {
+        let repo = appState.repos.first(where: { $0.id == repoID })
+        return RemoteCreateFormLogic.willCreateImmediately(
+            describe: provider.describe,
+            repoPrefill: RemoteCreateFormLogic.repoPrefill(remoteURL: repo?.remoteURL),
+            repoDefaults: repo?.remoteCreateDefaults ?? [:],
+            globalDefaults: appState.globalRemoteCreateDefaults)
+    }
 
     /// Leading glyph for every remote-lane row — reads as "a machine that is
     /// not this one".
@@ -341,9 +363,10 @@ struct WorktreeProfilePickerView: View {
     /// One gate: **no provider registered → nothing at all.** Omitting rather
     /// than disabling mirrors `RepoSectionView.newRemoteSessionMenuItem` and
     /// `RemoteSessionActionMenu`, which omit capability-gated items instead of
-    /// graying them out. Exactly one provider goes straight to that provider's
-    /// create sheet; more than one drills into the `.remoteProviders` page
-    /// first.
+    /// graying them out. Exactly one provider goes straight to starting a
+    /// session with it (which creates outright or opens the create form,
+    /// depending on what `RemoteCreateFormLogic.launch` can answer); more than
+    /// one drills into the `.remoteProviders` page first.
     ///
     /// `parentWorktreeID` is **not** a gate, and the parameter is kept to say
     /// so where a test can pin it. The nested `+` promises the new lane nests

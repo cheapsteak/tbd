@@ -1,13 +1,24 @@
 import Foundation
 import TBDShared
 
-/// Pure logic behind `RemoteCreateSheet`: prefilling the generic create-form
-/// fields `describe.create_params` describes, and validating + assembling
-/// them into the `paramsJSON` string `DaemonClient.remoteCreate` sends.
+/// Pure logic behind starting a remote session: resolving the generic
+/// create-form fields `describe.create_params` describes, deciding whether the
+/// form needs to be shown at all, and validating + assembling the answers into
+/// the `paramsJSON` string `DaemonClient.remoteCreate` sends.
+///
 /// Deliberately dumb per the contract's own framing (`docs/remote-provider-contract.md`
 /// § `describe`): "the caller renders this generically ... and only does
 /// required/type checks client-side — the provider is the validator of
 /// record". No SwiftUI here, so every branch is directly unit-testable.
+///
+/// Three layers, each built on the one above it:
+///
+///  - `resolveString` / `prefillBools` — one field's value, resolved through
+///    repo → ambient → global → the provider's own `default`.
+///  - `plan` — every field resolved, plus which required ones are still
+///    unanswered.
+///  - `launch` — create outright, or open the form prefilled with what is
+///    known. Creating on a guess is never an option.
 enum RemoteCreateFormLogic {
     /// A field failed local validation. Carries the field's raw `name` (the
     /// key the provider knows it by), so the view can look up its `label`
@@ -43,36 +54,105 @@ enum RemoteCreateFormLogic {
         return RemoteRepoMatching.displayKey(remoteURL)
     }
 
-    /// Seeds initial string-typed field values (every type except `bool`):
-    /// the well-known `repo` field gets `repoPrefill` when present and
-    /// non-blank (docs/remote-provider-contract.md § `describe` — `repo` is
-    /// a well-known field name a caller may prefill from ambient context);
-    /// every other field falls back to its own `default`; everything else
-    /// (including `title`, which has no ambient source) starts blank.
-    ///
-    /// An `enum` field is the one type with a CLOSED value set, so a prefill
-    /// is projected onto that set with `matchAllowedValue` rather than
-    /// written in verbatim — a value outside `values` matches no `.tag(...)`
-    /// in the sheet's `Picker` (the control renders blank even for a required
-    /// field with a default) and the provider rejects it at `create` time.
-    /// When nothing matches, the field falls back to its own `default`, and
-    /// with no default it lands exactly where a prefill-less field would:
-    /// blank. Never an invented selection.
-    static func prefillStrings(fields: [ProviderCreateParamField], repoPrefill: String?) -> [String: String] {
+    /// Seeds initial string-typed field values (every type except `bool`) by
+    /// walking the precedence chain in `resolveString(field:...)`. Every
+    /// parameter past `repoPrefill` is defaulted, so a caller with no stored
+    /// defaults and no generated slug gets exactly the ambient-prefill-only
+    /// behavior this function has always had.
+    static func prefillStrings(
+        fields: [ProviderCreateParamField],
+        repoPrefill: String?,
+        repoDefaults: [String: String] = [:],
+        globalDefaults: [String: String] = [:],
+        generatedSlug: String? = nil
+    ) -> [String: String] {
         var values: [String: String] = [:]
         for field in fields where field.type != "bool" {
-            guard field.name == "repo", let repoPrefill, !repoPrefill.isEmpty else {
-                values[field.name] = field.defaultValue ?? ""
-                continue
-            }
-            if field.type == "enum" {
-                values[field.name] = matchAllowedValue(repoPrefill, in: field.values ?? [])
-                    ?? field.defaultValue ?? ""
-            } else {
-                values[field.name] = repoPrefill
-            }
+            values[field.name] = resolveString(
+                field: field, repoPrefill: repoPrefill, repoDefaults: repoDefaults,
+                globalDefaults: globalDefaults, generatedSlug: generatedSlug)
         }
         return values
+    }
+
+    /// The value one non-bool field starts with, resolved through four levels
+    /// and falling through wherever a level has no usable answer:
+    ///
+    ///  1. the repo's own stored default (`Repo.remoteCreateDefaults`)
+    ///  2. an ambient **well-known** prefill (`ambientPrefill(for:...)`)
+    ///  3. the machine-wide stored default (`Config.remoteCreateDefaults`)
+    ///  4. the field's provider-declared `default`
+    ///  5. blank
+    ///
+    /// The repo → global → provider spine mirrors the model-profile chain
+    /// (`ModelProfileResolver.resolve`: repo override → global default →
+    /// none). The ambient prefill sits INSIDE the repo tier rather than above
+    /// or below the pair, because it is itself repo-scoped evidence — the user
+    /// clicked this repo's `+` — so it must outrank a machine-wide value that
+    /// cannot know which repo was clicked, while still yielding to a default
+    /// stored against this very repo.
+    ///
+    /// **Blank is "no opinion", not an answer.** A whitespace-only value at any
+    /// level falls through, so clearing a control (which writes `""` on some
+    /// paths) reads the same as never having set it.
+    ///
+    /// **An `enum` value is validated on replay, never replayed blindly.** It
+    /// is the one type with a CLOSED value set, and a provider is free to
+    /// retire a value between the setting being stored and this create. Every
+    /// candidate — stored, ambient, and the provider's own `default` — is
+    /// therefore projected onto `values` with `matchAllowedValue`, and a
+    /// candidate that matches nothing is DROPPED so the next level gets its
+    /// turn. A value outside `values` matches no `.tag(...)` in the sheet's
+    /// `Picker` (the control renders blank even for a required field) and the
+    /// provider rejects it at `create` time; degrading is strictly better than
+    /// either. Never an invented selection.
+    static func resolveString(
+        field: ProviderCreateParamField,
+        repoPrefill: String?,
+        repoDefaults: [String: String],
+        globalDefaults: [String: String],
+        generatedSlug: String?
+    ) -> String {
+        let candidates: [String?] = [
+            repoDefaults[field.name],
+            ambientPrefill(for: field.name, repoPrefill: repoPrefill, generatedSlug: generatedSlug),
+            globalDefaults[field.name],
+            field.defaultValue,
+        ]
+        for candidate in candidates {
+            guard let candidate,
+                  !candidate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            guard field.type == "enum" else { return candidate }
+            if let matched = matchAllowedValue(candidate, in: field.values ?? []) { return matched }
+        }
+        return ""
+    }
+
+    /// The ambient value for a **well-known** `create_params` field name
+    /// (docs/remote-provider-contract.md § `describe`), or nil for a field TBD
+    /// has no ambient source for.
+    ///
+    /// - `repo` — the repo whose `+` was clicked, normalized by
+    ///   `repoPrefill(remoteURL:)`.
+    /// - `slug` — a freshly generated lane identifier. It comes from
+    ///   `NameGenerator`, the same generator that names local worktrees, so a
+    ///   remote lane reads like every other lane in the sidebar instead of
+    ///   introducing a second naming scheme.
+    ///
+    /// `branch` is deliberately NOT filled. It is optional, and a blank
+    /// optional field is omitted from the params entirely, so the provider's
+    /// own answer applies — which is the better one: TBD would be inventing a
+    /// branch name that exists nowhere, while the provider knows what its
+    /// backend does with an absent branch. `prompt` and `title` have no
+    /// ambient source at all.
+    static func ambientPrefill(
+        for fieldName: String, repoPrefill: String?, generatedSlug: String?
+    ) -> String? {
+        switch fieldName {
+        case "repo": return repoPrefill
+        case "slug": return generatedSlug
+        default: return nil
+        }
     }
 
     /// Projects `candidate` onto a field's declared `allowed` values, so a
@@ -129,16 +209,153 @@ enum RemoteCreateFormLogic {
         type != "bool" && type != "enum"
     }
 
-    /// Seeds initial bool-typed field values from `default` ("true"/"false"
-    /// as a string, matching how every other field's default is carried on
-    /// the wire); any other/missing value defaults to `false`.
-    static func prefillBools(fields: [ProviderCreateParamField]) -> [String: Bool] {
+    /// Seeds initial bool-typed field values through the same repo → global →
+    /// provider chain as `resolveString`, reading "true"/"false" strings at
+    /// every level (that is how a bool's `default` is carried on the wire, so
+    /// the stored maps use the same spelling and stay a plain
+    /// `[String: String]`). Anything else at a level — including a blank — is
+    /// no opinion and falls through; nothing answers `false` by default.
+    ///
+    /// No `required` handling here on purpose: a checkbox always has a value,
+    /// so `false` is a real answer rather than a missing one (same rule
+    /// `buildParamsJSON` applies).
+    static func prefillBools(
+        fields: [ProviderCreateParamField],
+        repoDefaults: [String: String] = [:],
+        globalDefaults: [String: String] = [:]
+    ) -> [String: Bool] {
         var values: [String: Bool] = [:]
         for field in fields where field.type == "bool" {
-            values[field.name] = field.defaultValue == "true"
+            values[field.name] = [
+                repoDefaults[field.name], globalDefaults[field.name], field.defaultValue,
+            ].compactMap { $0 }.compactMap(boolValue(of:)).first ?? false
         }
         return values
     }
+
+    /// The wire spelling of a bool create-param value, or nil for anything
+    /// that is not an answer (a blank, or a value from a provider that spells
+    /// its booleans some other way — which falls through rather than being
+    /// coerced to `false`).
+    private static func boolValue(of raw: String) -> Bool? {
+        switch raw.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "true": return true
+        case "false": return false
+        default: return nil
+        }
+    }
+
+    // MARK: - Prefilled state and the one-click decision
+
+    /// The create form's fully prefilled starting state, plus what is still
+    /// unanswered. Produced by `plan`, consumed both by `RemoteCreateSheet`
+    /// (which renders it) and by `launch` (which decides whether the sheet
+    /// needs to be rendered at all).
+    struct Plan: Equatable {
+        let stringValues: [String: String]
+        let boolValues: [String: Bool]
+        /// Required fields no level could answer, in `fields` order.
+        let missingRequired: [String]
+        /// Every required field is answered, so nothing needs asking.
+        var isComplete: Bool { missingRequired.isEmpty }
+    }
+
+    /// Resolve every field through the precedence chain and report which
+    /// required ones are still unanswered.
+    ///
+    /// `required` is applied only to non-bool fields, matching
+    /// `buildParamsJSON`: a checkbox always has a value.
+    static func plan(
+        fields: [ProviderCreateParamField],
+        repoPrefill: String?,
+        repoDefaults: [String: String],
+        globalDefaults: [String: String],
+        generatedSlug: String?
+    ) -> Plan {
+        let strings = prefillStrings(
+            fields: fields, repoPrefill: repoPrefill, repoDefaults: repoDefaults,
+            globalDefaults: globalDefaults, generatedSlug: generatedSlug)
+        let bools = prefillBools(
+            fields: fields, repoDefaults: repoDefaults, globalDefaults: globalDefaults)
+        let missing = fields
+            .filter { $0.required && $0.type != "bool" }
+            .filter { (strings[$0.name] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .map(\.name)
+        return Plan(stringValues: strings, boolValues: bools, missingRequired: missing)
+    }
+
+    /// What selecting "New remote session…" should actually do.
+    enum Launch: Equatable {
+        /// Every required answer was already knowable — create straight away.
+        case createNow(paramsJSON: String)
+        /// Something still needs a human: render the form, prefilled with
+        /// everything that IS known.
+        case openForm(Plan)
+    }
+
+    /// Decide between creating immediately and opening the form.
+    ///
+    /// The form opens in exactly three cases, and creating on a guess is the
+    /// one outcome ruled out entirely:
+    ///
+    ///  - the provider has not reported its `create_params` yet (`describe`
+    ///    is nil), so TBD does not know what it would be answering;
+    ///  - a required field no level could answer;
+    ///  - a resolved value that fails the same local validation the form
+    ///    applies (an `int` field holding a stored non-number, say) — the
+    ///    error belongs in front of the user, next to the field.
+    ///
+    /// Otherwise every answer is known and the session is created with no
+    /// sheet. A provider with no create params at all lands here too: an empty
+    /// form has nothing to ask.
+    static func launch(
+        describe: ProviderDescribe?,
+        repoPrefill: String?,
+        repoDefaults: [String: String],
+        globalDefaults: [String: String],
+        generatedSlug: String?
+    ) -> Launch {
+        guard let describe else {
+            return .openForm(Plan(stringValues: [:], boolValues: [:], missingRequired: []))
+        }
+        let fields = describe.createParams
+        let plan = plan(
+            fields: fields, repoPrefill: repoPrefill, repoDefaults: repoDefaults,
+            globalDefaults: globalDefaults, generatedSlug: generatedSlug)
+        guard plan.isComplete,
+              case .success(let json) = buildParamsJSON(
+                fields: fields, stringValues: plan.stringValues, boolValues: plan.boolValues)
+        else {
+            return .openForm(plan)
+        }
+        return .createNow(paramsJSON: json)
+    }
+
+    /// Whether selecting the remote-lane row will create outright rather than
+    /// open the form — the same decision `launch` makes, asked ahead of the
+    /// click so the row can label itself honestly (a trailing ellipsis
+    /// promises a dialog).
+    ///
+    /// It asks with a placeholder slug rather than minting a real lane name
+    /// for a label, which changes no answer: what a `slug` field needs is a
+    /// non-blank value, and both a placeholder and a generated name are that.
+    static func willCreateImmediately(
+        describe: ProviderDescribe?,
+        repoPrefill: String?,
+        repoDefaults: [String: String],
+        globalDefaults: [String: String]
+    ) -> Bool {
+        if case .createNow = launch(
+            describe: describe, repoPrefill: repoPrefill, repoDefaults: repoDefaults,
+            globalDefaults: globalDefaults, generatedSlug: slugPreviewPlaceholder) {
+            return true
+        }
+        return false
+    }
+
+    /// Stands in for a generated slug when only the DECISION is wanted, not a
+    /// name anything will be created under.
+    static let slugPreviewPlaceholder = "slug-preview"
 
     /// Validates and assembles the create-form values into the JSON object
     /// string `remote.create` expects as `paramsJSON`. Fields are checked in

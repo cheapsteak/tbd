@@ -135,9 +135,9 @@ struct WorktreeRowView: View {
                     highlightDefaultProfile: newChildMenu.isTriggerHovered,
                     onClose: { newChildMenu.closeNow() },
                     // The picker closes itself first (see its
-                    // `startRemoteSession`), so this only has to present the
-                    // sheet — same division as `RepoSectionView`.
-                    onStartRemoteSession: { remoteCreateSheetProvider = $0 }
+                    // `startRemoteSession`), so this only has to create or
+                    // present the sheet — same division as `RepoSectionView`.
+                    onStartRemoteSession: { startRemoteSession(with: $0) }
                 )
                 .environmentObject(appState)
                 .background(.ultraThickMaterial)
@@ -166,10 +166,40 @@ struct WorktreeRowView: View {
         RemoteCreateSheet(
             provider: provider.config,
             describe: provider.describe,
-            repoPrefill: RemoteCreateFormLogic.repoPrefill(
-                remoteURL: appState.repos.first(where: { $0.id == worktree.repoID })?.remoteURL),
+            repoPrefill: RemoteCreateFormLogic.repoPrefill(remoteURL: owningRepo?.remoteURL),
+            repoDefaults: owningRepo?.remoteCreateDefaults ?? [:],
             parentWorktreeID: worktree.id
         )
+    }
+
+    /// The repo this row's worktree belongs to — reached through `appState`
+    /// because a row is handed a `Worktree`, not a `Repo`.
+    private var owningRepo: Repo? {
+        appState.repos.first(where: { $0.id == worktree.repoID })
+    }
+
+    /// The nested `+`'s remote-lane row: same one-click-or-form decision as
+    /// the repo header's (`RepoSectionView.startRemoteSession(with:)`), plus
+    /// the parent this row stands for. Both `+` buttons must behave
+    /// identically here — the only difference is where the lane nests.
+    private func startRemoteSession(with provider: RemoteProviderStatus) {
+        let repo = owningRepo
+        let launch = RemoteCreateFormLogic.launch(
+            describe: provider.describe,
+            repoPrefill: RemoteCreateFormLogic.repoPrefill(remoteURL: repo?.remoteURL),
+            repoDefaults: repo?.remoteCreateDefaults ?? [:],
+            globalDefaults: appState.globalRemoteCreateDefaults,
+            generatedSlug: NameGenerator.generate())
+        switch launch {
+        case .createNow(let paramsJSON):
+            Task {
+                await appState.createRemoteSession(
+                    provider: provider.config.name, paramsJSON: paramsJSON,
+                    parentWorktreeID: worktree.id)
+            }
+        case .openForm:
+            remoteCreateSheetProvider = provider
+        }
     }
 
     /// Hover-only pin toggle in the gutter left of the row's content — the fast
