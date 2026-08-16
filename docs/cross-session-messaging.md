@@ -87,6 +87,16 @@ long ago it started. **The row does not carry a working directory** — the
 tmux pane is the field that ties a row to a specific terminal, and the
 one to reach for whenever the name is not enough.
 
+The tmux field is there only for a session running inside tmux, which
+every TBD session is. A plain-terminal `claude` started outside tmux, and
+rows of other kinds (`cloud`, remote control), carry no tmux coordinates,
+and the pane matching described below does not reach them.
+
+The row layout above, and the not-found refusal in
+[When a name is not reachable](#when-a-name-is-not-reachable), were read
+off CLI 2.1.233. The wording is Claude Code's rather than TBD's, so treat
+the field set as the durable part and the exact text as version-bound.
+
 **Address a peer you have not messaged before as `name [ref]`.** A bare
 name may be refused even when exactly one row answers to it, and nothing
 is delivered when it is:
@@ -139,8 +149,8 @@ carries the working-directory slug instead. Reading the refusal as a
 death notice — and giving up on a peer that is sitting there working —
 is the mistake to avoid.
 
-Find the row by its tmux pane instead of by its name. Every listing row
-prints its pane as `tmux <server>:<window>.<pane>`, and TBD prints the
+Find the row by its tmux pane instead of by its name. Every TBD-spawned
+row prints its pane as `tmux <server>:<window>.<pane>`, and TBD prints the
 same coordinates from its own side:
 
 ```sh
