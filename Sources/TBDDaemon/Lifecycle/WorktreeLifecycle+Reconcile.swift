@@ -42,6 +42,21 @@ extension WorktreeLifecycle {
         let baseTip = tips["origin/\(repo.defaultBranch)"]
         await conflictSweepCache.retain(repoID: repoID, worktreeIDs: Set(worktrees.map(\.id)))
 
+        // §13's "commits unchanged across cycles" rides along on the map that
+        // was just resolved: the sweep already knows every branch tip, so
+        // remembering when each one first arrived costs one actor hop and no
+        // subprocess. A tip that keeps arriving unchanged keeps its original
+        // stamp. Deliberately no working-tree diff fact — answering that half
+        // would mean a `git status` per worktree per sweep, and an
+        // unestablished fact is reported as nil rather than as "unchanged".
+        let observedAt = now()
+        await branchTipTracker.retain(repoID: repoID, worktreeIDs: Set(worktrees.map(\.id)))
+        for wt in worktrees {
+            guard let branchTip = tips[wt.branch] else { continue }
+            await branchTipTracker.record(
+                repoID: repoID, worktreeID: wt.id, branchTip: branchTip, at: observedAt)
+        }
+
         await withTaskGroup(of: Void.self) { group in
             for wt in worktrees {
                 group.addTask {

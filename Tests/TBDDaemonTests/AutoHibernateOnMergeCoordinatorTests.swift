@@ -26,7 +26,9 @@ struct AutoHibernateOnMergeCoordinatorTests {
         sessionID: String? = "sess-1",
         kind: TerminalKind? = .claude,
         status: WorktreeStatus = .active,
-        logPath: String? = nil
+        logPath: String? = nil,
+        activityObservedAt: Date? = nil,
+        inputTracker: InputActivityTracker? = nil
     ) async throws -> (AutoHibernateOnMergeCoordinator, TBDDatabase, wtID: UUID, terminalID: UUID) {
         let db = try TBDDatabase(inMemory: true)
         let subs = StateSubscriptionManager()
@@ -45,7 +47,15 @@ struct AutoHibernateOnMergeCoordinatorTests {
             worktreeID: wt.id, tmuxWindowID: "@0", tmuxPaneID: "%0",
             label: "claude", claudeSessionID: sessionID, kind: kind)
         if activityState != .unknown {
-            try await db.terminals.setActivityState(id: terminal.id, activityState: activityState)
+            try await db.terminals.setActivityState(
+                id: terminal.id, activityState: activityState, source: .derived,
+                observedAt: activityObservedAt ?? Date())
+        }
+        if let inputTracker {
+            // The daemon wires the input router's shared tracker into the
+            // coordinator post-construction; tests do the same so keystrokes
+            // can be driven through the merge path.
+            await hibernation.setInputActivity(inputTracker)
         }
         if keepWarm {
             try await db.terminals.setKeepWarm(id: terminal.id, keepWarm: true)
@@ -187,7 +197,7 @@ struct AutoHibernateOnMergeCoordinatorTests {
         let terminal2 = try await db.terminals.create(
             worktreeID: wtID, tmuxWindowID: "@1", tmuxPaneID: "%1",
             label: "claude2", claudeSessionID: "sess-2", kind: .claude)
-        try await db.terminals.setActivityState(id: terminal2.id, activityState: .idle)
+        try await db.terminals.setActivityState(id: terminal2.id, activityState: .idle, source: .derived)
 
         await coord.handleMergedTransition(worktreeID: wtID, prNumber: 11)
 
@@ -205,6 +215,119 @@ struct AutoHibernateOnMergeCoordinatorTests {
         #expect(notifications.first?.type == .taskComplete)
         #expect(notifications.first?.message?.contains("2 sessions") == true)
         #expect(notifications.first?.message?.contains("#11") == true)
+    }
+
+    // MARK: - Pending typed input (the input veto) on the MERGE path
+    //
+    // `TmuxManager(dryRun: true)` has no `dryRunCapturePane`, so the backup TUI
+    // scrape in `performHibernate` reads an empty pane and never fires: what
+    // these four tests exercise is the gate rail alone. Merge-park runs on the
+    // daemon's clock now, so this fires unattended — and a park that eats a
+    // half-composed prompt is not undone by reverting a commit.
+
+    /// The at-rest instant these tests pin the terminal's observation to.
+    private static let atRest = Date(timeIntervalSince1970: 1_700_000_000)
+
+    /// A tracker whose recorded input lands `after` seconds from `atRest`.
+    private func tracker(secondsAfterAtRest after: TimeInterval) -> InputActivityTracker {
+        InputActivityTracker(now: { Self.atRest.addingTimeInterval(after) })
+    }
+
+    @Test func vetoEnabledDoesNotParkSessionWithTypedInput() async throws {
+        // Typed into a minute AFTER it came to rest: the keystrokes never went
+        // through a turn, so they are still unsent. Armed merge → no park.
+        let input = tracker(secondsAfterAtRest: 60)
+        let (coord, db, wtID, terminalID) = try await makeDeps(
+            activityObservedAt: Self.atRest, inputTracker: input)
+        input.recordInput(paneID: "%0")
+        try await db.config.setHibernateInputVeto(enabled: true)
+        try await db.worktrees.setAutoHibernateOnMerge(id: wtID, value: true)
+
+        await coord.handleMergedTransition(worktreeID: wtID, prNumber: 20)
+
+        #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt == nil)
+        // Nothing parked → no summary notification either.
+        #expect(try await db.notifications.unread(worktreeID: wtID).isEmpty)
+    }
+
+    @Test func vetoEnabledStillParksSessionWithNoPendingInput() async throws {
+        // Same flag, input recorded BEFORE the at-rest observation — i.e. it
+        // was submitted and the turn that consumed it is what returned the
+        // session to rest. Parks exactly as it does today.
+        let input = tracker(secondsAfterAtRest: -600)
+        let (coord, db, wtID, terminalID) = try await makeDeps(
+            activityObservedAt: Self.atRest, inputTracker: input)
+        input.recordInput(paneID: "%0")
+        try await db.config.setHibernateInputVeto(enabled: true)
+        try await db.worktrees.setAutoHibernateOnMerge(id: wtID, value: true)
+
+        await coord.handleMergedTransition(worktreeID: wtID, prNumber: 21)
+
+        let after = try await db.terminals.get(id: terminalID)
+        #expect(after?.hibernatedAt != nil)
+        #expect(after?.hibernateReason == .merged)
+    }
+
+    @Test func vetoDisabledParksDespiteTypedInput() async throws {
+        // The flag's OFF branch, with the exact inputs that block above. This
+        // is today's behavior, and — since the column defaults to false — what
+        // every install that has not opted into the soak still gets.
+        let input = tracker(secondsAfterAtRest: 60)
+        let (coord, db, wtID, terminalID) = try await makeDeps(
+            activityObservedAt: Self.atRest, inputTracker: input)
+        input.recordInput(paneID: "%0")
+        try await db.config.setHibernateInputVeto(enabled: false)
+        try await db.worktrees.setAutoHibernateOnMerge(id: wtID, value: true)
+
+        await coord.handleMergedTransition(worktreeID: wtID, prNumber: 22)
+
+        let after = try await db.terminals.get(id: terminalID)
+        #expect(after?.hibernatedAt != nil)
+        #expect(after?.hibernateReason == .merged)
+    }
+
+    @Test func vetoDisabledParksSessionWithNoPendingInput() async throws {
+        // The other half of the OFF branch: no recorded input, flag off. The
+        // wiring must not have changed the ordinary merge-park at all.
+        let (coord, db, wtID, terminalID) = try await makeDeps(activityObservedAt: Self.atRest)
+        try await db.config.setHibernateInputVeto(enabled: false)
+        try await db.worktrees.setAutoHibernateOnMerge(id: wtID, value: true)
+
+        await coord.handleMergedTransition(worktreeID: wtID, prNumber: 23)
+
+        let after = try await db.terminals.get(id: terminalID)
+        #expect(after?.hibernatedAt != nil)
+        #expect(after?.hibernateReason == .merged)
+    }
+
+    @Test func vetoEnabledFailsClosedWhenNoActivityObservationExists() async throws {
+        // `.unknown` with no observation stamp (a row written before the
+        // provenance columns) plus recorded input: nothing proves the input was
+        // ever consumed, so the park is refused rather than guessed.
+        let input = tracker(secondsAfterAtRest: 0)
+        let (coord, db, wtID, terminalID) = try await makeDeps(
+            activityState: .unknown, inputTracker: input)
+        input.recordInput(paneID: "%0")
+        try await db.config.setHibernateInputVeto(enabled: true)
+        try await db.worktrees.setAutoHibernateOnMerge(id: wtID, value: true)
+        #expect(try await db.terminals.get(id: terminalID)?.activityStateObservedAt == nil)
+
+        await coord.handleMergedTransition(worktreeID: wtID, prNumber: 24)
+
+        #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt == nil)
+    }
+
+    @Test func hardRailStillBlocksWithVetoEnabledAndNoPendingInput() async throws {
+        // The rails the merge path already had are untouched by the new arm:
+        // keep-warm refuses even with the veto on and nothing typed.
+        let (coord, db, wtID, terminalID) = try await makeDeps(
+            keepWarm: true, activityObservedAt: Self.atRest)
+        try await db.config.setHibernateInputVeto(enabled: true)
+        try await db.worktrees.setAutoHibernateOnMerge(id: wtID, value: true)
+
+        await coord.handleMergedTransition(worktreeID: wtID, prNumber: 25)
+
+        #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt == nil)
     }
 
     // MARK: - The rail's own actuation record
@@ -228,7 +351,7 @@ struct AutoHibernateOnMergeCoordinatorTests {
         let keptWarm = try await db.terminals.create(
             worktreeID: wtID, tmuxWindowID: "@1", tmuxPaneID: "%1",
             label: "claude2", claudeSessionID: "sess-2", kind: .claude)
-        try await db.terminals.setActivityState(id: keptWarm.id, activityState: .idle)
+        try await db.terminals.setActivityState(id: keptWarm.id, activityState: .idle, source: .derived)
         try await db.terminals.setKeepWarm(id: keptWarm.id, keepWarm: true)
 
         await coord.handleMergedTransition(worktreeID: wtID, prNumber: 12)

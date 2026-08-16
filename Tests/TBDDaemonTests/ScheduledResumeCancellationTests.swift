@@ -102,7 +102,7 @@ import TestSupport
         let hibTerminal = try await db.terminals.create(
             worktreeID: worktreeID, tmuxWindowID: "@2", tmuxPaneID: "%2",
             claudeSessionID: "sess-hib", kind: .claude)
-        try await db.terminals.setActivityState(id: hibTerminal.id, activityState: .idle)
+        try await db.terminals.setActivityState(id: hibTerminal.id, activityState: .idle, source: .derived)
         _ = try await db.scheduledResumes.insertPending(ScheduledResume(
             terminalID: hibTerminal.id, worktreeID: worktreeID,
             resetsAt: Date().addingTimeInterval(3600),

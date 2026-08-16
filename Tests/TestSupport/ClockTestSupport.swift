@@ -40,7 +40,7 @@ public extension Trait where Self == TimeLimitTrait {
     /// `Tests/TBDDaemonTests/ControlModeTestSupport.swift`). Clock-driven
     /// suites really do consume the latter — `AttachRPCOrchestrationTests` and
     /// `PaneRepairCoordinatorTests` are both `.clockDriven, .serialized` and
-    /// between them hold 48 `waitFor` call sites — so the two values race and
+    /// between them hold 44 `waitFor` call sites — so the two values race and
     /// must be derived together.
     ///
     /// The invariant is **not** "every chained wait in a test fits inside this
@@ -91,9 +91,11 @@ public extension Trait where Self == TimeLimitTrait {
     ///   with nothing behind it to inherit the run, so at most one 45 s guard
     ///   elapses in any single run and 270 s describes a run that cannot
     ///   happen (see "The event-driven alternative" below).
-    /// - In `PaneRepairCoordinatorTests`, **9 of 13** tests have a worst case
+    /// - In `PaneRepairCoordinatorTests`, **6 of 13** tests have a worst case
     ///   above 240 s (counting `waitFor` at 90 s and each clock wait at 45 s),
-    ///   not just the one 6-deep chain (540 s) usually cited.
+    ///   not just the one 6-deep chain (540 s) usually cited. Four of the sites
+    ///   that used to push that count to 9 of 13 are now single `advanceUntil`
+    ///   guards instead of an advance plus a 90 s `waitFor`.
     ///
     /// **If these start tripping, shorten the chain — do not raise this limit
     /// again.** `Tests/CLAUDE.md` already requires advance chains to stay in
@@ -123,6 +125,28 @@ public extension Trait where Self == TimeLimitTrait {
 
 // MARK: - TestClock
 
+/// A clock-driven wait that never saw its effect, rendered onto the **primary**
+/// failure line.
+///
+/// Thrown-`Error` shape on purpose (`Tests/CLAUDE.md` assertion-hygiene rule 4):
+/// only `Issue.record(_: some Error)` survives into a CI summary — both
+/// `#expect(cond, "message")` and `Issue.record(String)` demote the text to a
+/// trailing `↳` line the summary drops. `advances` is the observed half: zero
+/// says the code under test never armed a sleep at all, while a large count says
+/// it kept re-arming and never produced the effect. Those are different bugs.
+public struct ClockAdvanceTimeout: Error, CustomStringConvertible {
+    public let what: String
+    public let advances: Int
+    public let timeout: Swift.Duration
+
+    public var description: String {
+        """
+        timed out waiting for \(what) — observed \(advances) clock advance(s) \
+        over up to \(timeout) of real time
+        """
+    }
+}
+
 public extension TestClock {
     /// Waits until the code under test has actually registered a sleep on this
     /// clock, then advances virtual time by `duration`.
@@ -147,6 +171,105 @@ public extension TestClock {
                               sourceLocation: SourceLocation = #_sourceLocation) async {
         await waitForSuspension(sourceLocation: sourceLocation)
         await advance(by: duration)
+    }
+
+    /// Advances virtual time in `interval` steps for as long as the code under
+    /// test keeps **re-arming** a sleep, until `condition` holds. Returns
+    /// whether it held.
+    ///
+    /// ## Why one advance is not enough for a poll-and-re-arm loop
+    ///
+    /// `advanceWhenSuspended` proves exactly one thing: a sleeper was armed at
+    /// the instant it advanced. It cannot prove that the loop under test
+    /// *observes* the state the test just created on the probe that follows
+    /// that advance. Where the code under test is a **poll-and-re-arm loop** —
+    /// probe some external state, and if it is not yet the state we are waiting
+    /// for, arm another sleep — a test that grants exactly one advance stakes
+    /// the whole run on a single probe. Any transient that makes that one probe
+    /// read "keep waiting" re-arms a sleep that nothing will ever advance
+    /// again, and the test does not fail: it **hangs** until its `.timeLimit`,
+    /// with no assertion fired, a diagnostic that names the symptom rather than
+    /// the cause, and minutes of CI burned.
+    ///
+    /// That failure is field-observed, not hypothetical.
+    /// `PaneRepairCoordinatorTests`' broken-pipe test drove the repair's
+    /// reader-wait — a `poll(2)`-and-re-arm loop — with a single advance after
+    /// closing the pipe's read end, and wedged in CI for the full 240 s limit
+    /// with only the pause written, the sink still `repairing` and the repair
+    /// still in flight: the exact fingerprint of a probe that read "keep
+    /// waiting" once and then never got another advance. It survived a
+    /// `.timeLimit` raise from 60 s to 240 s, because the wait was not slow —
+    /// it was over.
+    ///
+    /// ## What this does instead
+    ///
+    /// Each step is gated on the code under test actually being armed, so no
+    /// advance is spent on an empty clock and virtual time never runs ahead of
+    /// a sleeper that has not arrived yet: an armed clock is advanced, an
+    /// unarmed one is stepped aside for. The loop ends the moment `condition`
+    /// holds. **The assertion is not weakened** — code that never produces the
+    /// effect still fails, and now inside this helper's own deadline with a
+    /// named diagnostic on the primary failure line, rather than as an
+    /// unattributed suite timeout.
+    ///
+    /// ## When NOT to use it
+    ///
+    /// Where the **number** of advances is itself the property under test.
+    /// `PaneRepairCoordinatorTests.readerWaitEscalatesToTheSlowInterval` pins
+    /// the pacing-escalation boundary by advancing an exact number of times and
+    /// asserting nothing happened; this helper deliberately advances as often
+    /// as the code re-arms, which would dissolve that proof. Use the explicit
+    /// `advanceWhenSuspended` pair there.
+    ///
+    /// - Parameters:
+    ///   - what: names the effect being waited for, for the timeout diagnostic.
+    ///   - interval: virtual time per step — normally the pacing the code under
+    ///     test sleeps on, so one step wakes it once.
+    ///   - timeout: real-time hang guard, same family and same 45 s value as
+    ///     `waitForSuspension` (see its note for the derivation). Count one call
+    ///     to this helper as one guard when tallying a test's worst case; it
+    ///     *replaces* an `advanceWhenSuspended` (45 s) plus the `waitFor` (90 s)
+    ///     that used to follow it, so converting a site shortens the chain.
+    ///   - pollInterval: how long to step aside when nothing is armed yet. Each
+    ///     probe costs a `megaYield`, so lazier is better — same reasoning as
+    ///     `waitForSuspension`.
+    @discardableResult
+    func advanceUntil(
+        _ what: String,
+        by interval: Duration,
+        timeout: Swift.Duration = .seconds(45),
+        pollInterval: Swift.Duration = .milliseconds(25),
+        sourceLocation: SourceLocation = #_sourceLocation,
+        _ condition: @Sendable () async -> Bool
+    ) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        var advances = 0
+        repeat {
+            if await condition() { return true }
+            if await isArmed() {
+                await advance(by: interval)
+                advances += 1
+            } else {
+                try? await Task.sleep(for: pollInterval)
+            }
+        } while ContinuousClock.now < deadline
+        if await condition() { return true }
+        Issue.record(
+            ClockAdvanceTimeout(what: what, advances: advances, timeout: timeout),
+            sourceLocation: sourceLocation)
+        return false
+    }
+
+    /// Whether a task is suspended on this clock right now — the quiet form of
+    /// `waitForSuspension`'s probe, for callers that loop on it. Same inverted
+    /// detection: `checkSuspension()` throws when a sleeper *is* registered.
+    private func isArmed() async -> Bool {
+        do {
+            try await checkSuspension()
+            return false
+        } catch {
+            return true
+        }
     }
 
     /// Waits until at least one task is suspended on this clock.

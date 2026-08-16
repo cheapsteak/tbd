@@ -152,6 +152,68 @@ struct TerminalSessionEventHandlerTests {
         #expect(updated?.transcriptPath == "/abs/s1.jsonl")
     }
 
+    /// A `/clear`, a resume after an in-place profile swap, and a hand relaunch
+    /// all arrive here as one event: a NEW session context in this pane. A
+    /// prompt recorded against the previous one died with it.
+    ///
+    /// Nothing else retracts it. `SessionStateResolver`'s rung 4 keeps a
+    /// standing `promptOnScreen` live while the transcript has not grown past
+    /// it, and after a `/clear` the new `transcriptPath` points at a file Claude
+    /// Code creates lazily — so the growth fact is absent and "we could not look
+    /// is not evidence it went away" pins the dead prompt in place. The
+    /// overlay's own `tbd terminal-activity idle` does not save it either: this
+    /// row already reads idle, and `handleTerminalActivityEvent` returns early
+    /// on an unchanged state without rewriting provenance.
+    @Test("SessionStart retracts a wait reason recorded against the previous session")
+    func sessionStartRetractsAStandingWaitReason() async throws {
+        let (terminal, _) = try await makeTerminal(initialSession: "old-id")
+        let idleAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let promptAt = idleAt.addingTimeInterval(60)
+        try await db.terminals.setActivityState(
+            id: terminal.id, activityState: .idle, source: .hookEvent("Stop"),
+            observedAt: idleAt)
+        try await db.terminals.recordAwaitingInputReason(
+            id: terminal.id,
+            reason: AwaitingInputReason(
+                message: "Claude needs your permission to use Bash",
+                hookEventName: "Notification",
+                notificationType: "permission_prompt"),
+            observedAt: promptAt)
+
+        let before = try #require(try await db.terminals.get(id: terminal.id))
+        guard case .awaitingInput = SessionStateResolver()
+            .resolve(SessionStateFacts(terminal: before)).value else {
+            Issue.record("precondition: the prompt should read as live before the SessionStart")
+            return
+        }
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "cleared-id",
+                transcriptPath: "/Users/me/.claude/projects/-x/cleared-id.jsonl",
+                source: "clear"
+            )
+        ))
+        #expect(response.success)
+
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(after.awaitingInputReason == nil)
+        #expect(after.awaitingInputObservedAt == nil)
+        // The composed answer no longer reports a wait that ended.
+        let state = SessionStateResolver().resolve(SessionStateFacts(terminal: after))
+        #expect(state.value == .idle)
+
+        // And the retraction did NOT reach for `setActivityState`: this event
+        // says a session exists, not what it is doing, and `activityState` is
+        // what `HibernationGate.blockingRail` gates on. All three activity
+        // columns survive unchanged, provenance included.
+        #expect(after.activityState == .idle)
+        #expect(after.activityStateSource == .hookEvent("Stop"))
+        #expect(after.activityStateObservedAt == idleAt)
+    }
+
     @Test("unknown terminalID is a soft no-op (success, no error)")
     func unknownTerminalSoftSuccess() async throws {
         let request = try RPCRequest(

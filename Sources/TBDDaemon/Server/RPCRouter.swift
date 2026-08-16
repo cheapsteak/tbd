@@ -126,13 +126,26 @@ public final class RPCRouter: Sendable {
             title: title)
     }
 
+    /// Runaway-detection counters (design §13): turns appended per session and
+    /// hook events received per session, over one observation window. The
+    /// hook-driven handlers increment it; `session.states` samples it. An actor
+    /// reference held here so the whole daemon keeps one set of books.
+    ///
+    /// It reports numbers and nothing acts on them — see the actor's doc
+    /// comment for why no threshold lives in compiled TBD.
+    let sessionCounters = SessionCountersTracker()
     /// Single-flights concurrent `pr.list` RPCs so a poll storm collapses into
     /// one git enumeration + gh fetch instead of N overlapping ones.
     let prListCoordinator = PRListCoordinator()
     /// TTL cache for the per-worktree branch facts PR matching needs (upstream
     /// and `@{push}`), so `pr.list` stops spawning git subprocesses per worktree
     /// on every poll — and so the poll and an on-select refresh agree.
-    let branchTrackingCache = BranchTrackingCache()
+    let branchTrackingCache: BranchTrackingCache
+    /// The daemon-side timer that drives `runPollPass`, wired at the end of
+    /// `init`. The pass itself stays here because `pr.refresh` and the timer
+    /// must never enumerate differently, and the router keeps the timer because
+    /// `Daemon.start()` reaches it through the router to start the loop.
+    public let prPoller: PRPoller
     /// Coalesces fetch operations per repo using a TTL cache + singleflight.
     let fetchCache = FetchCache()
     /// Binding policy for the multi-PR-per-worktree bindings — repo validation,
@@ -159,6 +172,13 @@ public final class RPCRouter: Sendable {
     let decoder = JSONDecoder()
     let encoder = JSONEncoder()
 
+    /// Date seam for facts the router *persists*. A stored observed-at is data,
+    /// not behavior, so this is the `now: @Sendable () -> Date` seam rather
+    /// than a `Clock` — tests pin it and assert the exact stamp instead of a
+    /// tolerance window. Only handlers that write an observation may read it;
+    /// it is not a general-purpose "what time is it".
+    let now: @Sendable () -> Date
+
     public init(
         db: TBDDatabase,
         lifecycle: WorktreeLifecycle,
@@ -178,8 +198,10 @@ public final class RPCRouter: Sendable {
         codexExecutableResolver: (@Sendable () throws -> String)? = nil,
         codexHomeEnsurer: (@Sendable () throws -> URL)? = nil,
         prBindingRepoResolver: (@Sendable (UUID) async -> (owner: String, name: String)?)? = nil,
+        now: @escaping @Sendable () -> Date = { Date() },
         actuationLog: ActuationLog
     ) {
+        self.now = now
         self.actuationLog = actuationLog
         self.db = db
         self.lifecycle = lifecycle
@@ -188,6 +210,12 @@ public final class RPCRouter: Sendable {
         self.startTime = startTime
         self.subscriptions = subscriptions
         self.prManager = prManager
+        // One cache instance, shared by the on-select refresh path and the
+        // poller's enumeration: a poll and a refresh judging the same worktree
+        // against different candidate lists is what the cache exists to stop.
+        let branchCache = BranchTrackingCache()
+        self.branchTrackingCache = branchCache
+        self.prPoller = PRPoller()
         let resolvedModelProfileResolver = modelProfileResolver ?? ModelProfileResolver(
             profiles: db.modelProfiles,
             repos: db.repos,
@@ -231,6 +259,14 @@ public final class RPCRouter: Sendable {
             }
             return try CodexHomeManager().ensureProfilePlugin()
         }
+        // The poller is a timer and nothing else; the pass it drives is
+        // `runPollPass`, which lives here because `pr.refresh` and the on-select
+        // path share its enumeration helpers. Wired at the end of `init` rather
+        // than handed to the initializer because the closure needs the fully
+        // formed router. `weak`, so a discarded router (every test that builds
+        // one) is not kept alive by its own poller; a pass on a deallocated
+        // router is a no-op, which is the honest answer.
+        prPoller.installPass { [weak self] in try await self?.runPollPass() }
     }
 
     /// Handle a raw JSON Data blob representing an RPCRequest.
@@ -318,6 +354,10 @@ public final class RPCRouter: Sendable {
                 return try await handleTerminalSessionEvent(request.paramsData)
             case RPCMethod.terminalActivityEvent:
                 return try await handleTerminalActivityEvent(request.paramsData)
+            case RPCMethod.terminalNotificationEvent:
+                return try await handleTerminalNotificationEvent(request.paramsData)
+            case RPCMethod.sessionStates:
+                return try await handleSessionStates(request.paramsData)
             case RPCMethod.notify:
                 return try await handleNotify(request.paramsData)
             case RPCMethod.terminalFocus:
@@ -606,16 +646,35 @@ public final class RPCRouter: Sendable {
         // await it and share the snapshot instead of each starting their own
         // git enumeration + gh fetch.
         let result = try await prListCoordinator.run { [self] in
-            try await computePRList()
+            await computePRList()
         }
         return try RPCResponse(result: result)
     }
 
-    /// Enumerate active worktrees, enrich each with its (cached) upstream branch,
-    /// refresh PR status, and return the snapshot. Throws on a DB enumeration
-    /// failure so the app sees an RPC error instead of a silently-stale snapshot;
-    /// `PRListCoordinator` propagates the error to every concurrent caller.
-    private func computePRList() async throws -> PRListResult {
+    /// Return the daemon's PR snapshot. Serving only — this handler never
+    /// drives a fetch.
+    ///
+    /// `PRPoller` owns the clock, and it owns it alone. That is not tidiness:
+    /// the merged-PR transition is edge-triggered on a cache change, so
+    /// whichever path updates the cache consumes the edge. A second periodic
+    /// driver here would swallow edges the first one's consumers (auto-archive,
+    /// auto-hibernate-on-merge) are waiting for, and they would silently never
+    /// fire.
+    private func computePRList() async -> PRListResult {
+        PRListResult(statuses: await prManager.allStatuses(),
+                     observations: await prManager.allObservations())
+    }
+
+    /// One poll pass: enumerate active worktrees, enrich each with its (cached)
+    /// branch facts, refresh PR status, and settle every binding that pass
+    /// implies. Throws on a DB enumeration failure — `PRPoller.tick` logs it and
+    /// waits for the next tick rather than tearing its loop down.
+    ///
+    /// Lives here rather than in `PRPoller` because `pr.refresh` and the
+    /// on-select path share `pollWorkingDirectory` and `branchFacts` with it: an
+    /// enumeration that drifted between the timer and a user gesture would let a
+    /// worktree be polled under one candidate list and healed under another.
+    func runPollPass() async throws {
         // Open the pass BEFORE anything can observe a merge. One pass raises
         // both merge edges for a worktree whose already-merged PR is discovered
         // with nothing bound yet — `fetchAll` fires the un-bound fallback, then
@@ -646,9 +705,14 @@ public final class RPCRouter: Sendable {
         }
         await seedProvenanceBindings(worktrees)
         await refreshBindingStatuses(polled: infos, repoPath: infos.first?.worktreePath)
-        // Prune at the END so we never drop an entry this pass just populated.
+        // Prune at the END so we never drop an entry this pass just populated,
+        // and **unconditionally** — including when the enumeration came back
+        // empty, which is the pass that has the most to prune.
         await branchTrackingCache.retain(active: infos.map { (worktreePath: $0.worktreePath, branch: $0.branch) })
-        return PRListResult(statuses: await prManager.allStatuses())
+        // Same contract, same reason, for the PR facts themselves: the outcome
+        // of an attempt on a worktree that has left the fleet is not a fact
+        // anyone can act on, and every `pr.list` payload would carry it.
+        await prManager.retain(active: Set(infos.map(\.id)))
     }
 
     /// Bind the PR a worktree was *created from* — `Worktree.prNumber` — so a
@@ -715,7 +779,11 @@ public final class RPCRouter: Sendable {
         refreshed.reserveCapacity(bindings.count)
         for binding in bindings {
             let updated = Self.folding(binding, onto: observations[binding.id])
-            if updated != binding {
+            // `sameValue`, never `!=`: a fresh reading of an unchanged PR
+            // differs only in its `observedAt`, and letting a freshness stamp
+            // decide "changed" would make an idle poll write every binding row
+            // every tick.
+            if !updated.sameValue(as: binding) {
                 try? await db.prBindings.updateObservation(
                     bindingID: binding.id, status: updated.status,
                     headBranch: updated.headBranch, baseRef: updated.baseRef)
@@ -731,7 +799,7 @@ public final class RPCRouter: Sendable {
         // SELECT per worktree that actually has bindings.
         for update in Self.worktreePRStatusUpdates(refreshed) {
             guard let current = try? await db.worktrees.get(id: update.worktreeID),
-                  current.prStatus != update.status else { continue }
+                  current.prStatus?.sameValue(as: update.status) != true else { continue }
             try? await db.worktrees.setPRStatus(id: update.worktreeID, status: update.status)
         }
 
@@ -942,7 +1010,9 @@ public final class RPCRouter: Sendable {
         // an unknown id, or a remote row whose repo is gone — gets "nothing to
         // report".
         guard let wt = try await db.worktrees.get(id: params.worktreeID) else {
-            return try RPCResponse(result: PRRefreshResult(status: nil))
+            // No observation: no attempt was made, which is a third thing again
+            // from `.none` and `.undetermined` and must not be dressed as either.
+            return try RPCResponse(result: PRRefreshResult(status: nil, observation: nil))
         }
         var repo: Repo?
         if let repoID = wt.repoID {
@@ -968,7 +1038,8 @@ public final class RPCRouter: Sendable {
             repoPath: workingDirectory,
             prNumber: wt.prNumber
         )
-        return try RPCResponse(result: PRRefreshResult(status: status))
+        return try RPCResponse(result: PRRefreshResult(
+            status: status, observation: await prManager.observation(for: wt.id)))
     }
 
     // MARK: - PR bindings

@@ -203,9 +203,18 @@ struct PRPollReconcileTests {
             return worktree.id
         }
 
+        /// One poll pass, driven the way the daemon drives it. `pr.list` is
+        /// serve-only — `PRPoller` owns the clock and the pass — so a test that
+        /// polled through the RPC would assert against a snapshot nothing
+        /// refreshed.
         @discardableResult
         func poll() async -> Bool {
-            await router.handle(RPCRequest(method: RPCMethod.prList)).success
+            do {
+                try await router.runPollPass()
+                return true
+            } catch {
+                return false
+            }
         }
 
         func seedBinding(_ number: Int, worktreeID: UUID, source: PRBindingSource,

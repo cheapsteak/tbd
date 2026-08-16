@@ -54,9 +54,9 @@ import Testing
 /// Two suites that consume this value ARE `.clockDriven`, so its time limit and
 /// this deadline race each other: `AttachRPCOrchestrationTests`
 /// (`Tests/TBDDaemonTests/AttachRPCTests.swift`, 13 `waitFor` call sites) and
-/// `PaneRepairCoordinatorTests` (35 call sites).
+/// `PaneRepairCoordinatorTests` (31 call sites).
 ///
-/// All 48 of those call sites are **unguarded**. They read
+/// All 44 of those call sites are **unguarded**. They read
 /// `try await waitFor(…)`, but `waitFor` is `@discardableResult` and does not
 /// throw on timeout — it records an `Issue` and returns `false`, and the `try`
 /// covers only the inner `Task.sleep`. Execution therefore continues past a
@@ -84,7 +84,7 @@ import Testing
 ///   must afford both waits" property the old pairing reasoned about)
 ///
 /// The margin past that is thin, and the 6-deep chain is not the only case that
-/// overruns: counting `waitFor` at 90 s and each clock wait at 45 s, **9 of the
+/// overruns: counting `waitFor` at 90 s and each clock wait at 45 s, **6 of the
 /// 13** `PaneRepairCoordinatorTests` have a worst case above 240 s (the 6-deep
 /// one needs 540 s). All of them are consistent with the invariant above — only
 /// an already-failing test walks a full chain of timeouts, and the first

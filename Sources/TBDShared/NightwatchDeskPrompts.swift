@@ -51,7 +51,7 @@ public enum NightwatchDeskPrompts {
         • Single-driver rule: Before actioning any atlantis apply/merge, claim the item in queue/claims
         • Escalations in batches ≤4: Each question with exact PR#/command/recommendation
         • Capacity check: Before nudging others, verify profile usage <80% weekly cap
-        • Context ceiling: At ~600k tokens, run the handoff relay (below) — do NOT defer it and keep working
+        • Context ceiling: When `handoff.py --check` reports OVER, run the handoff relay (below) — do NOT defer it and keep working
         • Merging: only loop-perfect PRs authored by `zionts` qualify, and only nightwatch acts (see below)
         • NEVER trigger `/closeout` — a finished-looking worktree is an archive question for the human
 
@@ -67,11 +67,15 @@ public enum NightwatchDeskPrompts {
         **Hand off at the context ceiling — never push through it.** Nothing respawns this desk
         by itself: a machine-local babysitter daemon may be watching worker panes, but it does
         not restart the judge, and the only thing that spawns your successor is you running
-        `handoff.py --act`. It does work — run it, don't "flag for respawn". When this session
-        passes ~600k tokens it starts truncating its own shift, so use the relay:
+        `handoff.py --act`. It does work — run it, don't "flag for respawn". Past its context
+        ceiling this session starts truncating its own shift, and the ceiling is a fraction of
+        the context window THIS session reported — a different number on a different desk, so
+        there is nothing to watch for by eye. Ask the script, and use the relay:
 
             python3 \(skillDir)/scripts/handoff.py --check
                 # exit 0 = under the ceiling · exit 10 = OVER
+                # prints the ceiling and whether it came from this session's
+                # reported window or from the fallback guess
 
             python3 \(skillDir)/scripts/handoff.py --act --notes-file <your-notes.md>
                 # writes the handoff doc and spawns a fresh successor in this worktree
@@ -230,7 +234,8 @@ public enum NightwatchDeskPrompts {
           panes, but it does not restart the judge. The relay below is what continues the
           shift, and it does work: run it rather than deferring to something that won't.
         - Check: `python3 \(skillDir)/scripts/handoff.py --check` (exit 0 = under, 10 = OVER;
-          the ceiling is 600k tokens — the script is the authority, don't eyeball it)
+          the ceiling is a fraction of the context window this session reported, so it
+          differs desk to desk — the script is the authority, don't eyeball it)
         - When OVER: write your handoff notes to a file, then
           `python3 \(skillDir)/scripts/handoff.py --act --notes-file <your-notes.md>`
           which writes the handoff doc and spawns a fresh successor in this worktree

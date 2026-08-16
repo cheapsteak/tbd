@@ -108,8 +108,47 @@ public enum HibernationGate {
     ///
     /// It still honors every hard safety rail via `blockingRail` — including
     /// keep-warm, unlike `manualHibernate` — because this is system-initiated,
-    /// not an explicit user request.
-    public static func decideForMerge(terminal: Terminal) -> Decision {
-        blockingRail(terminal: terminal) ?? .eligible
+    /// not an explicit user request. And it honors the pending-input veto on
+    /// the same terms the sweep does: a merge is not a reason to eat a
+    /// half-composed prompt, and merge-park now runs on the daemon's clock with
+    /// no app in front of it, so nobody is watching when it does.
+    ///
+    /// - Parameters:
+    ///   - terminal: the candidate.
+    ///   - inputVetoEnabled: soak flag for the input-pipeline pending-input
+    ///     veto (`config.hibernateInputVetoEnabled`). Not defaulted: a park
+    ///     path that silently forgets to arm this rail is the exact defect this
+    ///     parameter exists to prevent.
+    ///   - lastInputAt: the timestamp of the last keystroke/paste routed to
+    ///     this terminal's pane (from `InputActivityTracker`) — the same fact
+    ///     the sweep passes. `nil` means no input was recorded for the pane.
+    public static func decideForMerge(
+        terminal: Terminal,
+        inputVetoEnabled: Bool,
+        lastInputAt: Date?
+    ) -> Decision {
+        if let blocked = blockingRail(terminal: terminal) { return blocked }
+        guard inputVetoEnabled, let lastInputAt else { return .eligible }
+        // The sweep compares `lastInputAt` against its own `idleSince` marker.
+        // Merge-park has no such marker to compare against: it does not run the
+        // idle window at all, and the sweep's in-memory `idleSince` is cleared
+        // on every pass while the idle sweep's master switch is off (its
+        // default since v50), so it would read `nil` on most installs.
+        //
+        // The persisted equivalent is `activityStateObservedAt`: the moment
+        // this terminal was OBSERVED to enter the at-rest state it is in now.
+        // Input recorded at or after that moment has not been through a turn —
+        // sending it would have moved the session to `.working` and back, and
+        // the return to `.idle` would have re-stamped the observation later —
+        // so it is still sitting unsent in the composer.
+        guard let atRestSince = terminal.activityStateObservedAt else {
+            // No observation to prove the recorded input was ever consumed.
+            // Fail closed: a session that survives an armed merge-park is
+            // recoverable, typed-but-unsent input that got eaten is not.
+            return .pendingTypedInput
+        }
+        // `>=`, matching the sweep: input at exactly the at-rest instant counts
+        // as arriving after it.
+        return lastInputAt >= atRestSince ? .pendingTypedInput : .eligible
     }
 }

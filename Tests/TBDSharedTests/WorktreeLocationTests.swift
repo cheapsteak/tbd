@@ -78,7 +78,12 @@ import Foundation
             foreignHead: true,
             pinnedAt: Date(timeIntervalSince1970: 1_700_000_200),
             pinSortOrder: 2,
-            location: .remote(provider: "agentbox", sessionID: "s-1")
+            location: .remote(provider: "agentbox", sessionID: "s-1"),
+            pendingPrompt: "look at the failing check",
+            pendingPromptSubmit: true,
+            prObservation: PRObservation(
+                outcome: .undetermined(cause: "network unreachable"),
+                observedAt: Date(timeIntervalSince1970: 1_700_000_400))
         )
         let decoded = try JSONDecoder().decode(Worktree.self, from: JSONEncoder().encode(wt))
         #expect(decoded == wt)

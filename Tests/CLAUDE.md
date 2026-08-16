@@ -221,7 +221,7 @@ rate on `main` with **zero** logic assertions failing.
 `.timeLimit(.minutes(4))` = 240 s. The suite limit and the two wait deadlines
 race each other for real: `AttachRPCOrchestrationTests` and
 `PaneRepairCoordinatorTests` are both `.clockDriven` **and** consume
-`ciSafeDeadline`, across 48 `waitFor` call sites. Every one of those sites is
+`ciSafeDeadline`, across 44 `waitFor` call sites. Every one of those sites is
 unguarded — `waitFor` is `@discardableResult` and non-throwing on timeout, so
 the test continues and chained waits are real (the `try` covers only the inner
 `Task.sleep`).
@@ -247,7 +247,24 @@ are worth knowing before someone reaches for a raise.**
 **Count `advanceWhenSuspended` as a `waitForSuspension`** — it opens with one
 (`await waitForSuspension(...)`, then `advance`), so it pays the full 45 s
 guard. Grepping only for the literal `waitForSuspension(` undercounts every
-chain below, which is exactly the miscount a PR #547 reviewer made.
+chain below, which is exactly the miscount a PR #547 reviewer made. Count
+`advanceUntil` as **one** guard (45 s) too — it replaces an
+`advanceWhenSuspended` plus the `waitFor` that used to follow it, so converting
+a site takes 135 s off that test's paper worst case.
+
+**A single advance is the wrong instrument for a poll-and-re-arm loop, and the
+failure it produces is a hang, not a red.** `advanceWhenSuspended` proves a
+sleeper was armed when it advanced; it cannot prove the loop *observes* the
+state the test just created on the probe that follows. Where the code under test
+probes external state and re-arms if it is not there yet, one advance stakes the
+run on one probe, and a probe that reads "keep waiting" re-arms a sleep nothing
+will ever advance again. `PaneRepairCoordinatorTests`' broken-pipe test wedged
+in CI that way for its full 240 s limit — one write, `repairing` still set —
+and had already done so once before, on a diff that touched only
+`Sources/TBDCLI`. Drive those with `advanceUntil` (`Tests/TestSupport/ClockTestSupport.swift`),
+which advances for as long as the code keeps re-arming and fails with a named
+diagnostic carrying the advance count. Keep explicit single advances where the
+*number* of advances is the property under test.
 
 On that basis, the deepest chains in the tree are the poller tests, and their
 paper tallies do not all fit under the ceiling:
@@ -270,7 +287,7 @@ cannot happen. That is a property of these chains' *shape*, not of strictness
 alone: put a `next()` mid-chain and its 45 s becomes payable on top of whatever
 follows. Suites on the predecessor helpers have no such property at all and pay
 the full tally. And counting `waitFor` at 90 s plus
-each clock wait at 45 s, **9 of the 13** `PaneRepairCoordinatorTests` have a
+each clock wait at 45 s, **6 of the 13** `PaneRepairCoordinatorTests` have a
 worst case above 240 s — not just the 6-deep chain (540 s) usually cited. Every one of those is still consistent with
 the invariant, because only an already-failing test walks a full chain of
 timeouts and the first diagnostic is already recorded by then.

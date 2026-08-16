@@ -158,10 +158,15 @@ struct PaneRepairCoordinatorTests {
         #expect(recorder.writes.count == 1,
                 "captures+continue must not be sent while the reader is behind")
 
-        // The app catches up — the pipe becomes writable.
+        // The app catches up — the pipe becomes writable. Virtual time is
+        // driven for as long as the reader-wait keeps re-arming (see
+        // `advanceUntil`): one advance would stake the test on a single
+        // writability probe, and a probe that reads "keep waiting" re-arms a
+        // sleep nothing would ever advance again.
         drainPipe(readFD)
-        await clock.advanceWhenSuspended(by: checkInterval)
-        try await waitFor("captures+continue write") { recorder.writes.count >= 2 }
+        await clock.advanceUntil("captures+continue write", by: checkInterval) {
+            recorder.writes.count >= 2
+        }
         try #require(recorder.writes.count >= 2, "the captures+continue batch was never sent")
         #expect(recorder.writes[1] == """
             capture-pane -peqJN -S -50000 -E -1 -q -t %1
@@ -380,8 +385,9 @@ struct PaneRepairCoordinatorTests {
         // proceeds — batch 2 (captures + continue), replay behind the fence,
         // endRepair, streaming resumed. No new attach needed.
         drainPipe(readFD)
-        await clock.advanceWhenSuspended(by: slow)
-        try await waitFor("captures+continue write") { recorder.writes.count >= 2 }
+        await clock.advanceUntil("captures+continue write", by: slow) {
+            recorder.writes.count >= 2
+        }
         try #require(recorder.writes.count >= 2, "the captures+continue batch was never sent")
         #expect(recorder.writes[1].hasSuffix("refresh-client -A '%4:continue'"),
                 "the same repair must send batch 2 once the reader drains")
@@ -498,8 +504,15 @@ struct PaneRepairCoordinatorTests {
         Darwin.close(readFD)
         readClosed = true
 
-        await clock.advanceWhenSuspended(by: checkInterval)
-        try await waitFor("trailing continue write") { recorder.writes.count >= 2 }
+        // The reader-wait is a poll-and-re-arm loop, so virtual time is driven
+        // for as long as it keeps re-arming rather than exactly once: a single
+        // advance stakes the test on one `poll(2)` reading the closed read end,
+        // and a probe that reads "keep waiting" re-arms a sleep nothing would
+        // ever advance again — a 240 s hang instead of a failure. See
+        // `advanceUntil`. The contract asserted below is unchanged.
+        await clock.advanceUntil("trailing continue write", by: checkInterval) {
+            recorder.writes.count >= 2
+        }
         #expect(recorder.writes.last == "refresh-client -A '%5:continue'",
                 "a broken pipe must unpause the pane")
         #expect(!recorder.writes.contains { $0.contains("capture-pane") },
@@ -718,8 +731,9 @@ struct PaneRepairCoordinatorTests {
         // bridge threaded its clock into the coordinator it constructed.
         await clock.waitForSuspension()
         drainPipe(readFD)
-        await clock.advanceWhenSuspended(by: checkInterval)
-        try await waitFor("captures+continue write") { recorder.writes.count >= 2 }
+        await clock.advanceUntil("captures+continue write", by: checkInterval) {
+            recorder.writes.count >= 2
+        }
         await succeed(client, captureAndContinueReplies(paneID: paneID))
         try await waitFor("repair completion") {
             let stats = bridge.supervisor.fanout.flowStats(key: key)

@@ -174,7 +174,11 @@ public struct MockSeeder: Sendable {
             )
 
             if let state = tSeed.activityState {
-                try await db.terminals.setActivityState(id: terminal.id, activityState: state)
+                // Mock fixtures are composed by TBD, not observed from any
+                // machine interface — `.derived` is the honest source, and the
+                // seeded row carries it like every other.
+                try await db.terminals.setActivityState(
+                    id: terminal.id, activityState: state, source: .derived)
             }
 
             if let fixture = tSeed.transcriptFixture {

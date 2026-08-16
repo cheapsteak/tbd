@@ -184,18 +184,42 @@ knows the resolved window is Claude Code itself, and the one surface where it
 tells a third party is the statusline: its stdin JSON carries
 `context_window.context_window_size` alongside used/remaining percentages.
 
-So the denominator's source is a **statusline tee**. For every session TBD
-spawns, the per-session settings overlay installs a statusline wrapper that
-writes the stdin JSON where the daemon can read it, then execs the statusline
-the operator configured — or exits quietly when there is none. Presence is by
-construction for TBD-spawned sessions, and nothing clobbers a display slot the
-user owns, which is what makes the statusline usable as a source at all.
-Where the tee is absent or has not yet fired — an older Claude Code, a session
-TBD did not spawn — the denominator is **unknown and reported as unknown**:
-raw token counts with no percentage, never a guessed one. Anything that needs
-a number anyway assumes 200k as a labeled assumption, because 200k errs safe —
-thresholds fire early, never late. The current pane-read for context goes
-away.
+So the denominator's source is a **statusline tee**, and it is installed on
+**desk sessions only**. A desk's per-session settings overlay carries a
+statusline wrapper that writes the stdin JSON where the daemon can read it,
+then execs the statusline the operator configured — or exits quietly when
+there is none, since a wrapper that printed something of its own would be
+claiming a slot nobody gave it.
+
+The narrow scope follows from what the denominator is for and from what
+installing it costs. It exists to serve a desk's own context-recycling
+thresholds (§9), which are fractions of the session's effective window. Fleet
+agents need no such number: auto-compaction bears their survival, exactly as
+§9 says it bears a desk's. And the cost is not hypothetical — `statusLine` is
+an object-valued setting with no merge across scopes, so the highest scope
+wins outright, and TBD's per-session settings file outranks every scope an
+operator can write: the project-local file, the project file, and their user
+settings. A fleet-wide tee would therefore take over a display slot the
+operator owns in every session they open and type into. A desk is a session
+TBD configures end to end, so the same mechanism there costs nobody anything.
+Above TBD sits managed/enterprise settings, which outrank the overlay: where
+an organization sets a statusline, TBD's entry is ignored, the tee never runs,
+and the denominator stays unknown — the correct outcome, and one that needs no
+handling beyond not pretending otherwise.
+
+The ordinary case is therefore that there is no tee reading, and the design
+says so plainly: for every fleet session, and for a desk whose statusline has
+not run yet, the denominator is **unknown and reported as unknown** — raw
+token counts with no percentage, never a guessed one. Anything that needs a
+number anyway assumes 200k as a labeled assumption, because 200k errs safe —
+thresholds fire early, never late. Where the tee has fired, its captured
+payload supplies numerator and denominator together, computed by Claude Code
+at one instant from one source; a numerator taken from the transcript against a
+denominator captured earlier is an estimate and is labeled as one rather than
+presented as a single coherent fraction. The pane-read for context goes away:
+inferring context from a rendered status line is screen-scraping, it breaks
+silently whenever Claude Code rewords its display, and a `[1m]` suffix read off
+the screen reports capability rather than the window in force.
 
 **P1 — make existing work facts available overnight.** The daemon already
 calculates almost all work state. It gets pull request (PR) status for each
@@ -3102,7 +3126,9 @@ to inaction at the largest scale.
   author the account.
 - **Fleet-agent context management** — auto-compaction is fine for fleet
   sessions. No handoff templates, recycle flags, or compaction counters for
-  agents; the context fact is informational only (§2, §9). Deliberate
+  agents; the context fact is informational only (§2, §9), and for a fleet
+  session it is raw token counts with no denominator, because the statusline
+  tee that would supply one is installed on desks alone (§2). Deliberate
   recycling exists solely for the supervisor's own session (§9).
 - **A compiled model → window-size table** — refused, because the effective
   window is a session fact, not a model fact:
@@ -3114,7 +3140,8 @@ to inaction at the largest scale.
   session hides the boundary). The Models API would be authoritative but
   subscription OAuth tokens are contractually and technically scoped to
   Claude Code itself. The statusline tee (§2) is the one source that reports
-  the resolved value; wherever it is absent the design says unknown rather
+  the resolved value, and it runs on desk sessions only; everywhere else — and
+  on a desk before its first statusline fires — the design says unknown rather
   than consulting a table.
 - **Pinning the compaction window at spawn** — rejected. Claude Code clamps
   `CLAUDE_CODE_AUTO_COMPACT_WINDOW` to the model's real window silently, so a
