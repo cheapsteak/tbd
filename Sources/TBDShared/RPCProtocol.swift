@@ -226,6 +226,8 @@ public enum RPCMethod {
     public static let repoListOpenPRs = "repo.listOpenPRs"
     public static let configSetEnvOverrides       = "config.setEnvOverrides"
     public static let repoSetEnvOverrides         = "repo.setEnvOverrides"
+    public static let configSetRemoteCreateDefaults = "config.setRemoteCreateDefaults"
+    public static let repoSetRemoteCreateDefaults   = "repo.setRemoteCreateDefaults"
     public static let modelProfileSetEnvOverrides = "modelProfile.setEnvOverrides"
     public static let worktreeSetAutoArchive = "worktree.setAutoArchive"
     public static let worktreeSetAutoHibernate = "worktree.setAutoHibernate"
@@ -750,6 +752,10 @@ public struct ModelProfileListResult: Codable, Sendable {
     public let autoResumeOnApiError: Bool
     /// The orphan-GC master switch (config mirror, default true).
     public let gcEnabled: Bool
+    /// The machine-wide remote create-param defaults (config scope), keyed by
+    /// the provider's own `create_params` field names. Carried alongside the
+    /// other config-derived fields so the app loads it in one round-trip.
+    public let globalRemoteCreateDefaults: [String: String]
     public init(
         profiles: [ModelProfileWithUsage],
         defaultID: UUID? = nil,
@@ -760,7 +766,8 @@ public struct ModelProfileListResult: Codable, Sendable {
         nightwatchMode: NightwatchMode = .off,
         autoResumeOnLimitReset: Bool = false,
         autoResumeOnApiError: Bool = false,
-        gcEnabled: Bool = true
+        gcEnabled: Bool = true,
+        globalRemoteCreateDefaults: [String: String] = [:]
     ) {
         self.profiles = profiles
         self.defaultID = defaultID
@@ -772,6 +779,7 @@ public struct ModelProfileListResult: Codable, Sendable {
         self.autoResumeOnLimitReset = autoResumeOnLimitReset
         self.autoResumeOnApiError = autoResumeOnApiError
         self.gcEnabled = gcEnabled
+        self.globalRemoteCreateDefaults = globalRemoteCreateDefaults
     }
 
     public init(from decoder: Decoder) throws {
@@ -797,6 +805,12 @@ public struct ModelProfileListResult: Codable, Sendable {
         autoResumeOnApiError = try c.decodeIfPresent(
             Bool.self, forKey: .autoResumeOnApiError) ?? false
         gcEnabled = try c.decodeIfPresent(Bool.self, forKey: .gcEnabled) ?? true
+        // Absent (older daemon) means the daemon knew nothing about create
+        // defaults — the same state as an empty map: no opinion at this level.
+        globalRemoteCreateDefaults = try c.decodeIfPresent(
+            [String: String].self,
+            forKey: .globalRemoteCreateDefaults
+        ) ?? [:]
     }
 }
 
@@ -2601,6 +2615,24 @@ public struct ConfigSetGCProfileDirsEnabledParams: Codable, Sendable {
 public struct ConfigSetGCOrphanProcessesEnabledParams: Codable, Sendable {
     public var enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setRemoteCreateDefaults` — the machine-wide remote
+/// create-param defaults, keyed by the provider's own field names.
+public struct SetGlobalRemoteCreateDefaultsParams: Codable, Sendable, Equatable {
+    public let defaults: [String: String]
+    public init(defaults: [String: String]) { self.defaults = defaults }
+}
+
+/// Params for `repo.setRemoteCreateDefaults` — per-repo remote create-param
+/// defaults, keyed by the provider's own field names.
+public struct SetRepoRemoteCreateDefaultsParams: Codable, Sendable, Equatable {
+    public let repoID: UUID
+    public let defaults: [String: String]
+    public init(repoID: UUID, defaults: [String: String]) {
+        self.repoID = repoID
+        self.defaults = defaults
+    }
 }
 
 /// Params for `repo.setEnvOverrides` — per-repo free-form env overrides.

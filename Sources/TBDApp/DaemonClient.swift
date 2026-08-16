@@ -870,6 +870,22 @@ actor DaemonClient {
         )
     }
 
+    /// Push the machine-wide remote create-param defaults to the daemon.
+    func setGlobalRemoteCreateDefaults(_ defaults: [String: String]) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetRemoteCreateDefaults,
+            params: SetGlobalRemoteCreateDefaultsParams(defaults: defaults)
+        )
+    }
+
+    /// Set or clear a repo's remote create-param defaults.
+    func setRepoRemoteCreateDefaults(repoID: UUID, defaults: [String: String]) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.repoSetRemoteCreateDefaults,
+            params: SetRepoRemoteCreateDefaultsParams(repoID: repoID, defaults: defaults)
+        )
+    }
+
     /// Set the per-worktree auto-archive-on-PR-merge override.
     func setWorktreeAutoArchive(id: UUID, enabled: Bool) async throws {
         try await callVoidAsync(

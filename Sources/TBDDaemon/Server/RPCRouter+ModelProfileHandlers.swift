@@ -61,7 +61,8 @@ extension RPCRouter {
             nightwatchMode: config.nightwatchMode,
             autoResumeOnLimitReset: config.autoResumeOnLimitReset,
             autoResumeOnApiError: config.autoResumeOnApiError,
-            gcEnabled: config.gcEnabled
+            gcEnabled: config.gcEnabled,
+            globalRemoteCreateDefaults: config.remoteCreateDefaults
         ))
     }
 
