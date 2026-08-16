@@ -315,6 +315,15 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     /// Not a queue: parking a second prompt replaces the first.
     public var pendingPrompt: String?
 
+    /// True once adoption has given this row a parent — at mint time or by
+    /// healing a parentless row later. It is the fact `parentWorktreeID == nil`
+    /// cannot carry: a nil edge on a marked row means the user un-nested a lane
+    /// adoption had already filed, and adoption must leave it alone. `false` on
+    /// every local row and on every remote row adoption has never been able to
+    /// place; the user's own `move()` never clears it, because re-nesting after
+    /// a deliberate un-nest is the bug it exists to prevent.
+    public var remoteParentAssigned: Bool = false
+
     /// Whether delivering `pendingPrompt` ends with Enter, as recorded. `nil`
     /// on any row saved without naming the bit — the initializer defaults it to
     /// nil and `WorktreeRecord` writes that through as SQL NULL, which is what
@@ -376,7 +385,8 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
                 origin: WorktreeOrigin? = nil,
                 pendingPrompt: String? = nil,
                 pendingPromptSubmit: Bool? = nil,
-                prObservation: PRObservation? = nil) {
+                prObservation: PRObservation? = nil,
+                remoteParentAssigned: Bool = false) {
         self.id = id
         self.repoID = repoID
         self.name = name
@@ -409,6 +419,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         self.pendingPrompt = pendingPrompt
         self.pendingPromptSubmit = pendingPromptSubmit
         self.prObservation = prObservation
+        self.remoteParentAssigned = remoteParentAssigned
     }
 
     enum CodingKeys: String, CodingKey {
@@ -419,7 +430,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         case autoHibernateOnMerge
         case promotedToRepoID, prStatus, prNumber, foreignHead, pinnedAt, pinSortOrder
         case locationKind, providerName, providerSessionID, pendingPrompt, pendingPromptSubmit
-        case prObservation
+        case prObservation, remoteParentAssigned
     }
 
     public init(from decoder: Decoder) throws {
@@ -481,6 +492,10 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         // Absent in JSON written before the PR-observation column: no attempt
         // is on record, which is itself distinct from a recorded `.none`.
         prObservation = try c.decodeIfPresent(PRObservation.self, forKey: .prObservation)
+        // Absent in JSON written before v80. Those rows predate the marker, so
+        // nothing recorded that adoption placed them; `false` is what the
+        // column's own backfill then corrects for the rows it can.
+        remoteParentAssigned = try c.decodeIfPresent(Bool.self, forKey: .remoteParentAssigned) ?? false
     }
 
     /// Hand-written because `location` is an enum with an associated value that
@@ -524,6 +539,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         try c.encodeIfPresent(pendingPrompt, forKey: .pendingPrompt)
         try c.encodeIfPresent(pendingPromptSubmit, forKey: .pendingPromptSubmit)
         try c.encodeIfPresent(prObservation, forKey: .prObservation)
+        try c.encode(remoteParentAssigned, forKey: .remoteParentAssigned)
     }
 }
 

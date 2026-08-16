@@ -659,6 +659,134 @@ struct RemoteSessionAdoptionTests {
         #expect(moved.first?.newParentID == parent.id)
     }
 
+    // MARK: - A parent the user took away stays taken away
+
+    /// The stamp is static: a provider that stamped `tbd_parent_worktree_id`
+    /// at create time repeats it on every later poll, forever. So nil-ness
+    /// alone cannot tell "never had a parent" from "the user took it away",
+    /// and reading the stamp again would revert `tbd worktree move --root`
+    /// inside one poll interval — with a `.worktreeMoved` the user never asked
+    /// for, so the lane visibly jumps back in the sidebar.
+    @Test func aLaneTheUserUnnestedIsNotReNestedByTheNextPoll() async throws {
+        let repo = try await makeRepo()
+        let parent = try await db.worktrees.create(
+            repoID: repo.id, name: "lane", branch: "lane",
+            path: "/tmp/lane-\(UUID().uuidString)", tmuxServer: "t")
+        let m = manager()
+        let stamped = session("s-1", meta: ["repo": "acme/api",
+                                            "tbd_parent_worktree_id": parent.id.uuidString])
+
+        try await m.apply(snapshot: [stamped], provider: "fake")
+        let adopted = try #require(try await remoteRows().first)
+        #expect(adopted.parentWorktreeID == parent.id)
+
+        // `tbd worktree move <lane> --root`.
+        try await db.worktrees.move(worktreeID: adopted.id, newParentID: nil, newSortOrder: 0)
+
+        let received = DeltaRecorder()
+        subs.addSubscriber { data in
+            received.record(data)
+            return true
+        }
+        try await m.apply(snapshot: [stamped], provider: "fake")
+        try await m.apply(snapshot: [stamped], provider: "fake")
+
+        #expect(try await remoteRows().first?.parentWorktreeID == nil)
+        #expect(received.worktreeMovedDeltas().isEmpty)
+    }
+
+    /// The same for a lane that got its parent late rather than at adoption:
+    /// healing happens once, and the user's answer to it is final.
+    @Test func aLaneHealedLateAndThenUnnestedIsNotReNested() async throws {
+        let repo = try await makeRepo()
+        let m = manager()
+
+        try await m.apply(snapshot: [session("s-1")], provider: "fake")
+        let parent = try await db.worktrees.create(
+            repoID: repo.id, name: "lane", branch: "lane",
+            path: "/tmp/lane-\(UUID().uuidString)", tmuxServer: "t")
+        let stamped = session("s-1", meta: ["repo": "acme/api",
+                                            "tbd_parent_worktree_id": parent.id.uuidString])
+        try await m.apply(snapshot: [stamped], provider: "fake")
+        let healed = try #require(try await remoteRows().first)
+        #expect(healed.parentWorktreeID == parent.id)
+
+        try await db.worktrees.move(worktreeID: healed.id, newParentID: nil, newSortOrder: 0)
+        try await m.apply(snapshot: [stamped], provider: "fake")
+
+        #expect(try await remoteRows().first?.parentWorktreeID == nil)
+    }
+
+    /// The nested `+`'s override assigns a parent the same way a stamp does, so
+    /// it earns the same finality: a lane started from a worktree and then
+    /// dragged to top level stays there, even though the override is replayed
+    /// on nothing — what would re-nest it is the provider's stamp, which a
+    /// TBD-initiated create may well also carry.
+    @Test func aLaneStartedFromTheNestedPlusStaysWhereTheUserDragsIt() async throws {
+        let repo = try await makeRepo()
+        let parent = try await db.worktrees.create(
+            repoID: repo.id, name: "lane", branch: "lane",
+            path: "/tmp/lane-\(UUID().uuidString)", tmuxServer: "t")
+        let m = manager()
+        let stamped = session("s-1", meta: ["repo": "acme/api",
+                                            "tbd_parent_worktree_id": parent.id.uuidString])
+
+        await m.applyUpsert(session("s-1"), provider: "fake", parentWorktreeID: parent.id)
+        let created = try #require(try await remoteRows().first)
+        #expect(created.parentWorktreeID == parent.id)
+
+        try await db.worktrees.move(worktreeID: created.id, newParentID: nil, newSortOrder: 0)
+        try await m.apply(snapshot: [stamped], provider: "fake")
+
+        #expect(try await remoteRows().first?.parentWorktreeID == nil)
+    }
+
+    /// The other side of the same coin, and the reason the marker exists rather
+    /// than a blanket "adoption never nests twice": a row created parentless was
+    /// offered nothing, so a stamp that only becomes readable later must still
+    /// be able to file it. This is the shipped healing feature, held still.
+    @Test func aRowAdoptedWithNoStampStillHealsWhenOneArrives() async throws {
+        let repo = try await makeRepo()
+        let m = manager()
+
+        try await m.apply(snapshot: [session("s-1")], provider: "fake")
+        #expect(try await remoteRows().first?.parentWorktreeID == nil)
+
+        let parent = try await db.worktrees.create(
+            repoID: repo.id, name: "lane", branch: "lane",
+            path: "/tmp/lane-\(UUID().uuidString)", tmuxServer: "t")
+        try await m.apply(
+            snapshot: [session("s-1", meta: ["repo": "acme/api",
+                                             "tbd_parent_worktree_id": parent.id.uuidString])],
+            provider: "fake")
+
+        #expect(try await remoteRows().first?.parentWorktreeID == parent.id)
+    }
+
+    /// A stamp that names a parent the rules refuse leaves the row parentless
+    /// AND unmarked: nothing was assigned, so a later resolvable stamp must
+    /// still heal it. Refusal is not assignment.
+    @Test func aRefusedStampDoesNotSpendTheOneAssignment() async throws {
+        let repo = try await makeRepo()
+        let m = manager()
+
+        try await m.apply(
+            snapshot: [session("s-1", meta: ["repo": "acme/api",
+                                             "tbd_parent_worktree_id": UUID().uuidString])],
+            provider: "fake")
+        #expect(try await remoteRows().first?.parentWorktreeID == nil)
+
+        let parent = try await db.worktrees.create(
+            repoID: repo.id, name: "lane", branch: "lane",
+            path: "/tmp/lane-\(UUID().uuidString)", tmuxServer: "t")
+        try await m.apply(
+            snapshot: [session("s-1", meta: ["repo": "acme/api",
+                                             "tbd_parent_worktree_id": parent.id.uuidString])],
+            provider: "fake")
+
+        #expect(try await remoteRows().first?.parentWorktreeID == parent.id)
+    }
+
     /// The binding lookup adoption tests on every poll must find the row it
     /// created, and must not answer for a different provider's session of the
     /// same name.

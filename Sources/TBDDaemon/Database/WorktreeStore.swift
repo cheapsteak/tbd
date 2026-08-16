@@ -57,6 +57,11 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     // no attempt on record, which is a third thing again from a recorded
     // `.none` ("the forge answered; no PR") or `.undetermined`.
     var prObservation: String?
+    // True once adoption has given this row a parent (v80). nil on rows written
+    // before the column existed, which read as false. Never cleared: a nil
+    // `parentWorktreeID` on a row marked here is the user's un-nesting, and
+    // adoption must not undo it.
+    var remote_parent_assigned: Bool?
 
     init(from wt: Worktree) {
         self.id = wt.id.uuidString
@@ -98,6 +103,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.pending_prompt = wt.pendingPrompt
         self.pending_prompt_submit = wt.pendingPromptSubmit
         self.prObservation = FactColumnJSON.encode(wt.prObservation)
+        self.remote_parent_assigned = wt.remoteParentAssigned
     }
 
     /// Failable decode: skips (returns nil after a logged warning) only when the
@@ -179,7 +185,8 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             origin: worktreeOrigin,
             pendingPrompt: pending_prompt,
             pendingPromptSubmit: pending_prompt_submit,
-            prObservation: Self.decodePRObservation(prObservation)
+            prObservation: Self.decodePRObservation(prObservation),
+            remoteParentAssigned: remote_parent_assigned ?? false
         )
     }
 
@@ -312,7 +319,13 @@ public struct WorktreeStore: Sendable {
                 sortOrder: maxOrder + 1,
                 parentWorktreeID: parentWorktreeID,
                 prNumber: prNumber,
-                location: location
+                location: location,
+                // A remote row is minted by adoption and by nothing else, so a
+                // remote row born with a parent is a parent adoption assigned.
+                // Derived here rather than asked of the caller: the marker
+                // records what this write did, and this is where that is known.
+                // Local rows never carry it — nothing adopts them.
+                remoteParentAssigned: !location.isLocal && parentWorktreeID != nil
             )
             let record = WorktreeRecord(from: wt)
             try record.insert(db)
@@ -925,9 +938,10 @@ public struct WorktreeStore: Sendable {
         }
     }
 
-    /// Give a row that has no parent its FIRST one, appended to the end of the
-    /// destination's child group. Returns the assigned sortOrder, or nil when
-    /// the row already had a parent.
+    /// Give a row that has never been given one its FIRST parent, appended to
+    /// the end of the destination's child group. Returns the assigned
+    /// sortOrder, or nil when the row already has a parent or has already been
+    /// given one.
     ///
     /// Deliberately narrower than `move()`: it can only ever fill a nil, so it
     /// cannot reparent a row the user has already placed, and it never asks the
@@ -937,15 +951,22 @@ public struct WorktreeStore: Sendable {
     /// relaxed copy of it, so a late edge is held to the same rules as one the
     /// user drags into place.
     ///
-    /// The nil-check and the write share one transaction: two concurrent
-    /// callers must not both read "no parent" and both assign one.
+    /// **A nil parent is not sufficient.** `remote_parent_assigned` is the
+    /// second half of the condition, because a row can arrive back at nil by
+    /// the user un-nesting it, and a caller replaying a static provider stamp
+    /// on every poll would undo that gesture within the minute. The marker is
+    /// set by the same write, so "was ever assigned" survives the removal.
+    ///
+    /// Both checks and the write share one transaction: two concurrent callers
+    /// must not both read "no parent" and both assign one.
     @discardableResult
     public func assignParentIfUnset(worktreeID: UUID, parentID: UUID) async throws -> Int? {
         try await writer.write { db in
             guard let record = try WorktreeRecord.fetchOne(db, key: worktreeID.uuidString) else {
                 throw WorktreeMoveError.worktreeNotFound
             }
-            guard record.parentWorktreeID == nil else { return nil }
+            guard record.parentWorktreeID == nil,
+                  record.remote_parent_assigned != true else { return nil }
             try Self.validateParent(db, worktreeID: worktreeID, parentID: parentID)
 
             let maxOrder = try Int.fetchOne(
@@ -955,7 +976,11 @@ public struct WorktreeStore: Sendable {
             ) ?? 0
             let sortOrder = maxOrder + 1
             try db.execute(
-                sql: "UPDATE worktree SET parentWorktreeID = ?, sortOrder = ? WHERE id = ?",
+                sql: """
+                    UPDATE worktree
+                    SET parentWorktreeID = ?, sortOrder = ?, remote_parent_assigned = 1
+                    WHERE id = ?
+                    """,
                 arguments: [parentID.uuidString, sortOrder, worktreeID.uuidString]
             )
             return sortOrder
