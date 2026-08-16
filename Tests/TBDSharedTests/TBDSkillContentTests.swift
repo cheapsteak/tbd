@@ -46,10 +46,10 @@ import Foundation
     #expect(body.contains("worktree display name at spawn"))
     #expect(body.contains("tbd terminal send"))
     #expect(body.contains("tbd terminal output"))
-    // The display-name correspondence is a default, not a guarantee: a row can
-    // carry the cwd slug instead when the session outlived a rename or was
-    // spawned by a daemon without naming. Pin the qualifier, so a rewrite that
-    // restores the unconditional claim reds.
+    // The display-name correspondence is a default, not a guarantee: a session
+    // spawned by a daemon without naming carries the cwd slug instead, and one
+    // that outlived a rename keeps its spawn-time name. Pin the qualifier, so a
+    // rewrite that restores the unconditional claim reds.
     #expect(body.contains("working-directory slug plus a short suffix"))
     // The consequence is the part sessions get wrong in the field: a flat
     // not-found reads as "the peer is dead" unless the text says otherwise.

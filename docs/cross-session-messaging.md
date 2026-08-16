@@ -83,9 +83,12 @@ acme-worker [455f3e]  ·  interactive  ·  busy  ·  tmux main:@388.%388  ·  st
 
 The fields are the session's name, a short `[ref]` unique to that live
 session, its kind, its status, its tmux server, window and pane, and how
-long ago it started. **The row does not carry a working directory** — the
-tmux pane is the field that ties a row to a specific terminal, and the
-one to reach for whenever the name is not enough.
+long ago it started. **The listing row does not carry a working
+directory** — the tmux pane is the field that ties a row to a specific
+terminal, and the one to reach for whenever the name is not enough. (The
+on-disk registry record described under [The peer
+registry](#the-peer-registry) does hold one; the listing does not print
+it.)
 
 The tmux field is there only for a session running inside tmux, which
 every TBD session is. A plain-terminal `claude` started outside tmux, and
@@ -143,11 +146,11 @@ No agent named 'acme-worker' is reachable.
 This one is a flat not-found: nothing in the listing answers to that
 name. **It usually does not mean the session died.** Far more often the
 session is alive and listed under a different name — the drift described
-in [Naming](#naming), where a session spawned before the running daemon
-supported `--name`, or one whose worktree was renamed after it started,
-carries the working-directory slug instead. Reading the refusal as a
-death notice — and giving up on a peer that is sitting there working —
-is the mistake to avoid.
+in [Naming](#naming). A session spawned before the running daemon
+supported `--name` carries the working-directory slug instead; one whose
+worktree was renamed after it started still answers to its spawn-time
+name. Reading the refusal as a death notice — and giving up on a peer
+that is sitting there working — is the mistake to avoid.
 
 Find the row by its tmux pane instead of by its name. Every TBD-spawned
 row prints its pane as `tmux <server>:<window>.<pane>`, and TBD prints the

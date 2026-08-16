@@ -110,11 +110,12 @@ running session can be missing — and `SendMessage` hands one plain text,
 delivered between the recipient's turns. Each row carries a name, a short
 `[ref]`, its kind and its status; TBD-spawned rows also carry a tmux pane. TBD
 sets a session's peer name from the worktree display name at spawn, so rows
-usually match the sidebar — but a row can instead carry the
-working-directory slug plus a short suffix, when the session was spawned
-before the running daemon supported naming, or when the worktree has been
-renamed since (the name is fixed at spawn, and a new one applies at that
-session's next respawn or resume).
+usually match the sidebar — but two things pull them apart. A session spawned
+before the running daemon supported naming carries the
+working-directory slug plus a short suffix instead. And a worktree renamed
+after a session started leaves that session on its spawn-time name, because the
+name is fixed at spawn and a new one applies only at the next respawn or
+resume.
 
 So a `No agent named 'X' is reachable.` refusal usually means the peer is
 listed under a different name, not that it is dead — do not conclude a session
