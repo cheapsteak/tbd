@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 import TBDShared
 
@@ -63,7 +64,15 @@ final class QueuedPromptTarget: ObservableObject, Identifiable {
 /// the read-back — which must agree, because the toggle means the same thing in
 /// both and an operator meets them a minute apart.
 enum QueuedPromptComposer {
-    /// Whether a NEW first message sends itself once it reaches the composer.
+    /// `UserDefaults` key holding the operator's remembered answer for new
+    /// first messages (`docs/specs/2026-08-16-send-immediately-preference-design.md`).
+    /// Written by the creation modal's checkbox and by the Settings ▸ General ▸
+    /// Worktrees row, which are two views onto this one key.
+    static let sendImmediatelyKey = "queuedPromptSendImmediately"
+
+    /// Whether a NEW first message sends itself once it reaches the composer,
+    /// for an operator who has never answered. The choice persists once made,
+    /// so this is the value they meet the first time and never again.
     ///
     /// OFF. Delivery types the message in and stops there unless the operator
     /// ticks the box, because sending is what starts a turn nobody watched
@@ -76,6 +85,30 @@ enum QueuedPromptComposer {
     /// An EXISTING parked message ignores this and shows the bit stored with
     /// it, so the composer never misreports what delivery will do.
     static let sendImmediatelyDefault = false
+
+    /// Resolve the remembered answer, keeping "never chose" distinct from
+    /// "chose off".
+    ///
+    /// The `object(forKey:) as? Bool ??` shape is the point, not a style echo:
+    /// `UserDefaults.bool(forKey:)` collapses absent into `false`, and once
+    /// those read alike a later change to `sendImmediatelyDefault` either
+    /// reaches nobody or overrides deliberate opt-outs — the same destroyed
+    /// distinction that made `auto_hibernate_enabled` unflippable.
+    ///
+    /// `shippedDefault` is a defaulted test seam, not a production knob: it
+    /// lets a test prove the absent case *follows* the default rather than
+    /// coincidentally matching today's `false`.
+    ///
+    /// The views read the key through `@AppStorage`, which applies this same
+    /// rule internally. This is that rule in assertable form — `@AppStorage`
+    /// lives in a `View` and cannot be unit-tested — and the read site for any
+    /// future non-view caller.
+    static func resolveSendImmediately(
+        defaults: UserDefaults,
+        shippedDefault: Bool = sendImmediatelyDefault
+    ) -> Bool {
+        defaults.object(forKey: sendImmediatelyKey) as? Bool ?? shippedDefault
+    }
 }
 
 /// Sheet for the prompt an operator composes while a freshly created worktree
@@ -91,7 +124,14 @@ struct QueuedPromptModal: View {
     @ObservedObject var target: QueuedPromptTarget
 
     @State private var draft: String = ""
-    @State private var sendImmediately = QueuedPromptComposer.sendImmediatelyDefault
+
+    /// Remembered across composers, and written the moment the box is ticked —
+    /// including when the sheet is then dismissed with Escape. That is what the
+    /// gesture means: "I want this on", not "I want this on if I also send this
+    /// particular message". Settings ▸ General ▸ Worktrees is where the
+    /// preference is audited and reversed.
+    @AppStorage(QueuedPromptComposer.sendImmediatelyKey)
+    private var sendImmediately = QueuedPromptComposer.sendImmediatelyDefault
 
     private var isBlank: Bool {
         draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty

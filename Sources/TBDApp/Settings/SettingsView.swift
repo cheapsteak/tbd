@@ -38,6 +38,8 @@ struct GeneralSettingsTab: View {
     @AppStorage(AppState.enableTranscriptKey) private var enableTranscript: Bool = AppState.enableTranscriptDefault
     @AppStorage(AppState.nightwatchExperimentalKey) private var nightwatchExperimental: Bool = false
     @AppStorage(AppState.showScratchSectionKey) private var showScratchSection: Bool = true
+    @AppStorage(QueuedPromptComposer.sendImmediatelyKey)
+    private var sendFirstMessageImmediately: Bool = QueuedPromptComposer.sendImmediatelyDefault
     @AppStorage(AppState.showClaudeTabUsageTooltipKey) private var showClaudeTabUsageTooltip: Bool = true
     @AppStorage(AppState.usageResetTimeStyleKey)
     private var usageResetTimeStyle: ProfileUsagePresentation.ResetTimeStyle = .timeOfReset
@@ -157,6 +159,9 @@ struct GeneralSettingsTab: View {
 
                 Toggle("Show Scratch section", isOn: $showScratchSection)
                     .help("Hide the repo-less Scratch section. Existing scratch spaces and their terminals keep running.")
+
+                Toggle("Send first messages immediately", isOn: $sendFirstMessageImmediately)
+                    .help("On: TBD presses Return, and the agent starts working the moment the first message is in. Off: the text waits in the composer for you to read and send. The checkbox in the first-message sheet changes this too.")
 
                 Toggle("Automatically clean up orphaned agent worktrees", isOn: Binding(
                     get: { appState.gcEnabled },
