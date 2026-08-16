@@ -150,11 +150,10 @@ struct SupervisionReadOnlyRPCTests {
         #expect(response.error?.contains("There is no project \"acme-ghost\"") == true)
     }
 
-    @Test("Neither read-only surface writes to either record")
-    func readOnlySurfacesWriteNothing() async throws {
-        let fixture = try makeFixture()
-        try await seed(fixture, project: "acme-alpha")
+    // MARK: - What "read-only" does and does not mean
 
+    /// Call both surfaces once, and answer for each that its RPC succeeded.
+    private func callBothReadOnlySurfaces(_ fixture: Fixture) async throws {
         for method in [RPCMethod.superviseReadout, RPCMethod.superviseLedger] {
             let params: Data
             if method == RPCMethod.superviseReadout {
@@ -169,8 +168,63 @@ struct SupervisionReadOnlyRPCTests {
                 method: method, params: String(decoding: params, as: UTF8.self)))
             #expect(response.success, "\(method): \(response.error ?? "")")
         }
+    }
+
+    private func ledgerLineCount(_ fixture: Fixture) -> Int {
+        guard let data = FileManager.default.contents(atPath: fixture.ledgerPath) else { return 0 }
+        return data.split(separator: 0x0A, omittingEmptySubsequences: true).count
+    }
+
+    /// With nothing left over to reconcile — the ordinary case, and every case
+    /// a sweep program hits on a healthy fleet — neither surface puts a byte in
+    /// either record.
+    @Test("Neither read-only surface writes to either record when there is nothing to reconcile")
+    func readOnlySurfacesWriteNothing() async throws {
+        let fixture = try makeFixture()
+        try await seed(fixture, project: "acme-alpha")
+
+        try await callBothReadOnlySurfaces(fixture)
 
         #expect(FileManager.default.fileExists(atPath: fixture.ledgerPath) == false)
         #expect(FileManager.default.fileExists(atPath: fixture.actuationPath) == false)
+    }
+
+    /// The one append either surface can cause, pinned so the boundary is
+    /// documented by a test rather than only by a comment.
+    ///
+    /// The surfaces resolve their project through `SupervisionStore`, which
+    /// reads through the store's reconciliation — so when an operator ends a
+    /// project's coverage by hand-editing the supervision file, the first
+    /// readout to notice closes the span with a `projectOff` line. That records
+    /// the **operator's** decision at the moment TBD observed it; the readout
+    /// authored nothing and sent nothing. Skipping the reconciliation would buy
+    /// an untouched file at the price of a readout reporting a mark it already
+    /// knows is stale.
+    @Test("A readout closes a span an operator ended by hand, and says so in the ledger")
+    func aReadoutClosesAnOperatorsOrphanedSpan() async throws {
+        let fixture = try makeFixture()
+        try await seed(fixture, project: "acme-alpha")
+        let store = try #require(fixture.router.supervision)
+        _ = try await store.setProjectMark(project: "acme-alpha", on: true)
+        #expect(ledgerLineCount(fixture) == 1, "the projectOn line the gesture wrote")
+
+        // The operator clears the mark in the file, outside TBD.
+        try SupervisionFileStore(
+            fileURL: fixture.directory.appendingPathComponent("supervision.json"))
+            .save(SupervisionFile())
+
+        try await callBothReadOnlySurfaces(fixture)
+
+        let lines = ledgerLineCount(fixture)
+        #expect(lines == 2, "exactly one closing line — the second surface finds nothing left")
+        guard let data = FileManager.default.contents(atPath: fixture.ledgerPath),
+              let last = data.split(separator: 0x0A, omittingEmptySubsequences: true).last,
+              case .projectOff = try JSONDecoder()
+                .decode(SupervisionLedgerLine.self, from: Data(last)).payload else {
+            Issue.record("the appended line must be the projectOff closing the orphaned span")
+            return
+        }
+        #expect(FileManager.default.fileExists(atPath: fixture.actuationPath) == false,
+                "the actuation record is untouched either way — no act happened")
     }
 }

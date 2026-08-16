@@ -81,9 +81,18 @@ extension RPCRouter {
 
     // MARK: - The read-only surfaces
     //
-    // Both write nothing, append no ledger line, and start nothing. They are
+    // Neither makes a decision, sends anything, or starts anything. They are
     // free to call: the readout is a sweep program's opening move on every
     // tick, and the ledger query closes its loop.
+    //
+    // Read-only about *decisions*, not about bytes on disk. Both resolve the
+    // project through `SupervisionStore.projectFacts`, which reads through the
+    // store's reconciliation — so a coverage span an operator ended by
+    // hand-editing the supervision file gets closed here, appending a
+    // `projectOff` line. That append records a decision the **operator** made,
+    // observed at the first read that noticed it; the readout authored nothing.
+    // Skipping the reconciliation to keep the file untouched would be the worse
+    // trade: the surface would report a mark it already knows is stale.
 
     /// `supervise.readout` — the project's whole current picture (sweep-program
     /// design §3). An unknown project is refused by

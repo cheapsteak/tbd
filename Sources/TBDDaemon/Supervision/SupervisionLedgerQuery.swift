@@ -9,8 +9,14 @@ private let ledgerQueryLogger = Logger(
 /// since an instant
 /// (`docs/specs/2026-08-01-fleet-supervision-sweep-program-design.md` §3).
 ///
-/// Read-only in the strongest sense: it opens both records for reading, writes
-/// nothing, appends nothing, and starts nothing.
+/// This query itself opens both records for reading only: it makes no decision,
+/// writes nothing, appends nothing, and starts nothing.
+///
+/// Its RPC handler resolves the project through `SupervisionStore` first, and
+/// that resolution reads through the store's reconciliation, which may append a
+/// `projectOff` line closing a coverage span an operator ended by hand-editing
+/// the supervision file. The line records the **operator's** decision at the
+/// moment TBD first noticed it — not one this query made.
 ///
 /// **Lines pass through verbatim.** Each is decoded as a `SupervisionJSONValue`
 /// object rather than into a modelled struct, the few envelope keys this build
