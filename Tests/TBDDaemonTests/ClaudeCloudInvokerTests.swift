@@ -202,4 +202,212 @@ struct ClaudeCloudInvokerTests {
         #expect(result.exitCode == 2)
         #expect(result.failureClass == .contractBug)
     }
+
+    // MARK: - create
+
+    private func createBody(
+        repo: String = "acme/api", branch: String? = "fix-ci",
+        prompt: String = "add a probe", key: String = "tbd-1"
+    ) -> Data {
+        var params: [String: String] = ["repo": repo, "prompt": prompt]
+        if let branch { params["branch"] = branch }
+        let body: [String: Any] = ["params": params, "idempotency_key": key]
+        return try! JSONSerialization.data(withJSONObject: body)
+    }
+
+    private func seedRepo(_ db: TBDDatabase) async throws {
+        _ = try await db.repos.create(
+            path: "/tmp/api", displayName: "api", defaultBranch: "main",
+            remoteURL: "https://github.com/acme/api")
+    }
+
+    private let successOutput = """
+        Created cloud session: Add probe pong reply
+        View: https://claude.ai/code/session_01AAAAAAAAAAAAAAAAAAAAAA?from=cli&m=0
+        Resume with: claude --teleport session_01AAAAAAAAAAAAAAAAAAAAAA
+        """
+
+    @Test func createSpawnsOnAPseudoTerminalInTheRepoCheckoutAndReturnsTheSession() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await seedRepo(db)
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput)])
+        let result = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["create"], stdin: createBody(), timeout: 60, contractVersion: 2)
+
+        #expect(result.exitCode == 0)
+        let request = try #require(spawner.requestsSnapshot().first)
+        #expect(request.arguments == ["--cloud", "add a probe"])
+        #expect(request.workingDirectory == "/tmp/api")
+        // Non-negotiable: the CLI refuses `--cloud` creation on a pipe, so a
+        // piped spawn does not degrade — it never works.
+        #expect(request.usesPseudoTerminal)
+
+        let session = try result.decoded(RemoteSessionPayload.self)
+        #expect(session.id == "session_01AAAAAAAAAAAAAAAAAAAAAA")
+        // The name comes from the VENDOR's server-derived summary…
+        #expect(session.title == "Add probe pong reply")
+        // …never from what was submitted.
+        #expect(session.title != "add a probe")
+        // The ledger knows a session was created; it does not know whether it
+        // lives, and the contract forbids guessing.
+        #expect(session.state == .unknown)
+        #expect(session.agentState == .unknown)
+        #expect(session.meta?["repo"] == "acme/api")
+        #expect(session.meta?["branch"] == "fix-ci")
+    }
+
+    @Test func createWritesTheLedgerRowBeforeResolvingIt() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await seedRepo(db)
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput)])
+        _ = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["create"], stdin: createBody(), timeout: 60, contractVersion: 2)
+        let row = try #require(try await db.claudeCloudSessions.rows().first)
+        #expect(row.idempotencyKey == "tbd-1")
+        #expect(row.state == ClaudeCloudLedgerState.resolved.rawValue)
+        #expect(row.sessionID == "session_01AAAAAAAAAAAAAAAAAAAAAA")
+        #expect(row.title == "Add probe pong reply")
+        #expect(row.repoKey == "acme/api")
+        #expect(row.repoPath == "/tmp/api")
+        #expect(row.branch == "fix-ci")
+        #expect(row.archived == false)
+    }
+
+    /// An unreadable id costs the lane its identity, so it fails LOUDLY as a
+    /// contract bug — and the pending row it left behind is what keeps that
+    /// failure from being silent.
+    @Test func anUnreadableSessionIDFailsTheCreateAndLeavesThePendingRow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await seedRepo(db)
+        let spawner = FakeClaudeSpawner(outcomes: [
+            .completed(status: 0, output: "Something went sideways")
+        ])
+        let result = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["create"], stdin: createBody(), timeout: 60, contractVersion: 2)
+        #expect(result.exitCode == 2)
+        #expect(result.failureClass == .contractBug)
+        #expect(result.decodedError?.message.contains("Something went sideways") == true)
+        let row = try #require(try await db.claudeCloudSessions.rows().first)
+        #expect(row.state == ClaudeCloudLedgerState.pending.rawValue)
+        #expect(row.sessionID == nil)
+    }
+
+    @Test func conflictingSessionIDsAlsoFailAsAContractBug() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await seedRepo(db)
+        let spawner = FakeClaudeSpawner(outcomes: [
+            .completed(status: 0, output: """
+                Created cloud session: two
+                View: https://claude.ai/code/session_01AAA?from=cli
+                Resume with: claude --teleport session_01BBB
+                """)
+        ])
+        let result = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["create"], stdin: createBody(), timeout: 60, contractVersion: 2)
+        #expect(result.failureClass == .contractBug)
+        #expect(try await db.claudeCloudSessions.rows().first?.state
+            == ClaudeCloudLedgerState.pending.rawValue)
+    }
+
+    /// The opposite posture, and the pair that discriminates: an unreadable
+    /// TITLE must never fail a create that produced a readable id.
+    @Test func anUnreadableTitleStillSucceedsAndNamesTheRowFromItsID() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await seedRepo(db)
+        let spawner = FakeClaudeSpawner(outcomes: [
+            .completed(status: 0, output:
+                "Resume with: claude --teleport session_01AAAAAAAAAAAAAAAAAAAAAA")
+        ])
+        let result = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["create"], stdin: createBody(), timeout: 60, contractVersion: 2)
+        #expect(result.exitCode == 0)
+        let session = try result.decoded(RemoteSessionPayload.self)
+        #expect(session.id == "session_01AAAAAAAAAAAAAAAAAAAAAA")
+        #expect(session.title == nil)
+        #expect(try await db.claudeCloudSessions.rows().first?.title == nil)
+    }
+
+    /// The single same-key retry must find the row it already wrote, keeping
+    /// the original timestamp — the failure window is measured from the
+    /// create, not from the retry.
+    @Test func replayingTheSameIdempotencyKeyReusesTheSameLedgerRow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await seedRepo(db)
+        let spawner = FakeClaudeSpawner(outcomes: [
+            .completed(status: 0, output: successOutput),
+            .completed(status: 0, output: successOutput),
+        ])
+        let inv = invoker(db: db, spawner: spawner)
+        _ = try await inv.run(config(), verb: ["create"], stdin: createBody(),
+                              timeout: 60, contractVersion: 2)
+        _ = try await inv.run(config(), verb: ["create"], stdin: createBody(),
+                              timeout: 60, contractVersion: 2)
+        #expect(try await db.claudeCloudSessions.rows().count == 1)
+    }
+
+    @Test func aNonZeroVendorExitIsAPermanentFailureCarryingItsOutput() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await seedRepo(db)
+        let spawner = FakeClaudeSpawner(outcomes: [
+            .completed(status: 1, output: "Error: not logged in")
+        ])
+        let result = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["create"], stdin: createBody(), timeout: 60, contractVersion: 2)
+        #expect(result.exitCode == 1)
+        #expect(result.failureClass == .permanent)
+        #expect(result.decodedError?.message.contains("not logged in") == true)
+    }
+
+    /// A timeout is thrown, not synthesized, because the handler's single
+    /// same-key retry is armed by `ProviderRunError` — and that retry is
+    /// exactly what the pending ledger row exists to make safe.
+    @Test func aSpawnTimeoutThrowsSoTheHandlerCanRetryTheSameKey() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await seedRepo(db)
+        let spawner = FakeClaudeSpawner(outcomes: [.timedOut])
+        await #expect(throws: ProviderRunError.self) {
+            _ = try await invoker(db: db, spawner: spawner).run(
+                config(), verb: ["create"], stdin: createBody(), timeout: 60, contractVersion: 2)
+        }
+        #expect(try await db.claudeCloudSessions.rows().first?.state
+            == ClaudeCloudLedgerState.pending.rawValue)
+    }
+
+    @Test func anUnregisteredRepositoryIsRefusedBeforeAnythingIsSpawned() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let spawner = FakeClaudeSpawner(outcomes: [])
+        let result = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["create"], stdin: createBody(repo: "acme/unknown"),
+            timeout: 60, contractVersion: 2)
+        #expect(result.exitCode == 1)
+        #expect(result.decodedError?.code == "not_found")
+        #expect(spawner.requestsSnapshot().isEmpty)
+        #expect(try await db.claudeCloudSessions.rows().isEmpty)
+    }
+
+    @Test func aBlankPromptIsRefusedBeforeAnythingIsSpawned() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await seedRepo(db)
+        let spawner = FakeClaudeSpawner(outcomes: [])
+        let result = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["create"], stdin: createBody(prompt: "   "),
+            timeout: 60, contractVersion: 2)
+        #expect(result.exitCode == 2)
+        #expect(result.decodedError?.code == "invalid_params")
+        #expect(spawner.requestsSnapshot().isEmpty)
+    }
+
+    /// The measured CLI surface exposes no flag for either, so they are
+    /// RECORDED and reported rather than submitted. Do not invent flags.
+    @Test func branchAndEnvironmentAreRecordedNotPassedToTheCLI() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await seedRepo(db)
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput)])
+        _ = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["create"], stdin: createBody(), timeout: 60, contractVersion: 2)
+        let request = try #require(spawner.requestsSnapshot().first)
+        #expect(!request.arguments.contains("fix-ci"))
+        #expect(!request.arguments.contains(where: { $0.hasPrefix("--branch") }))
+        #expect(try await db.claudeCloudSessions.rows().first?.branch == "fix-ci")
+    }
 }
