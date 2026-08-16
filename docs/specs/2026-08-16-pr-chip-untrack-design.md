@@ -1,0 +1,168 @@
+# Untracking and identifying a PR from the status-bar chips
+
+## Problem
+
+The status bar renders one chip per PR bound to the selected worktree — a
+status dot plus `#21156` — capped at four, with the rest collapsed into `+N`.
+Three things are missing from that strip.
+
+**A chip cannot be removed.** A worktree that has been alive for a week
+accumulates PRs that merged, got closed, or belonged to work nobody is thinking
+about any more. `tbd pr detach` removes one, but the gesture lives in a terminal
+while the thing being removed is on screen; nobody runs it. So the cluster only
+ever grows, and the chips that matter get pushed behind `+N` by chips that do
+not.
+
+**A chip says only its number.** `#21156` identifies a PR to GitHub and to
+nobody else. Deciding whether a chip is worth keeping — or worth clicking —
+means opening it in a browser, which is the action the strip exists to make
+unnecessary.
+
+**Four is too few** for a worktree whose agent has opened a handful of PRs, so
+the overflow menu carries PRs that would have fit on screen.
+
+## Design
+
+### Cap
+
+Seven chips before `+N`, up from four. The cluster already yields width to the
+path label (`layoutPriority(-1)`), so a narrow window degrades by collapsing
+into the overflow menu rather than by squeezing its neighbours — which is what
+makes raising the cap safe rather than a gamble on window width.
+
+### Untracking from the chip
+
+Hovering a chip turns its **status dot into an `xmark`**, in place. Clicking the
+xmark detaches that PR from the worktree; clicking anywhere else on the chip
+keeps its present meaning and opens the PR in the default browser.
+
+The dot is the right host for this, and not merely the convenient one. It is the
+only part of the chip with no click behaviour of its own, so nothing is
+displaced; it is already the chip's leading affordance, so the cursor is
+travelling past it anyway; and swapping in place means the chip does not grow a
+control that has to be laid out somewhere.
+
+Two constraints govern the implementation:
+
+- **The layout must not move between the two states.** The icon slot is a fixed
+  size that fits the larger of the two glyphs, and both are centred in it. A
+  chip that changed width on hover would shove every chip to its right, and the
+  xmark would slide out from under the cursor that summoned it.
+- **The hit area is at least 12×12pt**, larger than the 6pt dot and larger than
+  the drawn xmark. It is contributed by a transparent overlay rather than by
+  padding, so it costs no layout width: an overlay is sized by its parent and
+  cannot push its siblings. At 12pt centred on a 6pt dot the region extends 3pt
+  past the dot on each side, which stays inside the 6pt gap between chips, so no
+  chip can steal a click from its neighbour.
+
+Detaching is **tombstoning**, which is what `pr.detach` already does — a delete
+would be undone by the next poll or hook fire. The status bar therefore inherits
+the whole of the existing durability story rather than inventing one.
+
+#### Detach must be able to tombstone a PR that was never bound
+
+A worktree with no bindings but a cached `Worktree.prStatus` renders a
+**synthetic** binding — a display-only value lifted from that status, which by
+design never reaches the database. It is not an edge case worth ignoring: it is
+what keeps the PR surfaces alive when `gh` is unauthenticated or offline, and
+what every worktree shows before its first successful poll after upgrade.
+
+Against today's `pr.detach` the xmark on such a chip would do nothing at all.
+The detach matches no row, updates nothing, and reports `detached: false`; the
+cached status is untouched, so the chip returns on the next render. A control
+that silently declines is worse than an absent one.
+
+So `pr.detach` gains one rule: **when no row matches, insert a tombstone
+instead of reporting failure.** The detach becomes an assertion about the PR's
+future — "this does not belong to this worktree" — rather than an edit to a row
+that happens to exist. Three consequences follow, all wanted:
+
+- the xmark works uniformly, on every chip, whatever backs it;
+- `detachedCount` becomes non-zero, which is precisely the signal that
+  suppresses the legacy-status fallback, so the chip clears and stays cleared;
+- `tbd pr detach` becomes idempotent and order-independent — detaching a PR
+  before anything discovers it pre-empts the binding rather than losing to it.
+
+The inserted row is `source = manual`, because a tombstone with no prior row
+records nothing but a user's decision. `pr.attach` clears it exactly as it
+clears any other tombstone, so the gesture stays reversible.
+
+### Identifying a chip: the hover overlay
+
+Resting on a chip shows an overlay carrying the PR **number, title, state, and
+the age of that observation**. The title is the whole point: it is what turns
+`#21156` into something a person can decide about.
+
+**No description.** GitHub's GraphQL cannot return a truncated body — `body` and
+`bodyText` come whole — so any excerpt would be trimmed only after the bytes had
+crossed the wire, on every PR, on every poll, on a fleet that polls
+continuously. PR bodies routinely run to kilobytes and are template-heavy. A
+title is one short string riding a query that already runs, and it answers the
+question the strip actually poses. The description belongs to the PR page, which
+is one click away.
+
+Titles are fetched by adding `title` to `prNodeFieldSelection`, the by-number
+selection the binding refresh already issues. The viewer-authored batch query
+alongside it fetches `title` already, so this closes a gap rather than opening a
+cost.
+
+The title is persisted on the binding row, in a new nullable `title` column
+(the migration follows the shared-model rule: column, GRDB record, and Codable
+model in one commit). It is folded in through `withObservation`, on the same
+terms as `headBranch` and `baseRef`: **nil means "not observed", never
+"cleared"**, so a transient fetch failure cannot blank a title that is already
+on screen.
+
+A synthetic binding has no title, and the overlay renders without one rather
+than fabricating a placeholder — number, state and age are still worth showing,
+and the missing line is honest about a status that was hydrated rather than
+polled.
+
+The overlay states the observation's age because the cached `PRStatus` is
+display-tier and has been measured reading "Ready to merge" for PRs merged days
+earlier. Every surface that renders it must render its age with it.
+
+## Testing
+
+- Chip cap — seven bindings produce seven chips and no overflow; eight produce
+  seven and `+1`; the overflow chip's tooltip still names the total.
+- Detach on a live binding tombstones it, and the chip does not return after a
+  poll.
+- Detach with no matching row inserts a `manual` tombstone; a second detach of
+  the same PR is a no-op rather than a duplicate row; `pr.attach` afterwards
+  clears it.
+- Detaching the last chip of a worktree whose bindings were synthetic leaves the
+  cluster empty, because `detachedCount` suppresses the legacy fallback.
+- Title parse — a by-number GraphQL response carrying `title` populates it; one
+  omitting `title` leaves the stored value untouched rather than clearing it.
+- Title round-trips through the row, the RPC, and back.
+- Overlay content for a binding with a title, without one, and with no observed
+  status.
+
+## Rejected alternatives
+
+**A separate xmark button beside the number.** Every chip grows a permanent
+control, the cluster gets wider at exactly the moment the cap went up, and the
+dot — which carries the state — competes with it for the eye.
+
+**A right-click context menu.** Discoverable by nobody, and a second interaction
+grammar for a strip whose entire vocabulary is "click the thing".
+
+**Fetching bodies in the poll and truncating server-side.** The bandwidth is
+spent before the truncation happens, which is the cost being avoided.
+
+**Fetching the body lazily on hover.** Bounded by what the user looks at, so the
+bandwidth objection mostly dissolves — but it buys a new RPC, a cache, and a
+loading state in the overlay for content that the PR page presents better. Left
+available if titles prove insufficient.
+
+**Hiding the xmark on synthetic chips** rather than making detach tombstone
+unconditionally. Zero daemon change, but one chip in a row would silently lack
+the affordance its neighbours have, with no way to explain why.
+
+## Why no feature flag
+
+The convention gates behavior that acts without a user gesture or that destroys
+state. This is the opposite of both: every removal here is a deliberate click,
+and it removes an association TBD inferred, not any repository or session state.
+The PR itself is untouched, and `pr.attach` reverses the gesture.
