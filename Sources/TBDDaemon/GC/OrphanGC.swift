@@ -61,6 +61,7 @@ public actor OrphanGC {
     private let scratchpadCollector: ScratchpadCollector
     private let deletionQueueCollector: DeletionQueueCollector
     private let profileDirCollector: ProfileDirCollector
+    private let supervisionDeskCollector: SupervisionDeskCollector
     /// Deletes the path-keyed Claude Code credentials item belonging to a
     /// quarantined profile dir. Injected so tests never reach the real login
     /// keychain, which `scripts/test.sh` cannot fence.
@@ -94,7 +95,8 @@ public actor OrphanGC {
         scratchpadBase: URL? = nil,
         now: (@Sendable () -> Date)? = nil,
         profileDirBase: URL? = nil,
-        credentialsKeychain: any ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain()
+        credentialsKeychain: any ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain(),
+        supervisionDesks: SupervisionDesksStore? = nil
     ) {
         var wrapped: (@Sendable () async -> [String]?)?
         if let lsofProvider {
@@ -103,7 +105,8 @@ public actor OrphanGC {
         self.init(
             db: db, git: git, broadcast: broadcast, liveCWDsProvider: wrapped,
             scratchpadBase: scratchpadBase, now: now,
-            profileDirBase: profileDirBase, credentialsKeychain: credentialsKeychain
+            profileDirBase: profileDirBase, credentialsKeychain: credentialsKeychain,
+            supervisionDesks: supervisionDesks
         )
     }
 
@@ -122,7 +125,11 @@ public actor OrphanGC {
         beforeInterruptedArchiveReap: (@Sendable () async -> Void)? = nil,
         profileDirBase: URL? = nil,
         credentialsKeychain: any ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain(),
-        beforeProfileDirReap: (@Sendable () async -> Void)? = nil
+        beforeProfileDirReap: (@Sendable () async -> Void)? = nil,
+        /// Where the hosted-desk record lives. Defaulted to the real path
+        /// through `TBDConstants`, which honors `TBD_HOME`; tests inject a
+        /// store on a temp directory so a sweep never reads the developer's.
+        supervisionDesks: SupervisionDesksStore? = nil
     ) {
         let resolvedNow = now ?? Date.init
         let resolvedScratchpadBase = scratchpadBase ?? TBDConstants.claudeScratchpadBase
@@ -148,6 +155,10 @@ public actor OrphanGC {
         self.deletionQueueCollector = DeletionQueueCollector(git: git, now: resolvedNow)
         self.profileDirCollector = ProfileDirCollector(
             base: resolvedProfileDirBase, now: resolvedNow)
+        self.supervisionDeskCollector = SupervisionDeskCollector(
+            desks: supervisionDesks ?? SupervisionDesksStore(),
+            scratchBase: TBDConstants.scratchDir,
+            now: resolvedNow)
     }
 
     // MARK: - Sweep
@@ -223,6 +234,10 @@ public actor OrphanGC {
 
         await reclaimProfileDirs(
             config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
+        )
+
+        await reclaimSupervisionDesks(
+            config: config, live: live, dryRun: dryRun, planned: &planned, reaped: &reaped
         )
 
         // Snapshot retention never runs in dryRun; the outer guard already
@@ -625,6 +640,84 @@ public actor OrphanGC {
                 }
                 await insertReapRecord(record)
                 reaped += 1
+            }
+        }
+    }
+
+    /// Reclaims hosted supervision desks whose session is gone: drops the
+    /// `desks.json` entry and hands the scratch worktree to the archive path
+    /// this sweep already runs, by moving its row to `.archived`. The
+    /// deletion-queue and scratchpad legs above then reclaim the directory on
+    /// this or a later sweep, and `WorktreeLifecycle+Reconcile` settles its tmux
+    /// state — this leg deliberately kills no window itself, because an
+    /// archived row is exactly the shape those two already own.
+    ///
+    /// **Gated by `gcSupervisionDesksEnabled` on top of `gcEnabled`**, following
+    /// the profile-dir precedent: the leg archives a worktree and drops a
+    /// record, so it soaks behind its own default-off switch before graduating.
+    /// `dryRun` bypasses the flag exactly as `sweep` lets it bypass `gcEnabled`
+    /// — someone deciding whether to enable a default-off flag needs to see
+    /// what enabling it would reclaim. A NON-dry run still requires the flag.
+    ///
+    /// **A live desk is never reclaimed**, and that is the property the leg is
+    /// tested for in both directions.
+    private func reclaimSupervisionDesks(
+        config: Config, live: [String], dryRun: Bool,
+        planned: inout [String], reaped: inout Int
+    ) async {
+        guard config.gcSupervisionDesksEnabled || dryRun else { return }
+
+        for candidate in supervisionDeskCollector.candidates() {
+            // Both reads fail toward keeping: a nil `terminalExists` is a read
+            // that never answered, kept distinct from a row that is genuinely
+            // gone, and a worktree read failure is indistinguishable from a
+            // missing row only if we collapse them — so it is not collapsed.
+            var terminalExists: Bool?
+            do {
+                terminalExists = try await db.terminals.get(id: candidate.entry.terminal) != nil
+            } catch {
+                terminalExists = nil
+            }
+            let worktree = (try? await db.worktrees.get(id: candidate.entry.worktree)) ?? nil
+
+            switch supervisionDeskCollector.decide(
+                candidate, terminalExists: terminalExists, worktree: worktree,
+                liveCWDs: live, graceSeconds: config.gcGraceSeconds
+            ) {
+            case .keep(let reason):
+                planned.append("KEEP \(reason) desk:\(candidate.project)")
+                logger.debug("""
+                gc: keep \(reason, privacy: .public) desk for \
+                \(candidate.project, privacy: .public)
+                """)
+            case .reap(let reason):
+                planned.append("REAP supervision-desk \(reason) desk:\(candidate.project)")
+                // This leg's guard is `gcSupervisionDesksEnabled || dryRun`, so
+                // every line below runs only with the flag actually on.
+                guard !dryRun else { continue }
+                guard supervisionDeskCollector.forget(project: candidate.project) else {
+                    planned.append("KEEP desk-record-write-failed desk:\(candidate.project)")
+                    continue
+                }
+                reaped += 1
+                if let worktree, worktree.status == .active {
+                    do {
+                        try await db.worktrees.archive(id: worktree.id)
+                        logger.info("""
+                        gc: archived the scratch space of \(candidate.project, privacy: .public)'s \
+                        orphaned desk at \(worktree.localPath, privacy: .public)
+                        """)
+                    } catch {
+                        // The record is already dropped, which is the half that
+                        // stops a second desk from being mistaken for this one.
+                        // The directory stays until someone archives it.
+                        logger.warning("""
+                        gc: dropped the desk record for \(candidate.project, privacy: .public) but \
+                        could not archive \(worktree.localPath, privacy: .public): \
+                        \(String(describing: error), privacy: .public)
+                        """)
+                    }
+                }
             }
         }
     }

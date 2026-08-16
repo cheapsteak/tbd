@@ -1195,6 +1195,11 @@ public struct Config: Codable, Sendable, Equatable {
     /// means "never chose" and follows the shipped default wherever it goes;
     /// `0`/`1` is an explicit gesture and is honored forever.
     public var gcProfileDirsEnabled: Bool
+    /// Gate for the supervision-desk collector, resolved as
+    /// `gc_supervision_desks_enabled ?? Config.gcSupervisionDesksEnabledDefault`.
+    /// NULL means nobody chose, `0`/`1` mean somebody did — the third state the
+    /// column has no SQL default in order to keep.
+    public var gcSupervisionDesksEnabled: Bool
 
     /// Default idle-timeout for auto-hibernation, in minutes.
     public static let defaultHibernateIdleMinutes = 30
@@ -1226,6 +1231,16 @@ public struct Config: Codable, Sendable, Equatable {
     /// is left alone.
     public static let gcProfileDirsEnabledDefault = false
 
+    /// The shipped default for `gcSupervisionDesksEnabled`, and the single
+    /// place it lives.
+    ///
+    /// Ships OFF and soaks, following the profile-dir precedent: reclaiming a
+    /// desk archives a worktree and drops its record, so the classifier proves
+    /// itself against real fleets before it graduates. Graduation is a one-line
+    /// change here — it reaches every install whose operator never touched the
+    /// toggle and preserves every explicit opt-out.
+    public static let gcSupervisionDesksEnabledDefault = false
+
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
                 envSettingOverrides: [String: ClaudeEnvValue] = [:],
@@ -1253,7 +1268,9 @@ public struct Config: Codable, Sendable, Equatable {
                 deliveryVerificationEnabled: Bool = false,
                 queuedPromptEnabled: Bool = Config.queuedPromptDefault,
                 supervisionEnabled: Bool = Config.supervisionEnabledDefault,
-                gcProfileDirsEnabled: Bool = Config.gcProfileDirsEnabledDefault) {
+                gcProfileDirsEnabled: Bool = Config.gcProfileDirsEnabledDefault,
+                gcSupervisionDesksEnabled: Bool =
+                    Config.gcSupervisionDesksEnabledDefault) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
         self.envSettingOverrides = envSettingOverrides
@@ -1282,6 +1299,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.queuedPromptEnabled = queuedPromptEnabled
         self.supervisionEnabled = supervisionEnabled
         self.gcProfileDirsEnabled = gcProfileDirsEnabled
+        self.gcSupervisionDesksEnabled = gcSupervisionDesksEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -1350,6 +1368,9 @@ public struct Config: Codable, Sendable, Equatable {
         // default rather than hardcoding `false`.
         gcProfileDirsEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .gcProfileDirsEnabled) ?? Config.gcProfileDirsEnabledDefault
+        gcSupervisionDesksEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .gcSupervisionDesksEnabled)
+            ?? Config.gcSupervisionDesksEnabledDefault
     }
 }
 

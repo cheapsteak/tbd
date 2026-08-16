@@ -369,4 +369,94 @@ struct ConfigStoreTests {
         try await db.config.setGCProfileDirsEnabled(false)
         #expect(try await db.config.get().gcProfileDirsEnabled == false)
     }
+
+    // MARK: - v80: the supervision-desk collector's soak gate
+    //
+    // The same three-state property as v78, for the same reason: the leg
+    // archives a worktree and drops a record, so it ships off and soaks, and
+    // graduation must be a one-line constant change that reaches every
+    // never-chosen install while preserving every explicit opt-out.
+
+    /// A row written by a real pre-v80 daemon must read NULL, not 0.
+    @Test func rowWrittenBeforeV80StillReadsNull() throws {
+        let queue = try DatabaseQueue()
+        let migrator = TBDDatabase.buildMigratorForTests()
+        try migrator.migrate(queue, upTo: "v79_reap_records_quarantine_path")
+
+        try queue.write { db in
+            try db.execute(
+                sql: "UPDATE config SET gc_enabled = 1 WHERE id = ?",
+                arguments: [ConfigStore.singletonID]
+            )
+        }
+
+        try migrator.migrate(queue)
+
+        try queue.read { db in
+            let row = try #require(try Row.fetchOne(
+                db, sql: "SELECT * FROM config WHERE id = ?",
+                arguments: [ConfigStore.singletonID]))
+            let raw: DatabaseValue = row["gc_supervision_desks_enabled"]
+            #expect(
+                raw.isNull,
+                "a config row written before v80 must read NULL, not \(raw)"
+            )
+            #expect(row["gc_enabled"] == true)
+        }
+    }
+
+    /// NULL follows the shipped default wherever it goes; an explicit `false`
+    /// does not. Exercised against BOTH default values, so it fails if the
+    /// resolution is ever wired as `?? false`.
+    @Test func gcSupervisionDesksExplicitFalseSurvivesADefaultFlipWhileNullFollowsIt()
+        async throws {
+        let db = try TBDDatabase(inMemory: true)
+
+        let untouched = try #require(try await fetchConfigRecord(db))
+        #expect(untouched.gc_supervision_desks_enabled == nil)
+        #expect(
+            untouched.toModel(gcSupervisionDesksDefault: false).gcSupervisionDesksEnabled
+                == false)
+        #expect(
+            untouched.toModel(gcSupervisionDesksDefault: true).gcSupervisionDesksEnabled == true,
+            "a never-chosen row must pick up a changed shipped default"
+        )
+
+        try await db.config.setGCSupervisionDesksEnabled(false)
+        let explicitlyOff = try #require(try await fetchConfigRecord(db))
+        #expect(explicitlyOff.gc_supervision_desks_enabled == false)
+        #expect(
+            explicitlyOff.toModel(gcSupervisionDesksDefault: true).gcSupervisionDesksEnabled
+                == false,
+            "an explicit opt-out must be honored forever, whatever the shipped default becomes"
+        )
+    }
+
+    /// Isolates the RESOLUTION guard from the STORAGE guard: no database, no
+    /// migration, just the record's own `??`.
+    @Test func gcSupervisionDesksToModelResolvesNullThroughTheInjectedDefault() {
+        let record = ConfigRecord(id: "unstored", gc_supervision_desks_enabled: nil)
+        #expect(
+            record.toModel(gcSupervisionDesksDefault: false).gcSupervisionDesksEnabled == false)
+        #expect(
+            record.toModel(gcSupervisionDesksDefault: true).gcSupervisionDesksEnabled == true,
+            "a NULL record must pick up whatever default is injected, not a hardcoded false"
+        )
+    }
+
+    /// The shipped default today: OFF. Graduation edits this constant and
+    /// nothing else.
+    @Test func gcSupervisionDesksShipsOff() async throws {
+        #expect(Config.gcSupervisionDesksEnabledDefault == false)
+        let db = try TBDDatabase(inMemory: true)
+        #expect(try await db.config.get().gcSupervisionDesksEnabled == false)
+    }
+
+    @Test func setGCSupervisionDesksEnabledRoundtrips() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCSupervisionDesksEnabled(true)
+        #expect(try await db.config.get().gcSupervisionDesksEnabled == true)
+        try await db.config.setGCSupervisionDesksEnabled(false)
+        #expect(try await db.config.get().gcSupervisionDesksEnabled == false)
+    }
 }
