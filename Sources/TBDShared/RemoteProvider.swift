@@ -3,6 +3,11 @@ import os
 
 private let registryLogger = Logger(subsystem: "com.tbd.daemon", category: "remote")
 
+/// Decode-time diagnostics for the provider contract. A provider's output is
+/// untrusted input, so what TBD had to drop from it is a fact worth being able
+/// to read back — but only ever the shape of the damage, never the payload.
+private let contractLogger = Logger(subsystem: "com.tbd.daemon", category: "remote.contract")
+
 // MARK: - Remote provider contract types (docs/remote-provider-contract.md, v1)
 
 /// One registered provider from `~/tbd/agent-providers.json`.
@@ -159,8 +164,69 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
         agentState = try c.decodeIfPresent(RemoteAgentState.self, forKey: .agentState) ?? .unknown
         agentStateReason = try c.decodeIfPresent(String.self, forKey: .agentStateReason)
         agentStateAt = try c.decodeIfPresent(String.self, forKey: .agentStateAt)
-        meta = try c.decodeIfPresent([String: String].self, forKey: .meta)
+        meta = Self.decodeMeta(from: c, sessionID: id)
         archived = try c.decodeIfPresent(Bool.self, forKey: .archived)
+    }
+
+    /// `meta` decoded leniently, and never fatally.
+    ///
+    /// The contract calls `meta` a flat string-to-string map of display pairs,
+    /// and it also calls the whole Session object untrusted input a caller must
+    /// degrade gracefully on. Those two together decide this: a value that is
+    /// not a string costs its own key and nothing else — not the session, and
+    /// not (via the enclosing array) the rest of the fleet.
+    ///
+    /// Scalars are coerced rather than dropped because a map of display pairs
+    /// can display them unambiguously; objects, arrays and nulls are dropped
+    /// because there is no one right way to render them and inventing one would
+    /// put a caller-chosen string where a provider-chosen one belongs.
+    private static func decodeMeta(
+        from c: KeyedDecodingContainer<CodingKeys>, sessionID: String
+    ) -> [String: String]? {
+        // `meta` absent, null, or not an object at all: no map, still a session.
+        guard let raw = try? c.decodeIfPresent([String: MetaValue].self, forKey: .meta) else {
+            return nil
+        }
+        var kept: [String: String] = [:]
+        var dropped: [String] = []
+        for (key, value) in raw {
+            if let literal = value.literal {
+                kept[key] = literal
+            } else {
+                dropped.append(key)
+            }
+        }
+        if !dropped.isEmpty {
+            // Keys only. A provider-defined map may carry anything, so the
+            // values never reach the log.
+            contractLogger.debug(
+                """
+                session \(sessionID, privacy: .public): dropped \(dropped.count, privacy: .public) \
+                non-scalar meta key(s): \(dropped.sorted().joined(separator: ", "), privacy: .public)
+                """
+            )
+        }
+        return kept
+    }
+
+    /// One `meta` value, decoded down to the string a display map can show.
+    /// `literal` is nil for anything with no unambiguous literal form — an
+    /// object, an array, or an explicit null.
+    private struct MetaValue: Decodable {
+        let literal: String?
+
+        init(from decoder: any Decoder) throws {
+            guard let c = try? decoder.singleValueContainer(), !c.decodeNil() else {
+                literal = nil
+                return
+            }
+            if let s = try? c.decode(String.self) { literal = s; return }
+            if let b = try? c.decode(Bool.self) { literal = b ? "true" : "false"; return }
+            // Int before Double so a whole number reads as `42`, not `42.0`.
+            if let i = try? c.decode(Int.self) { literal = String(i); return }
+            if let d = try? c.decode(Double.self) { literal = String(d); return }
+            literal = nil
+        }
     }
 
     /// The contract's absent-reads-as-`false` display semantics. The sync
@@ -222,8 +288,64 @@ public struct RemoteSessionListEnvelope: Codable, Sendable {
     /// provider needs no edit.
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        sessions = try c.decode([RemoteSessionPayload].self, forKey: .sessions)
+        sessions = try c.decode(LenientSessionArray.self, forKey: .sessions).sessions
         complete = try c.decodeIfPresent(Bool.self, forKey: .complete) ?? true
+    }
+}
+
+/// An inventory of sessions, decoded element by element, so one malformed
+/// session costs one session.
+///
+/// A plain `[RemoteSessionPayload]` fails whole on its first bad element,
+/// which turns one contract-violating session into a failed inventory for the
+/// entire provider — every remote row goes stale at once, and the fleet
+/// disappears from view because of a session nobody was looking at. Both places
+/// a provider enumerates its fleet decode through this: the `list` envelope and
+/// the `events` stream's `snapshot` line.
+///
+/// A skipped session is simply absent from the snapshot, so the mirror's
+/// absence bookkeeping starts counting it missing and may eventually mark it
+/// gone. That is the honest reading of the only evidence there is: the provider
+/// said nothing this caller could understand about that session.
+public struct LenientSessionArray: Decodable, Sendable {
+    public let sessions: [RemoteSessionPayload]
+
+    public init(from decoder: any Decoder) throws {
+        let elements = try [LenientSession](from: decoder)
+        sessions = elements.compactMap(\.payload)
+        let skipped = elements.filter { $0.payload == nil }
+        if !skipped.isEmpty {
+            // `.error`, not `.debug`: losing a session from the inventory is
+            // significant, and the id is what makes it actionable when the
+            // element was intact enough to carry one.
+            let named = skipped.compactMap(\.id).sorted()
+            contractLogger.error(
+                """
+                skipped \(skipped.count, privacy: .public) undecodable session(s) in a provider \
+                inventory; ids: \(named.isEmpty ? "none recoverable" : named.joined(separator: ", "), privacy: .public)
+                """
+            )
+        }
+    }
+
+    /// One array element, decoded without the power to fail the array.
+    /// `payload` is nil for an element `RemoteSessionPayload` could not decode;
+    /// `id` is recovered separately where it survives, since it is the only
+    /// part of a broken element worth naming.
+    private struct LenientSession: Decodable {
+        let payload: RemoteSessionPayload?
+        let id: String?
+
+        init(from decoder: any Decoder) throws {
+            let decoded = try? RemoteSessionPayload(from: decoder)
+            payload = decoded
+            if let decoded {
+                id = decoded.id
+            } else {
+                let c = try? decoder.container(keyedBy: RemoteSessionPayload.CodingKeys.self)
+                id = (try? c?.decodeIfPresent(String.self, forKey: .id)) ?? nil
+            }
+        }
     }
 }
 

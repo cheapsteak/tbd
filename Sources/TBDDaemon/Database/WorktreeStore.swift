@@ -833,37 +833,7 @@ public struct WorktreeStore: Sendable {
             }
 
             if let pid = newParentID {
-                if pid == worktreeID {
-                    throw WorktreeMoveError.selfReference
-                }
-                guard let parent = try WorktreeRecord.fetchOne(db, key: pid.uuidString) else {
-                    throw WorktreeMoveError.parentNotFound
-                }
-                if parent.status == WorktreeStatus.main.rawValue {
-                    throw WorktreeMoveError.parentIsMain
-                }
-                if parent.status == WorktreeStatus.archived.rawValue {
-                    // Symmetric to ParentResolver's create-time check: moving a
-                    // worktree under an archived parent would produce an
-                    // invisible row until reconcile clears the pointer.
-                    throw WorktreeMoveError.parentIsArchived
-                }
-                // Cycle check: walk up from parent; if we ever hit `worktreeID`, cycle.
-                // The `visited` set defends against a pre-existing cycle in the DB
-                // (manual edit or future regression) by treating any revisit as a
-                // cycle too — otherwise the loop would spin forever inside the
-                // write transaction and block the database.
-                var cursor: String? = parent.parentWorktreeID
-                var visited: Set<String> = [pid.uuidString]
-                while let curID = cursor {
-                    if curID == worktreeID.uuidString {
-                        throw WorktreeMoveError.cycle
-                    }
-                    if !visited.insert(curID).inserted {
-                        throw WorktreeMoveError.cycle
-                    }
-                    cursor = try WorktreeRecord.fetchOne(db, key: curID)?.parentWorktreeID
-                }
+                try Self.validateParent(db, worktreeID: worktreeID, parentID: pid)
             }
 
             // Renumber destination siblings: shift sortOrder of siblings >= newSortOrder by +1,
@@ -889,6 +859,84 @@ public struct WorktreeStore: Sendable {
                 sql: "UPDATE worktree SET parentWorktreeID = ?, sortOrder = ? WHERE id = ?",
                 arguments: [parentArg, newSortOrder, worktreeID.uuidString]
             )
+        }
+    }
+
+    /// Every rule about who may be whose parent, in one place: not-self, the
+    /// parent exists, it is neither `main` nor archived, and the edge closes no
+    /// cycle. `move()` and `assignParentIfUnset()` both go through it so a
+    /// second copy cannot drift from the first.
+    ///
+    /// Runs inside the caller's write transaction, since the answer is only
+    /// true for as long as the rows it read stay put.
+    private static func validateParent(_ db: Database, worktreeID: UUID, parentID: UUID) throws {
+        if parentID == worktreeID {
+            throw WorktreeMoveError.selfReference
+        }
+        guard let parent = try WorktreeRecord.fetchOne(db, key: parentID.uuidString) else {
+            throw WorktreeMoveError.parentNotFound
+        }
+        if parent.status == WorktreeStatus.main.rawValue {
+            throw WorktreeMoveError.parentIsMain
+        }
+        if parent.status == WorktreeStatus.archived.rawValue {
+            // Symmetric to ParentResolver's create-time check: nesting a
+            // worktree under an archived parent would produce an
+            // invisible row until reconcile clears the pointer.
+            throw WorktreeMoveError.parentIsArchived
+        }
+        // Cycle check: walk up from parent; if we ever hit `worktreeID`, cycle.
+        // The `visited` set defends against a pre-existing cycle in the DB
+        // (manual edit or future regression) by treating any revisit as a
+        // cycle too — otherwise the loop would spin forever inside the
+        // write transaction and block the database.
+        var cursor: String? = parent.parentWorktreeID
+        var visited: Set<String> = [parentID.uuidString]
+        while let curID = cursor {
+            if curID == worktreeID.uuidString {
+                throw WorktreeMoveError.cycle
+            }
+            if !visited.insert(curID).inserted {
+                throw WorktreeMoveError.cycle
+            }
+            cursor = try WorktreeRecord.fetchOne(db, key: curID)?.parentWorktreeID
+        }
+    }
+
+    /// Give a row that has no parent its FIRST one, appended to the end of the
+    /// destination's child group. Returns the assigned sortOrder, or nil when
+    /// the row already had a parent.
+    ///
+    /// Deliberately narrower than `move()`: it can only ever fill a nil, so it
+    /// cannot reparent a row the user has already placed, and it never asks the
+    /// caller for a position. It exists for a row adopted before its parent was
+    /// knowable — a remote session whose spawning lane became visible only on a
+    /// later sighting (`RemoteSessionAdopter`). Validation is `move()`'s, not a
+    /// relaxed copy of it, so a late edge is held to the same rules as one the
+    /// user drags into place.
+    ///
+    /// The nil-check and the write share one transaction: two concurrent
+    /// callers must not both read "no parent" and both assign one.
+    @discardableResult
+    public func assignParentIfUnset(worktreeID: UUID, parentID: UUID) async throws -> Int? {
+        try await writer.write { db in
+            guard let record = try WorktreeRecord.fetchOne(db, key: worktreeID.uuidString) else {
+                throw WorktreeMoveError.worktreeNotFound
+            }
+            guard record.parentWorktreeID == nil else { return nil }
+            try Self.validateParent(db, worktreeID: worktreeID, parentID: parentID)
+
+            let maxOrder = try Int.fetchOne(
+                db,
+                sql: "SELECT MAX(sortOrder) FROM worktree WHERE parentWorktreeID = ?",
+                arguments: [parentID.uuidString]
+            ) ?? 0
+            let sortOrder = maxOrder + 1
+            try db.execute(
+                sql: "UPDATE worktree SET parentWorktreeID = ?, sortOrder = ? WHERE id = ?",
+                arguments: [parentID.uuidString, sortOrder, worktreeID.uuidString]
+            )
+            return sortOrder
         }
     }
 

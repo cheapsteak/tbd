@@ -26,7 +26,9 @@ enum RemoteEventParser {
     private struct Envelope: Decodable {
         let event: String
         let contractVersion: Int?
-        let sessions: [RemoteSessionPayload]?
+        /// Element-wise, like `list`'s envelope: a `snapshot` line is a whole
+        /// inventory, so one malformed session in it must not cost the fleet.
+        let sessions: LenientSessionArray?
         let session: RemoteSessionPayload?
         let id: String?
         let complete: Bool?
@@ -43,7 +45,8 @@ enum RemoteEventParser {
               let envelope = try? JSONDecoder().decode(Envelope.self, from: data) else { return nil }
         switch envelope.event {
         case "hello": return .hello(contractVersion: envelope.contractVersion ?? 1)
-        case "snapshot": return .snapshot(envelope.sessions ?? [], complete: envelope.complete ?? true)
+        case "snapshot":
+            return .snapshot(envelope.sessions?.sessions ?? [], complete: envelope.complete ?? true)
         case "session": return envelope.session.map { .session($0) }
         case "removed": return envelope.id.map { .removed(id: $0) }
         case "ping": return .ping

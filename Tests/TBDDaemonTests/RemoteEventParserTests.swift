@@ -25,6 +25,24 @@ struct RemoteEventParserTests {
         #expect(s.state == .exited)
     }
 
+    /// A `snapshot` line is a whole inventory, so one malformed session in it
+    /// must cost one session — not the line, which would leave every remote
+    /// row frozen at whatever it last said.
+    @Test func aSnapshotSurvivesOneUndecodableSession() throws {
+        let line = #"""
+        {"event": "snapshot", "sessions": [
+          {"id": "a", "state": "running"},
+          {"id": "bad", "state": "running", "exit_code": "not-a-number"},
+          {"id": "c", "state": "running", "meta": {"detail": {"nested": "object"}}}]}
+        """#
+        let event = RemoteEventParser.parse(line: line.replacingOccurrences(of: "\n", with: " "))
+        guard case .snapshot(let sessions, _) = event else {
+            Issue.record("not a snapshot: \(String(describing: event))")
+            return
+        }
+        #expect(sessions.map(\.id) == ["a", "c"])
+    }
+
     @Test func helloDefaultsContractVersionWhenAbsent() {
         #expect(RemoteEventParser.parse(line: #"{"event": "hello"}"#) == .hello(contractVersion: 1))
     }
