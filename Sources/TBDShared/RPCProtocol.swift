@@ -283,6 +283,8 @@ public enum RPCMethod {
     public static let remoteSessions = "remote.sessions"
     public static let remoteCreate = "remote.create"
     public static let remoteStop = "remote.stop"
+    public static let remoteArchive = "remote.archive"
+    public static let remoteUnarchive = "remote.unarchive"
     public static let remoteSend = "remote.send"
     public static let remoteLog = "remote.log"
     public static let remoteRename = "remote.rename"
@@ -1403,6 +1405,22 @@ public struct RemoteCreateParams: Codable, Sendable {
 }
 
 public struct RemoteStopParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public init(provider: String, sessionID: String) {
+        self.provider = provider; self.sessionID = sessionID
+    }
+}
+
+public struct RemoteArchiveParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public init(provider: String, sessionID: String) {
+        self.provider = provider; self.sessionID = sessionID
+    }
+}
+
+public struct RemoteUnarchiveParams: Codable, Sendable {
     public let provider: String
     public let sessionID: String
     public init(provider: String, sessionID: String) {

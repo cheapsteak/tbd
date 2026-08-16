@@ -115,9 +115,19 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
     public let agentStateReason: String?
     public let agentStateAt: String?
     public let meta: [String: String]?
+    /// Retirement-from-inventory claim, per the provider contract's
+    /// `archived` field. `nil` means the provider made no claim (absent);
+    /// `.some(false)`/`.some(true)` is an explicit claim. Deliberately NOT
+    /// collapsed to a non-optional `Bool` — the filing-sync authority rule
+    /// (docs/specs/2026-08-16-remote-lane-archive-design.md §"Whose report
+    /// counts") must distinguish "no claim" from "explicit false", and
+    /// collapsing this at decode would destroy that distinction. Use
+    /// `isArchived` for display, which supplies the contract's
+    /// absent-reads-as-false semantics.
+    public let archived: Bool?
 
     enum CodingKeys: String, CodingKey {
-        case id, title, state, meta
+        case id, title, state, meta, archived
         case createdAt = "created_at"
         case exitCode = "exit_code"
         case agentState = "agent_state"
@@ -129,11 +139,11 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
                 state: RemoteProcessState, exitCode: Int? = nil,
                 agentState: RemoteAgentState = .unknown,
                 agentStateReason: String? = nil, agentStateAt: String? = nil,
-                meta: [String: String]? = nil) {
+                meta: [String: String]? = nil, archived: Bool? = nil) {
         self.id = id; self.title = title; self.createdAt = createdAt
         self.state = state; self.exitCode = exitCode
         self.agentState = agentState; self.agentStateReason = agentStateReason
-        self.agentStateAt = agentStateAt; self.meta = meta
+        self.agentStateAt = agentStateAt; self.meta = meta; self.archived = archived
     }
 
     public init(from decoder: Decoder) throws {
@@ -147,7 +157,13 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
         agentStateReason = try c.decodeIfPresent(String.self, forKey: .agentStateReason)
         agentStateAt = try c.decodeIfPresent(String.self, forKey: .agentStateAt)
         meta = try c.decodeIfPresent([String: String].self, forKey: .meta)
+        archived = try c.decodeIfPresent(Bool.self, forKey: .archived)
     }
+
+    /// The contract's absent-reads-as-`false` display semantics. The sync
+    /// path must NOT use this — it needs to distinguish "no claim" (nil) from
+    /// an explicit `false`, so it reads `archived` directly.
+    public var isArchived: Bool { archived ?? false }
 
     /// A presentation-safe projection for a cached row whose provider has
     /// failed to produce a fresh inventory. The mirror keeps the last good
