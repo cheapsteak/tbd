@@ -2904,6 +2904,13 @@ by the receiving session's inbound settings. Reachability is therefore a
 per-session fact to be measured, not something fleet sessions can be assumed
 to have.
 
+The inbox socket is not the same thing as Claude Code's **Channels**
+interface, and the desk subsection below turns on that difference. Channels is
+the separate research-preview feature for pushing external events into a
+session; it needs an agent-side registration and an interactive per-session
+consent prompt at session start, which is exactly the obstacle the desk
+handshake and the consent question below are written against.
+
 Typing carries one known risk, and this design names it rather than waving
 it off. If a human has typed something into an agent's composer and not yet
 pressed enter, a paste-and-submit delivery sends the human's unsent text

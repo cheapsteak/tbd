@@ -535,12 +535,16 @@ Getting a message into a running agent session is out of scope; assume an adapte
 agent kind. Two real mechanisms have been investigated, and they are worth knowing about
 because their differences are what you should design against.
 
-For Claude Code, the research-preview **Channels** interface: an MCP server bound to the session
-emits a notification, and Claude Code starts a turn from it. Crucially it does not write into
-the composer — in testing, a message arrived while an unsent human draft was present and the
-draft survived byte-for-byte. Findings, including the caveats:
-`https://github.com/cheapsteak/tbd/blob/b0e3ab35ef677fc6788920eef687d4df7f13257e/docs/research/2026-07-26-claude-code-channels/findings.md`
-and the upstream docs at `https://code.claude.com/docs/en/channels`.
+For Claude Code, the per-session **inbox socket** that cross-session messaging binds: any
+process running as the same OS user connects to it and posts a message, and the receiving
+session enqueues it as a user turn. Crucially it does not write into the composer — in testing,
+a message arrived while an unsent human draft was present and the draft survived byte-for-byte.
+Whether a message is delivered, held for approval, or dropped is the receiver's own call,
+decided by its `crossSessionInbound` setting. Findings, including the caveats:
+`https://github.com/cheapsteak/tbd/blob/main/docs/research/2026-07-26-claude-code-channels/findings.md`
+and the upstream docs at `https://code.claude.com/docs/en/cross-session-messaging`. Claude
+Code's research-preview **Channels** interface is a *different* mechanism — an MCP server the
+session must be started against, for pushing external events in — and is not what was measured.
 
 For Codex, the app-server protocol (`https://learn.chatgpt.com/docs/app-server`) instead exposes
 request-shaped operations: steer input into the active turn, start a turn when the thread is

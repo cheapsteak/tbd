@@ -21,8 +21,9 @@ no per-session consent prompt.
 Draft safety was measured directly. With an unsent draft sitting in the
 composer, an external Python script posted a message to the socket; the message
 was delivered and answered, and the draft was byte-for-byte unchanged
-afterward. This held in both the idle case (the message started a new turn) and
-the mid-turn case (the message was read during a turn already running).
+afterward. This held with the receiver idle, and with a turn already running —
+both when the message waited for that turn to finish and when it joined the
+turn in flight.
 
 The real constraint is not access, it is the receiver's **inbound gate**. A
 message can be delivered, held for approval, or dropped, depending on the
@@ -49,8 +50,9 @@ have not been tested.
 Official documentation:
 
 - [Cross-session messaging](https://code.claude.com/docs/en/cross-session-messaging)
-- [Channels](https://code.claude.com/docs/en/channels) — the separate shipped
-  feature for pushing external events (CI results, chat) into a session
+- [Channels](https://code.claude.com/docs/en/channels) — the separate
+  research-preview feature for pushing external events (CI results, chat) into
+  a session
 - [Settings](https://code.claude.com/docs/en/settings) — `crossSessionInbound`,
   `dialogExpiry`, `isolatePeerMachines`
 - [Codex app-server](https://learn.chatgpt.com/docs/app-server.md)
@@ -58,6 +60,16 @@ Official documentation:
 
 A broader external message-injection API is an open upstream feature request:
 [anthropics/claude-code#53049](https://github.com/anthropics/claude-code/issues/53049).
+
+TBD already ships against this mechanism, and those two documents are where to
+start before designing anything further on it:
+
+- [`docs/cross-session-messaging.md`](../../cross-session-messaging.md) — the
+  user-facing description of what TBD supports today.
+- [`docs/specs/2026-08-09-cross-session-messaging-design.md`](../../specs/2026-08-09-cross-session-messaging-design.md)
+  — the shipped design, including the decision to mirror the session registry
+  into the host store so TBD's per-profile config directories stay mutually
+  visible.
 
 ## How these findings were established
 
@@ -85,8 +97,9 @@ against a running Codex session.
 61 rows present on the probe machine, every row carried `pid`, `sessionId`,
 `cwd`, `startedAt`, `procStart`, `version`, `peerProtocol`, `kind`,
 `entrypoint`, `name`, `status`, `statusUpdatedAt` and `updatedAt`; most also
-carried `tmux` (a target pane), `messagingSocketPath` and `nameSource`. Rows
-that carry `bridgeSessionId` are the link to cloud and Remote Control sessions.
+carried `tmux` (a target pane), `messagingSocketPath` and `nameSource`. Some rows
+carry `bridgeSessionId`; on the probe machine those were the rows belonging to
+cloud and Remote Control sessions.
 `status` is coarse — `idle`, `busy`, `waiting`, `shell`. **No transcript
 content appears in the registry.**
 
@@ -116,10 +129,10 @@ call:
 - **`CLAUDE_CODE_MESSAGING_SOCKET`** — this session's own socket path.
 - **`CLAUDE_CODE_MESSAGING_TOKEN`** — this session's **child** token.
 
-Each session exports its own pair, never one inherited from a parent. When a
-session starts before the feature flag that turns messaging on has resolved,
-both are exported once the fetch completes, so processes started earlier keep
-seeing them unset. `/status` shows the same path in its `Peer address` row,
+Each session exports its own pair, never one inherited from a parent. *Read
+from the 2.1.233 binary:* when a session starts before the feature flag that
+turns messaging on has resolved, both are exported once the fetch completes, so
+processes started earlier keep seeing them unset. `/status` shows the same path in its `Peer address` row,
 prefixed `uds:`.
 
 ## Wire protocol
@@ -147,7 +160,10 @@ warning. Optional fields on the user frame:
 - **`session_id`** — if present and it does not match the receiving session's
   ID, the message is dropped. This is the guard against a reused pid.
 - **`priority`** — `now`, `next`, or `later`; anything else falls back to
-  `next`.
+  `next`. *Measured:* posted to a session mid-turn, `next` waits for the
+  running turn to finish, while `now` joins that turn in flight and is answered
+  in the same assistant reply as the prompt already being worked on. `later`
+  was not exercised.
 - **`msg_id`** — correlates the sender-side delivery receipt described below.
 - **`uuid`** — the queue entry's identifier; one is generated if omitted.
 - **`file_attachments`** — materialized locally before the message is enqueued.
@@ -168,6 +184,13 @@ An injected user message is enqueued with `isMeta: true` and
 `skipSlashCommands: true`, so **a slash command inside an injected message is
 inert** — it arrives as plain text and is never executed. That is a meaningful
 safety property for anything built on this surface.
+
+**Measured.** The transcript entry an injected message produces carries
+`isMeta: true`, `promptSource: "system"`, `userType: "external"` and
+`origin: {"kind":"peer","from":"<the label the sender asserted>"}`. Posting the
+literal text `/help` drew a prose answer describing the session rather than the
+slash command's output, so the inert-slash-command property holds in practice
+and not only in the binary.
 
 The CLI logs its own injection recipe at bind time, which is the most direct
 citation for the format:
@@ -318,7 +341,7 @@ session. A daemon, a scheduler, or any other host-side process is structurally
 outside it and must reach the receiver another way — `crossSessionInbound`, or
 the attestation envelope above.
 
-*Documented.* One prerequisite sits underneath all of this: a Bash command
+**Documented.** One prerequisite sits underneath all of this: a Bash command
 running inside Claude Code's sandbox reaches the socket only if the sandbox's
 Unix-socket settings, `sandbox.network.allowAllUnixSockets` and
 `sandbox.network.allowUnixSockets`, permit it. That constrains the hook and
@@ -341,19 +364,30 @@ and appears in the listing. Bare mode binds no socket and does not appear
 
 ## Draft safety
 
-**Measured** on 2026-08-14 against Claude Code 2.1.233 on macOS 26.1. A
-throwaway interactive session was started in its own tmux server, and an
-unrelated external Python process — no Claude involved, no auth token
-presented — posted a message to that session's socket. The composer's rendered
-draft line was captured before and after and compared byte-for-byte.
+**Measured** against Claude Code 2.1.233 on macOS 26.1. A throwaway
+interactive session ran in its own tmux server, and an unrelated external
+Python process — no Claude involved, no auth token presented — posted messages
+to that session's socket with [`inject-message.py`](inject-message.py). A
+distinct sentinel string was typed into the composer and left unsent before
+each post, and the composer region of the rendered pane was captured before and
+after and compared byte-for-byte.
 
-- **Idle receiver, unsent draft present.** The message was delivered, rendered
-  in the conversation, and started a new turn that ran to completion. The draft
-  was unchanged afterward.
-- **Mid-turn receiver, unsent draft typed while the turn ran.** The session's
-  registry `status` was confirmed `busy` immediately before and after the post.
-  The message was delivered and answered, and the draft was unchanged
-  afterward.
+- **Idle receiver.** The message was delivered, rendered in the conversation,
+  and started a new turn that ran to completion. The composer was unchanged:
+  same byte length, same SHA-256 before and after.
+- **Turn already running, default `priority: next`.** The registry `status` was
+  confirmed `busy` when the draft was typed, immediately before the post, and
+  immediately after it. The message waited for the running turn to finish and
+  was answered once it did. The composer was captured both while that turn was
+  still running and again after the session went idle; both matched the before
+  capture byte for byte.
+- **Turn already running, `priority: now`.** The message joined the turn in
+  flight: the transcript records it ahead of that turn's assistant reply, and
+  the reply answered the injected message and the original prompt together. The
+  composer was again identical before and after.
+
+Those three posts landed on one session while an unsent draft sat in its
+composer, and in none of them did the draft's bytes change.
 
 This is the property that matters for scheduled delivery: a message arriving on
 the socket does not compete with a person typing. It establishes the behavior
@@ -389,9 +423,13 @@ Two runnable Python 3 scripts sit next to this document. Both are standard
 library only.
 
 - **[`inject-message.py`](inject-message.py)** — posts a user message to a
-  socket. Defaults the target to `$CLAUDE_CODE_MESSAGING_SOCKET` and sends the
-  `CLAUDE_CODE_MESSAGING_TOKEN` auth frame when one is available. Takes
-  `--from`, `--priority` and `--session-id`.
+  socket. Defaults the target to `$CLAUDE_CODE_MESSAGING_SOCKET`, and sends the
+  `CLAUDE_CODE_MESSAGING_TOKEN` auth frame only when `--socket` resolves to
+  that same path: the environment's token belongs to your session and means
+  nothing to a different one, so against any other socket it is dropped with a
+  note on stderr. Takes `--from`, `--priority`, `--session-id`, `--token` to
+  present a token you name yourself, and `--no-token` to send no auth frame at
+  all.
 - **[`list-sessions.py`](list-sessions.py)** — reads the session registry from
   `$CLAUDE_CONFIG_DIR/sessions`, falling back to `~/.claude/sessions`, and
   prints live peers with pid, name, status, cwd and socket, skipping rows whose
@@ -453,9 +491,10 @@ documented integration point for TBD.
 
 ## Unknowns and limitations
 
-- Draft preservation is established for Claude Code 2.1.233 on macOS. It is not
-  a compatibility guarantee for future versions, and it was not re-measured on
-  Linux.
+- Draft preservation is established for Claude Code 2.1.233 on macOS, for a
+  single-line composer draft. It is not a compatibility guarantee for future
+  versions, it was not re-measured on Linux, and a multi-line or
+  attachment-bearing draft was not tested.
 - The own-child seam was measured only from the *outside*: a non-child holding
   the token is held. The documented case it is the counterpart to — a genuine
   own-child that has already exited, presenting the token on macOS — was not
