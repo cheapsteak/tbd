@@ -96,7 +96,7 @@ struct ProviderEventsSupervisorTests {
             registryURL: dir.appendingPathComponent("unused.json"))
         let config = RemoteProviderConfig(name: "stub", exec: script.path)
         let supervisor = ProviderEventsSupervisor(
-            config: config, manager: manager,
+            config: config, manager: manager, contractVersion: 1,
             silenceLimit: 5, backoffCap: 1, healthyResetUptime: 1)
         await supervisor.start()
 
@@ -159,7 +159,7 @@ struct ProviderEventsSupervisorTests {
             registryURL: dir.appendingPathComponent("unused.json"))
         let supervisor = ProviderEventsSupervisor(
             config: RemoteProviderConfig(name: "stubborn", exec: script.path), manager: manager,
-            silenceLimit: 90, backoffCap: 1, healthyResetUptime: 1)
+            contractVersion: 1, silenceLimit: 90, backoffCap: 1, healthyResetUptime: 1)
         await supervisor.start()
 
         // Bounded wait for the child to exist before stopping it.

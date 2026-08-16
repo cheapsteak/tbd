@@ -274,7 +274,9 @@ public actor RemoteProviderManager {
     /// supervised low-latency NDJSON stream.
     private func startLoop(for config: RemoteProviderConfig) async {
         if describes[config.name]?.capabilities.contains("events") == true {
-            let supervisor = ProviderEventsSupervisor(config: config, manager: self, clock: clock)
+            let supervisor = ProviderEventsSupervisor(
+                config: config, manager: self,
+                contractVersion: contractMajor(for: config.name), clock: clock)
             supervisors[config.name] = supervisor
             // Awaiting `supervisor.start()` (a different actor) suspends this
             // actor's executor, which by itself does NOT close the race

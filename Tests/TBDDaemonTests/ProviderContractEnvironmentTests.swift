@@ -36,4 +36,26 @@ struct ProviderContractEnvironmentTests {
         #expect(text.contains("TBD_CONTRACT_VERSION=2"))
         #expect(!text.contains("TBD_CONTRACT_VERSION=1"))
     }
+
+    /// The second daemon-side emitter. It hardcoded `"1"` alongside the
+    /// runner's, so the two would disagree for any provider that negotiated
+    /// anything else — and the events stream is a long-lived process, so the
+    /// disagreement would persist for the provider's whole lifetime.
+    @Test func eventsStreamEnvironmentCarriesTheNegotiatedMajor() {
+        let env = ProviderEventsSupervisor.streamEnvironment(
+            base: ["PATH": "/usr/bin"], contractVersion: 2)
+        #expect(env["TBD_CONTRACT_VERSION"] == "2")
+        #expect(env["PATH"] == "/usr/bin")
+    }
+
+    /// Both emitters agree for a given major — the property that matters, since
+    /// they are two independent code paths spawning the same provider.
+    @Test func bothDaemonEmittersAgree() {
+        for major in [1, 2] {
+            let runner = ProviderRunner.invocationEnvironment(base: [:], contractVersion: major)
+            let stream = ProviderEventsSupervisor.streamEnvironment(base: [:], contractVersion: major)
+            #expect(runner["TBD_CONTRACT_VERSION"] == stream["TBD_CONTRACT_VERSION"])
+            #expect(runner["TBD_CONTRACT_VERSION"] == String(major))
+        }
+    }
 }
