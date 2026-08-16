@@ -179,6 +179,56 @@ struct BoundedProcessRunnerTests {
         }
     }
 
+    /// The reported terminal geometry is wide ON PURPOSE and a comment alone
+    /// cannot stop someone "restoring" it to the 24x80 that
+    /// `TmuxControlConnection` uses. A pty never wraps by itself — `winsize` is
+    /// advisory metadata — but a child that reads `TIOCGWINSZ` formats to it and
+    /// inserts REAL newlines at the wrap, which then corrupt the captured bytes.
+    /// At 80 columns the headroom over a realistic output line was six
+    /// characters. `stty size` is what the child sees, so this pins the actual
+    /// contract rather than the constant's spelling.
+    @Test func pseudoTerminalReportsAWideGeometryToTheChild() async throws {
+        let outcome = try await runBoundedProcess(
+            executable: "/bin/sh", arguments: ["-c", "stty size"],
+            currentDirectory: nil, timeout: .seconds(10), stdio: .pseudoTerminal)
+        guard case .completed(let status, let stdout, _) = outcome else {
+            Issue.record("expected .completed under .pseudoTerminal, got \(outcome)")
+            return
+        }
+        #expect(status == 0)
+        let reported = (String(data: stdout, encoding: .utf8) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(reported == "200 400", "child saw rows/cols \(reported.debugDescription), wanted \"200 400\"")
+    }
+
+    /// The merge itself, asserted directly rather than inferred from an empty
+    /// `stderr`. `pseudoTerminalModeGivesTheChildATty` checks only that the
+    /// reported stderr is empty, and emptiness is the WRONG witness: deleting
+    /// `process.standardError = replicaHandle` leaves it empty too — the
+    /// child's stderr would simply escape to the daemon's own stderr, where the
+    /// CLI's error text vanishes unlogged and a nonzero status arrives with
+    /// nothing to diagnose from. Requiring BOTH streams to appear in `stdout`
+    /// is the contract; the empty `stderr` is only its consequence.
+    ///
+    /// Its `.pipes` twin is `defaultStdioIsStillPipes` below, which runs the
+    /// same probe and requires the two streams to stay SEPARATE — so between
+    /// them the merge is pinned in both directions.
+    @Test func pseudoTerminalModeMergesStderrIntoStdout() async throws {
+        let outcome = try await runBoundedProcess(
+            executable: "/bin/sh", arguments: ["-c", "echo out; echo err 1>&2"],
+            currentDirectory: nil, timeout: .seconds(10), stdio: .pseudoTerminal)
+        guard case .completed(let status, let stdout, let stderr) = outcome else {
+            Issue.record("expected .completed under .pseudoTerminal, got \(outcome)")
+            return
+        }
+        #expect(status == 0)
+        let merged = String(data: stdout, encoding: .utf8) ?? ""
+        #expect(merged.contains("out"), "child's stdout missing from the merged capture: \(merged.debugDescription)")
+        #expect(merged.contains("err"), "child's stderr missing from the merged capture: \(merged.debugDescription)")
+        // One descriptor, so there is nothing left to report separately.
+        #expect(stderr.isEmpty)
+    }
+
     /// The default is unchanged, which is what keeps every existing call site
     /// on pipes without being revisited.
     @Test func defaultStdioIsStillPipes() async throws {

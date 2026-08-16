@@ -233,6 +233,29 @@ enum BoundedProcessStdio: Sendable {
     case pseudoTerminal
 }
 
+/// The `winsize` reported to a `.pseudoTerminal` child via `TIOCGWINSZ`.
+///
+/// **This is a capture surface, not a display surface — do NOT "restore" it to
+/// the 24x80 that `TmuxControlConnection` uses.** That site is not a precedent:
+/// what crosses its pty is tmux's `-CC` control protocol, which is not
+/// width-formatted at all, so the reported width cannot affect its bytes.
+///
+/// Here it can, and does. The pty itself never wraps — `winsize` is advisory
+/// metadata and the kernel line discipline inserts nothing — but a child that
+/// ASKS will format to it, and the CLIs this mode exists for do exactly that:
+/// an ANSI-rendering layer formats to `process.stdout.columns` and inserts REAL
+/// newlines at the wrap, which then land in the captured bytes and corrupt any
+/// downstream parse. The measured headroom at 80 was six columns: a reference
+/// output's longest line is 74 characters, and a `Created cloud session: `
+/// prefix (23 characters) leaves 57 for a title that a parser reads with no
+/// cross-check. Reporting a width no realistic output reaches removes the whole
+/// class of failure; the cost of an over-wide report is nil, because nothing
+/// pads to the full width.
+private enum PseudoTerminalGeometry {
+    static let columns: UInt16 = 400
+    static let rows: UInt16 = 200
+}
+
 /// Refusals that belong to the runner itself rather than to the child.
 enum BoundedProcessRunnerError: Error, Equatable, LocalizedError {
     /// A `stdin` payload was supplied under `.pseudoTerminal`. The replica is
@@ -380,10 +403,28 @@ func runBoundedProcess(
             // Raw: no echo, no canonical editing, no CR translation, so the
             // bytes the parent reads are the bytes the child wrote.
             cfmakeraw(&term)
-            var size = winsize(ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0)
+            // See `PseudoTerminalGeometry`: wide on purpose, because the child
+            // formats its output to whatever width it is told.
+            var size = winsize(
+                ws_row: PseudoTerminalGeometry.rows,
+                ws_col: PseudoTerminalGeometry.columns,
+                ws_xpixel: 0,
+                ws_ypixel: 0)
             guard openpty(&primary, &replica, nil, &term, &size) == 0 else {
                 continuation.resume(throwing: POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO))
                 return
+            }
+            // Non-blocking primary. `readAvailableRaw` runs on a GCD worker and
+            // holds the accumulator lock across its `read(2)`, so a spurious
+            // readability wakeup on a BLOCKING descriptor would park that worker
+            // holding the lock — and `finish()`, which the watchdog thread calls
+            // on the deadline path, would then block behind it. That thread is
+            // the one this file promises never blocks. `EAGAIN` is already a
+            // "keep draining" return, and `finish()` sets this flag itself, so
+            // the pattern is unchanged, only earlier.
+            let flags = fcntl(primary, F_GETFL)
+            if flags >= 0 {
+                _ = fcntl(primary, F_SETFL, flags | O_NONBLOCK)
             }
             let replicaHandle = FileHandle(fileDescriptor: replica, closeOnDealloc: false)
             stdoutHandle = FileHandle(fileDescriptor: primary, closeOnDealloc: false)
