@@ -3032,6 +3032,34 @@ final class AppState: ObservableObject {
         if next.detachedCounts != prDetachedCounts { prDetachedCounts = next.detachedCounts }
     }
 
+    /// Untrack one PR from one worktree — the status bar chip's xmark.
+    ///
+    /// Tombstoning, not deleting, which is what `pr.detach` already does; the
+    /// app adds no durability story of its own. The bindings are refreshed on
+    /// the way out rather than waiting for the next poll, so the chip leaves
+    /// the bar as part of the gesture.
+    ///
+    /// A `detached: false` result is success, not failure — it says the PR was
+    /// already tombstoned, which from the chips is reachable only by
+    /// double-clicking the same xmark. The user asked for the PR to be gone and
+    /// it is. Only a thrown error is a failure, and that one is worth a toast:
+    /// the chip would otherwise stay put with nothing said.
+    func detachPR(worktreeID: UUID, url: String) async {
+        do {
+            _ = try await daemonClient.detachPR(worktreeID: worktreeID, url: url)
+        } catch {
+            logger.error("""
+                Failed to detach PR \(url, privacy: .public) from worktree \
+                \(worktreeID, privacy: .public): \
+                \(String(describing: error), privacy: .public)
+                """)
+            showTransientToast("Could not stop tracking that PR", style: .error)
+            handleConnectionError(error)
+            return
+        }
+        await refreshPRBindings()
+    }
+
     /// Trigger an immediate PR refresh for one worktree (on-select).
     func refreshPRStatus(worktreeID: UUID) async {
         do {
