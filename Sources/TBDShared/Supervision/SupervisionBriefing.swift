@@ -95,9 +95,14 @@ public struct SupervisionBriefResult: Codable, Sendable, Equatable {
     public let schemaVersion: Int
     public let project: String
     public let result: SupervisionBriefOutcome
-    /// When the submission was taken. Every submission updates the project's
-    /// liveness record, refusals included, so this stamp is meaningful on every
-    /// outcome rather than only on `delivered`.
+    /// When TBD took this submission — stamped once, ahead of every refusal, so
+    /// it carries the same meaning on all seven outcomes.
+    ///
+    /// It says nothing about liveness. `refused-off` and `refused-paused` are
+    /// answered before any contact is recorded — the contact window is disarmed
+    /// while coverage is closed — so on those two the project's liveness record
+    /// is exactly where it was, and a program that needs to know its contact
+    /// registered must read the outcome rather than this stamp.
     public let submittedAt: SupervisionInstant
     /// One sentence a human reads. Never parsed — the machine-readable answer
     /// is `result`, and a program that branches on this string is branching on
