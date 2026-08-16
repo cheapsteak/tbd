@@ -122,4 +122,111 @@ struct SnapshotCompletenessTests {
         _ = try await db.remoteSessions.applySnapshot(provider: "p", sessions: [], now: Date())
         #expect(try await db.remoteSessions.list()[0].gone)
     }
+
+    // MARK: - The manager half
+
+    /// The whole point of the field for `claude-cloud`: a provider whose
+    /// snapshots are always incomplete never claims freshness, so a restart
+    /// cannot recover a timestamp it never earned.
+    @Test func anIncompleteSnapshotDoesNotStampInMemoryFreshness() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let subs = StateSubscriptionManager()
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("snapshot-complete-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let registryURL = dir.appendingPathComponent("agent-providers.json")
+        try #"[{"name": "fake", "exec": "/nonexistent/fake"}]"#
+            .write(to: registryURL, atomically: true, encoding: .utf8)
+        let invoker = FakeProviderInvoker(script: [
+            providerOK(#"{"complete": false, "sessions": [{"id": "a", "state": "running"}]}"#)
+        ])
+        let m = RemoteProviderManager(
+            db: db, subscriptions: subs, runner: invoker, registryURL: registryURL)
+
+        await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
+
+        let status = await m.providerStatuses().first
+        // The provider ANSWERED, so degraded health clears…
+        #expect(status?.health == .ok)
+        // …but nothing claims a complete inventory was ever held.
+        #expect(status?.lastSuccessfulSnapshotAt == nil)
+        // And the row it sighted was still adopted into the mirror.
+        #expect(try await db.remoteSessions.list().map(\.sessionID) == ["a"])
+        // Mutations stay available: `isStaleSnapshot` deliberately excludes a
+        // provider confirmed never to have snapshotted, so Send renders.
+        #expect(await m.hasStaleSnapshot(provider: "fake") == false)
+        #expect(status?.hasStaleSnapshot == false)
+    }
+
+    @Test func aCompleteSnapshotStillStampsInMemoryFreshness() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let subs = StateSubscriptionManager()
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("snapshot-complete-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let registryURL = dir.appendingPathComponent("agent-providers.json")
+        try #"[{"name": "fake", "exec": "/nonexistent/fake"}]"#
+            .write(to: registryURL, atomically: true, encoding: .utf8)
+        let invoker = FakeProviderInvoker(script: [
+            providerOK(#"{"complete": true, "sessions": [{"id": "a", "state": "running"}]}"#)
+        ])
+        let m = RemoteProviderManager(
+            db: db, subscriptions: subs, runner: invoker, registryURL: registryURL)
+
+        await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
+
+        #expect(await m.providerStatuses().first?.lastSuccessfulSnapshotAt != nil)
+    }
+
+    /// A provider that only ever answers incompletely must still recover from
+    /// a transport failure — "the provider answered" is what clears degraded
+    /// health, and conflating it with freshness would wedge Send forever.
+    @Test func anIncompleteSnapshotClearsDegradedHealth() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let subs = StateSubscriptionManager()
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("snapshot-complete-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let registryURL = dir.appendingPathComponent("agent-providers.json")
+        try #"[{"name": "fake", "exec": "/nonexistent/fake"}]"#
+            .write(to: registryURL, atomically: true, encoding: .utf8)
+        let invoker = FakeProviderInvoker(script: [
+            ProviderResult(exitCode: 3, stdout: Data(), stderr: "offline"),
+            providerOK(#"{"complete": false, "sessions": []}"#),
+        ])
+        let m = RemoteProviderManager(
+            db: db, subscriptions: subs, runner: invoker, registryURL: registryURL)
+        let provider = RemoteProviderConfig(name: "fake", exec: "/x")
+
+        await m.pollOnce(provider: provider)
+        #expect(await m.providerStatuses().first?.health == .stale)
+
+        await m.pollOnce(provider: provider)
+        #expect(await m.providerStatuses().first?.health == .ok)
+    }
+
+    /// A recovered-from-disk stamp is knowledge the manager legitimately has;
+    /// an incomplete snapshot must not overwrite it with `now`.
+    @Test func anIncompleteSnapshotLeavesARecoveredStampAlone() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let good = Date(timeIntervalSince1970: 1_700_000_000)
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "fake", sessions: [RemoteSessionPayload(id: "a", state: .running)],
+            complete: true, now: good)
+        let subs = StateSubscriptionManager()
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("snapshot-complete-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let registryURL = dir.appendingPathComponent("agent-providers.json")
+        try #"[{"name": "fake", "exec": "/nonexistent/fake"}]"#
+            .write(to: registryURL, atomically: true, encoding: .utf8)
+        let m = RemoteProviderManager(
+            db: db, subscriptions: subs,
+            runner: FakeProviderInvoker(script: [providerOK(#"{"complete": false, "sessions": []}"#)]),
+            registryURL: registryURL)
+
+        await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
+
+        #expect(await m.providerStatuses().first?.lastSuccessfulSnapshotAt == good)
+    }
 }

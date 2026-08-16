@@ -316,7 +316,8 @@ public actor RemoteProviderManager {
             let envelope = try result.decoded(RemoteSessionListEnvelope.self)
             let snapshotAt = Date()
             try await apply(
-                snapshot: envelope.sessions, provider: provider.name, now: snapshotAt,
+                snapshot: envelope.sessions, provider: provider.name,
+                complete: envelope.complete, now: snapshotAt,
                 requestStartedAt: requestStartedAt)
         } catch {
             remoteLogger.debug(
@@ -327,7 +328,16 @@ public actor RemoteProviderManager {
         }
     }
 
-    /// Shared by the poll path and the events snapshot path (Task 6).
+    /// Shared by the poll path and the events snapshot path.
+    ///
+    /// `complete` carries the contract's snapshot-completeness claim through
+    /// to the mirror and to freshness. An INCOMPLETE snapshot still adopts
+    /// what it sighted, still files the decisions those sightings imply, and
+    /// still clears degraded health — the provider answered — while claiming
+    /// no complete inventory in either store: not the in-memory stamp below,
+    /// and not the persisted `tbd_meta` row `applySnapshot` writes. Defaulted
+    /// to `true` so every caller that predates the field keeps its exact
+    /// behavior.
     ///
     /// `now` is arrival — when this response landed. `requestStartedAt` is
     /// when the question behind it was posed: the poll stamps it before
@@ -338,28 +348,41 @@ public actor RemoteProviderManager {
     /// `applyUpsert`'s pushed `session` line — reads correctly without
     /// inventing a start time.
     func apply(
-        snapshot sessions: [RemoteSessionPayload], provider: String, now: Date = Date(),
+        snapshot sessions: [RemoteSessionPayload], provider: String,
+        complete: Bool = true, now: Date = Date(),
         requestStartedAt: Date? = nil
     ) async throws {
         let outcome = try await db.remoteSessions.applySnapshot(
-            provider: provider, sessions: sessions, now: now)
+            provider: provider, sessions: sessions, complete: complete, now: now)
         // After the mirror, never before: adoption reads the repo association
         // `applySnapshot` just pinned rather than resolving `meta["repo"]` a
         // second time. Unconditional on `outcome.changed` — a session can
         // become adoptable without its payload changing at all, because the
         // mirror re-attempts resolution on every poll while its pin is null,
         // and the poll after the user registers the repo is exactly that case.
+        // Also unconditional on `complete`: an incomplete snapshot is
+        // authoritative about presence, so a session it sighted is adopted.
         broadcastAdoptions(await adopter.adopt(sessions: sessions, provider: provider))
         // After adoption, never before: a session first sighted in this very
         // snapshot already reporting `archived: true` must be filed on the
         // row adoption just minted, not skipped for lack of one.
+        //
+        // Unconditional on `complete`, for the same reason adoption is: this
+        // reads each sighted session's own `archived` claim and never infers
+        // anything from absence, so an incomplete snapshot is as authoritative
+        // here as a complete one. Completeness gates only the absence-derived
+        // and inventory-freshness conclusions below.
         await syncFilingDecisions(
             sessions: sessions, provider: provider,
             requestStartedAt: requestStartedAt ?? now, now: now)
-        lastSuccessfulSnapshotAt[provider] = now
-        // A live snapshot supersedes whatever the persisted row would have
-        // said, so an earlier unreadable read no longer gates anything.
-        snapshotFreshnessUnreadable.remove(provider)
+        if complete {
+            lastSuccessfulSnapshotAt[provider] = now
+            // A live COMPLETE snapshot supersedes whatever the persisted row
+            // would have said, so an earlier unreadable read no longer gates
+            // anything. An incomplete one supersedes nothing — it wrote no
+            // persisted row — so the unreadable flag is left where it stands.
+            snapshotFreshnessUnreadable.remove(provider)
+        }
         markHealthy(provider: provider)
         if outcome.changed {
             subscriptions.broadcast(delta: .remoteSessionsChanged)
