@@ -260,6 +260,7 @@ public enum RPCMethod {
     public static let configSetHibernateInputVeto = "config.setHibernateInputVeto"
     public static let configSetDeliveryVerification = "config.setDeliveryVerification"
     public static let configSetQueuedPrompt = "config.setQueuedPrompt"
+    public static let configSetClaudeCloud = "config.setClaudeCloud"
     public static let configSetSupervisionEnabled = "config.setSupervisionEnabled"
     public static let superviseStatus = "supervise.status"
     public static let superviseSetProjectMark = "supervise.setProjectMark"
@@ -2081,6 +2082,18 @@ public struct ConfigSetDeliveryVerificationParams: Codable, Sendable {
 /// until this verb writes to it, and a written `false` stays off even after the
 /// shipped default graduates.
 public struct ConfigSetQueuedPromptParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setClaudeCloud` — the Claude cloud sessions gate
+/// (design 2026-08-15 §7, default OFF). A second gate inside
+/// `remote_backends_enabled`, never a bypass.
+///
+/// Sending either value is an explicit gesture: the backing column is NULL
+/// until this verb writes to it, and a written `false` stays off even after the
+/// shipped default graduates.
+public struct ConfigSetClaudeCloudParams: Codable, Sendable {
     public let enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }

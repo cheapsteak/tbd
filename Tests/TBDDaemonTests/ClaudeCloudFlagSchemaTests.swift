@@ -107,4 +107,35 @@ struct ClaudeCloudFlagSchemaTests {
     @Test func theReservedProviderNameIsClaudeCloud() {
         #expect(ClaudeCloudProvider.name == "claude-cloud")
     }
+
+    /// The RPC is what the Settings toggle writes through, and it must
+    /// broadcast so another client's capability fetch sees the change without a
+    /// reconnect — the same shape every sibling config verb uses.
+    @Test func setClaudeCloudRPCPersistsAndBroadcasts() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let subs = StateSubscriptionManager()
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            tmux: TmuxManager(dryRun: true),
+            startTime: Date(),
+            subscriptions: subs,
+            actuationLog: ActuationLog(
+                path: FileManager.default.temporaryDirectory
+                    .appendingPathComponent("cloud-rpc-\(UUID().uuidString).jsonl").path))
+
+        let params = try JSONEncoder().encode(ConfigSetClaudeCloudParams(enabled: true))
+        let response = try await router.handleConfigSetClaudeCloud(params)
+        #expect(response.success)
+        #expect(try await db.config.get().claudeCloudEnabled == true)
+
+        let off = try JSONEncoder().encode(ConfigSetClaudeCloudParams(enabled: false))
+        #expect(try await router.handleConfigSetClaudeCloud(off).success)
+        #expect(try await db.config.get().claudeCloudEnabled == false)
+    }
+
+    @Test func theRPCMethodNameIsStable() {
+        #expect(RPCMethod.configSetClaudeCloud == "config.setClaudeCloud")
+    }
 }
