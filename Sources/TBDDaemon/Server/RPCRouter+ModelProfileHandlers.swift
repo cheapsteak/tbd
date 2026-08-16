@@ -201,15 +201,19 @@ extension RPCRouter {
         try await db.repos.clearProfileOverride(matching: params.id)
 
         try await db.modelProfileUsage.deleteForProfile(id: params.id)
-        try await db.modelProfiles.delete(id: params.id)
 
         // NOTE: We deliberately do NOT touch terminal.profile_id here.
         // Running terminals keep the env var that was injected at spawn time;
         // mutating their stored profile id would mislead the UI about what the
         // already-running claude process is actually using.
-        // DB row deletion is the source of truth — don't fail the RPC if the
-        // on-disk secret file delete fails (permission, missing, disk error).
-        // Log so an orphan file isn't completely silent.
+        //
+        // Cleanup order is load-bearing: the `model_profiles` row is the ONLY
+        // pointer to `~/tbd/profiles/<uuid>/`, so it is deleted LAST. A daemon
+        // killed partway now leaves "row present, directory gone or present" —
+        // both benign — instead of a directory nothing will ever reclaim.
+        // Individual cleanup failures stay log-only and non-fatal: the user
+        // asked for the profile to be gone, and the profile-dir collector
+        // reclaims whatever is left behind.
         // Only API-key profiles store a Keychain entry; OAuth and Bedrock profiles do not.
         if profile.kind == .apiKey {
             do {
@@ -248,6 +252,9 @@ extension RPCRouter {
                 logger.warning("Failed to delete config directory for \(params.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
         }
+
+        // Last DB mutation: everything keyed by the row has now been cleaned.
+        try await db.modelProfiles.delete(id: params.id)
 
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()
