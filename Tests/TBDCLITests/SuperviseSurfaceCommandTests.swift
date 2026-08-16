@@ -266,6 +266,24 @@ struct SuperviseSinceParsingTests {
         #expect(resolved != (instant("2026-11-01T08:30:00Z")))
     }
 
+    /// **The daylight-saving spring-forward case, which is what the two-day
+    /// search window exists for.** On 8 March 2026 the US west coast puts its
+    /// clocks forward at 02:00 PST, so local `02:30` never occurs that day at
+    /// all: 09:30Z reads 01:30 PST and the next minute-aligned candidate above
+    /// it, 10:30Z, already reads 03:30 PDT. The walk carries on into the 7th,
+    /// where `02:30` PST is 10:30Z — 31.5 hours behind the reference instant,
+    /// and therefore inside a 48-hour window and outside a 24-hour one. That is
+    /// the whole justification for the constant, exercised rather than asserted
+    /// in prose.
+    @Test func aSkippedSpringForwardTimeResolvesToYesterdaysOccurrence() throws {
+        let laterThatMorning = instant("2026-03-08T18:00:00Z")  // 11:00 PDT
+        let resolved = try parseSupervisionSince(
+            "02:30", now: laterThatMorning, calendar: calendar)
+        #expect(resolved == (instant("2026-03-07T10:30:00Z")), "02:30 PST on the 7th")
+        #expect(laterThatMorning.timeIntervalSince(resolved) > 24 * 3600,
+                "a one-day window would have refused this, which is why the window is two")
+    }
+
     // MARK: shape three — bare relative duration
 
     @Test func durationsAreReadAsThatLongAgo() throws {
