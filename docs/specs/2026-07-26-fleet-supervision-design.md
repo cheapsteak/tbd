@@ -2251,11 +2251,22 @@ the one way to send a desk substance.
     disposes a desk, so the desk is reclaimed when it dies and not before.
     Reclaiming is destructive enough to soak behind its own default-off switch
     first.
-  - *A spawn that failed before the record was written* leaves nothing for that
+  - *An ensure that ended with no record written* leaves nothing for that
     collector to enumerate, so the **spawn path archives the scratch row
     itself** on every failing exit, which puts the directory under the sweep's
-    deletion-queue pass. Best-effort, as create-time cleanup always is; the
-    standing guarantee remains a sweep, not the rollback.
+    deletion-queue pass. All three exits are covered, including the one that
+    bites hardest — a desk that ran and could not be written down, where the
+    next `on` would otherwise read no entry and spawn a second desk beside a
+    live one. Best-effort, as create-time cleanup always is; the standing
+    guarantee remains a sweep, not the rollback.
+  - *The desk a replacement succeeded* is the third shape, and it is the
+    replacement's own to hand back: recording the successor overwrites the
+    project's entry, so from that moment the predecessor's scratch space is
+    named by nothing the collector enumerates. It is archived once the
+    successor is safely recorded — never before, so a record write that failed
+    leaves the project the one desk it still has. This is not the disposal the
+    rule below forbids: a coverage gesture still disposes of nothing, and what
+    is let go here is a desk already found dead and already replaced.
 - **`off <project>` stands the desk down; it does not dispose of it.** The
   mark is a delivery precondition rechecked at act time (§3, §8), so a
   stood-down desk simply receives nothing — an idle session holding its

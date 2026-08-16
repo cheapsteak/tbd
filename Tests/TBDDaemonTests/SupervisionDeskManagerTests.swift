@@ -23,22 +23,19 @@ struct SupervisionDeskManagerTests {
         func isDead(_ windowID: String) -> Bool { lock.withLock { dead.contains(windowID) } }
     }
 
-    /// A `SupervisionDeskCollector` reap, standing by to land mid-spawn. Armed
-    /// after the fixture is built so it fires during one chosen spawn and not
-    /// the one that set the record up.
-    private final class ArmedReap: @unchecked Sendable {
+    /// Something else touching the desk record, standing by to land mid-spawn.
+    /// Armed after the fixture is built, because what it does is written in
+    /// terms of the store the fixture created — and, for the reap, so it fires
+    /// during one chosen spawn and not the one that set the record up.
+    private final class ArmedHook: @unchecked Sendable {
         private let lock = NSLock()
-        private var target: (store: SupervisionDesksStore, project: String)?
+        private var action: (@Sendable () -> Void)?
 
-        func arm(store: SupervisionDesksStore, project: String) {
-            lock.withLock { target = (store, project) }
+        func arm(_ action: @escaping @Sendable () -> Void) {
+            lock.withLock { self.action = action }
         }
 
-        func run() {
-            guard let target = lock.withLock({ target }) else { return }
-            guard let file = try? target.store.load() else { return }
-            try? target.store.save(file.forgetting(target.project))
-        }
+        func run() { lock.withLock { action }?() }
     }
 
     private struct Fixture {
@@ -287,6 +284,27 @@ struct SupervisionDeskManagerTests {
         })
     }
 
+    @Test("A desk that cannot be written to the record hands its scratch space back too")
+    func unrecordableDeskArchivesTheScratchSpace() async throws {
+        // The record goes unreadable while the spawn is in flight, so the
+        // write that follows cannot land. This is the exit that bites hardest:
+        // the session is live and nothing recorded it, so the next `on` would
+        // read no entry and spawn a second desk beside it.
+        let hook = ArmedHook()
+        let fixture = try Self.makeFixture(duringSpawn: { hook.run() })
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        let url = fixture.desks.fileURL
+        hook.arm { try? Data("{ not json".utf8).write(to: url) }
+
+        await #expect(throws: SupervisionDeskError.self) {
+            try await fixture.manager.ensureDesk(project: Self.inputs())
+        }
+
+        let scratch = try await Self.onlyScratchRow(fixture)
+        #expect(scratch.status == .archived)
+    }
+
     // MARK: - Recording a desk must not resurrect a reaped one
 
     @Test("A reap that lands mid-spawn survives the record: the desk file is re-read")
@@ -296,7 +314,7 @@ struct SupervisionDeskManagerTests {
         // the seconds a spawn takes. Nothing here spawns concurrently: the
         // manager's gate serializes ensures, and the race being reproduced is
         // with the collector, which does not hold that gate.
-        let armed = ArmedReap()
+        let armed = ArmedHook()
         let fixture = try Self.makeFixture(duringSpawn: { armed.run() })
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
 
@@ -309,7 +327,11 @@ struct SupervisionDeskManagerTests {
         #expect(try fixture.desks.load().desk(for: "seed-project") != nil)
 
         // Arm the reap only now, so it lands during the second spawn.
-        armed.arm(store: fixture.desks, project: "seed-project")
+        let desks = fixture.desks
+        armed.arm {
+            guard let file = try? desks.load() else { return }
+            try? desks.save(file.forgetting("seed-project"))
+        }
         let outcome = try await fixture.manager.ensureDesk(project: Self.inputs())
         guard case .spawned(let entry) = outcome else {
             Issue.record("expected a spawn, got \(outcome)")
@@ -383,6 +405,37 @@ struct SupervisionDeskManagerTests {
         }
         #expect(desk.terminal == successor.terminal)
         #expect(previous.terminal == predecessor.terminal)
+    }
+
+    @Test("Replacing a desk hands the predecessor's scratch space back")
+    func replacementArchivesThePredecessorsScratchSpace() async throws {
+        let fixture = try Self.makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        let first = try await fixture.manager.ensureDesk(project: Self.inputs())
+        guard case .spawned(let predecessor) = first else {
+            Issue.record("expected a spawn, got \(first)")
+            return
+        }
+        let terminal = try #require(try await fixture.db.terminals.get(id: predecessor.terminal))
+        fixture.deadWindows.markDead(terminal.tmuxWindowID)
+
+        let outcome = try await fixture.manager.ensureDesk(project: Self.inputs())
+        guard case .replaced(let successor, _) = outcome else {
+            Issue.record("expected a replacement, got \(outcome)")
+            return
+        }
+
+        // Recording the successor overwrites the project's key, so from that
+        // moment nothing references the predecessor's space: the collector
+        // enumerates `desks.json` and reads the successor, and every other
+        // sweep leg walks repo-backed or already-archived rows. Leaving it
+        // `.active` would leak one scratch space per replacement, forever.
+        let old = try #require(try await fixture.db.worktrees.get(id: predecessor.worktree))
+        #expect(old.status == .archived)
+        // And the desk that now serves the project is untouched.
+        let live = try #require(try await fixture.db.worktrees.get(id: successor.worktree))
+        #expect(live.status == .active)
     }
 
     // MARK: - Appointment

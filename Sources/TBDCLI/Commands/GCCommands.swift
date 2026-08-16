@@ -6,7 +6,10 @@ struct GCCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "gc",
         abstract: "Orphan GC: list reaps, restore a reaped agent worktree, trigger a sweep",
-        subcommands: [GCList.self, GCRestore.self, GCSweep.self, GCProfileDirs.self]
+        subcommands: [
+            GCList.self, GCRestore.self, GCSweep.self, GCProfileDirs.self,
+            GCSupervisionDesks.self,
+        ]
     )
 }
 
@@ -28,6 +31,28 @@ struct GCProfileDirs: AsyncParsableCommand {
         try SocketClient().callVoid(method: RPCMethod.configSetGCProfileDirsEnabled,
                                     params: ConfigSetGCProfileDirsEnabledParams(enabled: enabled))
         print("Profile-dir GC \(enabled ? "enabled" : "disabled").")
+    }
+}
+
+/// The soak switch for the supervision-desk collector. It archives the scratch
+/// space of a hosted supervisor whose session is gone and drops its record, so
+/// it ships off and is opted into by hand — the same shape `profile-dirs` uses.
+struct GCSupervisionDesks: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "supervision-desks",
+        abstract: "Enable or disable reclaiming orphaned supervision desks (default off)")
+    @Argument(help: "on | off") var state: String
+    mutating func run() async throws {
+        let enabled: Bool
+        switch state.lowercased() {
+        case "on", "true", "enable": enabled = true
+        case "off", "false", "disable": enabled = false
+        default: throw ValidationError("Expected 'on' or 'off', got: \(state)")
+        }
+        try SocketClient().callVoid(
+            method: RPCMethod.configSetGCSupervisionDesksEnabled,
+            params: ConfigSetGCSupervisionDesksEnabledParams(enabled: enabled))
+        print("Supervision-desk GC \(enabled ? "enabled" : "disabled").")
     }
 }
 

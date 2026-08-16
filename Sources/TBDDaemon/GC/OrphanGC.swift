@@ -678,10 +678,19 @@ public actor OrphanGC {
             } catch {
                 terminalExists = nil
             }
-            let worktree = (try? await db.worktrees.get(id: candidate.entry.worktree)) ?? nil
+            let lookup: SupervisionDeskCollector.WorktreeLookup
+            do {
+                if let row = try await db.worktrees.get(id: candidate.entry.worktree) {
+                    lookup = .row(row)
+                } else {
+                    lookup = .gone
+                }
+            } catch {
+                lookup = .unreadable
+            }
 
             switch supervisionDeskCollector.decide(
-                candidate, terminalExists: terminalExists, worktree: worktree,
+                candidate, terminalExists: terminalExists, worktree: lookup,
                 liveCWDs: live, graceSeconds: config.gcGraceSeconds
             ) {
             case .keep(let reason):
@@ -695,12 +704,22 @@ public actor OrphanGC {
                 // This leg's guard is `gcSupervisionDesksEnabled || dryRun`, so
                 // every line below runs only with the flag actually on.
                 guard !dryRun else { continue }
-                guard supervisionDeskCollector.forget(project: candidate.project) else {
+                switch supervisionDeskCollector.forget(
+                    project: candidate.project, expecting: candidate.entry) {
+                case .changed:
+                    // A spawn for this project landed while the sweep ran. Its
+                    // desk is live and nothing judged it, so neither the record
+                    // nor the worktree below is touched.
+                    planned.append("KEEP desk-record-changed desk:\(candidate.project)")
+                    continue
+                case .writeFailed:
                     planned.append("KEEP desk-record-write-failed desk:\(candidate.project)")
                     continue
+                case .dropped:
+                    break
                 }
                 reaped += 1
-                if let worktree, worktree.status == .active {
+                if case .row(let worktree) = lookup, worktree.status == .active {
                     do {
                         try await db.worktrees.archive(id: worktree.id)
                         logger.info("""

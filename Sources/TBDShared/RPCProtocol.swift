@@ -281,6 +281,8 @@ public enum RPCMethod {
     public static let gcSweepNow = "gc.sweepNow"
     public static let configSetGCEnabled = "config.setGCEnabled"
     public static let configSetGCProfileDirsEnabled = "config.setGCProfileDirsEnabled"
+    public static let configSetGCSupervisionDesksEnabled =
+        "config.setGCSupervisionDesksEnabled"
     public static let remoteProviders = "remote.providers"
     public static let remoteSessions = "remote.sessions"
     public static let remoteCreate = "remote.create"
@@ -2526,6 +2528,15 @@ public struct ConfigSetGCEnabledParams: Codable, Sendable {
 /// collector, which reclaims orphaned `~/tbd/profiles/<uuid>/` directories
 /// (default OFF during soak, on top of the GC master switch).
 public struct ConfigSetGCProfileDirsEnabledParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setGCSupervisionDesksEnabled` — the gate for the
+/// supervision-desk collector, which reclaims the scratch space and the
+/// `desks.json` entry of a hosted desk whose session is gone (default OFF
+/// during soak, on top of the GC master switch).
+public struct ConfigSetGCSupervisionDesksEnabledParams: Codable, Sendable {
     public var enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }

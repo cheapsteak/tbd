@@ -103,6 +103,90 @@ struct OrphanGCSupervisionDeskTests: ~Copyable {
         #expect(row?.status == .active)
     }
 
+    @Test("a desk whose only process sits in a subdirectory is live, and survives")
+    func processBelowTheDeskRootIsLive() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await enable(db, desks: true)
+        let desk = try await makeDesk(project: "acme-web", db: db)
+
+        // An agent's own shell sits below the worktree root as often as in it.
+        // Every other GC leg matches on the prefix boundary for exactly this
+        // reason; exact equality would read this as "nothing is running here".
+        let below = AgentWorktreeCollector.canon(desk.worktree.localPath) + "/src/inner"
+        let result = await makeGC(db: db, liveCWDs: [below]).sweep()
+
+        #expect(result.planned.contains { $0 == "KEEP desk-live desk:acme-web" })
+        #expect(!result.planned.contains { $0.hasPrefix("REAP supervision-desk") })
+        let row = try await db.worktrees.get(id: desk.worktree.id)
+        #expect(row?.status == .active)
+    }
+
+    @Test("a sibling directory sharing the desk's name prefix is not the desk running")
+    func siblingPrefixIsNotLive() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await enable(db, desks: true)
+        let desk = try await makeDesk(project: "acme-web", db: db)
+
+        // The other half of the prefix-boundary match: `/…/desk-ab` must not
+        // keep `/…/desk-a` alive.
+        let sibling = AgentWorktreeCollector.canon(desk.worktree.localPath) + "-sibling"
+        let result = await makeGC(db: db, liveCWDs: [sibling]).sweep()
+
+        #expect(result.planned.contains {
+            $0 == "REAP supervision-desk desk-process-gone desk:acme-web"
+        })
+    }
+
+    @Test("a worktree read that failed keeps the desk; only a real absence reaps it")
+    func unreadableWorktreeRowKeeps() throws {
+        let fixed = clock
+        let collector = SupervisionDeskCollector(
+            desks: desks, scratchBase: sandbox, now: { fixed })
+        let candidate = SupervisionDeskCollector.Candidate(
+            project: "acme-web",
+            entry: SupervisionDeskEntry(
+                terminal: UUID(), worktree: UUID(),
+                spawnedAt: SupervisionInstant(clock.addingTimeInterval(-86_400)),
+                conductHash: "abc"))
+
+        // A read that never answered says nothing about the desk, so it keeps —
+        // the same direction the terminal read's `nil` already takes. Collapsing
+        // it into "the row is gone" would drop a live desk's record on a
+        // transient database error.
+        #expect(collector.decide(
+            candidate, terminalExists: true, worktree: .unreadable,
+            liveCWDs: [], graceSeconds: 60) == .keep("desk-worktree-read-failed"))
+        #expect(collector.decide(
+            candidate, terminalExists: true, worktree: .gone,
+            liveCWDs: [], graceSeconds: 60) == .reap("desk-worktree-row-gone"))
+    }
+
+    @Test("forget drops only the entry the sweep judged, never one that replaced it")
+    func forgetLeavesAReplacedEntryAlone() throws {
+        let fixed = clock
+        let collector = SupervisionDeskCollector(
+            desks: desks, scratchBase: sandbox, now: { fixed })
+        let judged = SupervisionDeskEntry(
+            terminal: UUID(), worktree: UUID(),
+            spawnedAt: SupervisionInstant(clock), conductHash: "abc")
+        let successor = SupervisionDeskEntry(
+            terminal: UUID(), worktree: UUID(),
+            spawnedAt: SupervisionInstant(clock), conductHash: "abc")
+
+        // A spawn for this same project landed between `candidates()` and the
+        // write. Its desk is live and nothing judged it, so dropping the key
+        // would unrecord a running desk — the resurrection hazard from the
+        // other end.
+        try desks.save(SupervisionDesksFile().recording(successor, for: "acme-web"))
+        #expect(collector.forget(project: "acme-web", expecting: judged) == .changed)
+        #expect(try desks.load().desk(for: "acme-web") == successor)
+
+        // The entry it did judge still goes.
+        try desks.save(SupervisionDesksFile().recording(judged, for: "acme-web"))
+        #expect(collector.forget(project: "acme-web", expecting: judged) == .dropped)
+        #expect(try desks.load().desk(for: "acme-web") == nil)
+    }
+
     @Test("a desk spawned moments ago is kept, however quiet lsof is about it")
     func youngDeskIsKept() async throws {
         let db = try TBDDatabase(inMemory: true)

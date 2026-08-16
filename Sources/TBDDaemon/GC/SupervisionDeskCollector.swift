@@ -65,6 +65,29 @@ public struct SupervisionDeskCollector: Sendable {
         case reap(String)
     }
 
+    /// What the sweep found when it looked a desk's worktree row up.
+    ///
+    /// **A read that did not answer is not a row that is gone**, and collapsing
+    /// the two is how a sweep reaps a live desk on a transient database error.
+    /// The terminal read is kept apart the same way, by its `Bool?`.
+    public enum WorktreeLookup: Sendable, Equatable {
+        case row(Worktree)
+        /// The row is genuinely absent — the read answered, with nothing.
+        case gone
+        /// The read failed. Keeps.
+        case unreadable
+    }
+
+    /// What `forget` did, which is not always "dropped it".
+    public enum ForgetResult: Sendable, Equatable {
+        case dropped
+        /// The record no longer holds the entry this sweep judged — a spawn for
+        /// the same project landed while the sweep ran. Its desk is live and
+        /// nobody judged it, so it is left exactly as it is.
+        case changed
+        case writeFailed
+    }
+
     /// The recorded desks, ordered by project so a plan is stable to diff.
     ///
     /// An unreadable or malformed record yields no candidates rather than an
@@ -91,14 +114,16 @@ public struct SupervisionDeskCollector: Sendable {
     /// - Parameters:
     ///   - terminalExists: whether the desk's terminal row is still in the
     ///     database. Nil means the read failed, which keeps.
-    ///   - worktree: the desk's worktree row, or nil when it is gone.
+    ///   - worktree: what the worktree read answered — a row, a genuine
+    ///     absence, or a read that failed.
     ///   - liveCWDs: the sweep's single `lsof` pass, already canonicalized —
     ///     the same evidence `AgentWorktreeCollector` gates on. A process
-    ///     sitting in the desk's directory is the desk running.
+    ///     sitting in the desk's directory **or anywhere below it** is the desk
+    ///     running.
     ///   - graceSeconds: a desk spawned moments ago may not have shown up in
     ///     the `lsof` pass yet, so a young record is kept regardless.
     public func decide(
-        _ candidate: Candidate, terminalExists: Bool?, worktree: Worktree?,
+        _ candidate: Candidate, terminalExists: Bool?, worktree: WorktreeLookup,
         liveCWDs: [String], graceSeconds: Int
     ) -> Decision {
         let age = now().timeIntervalSince(candidate.entry.spawnedAt.date)
@@ -107,23 +132,32 @@ public struct SupervisionDeskCollector: Sendable {
         }
         guard let terminalExists else { return .keep("desk-row-read-failed") }
 
-        guard let worktree else {
+        let row: Worktree
+        switch worktree {
+        case .unreadable:
+            return .keep("desk-worktree-read-failed")
+        case .gone:
             // The row is gone, so there is nothing to archive and nothing on
             // disk this sweep can attribute. Drop the record only.
             return .reap("desk-worktree-row-gone")
+        case .row(let found):
+            row = found
         }
         // Only a scratch space under the scratch base is a desk's, and only
         // those are this leg's to touch. Anything else in the record is either
         // an older layout or a hand edit, and reclaiming it would be acting on
         // a resource this sweep does not own.
-        guard worktree.repoID == nil,
-              LocalWorktree(worktree)?.path.hasPrefix(scratchBase.path + "/") == true else {
+        guard row.repoID == nil,
+              LocalWorktree(row)?.path.hasPrefix(scratchBase.path + "/") == true else {
             return .keep("desk-not-a-scratch-space")
         }
-        guard worktree.status == .active else { return .keep("desk-already-archived") }
+        guard row.status == .active else { return .keep("desk-already-archived") }
 
-        let canonical = AgentWorktreeCollector.canon(worktree.localPath)
-        if liveCWDs.contains(canonical) {
+        let canonical = AgentWorktreeCollector.canon(row.localPath)
+        // The shared prefix-boundary match, not equality: an agent's own shell
+        // sits in a subdirectory as often as in the root, and equality would
+        // read that as "nothing is running here" and archive a live desk.
+        if AgentWorktreeCollector.liveCWDsContain(liveCWDs, path: canonical) {
             // A process is sitting in the desk's directory. **Never reclaim a
             // live desk**, whatever its terminal row or its project says.
             return .keep("desk-live")
@@ -132,26 +166,38 @@ public struct SupervisionDeskCollector: Sendable {
         return .reap("desk-process-gone")
     }
 
-    /// Drop one project's entry from the record.
+    /// Drop from the record the exact entry this sweep judged.
     ///
     /// Read-modify-write per reap rather than once per sweep: `desks.json` is
     /// also written by `SupervisionDeskManager` when a project is turned on, and
     /// a whole-file rewrite computed at the top of a sweep would clobber a desk
-    /// spawned while the sweep ran. Returns whether the record changed.
+    /// spawned while the sweep ran.
+    ///
+    /// **Re-reading is not enough on its own** — the entry has to match too. A
+    /// spawn for *this* project landing between `candidates()` and this write
+    /// leaves a different entry under the same key, and dropping it would
+    /// unrecord a desk that is live and that nothing judged. That is the same
+    /// resurrection hazard `SupervisionDeskManager` guards on its side, from
+    /// the other end.
     @discardableResult
-    public func forget(project: String) -> Bool {
+    public func forget(project: String, expecting entry: SupervisionDeskEntry) -> ForgetResult {
         do {
             let file = try desks.load()
-            let updated = file.forgetting(project)
-            guard updated != file else { return false }
-            try desks.save(updated)
-            return true
+            guard file.desk(for: project) == entry else {
+                logger.notice("""
+                gc: the desk record for \(project, privacy: .public) changed while the sweep ran; \
+                leaving it alone
+                """)
+                return .changed
+            }
+            try desks.save(file.forgetting(project))
+            return .dropped
         } catch {
             logger.warning("""
             gc: could not drop the desk record for \(project, privacy: .public): \
             \(String(describing: error), privacy: .public)
             """)
-            return false
+            return .writeFailed
         }
     }
 }

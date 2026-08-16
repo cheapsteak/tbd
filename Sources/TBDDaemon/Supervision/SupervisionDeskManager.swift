@@ -121,8 +121,9 @@ public typealias SupervisionDeskSpawn = @Sendable (
 /// - *A recorded desk that died* is `SupervisionDeskCollector`'s, run as a leg
 ///   of `OrphanGC`: it prunes the `desks.json` entry and hands the worktree to
 ///   the archive path the sweep already runs, and never touches a live desk.
-/// - *A spawn that failed before the record was written* is invisible to that
-///   collector, which walks `desks.json` and finds no entry — so this type
+/// - *An ensure that ended with no entry written* — the spawn threw, produced
+///   no terminal, or ran and could not be recorded — is invisible to that
+///   collector, which walks `desks.json` and finds nothing. So this type
 ///   archives the scratch row itself on every such exit (`abandon`), which puts
 ///   it under `OrphanGC`'s deletion-queue leg instead.
 public actor SupervisionDeskManager {
@@ -358,8 +359,10 @@ public actor SupervisionDeskManager {
     /// created first because it cannot be created transactionally, then the
     /// record, then the line.
     ///
-    /// **Every exit between the scratch space and the record hands the space
-    /// back.** `SupervisionDeskCollector` walks `desks.json`, so a failure
+    /// **Every failing exit after the scratch space exists hands it back** —
+    /// the spawn that threw, the spawn that produced no terminal, and the desk
+    /// that could not be written to the record.
+    /// `SupervisionDeskCollector` walks `desks.json`, so a failure
     /// before the entry is written is invisible to it — and to every other leg
     /// of the sweep, because a scratch row has no repo and the archived legs
     /// only touch rows already archived. `abandon` archives the row, which is
@@ -432,6 +435,18 @@ public actor SupervisionDeskManager {
             let latest = try desks.load()
             try desks.save(latest.recording(entry, for: inputs.project))
         } catch {
+            // A desk that ran and was never written down is the worst of the
+            // three failing exits, not the mildest: the session is live, so the
+            // next `on` reads no entry and spawns a second one beside it, and
+            // the pile grows one agent per gesture. Nothing else reclaims it —
+            // `SupervisionDeskCollector` enumerates the record this write did
+            // not reach, and the sweep's other legs walk repo-backed or
+            // already-archived rows. So this exit hands the space back too, and
+            // the archived row is what carries the session's own teardown to
+            // `WorktreeLifecycle+Reconcile`.
+            await abandon(
+                worktree, project: inputs.project,
+                because: "its desk could not be written to the record")
             throw SupervisionDeskError.recordFailed(
                 project: inputs.project, detail: String(describing: error))
         }
@@ -439,9 +454,23 @@ public actor SupervisionDeskManager {
         subscriptions?.broadcast(delta: .worktreeCreated(WorktreeDelta(
             worktreeID: worktree.id, repoID: nil, name: worktree.name,
             path: worktree.localPath, status: worktree.status)))
+        for created in created {
+            // The sidebar shows the desk's scratch space the moment the row
+            // broadcast above lands; without this it would sit there tabless
+            // until the next full state refresh. Same pair `scratch.create`
+            // sends, for the same reason.
+            subscriptions?.broadcast(delta: .terminalCreated(TerminalDelta(
+                terminalID: created.id, worktreeID: worktree.id, label: created.label)))
+        }
 
         let ref = SupervisionDeskRef(terminal: entry.terminal, worktree: entry.worktree)
         if let predecessor {
+            // The desk this one succeeds keeps a scratch space that the record
+            // no longer names, and that nothing else reclaims: the collector
+            // enumerates `desks.json`, where this project's key now holds the
+            // successor. Handing it back here is what keeps a project's
+            // replacements from piling up one dead space per replacement.
+            await abandonPredecessor(predecessor, project: inputs.project)
             await ledger.append(SupervisionLedgerLine.deskReplaced(
                 project: inputs.project, mode: inputs.mode, desk: ref,
                 predecessor: SupervisionDeskRef(
@@ -553,6 +582,27 @@ public actor SupervisionDeskManager {
                 \(String(describing: error), privacy: .public). It is left for a human.
                 """)
         }
+    }
+
+    /// Hand back the scratch space of the desk a replacement just succeeded.
+    ///
+    /// Recording the successor overwrites the project's key, so from that
+    /// moment the predecessor's space is referenced by nothing: the collector
+    /// enumerates `desks.json` and reads the successor there, the
+    /// agent-worktree leg walks only repo-backed worktrees, and the archived
+    /// legs only touch rows already archived. Without this it would leak one
+    /// scratch space per replacement, forever.
+    ///
+    /// Done only **after** the successor is recorded, so a record write that
+    /// failed leaves the predecessor exactly as it was rather than letting go
+    /// of the one desk the project still has. A row that is already archived,
+    /// or gone, is left alone — there is nothing to hand back.
+    private func abandonPredecessor(
+        _ predecessor: SupervisionDeskEntry, project: String
+    ) async {
+        guard let row = ((try? await db.worktrees.get(id: predecessor.worktree)) ?? nil),
+              row.status == .active else { return }
+        await abandon(row, project: project, because: "the desk it held was replaced")
     }
 
     private func notify(_ message: String, worktree: UUID) {

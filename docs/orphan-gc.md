@@ -18,7 +18,7 @@ auto-removes one if it ended unchanged — the moment an agent commits, the work
 Code's own 30-day sweep permanently exempts anything with unpushed commits. Nothing
 else ever cleans these up.
 
-Three things get reaped:
+Four things get reaped:
 - **Agent worktrees** — `<repo>/.claude/worktrees/agent-*` and `wf_*` whose run has
   ended (see gates below).
 - **Attributable scratchpads** — `/private/tmp/claude-<uid>/<slug>` directories TBD can
@@ -27,6 +27,9 @@ Three things get reaped:
   `model_profiles` row is gone; `ProfileDirCollector` is the named reconciler for that
   resource class, alongside the agent-worktree and scratchpad collectors, and it
   quarantines rather than deletes (see below).
+- **Orphaned supervision desks** — the scratch space and `desks.json` entry of a hosted
+  supervisor whose session is gone; `SupervisionDeskCollector` is the named reconciler
+  for that resource class (see below).
 
 ## Philosophy: orphaned, not idle
 
@@ -235,6 +238,56 @@ profile and moves the directory into the new UUID. The app's Reclaimed section d
 surface these records — it is per-repo, and a profile directory belongs to no repo — so
 the CLI is where a quarantine path is read.
 
+## Hosted supervision desks
+
+Turning a project on under fleet supervision spawns a **hosted desk**: a scratch
+worktree with one agent session in it, recorded in `~/tbd/supervision/desks.json`
+(`docs/specs/2026-07-26-fleet-supervision-design.md` §9). Neither half is covered by the
+legs above — the agent-worktree leg walks `db.repos.list()` and so sees only repo-backed
+worktrees, and the archived legs only touch rows already `.archived` — so
+`SupervisionDeskCollector` is that resource class's reconciler.
+
+**Its subject is a desk that got recorded and then died.** It enumerates the record, so
+a spawn that failed before writing an entry is not visible to it at all; that half is
+the spawn path's own, which archives its scratch row on every failing exit and thereby
+hands the directory to the deletion-queue leg.
+
+**Flag: `gc_supervision_desks_enabled`, default off.** Enable it for a soak with
+`tbd gc supervision-desks on` (RPC `config.setGCSupervisionDesksEnabled`); there is no
+Settings toggle. Like the profile-dir flag it carries no SQL default, so an untouched
+install reads NULL and resolves through `Config.gcSupervisionDesksEnabledDefault` —
+graduation is a one-line change to that constant. `tbd gc sweep --dry-run` bypasses the
+flag and prints the `REAP supervision-desk` lines it would act on.
+
+**Gates**, every one failing toward keeping:
+
+1. **Grace** (`desk-within-grace`) — a desk spawned inside `gcGraceSeconds` may not have
+   reached the `lsof` pass yet.
+2. **Terminal read** (`desk-row-read-failed`) — a read that did not answer says nothing
+   about the desk.
+3. **Worktree read** (`desk-worktree-read-failed`) — likewise, and kept distinct from a
+   row that is genuinely absent (`desk-worktree-row-gone`, which reaps the record only,
+   there being nothing on disk this sweep can attribute).
+4. **Shape** (`desk-not-a-scratch-space`) — a recorded worktree that is repo-backed, or
+   outside the scratch base, is not this leg's to touch.
+5. **Already archived** (`desk-already-archived`) — the row is where a reap would put it.
+6. **Live** (`desk-live`) — a process sitting in the desk's directory *or anywhere below
+   it* is the desk running, matched on the same prefix boundary the agent-worktree leg
+   uses. **A live desk is never reclaimed**, whatever its rows or its project say.
+
+Reaping drops the record and moves the worktree row to `.archived`, from where the
+deletion-queue and scratchpad legs reclaim the directory and `WorktreeLifecycle+Reconcile`
+settles its tmux state — this leg kills no window itself. The record write is guarded on
+the entry the sweep judged (`desk-record-changed`): a spawn for the same project landing
+mid-sweep leaves a live desk nobody judged, and dropping its key would unrecord it.
+
+**Liveness is the whole decision.** A desk whose project stopped resolving is not
+reaped on that ground: design §9 is explicit that a topology gesture ending a project
+takes its mark, its mode selection and its supervisor binding, and that no coverage
+gesture disposes a desk. Once the desk is not live it is reclaimed regardless of whether
+the project still resolves, so a project check would gate nothing and would need a
+second reader of `supervision.json`.
+
 ## Cadence and the `gcEnabled` gate
 
 `gcEnabled` (config-table boolean, **default on**) is the single master switch — it
@@ -284,6 +337,7 @@ than the preceding dry run predicted.
 |---|---|---|
 | `gcEnabled` | `true` | Settings toggle + `config.setGCEnabled` RPC |
 | `gcProfileDirsEnabled` | `false` | `tbd gc profile-dirs on\|off` + `config.setGCProfileDirsEnabled` RPC, no UI |
+| `gcSupervisionDesksEnabled` | `false` | `tbd gc supervision-desks on\|off` + `config.setGCSupervisionDesksEnabled` RPC, no UI |
 | `gcGraceSeconds` | `3600` (1h) | config table only, no UI |
 | `gcSnapshotRetentionDays` | `30` | config table only, no UI |
 
@@ -313,6 +367,7 @@ tbd gc list [--repo <path>] [--json]   # list reap records (id, kind, path, size
 tbd gc restore <uuid>                  # restore a reaped agent worktree
 tbd gc sweep [--dry-run]               # run a sweep now; --dry-run prints the plan, mutates nothing
 tbd gc profile-dirs on|off             # gate the profile-config-dir collector (ships off)
+tbd gc supervision-desks on|off        # gate the supervision-desk collector (ships off)
 ```
 
 ## Non-goals (from the design spec)
