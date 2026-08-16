@@ -511,8 +511,9 @@ tbd supervise brief --project <name>    # briefing text on stdin
 
 Submits a composed briefing for delivery to the project's supervisor. The
 text is delivered verbatim under a short compiled header (active mode name,
-any pending playbook update); TBD never parses it. Delivery is recorded in
-the ledger with the delivered text's hash.
+any pending playbook update); TBD never parses it. Delivery — the half that has
+not landed, as the paragraph on it below says — will be recorded in the ledger
+with the delivered text's hash.
 
 **The pipeline runs in this order, and no step reads your text:** refuse for a
 standing state (the project off, or the fleet brake engaged),
@@ -573,9 +574,15 @@ Submissions beyond the per-project rate limit (one briefing per 2
 minutes) or the size bound (256 KiB) are refused with the condition named,
 and both are counted as contact — the program looked.
 
-**The pacing slot is spent at the delivery attempt, not at the check**, so a
-submission refused as paused, off or oversize never burns it and the next one
-is free to go. A program is not penalised for a refusal it did not cause.
+**The pacing slot is spent by a briefing that reached a supervisor, not by one
+that was merely attempted.** The limit paces *delivered* briefings, so a
+submission refused as paused, off or oversize never burns it, and neither does
+one answered `no-live-supervisor` or `transport-failed` — the next submission
+is free to go. That is what makes the documented continuation work: a program
+handling `no-live-supervisor` by running `on` and resubmitting in the same run
+would otherwise meet `refused-rate-limit` on the resubmission. A program is not
+penalised for a refusal it did not cause, nor for a delivery that did not
+happen.
 
 ### Examples
 
@@ -618,12 +625,19 @@ stdout, `schemaVersion` at top level.
   are disjoint, so a single array reads correctly and you filter by `kind`.
   `source` rides every entry regardless, so provenance never depends on
   remembering which vocabulary a kind belongs to.
-- **A row appears only when it resolves into this project.** An actuation
-  row's target is matched by worktree, terminal, or repo, each resolved
+- **An actuation row appears only when it resolves into this project.** Its
+  target is matched by worktree, terminal, or repo, each resolved
   through TBD's own tables to a project. A row that resolves to nothing — a
   target whose row has since been deleted, a remote-provider act with no local
   coordinates — is excluded rather than included on a guess. The failure worth
   preventing is one project's query showing another project's lines.
+- **A supervision line appears when it names this project, or names none at
+  all.** A line carrying a different project's name is excluded exactly as an
+  actuation row would be, but a line with no `project` is fleet-wide and
+  belongs in every project's view. The brake's lifecycle lines are the reason:
+  they name no project by construction, and a brake engaged at 02:00 is
+  precisely what explains a project's silence for the rest of the night. A view
+  that hid it would leave a program reading a quiet fleet as a broken one.
 - **Unparseable lines are counted, not swallowed.** Both records are
   append-only files a human may hand-edit and a crash may truncate mid-write.
   A line that cannot be read at all is dropped from `lines` and counted in
