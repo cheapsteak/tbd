@@ -417,9 +417,9 @@ actor ProviderEventsSupervisor {
         switch event {
         case .hello, .ping:
             break   // activity timestamp already updated by the caller
-        case .snapshot(let sessions):
+        case .snapshot(let sessions, let complete):
             try? await manager.apply(
-                snapshot: sessions, provider: config.name,
+                snapshot: sessions, provider: config.name, complete: complete,
                 requestStartedAt: connectionOpenedAt)
         case .session(let session):
             await manager.applyUpsert(session, provider: config.name)

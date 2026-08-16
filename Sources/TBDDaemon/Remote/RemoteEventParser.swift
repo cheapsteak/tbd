@@ -8,7 +8,10 @@ import TBDShared
 /// absence from `list`/`snapshot` polls.
 enum RemoteEvent: Equatable, Sendable {
     case hello(contractVersion: Int)
-    case snapshot([RemoteSessionPayload])
+    /// `complete` carries the contract's snapshot-completeness claim, with
+    /// exactly the meaning it has on `list`: an incomplete snapshot retires
+    /// nothing and refreshes no freshness. Absent reads as `true`.
+    case snapshot([RemoteSessionPayload], complete: Bool)
     case session(RemoteSessionPayload)
     case removed(id: String)
     case ping
@@ -26,8 +29,9 @@ enum RemoteEventParser {
         let sessions: [RemoteSessionPayload]?
         let session: RemoteSessionPayload?
         let id: String?
+        let complete: Bool?
         enum CodingKeys: String, CodingKey {
-            case event, sessions, session, id
+            case event, sessions, session, id, complete
             case contractVersion = "contract_version"
         }
     }
@@ -39,7 +43,7 @@ enum RemoteEventParser {
               let envelope = try? JSONDecoder().decode(Envelope.self, from: data) else { return nil }
         switch envelope.event {
         case "hello": return .hello(contractVersion: envelope.contractVersion ?? 1)
-        case "snapshot": return .snapshot(envelope.sessions ?? [])
+        case "snapshot": return .snapshot(envelope.sessions ?? [], complete: envelope.complete ?? true)
         case "session": return envelope.session.map { .session($0) }
         case "removed": return envelope.id.map { .removed(id: $0) }
         case "ping": return .ping
