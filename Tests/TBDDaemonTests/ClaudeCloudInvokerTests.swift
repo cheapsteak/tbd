@@ -40,7 +40,13 @@ final class FakeClaudeSpawner: ClaudeCloudSpawning, @unchecked Sendable {
     }
 }
 
-// Tier 1: pure over injected values.
+// Tier 1 + Tier 2: the two `invocationEnvironment` tests are pure over
+// injected values (no subprocess, no filesystem); the two `spawn(_:)` tests
+// spawn short-lived local processes (`/usr/bin/env`) this suite fully
+// controls, with generous (5s) timeouts against near-instant children — no
+// deadline-racing test belongs in this file. `.timedOut`-outcome coverage
+// lives in `Tests/TBDDaemonLiveTests/ClaudeCloudSpawnerTimeoutTests.swift`
+// (Tier 3), per `Tests/CLAUDE.md`'s "spawns a child racing a deadline" rule.
 @Suite("ClaudeCloudInvoker")
 struct ClaudeCloudInvokerTests {
     /// The pty is a capture surface at 400x200, but the child still formats
@@ -123,21 +129,5 @@ struct ClaudeCloudInvokerTests {
         #expect(status == 0)
         #expect(!output.contains("COLUMNS=400"))
         #expect(!output.contains("LINES=200"))
-    }
-
-    /// `.timedOut` must pass through the outcome mapping untouched — the
-    /// other branch of the `switch` in `spawn(_:)`. `/bin/sh -c "sleep 5"`
-    /// against a far shorter deadline exercises the real watchdog rather
-    /// than asserting the mapping in isolation.
-    @Test func spawnMapsATimeoutToTimedOut() async throws {
-        let tmp = FileManager.default.temporaryDirectory.path
-        let spawner = BoundedProcessClaudeSpawner(executable: "/bin/sh")
-        let outcome = try await spawner.spawn(
-            ClaudeCloudSpawnRequest(
-                arguments: ["-c", "sleep 5"],
-                workingDirectory: tmp,
-                usesPseudoTerminal: false,
-                timeout: 0.2))
-        #expect(outcome == .timedOut)
     }
 }
