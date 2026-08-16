@@ -14,7 +14,15 @@ import Testing
 /// Every timestamp these tests care about is passed in explicitly. Nothing
 /// sleeps: the rule under test is an ordering between two `Date`s, so wall
 /// time would only make the assertions slower and flakier.
-@Suite("Remote filing sync")
+///
+/// The time limit is a hang-catcher, not a budget. Three of these tests drive a
+/// competing gesture into the sync's check-then-act window, and an earlier
+/// rendezvous that blocked a cooperative-pool thread there wedged a CI run for
+/// its whole 30-minute step timeout with no failing test and no output. Two
+/// minutes turns any future recurrence into a named red instead, with headroom
+/// for the scheduling latency a ~4500-test parallel pass adds to a trivial test
+/// (`Tests/CLAUDE.md`, "Population is the scheduler").
+@Suite("Remote filing sync", .timeLimit(.minutes(2)))
 struct RemoteFilingSyncTests {
     let db: TBDDatabase
     let subs: StateSubscriptionManager
@@ -51,14 +59,11 @@ struct RemoteFilingSyncTests {
 
     /// A manager whose cached `describe` declares `capabilities`, with a real
     /// actuation log wired in — the sync fails closed without one.
-    private func manager(
-        declaring capabilities: [String], runner: (any RemoteProviderInvoking)? = nil,
-        log: ActuationLog? = nil
-    ) async -> RemoteProviderManager {
-        let invoker = runner ?? FakeProviderInvoker(script: [describeDeclaring(capabilities)])
+    private func manager(declaring capabilities: [String]) async -> RemoteProviderManager {
+        let invoker = FakeProviderInvoker(script: [describeDeclaring(capabilities)])
         let m = RemoteProviderManager(
             db: db, subscriptions: subs, runner: invoker, registryURL: registryURL,
-            actuationLog: log ?? ActuationLog(path: logPath))
+            actuationLog: ActuationLog(path: logPath))
         await m.loadRegistryAndDescribe()
         return m
     }
@@ -397,37 +402,27 @@ struct RemoteFilingSyncTests {
     /// re-reads both and abandons rather than restating an act somebody else
     /// already performed.
     ///
-    /// The interleave is exact rather than raced: the actuation log's own
-    /// `write` syscall is the seam. It hands control to the racing gesture and
-    /// blocks until that gesture has finished, so the sync always resumes into
-    /// a world it has not looked at since it decided.
+    /// The interleave is exact rather than raced, and it costs no second task:
+    /// the gesture runs inline on the sync's own task, through the manager's
+    /// `midFlipHook`, at the one moment that lands it after the sync decided
+    /// and before the recheck re-reads. Nothing blocks a cooperative-pool
+    /// thread, so a narrow pool shared with the rest of the suite cannot wedge
+    /// it.
     @Test("a gesture landing mid-sync abandons the flip instead of restating it")
     func aGestureLandingMidSyncAbandonsTheFlip() async throws {
-        let handshake = MidAppendHandshake()
-        let log = ActuationLog(
-            path: logPath, now: { Date() },
-            syscalls: ActuationLogSyscalls(
-                write: { descriptor, buffer, count in
-                    handshake.pauseOnFirstWrite()
-                    return Foundation.write(descriptor, buffer, count)
-                },
-                fsync: { Foundation.fsync($0) }))
-        let m = await manager(declaring: ["archive", "unarchive"], log: log)
+        let m = await manager(declaring: ["archive", "unarchive"])
         let row = try await adoptedRow(m)
 
-        // The user's own archive, waiting for the sync to reach its record.
-        let gesture = Task { [db] in
-            await handshake.awaitSyncAtRecord()
+        // The user's own archive, landing while the sync is recording its own.
+        await m.setMidFlipHook { [db] in
             try? await db.worktrees.archive(id: row.id)
             await m.noteFilingDecision(worktreeID: row.id, at: Date(timeIntervalSince1970: 3_000))
-            handshake.releaseSync()
         }
 
         try await m.apply(
             snapshot: [session("a", archived: true)], provider: "fake",
             now: Date(timeIntervalSince1970: 2_001),
             requestStartedAt: Date(timeIntervalSince1970: 2_000))
-        await gesture.value
 
         #expect(try await status(row.id) == .archived, "the user's own archive stands")
         // The gesture is the author of this filing, so nothing may say the
@@ -449,29 +444,17 @@ struct RemoteFilingSyncTests {
     /// record over a row that was never eligible.
     @Test("a row that became ineligible mid-sync is recorded not-eligible, not noop")
     func ineligibleRowMidSyncIsNotRecordedAsANoop() async throws {
-        let handshake = MidAppendHandshake()
-        let log = ActuationLog(
-            path: logPath, now: { Date() },
-            syscalls: ActuationLogSyscalls(
-                write: { descriptor, buffer, count in
-                    handshake.pauseOnFirstWrite()
-                    return Foundation.write(descriptor, buffer, count)
-                },
-                fsync: { Foundation.fsync($0) }))
-        let m = await manager(declaring: ["archive", "unarchive"], log: log)
+        let m = await manager(declaring: ["archive", "unarchive"])
         let row = try await adoptedRow(m)
 
-        let gesture = Task { [db] in
-            await handshake.awaitSyncAtRecord()
+        await m.setMidFlipHook { [db] in
             try? await db.worktrees.updateStatus(id: row.id, status: .failed)
-            handshake.releaseSync()
         }
 
         try await m.apply(
             snapshot: [session("a", archived: true)], provider: "fake",
             now: Date(timeIntervalSince1970: 2_001),
             requestStartedAt: Date(timeIntervalSince1970: 2_000))
-        await gesture.value
 
         #expect(try await status(row.id) == .failed, "the sync filed a row it may not touch")
         let rows = try actuationRows()
@@ -488,29 +471,17 @@ struct RemoteFilingSyncTests {
     /// to the flip's own target really is a no-op.
     @Test("a row already at the flip's target is recorded noop")
     func alreadyFiledRowIsRecordedNoop() async throws {
-        let handshake = MidAppendHandshake()
-        let log = ActuationLog(
-            path: logPath, now: { Date() },
-            syscalls: ActuationLogSyscalls(
-                write: { descriptor, buffer, count in
-                    handshake.pauseOnFirstWrite()
-                    return Foundation.write(descriptor, buffer, count)
-                },
-                fsync: { Foundation.fsync($0) }))
-        let m = await manager(declaring: ["archive", "unarchive"], log: log)
+        let m = await manager(declaring: ["archive", "unarchive"])
         let row = try await adoptedRow(m)
 
-        let gesture = Task { [db] in
-            await handshake.awaitSyncAtRecord()
+        await m.setMidFlipHook { [db] in
             try? await db.worktrees.archive(id: row.id)
-            handshake.releaseSync()
         }
 
         try await m.apply(
             snapshot: [session("a", archived: true)], provider: "fake",
             now: Date(timeIntervalSince1970: 2_001),
             requestStartedAt: Date(timeIntervalSince1970: 2_000))
-        await gesture.value
 
         let rows = try actuationRows()
         let request = try #require(rows.first { $0["kind"] as? String == "dispose" })
@@ -657,48 +628,6 @@ struct RemoteFilingSyncTests {
         let requestID = try #require(request["id"] as? String)
         let outcome = try #require(rows.first { $0["confirms"] as? String == requestID })
         #expect(outcome["result"] as? String == "dispatched")
-    }
-}
-
-/// Rendezvous between the filing sync — paused inside the actuation log's
-/// first `write` syscall — and a gesture racing it. Two semaphores rather than
-/// one: the gesture must not start before the sync has committed to its
-/// decision, and the sync must not resume before the gesture has landed.
-///
-/// The blocking `wait` on the sync's side parks the actuation log's executor
-/// thread, which is exactly the point; the gesture's side never blocks a
-/// cooperative thread, since it waits on a global dispatch queue and resumes
-/// through a continuation.
-private final class MidAppendHandshake: @unchecked Sendable {
-    private let syncReachedRecord = DispatchSemaphore(value: 0)
-    private let gestureLanded = DispatchSemaphore(value: 0)
-    private let lock = NSLock()
-    private var paused = false
-
-    /// Called from the log's `write` syscall. Only the first append pauses:
-    /// the outcome row is written after the decision has been re-confirmed and
-    /// has nothing left to race.
-    func pauseOnFirstWrite() {
-        lock.lock()
-        let alreadyPaused = paused
-        paused = true
-        lock.unlock()
-        guard !alreadyPaused else { return }
-        syncReachedRecord.signal()
-        gestureLanded.wait()
-    }
-
-    func awaitSyncAtRecord() async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            DispatchQueue.global().async { [syncReachedRecord] in
-                syncReachedRecord.wait()
-                continuation.resume()
-            }
-        }
-    }
-
-    func releaseSync() {
-        gestureLanded.signal()
     }
 }
 

@@ -505,6 +505,25 @@ public actor RemoteProviderManager {
         filingDecisions[worktreeID]
     }
 
+    /// Test seam: awaited inside the check-then-act window, immediately before
+    /// `recheckBeforeFiling` re-reads the row and the watermark. Nil in
+    /// production; nothing outside the suite ever sets it.
+    private var midFlipHook: (@Sendable () async -> Void)?
+
+    /// Test seam: installs `midFlipHook`.
+    ///
+    /// The window it opens onto is reachable only from *inside* the sync, and
+    /// every other seam within it — the actuation log's `write` syscall, its
+    /// `now` closure — is synchronous, so a test that waited from one would
+    /// park a cooperative-pool thread until a second task released it. Under a
+    /// narrow pool shared with the rest of the suite, nothing is left to do the
+    /// releasing and the run wedges with no failing test. A gesture run inline
+    /// on the sync's own task needs no second task at all, so it is exactly as
+    /// deterministic and cannot starve.
+    func setMidFlipHook(_ hook: (@Sendable () async -> Void)?) {
+        midFlipHook = hook
+    }
+
     /// Applies the provider's own `archived` claims to the worktree rows
     /// bound to its sessions, so a lane retired on the provider's surface or
     /// from another machine leaves TBD's active list too, and one returned to
@@ -613,6 +632,7 @@ public actor RemoteProviderManager {
         _ worktreeID: UUID, expecting expected: WorktreeStatus, becoming target: WorktreeStatus,
         requestStartedAt: Date
     ) async -> FlipRecheck {
+        await midFlipHook?()
         let current: Worktree?
         do {
             current = try await db.worktrees.get(id: worktreeID)
