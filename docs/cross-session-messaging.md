@@ -59,6 +59,11 @@ session's **next respawn or resume**; until then the running session
 still answers to its spawn-time name. Nothing breaks in the meantime —
 the listing tells the two apart, as described next.
 
+A running session is not stuck with that name, though: Claude Code's
+documentation states that a session answers to the name set with the
+`/rename` command as well as the one given by `--name`, so a drifted
+name can be corrected from inside the session without a respawn.
+
 **A stale daemon binary produces the slug fallback fleet-wide.** The flag
 is passed by the daemon, and `scripts/restart.sh` from any worktree
 replaces the one live daemon for the whole machine. Restarting from a
@@ -74,8 +79,9 @@ what the listing shows rather than by what you expect it to show.
 
 ## Addressing a peer
 
-Addressing starts at the listing. Run `/list-agents` — or call the
-`ListAgents` tool. A row looks like this:
+Addressing starts at the listing a session itself receives — the
+**`ListAgents` tool result**, which is the form that matters when a
+session is trying to reach a peer. A row in it looks like this:
 
 ```
 acme-worker [455f3e]  ·  interactive  ·  busy  ·  tmux main:@388.%388  ·  started 5d ago
@@ -83,12 +89,18 @@ acme-worker [455f3e]  ·  interactive  ·  busy  ·  tmux main:@388.%388  ·  st
 
 The fields are the session's name, a short `[ref]` unique to that live
 session, its kind, its status, its tmux server, window and pane, and how
-long ago it started. **The listing row does not carry a working
+long ago it started. **The tool result does not carry a working
 directory** — the tmux pane is the field that ties a row to a specific
 terminal, and the one to reach for whenever the name is not enough. (The
 on-disk registry record described under [The peer
-registry](#the-peer-registry) does hold one; the listing does not print
-it.)
+registry](#the-peer-registry) does hold one; the tool result does not
+print it.)
+
+What a human sees in the TUI is a separate surface with its own field
+set. Claude Code's documentation states that the `/list-agents`
+slash-command view shows each local session's working directory, so do
+not assume the two render the same fields. Everything below — the pane
+join especially — is written for the session-facing tool result.
 
 The tmux field is there only for a session running inside tmux, which
 every TBD session is. A plain-terminal `claude` started outside tmux, and
@@ -97,7 +109,9 @@ and the pane matching described below does not reach them.
 
 The row layout above, and the not-found refusal in
 [When a name is not reachable](#when-a-name-is-not-reachable), were read
-off CLI 2.1.233. The wording is Claude Code's rather than TBD's, so treat
+off the `ListAgents` tool result on CLI 2.1.233; the slash-command
+layout is Claude Code's documented behavior rather than anything
+measured here. The wording is Claude Code's rather than TBD's, so treat
 the field set as the durable part and the exact text as version-bound.
 
 **Address a peer you have not messaged before as `name [ref]`.** A bare
