@@ -232,6 +232,14 @@ write additional ReapRecords — the quarantine entry's record already exists.
 ## Reconciler doctrine
 
 `ProfileDirCollector` is the named reconciler for the durable resource class
-"per-profile config directories under `~/tbd/profiles/`". Every durable
-external resource TBD creates needs exactly such a named reconciler; this
-collector closes the last known class that had none.
+"per-profile config directories under `~/tbd/profiles/`", the answer this
+design owes to CLAUDE.md's "Every durable external resource needs a named
+reconciler". It arrives as an extension of `OrphanGC`, the reconciler that
+rule already names for filesystem resources, rather than as a fourth sweep.
+
+The class qualified for that question the moment the directories started
+outliving the request that created them: they are created lazily at spawn,
+and the only thing that ever pointed at one was a `model_profiles` row whose
+deletion was not, and cannot be, transactional with the directory's removal.
+That is the same shape as the leaks the doctrine cites as its field evidence
+— best-effort cleanup on the deletion path, no sweep behind it.
