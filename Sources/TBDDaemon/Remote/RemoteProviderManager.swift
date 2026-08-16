@@ -428,7 +428,8 @@ public actor RemoteProviderManager {
         }
     }
 
-    /// Single-session upsert from an events `session` line. No absence
+    /// Single-session upsert from an events `session` line, or from the
+    /// response to a create/stop/rename this daemon issued. No absence
     /// bookkeeping happens here — only `apply(snapshot:)` drives the
     /// two-absence rule, since only a full snapshot can tell what's missing.
     ///
@@ -442,8 +443,14 @@ public actor RemoteProviderManager {
     /// through the date seam rather than a bare `Date()`
     /// (`Tests/CLAUDE.md`, "Clock and date seams": `Duration` is behavior,
     /// `Date` is data). Defaulted, so no call site changes.
+    ///
+    /// `parentWorktreeID` is set only by `remote.create`, and only when the
+    /// user started the lane from a worktree's nested `+`: it is the parent
+    /// they asked for, handed to adoption as an override of whatever the
+    /// provider stamped. See `RemoteSessionAdopter.adopt(session:provider:parentOverride:)`.
     func applyUpsert(
-        _ session: RemoteSessionPayload, provider: String, date: Date = Date()
+        _ session: RemoteSessionPayload, provider: String, parentWorktreeID: UUID? = nil,
+        date: Date = Date()
     ) async {
         let arrivedAt = date
         let outcome: SnapshotOutcome
@@ -459,7 +466,9 @@ public actor RemoteProviderManager {
         // Same ordering rule as the snapshot path: the mirror pins, then
         // adoption reads the pin. A session first sighted on the events stream
         // must not have to wait for the next full poll to get its row.
-        broadcastAdoptions(await adopter.adopt(session: session, provider: provider))
+        broadcastAdoptions(
+            await adopter.adopt(
+                session: session, provider: provider, parentOverride: parentWorktreeID))
         await syncFilingDecisions(
             sessions: [session], provider: provider,
             requestStartedAt: arrivedAt, now: arrivedAt)

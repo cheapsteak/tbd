@@ -1438,8 +1438,23 @@ public struct RemoteCreateParams: Codable, Sendable {
     /// inside the contract's create request. Kept as a string so RPC stays
     /// schema-free about provider-specific fields.
     public let paramsJSON: String
-    public init(provider: String, paramsJSON: String) {
-        self.provider = provider; self.paramsJSON = paramsJSON
+    /// Where the caller clicked: the worktree the new lane should nest under,
+    /// or nil for a top-level lane.
+    ///
+    /// TBD-local and deliberately outside the provider contract — it is not
+    /// sent on `create`'s stdin and the provider never learns it. The parent
+    /// edge is TBD's own policy (the same column a drag sets), so the only
+    /// thing the provider could add is a round trip through
+    /// `meta["tbd_parent_worktree_id"]` that could be dropped, garbled, or
+    /// contradicted. The daemon applies it at adoption instead, as an override
+    /// of that stamp.
+    ///
+    /// Optional and defaulted: params encoded by an older app still decode.
+    public let parentWorktreeID: UUID?
+    public init(provider: String, paramsJSON: String, parentWorktreeID: UUID? = nil) {
+        self.provider = provider
+        self.paramsJSON = paramsJSON
+        self.parentWorktreeID = parentWorktreeID
     }
 }
 
