@@ -1209,7 +1209,15 @@ extension WorktreeLifecycle {
         /// until the lease store promotes one of them to `.judge` — because at
         /// spawn time no lease has been acquired yet. Every other caller leaves
         /// it nil and gets exactly the overlay it got before the tee existed.
-        watchDeskRole: WatchDeskRole? = nil
+        watchDeskRole: WatchDeskRole? = nil,
+        /// Non-nil when this spawn is a supervision hosted desk. The name is
+        /// injected as `TBD_PROJECT` — the desk's ambient identity, the same
+        /// variable an appointment relaunch injects (design §9) — and the
+        /// playbook is installed as the session's standing conduct layer
+        /// through `SystemPromptBuilder` (sweep-program design §8). Every other
+        /// caller leaves both nil and gets exactly the spawn it got before.
+        supervisionProject: String? = nil,
+        supervisionPlaybook: String? = nil
     ) async throws -> [(id: UUID, label: String)] {
         let worktreeID = worktree.id
         let tmuxServer = worktree.tmuxServer
@@ -1344,7 +1352,8 @@ extension WorktreeLifecycle {
                 : SystemPromptBuilder.build(
                     repo: repo, worktree: worktree, isResume: false,
                     scratchInstructions: config.scratchInstructions,
-                    scratchRenamePrompt: config.scratchRenamePrompt)
+                    scratchRenamePrompt: config.scratchRenamePrompt,
+                    supervisionPlaybook: supervisionPlaybook)
             let profileConfigDir = configDirManager.resolveConfigDir(for: resolvedProfile)
             // Pre-accept Claude Code's folder-trust dialog. TBD just created
             // this worktree from a repo the operator registered, so the trust
@@ -1419,10 +1428,15 @@ extension WorktreeLifecycle {
                 sessionName: worktree.displayName
             )
             primaryCommand = spawn.command
-            primaryEnv = [
+            var claudeEnv = [
                 "TBD_WORKTREE_ID": worktreeID.uuidString,
                 "TBD_TERMINAL_ID": plannedTerminalID1.uuidString,
             ]
+            // A hosted desk's ambient identity, alongside the two ids every TBD
+            // session already carries. Non-sensitive, so it rides the same
+            // inline-exported `env` map (design §9, §5).
+            if let supervisionProject { claudeEnv["TBD_PROJECT"] = supervisionProject }
+            primaryEnv = claudeEnv
             // Layer the builder's auth/routing env ON TOP of free-form overrides
             // so auth/routing stays final and free-form vars can't clobber it.
             primarySensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
