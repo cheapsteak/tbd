@@ -130,4 +130,76 @@ struct ClaudeCloudInvokerTests {
         #expect(!output.contains("COLUMNS=400"))
         #expect(!output.contains("LINES=200"))
     }
+
+    // MARK: - describe
+
+    private func invoker(
+        db: TBDDatabase, spawner: FakeClaudeSpawner,
+        now: @escaping @Sendable () -> Date = { Date(timeIntervalSince1970: 1_000_000) }
+    ) -> ClaudeCloudInvoker {
+        ClaudeCloudInvoker(db: db, spawner: spawner, now: now)
+    }
+
+    private func config() -> RemoteProviderConfig {
+        RemoteProviderConfig(name: ClaudeCloudProvider.name, exec: "/opt/acme/claude")
+    }
+
+    /// `describe` is static and OFFLINE, and its answer does not vary with
+    /// the account — including for `attach`, which is declared because the
+    /// provider implements it. Whether a given account may USE it is a
+    /// separate runtime question.
+    @Test func describeIsStaticOfflineAndSpawnsNothing() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let spawner = FakeClaudeSpawner(outcomes: [])
+        let result = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["describe"], stdin: nil, timeout: 10, contractVersion: 2)
+        #expect(result.exitCode == 0)
+        #expect(spawner.requestsSnapshot().isEmpty, "describe must touch no process at all")
+        let describe = try result.decoded(ProviderDescribe.self)
+        #expect(describe.name == ClaudeCloudProvider.name)
+        // `[2]` ALONE: nothing exposed terminates a running cloud session, so
+        // the provider cannot implement `stop`, which major 1 requires.
+        #expect(describe.contractVersions == [2])
+        #expect(describe.capabilities.sorted()
+            == ["archive", "attach", "land", "send", "unarchive"])
+        // Each absence is a fact about the surface, not an unimplemented verb.
+        #expect(!describe.capabilities.contains("stop"))
+        #expect(!describe.capabilities.contains("log"))
+        #expect(!describe.capabilities.contains("transcript"))
+        #expect(!describe.capabilities.contains("events"))
+        #expect(describe.createParams.map(\.name) == ["repo", "branch", "prompt", "environment"])
+        #expect(describe.createParams.first(where: { $0.name == "repo" })?.required == true)
+        #expect(describe.createParams.first(where: { $0.name == "prompt" })?.required == true)
+        // `environment` is typed `string`, not `enum`: `describe` answers
+        // offline and the set of configured cloud environments is knowable
+        // only from the account.
+        #expect(describe.createParams.first(where: { $0.name == "environment" })?.type == "string")
+        #expect(describe.createParams.first(where: { $0.name == "prompt" })?.type == "text")
+    }
+
+    /// A declared capability whose verb is not wired yet must say so as a
+    /// contract error rather than exiting 0 with nothing — these arms are
+    /// filled in by the archive and land steps of the same delivery.
+    @Test func anUnwiredDeclaredVerbFailsAsAContractBug() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let spawner = FakeClaudeSpawner(outcomes: [])
+        for verb in [["archive", "s"], ["unarchive", "s"], ["land", "s"]] {
+            let result = try await invoker(db: db, spawner: spawner).run(
+                config(), verb: verb, stdin: nil, timeout: 30, contractVersion: 2)
+            #expect(result.exitCode == 2)
+            #expect(result.failureClass == .contractBug)
+            #expect(result.decodedError?.code == "not_implemented")
+        }
+        #expect(spawner.requestsSnapshot().isEmpty)
+    }
+
+    /// An undeclared verb is a caller bug — the contract forbids invoking one
+    /// — and must be reported as such rather than silently succeeding.
+    @Test func anUndeclaredVerbIsAContractError() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let result = try await invoker(db: db, spawner: FakeClaudeSpawner(outcomes: [])).run(
+            config(), verb: ["stop", "s"], stdin: nil, timeout: 30, contractVersion: 2)
+        #expect(result.exitCode == 2)
+        #expect(result.failureClass == .contractBug)
+    }
 }
