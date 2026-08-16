@@ -119,4 +119,77 @@ struct BoundedProcessRunnerTests {
         }
         #expect(status == 7)
     }
+
+    /// The whole point of the mode. The vendor CLI refuses `--cloud` creation
+    /// when stdout is not a terminal, so a probe that reports what it sees is
+    /// the only assertion that proves the child got one. Both arms run the SAME
+    /// probe, so the test discriminates rather than merely passing.
+    @Test func pseudoTerminalModeGivesTheChildATty() async throws {
+        let probe = "if [ -t 1 ]; then echo tty; else echo pipe; fi"
+
+        let pty = try await runBoundedProcess(
+            executable: "/bin/sh", arguments: ["-c", probe],
+            currentDirectory: nil, timeout: .seconds(10), stdio: .pseudoTerminal)
+        guard case .completed(let ptyStatus, let ptyOut, let ptyErr) = pty else {
+            Issue.record("expected .completed under .pseudoTerminal, got \(pty)")
+            return
+        }
+        #expect(ptyStatus == 0)
+        #expect((String(data: ptyOut, encoding: .utf8) ?? "").contains("tty"))
+        // One file descriptor: everything the child wrote is on stdout.
+        #expect(ptyErr.isEmpty)
+
+        let piped = try await runBoundedProcess(
+            executable: "/bin/sh", arguments: ["-c", probe],
+            currentDirectory: nil, timeout: .seconds(10))
+        guard case .completed(let pipeStatus, let pipeOut, _) = piped else {
+            Issue.record("expected .completed under the default .pipes, got \(piped)")
+            return
+        }
+        #expect(pipeStatus == 0)
+        #expect((String(data: pipeOut, encoding: .utf8) ?? "").contains("pipe"))
+    }
+
+    /// A pty has a small kernel buffer, so the incremental drain matters here
+    /// at least as much as it does for a pipe: a child that outruns it would
+    /// otherwise block on write while the parent waits for exit.
+    @Test func pseudoTerminalModeDrainsMoreThanOneBufferful() async throws {
+        let outcome = try await runBoundedProcess(
+            executable: "/bin/sh",
+            arguments: ["-c", "head -c 200000 /dev/zero | tr '\\0' 'x'"],
+            currentDirectory: nil, timeout: .seconds(20), stdio: .pseudoTerminal)
+        guard case .completed(let status, let stdout, _) = outcome else {
+            Issue.record("expected .completed, got \(outcome)")
+            return
+        }
+        #expect(status == 0)
+        // Raw mode, so no CR is inserted and the byte count is exact.
+        #expect(stdout.count == 200_000)
+    }
+
+    /// The replica is the child's stdin AND its stdout on one descriptor, so
+    /// there is no write end to close and a child waiting for EOF would hang
+    /// forever. Refusing loudly beats hanging quietly; `create` passes no stdin.
+    @Test func pseudoTerminalModeRefusesAStdinPayload() async {
+        await #expect(throws: BoundedProcessRunnerError.stdinUnsupportedOnPseudoTerminal) {
+            _ = try await runBoundedProcess(
+                executable: "/bin/cat", arguments: [],
+                currentDirectory: nil, stdin: Data("hi".utf8),
+                timeout: .seconds(10), stdio: .pseudoTerminal)
+        }
+    }
+
+    /// The default is unchanged, which is what keeps every existing call site
+    /// on pipes without being revisited.
+    @Test func defaultStdioIsStillPipes() async throws {
+        let outcome = try await runBoundedProcess(
+            executable: "/bin/sh", arguments: ["-c", "echo out; echo err 1>&2"],
+            currentDirectory: nil, timeout: .seconds(10))
+        guard case .completed(_, let stdout, let stderr) = outcome else {
+            Issue.record("expected .completed, got \(outcome)")
+            return
+        }
+        #expect((String(data: stdout, encoding: .utf8) ?? "").contains("out"))
+        #expect((String(data: stderr, encoding: .utf8) ?? "").contains("err"))
+    }
 }
