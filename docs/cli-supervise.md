@@ -13,15 +13,19 @@ Status: documents the `tbd supervise` surface specified by
 Part of that surface exists and part of it is specification the rest of this
 document describes ahead of the code:
 
-- **Built** – `on`, `off`, `status`, `mode`, `project`. These are what
-  `tbd supervise --help` lists, and their output is quoted here exactly.
-- **Specified, not yet built** – `appoint`, `relieve`, `sweep customize`,
-  `readout`, `brief`, `ledger`. Their sections below carry the same marker,
-  and any output they show is the specified shape rather than a transcript.
+- **Built** – `on`, `off`, `status`, `mode`, `project`, and the sweep
+  program's three surfaces: `readout`, `brief`, `ledger`. These are what
+  `tbd supervise --help` lists, and their output is quoted here as it prints,
+  with long JSON values elided for the page.
+- **Specified, not yet built** – `appoint`, `relieve`, `sweep customize`.
+  Their sections below carry the same marker, and any output they show is the
+  specified shape rather than a transcript.
 
-The migration from the current implementation is planned separately. JSON
-output for the unbuilt commands is illustrative of the schema family until
-their schemas ship.
+Briefing *delivery* is a separate half from the `brief` surface itself, and it
+is the half that has not landed: `brief` accepts, attributes, paces, and
+refuses where it should today, and answers `no-live-supervisor` because no
+supervisor is ever resolved. Its section below says so plainly. The migration
+from the current implementation is planned separately.
 
 ## Synopsis
 
@@ -69,11 +73,27 @@ taken verbatim** — a `<project>` argument reaches the daemon exactly as typed,
 surrounding spaces included, because a singleton's name is its repo's display
 name and TBD lets a repo be called ` api `. A name of nothing but whitespace
 is refused: that is the empty case, and it would otherwise read as the bare
-fleet-brake form of `on`/`off`. JSON output carries a
-top-level `schemaVersion`; changes within a version are additive only.
+fleet-brake form of `on`/`off`.
 Commands exit 0 on success and nonzero with the refusing condition named on
 stderr; exit codes called out below as stable are a contract scripts may
 branch on.
+
+**Schema versions.** JSON output carries a top-level `schemaVersion` — `1` for
+`readout` and `ledger`, and `brief`'s result is versioned on the same terms
+even though its input has no schema at all (the briefing is prose for a desk,
+and TBD parses none of it). Within a version, fields may be added at any
+level and a consumer must tolerate keys it does not recognize; a field never
+changes what it computes, timestamps stay ISO-8601, and an enum value already
+emitted keeps its sense. Removing a field, or changing what one means,
+requires a version bump — so a program branching on `schemaVersion == 1` is
+never silently surprised. The version sits on the printed envelope rather than
+on each line or each agent entry: one binary emits one shape, so a per-entry
+version could never legitimately differ, and the rules being versioned — the
+ledger's projection rule, the readout's absence-means-unestablished rule —
+have the whole object as their subject. It is stamped where a program reads
+bytes, which is this CLI's stdout, not the daemon's internal RPC seam. TBD's
+older JSON output predates the convention and carries no version, so expect
+one only from a command documented as having it.
 
 ## Subcommands
 
@@ -118,10 +138,10 @@ brake: released
 acme-platform  on since 22:04  mode autonomous  supervisor: hosted desk      last sweep contact: never  coverage unknown
 acme-hooks     on since 21:40  mode attended    supervisor: appointed (t42)  last sweep contact: never  coverage unknown
 
-# Read the facts the way the sweep program does (not yet built)
+# Read the facts the way the sweep program does
 $ tbd supervise readout --project acme-platform
 
-# Answer "what did supervision actually do overnight?" (not yet built)
+# Answer "what did supervision actually do overnight?"
 $ tbd supervise ledger --project acme-platform --since 22:00
 
 # Make your current pairing session the project's supervisor for the day (not yet built)
@@ -391,25 +411,44 @@ tick with no setup.
 
 ## tbd supervise readout
 
-*Specified, not yet built.*
-
 ```
 tbd supervise readout --project <name>
 ```
 
 Read-only; prints and changes nothing else. The project's live-agent facts —
-session state with its source and observed-at, work facts, runaway counters,
-pin state, the not-to-act facts — plus machinery state (the brake, the
-project's mark, the active mode) and the **supervisor section**: the
+session state with its source and observed-at, the work facts below, runaway
+counters, pin state, the not-to-act facts — plus machinery state (the brake,
+the project's mark, the active mode) and the **supervisor section**: the
 supervisor's session state, last attested act, context fullness where
 known, and the age of any delivered briefing with no answering act from
 the desk. The supervisor is in the sweep program's perimeter — whether its
 silence is failure, and what to do about it, is the program's judgment
 over these facts.
 
+### The work facts, and the one that is deliberately missing
+
+Each agent's `work` object carries what the supervision sweep already
+resolves: the branch, whether that branch has conflicts, since when its
+commits stopped moving, and the PR observation and status TBD keeps beside
+the worktree. All of that comes out of the one `git for-each-ref` per repo
+the sweep runs anyway, so the readout costs no extra subprocess per agent.
+
+There is no working-tree fact — no uncommitted-file count, no diff summary —
+and there is not going to be one at this layer. The sweep resolves refs, not
+worktree status; answering the working-tree half would mean a `git status`
+subprocess per worktree per cycle, which is the per-agent cost the readout
+exists to avoid. A program whose theory of work needs the working tree runs
+`git status` itself, over the worktrees it actually cares about.
+
+**An unestablished fact is `null`, never a fabricated zero.**
+`commitsUnchangedSince` is null until the sweep has seen the same branch tip
+twice, because one sample measures no duration — a zero there would be a claim
+of stillness TBD never observed. Read a null as *unknown*, which is neither
+"moving" nor "still", and decide which way to fail from your own conduct.
+
 ### Output
 
-JSON on stdout, `schemaVersion` at top level. Illustrative:
+JSON on stdout, `schemaVersion` at top level:
 
 ```
 $ tbd supervise readout --project acme-platform
@@ -417,13 +456,18 @@ $ tbd supervise readout --project acme-platform
   "schemaVersion": 1,
   "supervision": { "on": true, "brakeEngaged": false, "mode": "autonomous" },
   "supervisor": { "arrangement": "hostedDesk", "terminal": "t81",
-                  "state": { "value": "idle", "source": "hook", "observedAt": "02:13:12Z" },
-                  "lastAttestedAct": "02:04:51Z", "unansweredBriefingSince": null },
+                  "state": { "value": "idle", "source": "hook", "observedAt": "2026-08-15T02:13:12.000Z" },
+                  "lastAttestedAct": "2026-08-15T02:04:51.000Z", "unansweredBriefingSince": null },
   "agents": [
     { "terminal": "t17",
-      "state": { "value": "idle", "source": "hook", "observedAt": "02:13:40Z" },
-      "work": { "uncommittedFiles": 2, "branchAheadBy": 3 },
-      "counters": { "turnsInWindow": 12, "minutesSinceCommit": 47 },
+      "state": { "value": "idle", "source": "hook", "observedAt": "2026-08-15T02:13:40.000Z" },
+      "work": { "branch": "tbd/public-surfaces",
+                "hasConflicts": false,
+                "commitsUnchangedSince": "2026-08-15T01:14:02.000Z",
+                "pr": { "outcome": "observed", "observedAt": "2026-08-15T02:09:30.000Z" },
+                "prStatus": { … } },
+      "counters": { "turnsInWindow": 12, "hookEventsInWindow": 31,
+                    "windowStart": "2026-08-15T01:13:40.000Z" },
       "pinned": false,
       "notToAct": { "interventionInFlight": false, "recheckPending": false,
                     "rateLimitedUntil": null } }
@@ -443,8 +487,6 @@ $ tbd supervise readout --project tbd | jq '.agents[] | {terminal, state}'
 
 ## tbd supervise brief
 
-*Specified, not yet built.*
-
 ```
 tbd supervise brief --project <name>    # briefing text on stdin
 ```
@@ -452,21 +494,43 @@ tbd supervise brief --project <name>    # briefing text on stdin
 Submits a composed briefing for delivery to the project's supervisor. The
 text is delivered verbatim under a short compiled header (active mode name,
 any pending playbook update); TBD never parses it. Delivery is recorded in
-the ledger with the delivered text's hash. An **empty submission is
-meaningful**: it is the attested "looked,
-found nothing" that keeps the project's liveness contact fresh without
-delivering anything.
+the ledger with the delivered text's hash.
+
+**The pipeline is four steps, in this order, and no step reads your text:**
+timestamp-and-attribute (the submission updates the project's liveness
+record), pace, refuse while the project is paused or off, deliver.
+
+**Pacing is identity-blind.** One briefing per project per 2 minutes, decided
+on timestamps alone. It does not consult who is submitting, and it must not:
+the moment pacing reads an identity it stops being a mechanism and becomes a
+policy — some submitters worth more of the window than others — and policy
+belongs to the project's own program, not to the pipe.
 
 **One attempt, honest result, your policy.** TBD makes one full delivery
 attempt (internal transport fallback included) and never retries a
-briefing. The synchronous result is machine-readable and stable:
-`delivered`, `refused-paused` (exit 75), `refused-off`,
-`refused-rate-limit`, `refused-size`, `transport-failed`, or
+briefing. The synchronous result is machine-readable, and these seven values
+are the contract: `delivered`, `refused-paused` (exit 75), `refused-off`,
+`refused-rate-limit`, `refused-size`, `transport-failed`,
 `no-live-supervisor`. What happens next — resubmit, replace the desk with
 `on` and resubmit, page with `tbd notify`, or wait for the next
 evaluation — is the submitting program's continuation policy; the shipped
 program handles `no-live-supervisor` by running `on` (ensure) and
 resubmitting in the same run.
+
+**Delivery has not shipped, so today every submission answers
+`no-live-supervisor`.** Nothing else about the surface is a stub: the
+submission is timestamped, attributed, paced, refused where it should be
+refused, and counted as liveness contact exactly as described here. It is an
+honest answer to "did a supervisor receive this" — no — rather than a
+placeholder, and it is enough to write and test a whole sweep program against,
+minus the delivery leg.
+
+**An empty submission is still a submission.** It is the attested "looked,
+found nothing": it updates the liveness record, delivers nothing, writes no
+ledger line, and pacing never applies to it. Its durable trace is the coverage
+summary on the lifecycle line that ends the project's coverage span, which is
+what lets the account say "checked 14 times, nothing found" — an attested calm
+night rather than an absence of evidence.
 
 Refusals: while the fleet brake is engaged, exits **75**
 (temporary; retry when supervision resumes). A project whose mark is off is
@@ -490,8 +554,6 @@ $ tbd supervise brief --project acme-platform < /dev/null
 
 ## tbd supervise ledger
 
-*Specified, not yet built.*
-
 ```
 tbd supervise ledger --project <name> --since <t>
 ```
@@ -505,14 +567,53 @@ everything that touched the fleet since its last evaluation, not only
 supervision's half — and how anything else audits the night. JSON on
 stdout, `schemaVersion` at top level.
 
+### How the join is computed
+
+- **Lines pass through verbatim.** Each line is its original JSON object with
+  two fields added: `source`, either `actuation` or `supervision`, and for a
+  verified send a computed `delivery` status. Neither record is re-modelled.
+  The actuation record's field list is documented as growing, and the
+  supervision ledger carries kinds a given build does not write — so
+  re-modelling would make a later build's line, or any field added within a
+  schema version, vanish from a query whose entire job is showing you
+  everything that touched the fleet.
+- **One merged `lines` array, ascending by timestamp.** The two kind
+  vocabularies are disjoint, so a single array reads correctly and you filter
+  by `kind`. `source` rides every line regardless, so provenance never depends
+  on remembering which vocabulary a kind belongs to.
+- **A row appears only when it resolves into this project.** An actuation
+  row's target is matched by worktree, terminal, or repo, each resolved
+  through TBD's own tables to a project. A row that resolves to nothing — a
+  target whose row has since been deleted, a remote-provider act with no local
+  coordinates — is excluded rather than included on a guess. The failure worth
+  preventing is one project's query showing another project's lines.
+- **Unparseable lines are counted, not swallowed.** A hand-edit or a crash
+  fragment is reported as a count beside the array, so damage reads as damage
+  rather than as a quiet absence.
+
+### `--since`
+
+Three shapes are accepted, and anything else is refused naming all three:
+
+- **A full ISO-8601 timestamp**, with an offset or `Z`. The form a program
+  computing "since my last evaluation" should use — unambiguous across time
+  zones and daylight-saving edges.
+- **Bare `HH:MM`**, resolved to the **most recent past** occurrence in the
+  machine's local time zone. The operator's shape: at 02:40, `--since 22:00`
+  means last night's 22:00.
+- **A bare relative duration** — `30m`, `2h`, `90s` — meaning that long ago.
+
 ### Examples
 
 ```
-# What happened since my last evaluation?
-$ tbd supervise ledger --project acme-platform --since 02:10
+# What happened since my last evaluation? (a program: exact instant)
+$ tbd supervise ledger --project acme-platform --since 2026-08-15T02:10:00Z
 
 # Morning audit, human-shaped: prefer the account file, but this is the raw truth
 $ tbd supervise ledger --project tbd --since 22:00 | jq '.lines[] | select(.kind=="send")'
+
+# The last half hour, whatever the clock says
+$ tbd supervise ledger --project acme-platform --since 30m
 ```
 
 ## Acting and narrative
@@ -632,17 +733,22 @@ facts TBD itself observed.
 
 ## Exit codes
 
-- **0** – success.
-- **75** – the fleet brake is engaged (`brief` only). Temporary by
-  contract: retry when supervision resumes. Stable; scripts may branch on
-  it. A project turned off is an ordinary nonzero refusal, not 75 — off is
-  standing, not temporary.
-- **other nonzero** – refusal or failure, with the condition named on
-  stderr: usage errors, rate or size bounds at `brief`, an unsupported
-  agent kind at `appoint`. Codes other than 0 and 75 are not yet pinned as
-  contract; branch on 0 / 75 / nonzero, not on specific values. (The
-  public send's precondition refusals are `tbd terminal send`'s own,
-  ordinary nonzero errors naming the condition.)
+- **0** – success. `readout` and `ledger` are read-only and exit 0 whenever
+  they printed their JSON; a `brief` that was `delivered` exits 0 too.
+- **75** – `brief`'s `refused-paused`, and only that: the fleet brake is
+  engaged. It is sysexits' `EX_TEMPFAIL` — "not now, retry later" — which is
+  exactly what a brake refusal means, and it is stable, so scripts may branch
+  on it.
+- **other nonzero** – every other refusal or failure, with the condition
+  named on stderr: `refused-off`, `refused-rate-limit`, `refused-size`,
+  `transport-failed` and `no-live-supervisor` at `brief`, usage errors
+  anywhere, an unsupported agent kind at `appoint`. `refused-off` is
+  deliberately not 75: an off project is a standing state, so a program
+  should stop submitting against it rather than retry on a timer. Codes other
+  than 0 and 75 are not pinned as contract; branch on 0 / 75 / nonzero and
+  read the result value for the rest. (The public send's precondition
+  refusals are `tbd terminal send`'s own, ordinary nonzero errors naming the
+  condition.)
 
 ## Files
 
