@@ -1,0 +1,39 @@
+import Foundation
+import Testing
+
+@testable import TBDDaemonLib
+@testable import TBDShared
+
+/// The contract requires `TBD_CONTRACT_VERSION` on every invocation, and the
+/// daemon has two emitters of it. Both must announce the major the daemon
+/// negotiated for that provider rather than a constant, or a provider that
+/// branches on the version sees a different answer per verb.
+///
+/// Tier 2: the one spawn here is `/bin/sh -c env`, a short-lived child this
+/// suite fully controls.
+@Suite("ProviderContractEnvironment")
+struct ProviderContractEnvironmentTests {
+
+    @Test func runnerEnvironmentCarriesTheNegotiatedMajor() {
+        let env = ProviderRunner.invocationEnvironment(
+            base: ["PATH": "/usr/bin"], contractVersion: 2)
+        #expect(env["TBD_CONTRACT_VERSION"] == "2")
+        #expect(env["PATH"] == "/usr/bin")
+    }
+
+    @Test func runnerEnvironmentStillEmitsOneForAV1Provider() {
+        let env = ProviderRunner.invocationEnvironment(base: [:], contractVersion: 1)
+        #expect(env["TBD_CONTRACT_VERSION"] == "1")
+    }
+
+    /// End to end through a real spawn: the variable the child actually sees is
+    /// the negotiated major, not the constant the runner used to hardcode.
+    @Test func spawnedProviderSeesTheNegotiatedMajor() async throws {
+        let config = RemoteProviderConfig(name: "probe", exec: "/bin/sh", args: ["-c", "env"])
+        let result = try await ProviderRunner().run(
+            config, verb: ["describe"], stdin: nil, timeout: 10, contractVersion: 2)
+        let text = String(data: result.stdout, encoding: .utf8) ?? ""
+        #expect(text.contains("TBD_CONTRACT_VERSION=2"))
+        #expect(!text.contains("TBD_CONTRACT_VERSION=1"))
+    }
+}

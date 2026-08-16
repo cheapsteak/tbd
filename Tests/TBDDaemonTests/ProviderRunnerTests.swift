@@ -26,7 +26,8 @@ struct ProviderRunnerTests: ~Copyable {
 
     @Test func successCapturesStdoutAndContractVersionEnv() async throws {
         let config = try stub(#"echo "{\"ok\": true, \"v\": \"$TBD_CONTRACT_VERSION\"}""#)
-        let result = try await ProviderRunner().run(config, verb: ["list"], stdin: nil, timeout: 10)
+        let result = try await ProviderRunner().run(
+            config, verb: ["list"], stdin: nil, timeout: 10, contractVersion: 1)
         #expect(result.exitCode == 0)
         let text = String(data: result.stdout, encoding: .utf8) ?? ""
         #expect(text.contains(#""v": "1""#))
@@ -35,29 +36,33 @@ struct ProviderRunnerTests: ~Copyable {
     @Test func stdinIsDelivered() async throws {
         let config = try stub("cat")
         let result = try await ProviderRunner().run(
-            config, verb: ["create"], stdin: Data("hello".utf8), timeout: 10)
+            config, verb: ["create"], stdin: Data("hello".utf8), timeout: 10, contractVersion: 1)
         #expect(String(data: result.stdout, encoding: .utf8) == "hello")
     }
 
     @Test func exitCodesClassify() async throws {
         let auth = try stub(#"echo '{"error": {"code": "auth_expired", "message": "x"}}'; exit 4"#)
-        let result = try await ProviderRunner().run(auth, verb: ["list"], stdin: nil, timeout: 10)
+        let result = try await ProviderRunner().run(
+            auth, verb: ["list"], stdin: nil, timeout: 10, contractVersion: 1)
         #expect(result.failureClass == .authNeeded)
         #expect(result.decodedError?.code == "auth_expired")
 
         let transient = try stub("exit 3")
-        let t = try await ProviderRunner().run(transient, verb: ["list"], stdin: nil, timeout: 10)
+        let t = try await ProviderRunner().run(
+            transient, verb: ["list"], stdin: nil, timeout: 10, contractVersion: 1)
         #expect(t.failureClass == .transient)
         #expect(t.decodedError == nil)   // unparseable stdout → class-only fallback
 
         let weird = try stub("exit 17")
-        let w = try await ProviderRunner().run(weird, verb: ["list"], stdin: nil, timeout: 10)
+        let w = try await ProviderRunner().run(
+            weird, verb: ["list"], stdin: nil, timeout: 10, contractVersion: 1)
         #expect(w.failureClass == .permanent)
     }
 
     @Test func stderrIsCapturedSeparately() async throws {
         let config = try stub(#"echo '{"sessions": []}'; echo "diag" 1>&2"#)
-        let result = try await ProviderRunner().run(config, verb: ["list"], stdin: nil, timeout: 10)
+        let result = try await ProviderRunner().run(
+            config, verb: ["list"], stdin: nil, timeout: 10, contractVersion: 1)
         #expect(String(data: result.stdout, encoding: .utf8) == "{\"sessions\": []}\n")
         #expect(result.stderr.contains("diag"))
     }
@@ -65,7 +70,8 @@ struct ProviderRunnerTests: ~Copyable {
     @Test func missingExecutableThrows() async throws {
         let config = RemoteProviderConfig(name: "gone", exec: dir.appendingPathComponent("nope").path)
         await #expect(throws: (any Error).self) {
-            _ = try await ProviderRunner().run(config, verb: ["list"], stdin: nil, timeout: 10)
+            _ = try await ProviderRunner().run(
+                config, verb: ["list"], stdin: nil, timeout: 10, contractVersion: 1)
         }
     }
 
@@ -80,7 +86,8 @@ struct ProviderRunnerTests: ~Copyable {
     @Test func largeStdoutIsFullyCapturedWithoutDeadlock() async throws {
         let expectedByteCount = 300_000
         let config = try stub(#"yes "0123456789abcdef" | head -c \#(expectedByteCount)"#)
-        let result = try await ProviderRunner().run(config, verb: ["log"], stdin: nil, timeout: 10)
+        let result = try await ProviderRunner().run(
+            config, verb: ["log"], stdin: nil, timeout: 10, contractVersion: 1)
         #expect(result.exitCode == 0)
         #expect(result.stdout.count == expectedByteCount)
     }

@@ -141,7 +141,9 @@ public actor RemoteProviderManager {
     private func describeProvider(_ config: RemoteProviderConfig) async {
         let result: ProviderResult
         do {
-            result = try await runner.run(config, verb: ["describe"], stdin: nil, timeout: 10)
+            result = try await runner.run(
+                config, verb: ["describe"], stdin: nil, timeout: 10,
+                contractVersion: contractMajor(for: config.name))
         } catch {
             remoteLogger.error(
                 "describe \(config.name, privacy: .public) couldn't run: \(String(describing: error), privacy: .public)"
@@ -284,7 +286,9 @@ public actor RemoteProviderManager {
         // accounted for a local filing decision. See `syncFilingDecisions`.
         let requestStartedAt = Date()
         do {
-            let result = try await runner.run(provider, verb: ["list"], stdin: nil, timeout: 30)
+            let result = try await runner.run(
+                provider, verb: ["list"], stdin: nil, timeout: 30,
+                contractVersion: contractMajor(for: provider.name))
             if let failure = result.failureClass {
                 await recordPollFailure(provider: provider.name, class: failure, result: result)
                 return
@@ -829,7 +833,9 @@ public actor RemoteProviderManager {
         guard let config = providers[providerName] ?? loadAdHoc(named: providerName) else {
             throw RemoteProviderError.unknownProvider(providerName)
         }
-        let result = try await runner.run(config, verb: verb, stdin: stdin, timeout: timeout)
+        let result = try await runner.run(
+            config, verb: verb, stdin: stdin, timeout: timeout,
+            contractVersion: contractMajor(for: providerName))
         if let failure = result.failureClass {
             recordFailure(provider: providerName, class: failure, result: result)
         }
@@ -868,6 +874,15 @@ public actor RemoteProviderManager {
     func declaredCapabilities(provider: String) -> Set<String> {
         Set(describes[provider]?.capabilities ?? [])
     }
+
+    /// The contract major to announce for one provider. Task 4 backs this with
+    /// the negotiated value; until then every provider gets the fallback, which
+    /// is the constant the runner used to hardcode.
+    func contractMajor(for provider: String) -> Int { Self.fallbackContractMajor }
+
+    /// What TBD announces before it has negotiated anything — the conservative
+    /// reading, and the value the runner emitted unconditionally before.
+    static let fallbackContractMajor = 1
 
     func providerStatuses() async -> [RemoteProviderStatus] {
         for name in providers.keys {

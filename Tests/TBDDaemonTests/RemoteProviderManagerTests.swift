@@ -25,6 +25,10 @@ final class FakeProviderInvoker: RemoteProviderInvoking, @unchecked Sendable {
     /// stdin bytes for each call, same index as `calls`. `nil` entries are
     /// calls made with no stdin (e.g. `stop`/`log`).
     private(set) var stdins: [Data?] = []
+    /// Contract major handed to each call, same index as `calls`. The whole
+    /// point of the parameter is that it varies per provider, so a fake that
+    /// dropped it could not prove the negotiated value ever arrives.
+    private(set) var contractVersions: [Int] = []
     /// Runs after a verb is asked for and before its canned outcome is
     /// returned — the seam for observing daemon state *mid-flight*, while the
     /// provider call is still outstanding, without sleeping. Same shape as
@@ -47,20 +51,23 @@ final class FakeProviderInvoker: RemoteProviderInvoking, @unchecked Sendable {
 
     func run(
         _ config: RemoteProviderConfig, verb: [String], stdin: Data?,
-        timeout: TimeInterval
+        timeout: TimeInterval, contractVersion: Int
     ) async throws -> ProviderResult {
         if let onCall { await onCall(verb) }
-        return try popScript(verb, stdin: stdin)
+        return try popScript(verb, stdin: stdin, contractVersion: contractVersion)
     }
 
     /// Synchronous helper so the NSLock critical section isn't taken from an
     /// `async` context (recent Foundation marks `NSLock.lock`/`unlock` as
     /// unavailable from async contexts to discourage blocking there).
-    private func popScript(_ verb: [String], stdin: Data?) throws -> ProviderResult {
+    private func popScript(
+        _ verb: [String], stdin: Data?, contractVersion: Int
+    ) throws -> ProviderResult {
         lock.lock()
         defer { lock.unlock() }
         calls.append(verb)
         stdins.append(stdin)
+        contractVersions.append(contractVersion)
         precondition(!script.isEmpty, "FakeProviderInvoker script exhausted for verb \(verb)")
         switch script.removeFirst() {
         case .result(let result):
@@ -84,6 +91,13 @@ final class FakeProviderInvoker: RemoteProviderInvoking, @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return stdins
+    }
+
+    /// Locked snapshot of `contractVersions`, same rationale as `callsSnapshot()`.
+    func contractVersionsSnapshot() -> [Int] {
+        lock.lock()
+        defer { lock.unlock() }
+        return contractVersions
     }
 }
 
