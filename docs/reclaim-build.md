@@ -136,11 +136,17 @@ commands do not enter the governor.
 - `TBD_SWIFT_ALLOW_HIGH_JOBS=1` permits an explicit higher job count on an
   otherwise idle machine.
 - `TBD_SWIFT_ALLOW_ORPHAN=1` keeps a queued build waiting even after the
-  process that requested it exits. A queued wrapper otherwise gives up when it
-  is reparented, because killing a shell or an agent session signals only that
-  process: the wrapper it started is never told, and left waiting it eventually
-  takes the machine-global slot to compile a tree nobody will read. Set this
-  only for a build deliberately launched detached.
+  process that requested it exits. A queued wrapper otherwise records its
+  ancestor chain at startup and gives up as soon as any of those processes
+  dies, because killing a shell or an agent session signals only that process:
+  the wrapper it started is never told, and left waiting it eventually takes
+  the machine-global slot to compile a tree nobody will read. The whole chain
+  is watched, not just the direct parent, because the requester usually is not
+  the parent — `scripts/test.sh` reaches the wrapper through `env`, which
+  execs, so a killed agent shell leaves test.sh alive in between. Set this for
+  a build deliberately detached from a shell that will exit later
+  (`nohup scripts/swift-safe build &`); a build launched from something already
+  parented to pid 1 needs no opt-out, since it records no ancestor that can die.
 
 The repository guardrail rejects raw `swift build`, `swift test`, and `swift
 run` commands issued by agents. CI and non-compiling package commands remain
