@@ -275,6 +275,7 @@ public enum RPCMethod {
     public static let gcRestore = "gc.restore"
     public static let gcSweepNow = "gc.sweepNow"
     public static let configSetGCEnabled = "config.setGCEnabled"
+    public static let configSetGCProfileDirsEnabled = "config.setGCProfileDirsEnabled"
     public static let remoteProviders = "remote.providers"
     public static let remoteSessions = "remote.sessions"
     public static let remoteCreate = "remote.create"
@@ -2494,6 +2495,14 @@ public struct ConfigSetAutoTrustWorktreesParams: Codable, Sendable {
 
 /// Params for `config.setGCEnabled` — the orphan-GC master switch.
 public struct ConfigSetGCEnabledParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setGCProfileDirsEnabled` — the gate for the profile-dir
+/// collector, which reclaims orphaned `~/tbd/profiles/<uuid>/` directories
+/// (default OFF during soak, on top of the GC master switch).
+public struct ConfigSetGCProfileDirsEnabledParams: Codable, Sendable {
     public var enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }

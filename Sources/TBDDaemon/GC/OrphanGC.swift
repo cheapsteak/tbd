@@ -1,5 +1,6 @@
 import Foundation
 import os
+import Security
 import TBDShared
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "gc")
@@ -59,6 +60,11 @@ public actor OrphanGC {
     private let agentCollector: AgentWorktreeCollector
     private let scratchpadCollector: ScratchpadCollector
     private let deletionQueueCollector: DeletionQueueCollector
+    private let profileDirCollector: ProfileDirCollector
+    /// Deletes the path-keyed Claude Code credentials item belonging to a
+    /// quarantined profile dir. Injected so tests never reach the real login
+    /// keychain, which `scripts/test.sh` cannot fence.
+    private let credentialsKeychain: any ClaudeCredentialsKeychainDeleting
     /// Test-only injection seam: awaited once inside `reclaimDeletionQueue`,
     /// after the interrupted-archive candidate list has been computed and
     /// before any candidate is reaped. That is the exact window the pre-reap
@@ -67,6 +73,15 @@ public actor OrphanGC {
     /// deterministically. `nil` in production (both public inits omit it), so
     /// the sweep is unchanged there.
     private let beforeInterruptedArchiveReap: (@Sendable () async -> Void)?
+    /// Test-only injection seam, the profile-dir twin of
+    /// `beforeInterruptedArchiveReap`: awaited once inside
+    /// `reapOrphanProfileDirs`, after the candidate list and the row snapshot have
+    /// been taken and before any candidate is reaped. That is the exact window
+    /// the pre-reap row re-read closes, and nothing else in that phase is slow
+    /// or interruptible enough to land a concurrent profile creation in it
+    /// deterministically. `nil` in production (both public inits omit it), so
+    /// the sweep is unchanged there.
+    private let beforeProfileDirReap: (@Sendable () async -> Void)?
 
     /// Production seam: an injected `lsofProvider` returns a non-optional
     /// `[String]` — by definition authoritative, it can't signal
@@ -77,7 +92,9 @@ public actor OrphanGC {
         broadcast: @escaping @Sendable (StateDelta) -> Void,
         lsofProvider: (@Sendable () async -> [String])? = nil,
         scratchpadBase: URL? = nil,
-        now: (@Sendable () -> Date)? = nil
+        now: (@Sendable () -> Date)? = nil,
+        profileDirBase: URL? = nil,
+        credentialsKeychain: any ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain()
     ) {
         var wrapped: (@Sendable () async -> [String]?)?
         if let lsofProvider {
@@ -85,7 +102,8 @@ public actor OrphanGC {
         }
         self.init(
             db: db, git: git, broadcast: broadcast, liveCWDsProvider: wrapped,
-            scratchpadBase: scratchpadBase, now: now
+            scratchpadBase: scratchpadBase, now: now,
+            profileDirBase: profileDirBase, credentialsKeychain: credentialsKeychain
         )
     }
 
@@ -101,10 +119,18 @@ public actor OrphanGC {
         liveCWDsProvider: (@Sendable () async -> [String]?)?,
         scratchpadBase: URL? = nil,
         now: (@Sendable () -> Date)? = nil,
-        beforeInterruptedArchiveReap: (@Sendable () async -> Void)? = nil
+        beforeInterruptedArchiveReap: (@Sendable () async -> Void)? = nil,
+        profileDirBase: URL? = nil,
+        credentialsKeychain: any ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain(),
+        beforeProfileDirReap: (@Sendable () async -> Void)? = nil
     ) {
         let resolvedNow = now ?? Date.init
         let resolvedScratchpadBase = scratchpadBase ?? TBDConstants.claudeScratchpadBase
+        // `ClaudeProfileConfigDirManager` owns where profile dirs live (and
+        // honors `TBD_HOME` through `TBDConstants`), so the collector's base is
+        // read from it rather than rebuilt here.
+        let resolvedProfileDirBase = profileDirBase
+            ?? ClaudeProfileConfigDirManager().baseDirectory
         let snap = ReapSnapshot(git: git)
 
         self.db = db
@@ -115,9 +141,13 @@ public actor OrphanGC {
         self.now = resolvedNow
         self.snapshot = snap
         self.beforeInterruptedArchiveReap = beforeInterruptedArchiveReap
+        self.beforeProfileDirReap = beforeProfileDirReap
+        self.credentialsKeychain = credentialsKeychain
         self.agentCollector = AgentWorktreeCollector(git: git, snapshot: snap, now: resolvedNow)
         self.scratchpadCollector = ScratchpadCollector(base: resolvedScratchpadBase)
         self.deletionQueueCollector = DeletionQueueCollector(git: git, now: resolvedNow)
+        self.profileDirCollector = ProfileDirCollector(
+            base: resolvedProfileDirBase, now: resolvedNow)
     }
 
     // MARK: - Sweep
@@ -189,6 +219,10 @@ public actor OrphanGC {
         await reconcileScratchpads(
             repos: repos, archived: archived, dryRun: dryRun,
             planned: &planned, reaped: &reaped
+        )
+
+        await reclaimProfileDirs(
+            config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
         )
 
         // Snapshot retention never runs in dryRun; the outer guard already
@@ -458,6 +492,140 @@ public actor OrphanGC {
             reaped += 1
             planned.append("REAP scratchpad \(record.worktreePath)")
             logger.info("gc: reaped scratchpad \(record.worktreePath, privacy: .public)")
+        }
+    }
+
+    /// Reclaims per-profile config directories under `~/tbd/profiles/` whose
+    /// `model_profiles` row is gone, and purges quarantine entries past the
+    /// retention window.
+    ///
+    /// The two halves answer to different switches, and that split is
+    /// deliberate. **Classifying** an orphan is gated by
+    /// `gcProfileDirsEnabled` on top of `gcEnabled`: unlike the other
+    /// collectors' targets, these directories hold per-profile credentials and
+    /// user content with no other copy, so reaping quarantines rather than
+    /// deletes and the classifier soaks behind its own switch before
+    /// graduating. **Purging** the quarantine is not classification of a user
+    /// resource at all — it is cleanup of GC's own artifacts, of data this
+    /// sweep already moved aside — so it runs whenever the sweep runs, i.e.
+    /// under `gcEnabled` alone. Turning the classifier off ends a soak; it must
+    /// never strand credentials in `.reaped/` indefinitely, since "the same
+    /// sweep expires the quarantine" is the whole basis on which quarantining
+    /// was preferred to deleting outright.
+    ///
+    /// `dryRun` bypasses the flag exactly as `sweep` lets it bypass
+    /// `gcEnabled`: planning is read-only, and someone deciding whether to
+    /// enable a default-off flag needs to see what enabling it would reclaim
+    /// before flipping it. A NON-dry run still requires the flag.
+    private func reclaimProfileDirs(
+        config: Config, dryRun: Bool, planned: inout [String], reaped: inout Int
+    ) async {
+        if config.gcProfileDirsEnabled || dryRun {
+            await reapOrphanProfileDirs(
+                config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
+            )
+        }
+
+        // Quarantine expiry — the second half of the bargain. Without it the
+        // quarantine grows unboundedly, which is the disease this phase treats.
+        for path in profileDirCollector.expiredQuarantineEntries(
+            retentionDays: config.gcSnapshotRetentionDays
+        ) {
+            planned.append("PURGE quarantine \(path)")
+            guard !dryRun else { continue }
+            _ = profileDirCollector.purge(quarantinePath: path)
+        }
+    }
+
+    /// The classifier arm of the profile-dir phase: enumerate candidates, gate
+    /// them, and quarantine what is eligible. Runs only with
+    /// `gcProfileDirsEnabled` on (or in a dry run, which plans without acting).
+    ///
+    /// Every DB read lives here rather than in the collector (the same division
+    /// as `DeletionQueueCollector`), and a failed read skips the whole arm —
+    /// the keep-favoring direction every other gate in this sweep takes.
+    /// Directories are enumerated BEFORE the rows are read, so a profile
+    /// created mid-sweep is always in the row set and can never be classified
+    /// as an orphan.
+    private func reapOrphanProfileDirs(
+        config: Config, dryRun: Bool, planned: inout [String], reaped: inout Int
+    ) async {
+        let candidates = profileDirCollector.candidates()
+        guard let profiles = try? await db.modelProfiles.list(),
+              let terminals = try? await db.terminals.list() else {
+            logger.warning("gc: profile-dir phase skipped — DB read failed")
+            return
+        }
+        let known = Set(profiles.map(\.id))
+        // A terminal row keeps its `profile_id` after the profile is deleted,
+        // so a live (or hibernated, resumable) session can still be pointing
+        // `CLAUDE_CONFIG_DIR` at this directory. Deliberately stricter than the
+        // interactive delete path: a background sweep yanking credentials out
+        // from under a running session is worse than a user doing it knowingly.
+        let referenced = Set(terminals.compactMap(\.profileID))
+
+        for candidate in candidates {
+            switch profileDirCollector.decide(
+                candidate, knownProfileIDs: known, referencedProfileIDs: referenced,
+                graceSeconds: config.gcGraceSeconds
+            ) {
+            case .keep(let reason):
+                planned.append("KEEP \(reason) \(candidate.path)")
+                logger.debug("""
+                gc: keep \(reason, privacy: .public) \(candidate.path, privacy: .public)
+                """)
+            case .reap:
+                planned.append("REAP profile-dir \(candidate.path)")
+                // This arm's guard is `gcProfileDirsEnabled || dryRun`, so every
+                // line below this point runs only with the flag actually on.
+                guard !dryRun else { continue }
+                await beforeProfileDirReap?()
+                // Re-read immediately before acting: the candidate list and the
+                // row snapshot above are exactly that, and a profile recreated
+                // with this UUID in between must not have its directory pulled
+                // out from under it. Both non-reap outcomes keep the directory,
+                // and they are kept distinct on purpose — a row that exists
+                // again, and a read that never answered. Collapsing a thrown
+                // read into "no row" would reap on exactly the evidence that
+                // says nothing, inverting this sweep's fail-toward-keeping
+                // direction.
+                do {
+                    if try await db.modelProfiles.get(id: candidate.profileID) != nil {
+                        planned.append("KEEP row-appeared \(candidate.path)")
+                        logger.info("""
+                        gc: keep row-appeared \(candidate.path, privacy: .public) — \
+                        a profile row with this id exists again since this sweep listed it
+                        """)
+                        continue
+                    }
+                } catch {
+                    planned.append("KEEP row-read-failed \(candidate.path)")
+                    logger.warning("""
+                    gc: keep row-read-failed \(candidate.path, privacy: .public) — \
+                    the pre-reap profile-row re-read failed: \
+                    \(String(describing: error), privacy: .public)
+                    """)
+                    continue
+                }
+                guard let record = await profileDirCollector.reap(candidate) else {
+                    planned.append("KEEP quarantine-failed \(candidate.path)")
+                    continue
+                }
+                // The Claude Code credentials item is keyed on the ORIGINAL
+                // config dir path, which the rename just invalidated — delete it
+                // now or it is unreachable garbage forever. `errSecItemNotFound`
+                // is success: there was nothing to clean.
+                let configDirPath = candidate.path + "/claude"
+                let status = credentialsKeychain.deleteCredentials(forConfigDirPath: configDirPath)
+                if status != errSecSuccess && status != errSecItemNotFound {
+                    logger.warning("""
+                    gc: failed to delete Claude credentials for \
+                    \(configDirPath, privacy: .public): OSStatus \(status, privacy: .public)
+                    """)
+                }
+                await insertReapRecord(record)
+                reaped += 1
+            }
         }
     }
 

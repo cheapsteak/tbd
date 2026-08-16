@@ -208,6 +208,70 @@ struct OrphanGCTests {
         #expect(changedCount == 2, "expected one broadcast from sweep + one from restore")
     }
 
+    // MARK: - profileDir reap records
+
+    /// The quarantine path is the only handle a user has on a reaped profile
+    /// directory — `.profileDir` has no restore path — so it must survive the
+    /// round trip through the store alongside the new kind.
+    @Test("a profileDir reap record round-trips through the store with its quarantine path")
+    func profileDirRecordRoundTrips() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let record = ReapRecord(
+            kind: .profileDir,
+            repoPath: "",
+            worktreePath: "/tmp/acme/profiles/1f2e3d4c-0000-0000-0000-000000000001",
+            apparentBytes: 4096,
+            quarantinePath: "/tmp/acme/profiles/.reaped/1f2e3d4c-0000-0000-0000-000000000001-20260815T101500Z",
+            reapedAt: Date(timeIntervalSince1970: 1_760_000_000)
+        )
+        try await db.reapRecords.insert(record)
+
+        let fetched = try await db.reapRecords.list(repoPath: nil)
+        #expect(fetched.count == 1)
+        #expect(fetched.first?.kind == .profileDir)
+        #expect(fetched.first?.quarantinePath == record.quarantinePath)
+        #expect(fetched.first?.worktreePath == record.worktreePath)
+    }
+
+    /// `.profileDir` must stay un-restorable, and that is a contract rather
+    /// than an oversight: the `model_profiles` row the directory depends on is
+    /// already gone by the time the collector runs, so renaming it back out of
+    /// quarantine would recreate an orphan for the very next sweep. Recovery is
+    /// by hand, from the `quarantinePath` this record carries.
+    @Test("restore refuses a profileDir record and leaves the quarantine in place")
+    func restoreRejectsProfileDirRecords() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let record = ReapRecord(
+            kind: .profileDir,
+            repoPath: "",
+            worktreePath: "/tmp/acme/profiles/1f2e3d4c-0000-0000-0000-000000000002",
+            quarantinePath: "/tmp/acme/profiles/.reaped/1f2e3d4c-0000-0000-0000-000000000002-20260815T101500Z"
+        )
+        try await db.reapRecords.insert(record)
+        let gc = OrphanGC(db: db, git: GitManager(), broadcast: { _ in }, lsofProvider: { [] })
+
+        await #expect(throws: OrphanGCError.unsupportedKind(.profileDir)) {
+            try await gc.restore(recordID: record.id)
+        }
+        // A refused restore must not consume the record: the quarantine path is
+        // still the user's only handle on the data.
+        let fetched = try await db.reapRecords.get(id: record.id)
+        #expect(fetched?.restoredAt == nil)
+        #expect(fetched?.quarantinePath == record.quarantinePath)
+    }
+
+    /// Every other kind deletes outright, so the column stays NULL for them —
+    /// and a record written without one must decode as `nil`, not as "".
+    @Test("a non-quarantined reap record round-trips with a nil quarantine path")
+    func nonQuarantinedRecordHasNilQuarantinePath() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.reapRecords.insert(
+            ReapRecord(kind: .scratchpad, repoPath: "", worktreePath: "/tmp/acme/scratch-1")
+        )
+        let fetched = try await db.reapRecords.list(repoPath: nil)
+        #expect(fetched.first?.quarantinePath == nil)
+    }
+
     // MARK: - Snapshot retention (anchor rule)
 
     @Test func snapshotRetentionDeletesOldRefs() async throws {

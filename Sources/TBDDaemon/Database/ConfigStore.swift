@@ -55,6 +55,13 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// `nil` here means "never chose" rather than "off". Resolve it through
     /// `Config.supervisionEnabledDefault`, never through `?? false`.
     var supervision_enabled: Bool?
+    /// Gate for the profile-dir collector
+    /// (design 2026-08-15). **Genuinely tri-state**, same shape as
+    /// `supervision_enabled`: the `v78_config_gc_profile_dirs` column carries
+    /// no SQL default, so `nil` here means "never chose" rather than "off".
+    /// Resolve it through `Config.gcProfileDirsEnabledDefault`, never through
+    /// `?? false`.
+    var gc_profile_dirs_enabled: Bool?
 
     /// - Parameter queuedPromptDefault: the shipped default a NULL
     ///   `queued_prompt_enabled` resolves to. Defaulted to the real constant;
@@ -65,9 +72,12 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   same NULL-follows/explicit-sticks property for the fleet brake
     ///   without waiting for the real `Config.supervisionEnabledDefault`
     ///   constant to change.
+    /// - Parameter gcProfileDirsDefault: same shape again, for
+    ///   `gc_profile_dirs_enabled` — the profile-dir collector's own soak gate.
     func toModel(
         queuedPromptDefault: Bool = Config.queuedPromptDefault,
-        supervisionEnabledDefault: Bool = Config.supervisionEnabledDefault
+        supervisionEnabledDefault: Bool = Config.supervisionEnabledDefault,
+        gcProfileDirsDefault: Bool = Config.gcProfileDirsEnabledDefault
     ) -> Config {
         Config(
             defaultProfileID: default_profile_id.flatMap(UUID.init(uuidString:)),
@@ -112,7 +122,10 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             // that is the whole point of v70_config_queued_prompt.
             queuedPromptEnabled: queued_prompt_enabled ?? queuedPromptDefault,
             // Same reasoning, for the fleet supervision brake — NOT `?? false`.
-            supervisionEnabled: supervision_enabled ?? supervisionEnabledDefault
+            supervisionEnabled: supervision_enabled ?? supervisionEnabledDefault,
+            // Same reasoning again, for the profile-dir collector's gate —
+            // NOT `?? false`.
+            gcProfileDirsEnabled: gc_profile_dirs_enabled ?? gcProfileDirsDefault
         )
     }
 }
@@ -426,6 +439,19 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET gc_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the profile-dir collector gate (default OFF, soaking) — read on
+    /// top of the GC master switch, so both must be on for the phase to run.
+    /// The column is written on every call, because writing either value is
+    /// the explicit gesture that lifts it out of NULL forever after.
+    public func setGCProfileDirsEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET gc_profile_dirs_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

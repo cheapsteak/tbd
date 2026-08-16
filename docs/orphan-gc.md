@@ -1,6 +1,7 @@
 # Orphan GC (product feature)
 
-Daemon-owned garbage collection for Claude Code agent worktrees and their scratchpads.
+Daemon-owned garbage collection for Claude Code agent worktrees, their scratchpads, and
+orphaned per-profile Claude config directories.
 **Shipped product**, unlike `scripts/reclaim-build.sh`/`sweep-scratchpads.sh` (see
 [`docs/reclaim-build.md`](reclaim-build.md) for the dev-script sibling and the boundary
 between the two). Design background:
@@ -17,11 +18,15 @@ auto-removes one if it ended unchanged — the moment an agent commits, the work
 Code's own 30-day sweep permanently exempts anything with unpushed commits. Nothing
 else ever cleans these up.
 
-Two things get reaped:
+Three things get reaped:
 - **Agent worktrees** — `<repo>/.claude/worktrees/agent-*` and `wf_*` whose run has
   ended (see gates below).
 - **Attributable scratchpads** — `/private/tmp/claude-<uid>/<slug>` directories TBD can
   tie to a worktree path it knows about (its own, or an agent worktree it just reaped).
+- **Orphaned profile config directories** — `~/tbd/profiles/<uuid>/` directories whose
+  `model_profiles` row is gone; `ProfileDirCollector` is the named reconciler for that
+  resource class, alongside the agent-worktree and scratchpad collectors, and it
+  quarantines rather than deletes (see below).
 
 ## Philosophy: orphaned, not idle
 
@@ -123,6 +128,113 @@ Non-goals: scratchpads of non-TBD projects, and scratchpads left behind by agent
 worktrees Claude Code itself removed before TBD ever swept them. That residue is
 `scripts/sweep-scratchpads.sh`'s territory (`docs/reclaim-build.md`).
 
+## Profile config directories
+
+Every non-Bedrock model profile gets an isolated Claude config directory at
+`~/tbd/profiles/<uuid>/`, created lazily — on session spawn, when the profile's
+`CLAUDE_CONFIG_DIR` is resolved, and on OAuth login prep
+(`modelProfile.prepareConfigDir`, called before `tbd profile login`). Exactly one
+`model_profiles` row points at it, and it is the *only* pointer: nothing on disk records
+which profile a directory belongs to beyond the UUID in its name.
+
+That makes deletion the risk. `modelProfile.delete` cleans the Keychain items and the
+directory before deleting the row — deliberately, so a daemon killed partway leaves "row
+present, directory gone or present", both benign — but each cleanup step is log-only and
+non-fatal. A `removeItem` that fails still deletes the row, and the row is what would
+have named the leftover directory. Without a sweep, a single failed removal orphans that
+directory permanently. `ProfileDirCollector` is the backstop.
+
+**Orphan definition.** An immediate child of `~/tbd/profiles/` whose name parses as a
+UUID, is a directory, and matches no `model_profiles` row. Non-UUID entries, plain files
+and the `.reaped/` quarantine are never candidates. Directories are enumerated *before*
+the rows are read, so a profile created mid-sweep is always in the row set and can never
+be classified as an orphan.
+
+**Flag: `gc_profile_dirs_enabled`, default off.** The flag gates *classification*: a
+directory is enumerated, gated and quarantined only when `gcEnabled` **and** this flag
+are both on. It does **not** gate quarantine expiry, which runs under `gcEnabled` alone —
+purging `.reaped/` is cleanup of GC's own artifacts, of data the sweep already moved
+aside, not a judgement about a user's resource. That split is what makes quarantining
+safer than deleting: an operator who ends a soak by turning the flag off (or backs out
+after a suspected misclassification) must not thereby strand credentials on disk forever,
+well past the retention window. A dry run bypasses both switches, exactly as it does for
+the rest of the sweep: `tbd gc sweep --dry-run` prints the `REAP profile-dir` and
+`PURGE quarantine` lines this phase *would* act on with the flag off, so the decision to
+enable a default-off switch can be made against real candidates rather than blind.
+Planning touches neither disk nor the database. Enable it for a soak with
+`tbd gc profile-dirs on` (RPC
+`config.setGCProfileDirsEnabled`); there is no Settings toggle. The column carries no SQL
+default, so an install nobody has touched reads NULL and resolves through
+`Config.gcProfileDirsEnabledDefault` — graduation is a one-line change to that constant,
+reaching everyone who never flipped the switch while preserving every explicit opt-out.
+
+**Gates**, in order. Like the agent-worktree gates, every one fails toward keeping, and
+each keep is reported in the sweep plan with its reason:
+
+1. **Row exists** (`row-exists`) — a `model_profiles` row with this UUID is present.
+2. **Terminal reference** (`terminal-reference`) — any `terminal` row's `profile_id`
+   matches the UUID. `modelProfile.delete` deliberately leaves `profile_id` on terminals
+   spawned with that profile's env, so a live (or hibernated, resumable) session may
+   still be pointing `CLAUDE_CONFIG_DIR` at the directory. Terminal rows disappear when
+   terminals close, so this converges. It is deliberately stricter than the interactive
+   delete path: a background sweep yanking credentials out from under a running session
+   is worse than a user doing it knowingly.
+3. **Grace window** (`grace`) — the directory's creation date is younger than
+   `gcGraceSeconds` (default 3600s / 1h). An unreadable creation date keeps too
+   (`unknown-age`).
+4. **Pre-reap re-read** (`row-appeared`, `row-read-failed`) — immediately before the
+   rename, `model_profiles` is re-read for the UUID. The candidate list and the row
+   snapshot are both taken at the top of the phase, so a profile recreated with this
+   UUID in between must not have its directory pulled out from under it. A row that is
+   found again keeps as `row-appeared`; a read that *throws* keeps as `row-read-failed`,
+   distinct on purpose — "no answer" is not "no row", and collapsing the two would reap
+   on the one piece of evidence that says nothing.
+
+A failed `model_profiles` or `terminal` read skips the whole classification arm rather
+than treating the empty result as "everything is an orphan".
+
+**Quarantine, not delete.** A reap renames the directory into
+`~/tbd/profiles/.reaped/<uuid>-<UTC timestamp>/`. The rename is the commit point: a
+failure leaves the candidate exactly where it was for the next sweep to reconsider
+(`quarantine-failed`). Both destructive filesystem calls are anchored first, and to the
+collector's own base rather than to whatever the caller passed: a reap refuses any
+candidate that is not a UUID-named *immediate* child of `~/tbd/profiles/` (so an
+already-quarantined entry can never be re-quarantined a level deeper), and a purge
+refuses any path not strictly under `.reaped/`. Apparent size is measured just before the rename, while it is
+still readable at the original path. Immediately after, the path-keyed Claude Code
+login-keychain item for the *original* config dir (`<uuid>/claude`) is deleted — the
+rename invalidated the path its service name is derived from, so it is unreachable
+garbage either way; `errSecItemNotFound` counts as success. A `.profileDir` reap record
+is then written, carrying the original path and the quarantine path.
+
+The other collectors can delete outright because what they remove is recoverable by
+other means, or was never precious: an agent worktree replays from a verified snapshot
+ref, and a scratchpad is disposable tmp. A profile directory is neither. It holds `.claude.json` (login identity, onboarding
+state, per-profile settings), `.credentials.json` (fallback OAuth credentials when the
+Keychain is unavailable), and `<slot>.profile-local` sidecars holding real pre-existing
+user content that was moved aside when a slot became a host symlink — none of which has
+another copy once the row is gone. A misclassification therefore has to stay
+recoverable, so reaping parks the data instead of destroying it.
+
+**Quarantine expiry.** The same phase deletes `.reaped/` entries older than
+`gcSnapshotRetentionDays` (default 30), which keeps the quarantine from growing into the
+disease it treats. It runs on every sweep `gcEnabled` allows, whatever
+`gc_profile_dirs_enabled` says, so nothing this collector parked can outlive the
+retention window. Age comes from the timestamp this collector stamped into the entry's
+own name; an entry whose name carries no parsable stamp falls back to the newer of its
+own creation and modification dates, and one with no readable date at all is kept rather
+than guessed at. Expiry writes no new reap record — the entry already has one.
+
+**No restore path, recovery by hand.** `tbd gc restore` accepts `.agentWorktree` records
+only and rejects `.profileDir`. By the time the collector runs, the profile row — its
+name, kind, endpoint — is already gone, so renaming the directory back would only
+recreate an orphan for the next sweep to find. Recovery is manual and lasts as long as
+the retention window: `tbd gc list` prints the quarantine location next to each record
+(`quarantined→ <path>`), and the user copies out whatever they need, or recreates a
+profile and moves the directory into the new UUID. The app's Reclaimed section does not
+surface these records — it is per-repo, and a profile directory belongs to no repo — so
+the CLI is where a quarantine path is read.
+
 ## Cadence and the `gcEnabled` gate
 
 `gcEnabled` (config-table boolean, **default on**) is the single master switch — it
@@ -160,17 +272,18 @@ The sweep itself runs:
 
 For an ad-hoc look without waiting for the clock, use `tbd gc sweep --dry-run` — it
 computes and prints the identical plan without touching disk or the DB, regardless of
-`gcEnabled`. One under-report to know about: a companion scratchpad reap for an
-agent worktree that's only *planned* (not actually reaped) in a dry run isn't planned
-either, since it's only computed once the agent worktree itself has actually been
-removed — a real (non-dry) sweep will report more scratchpad reaps than the preceding
-dry run predicted.
+`gcEnabled` or `gc_profile_dirs_enabled`. One under-report to know about: a companion
+scratchpad reap for an agent worktree that's only *planned* (not actually reaped) in a
+dry run isn't planned either, since it's only computed once the agent worktree itself
+has actually been removed — a real (non-dry) sweep will report more scratchpad reaps
+than the preceding dry run predicted.
 
 ## Config knobs
 
 | Key | Default | Where |
 |---|---|---|
 | `gcEnabled` | `true` | Settings toggle + `config.setGCEnabled` RPC |
+| `gcProfileDirsEnabled` | `false` | `tbd gc profile-dirs on\|off` + `config.setGCProfileDirsEnabled` RPC, no UI |
 | `gcGraceSeconds` | `3600` (1h) | config table only, no UI |
 | `gcSnapshotRetentionDays` | `30` | config table only, no UI |
 
@@ -196,9 +309,10 @@ Restore is available for `agentWorktree` records only.
 ## CLI
 
 ```sh
-tbd gc list [--repo <path>] [--json]   # list reap records (id, kind, path, size, snapshot state, restored)
+tbd gc list [--repo <path>] [--json]   # list reap records (id, kind, path, size, snapshot state, restored, quarantine path)
 tbd gc restore <uuid>                  # restore a reaped agent worktree
 tbd gc sweep [--dry-run]               # run a sweep now; --dry-run prints the plan, mutates nothing
+tbd gc profile-dirs on|off             # gate the profile-config-dir collector (ships off)
 ```
 
 ## Non-goals (from the design spec)

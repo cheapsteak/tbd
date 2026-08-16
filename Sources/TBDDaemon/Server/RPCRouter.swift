@@ -580,6 +580,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetAutoTrustWorktrees(request.paramsData)
             case RPCMethod.configSetGCEnabled:
                 return try await handleConfigSetGCEnabled(request.paramsData)
+            case RPCMethod.configSetGCProfileDirsEnabled:
+                return try await handleConfigSetGCProfileDirsEnabled(request.paramsData)
             case RPCMethod.configSetSupervisionEnabled:
                 return try await handleConfigSetSupervisionEnabled(request.paramsData)
             case RPCMethod.remoteProviders:

@@ -1180,6 +1180,21 @@ public struct Config: Codable, Sendable, Equatable {
     /// "never chose" and follows the shipped default wherever it goes; `0`/`1`
     /// is an explicit gesture and is honored forever.
     public var supervisionEnabled: Bool
+    /// Gate for the orphan-GC phase that reclaims per-profile config
+    /// directories under `~/tbd/profiles/`
+    /// (`docs/specs/2026-08-15-profile-dir-gc-design.md`). Read on top of
+    /// `gcEnabled`: both must be on for the phase to run. It ships OFF because
+    /// those directories hold per-profile credentials and user content with no
+    /// other copy, so a brand-new orphan classifier over them soaks behind its
+    /// own switch rather than riding the default-ON master switch.
+    ///
+    /// **Resolved, not stored**, like `supervisionEnabled`: the backing column
+    /// carries no SQL default and stays NULL until somebody touches the
+    /// toggle, so this property is
+    /// `gc_profile_dirs_enabled ?? Config.gcProfileDirsEnabledDefault`. NULL
+    /// means "never chose" and follows the shipped default wherever it goes;
+    /// `0`/`1` is an explicit gesture and is honored forever.
+    public var gcProfileDirsEnabled: Bool
 
     /// Default idle-timeout for auto-hibernation, in minutes.
     public static let defaultHibernateIdleMinutes = 30
@@ -1205,6 +1220,11 @@ public struct Config: Codable, Sendable, Equatable {
     /// change to this constant — no forcing `UPDATE` migration, and an explicit
     /// opt-out is left alone.
     public static let supervisionEnabledDefault = false
+    /// The shipped default for `gcProfileDirsEnabled`, and the single place it
+    /// lives. The profile-dir collector ships off; graduating it is a change to
+    /// this constant — no forcing `UPDATE` migration, and an explicit opt-out
+    /// is left alone.
+    public static let gcProfileDirsEnabledDefault = false
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -1232,7 +1252,8 @@ public struct Config: Codable, Sendable, Equatable {
                 remoteBackendsEnabled: Bool = false,
                 deliveryVerificationEnabled: Bool = false,
                 queuedPromptEnabled: Bool = Config.queuedPromptDefault,
-                supervisionEnabled: Bool = Config.supervisionEnabledDefault) {
+                supervisionEnabled: Bool = Config.supervisionEnabledDefault,
+                gcProfileDirsEnabled: Bool = Config.gcProfileDirsEnabledDefault) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
         self.envSettingOverrides = envSettingOverrides
@@ -1260,6 +1281,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.deliveryVerificationEnabled = deliveryVerificationEnabled
         self.queuedPromptEnabled = queuedPromptEnabled
         self.supervisionEnabled = supervisionEnabled
+        self.gcProfileDirsEnabled = gcProfileDirsEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -1323,6 +1345,11 @@ public struct Config: Codable, Sendable, Equatable {
         // default rather than hardcoding `false` here as well.
         supervisionEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .supervisionEnabled) ?? Config.supervisionEnabledDefault
+        // Same tri-state again: absent means the sender knew nothing about the
+        // flag, which is the NULL column's situation — follow the shipped
+        // default rather than hardcoding `false`.
+        gcProfileDirsEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .gcProfileDirsEnabled) ?? Config.gcProfileDirsEnabledDefault
     }
 }
 
@@ -1441,6 +1468,17 @@ public enum ReapKind: String, Codable, Sendable {
     /// A TBD worktree directory reclaimed after its archive failed to remove
     /// it, or drained from a pool's `.deleting/` queue.
     case archivedWorktree
+    /// A per-profile config directory under `~/tbd/profiles/<uuid>/` whose
+    /// `model_profiles` row is gone.
+    ///
+    /// Reaped by **quarantine**, not deletion: the directory is renamed into
+    /// `.reaped/` and `quarantinePath` records where, so its credentials and
+    /// user content stay hand-recoverable until the retention window expires.
+    /// It is **not restorable** — `OrphanGC.restore` accepts `.agentWorktree`
+    /// only, and must keep doing so: the profile row this directory depends on
+    /// is already gone, so renaming it back would just recreate an orphan for
+    /// the next sweep.
+    case profileDir
 }
 
 /// Record of a directory the daemon-owned orphan GC swept and (optionally)
@@ -1461,12 +1499,18 @@ public struct ReapRecord: Codable, Sendable, Identifiable, Equatable {
     public var snapshotRef: String?
     /// `du -sk` * 1024 at reap time.
     public var apparentBytes: Int64?
+    /// Where a quarantined reap parked the directory (`profileDir` only).
+    /// `nil` for kinds that delete outright. Not a restore pointer —
+    /// `OrphanGC.restore` rejects `.profileDir` — but the path a user needs to
+    /// retrieve anything by hand before the retention window expires.
+    public var quarantinePath: String?
     public var reapedAt: Date
     public var restoredAt: Date?
 
     public init(id: UUID = UUID(), kind: ReapKind, repoPath: String, worktreePath: String,
                 branch: String? = nil, headSHA: String? = nil, snapshotRef: String? = nil,
-                apparentBytes: Int64? = nil, reapedAt: Date = Date(), restoredAt: Date? = nil) {
+                apparentBytes: Int64? = nil, quarantinePath: String? = nil,
+                reapedAt: Date = Date(), restoredAt: Date? = nil) {
         self.id = id
         self.kind = kind
         self.repoPath = repoPath
@@ -1475,6 +1519,7 @@ public struct ReapRecord: Codable, Sendable, Identifiable, Equatable {
         self.headSHA = headSHA
         self.snapshotRef = snapshotRef
         self.apparentBytes = apparentBytes
+        self.quarantinePath = quarantinePath
         self.reapedAt = reapedAt
         self.restoredAt = restoredAt
     }

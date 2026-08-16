@@ -172,6 +172,19 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the profile-dir collector gate — the default-off soak switch for
+    /// reclaiming orphaned `~/tbd/profiles/<uuid>/` directories, read on top of
+    /// the GC master switch. Like that master switch, flipping it off does not
+    /// cancel an in-progress sweep: `OrphanGC.sweep` re-reads the flag on its
+    /// next pass.
+    func handleConfigSetGCProfileDirsEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConfigSetGCProfileDirsEnabledParams.self, from: paramsData)
+        try await db.config.setGCProfileDirsEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the fleet supervision brake (design 2026-07-26 §3, §7) — the
     /// fleet-wide on/off switch for supervision. Shipped OFF; nothing in the
     /// daemon reads this column to gate an actuation yet, because the acting
