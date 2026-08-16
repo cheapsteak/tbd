@@ -12,6 +12,14 @@ output sees nothing from this wrapper.  The holder writes ``pid``/``cwd``/
 say who it is queued behind; a heartbeat then repeats the wait's elapsed time
 so a human can tell a queued build from a hung one and an automated caller's
 stall watchdog sees liveness.
+
+A wait also ends when the process that requested the build goes away, which
+shows up as this wrapper being reparented off the pid it was started under.
+Killing a shell or an agent session signals only that process, so a wrapper
+queued behind the lock is never told; left waiting it stays in the queue and
+in time takes the machine-global slot and compiles a tree nobody will read,
+while a real requester waits behind it.  Set ``TBD_SWIFT_ALLOW_ORPHAN=1`` to
+keep waiting anyway, for a build deliberately launched detached.
 """
 
 from __future__ import annotations
@@ -70,6 +78,10 @@ RUN_OPTIONS_WITH_VALUES = {
     "-debug-info-format",
     "-j",
 }
+
+
+class Abandoned(Exception):
+    """The requester exited while we were queued, so the wait has no reader."""
 
 
 def _positive_number(name: str, default: float) -> float:
@@ -271,9 +283,15 @@ def _acquire(
     monotonic=time.monotonic,
     sleep=time.sleep,
     report=_report,
+    getppid=os.getppid,
 ) -> None:
     start = monotonic()
     deadline = start + timeout_seconds
+    # Who asked for this build. A run that was launched detached is already
+    # parented to pid 1 and has no requester to lose, so the signal is the
+    # move away from this recorded value, not the value 1 itself.
+    watch_requester = os.environ.get("TBD_SWIFT_ALLOW_ORPHAN") != "1"
+    requester = getppid() if watch_requester else 0
     announced = False
     next_heartbeat = 0.0
     while True:
@@ -281,6 +299,8 @@ def _acquire(
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             return
         except BlockingIOError:
+            if watch_requester and getppid() != requester:
+                raise Abandoned
             now = monotonic()
             if not announced:
                 report(
@@ -340,6 +360,14 @@ def main(arguments: list[str]) -> int:
     with path.open("a+", encoding="utf-8") as lock_file:
         try:
             _acquire(lock_file, path, timeout, heartbeat)
+        except Abandoned:
+            print(
+                "swift-safe: the process that requested this build exited while "
+                f"it was queued for {path}; abandoning the wait without starting "
+                "a build",
+                file=sys.stderr,
+            )
+            return 75
         except TimeoutError:
             print(
                 f"swift-safe: timed out after {timeout:g}s waiting for {path} "

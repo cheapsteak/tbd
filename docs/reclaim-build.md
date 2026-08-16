@@ -135,6 +135,12 @@ commands do not enter the governor.
 - `TBD_SWIFT_LOCK_PATH` overrides the shared lock path for isolated testing.
 - `TBD_SWIFT_ALLOW_HIGH_JOBS=1` permits an explicit higher job count on an
   otherwise idle machine.
+- `TBD_SWIFT_ALLOW_ORPHAN=1` keeps a queued build waiting even after the
+  process that requested it exits. A queued wrapper otherwise gives up when it
+  is reparented, because killing a shell or an agent session signals only that
+  process: the wrapper it started is never told, and left waiting it eventually
+  takes the machine-global slot to compile a tree nobody will read. Set this
+  only for a build deliberately launched detached.
 
 The repository guardrail rejects raw `swift build`, `swift test`, and `swift
 run` commands issued by agents. CI and non-compiling package commands remain
