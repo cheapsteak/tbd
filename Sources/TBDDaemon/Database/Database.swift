@@ -1408,6 +1408,20 @@ public final class TBDDatabase: Sendable {
                 table: "config", column: "supervision_enabled", type: .boolean)
         }
 
+        // Gate for `ProfileDirCollector` — the reconciler for
+        // `~/tbd/profiles/<uuid>/` (docs/specs/2026-08-15-profile-dir-gc-design.md).
+        // Ships OFF: unlike the other collectors' targets, those directories
+        // hold per-profile credentials and user content, so the classifier
+        // soaks behind its own switch before graduating. Tri-state like
+        // v73/v77 — no SQL default, so a pre-migration row reads NULL ("never
+        // chose") rather than 0, and NULL resolves through
+        // `Config.gcProfileDirsEnabledDefault` in `ConfigRecord.toModel()`,
+        // the single place graduation changes.
+        migrator.registerMigration("v78_config_gc_profile_dirs") { db in
+            try db.addColumnIfMissing(
+                table: "config", column: "gc_profile_dirs_enabled", type: .boolean)
+        }
+
         return migrator
     }
 }

@@ -6,8 +6,29 @@ struct GCCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "gc",
         abstract: "Orphan GC: list reaps, restore a reaped agent worktree, trigger a sweep",
-        subcommands: [GCList.self, GCRestore.self, GCSweep.self]
+        subcommands: [GCList.self, GCRestore.self, GCSweep.self, GCProfileDirs.self]
     )
+}
+
+/// The soak switch for the profile-dir collector. It quarantines orphaned
+/// `~/tbd/profiles/<uuid>/` directories, which hold per-profile credentials and
+/// user content, so it ships off and is opted into by hand.
+struct GCProfileDirs: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "profile-dirs",
+        abstract: "Enable or disable reclaiming orphaned model-profile config dirs (default off)")
+    @Argument(help: "on | off") var state: String
+    mutating func run() async throws {
+        let enabled: Bool
+        switch state.lowercased() {
+        case "on", "true", "enable": enabled = true
+        case "off", "false", "disable": enabled = false
+        default: throw ValidationError("Expected 'on' or 'off', got: \(state)")
+        }
+        try SocketClient().callVoid(method: RPCMethod.configSetGCProfileDirsEnabled,
+                                    params: ConfigSetGCProfileDirsEnabledParams(enabled: enabled))
+        print("Profile-dir GC \(enabled ? "enabled" : "disabled").")
+    }
 }
 
 struct GCList: AsyncParsableCommand {
