@@ -19,6 +19,9 @@ struct SuperviseCommand: ParsableCommand {
             SuperviseStatusCommand.self,
             SuperviseMode.self,
             SuperviseProject.self,
+            SuperviseReadoutCommand.self,
+            SuperviseBriefCommand.self,
+            SuperviseLedgerCommand.self,
         ]
     )
 }
@@ -296,5 +299,140 @@ struct SuperviseProjectMove: AsyncParsableCommand {
             params: SuperviseProjectMoveParams(repo: repo, to: target.argument),
             resultType: SuperviseProjectListResult.self)
         print(renderSupervisionProjectList(result))
+    }
+}
+
+// MARK: - the sweep program's three surfaces
+
+/// `tbd supervise readout --project <name>` — the project's whole current
+/// picture, read-only.
+///
+/// **There is no `--json` flag, because JSON is the only output this surface
+/// has.** Its consumer is a program: the sweep program's opening move
+/// (`docs/specs/2026-08-01-fleet-supervision-sweep-program-design.md` §3), and
+/// an operator reaching for one fact reaches for `jq`. A second rendering would
+/// be a second contract to keep, and the readout is far too wide for a table.
+/// The result carries its own `schemaVersion`, so nothing is wrapped here.
+struct SuperviseReadoutCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "readout",
+        abstract: "Print the project's live-agent, supervisor and machinery facts as JSON",
+        discussion: """
+            Read-only: it prints and changes nothing else. Every fact that is \
+            unknown is present and null rather than absent, so a reader never \
+            has to guess whether a value was unestablished or the writer was an \
+            older build.
+            """
+    )
+
+    @Option(name: .long, help: "Project name")
+    var project: String
+
+    mutating func run() async throws {
+        let name = try requireSupervisionProjectName(project)
+        let readout: SupervisionReadout = try SocketClient().call(
+            method: RPCMethod.superviseReadout,
+            params: SuperviseReadoutParams(project: name),
+            resultType: SupervisionReadout.self)
+        printJSON(readout)
+    }
+}
+
+/// `tbd supervise ledger --project <name> --since <t>` — the joined per-project
+/// record since an instant, read-only.
+struct SuperviseLedgerCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "ledger",
+        abstract: "Print the joined per-project record since <t> as JSON",
+        discussion: """
+            --since takes a full ISO-8601 timestamp with an offset or Z \
+            (2026-08-15T02:10:00Z), a bare 24-hour HH:MM resolved to its most \
+            recent past occurrence in local time (22:00), or a bare relative \
+            duration meaning that long ago (90s, 30m, 2h, 3d).
+
+            The value is resolved to an absolute instant before the query runs, \
+            so the window's lower bound is fixed at the moment you invoked the \
+            command rather than re-derived while it executes. That instant is \
+            what the result echoes back in "since".
+            """
+    )
+
+    @Option(name: .long, help: "Project name")
+    var project: String
+
+    @Option(name: .long, help: "Window lower bound: ISO-8601, HH:MM, or a duration like 30m")
+    var since: String
+
+    mutating func run() async throws {
+        let name = try requireSupervisionProjectName(project)
+        // Refused here, before any socket call: an unreadable `--since` is a
+        // thing the CLI can refuse honestly on its own.
+        let lowerBound = try parseSupervisionSince(since, now: Date())
+        let view: SupervisionLedgerView = try SocketClient().call(
+            method: RPCMethod.superviseLedger,
+            params: SuperviseLedgerParams(
+                project: name, since: SupervisionInstant(lowerBound)),
+            resultType: SupervisionLedgerView.self)
+        printJSON(view)
+    }
+}
+
+/// `tbd supervise brief --project <name>` — submit a composed briefing, with the
+/// text on stdin.
+///
+/// **Stdin, and read to EOF, with no TTY check.** The briefing is composed by a
+/// program and piped in; a check that refused a non-terminal stdin would refuse
+/// the only way this command is actually called. Closed stdin reads as EOF
+/// immediately rather than hanging.
+///
+/// **An empty submission is valid and meaningful** — the attested "looked, found
+/// nothing" that keeps the project's liveness contact fresh while delivering
+/// nothing. Both `< /dev/null` and a pipe that closes with no bytes are empty
+/// submissions, and both are sent rather than refused locally: refusing here
+/// would turn an attested calm night into no contact at all, which is exactly
+/// the dead-sensor reading the heartbeat exists to rule out.
+///
+/// **The streams split**: the result goes to stdout as JSON, carrying the
+/// machine-readable `result` a program branches on, and the human sentence goes
+/// to stderr. `$(… | tbd supervise brief --project acme-platform)` captures the
+/// JSON and nothing else.
+struct SuperviseBriefCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "brief",
+        abstract: "Submit a composed briefing for the project's supervisor (text on stdin)",
+        discussion: """
+            The briefing text is read from stdin to EOF and delivered verbatim; \
+            TBD never parses it. An empty submission is still a submission — the \
+            attested "looked, found nothing" — and is never rate-limited.
+
+            Exit codes: 0 when delivered, 75 when the fleet brake is engaged \
+            (retry when supervision resumes), nonzero otherwise. Branch on the \
+            "result" value in the JSON for which refusal it was.
+            """
+    )
+
+    @Option(name: .long, help: "Project name")
+    var project: String
+
+    mutating func run() async throws {
+        let name = try requireSupervisionProjectName(project)
+        let text = FileHandle.standardInput.readDataToEndOfFile()
+
+        let result: SupervisionBriefResult
+        if supervisionBriefingExceedsSizeBound(text.count) {
+            result = supervisionOversizeBriefResult(
+                project: name, byteCount: text.count, at: Date())
+        } else {
+            result = try SocketClient().call(
+                method: RPCMethod.superviseBrief,
+                params: SuperviseBriefParams(
+                    project: name, text: String(decoding: text, as: UTF8.self)),
+                resultType: SupervisionBriefResult.self)
+        }
+
+        printJSON(result)
+        printToStandardError(result.detail)
+        let code = supervisionBriefExitCode(result.result)
+        guard code == 0 else { throw ExitCode(code) }
     }
 }

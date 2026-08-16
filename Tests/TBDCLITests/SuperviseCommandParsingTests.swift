@@ -19,7 +19,11 @@ struct SuperviseCommandParsingTests {
 
     @Test func groupRegistersEverySubcommand() {
         let names = SuperviseCommand.configuration.subcommands.map { $0._commandName }
-        #expect(names.sorted() == ["mode", "off", "on", "project", "status"])
+        // The operating verbs a human uses, plus the sweep program's three
+        // contract surfaces (`readout`, `brief`, `ledger`).
+        #expect(names.sorted() == [
+            "brief", "ledger", "mode", "off", "on", "project", "readout", "status",
+        ])
     }
 
     @Test func projectGroupRegistersOnlyTheRestrictedVocabulary() {

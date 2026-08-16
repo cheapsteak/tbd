@@ -334,6 +334,237 @@ func parseSupervisionMoveTarget(_ raw: String) throws -> SupervisionMoveTarget {
     return SupervisionMoveTarget(argument: raw)
 }
 
+// MARK: - `--since`
+
+/// The units a bare relative duration may be spelled with, and what each is
+/// worth in seconds. Single letters only: `90s`, `30m`, `2h`, `3d`.
+private let supervisionSinceDurationUnits: [Character: Int] = [
+    "s": 1, "m": 60, "h": 3600, "d": 86400,
+]
+
+/// How far back `parseSupervisionSince` will look for a bare `HH:MM`.
+///
+/// Two days, because one is not always enough: on the morning the clocks spring
+/// forward, a wall-clock time inside the skipped hour never occurs *today*, and
+/// its most recent past occurrence is yesterday's. No valid `HH:MM` can be
+/// skipped on two consecutive days, so a window of two covers every case.
+private let supervisionSinceSearchWindow: TimeInterval = 48 * 3600
+
+/// The refusal every unrecognized `--since` value gets. It names all three
+/// accepted shapes with an example of each, because a refusal that does not say
+/// what would have worked makes the operator go look.
+func supervisionSinceRefusal(_ raw: String) -> String {
+    """
+    --since must be one of three shapes (got "\(raw)"): \
+    a full ISO-8601 timestamp with an offset or Z (e.g. 2026-08-15T02:10:00Z), \
+    a bare 24-hour HH:MM resolved to its most recent past occurrence in local \
+    time (e.g. 22:00), or a bare relative duration meaning that long ago \
+    (e.g. 90s, 30m, 2h, 3d)
+    """
+}
+
+/// Reads `--since <t>` into the absolute instant the ledger query is bounded by.
+///
+/// Three shapes, tried in this order — a full ISO-8601 timestamp, a bare
+/// `HH:MM`, then a bare relative duration
+/// (`docs/specs/2026-08-01-fleet-supervision-sweep-program-design.md` §3). None
+/// of the three can be mistaken for another, so the order is documentation
+/// rather than precedence.
+///
+/// **`now` and `calendar` are parameters, not reads of the ambient clock**, so
+/// this stays a pure function of its inputs: `Duration` is behavior and `Date`
+/// is data, and every rule below — "most recent past", "that long ago" — is a
+/// comparison against a timestamp rather than a delay. A test pins the
+/// daylight-saving case with a fixed calendar instead of hoping the machine is
+/// in the right zone on the right morning.
+///
+/// The value is resolved here, before the query runs, so the window's lower
+/// bound is fixed at the moment the operator invoked the command rather than
+/// re-derived while the daemon executes it. That resolved instant is what the
+/// result echoes back in `since`.
+func parseSupervisionSince(
+    _ raw: String, now: Date, calendar: Calendar = .current
+) throws -> Date {
+    let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    if let instant = supervisionSinceISO8601(value) { return instant }
+
+    if let clock = supervisionSinceClockTime(value) {
+        guard let instant = supervisionMostRecentPastOccurrence(
+            hour: clock.hour, minute: clock.minute, now: now, calendar: calendar) else {
+            throw CLIError.invalidArgument(
+                "--since \(value) names no time in the last 48 hours in time zone "
+                    + "\(calendar.timeZone.identifier)")
+        }
+        return instant
+    }
+
+    if let ago = supervisionSinceDurationAgo(value) {
+        return now.addingTimeInterval(-ago)
+    }
+
+    throw CLIError.invalidArgument(supervisionSinceRefusal(raw))
+}
+
+/// Shape one: a full ISO-8601 timestamp carrying an offset or `Z`, with or
+/// without fractional seconds. `.withInternetDateTime` is what makes the offset
+/// mandatory — a timestamp with no zone names a different instant in every time
+/// zone, which is the ambiguity a program computing "since my last evaluation"
+/// uses this shape to avoid.
+private func supervisionSinceISO8601(_ value: String) -> Date? {
+    let fractional = ISO8601DateFormatter()
+    fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    if let date = fractional.date(from: value) { return date }
+    let plain = ISO8601DateFormatter()
+    plain.formatOptions = [.withInternetDateTime]
+    return plain.date(from: value)
+}
+
+/// Shape two's grammar: a bare 24-hour `HH:MM`.
+///
+/// Out-of-range values are refused rather than clamped — `24:00` and `99:99` are
+/// mistakes, and a clamp would answer a question the operator did not ask.
+/// Digits are checked explicitly because `Int("+2")` succeeds: the sign would
+/// otherwise smuggle `+2:10` through as `02:10`.
+private func supervisionSinceClockTime(_ value: String) -> (hour: Int, minute: Int)? {
+    let parts = value.split(separator: ":", omittingEmptySubsequences: false)
+    guard parts.count == 2 else { return nil }
+    guard (1...2).contains(parts[0].count), parts[1].count == 2 else { return nil }
+    guard supervisionIsASCIIDigits(parts[0]), supervisionIsASCIIDigits(parts[1]) else {
+        return nil
+    }
+    guard let hour = Int(parts[0]), let minute = Int(parts[1]) else { return nil }
+    guard (0...23).contains(hour), (0...59).contains(minute) else { return nil }
+    return (hour, minute)
+}
+
+/// Shape two's resolution: the most recent instant at or before `now` whose
+/// local wall clock reads `hour:minute`.
+///
+/// Walked backwards a minute at a time from `now`, which is the rule stated
+/// directly rather than reconstructed from calendar arithmetic. Two properties
+/// come out of that for free, and both are the reason it is written this way:
+///
+/// - **A daylight-saving fall-back resolves to the *later* of the two candidate
+///   instants.** On the morning the clocks go back, `01:30` local happens twice;
+///   walking backwards from now reaches the second one first, and the second one
+///   is what "most recent past occurrence" means. Calendar helpers that match a
+///   wall time on a given day answer with the *first* of the pair instead.
+/// - A wall time skipped by a spring-forward simply has no match today, and the
+///   walk carries on into yesterday, where it does.
+///
+/// Every time-zone offset in use is a whole number of minutes, so stepping by 60
+/// seconds from a minute-aligned start keeps the candidate aligned to `:00`
+/// seconds in local time too. The walk costs at most 2,880 component reads,
+/// which is nothing in a one-shot CLI and buys an implementation whose
+/// correctness is readable.
+private func supervisionMostRecentPastOccurrence(
+    hour: Int, minute: Int, now: Date, calendar: Calendar
+) -> Date? {
+    let alignedSeconds = (now.timeIntervalSince1970 / 60).rounded(.down) * 60
+    var candidate = Date(timeIntervalSince1970: alignedSeconds)
+    let floor = now.addingTimeInterval(-supervisionSinceSearchWindow)
+    while candidate >= floor {
+        let parts = calendar.dateComponents([.hour, .minute], from: candidate)
+        if parts.hour == hour && parts.minute == minute { return candidate }
+        candidate = candidate.addingTimeInterval(-60)
+    }
+    return nil
+}
+
+/// Shape three: a bare relative duration — an integer magnitude and a
+/// single-letter unit — read as "that long ago".
+///
+/// `0m` is a legitimate value meaning now. A negative or non-integer magnitude
+/// is not: `-5m` and `1.5h` fail the digits test, because a duration that runs
+/// forwards is not a lower bound and a fractional one has no spelling here.
+private func supervisionSinceDurationAgo(_ value: String) -> TimeInterval? {
+    guard let unit = value.last, let secondsPerUnit = supervisionSinceDurationUnits[unit] else {
+        return nil
+    }
+    let magnitude = value.dropLast()
+    guard !magnitude.isEmpty, supervisionIsASCIIDigits(magnitude) else { return nil }
+    guard let count = Int(magnitude) else { return nil }
+    let (seconds, overflowed) = count.multipliedReportingOverflow(by: secondsPerUnit)
+    guard !overflowed else { return nil }
+    return TimeInterval(seconds)
+}
+
+/// `Character.isNumber` accepts every digit Unicode knows, and `Int(_:)` accepts
+/// a leading sign. Neither is what these two grammars mean by a digit.
+private func supervisionIsASCIIDigits(_ text: Substring) -> Bool {
+    !text.isEmpty && text.allSatisfy { $0.isASCII && $0.isNumber }
+}
+
+// MARK: - brief
+
+/// The exit code every `brief` outcome that is neither delivery nor a brake
+/// refusal answers with.
+///
+/// One value, deliberately: `docs/cli-supervise.md` pins 0 and 75 as contract
+/// and says the rest are not, so a program branches on 0 / 75 / nonzero and
+/// reads `result` for which of the five it got. Splitting these across several
+/// codes would invite exactly the branching the document says not to write.
+let supervisionBriefRefusedExitCode: Int32 = 1
+
+/// The exit code one briefing outcome earns.
+///
+/// **Exhaustive with no `default` arm, and that is the whole reason this is a
+/// function.** `SupervisionBriefOutcome`'s seven values are contract; an eighth
+/// added later must be a compile error here rather than falling through to 0,
+/// because "TBD did something new with your briefing" reported as success is
+/// precisely the silent failure this surface exists to prevent.
+///
+/// Only `refused-paused` is 75 — sysexits' `EX_TEMPFAIL`, "not now, retry
+/// later", which is exactly what a brake refusal means and the one numeric code
+/// a script may branch on. The other four refusals are deliberately not 75: an
+/// off project is a standing state, an oversize briefing needs recomposing, a
+/// rate-limited one needs the window to lift, and a failed transport needs
+/// re-evaluation. A program that retried all of them on a timer because they
+/// shared a code would be retrying four things that are not "wait a bit".
+func supervisionBriefExitCode(_ outcome: SupervisionBriefOutcome) -> Int32 {
+    switch outcome {
+    case .delivered:
+        return 0
+    case .refusedPaused:
+        return SupervisionBriefing.pausedExitCode
+    case .refusedOff, .refusedRateLimit, .refusedSize, .transportFailed, .noLiveSupervisor:
+        return supervisionBriefRefusedExitCode
+    }
+}
+
+/// Whether a submission of this many bytes is over the compiled bound.
+///
+/// **The daemon enforces the same bound authoritatively; this is the courteous
+/// early refusal, not the guarantee.** Refusing here spares the socket a quarter
+/// of a megabyte that would only be refused at the other end, and it is measured
+/// in **bytes rather than characters** because that is what the bound counts —
+/// a briefing of emoji or CJK text costs several bytes per character, and a
+/// character count would let three times the bound through.
+func supervisionBriefingExceedsSizeBound(_ byteCount: Int) -> Bool {
+    byteCount > SupervisionBriefing.maxBriefingBytes
+}
+
+/// The `refused-size` result the CLI composes itself when stdin is over the
+/// bound and the submission is therefore never sent.
+///
+/// It is a real `SupervisionBriefResult` rather than a bare error so the caller
+/// sees the same machine-readable shape on stdout it would have seen from the
+/// daemon: a program branching on `result` does not need to know which end
+/// refused it. `retryAfter` is null, because the remedy is a smaller briefing
+/// rather than a wait.
+func supervisionOversizeBriefResult(
+    project: String, byteCount: Int, at date: Date
+) -> SupervisionBriefResult {
+    SupervisionBriefResult(
+        project: project,
+        result: .refusedSize,
+        submittedAt: SupervisionInstant(date),
+        detail: "briefing is \(byteCount) bytes, over the "
+            + "\(SupervisionBriefing.maxBriefingBytes)-byte limit — nothing was submitted",
+        retryAfter: nil)
+}
+
 /// A project name typed on the command line, passed to the daemon **verbatim**.
 ///
 /// A name of nothing but whitespace is refused, because that is the empty case
