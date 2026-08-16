@@ -131,6 +131,88 @@ struct ProviderEventsSupervisorTests {
         try outcome.get()
     }
 
+    /// Only the parser and `RemoteProviderManager.apply(...)` have unit
+    /// coverage of `complete`; the pass-through at
+    /// `ProviderEventsSupervisor.handle(_:)` — private, and not itself
+    /// exercised by any other live test — has none. `snapshotAppliedAndRestartResyncs`
+    /// above never asserts on it: its stub's snapshot line never sets
+    /// `"complete"` at all, so it only ever walks the default-true branch. A
+    /// hardcoded `complete: true` at the pass-through would leave every test
+    /// in this file green while quietly resuming exactly the tombstoning the
+    /// events half of this feature exists to prevent.
+    ///
+    /// The stub emits one COMPLETE baseline snapshot (`keep-a`, `drop-b`),
+    /// then one INCOMPLETE snapshot that omits `drop-b` and introduces
+    /// `new-c`. `new-c` exists nowhere else in the script, so its arrival in
+    /// the mirror is the positive signal that the second, incomplete event
+    /// was actually applied — not just sent — which is what makes the
+    /// absence assertion that follows trustworthy rather than a race. Once
+    /// that signal fires, `drop-b`'s absence bookkeeping (`missingCount`/
+    /// `gone`, the two-absence rule in `RemoteSessionStore.applySnapshot`)
+    /// must be untouched: an incomplete snapshot is authoritative about
+    /// presence only, never about absence.
+    @Test func incompleteEventsSnapshotDoesNotAdvanceAbsenceBookkeeping() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("events-supervisor-incomplete-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let pidFile = dir.appendingPathComponent("pid")
+        let script = dir.appendingPathComponent("events-incomplete-stub.sh")
+        try """
+        #!/bin/bash
+        if [ "$1" != "events" ]; then echo '{"sessions": []}'; exit 0; fi
+        echo $$ > "\(pidFile.path)"
+        echo '{"event": "hello", "contract_version": 1}'
+        echo '{"event": "snapshot", "complete": true, "sessions": [{"id": "keep-a", "state": "running"}, {"id": "drop-b", "state": "running"}]}'
+        echo '{"event": "snapshot", "complete": false, "sessions": [{"id": "keep-a", "state": "running"}, {"id": "new-c", "state": "running"}]}'
+        sleep 600 &
+        child=$!
+        trap 'kill "$child" 2>/dev/null; exit 143' TERM INT
+        wait "$child"
+        """.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+
+        let db = try TBDDatabase(inMemory: true)
+        let manager = RemoteProviderManager(
+            db: db, subscriptions: StateSubscriptionManager(), runner: ProviderRunner(),
+            registryURL: dir.appendingPathComponent("unused.json"))
+        let config = RemoteProviderConfig(name: "stub-incomplete", exec: script.path)
+        // Well above anything this test's bounded polling could take: unlike
+        // `snapshotAppliedAndRestartResyncs`, nothing here exercises restart,
+        // so a watchdog-triggered respawn mid-assertion would only be noise
+        // to keep out, not behavior under test.
+        let supervisor = ProviderEventsSupervisor(
+            config: config, manager: manager, contractVersion: 1,
+            silenceLimit: 90, backoffCap: 1, healthyResetUptime: 1)
+        await supervisor.start()
+
+        // Same teardown-before-cleanup shape as `snapshotAppliedAndRestartResyncs`
+        // above, for the same reason: `stop()` is async so `defer` can't await
+        // it, and it must run before the temp dir goes away regardless of
+        // outcome.
+        let outcome: Result<Void, any Error>
+        do {
+            try await runIncompleteSnapshotAssertions(db: db)
+            outcome = .success(())
+        } catch {
+            outcome = .failure(error)
+        }
+        await supervisor.stop()
+
+        let pid = Int32((try? String(contentsOf: pidFile, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0
+        var alive = true
+        let leakDeadline = Date().addingTimeInterval(Self.reapDeadline)
+        while Date() < leakDeadline {
+            alive = pid > 0 && kill(-pid, 0) == 0
+            if !alive { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        #expect(!alive, "stub process group \(pid) survived stop(); leaked children")
+
+        try? FileManager.default.removeItem(at: dir)
+        try outcome.get()
+    }
+
     /// A provider that IGNORES SIGTERM must still die: `stop()` escalates to
     /// SIGKILL against the process group and only returns once the child is
     /// gone and the supervision task has finished. Without the escalation this
@@ -288,6 +370,45 @@ struct ProviderEventsSupervisorTests {
                 observed rows=\(rows.map(\.sessionID))
                 """)
         }
+    }
+
+    /// Bounded wait for the positive signal (`new-c`'s arrival) that the
+    /// INCOMPLETE snapshot reached the mirror, then a direct check of
+    /// `drop-b`'s absence bookkeeping. See
+    /// `incompleteEventsSnapshotDoesNotAdvanceAbsenceBookkeeping`'s doc
+    /// comment for why the positive signal is what makes this trustworthy.
+    private func runIncompleteSnapshotAssertions(db: TBDDatabase) async throws {
+        var rows: [RemoteSessionRow] = []
+        let deadline = Date().addingTimeInterval(Self.saturatedWaitDeadline)
+        while Date() < deadline {
+            rows = (try? await db.remoteSessions.list()) ?? []
+            if rows.contains(where: { $0.sessionID == "new-c" }) { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        guard rows.contains(where: { $0.sessionID == "new-c" }) else {
+            throw Failure("""
+                the incomplete snapshot never reached the mirror within \
+                \(Self.saturatedWaitDeadline)s — "new-c" only exists in that event; \
+                observed rows=\(rows.map(\.sessionID))
+                """)
+        }
+
+        let dropB = try #require(
+            rows.first { $0.sessionID == "drop-b" },
+            "the baseline COMPLETE snapshot's \"drop-b\" row must still exist")
+        #expect(
+            dropB.missingCount == 0,
+            """
+            an incomplete snapshot omitting "drop-b" must not advance its absence \
+            count; got missingCount=\(dropB.missingCount)
+            """)
+        #expect(!dropB.gone, "\"drop-b\" must not be tombstoned by an incomplete snapshot")
+
+        let keepA = try #require(
+            rows.first { $0.sessionID == "keep-a" },
+            "\"keep-a\", present in both snapshots, must still exist")
+        #expect(keepA.missingCount == 0)
+        #expect(!keepA.gone)
     }
 
     /// Highest `n` across ids shaped `run-<n>`, or `nil` if the mirror carries
