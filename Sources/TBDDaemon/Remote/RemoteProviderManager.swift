@@ -869,6 +869,23 @@ public actor RemoteProviderManager {
         supervisors[name] != nil
     }
 
+    /// Test seam: `snapshotFreshnessUnreadable`'s raw value for `name`, with
+    /// no recovery attempt in between. Every *production* reader
+    /// (`providerStatuses()`, `hasStaleSnapshot(provider:)`) calls
+    /// `recoverLastSuccessfulSnapshotAtIfNeeded` first, which — whenever
+    /// `lastSuccessfulSnapshotAt[name]` is still nil — unconditionally
+    /// re-derives this flag from a fresh `tbd_meta` read and overwrites
+    /// whatever `apply(snapshot:provider:complete:now:)` just left there. That
+    /// is correct production behavior (the freshest read should win) but it
+    /// means those accessors cannot discriminate a regression in `apply`'s own
+    /// gate: whether or not the incomplete branch clears the flag, the very
+    /// next status read silently recomputes the same answer from the
+    /// database. This seam reads the field directly so a test can observe
+    /// `apply`'s effect before any recovery call has a chance to launder it.
+    func freshnessUnreadableForTests(provider name: String) -> Bool {
+        snapshotFreshnessUnreadable.contains(name)
+    }
+
     /// Runs `describe` for every registered provider without arming poll loops
     /// or event supervisors. Exists so the negotiation rule is testable without
     /// a running actor's background tasks — the same reason `hasSupervisor`

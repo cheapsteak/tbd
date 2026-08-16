@@ -229,4 +229,63 @@ struct SnapshotCompletenessTests {
 
         #expect(await m.providerStatuses().first?.lastSuccessfulSnapshotAt == good)
     }
+
+    /// The other half of the same `if complete` gate: an incomplete snapshot
+    /// must not clear `snapshotFreshnessUnreadable` either, or a partial view
+    /// would silently launder a prior "freshness could not be read" state
+    /// into a clean one. Reuses the `DROP TABLE tbd_meta` technique from
+    /// `unreadableFreshnessStateGatesMutationsInsteadOfFailingOpen` in
+    /// RemoteProviderManagerTests to induce the flag.
+    ///
+    /// This reads the flag through `freshnessUnreadableForTests` rather than
+    /// `providerStatuses()`/`hasStaleSnapshot()`. Both of those call
+    /// `recoverLastSuccessfulSnapshotAtIfNeeded` first, which — while
+    /// `lastSuccessfulSnapshotAt["fake"]` stays nil, which it does throughout
+    /// this test — unconditionally re-derives the flag from a fresh
+    /// `tbd_meta` read on every single call. Checked empirically: a version
+    /// of this test built on `providerStatuses()` alone read `true` after the
+    /// incomplete apply *regardless* of whether `apply`'s own gate was
+    /// correct, because that trailing status read re-threw against the still
+    /// dropped table and stamped the flag back to `true` on its own. Going
+    /// through the plain accessor observes `apply`'s effect before any
+    /// recovery call gets a chance to launder it.
+    @Test func anIncompleteSnapshotLeavesFreshnessUnreadableSet() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "fake",
+            sessions: [RemoteSessionPayload(id: "a", state: .running)],
+            now: Date(timeIntervalSince1970: 1_700_000_000))
+        try await db.writerForTests.write { conn in
+            try conn.execute(sql: "DROP TABLE tbd_meta")
+        }
+        let subs = StateSubscriptionManager()
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("snapshot-complete-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let registryURL = dir.appendingPathComponent("agent-providers.json")
+        try #"[{"name": "fake", "exec": "/nonexistent/fake"}]"#
+            .write(to: registryURL, atomically: true, encoding: .utf8)
+        let m = RemoteProviderManager(
+            db: db, subscriptions: subs,
+            runner: FakeProviderInvoker(script: [
+                ProviderResult(exitCode: 3, stdout: Data(), stderr: "offline")
+            ]),
+            registryURL: registryURL)
+        let provider = RemoteProviderConfig(name: "fake", exec: "/x")
+
+        // Establish the unreadable state: the read that recovers
+        // `lastSuccessfulSnapshotAt` from the (now-dropped) `tbd_meta` table
+        // fails, so `hasStaleSnapshot` sets `snapshotFreshnessUnreadable`.
+        await m.pollOnce(provider: provider)
+        #expect(await m.freshnessUnreadableForTests(provider: "fake") == true)
+
+        // An incomplete apply must not touch the flag one way or the other,
+        // so the table's readability is irrelevant to this call — leave it
+        // dropped.
+        try await m.apply(
+            snapshot: [], provider: "fake", complete: false,
+            now: Date(timeIntervalSince1970: 1_700_000_500))
+
+        #expect(await m.freshnessUnreadableForTests(provider: "fake") == true)
+    }
 }
