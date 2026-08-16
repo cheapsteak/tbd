@@ -1,7 +1,8 @@
 # Draft-safe message injection: the Claude Code inbox socket and Codex app-server
 
 **Status:** Investigated, not implemented
-**Claude Code measured:** 2026-08-14 against Claude Code 2.1.233 on macOS 26.1
+**Claude Code measured:** 2026-08-14 and 2026-08-15 against Claude Code 2.1.233
+on macOS 26.1
 **Codex schema inspected:** 2026-07-26 with codex-cli 0.145.0
 
 This directory is named for Claude Code channels; the Claude Code mechanism it
@@ -26,10 +27,18 @@ the mid-turn case (the message was read during a turn already running).
 The real constraint is not access, it is the receiver's **inbound gate**. A
 message can be delivered, held for approval, or dropped, depending on the
 receiving session's `crossSessionInbound` setting and — when that is unset — on
-the two sessions' permission-mode classes. Upstream documents one consequence
-that matters most here: a fire-and-exit script on macOS must present the
-session's messaging token, or a bypass-permissions receiver will hold its
-message.
+the two sessions' permission-mode classes.
+
+The consequence that matters most for TBD is that a session running with
+`--dangerously-skip-permissions`, which is how TBD spawns every Claude session,
+is the *least* receptive class: it holds every arriving message for approval
+unless the sender attests that it also bypasses prompts. Measured against such a
+receiver, an outside process is held whether it presents no token, the peer
+token, or the session's own child token, and is delivered only when it attests a
+permission mode. **The token route is for a session's own children**, so a
+daemon or a scheduler — never a child of the session it writes to — cannot use
+it at any trust level. See [The inbound gate](#the-inbound-gate) for the
+measured truth table and the attestation format.
 
 Codex exposes a separate native pathway through its experimental app-server
 protocol. A client can steer an active turn or start a new turn without sending
@@ -208,6 +217,59 @@ one class and every other session into the other:
 
 The gate fails closed: an unrecognized or unreadable permission mode holds.
 
+### How a sender attests its permission mode
+
+**Measured 2026-08-15, and read from the 2.1.233 binary.** "Identifies itself as
+bypassing" is not a JSON field on the user frame. The sender wraps its content
+in an envelope that the receiver parses back out:
+
+```text
+<cross-session-message from="…" from-session="…" hop-chain="…"
+                       from-name="…" from-mode="bypass|prompting">
+the message text
+</cross-session-message>
+```
+
+Every attribute is optional, they serialize in that order, and the body sits on
+its own line between the tags. The receiver validates by re-serializing what it
+parsed and comparing to the input, so the format is exact — but it is entirely
+sender-asserted, which matches upstream's own wording that a sender "identifies
+itself as" bypassing. `bypass` and `prompting` are the only legal values.
+
+A throwaway `claude --dangerously-skip-permissions` session was started in its
+own tmux server with no `crossSessionInbound` value set, and an unrelated
+external Python process posted to its socket five ways:
+
+- **No auth frame, plain content** — held.
+- **Peer token from the on-disk `.key` file, plain content** — held.
+- **Child token (`CLAUDE_CODE_MESSAGING_TOKEN`), plain content** — held.
+- **No token, content wrapped in an envelope with `from-mode="bypass"`** —
+  delivered.
+- **No token, envelope also carrying `from` and `from-name`** — delivered, and
+  the receiver rendered the supplied name as the sender.
+
+Delivery was confirmed from the receiver's transcript: the delivered messages
+appear as `type: "user"` records carrying `origin.kind: "peer"`,
+`origin.fromMode: "bypass"`, and a `promptId`, while the held ones appear as
+`type: "system"` notices. The receiver's own hold notice names the rule —
+*"The sender did not attest its permission mode, and this session bypasses
+permission prompts. Review it below, or set `crossSessionInbound` to
+`accept`."*
+
+Two consequences for anything built on this surface. **Attesting truthfully
+does not help an outside process**: `prompting` is held by a bypass receiver
+exactly as silence is, so only `bypass` delivers. And the envelope is recovered
+from one build's binary rather than a documented contract, so a tool that
+depends on it can break silently on upgrade, where `crossSessionInbound` is
+documented and supported.
+
+**No sender-side receipt arrived in any of the five cases.** The binary sends a
+hold receipt only to a reply address derived from the `from` field, and only
+when that value is shaped as a `uds:` path inside the socket namespace; the
+probe used a plain label, and the binary logs `hold-receipt skipped: reply
+address unshaped or outside our socket namespace`. A sender that wants real
+receipts must bind its own socket there and set `from` accordingly.
+
 Other limits:
 
 - **Held-message expiry** — a held message expires at `dialogExpiry`, one of
@@ -244,6 +306,17 @@ Where process evidence is missing, the `CLAUDE_CODE_MESSAGING_TOKEN` auth frame
 is what verifies the child. **A fire-and-exit script on macOS must therefore
 present the token**, or it is treated as asserting no permission class — which
 a bypass-permissions receiver holds for approval.
+
+**The token verifies a child; it does not confer childhood.** Measured
+2026-08-15: an unrelated process that had been handed a session's child token —
+captured from a `SessionStart` hook and read out of a file — was still held by a
+bypass-permissions receiver. The receiver recorded a `verifiedPeerPid` for the
+sender, found it was not one of its children, and fell through to the
+no-permission-class path; the token changed nothing. So this whole section
+applies only to a genuine own-child, such as a hook or a Bash command inside the
+session. A daemon, a scheduler, or any other host-side process is structurally
+outside it and must reach the receiver another way — `crossSessionInbound`, or
+the attestation envelope above.
 
 *Documented.* One prerequisite sits underneath all of this: a Bash command
 running inside Claude Code's sandbox reaches the socket only if the sandbox's
@@ -383,9 +456,14 @@ documented integration point for TBD.
 - Draft preservation is established for Claude Code 2.1.233 on macOS. It is not
   a compatibility guarantee for future versions, and it was not re-measured on
   Linux.
-- The own-child macOS seam — that a fire-and-exit poster needs the token — was
-  not reproduced against a bypass-permissions receiver; it rests on the
-  documentation and on the binary's verification logic.
+- The own-child seam was measured only from the *outside*: a non-child holding
+  the token is held. The documented case it is the counterpart to — a genuine
+  own-child that has already exited, presenting the token on macOS — was not
+  reproduced, so that half still rests on the documentation and the binary.
+- The attestation envelope was measured against a bypass-permissions receiver
+  with no `crossSessionInbound` value set. Its interaction with an explicit
+  `hold` or `refuse`, and with a prompting receiver, was not exercised.
+- `crossSessionInbound: accept` was not measured; it rests on the documentation.
 - The documented loop throttles (per-sender rate limiting, identical-repeat
   suppression, the 50-message accepted queue cap) were not reproduced.
 - Reconnect, session restart, burst ordering, backpressure, and failure
@@ -411,9 +489,13 @@ TBD scheduler
     -> tbdd
     -> read $CLAUDE_CONFIG_DIR/sessions/<pid>.json for the session
     -> connect to /tmp/cc-socks/<pid>.sock
-    -> {"type":"auth",…} then {"type":"user",…}
+    -> {"type":"user", "session_id":…, …}
     -> Claude Code conversation queue
 ```
+
+No auth frame appears in that sketch, and its absence is the finding: `tbdd` is
+not a child of the session it writes to, so no token it could present changes
+the outcome. What decides delivery is the receiver's configuration.
 
 Three consequences follow for TBD specifically:
 
@@ -422,18 +504,30 @@ Three consequences follow for TBD specifically:
   session to a worktree without reading terminal content. Sending `session_id`
   on the user frame makes a reused pid a dropped message rather than a
   misdelivered one.
-- **The registry fragments per profile.** TBD gives each model profile its own
-  `CLAUDE_CONFIG_DIR`, so the daemon must look under the profile the session
-  was spawned with, not under `~/.claude`. The socket directory is per OS user
-  and does not fragment.
-- **Delivery is gated at the receiver, so it must be arranged at spawn.** A
-  fleet session running in bypass-permissions mode holds an unauthenticated
-  message. TBD would need to pass `crossSessionInbound: accept` in the
-  session's settings, present the child token, or accept that delivery depends
-  on the receiver's mode. Writing the frames is not evidence of delivery;
-  `peer_message_status` is the receipt, and a first implementation should
-  describe delivery as best-effort with bounded retention and deduplication in
-  the daemon until it consumes that receipt.
+- **The registry fragments per profile in general, but not for TBD sessions.**
+  Claude Code writes rows under `$CLAUDE_CONFIG_DIR/sessions`, which would split
+  the registry across TBD's per-profile config dirs. TBD already prevents that:
+  `sessions` is the one slot merged into the host store rather than owned per
+  profile, precisely so profiles can see each other's sessions
+  (`ClaudeProfileConfigDirManager`). Verified on this machine — a profile's
+  `sessions/` is a symlink to `~/.claude/sessions`. So a reader can use the host
+  directory alone and see every session across every profile. The socket
+  directory is per OS user and does not fragment either.
+- **Delivery is gated at the receiver, and the daemon cannot authenticate its
+  way past it.** A fleet session in bypass-permissions mode holds a message that
+  attests no permission class, and `tbdd` has no token route available to it
+  (see the own-child section). That leaves two options: set
+  `crossSessionInbound: accept` for those sessions, or send the attestation
+  envelope. The setting is documented and stable, and TBD reaches it without a
+  per-session spawn change — profile config dirs symlink `settings.json` to the
+  host `~/.claude/settings.json`, so one write covers every profile. The
+  envelope needs no configuration but is version-fragile and asserts a
+  permission class the daemon does not hold.
+- **Writing the frames is not evidence of delivery.** `peer_message_status` is
+  the receipt, and it only reaches a sender whose `from` is a `uds:` reply
+  address inside the socket namespace. Until an implementation binds such a
+  socket and consumes receipts, it should describe delivery as best-effort, with
+  bounded retention and deduplication in the daemon.
 
 `terminal.send` should remain the mechanism for intentional terminal input; the
 inbox socket would be a distinct out-of-band path for messages that must not
@@ -470,9 +564,12 @@ What remains is narrower, and it is a capability question rather than a
 cooperation one:
 
 - **Reliable delivery to a bypass-permissions session needs a settings value.**
-  Setting `crossSessionInbound: accept` at spawn is a change to the session's
-  configuration, even though TBD makes it through a launch flag it already
-  controls rather than through anything the user installs.
+  Measured, not assumed: without one, every message from a host-side sender is
+  held, and no token or trust class changes that. `crossSessionInbound: accept`
+  is a change to the session's configuration, even though TBD can make it
+  without anything the user installs — either through a launch flag it already
+  controls, or by writing the host `~/.claude/settings.json` that every profile
+  config dir already symlinks.
 - **The capability must be detected, not assumed.** Version, platform,
   provider, and the telemetry environment variables all decide whether a
   session binds a socket at all, so TBD has to treat reachability as a
@@ -488,16 +585,25 @@ The Claude Code inbox socket is ready to be designed against as the draft-safe
 delivery path, with reachability treated as a per-session fact and delivery
 reported as best-effort until the `peer_message_status` receipt is consumed.
 
+For a host-side sender such as `tbdd`, the delivery question is settled: arrange
+`crossSessionInbound: accept` on the receiving sessions. The token route is
+unavailable to a non-child, and the attestation envelope, while it works, buys
+only the avoidance of a one-time setting in exchange for a dependency on an
+undocumented format.
+
 The next investigations, in order of value:
 
-1. Reproduce the own-child macOS seam against a bypass-permissions receiver,
-   with and without the token, so the spawn-time requirement is measured rather
-   than inferred.
-2. Re-measure draft safety on Linux and on the next Claude Code minor version,
+1. Measure `crossSessionInbound: accept` end to end against a
+   bypass-permissions receiver, since it is now the recommended route and is the
+   one thing on that path still resting only on documentation.
+2. Bind a `uds:` reply address and confirm `peer_message_status` receipts
+   arrive, which is what would let a sender distinguish a held message from a
+   delivered one instead of assuming.
+3. Re-measure draft safety on Linux and on the next Claude Code minor version,
    to learn how stable the property is.
-3. Exercise the documented loop throttles, and burst and reconnect behavior,
+4. Exercise the documented loop throttles, and burst and reconnect behavior,
    before anything unattended writes to a socket on a schedule.
-4. Run the same empty-composer and dirty-composer tests against a remote Codex
+5. Run the same empty-composer and dirty-composer tests against a remote Codex
    TUI plus app-server client, and test multiple clients, reconnect behavior,
    and non-steerable-turn recovery.
 
