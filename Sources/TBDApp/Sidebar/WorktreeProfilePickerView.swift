@@ -313,7 +313,7 @@ struct WorktreeProfilePickerView: View {
             Divider()
 
             VStack(alignment: .leading, spacing: 0) {
-                ForEach(offerableProviders, id: \.config.name) { provider in
+                ForEach(Self.providerList(offer: remoteLaneOffer), id: \.config.name) { provider in
                     remoteProviderRow(
                         provider,
                         title: Self.providerLabel(provider),
@@ -359,6 +359,20 @@ struct WorktreeProfilePickerView: View {
     ) -> RemoteLaneOffer {
         if providers.count == 1, let only = providers.first { return .single(only) }
         return providers.isEmpty ? .hidden : .chooseProvider(providers)
+    }
+
+    /// The providers the `.remoteProviders` page lists — taken from the offer
+    /// that sent the user there, so the page cannot show a list the offer
+    /// disagrees with. `.single` yields its one provider (the page is not
+    /// normally reachable then, but a provider list that empties itself while
+    /// the page is open should shrink, not blank), and `.hidden` yields
+    /// nothing, which is the same thing the row would have said.
+    nonisolated static func providerList(offer: RemoteLaneOffer) -> [RemoteProviderStatus] {
+        switch offer {
+        case .hidden: return []
+        case .single(let only): return [only]
+        case .chooseProvider(let all): return all
+        }
     }
 
     /// The page's own header copy. "New worktree with…" stops being true once
