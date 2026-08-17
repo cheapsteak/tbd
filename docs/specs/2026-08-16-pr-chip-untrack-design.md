@@ -30,13 +30,14 @@ numbers are worth scanning at a glance, not a width calculation: nothing
 consults the available width, and the overflow count is a pure function of how
 many bindings there are.
 
-What the cluster does give up under pressure is width, not chips. It carries
-`layoutPriority(-1)` just as the path label beside it does, so a narrow window
-compresses the strip rather than squeezing the path — and compressing it
-truncates chip labels (`#41…`) rather than folding chips into the overflow
-menu. Seven chips reach that point at a wider window than four did. Width-aware
-collapsing would be the real answer and is deliberately not built here; it is a
-layout change to make on its own, with the window in front of you.
+It buys no width safety either. The `layoutPriority(-1)` the cluster carries is
+the same priority the path/branch cluster beside it carries, so the two are
+peers in one bucket and share the deficit rather than one yielding to the other.
+A narrow window squeezes both, truncating chip labels (`#41…`) and path segments
+alike rather than folding chips into the overflow menu — and seven chips reach
+that point at a wider window than four did. Width-aware collapsing would be the
+real answer and is deliberately not built here; it is a layout change to make on
+its own, with the window in front of you.
 
 ### Untracking from the chip
 

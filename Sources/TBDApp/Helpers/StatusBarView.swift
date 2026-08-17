@@ -104,6 +104,11 @@ struct StatusBarView: View {
         /// PR to the daemon — a synthetic chip has no row to name by id.
         let url: URL?
         let state: PRMergeableState?
+        /// The status's own words for that state, when it has any — the same
+        /// `reason ?? state.displayReason` the overflow menu and the toolbar
+        /// dropdown render. Carried rather than derived so the three surfaces
+        /// cannot describe one observation differently.
+        let reason: String?
         /// The PR's title, or nil when it was never observed (a chip lifted
         /// from a cached `Worktree.prStatus` has none). The hover overlay
         /// omits the line rather than fabricating a placeholder.
@@ -120,12 +125,14 @@ struct StatusBarView: View {
     /// calculation — nothing here consults the available width, and the
     /// overflow count is a pure function of how many bindings there are.
     ///
-    /// What the cluster yields under pressure is width, not chips: it carries
-    /// `layoutPriority(-1)` just as the path label beside it does, so a narrow
-    /// window compresses the strip rather than squeezing the path, and
-    /// compressing it truncates labels rather than folding chips into the
-    /// overflow menu. Width-aware collapsing would be the real answer and is
-    /// deliberately not built here.
+    /// It buys no width safety either, and the `layoutPriority(-1)` it carries
+    /// does not provide any: the path/branch cluster beside it is at the same
+    /// priority, so the two are peers in one bucket and share the deficit
+    /// rather than one yielding to the other. A narrow window therefore
+    /// squeezes both, truncating chip labels and path segments alike rather
+    /// than folding chips into the overflow menu — and seven chips reach that
+    /// point at a wider window than four did. Width-aware collapsing would be
+    /// the real answer and is deliberately not built here.
     nonisolated static let prChipLimit = 7
 
     /// The chip row for `bindings`, plus how many did not fit. Pure: delegates
@@ -163,6 +170,7 @@ struct StatusBarView: View {
                 refLabel: binding.refLabel,
                 url: URL(string: binding.url),
                 state: binding.status?.state,
+                reason: binding.status.map { $0.reason ?? $0.state.displayReason },
                 title: binding.title,
                 observedAt: binding.status?.observedAt
             )
@@ -192,7 +200,9 @@ struct StatusBarView: View {
             HoverCardRow(label: "PR", value: chip.label),
             HoverCardRow(
                 label: "State",
-                value: chip.state?.displayReason ?? unobservedStateValue,
+                // The status's own words when it has any, exactly as the
+                // overflow menu and the toolbar dropdown render them.
+                value: chip.reason ?? unobservedStateValue,
                 caption: PRFreshness.checkedLabel(observedAt: chip.observedAt, now: now)
             )
         ]
@@ -495,13 +505,18 @@ private struct PRChipView: View {
                 .onTapGesture {
                     if isHovering { detach() } else { open() }
                 }
-                // Accessibility does not hover, so this element keeps the
-                // untrack identity unconditionally and carries its own action —
-                // otherwise the gesture would exist for pointer users only.
+                // Accessibility never hovers, so `isHovering` is false for it
+                // and the slot's default action is "open" — which is what the
+                // label therefore says. Untracking is offered as a NAMED
+                // action instead of the default: a named action cannot be
+                // confused with the tap gesture's synthesized one, so the
+                // element can never announce one thing and do the other, and a
+                // destructive action is better reached deliberately than by
+                // activating whatever has focus.
                 .accessibilityElement()
-                .accessibilityLabel(StatusBarView.untrackLabel(chip))
+                .accessibilityLabel(StatusBarView.iconSlotLabel(chip, isHovering: isHovering))
                 .accessibilityAddTraits(.isButton)
-                .accessibilityAction { detach() }
+                .accessibilityAction(named: Text(StatusBarView.untrackLabel(chip))) { detach() }
         }
     }
 

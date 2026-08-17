@@ -167,6 +167,27 @@ struct StatusBarViewChipsTests {
         #expect(StatusBarView.chipHoverCard(chip(title: "   \n")).title == nil)
     }
 
+    /// The overflow menu and the toolbar dropdown render `reason ?? state`, so
+    /// the overlay has to as well — three surfaces describing one observation
+    /// differently is exactly what sharing the presentation exists to prevent.
+    @Test("the overlay prefers the status's own words to the generic state label")
+    func overlayPrefersTheStatusReason() {
+        let url = "https://github.com/acme/acme-prod/pull/412"
+        let binding = PRBinding(
+            worktreeID: UUID(), owner: "acme", repo: "acme-prod", number: 412, url: url,
+            status: PRStatus(number: 412, url: url, state: .blocked,
+                             reason: "Changes requested by reviewer"),
+            source: .hook)
+        let chip = StatusBarView.prChips([binding]).chips[0]
+
+        let value = StatusBarView.chipHoverCard(chip).rows.first { $0.label == "State" }?.value
+        #expect(value == "Changes requested by reviewer")
+        #expect(value != PRMergeableState.blocked.displayReason)
+        // …and it is the same string the overflow menu row is built from.
+        #expect(PRBindingPresentation.menuRows([binding])[0].title
+            .contains("Changes requested by reviewer"))
+    }
+
     @Test("a chip with no observed status still gets a number, and says the age is unknown")
     func overlayWithoutStatus() {
         let card = StatusBarView.chipHoverCard(chip(state: nil, observedAt: nil))

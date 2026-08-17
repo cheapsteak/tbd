@@ -3017,7 +3017,12 @@ final class AppState: ObservableObject {
     /// - a worktree ABSENT from a SUCCESSFUL response loses its entry, so a
     ///   `tbd pr detach` is observed. `PRBindingRefresh.state(from:)` owns that,
     ///   which is how it can be asserted without a daemon.
-    func refreshPRBindings() async {
+    /// Returns whether the fetch actually landed. Callers that judge an
+    /// outcome by re-reading these maps must check it: on failure the maps
+    /// still hold the pre-call values, which look identical to "the write did
+    /// nothing".
+    @discardableResult
+    func refreshPRBindings() async -> Bool {
         let result: PRBindingsAllResult
         do {
             result = try await prBindingsFetcher()
@@ -3025,11 +3030,12 @@ final class AppState: ObservableObject {
             // Leave the previous values in place — a failed fetch is not
             // evidence that any worktree lost its PRs.
             logger.error("Failed to list PR bindings: \(String(describing: error), privacy: .public)")
-            return
+            return false
         }
         let next = PRBindingRefresh.state(from: result)
         if next.bindings != prBindings { prBindings = next.bindings }
         if next.detachedCounts != prDetachedCounts { prDetachedCounts = next.detachedCounts }
+        return true
     }
 
     /// Untrack one PR from one worktree — the status bar chip's xmark.
@@ -3068,8 +3074,12 @@ final class AppState: ObservableObject {
             handleConnectionError(error)
             return
         }
-        await refreshPRBindings()
-        guard effectivePRBindings(worktreeID: worktreeID).contains(where: { $0.number == number })
+        // Only a refresh that LANDED is evidence. A failed one leaves the maps
+        // holding their pre-call values, which read exactly like a detach that
+        // did nothing — and reporting a landed detach as a failure is its own
+        // kind of lie.
+        guard await refreshPRBindings(),
+              effectivePRBindings(worktreeID: worktreeID).contains(where: { $0.number == number })
         else { return }
         logger.error("""
             Detach of PR #\(number, privacy: .public) from worktree \
