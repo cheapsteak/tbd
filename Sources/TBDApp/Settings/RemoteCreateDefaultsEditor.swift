@@ -208,7 +208,14 @@ struct RemoteCreateDefaultsEditor: View {
                 + "Anything left on Auto falls through to the global defaults, then to the provider's own."
         case .global:
             return "Applied when starting a remote session in any repo that has not set its own. "
-                + "Anything left on Auto falls through to the provider's own default."
+                + "Anything left on Auto falls through to the provider's own default. "
+                // A machine-wide value cannot know which repo's `+` was
+                // clicked, and a wrong repository is the one create-param
+                // mistake that cannot be undone — so `repo` is answered per
+                // repo or asked for, never defaulted here. Said out loud
+                // because a setting that silently does nothing is worse than
+                // one that is absent (see `RemoteCreateFormLogic.resolveString`).
+                + "A repository is always taken from the repo you start the session in, never from here."
         }
     }
 }

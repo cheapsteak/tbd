@@ -129,12 +129,56 @@ struct RemoteCreateFormLogicTests {
         #expect(values["repo"] == "Acme-App")
     }
 
-    @Test func prefillStringsFallsBackToTheEnumsDefaultWhenThePrefillMatchesNothing() {
+    /// The provider's declared `default` must NOT rescue an unmatched `repo`.
+    /// A provider whose only permitted value is another repository would
+    /// otherwise turn the `+` on THIS repo into a session on THAT one — which
+    /// is exactly what happened in the field before this rule existed.
+    @Test func prefillStringsRefusesTheEnumsDefaultForAnUnmatchedRepoPrefill() {
         let fields = [ProviderCreateParamField(
             name: "repo", type: "enum", required: true,
             defaultValue: "other-app", values: ["other-app"])]
         let values = RemoteCreateFormLogic.prefillStrings(fields: fields, repoPrefill: "acme-org/acme-app")
-        #expect(values["repo"] == "other-app")
+        #expect(values["repo"] == "")
+    }
+
+    /// The same refusal for the machine-wide map: it cannot know which repo's
+    /// `+` was clicked, so it may not answer `repo` either.
+    @Test func prefillStringsRefusesAGlobalStoredValueForRepo() {
+        let fields = [ProviderCreateParamField(name: "repo", type: "string", required: true)]
+        let values = RemoteCreateFormLogic.prefillStrings(
+            fields: fields, repoPrefill: nil, globalDefaults: ["repo": "acme-org/other-app"])
+        #expect(values["repo"] == "")
+    }
+
+    /// Negative control for the narrowness of that rule: every other field
+    /// still walks the full chain down to the provider's declared default.
+    @Test func prefillStringsStillTakesTheProviderDefaultForANonRepoField() {
+        let fields = [ProviderCreateParamField(
+            name: "permission_mode", type: "enum", required: true,
+            defaultValue: "plan", values: ["plan", "default"])]
+        let values = RemoteCreateFormLogic.prefillStrings(
+            fields: fields, repoPrefill: "acme-org/acme-app")
+        #expect(values["permission_mode"] == "plan")
+    }
+
+    /// And for the machine-wide map, which still answers every non-`repo`
+    /// field.
+    @Test func prefillStringsStillTakesAGlobalStoredValueForANonRepoField() {
+        let fields = [ProviderCreateParamField(name: "cmd", type: "string")]
+        let values = RemoteCreateFormLogic.prefillStrings(
+            fields: fields, repoPrefill: nil, globalDefaults: ["cmd": "claude --resume"])
+        #expect(values["cmd"] == "claude --resume")
+    }
+
+    /// The repo's OWN stored default is repo-scoped evidence — the user set it
+    /// against this very repo — so it still answers `repo`, and still outranks
+    /// the ambient prefill.
+    @Test func prefillStringsStillTakesTheRepoScopedStoredValueForRepo() {
+        let fields = [ProviderCreateParamField(name: "repo", type: "string", required: true)]
+        let values = RemoteCreateFormLogic.prefillStrings(
+            fields: fields, repoPrefill: "acme-org/acme-app",
+            repoDefaults: ["repo": "acme-org/acme-app-fork"])
+        #expect(values["repo"] == "acme-org/acme-app-fork")
     }
 
     /// No match AND no declared default: the field must land exactly where a
@@ -148,13 +192,14 @@ struct RemoteCreateFormLogicTests {
 
     /// Two allowed values sharing a last component make the loose stage
     /// ambiguous — picking either could silently create the session in the
-    /// wrong repo, so the field falls back to its declared default.
+    /// wrong repo — and for `repo` there is no declared default to fall back
+    /// to either, so the field lands blank and the user chooses.
     @Test func prefillStringsRefusesAnAmbiguousLastComponentMatch() {
         let fields = [ProviderCreateParamField(
             name: "repo", type: "enum", required: true, defaultValue: "acme-org/acme-app",
             values: ["acme-org/acme-app", "other-org/acme-app"])]
         let values = RemoteCreateFormLogic.prefillStrings(fields: fields, repoPrefill: "acme-app")
-        #expect(values["repo"] == "acme-org/acme-app")
+        #expect(values["repo"] == "")
     }
 
     /// Only enums carry a closed value set — a `string`/`text`/`int` repo

@@ -37,6 +37,11 @@ enum RemoteCreateFormLogic {
         }
     }
 
+    /// The well-known create-param naming the repository the session is
+    /// created against (`docs/remote-provider-contract.md` § `describe`). It
+    /// is the one field resolution treats as special — see `resolveString`.
+    static let repoFieldName = "repo"
+
     /// Derives the `repo` create-param prefill from a repo's `remoteURL`,
     /// using `RemoteRepoMatching.displayKey` — the SAME segment parsing
     /// `normalizedKey` uses to resolve a session's `meta["repo"]` back to a
@@ -96,6 +101,26 @@ enum RemoteCreateFormLogic {
     /// level falls through, so clearing a control (which writes `""` on some
     /// paths) reads the same as never having set it.
     ///
+    /// **`repo` stops after level 2.** It is answered by repo-scoped evidence
+    /// alone — this repo's own stored default, or the ambient prefill for the
+    /// repo whose `+` was clicked — and by nothing else. Neither the
+    /// machine-wide map nor the provider's declared `default` may answer it,
+    /// and when neither repo-scoped level can, the field stays blank and
+    /// `launch` refuses to create on it.
+    ///
+    /// That exception is narrow on purpose and must stay narrow. Falling
+    /// through to a provider default is right for every other field: a
+    /// `permission_mode` or `cmd` nobody chose is a preference, and the worst
+    /// case is a session configured a way the user did not intend. `repo` is
+    /// different in kind — it names a real repository on a real machine, so a
+    /// wrong value silently starts work against a repository the user was not
+    /// even looking at. Field evidence: a provider declaring `repo` as an enum
+    /// whose only permitted value was another repository turned a one-click
+    /// `+` on THIS repo into a live session on THAT one, adopted into that
+    /// repo's section. There is no supported way to undo a remote create —
+    /// archive and forget both refuse remote lanes — so the wrong value cannot
+    /// be walked back the way a wrong `permission_mode` can.
+    ///
     /// **An `enum` value is validated on replay, never replayed blindly.** It
     /// is the one type with a CLOSED value set, and a provider is free to
     /// retire a value between the setting being stored and this create. Every
@@ -113,12 +138,15 @@ enum RemoteCreateFormLogic {
         globalDefaults: [String: String],
         generatedSlug: String?
     ) -> String {
-        let candidates: [String?] = [
+        let repoScoped: [String?] = [
             repoDefaults[field.name],
             ambientPrefill(for: field.name, repoPrefill: repoPrefill, generatedSlug: generatedSlug),
-            globalDefaults[field.name],
-            field.defaultValue,
         ]
+        // `repo` stops here; every other field carries on to the machine-wide
+        // map and the provider's own default.
+        let candidates: [String?] = field.name == repoFieldName
+            ? repoScoped
+            : repoScoped + [globalDefaults[field.name], field.defaultValue]
         for candidate in candidates {
             guard let candidate,
                   !candidate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
@@ -133,7 +161,8 @@ enum RemoteCreateFormLogic {
     /// has no ambient source for.
     ///
     /// - `repo` — the repo whose `+` was clicked, normalized by
-    ///   `repoPrefill(remoteURL:)`.
+    ///   `repoPrefill(remoteURL:)`. For this one field the ambient value is the
+    ///   LAST level: nothing below it may answer (see `resolveString`).
     /// - `slug` — a freshly generated lane identifier. It comes from
     ///   `NameGenerator`, the same generator that names local worktrees, so a
     ///   remote lane reads like every other lane in the sidebar instead of
@@ -256,6 +285,17 @@ enum RemoteCreateFormLogic {
         let boolValues: [String: Bool]
         /// Required fields no level could answer, in `fields` order.
         let missingRequired: [String]
+        /// The provider asks which repository to work in, and no repo-scoped
+        /// level could say (see `resolveString`): either the `+` carried no
+        /// repo at all, or the repo it carried matches nothing the provider
+        /// declares.
+        ///
+        /// Tracked separately from `missingRequired` because it must block a
+        /// one-click even when the provider marks `repo` OPTIONAL. A blank
+        /// optional field is omitted from the params, and an omitted `repo` is
+        /// answered by the provider's own default — the same wrong repository,
+        /// reached by the other door.
+        let repoUnanswered: Bool
         /// Every required field is answered, so nothing needs asking.
         var isComplete: Bool { missingRequired.isEmpty }
     }
@@ -281,7 +321,11 @@ enum RemoteCreateFormLogic {
             .filter { $0.required && $0.type != "bool" }
             .filter { (strings[$0.name] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .map(\.name)
-        return Plan(stringValues: strings, boolValues: bools, missingRequired: missing)
+        let repoUnanswered = fields.contains { $0.name == repoFieldName }
+            && (strings[repoFieldName] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return Plan(
+            stringValues: strings, boolValues: bools, missingRequired: missing,
+            repoUnanswered: repoUnanswered)
     }
 
     /// What selecting "New remote session…" should actually do.
@@ -295,12 +339,16 @@ enum RemoteCreateFormLogic {
 
     /// Decide between creating immediately and opening the form.
     ///
-    /// The form opens in exactly three cases, and creating on a guess is the
+    /// The form opens in exactly four cases, and creating on a guess is the
     /// one outcome ruled out entirely:
     ///
     ///  - the provider has not reported its `create_params` yet (`describe`
     ///    is nil), so TBD does not know what it would be answering;
     ///  - a required field no level could answer;
+    ///  - the provider asks which repository to work in and no repo-scoped
+    ///    level could say (`Plan.repoUnanswered`) — including when the field
+    ///    is optional, since an omitted `repo` is answered by the provider's
+    ///    own default;
     ///  - a resolved value that fails the same local validation the form
     ///    applies (an `int` field holding a stored non-number, say) — the
     ///    error belongs in front of the user, next to the field.
@@ -316,13 +364,16 @@ enum RemoteCreateFormLogic {
         generatedSlug: String?
     ) -> Launch {
         guard let describe else {
-            return .openForm(Plan(stringValues: [:], boolValues: [:], missingRequired: []))
+            return .openForm(
+                Plan(
+                    stringValues: [:], boolValues: [:], missingRequired: [],
+                    repoUnanswered: false))
         }
         let fields = describe.createParams
         let plan = plan(
             fields: fields, repoPrefill: repoPrefill, repoDefaults: repoDefaults,
             globalDefaults: globalDefaults, generatedSlug: generatedSlug)
-        guard plan.isComplete,
+        guard plan.isComplete, !plan.repoUnanswered,
               case .success(let json) = buildParamsJSON(
                 fields: fields, stringValues: plan.stringValues, boolValues: plan.boolValues)
         else {
