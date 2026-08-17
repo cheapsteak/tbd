@@ -134,7 +134,7 @@ struct StatusBarViewChipsTests {
         ]).chips[0]
     }
 
-    @Test("the overlay names the PR, its title, its state and the age of that reading")
+    @Test("the overlay's headline names the PR, its state and its title on one line")
     func overlayWithTitle() {
         let now = Date(timeIntervalSince1970: 1_700_007_200)
         let card = StatusBarView.chipHoverCard(
@@ -142,29 +142,46 @@ struct StatusBarViewChipsTests {
                  title: "Fix the login timeout",
                  observedAt: now.addingTimeInterval(-7200)),
             now: now)
-        #expect(card.title == "Fix the login timeout")
-        #expect(card.rows.contains { $0.label == "PR" && $0.value == "#412" })
-        let state = card.rows.first { $0.label == "State" }
-        #expect(state?.value == PRMergeableState.checksFailed.displayReason)
-        // The age rides with the state — a display-tier cache is never rendered
-        // as current truth. Shared wording with the toolbar and sidebar.
-        #expect(state?.caption == "checked 2h ago")
-        #expect(state?.caption == PRFreshness.checkedLabel(
+        #expect(card.title == "PR#412 (\(PRMergeableState.checksFailed.displayReason))"
+                + " - Fix the login timeout")
+        // No labelled grid: the three facts are the headline, and the only row
+        // left is the one naming the click.
+        #expect(card.rows.count == 1)
+        #expect(card.rows.allSatisfy { $0.label == nil })
+        // The age rides under the headline — a display-tier cache is never
+        // rendered as current truth. Shared wording with the toolbar and sidebar.
+        #expect(card.titleCaption == "checked 2h ago")
+        #expect(card.titleCaption == PRFreshness.checkedLabel(
             observedAt: now.addingTimeInterval(-7200), now: now))
     }
 
-    @Test("a chip with no observed title renders no title line, not a placeholder")
-    func overlayWithoutTitle() {
-        let card = StatusBarView.chipHoverCard(chip(title: nil))
-        #expect(card.title == nil)
-        // The number and state are still worth showing.
-        #expect(card.rows.contains { $0.label == "PR" && $0.value == "#412" })
-        #expect(card.rows.contains { $0.label == "State" })
+    /// Every part of the headline but the number is optional, and an absent one
+    /// is *omitted* rather than filled: no empty `()`, and no dangling ` - `.
+    @Test("the headline degrades to whichever of state and title were observed")
+    func headlineDegradesByOmission() {
+        let state = PRMergeableState.merged.displayReason
+        #expect(StatusBarView.chipHeadline(
+            chip(state: .merged, title: "Relay the GitHub event"))
+            == "PR#412 (\(state)) - Relay the GitHub event")
+        #expect(StatusBarView.chipHeadline(chip(state: .merged, title: nil))
+                == "PR#412 (\(state))")
+        #expect(StatusBarView.chipHeadline(chip(state: nil, title: "Relay the GitHub event"))
+                == "PR#412 - Relay the GitHub event")
+        #expect(StatusBarView.chipHeadline(chip(state: nil, title: nil)) == "PR#412")
+        // …and no combination leaves a separator with nothing after it.
+        for headline in [StatusBarView.chipHeadline(chip(state: .merged, title: nil)),
+                         StatusBarView.chipHeadline(chip(state: nil, title: nil)),
+                         StatusBarView.chipHeadline(chip(state: nil, title: "x"))] {
+            #expect(headline.hasSuffix(" - ") == false)
+            #expect(headline.contains("()") == false)
+        }
     }
 
     @Test("a whitespace-only title counts as absent")
     func overlayBlankTitle() {
-        #expect(StatusBarView.chipHoverCard(chip(title: "   \n")).title == nil)
+        let card = StatusBarView.chipHoverCard(chip(state: nil, title: "   \n"))
+        #expect(card.title == "PR#412")
+        #expect(card.title?.contains("-") == false)
     }
 
     /// The overflow menu and the toolbar dropdown render `reason ?? state`, so
@@ -180,9 +197,9 @@ struct StatusBarViewChipsTests {
             source: .hook)
         let chip = StatusBarView.prChips([binding]).chips[0]
 
-        let value = StatusBarView.chipHoverCard(chip).rows.first { $0.label == "State" }?.value
-        #expect(value == "Changes requested by reviewer")
-        #expect(value != PRMergeableState.blocked.displayReason)
+        let headline = StatusBarView.chipHeadline(chip)
+        #expect(headline == "PR#412 (Changes requested by reviewer)")
+        #expect(headline.contains(PRMergeableState.blocked.displayReason) == false)
         // …and it is the same string the overflow menu row is built from.
         #expect(PRBindingPresentation.menuRows([binding])[0].title
             .contains("Changes requested by reviewer"))
@@ -195,10 +212,11 @@ struct StatusBarViewChipsTests {
     @Test("a chip with no observed status still gets a number, and says the age is unknown")
     func overlayWithoutStatus() {
         let card = StatusBarView.chipHoverCard(chip(state: nil, observedAt: nil))
-        #expect(card.rows.contains { $0.label == "PR" && $0.value == "#412" })
-        let state = card.rows.first { $0.label == "State" }
-        #expect(state?.value == StatusBarView.unobservedStateValue)
-        #expect(state?.caption == PRFreshness.checkedLabel(observedAt: nil, now: Date()))
+        #expect(card.title == "PR#412")
+        // A missing stamp is an unknown check time rather than silence — the
+        // card never renders a state, or the absence of one, without its age.
+        #expect(card.titleCaption == PRFreshness.checkedLabel(observedAt: nil, now: Date()))
+        #expect(card.titleCaption == "last checked at an unknown time")
     }
 
     /// The toolbar and sidebar both append "last check did not resolve" after
@@ -213,8 +231,7 @@ struct StatusBarViewChipsTests {
         let model = StatusBarView.prChips(
             [binding(412, .mergeable, observedAt: observed)], observation: observation)
 
-        let caption = StatusBarView.chipHoverCard(model.chips[0], now: now)
-            .rows.first { $0.label == "State" }?.caption
+        let caption = StatusBarView.chipHoverCard(model.chips[0], now: now).titleCaption
         #expect(caption == "checked 2h ago · last check did not resolve (gh unauthenticated)")
 
         // A settled attempt adds nothing — the clause is a caveat, not a field.
@@ -222,7 +239,7 @@ struct StatusBarViewChipsTests {
             [binding(412, .mergeable, observedAt: observed)],
             observation: PRObservation(outcome: .none, observedAt: observed))
         #expect(StatusBarView.chipHoverCard(settled.chips[0], now: now)
-            .rows.first { $0.label == "State" }?.caption == "checked 2h ago")
+            .titleCaption == "checked 2h ago")
     }
 
     // MARK: - The two click targets
@@ -302,15 +319,14 @@ struct StatusBarViewChipsTests {
         let open = StatusBarView.chipHoverCard(one, untrackTarget: false, now: now)
         let untrack = StatusBarView.chipHoverCard(one, untrackTarget: true, now: now)
 
+        // The headline and its age are untouched…
         #expect(open.title == untrack.title)
+        #expect(open.titleCaption == untrack.titleCaption)
+        #expect(open.titleCaption == "checked 2h ago")
         #expect(open.rows.count == untrack.rows.count)
-        #expect(open.rows.count == 3)
-        // The PR row, the state row and its age are untouched…
-        #expect(open.rows[0] == untrack.rows[0])
-        #expect(open.rows[1] == untrack.rows[1])
-        #expect(open.rows[1].caption == "checked 2h ago")
-        // …and the action row is the last one in both, never inserted midway.
-        #expect(open.rows[2].value != untrack.rows[2].value)
+        #expect(open.rows.count == 1)
+        // …and only the action row's sentence differs.
+        #expect(open.rows[0].value != untrack.rows[0].value)
         // The card is re-rendered on model INEQUALITY, so the swap only reaches
         // the screen because the two models genuinely differ.
         #expect(open != untrack)
@@ -329,10 +345,9 @@ struct StatusBarViewChipsTests {
         // The reservation is worth having only because the two differ enough to
         // reflow — a peer equal to the value would be decoration.
         #expect(open?.value != untrack?.value)
-        // Nothing else on the card reserves an alternate, so no other row can
-        // resize either.
-        #expect(StatusBarView.chipHoverCard(chip()).rows.dropLast()
-            .allSatisfy { $0.alternateValue == nil })
+        // It is the card's only row, so the reservation covers every row that
+        // could resize it — the headline and its age do not swap.
+        #expect(StatusBarView.chipHoverCard(chip()).rows.count == 1)
     }
 
     @Test("the action line is a function of which target the pointer is on")
@@ -356,12 +371,11 @@ struct StatusBarViewChipsTests {
     @Test("a chip with no title and one with no status still say what a click does")
     func actionRowSurvivesAbsentFields() {
         let untitled = StatusBarView.chipHoverCard(chip(title: nil), untrackTarget: true)
-        #expect(untitled.title == nil)
+        #expect(untitled.title?.contains(" - ") == false)
         #expect(untitled.rows.last?.value == StatusBarView.chipUntrackActionValue)
 
         let unobserved = StatusBarView.chipHoverCard(chip(state: nil, observedAt: nil))
-        #expect(unobserved.rows.first { $0.label == "State" }?.value
-                == StatusBarView.unobservedStateValue)
+        #expect(unobserved.title == "PR#412")
         #expect(unobserved.rows.last?.value == StatusBarView.chipOpenActionValue)
         #expect(unobserved.rows.last?.alternateValue == StatusBarView.chipUntrackActionValue)
     }

@@ -229,16 +229,121 @@ struct HoverDwellReducer: Equatable {
     }
 }
 
+// MARK: - Placement
+
+/// Where a card's panel goes for a given anchor.
+///
+/// Pure geometry in AppKit screen coordinates (y grows upward), so the whole
+/// rule is unit-testable without a window, a panel or a screen.
+///
+/// The rule is *below the anchor, leading-aligned, unless the card would leave
+/// the anchor's own window* — then above. Screen room alone is the wrong test:
+/// a card anchored to the status bar at the bottom of the window has plenty of
+/// desktop beneath it, and placing it there drops it out of the window
+/// altogether, right onto the strip it describes. Bounding it by the window
+/// keeps every card over the surface that summoned it, and leaves anchors with
+/// room beneath them — tab-bar items, sidebar rows — exactly where they were.
+///
+/// The window is a *preference*, not a hard constraint: when neither side fits
+/// inside it (a small floating panel, a short window), the screen decides, so
+/// this can never place a card worse than the screen rule alone would.
+enum HoverCardPlacement {
+    /// Gap between the anchor's edge and the card's visible edge.
+    ///
+    /// Sized to clear the padding a bar puts around its content, not just the
+    /// anchored control: the status-bar chip sits 4pt inside a `.bar` strip, so
+    /// a card flipped above it must clear the chip *and* that padding for the
+    /// strip to stay readable underneath.
+    static let anchorGap: CGFloat = 8
+    /// Keep-out from the edge of the screen's visible frame.
+    static let screenMargin: CGFloat = 4
+
+    /// The panel frame for one card.
+    ///
+    /// `panelSize` is the whole hosted size — the card plus the transparent
+    /// `shadowInset` margin its shadow draws into on every side — while the
+    /// gap, the alignment and the clamping all apply to the *visible* card
+    /// inside it. Anything else would leave the card floating a shadow's width
+    /// away from what it describes.
+    static func panelFrame(anchor: CGRect,
+                           panelSize: CGSize,
+                           shadowInset: CGFloat,
+                           window: CGRect?,
+                           screenVisibleFrame: CGRect?) -> CGRect {
+        let card = CGSize(width: panelSize.width - shadowInset * 2,
+                          height: panelSize.height - shadowInset * 2)
+
+        let below = anchor.minY - anchorGap - card.height
+        let above = anchor.maxY + anchorGap
+
+        let screenLower = screenVisibleFrame.map { $0.minY + screenMargin }
+        let screenUpper = screenVisibleFrame.map { $0.maxY - screenMargin }
+        let fitsScreenBelow = screenLower.map { below >= $0 } ?? true
+        let fitsScreenAbove = screenUpper.map { above + card.height <= $0 } ?? true
+        let fitsWindowBelow = (window.map { below >= $0.minY } ?? true) && fitsScreenBelow
+        let fitsWindowAbove = (window.map { above + card.height <= $0.maxY } ?? true) && fitsScreenAbove
+
+        var y: CGFloat
+        if fitsWindowBelow {
+            y = below
+        } else if fitsWindowAbove {
+            y = above
+        } else if fitsScreenBelow {
+            y = below
+        } else if fitsScreenAbove {
+            y = above
+        } else {
+            y = below
+        }
+        if let screenLower, let screenUpper {
+            y = min(max(y, screenLower), max(screenLower, screenUpper - card.height))
+        }
+
+        var x = anchor.minX
+        if let screenVisibleFrame {
+            let leftmost = screenVisibleFrame.minX + screenMargin
+            let rightmost = screenVisibleFrame.maxX - screenMargin - card.width
+            x = min(max(x, leftmost), max(leftmost, rightmost))
+        }
+
+        return CGRect(x: x - shadowInset,
+                      y: y - shadowInset,
+                      width: panelSize.width,
+                      height: panelSize.height)
+    }
+}
+
 // MARK: - Card view
 
 /// Renders a `HoverCardModel`: calm neutrals, type hierarchy, color only for
-/// state. Material background + hairline border; the hosting panel's window
-/// shadow provides the elevation.
+/// state.
+///
+/// Elevation is a material fill plus a **small shadow this view draws itself**,
+/// the way a menu or a popover separates from what is behind it — no border.
+/// The hosting panel's own window shadow is deliberately off: it is sized for a
+/// window rather than for a tooltip, so on a card a few dozen points tall it
+/// reads as a thick gray edge, and it spills far enough past the card to wash
+/// out whatever the card is anchored to. Drawing the shadow here bounds it to a
+/// radius chosen for this box, and makes it recomputed with the content rather
+/// than by the window server from a shape that may still be the previous card's.
+///
+/// The price is a transparent margin: a shadow drawn inside the hosting view
+/// needs somewhere to fall, and the panel is sized to fit its content exactly.
+/// So the card carries `shadowInset` points of clear padding on every side, and
+/// `HoverCardPlacement` positions the *card* inside that margin rather than the
+/// panel.
 struct HoverCardView: View {
     let model: HoverCardModel
 
     private static let maxWidth: CGFloat = 320
     private static let cornerRadius: CGFloat = 9
+    /// Transparent margin around the card, so its own shadow has room to draw
+    /// inside a panel that is otherwise sized exactly to the card.
+    ///
+    /// `nonisolated` because `View` conformance infers whole-type `@MainActor`
+    /// isolation onto even a constant, and the placement geometry that reads it
+    /// is a pure function with no actor of its own.
+    nonisolated static let shadowInset: CGFloat = 10
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -278,11 +383,18 @@ struct HoverCardView: View {
         .padding(.vertical, 10)
         .frame(maxWidth: Self.maxWidth, alignment: .leading)
         .fixedSize(horizontal: false, vertical: true)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
-        .overlay(
+        .background {
+            // The shadow rides on the background shape rather than on the
+            // composed card, so it traces the rounded rect instead of haloing
+            // every glyph. Dark and soft in both appearances: over a
+            // user-themed terminal the material alone can land too close to
+            // whatever is behind it, and this is the only thing separating
+            // them now that there is no border.
             RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
-        )
+                .fill(.thinMaterial)
+                .shadow(color: .black.opacity(0.28), radius: 5, x: 0, y: 2)
+        }
+        .padding(Self.shadowInset)
     }
 
     @ViewBuilder
@@ -371,7 +483,12 @@ private final class HoverCardPanel: NSPanel {
         isOpaque = false
         backgroundColor = .clear
         level = .popUpMenu
-        hasShadow = true
+        // The card draws its own shadow (see `HoverCardView`). AppKit's window
+        // shadow is sized for a window, so on a tooltip-sized panel it reads as
+        // a thick gray edge — and it is computed by the window server from the
+        // window's alpha mask, which on this shared, resized, SwiftUI-hosted
+        // panel is whatever the *previous* card left behind.
+        hasShadow = false
         ignoresMouseEvents = true
         isMovableByWindowBackground = false
         isReleasedWhenClosed = false
@@ -420,9 +537,6 @@ final class HoverCardController {
     /// Comfortably longer than the warm-grace window so a click can't be
     /// immediately undone by a lingering warm hover.
     private static let interactionSuppression: TimeInterval = 0.4
-
-    /// Gap between the anchor's edge and the card.
-    private static let anchorGap: CGFloat = 5
 
     init(timing: HoverCardTiming = .standard) {
         self.timing = timing
@@ -529,26 +643,19 @@ final class HoverCardController {
         position(panel: panel, relativeTo: anchor)
     }
 
-    /// Below the anchor, leading-aligned; flips above when there is no room
-    /// underneath, and clamps horizontally into the screen's visible frame.
+    /// Hands the anchor's geometry to `HoverCardPlacement`, which owns the rule.
     private func position(panel: HoverCardPanel, relativeTo anchor: NSView) {
         guard let window = anchor.window else { return }
         let anchorFrameInWindow = anchor.convert(anchor.bounds, to: nil)
         let anchorFrame = window.convertToScreen(anchorFrameInWindow)
-        let size = panel.hostingView.fittingSize
-
-        var origin = NSPoint(
-            x: anchorFrame.minX,
-            y: anchorFrame.minY - size.height - Self.anchorGap
+        let frame = HoverCardPlacement.panelFrame(
+            anchor: anchorFrame,
+            panelSize: panel.hostingView.fittingSize,
+            shadowInset: HoverCardView.shadowInset,
+            window: window.frame,
+            screenVisibleFrame: (window.screen ?? NSScreen.main)?.visibleFrame
         )
-        if let screen = window.screen ?? NSScreen.main {
-            let visible = screen.visibleFrame
-            if origin.y < visible.minY {
-                origin.y = anchorFrame.maxY + Self.anchorGap
-            }
-            origin.x = min(max(origin.x, visible.minX + 4), visible.maxX - size.width - 4)
-        }
-        panel.setFrame(NSRect(origin: origin, size: size), display: true)
+        panel.setFrame(frame, display: true)
     }
 
     private func hide() {

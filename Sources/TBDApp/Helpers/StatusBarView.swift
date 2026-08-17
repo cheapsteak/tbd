@@ -189,8 +189,9 @@ struct StatusBarView: View {
         return (chips, selected.overflow)
     }
 
-    /// What a chip's hover overlay says: the PR's title, its number, the state
-    /// and **when that state was read**.
+    /// What a chip's hover overlay says: one headline naming the PR, its state
+    /// and its title, the age of that reading beneath it, and what the click
+    /// under the pointer will do.
     ///
     /// The age is not decoration. `PRStatus` is a display-tier cache and was
     /// measured reading "Ready to merge" for pull requests merged days earlier,
@@ -198,8 +199,6 @@ struct StatusBarView: View {
     /// `PRFreshness`, shared with the toolbar and sidebar so the three cannot
     /// describe one observation differently.
     ///
-    /// A chip with no observed title renders no title line, and one with no
-    /// observed status still gets its number and an honest "unknown time".
     /// Pure, so the whole overlay can be asserted without a panel.
     ///
     /// `untrackTarget` says the pointer is over the icon slot *while that slot
@@ -210,27 +209,18 @@ struct StatusBarView: View {
         _ chip: PRChip, untrackTarget: Bool = false, now: Date = Date()
     ) -> HoverCardModel {
         var model = HoverCardModel()
-        if let title = chip.title?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !title.isEmpty {
-            model.title = title
-        }
+        model.title = chipHeadline(chip)
+        // Age first, then whether the last attempt to reconfirm it failed —
+        // composed by `PRFreshness` itself, not restated here, so this cannot
+        // drift from the toolbar and sidebar. It sits under the headline rather
+        // than beside the state, because it dates the whole reading.
+        model.titleCaption = PRFreshness.clauses(
+            observedAt: chip.observedAt, observation: chip.observation, now: now
+        ).joined(separator: " · ")
         model.rows = [
-            HoverCardRow(label: "PR", value: chip.label),
-            HoverCardRow(
-                label: "State",
-                // The status's own words when it has any, exactly as the
-                // overflow menu and the toolbar dropdown render them.
-                value: chip.reason ?? unobservedStateValue,
-                // Age first, then whether the last attempt to reconfirm it
-                // failed — composed by `PRFreshness` itself, not restated here,
-                // so this cannot drift from the toolbar and sidebar.
-                caption: PRFreshness.clauses(
-                    observedAt: chip.observedAt, observation: chip.observation, now: now
-                ).joined(separator: " · ")
-            ),
-            // Last, and always present: the chip has two click targets in about
-            // twenty points of width, and nothing else on screen says which one
-            // the pointer is on. The alternate wording rides along so the row is
+            // Always present: the chip has two click targets in about twenty
+            // points of width, and nothing else on screen says which one the
+            // pointer is on. The alternate wording rides along so the row is
             // laid out for both sentences at once — see `HoverCardRow`.
             HoverCardRow(
                 value: chipActionValue(untrackTarget: untrackTarget),
@@ -239,6 +229,34 @@ struct StatusBarView: View {
             )
         ]
         return model
+    }
+
+    /// The overlay's headline: `PR#412 (Checks failing) - Fix the login timeout`.
+    ///
+    /// One line rather than a labelled grid. The three facts are read together —
+    /// which PR, what state, what it is about — and a two-column table of them
+    /// spent most of a card's width on the words "PR" and "State" saying what
+    /// `#412` and "Checks failing" already say.
+    ///
+    /// Everything but the number is optional and degrades by *omission*: a
+    /// synthetic chip has no title, a never-polled binding has no state, and
+    /// neither an empty `()` nor a dangling separator may appear for either.
+    /// The state is deliberately not tinted with the PR palette — the dot the
+    /// pointer is on already carries that color, and this card colors words
+    /// only for a caution the reader must not miss.
+    nonisolated static func chipHeadline(_ chip: PRChip) -> String {
+        var headline = "PR\(chip.label)"
+        // The status's own words when it has any, exactly as the overflow menu
+        // and the toolbar dropdown render them.
+        if let state = chip.reason?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !state.isEmpty {
+            headline += " (\(state))"
+        }
+        if let title = chip.title?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !title.isEmpty {
+            headline += " - \(title)"
+        }
+        return headline
     }
 
     /// What the overlay's action row says the click under the pointer will do.
@@ -255,10 +273,6 @@ struct StatusBarView: View {
 
     nonisolated static let chipOpenActionValue = "Click to open this PR on GitHub"
     nonisolated static let chipUntrackActionValue = "Click to stop tracking this PR in this worktree"
-
-    /// What the overlay's state row says for a binding nothing has polled yet.
-    /// Named so a test can pin it without restating the copy.
-    nonisolated static let unobservedStateValue = "No status observed yet"
 
     /// Tooltip and accessibility label for a chip's untrack target — the xmark
     /// the status dot becomes on hover. It names the worktree scope explicitly

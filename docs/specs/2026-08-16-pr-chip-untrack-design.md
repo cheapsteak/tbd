@@ -276,6 +276,29 @@ Resting on a chip shows an overlay carrying the PR **number, title, state, and
 the age of that observation**. The title is the whole point: it is what turns
 `#21156` into something a person can decide about.
 
+Those first three are **one headline**, not a labelled grid:
+
+```
+PR#21485 (Merged) - longdesk relay: adding a GitHub event no longer means
+redeploying the team-shared relay
+```
+
+They are read together — which PR, what state, what it is about — and a
+two-column table of them spent most of the card's width on the words "PR" and
+"State" saying what `#21485` and "Merged" already say. Everything but the number
+is optional and degrades by **omission**: no state gives `PR#21485 - <title>`,
+no title gives `PR#21485 (Merged)`, neither gives `PR#21485`, and no combination
+leaves an empty `()` or a separator with nothing after it. The headline wraps
+inside the card's width rather than widening it.
+
+The state is **not** tinted with the PR palette. The status dot the pointer is
+resting on already carries that color, and this card colors words only for a
+caution the reader must not miss — a second colored copy of a fact three points
+away would compete with the title for the eye.
+
+The age is a muted caption directly under the headline. It dates the whole
+reading rather than the state alone, which is what it always did.
+
 **No description.** GitHub's GraphQL cannot return a truncated body — `body` and
 `bodyText` come whole — so any excerpt would be trimmed only after the bytes had
 crossed the wire, on every PR, on every poll, on a fleet that polls
@@ -300,9 +323,9 @@ terms as `headBranch` and `baseRef`: **nil means "not observed", never
 "cleared"**, so a transient fetch failure cannot blank a title that is already
 on screen.
 
-A synthetic binding has no title, and the overlay renders without one rather
+A synthetic binding has no title, and the headline ends after the state rather
 than fabricating a placeholder — number, state and age are still worth showing,
-and the missing line is honest about a status that was hydrated rather than
+and the missing half is honest about a status that was hydrated rather than
 polled.
 
 The overlay states the observation's age because the cached `PRStatus` is
@@ -311,10 +334,10 @@ earlier. Every surface that renders it must render its age with it.
 
 #### The overlay also says what the click will do
 
-A last row names the action under the pointer: *Click to open this PR on GitHub*
-anywhere on the chip, *Click to stop tracking this PR in this worktree* while
-the pointer is on the xmark. The sentences describe the gesture and nothing
-else — the number and the state are on the rows above them — and the untrack
+The card's one row names the action under the pointer: *Click to open this PR on
+GitHub* anywhere on the chip, *Click to stop tracking this PR in this worktree*
+while the pointer is on the xmark. The sentences describe the gesture and
+nothing else — the number and the state are in the headline above — and the untrack
 half names the worktree scope for the same reason the slot's label does: what is
 removed is an association TBD inferred, not the pull request.
 
@@ -327,6 +350,32 @@ pinning the row — and with it the card — to the larger of the two in both ax
 The peer is a general property of an overlay row rather than something the chip
 does for itself, because any row whose text swaps while a card is up has this
 problem.
+
+#### Where the overlay sits, and how it is separated from the terminal
+
+Hover cards go **below their anchor unless the card would leave the anchor's own
+window**, and above it when it would. Screen room is the wrong test on its own:
+the status bar is at the bottom edge of the window with a whole desktop beneath
+it, so a card placed by screen room alone drops out of the window and lands on
+the very strip it describes. Bounding the placement by the window keeps every
+card over the surface that summoned it, and leaves anchors with room beneath
+them — tab-bar items, sidebar rows — exactly where they were. The window is a
+preference rather than a hard constraint: where neither side fits inside it, the
+screen decides, so the rule can never place a card worse than screen room alone
+would. The gap clears the padding a bar puts around its content, not merely the
+anchored control, so the strip stays readable under a flipped card.
+
+Separation from what is behind the card is a material fill plus a **small shadow
+the card draws itself**, the way a menu or a popover separates — no border. The
+hosting panel's AppKit window shadow is off: it is sized for a window, so on a
+tooltip-sized panel it reads as a thick gray edge, and it spills far enough past
+the card to wash out the strip the card is anchored to. Drawing the shadow in
+the card bounds it to a radius chosen for this box, and it is recomputed with
+the content rather than by the window server from a shape that may still be the
+previous card's — the panel is shared across every anchor in the app and resized
+on each show. The cost is a transparent margin inside the panel for the shadow
+to fall into, which the placement geometry subtracts so the *card*, not the
+panel, is what sits a gap away from the anchor.
 
 ## Testing
 
@@ -361,13 +410,20 @@ problem.
   omitting `title` leaves the stored value untouched rather than clearing it.
 - Title round-trips through the row, the RPC, and back.
 - Overlay content for a binding with a title, without one, and with no observed
-  status.
+  status: the headline's four combinations of state and title, none of them
+  leaving an empty `()` or a trailing separator, and the age caption present in
+  every one — including the "unknown time" phrasing for a binding with no stamp.
 - The overlay's action row: the untrack sentence while the icon slot is the
-  target and the open sentence otherwise; the rest of the card — title, PR row,
-  state row and age — byte-identical between the two, with the two models still
-  unequal so the swap actually reaches the panel; each state reserving the
-  other's sentence; and both sentences surviving a chip with no title and one
-  with no observed status.
+  target and the open sentence otherwise; the headline and the age caption
+  byte-identical between the two, with the two models still unequal so the swap
+  actually reaches the panel; each state reserving the other's sentence; and
+  both sentences surviving a chip with no title and one with no observed status.
+- Placement: an anchor with window room below keeps its card below; one at the
+  bottom of its window flips above even though the screen has room beneath it,
+  and clears the bar's padding rather than only the anchor; a window too short
+  for either side falls back to the screen rule; cards clamp into the screen's
+  visible frame on both horizontal edges and when taller than the screen; and
+  the panel wraps the card by exactly one shadow inset on every side.
 
 ## Rejected alternatives
 
