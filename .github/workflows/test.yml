@@ -531,11 +531,13 @@ jobs:
           path: /tmp/retry-metrics.jsonl
           if-no-files-found: warn
 
-      # `if: always()` is the whole point: a passing run's XML tells nobody
-      # anything, and a failing run's is the only machine-readable account of
-      # what failed. Without it the artifact would exist exactly when it is
-      # useless. `warn` on absence, matching the metrics upload above — a
-      # missing file means the wiring broke and that must be visible.
+      # `if: always()` is the whole point, and both outcomes need the XML. A
+      # failing run's is the only machine-readable account of what failed. A
+      # passing run's carries the test populations the valve sums to print
+      # `Test run with N tests`, which six floor checks require before they will
+      # believe a run happened at all — without it a green remote verdict reads
+      # as a truncated suite. `warn` on absence, matching the metrics upload
+      # above: a missing file means the wiring broke and that must be visible.
       - name: Upload xUnit results
         if: always()
         uses: actions/upload-artifact@v4

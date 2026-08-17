@@ -142,6 +142,19 @@ Swift Testing writers, so the reader globs and merges whatever arrived. Fewer
 files than passes is normal rather than an error: a run that died early produces
 only what it reached.
 
+**A passing remote run must also state how many tests ran.** Six places decide
+whether a run is trustworthy by grepping its output for `Test run with N tests` —
+the pre-push hook, the nightly stress judge, and three floors in `test.yml` —
+because a suite that compiles and runs nothing otherwise reports success. A
+remote verdict that omits the line is read as a truncated run and rejected, so
+the driver sums the `tests=` populations across the merged results and prints it
+in that exact wording.
+
+The count is never invented. A pass whose results are missing, unreadable, or
+silent about their population refuses rather than emitting a number, because six
+floor checks would take that number as evidence. The cost of refusing is one
+local re-run.
+
 **Scraping the job log is rejected, on evidence.** A single failed `test.yml` run
 produces **5.3 MB across 32,228 lines** — far past what any agent can read — in
 which each line carries a job/step/timestamp prefix and ANSI codes, several
@@ -172,18 +185,36 @@ committing more often, so the constraint is cheap here.
 
 ## Which ref gets pushed
 
-`test.yml` triggers on `pull_request`, and on `push` only to `main`. Two cases
-follow:
+The valve pushes the commit to `preflight/<branch>` and never to the branch
+itself. That rule is unconditional, and the namespace is enforced at the one
+function that moves a ref, so no upstream choice can publish a branch.
 
-- **No PR open** — push the branch. Nothing fires, so the ref is inert already and
-  the dispatch is the only run.
-- **PR open** — push a separate inert ref instead. A push to the PR branch fires
-  `pull_request_target: synchronize`, which runs the claude-review fan-out on
-  every iteration. GitHub minutes are free; Claude quota is not, and it is the
-  only metered resource left in this loop.
+Three separate hazards make the branch unpushable, and the first two are why the
+rule takes no exceptions:
 
-`test.yml` gains a `workflow_dispatch` trigger. It has none today, so nothing can
-currently ask for a run on demand.
+- **A push to `main` is admitted.** `main` never has an open PR, so any rule of
+  the form "push the branch when no PR exists" resolves to `main` on `main` and
+  fast-forwards it. Branch protection does not stop this: `enforce_admins` is
+  false and there are no push restrictions, so the owner's push lands, firing the
+  `push: branches:[main]` CI and the Pages deploy with commits nobody reviewed.
+- **It bypasses the gate that called it.** `scripts/git-hooks/pre-push` runs the
+  suite to decide whether a push may proceed. A valve that publishes the branch
+  during that run has already shipped the commits, whatever verdict follows.
+- **A bare branch has no reconciler.** Refs under `preflight/` are swept; a
+  branch pushed to `origin` without a user gesture is not, which is the shape
+  behind this repo's largest measured leak.
+
+Pushing an inert ref also keeps the review gate quiet. A push to a branch with an
+open PR fires `pull_request_target: synchronize` and runs the claude-review
+fan-out on every iteration; GitHub minutes are free, but Claude quota is not, and
+it is the only metered resource in this loop.
+
+Because every pushable ref is a throwaway in a swept namespace, the push is
+always a force-push, and the driver additionally refuses outright when the
+current branch is the repository's default.
+
+`test.yml` gains a `workflow_dispatch` trigger. It has none otherwise, so nothing
+can ask for a run on demand.
 
 ## Placement and flag
 
