@@ -1148,12 +1148,14 @@ test_the_missing_remote_path_check_is_load_bearing() {
   rmfix "$fix"
 }
 
-# MUTATION. Widen the verdict branch to everything and the two fallbacks below
-# it become unreachable: a refusal is adopted as the run's exit status, so a
-# lane that could not go remote reports a failure instead of testing anything.
+# MUTATION. Have the refusal branch adopt the status instead of falling back and
+# a lane that could not go remote reports a failure instead of testing anything.
+# Keyed to the branch's own comment so the mutation is unambiguous about WHICH of
+# the three fallbacks it weakens — they all call the same function.
 test_the_refusal_fallback_is_load_bearing() {
   local fix mutant; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
-  mutant="$(mutant_of "$SCRIPT" 's/^( *)0\|1\)$/\1*)/')"
+  mutant="$(mutant_of "$SCRIPT" \
+    '/A REFUSAL IS NOT A FAILURE/,/;;/ s/fall_back_to_the_local_queue/test_status=$remote_status/')"
   RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC="76 0" FAKE_REMOTE_VERIFY_RC=78
            FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
   run_with_valve "$fix" "$mutant"
@@ -1185,12 +1187,13 @@ test_an_out_of_contract_status_is_a_refusal_not_a_verdict() {
   done
 }
 
-# MUTATION. The same widening as above, seen from the other side: with every
-# status treated as a verdict, a 127 from a mangled interpreter line becomes the
-# test suite's exit code and nothing is ever run.
+# MUTATION. The same weakening one branch over: have the catch-all adopt the
+# status and a 127 from a mangled interpreter line becomes the test suite's exit
+# code with nothing ever run.
 test_the_contract_whitelist_is_load_bearing() {
   local fix mutant; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
-  mutant="$(mutant_of "$SCRIPT" 's/^( *)0\|1\)$/\1*)/')"
+  mutant="$(mutant_of "$SCRIPT" \
+    '/OUTSIDE THE CONTRACT ENTIRELY/,/;;/ s/fall_back_to_the_local_queue/test_status=$remote_status/')"
   RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC="76 0" FAKE_REMOTE_VERIFY_RC=127
            FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
   run_with_valve "$fix" "$mutant"
@@ -1243,15 +1246,23 @@ test_the_fallback_bound_clearing_is_load_bearing() {
 }
 
 # ---------------------------------------------------------------------------
-# 7b. The valve refuses a narrowed run
+# 7b. A narrowed run routes, and its verdict is read by the asymmetry
 #
-# Nothing on the dispatch carries a filter, so a routed run is always the whole
-# suite. GREEN whole-suite is still sound for a filtered caller — the whole
-# suite passing implies their subset did — but RED is not: it would name
-# failures in tests the caller deliberately excluded as this run's result. The
-# refusal is therefore made BEFORE the bound is forwarded; deciding it after the
-# run would be too late, because `swift-safe` would already have answered 76 for
-# a yield the run has since decided it cannot use.
+# Nothing on the dispatch carries a filter, so a routed run is always the WHOLE
+# suite — and the two outcomes do not transfer equally to a caller who asked for
+# less:
+#
+#   GREEN transfers. Every test passed, so every subset of them passed. Adopted,
+#      with one line so the whole-suite test count is not read as the subset's.
+#   RED does not. The failures may lie entirely outside what the caller selected,
+#      so the narrowed suite is re-run locally and the LOCAL verdict reported.
+#
+# WHY THE CASES BELOW ASSERT ROUTING RATHER THAN REFUSAL. Refusing a narrowed run
+# outright needs no interpretation, but it turns the valve off for every real
+# caller: `scripts/git-hooks/pre-push` narrows BOTH of its passes (`--skip
+# '^TBDDaemonLiveTests\.'` and `--filter '^TBDDaemonLiveTests\.'`), the nightly
+# stress harness forwards a filter, and four of five live queued test lanes were
+# `--filter` runs.
 # ---------------------------------------------------------------------------
 
 test_narrows_the_suite_recognises_both_spellings() {
@@ -1275,50 +1286,143 @@ test_narrows_the_suite_recognises_both_spellings() {
   assert_nonzero "a regex mentioning a flag name does not narrow" "$?"
 }
 
-test_a_narrowed_run_is_never_routed_remotely() {
+# NARROWED + GREEN — the sound direction, adopted. The whole suite passing
+# implies the caller's subset passed, so there is nothing to re-run; only the
+# test COUNT fails to transfer, which is what the note exists for.
+test_a_narrowed_run_adopts_a_green_whole_suite_verdict() {
   local fix; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
   RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC=76 FAKE_REMOTE_VERIFY_RC=0
            FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
   run_with_valve "$fix" "$SCRIPT" --filter '^FooTests\.'
   RUN_ENV=()
-  assert_eq "nothing is dispatched" "0" "$(remote_verify_dispatches "$fix")"
-  assert_contains "no bound is forwarded, so there is no yield to strand" \
-    "$(dump_of "$fix")" "TBD_SWIFT_QUEUE_YIELD_SECONDS=<unset>"
+  assert_ok "a green whole-suite run passes the narrowed run" "$RUN_RC"
+  assert_eq "it really was dispatched" "1" "$(remote_verify_dispatches "$fix")"
+  assert_eq "and nothing was re-run locally" "1" "$(swift_invocations "$fix")"
+  assert_contains "the bound is forwarded like any other run" "$(dump_of "$fix")" \
+    "TBD_SWIFT_QUEUE_YIELD_SECONDS=$DEFAULT_YIELD_SECONDS"
   assert_contains "the filter still reaches swift test" "$(dump_of "$fix")" \
     "argv: test --filter"
-  assert_contains "and the decision is stated once" "$RUN_OUT" \
-    "narrowing arguments present"
+  assert_contains "and the count is flagged as whole-suite" "$RUN_OUT" \
+    "the remote run was the WHOLE suite"
   rmfix "$fix"
 }
 
-# The other side of the branch: with no narrowing argument the same fixture
-# routes. Without this the case above would pass against a valve that never
-# routes at all.
-test_an_unnarrowed_run_still_routes() {
+# NARROWED + RED — unattributable, so it is not adopted. The local re-run's
+# verdict is the one reported, and this fixture makes the two differ: remote says
+# 1, the local re-run says 3, and 3 is what comes out.
+test_a_narrowed_run_reports_the_local_verdict_after_a_red_whole_suite_run() {
   local fix; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
-  RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC=76 FAKE_REMOTE_VERIFY_RC=0
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC="76 3" FAKE_REMOTE_VERIFY_RC=1
+           FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
+  run_with_valve "$fix" "$SCRIPT" --filter '^FooTests\.'
+  RUN_ENV=()
+  assert_eq "the LOCAL verdict is reported, not the remote 1" "3" "$RUN_RC"
+  assert_eq "the narrowed suite was re-run locally" "2" "$(swift_invocations "$fix")"
+  assert_contains "and the re-run is still narrowed" "$(dump_of "$fix")" \
+    "argv: test --filter"
+  assert_contains "the reason is stated" "$RUN_OUT" "cannot"
+  assert_contains "and names what happened" "$RUN_OUT" "remote WHOLE-SUITE run failed"
+  assert_contains "the re-run carries no yield bound" "$(dump_of "$fix")" \
+    "TBD_SWIFT_QUEUE_YIELD_SECONDS=<unset>"
+  rmfix "$fix"
+}
+
+# The same shape when the local re-run PASSES: a red whole-suite verdict whose
+# failures were all outside the caller's subset must not fail the caller's run.
+test_a_narrowed_run_goes_green_when_the_local_rerun_passes() {
+  local fix; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC="76 0" FAKE_REMOTE_VERIFY_RC=1
+           FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
+  run_with_valve "$fix" "$SCRIPT" --skip '^TBDDaemonLiveTests\.'
+  RUN_ENV=()
+  assert_ok "failures outside the subset do not fail the narrowed run" "$RUN_RC"
+  assert_eq "the narrowed suite was re-run locally" "2" "$(swift_invocations "$fix")"
+  rmfix "$fix"
+}
+
+# UNNARROWED + RED — still the verdict, still adopted, still no re-run. This is
+# the branch the narrowed cases above must be distinguished FROM.
+test_an_unnarrowed_run_still_adopts_a_red_verdict() {
+  local fix; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC="76 0" FAKE_REMOTE_VERIFY_RC=1
            FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
   run_with_valve "$fix" "$SCRIPT" --parallel -j 2
   RUN_ENV=()
-  assert_ok "an unnarrowed run takes the remote verdict" "$RUN_RC"
-  assert_eq "and dispatches exactly once" "1" "$(remote_verify_dispatches "$fix")"
-  assert_missing "nothing is said about narrowing" "$RUN_OUT" "narrowing arguments present"
+  assert_eq "a red remote run fails an unnarrowed run" "1" "$RUN_RC"
+  assert_eq "and nothing is re-run locally" "1" "$(swift_invocations "$fix")"
+  assert_missing "nothing is said about attribution" "$RUN_OUT" "WHOLE-SUITE run failed"
+  assert_missing "nor about a whole-suite count" "$RUN_OUT" "was the WHOLE suite"
   rmfix "$fix"
 }
 
-# MUTATION. Stop recognising narrowing arguments and a `--filter`ed lane routes
-# to a whole-suite remote run, whose red verdict would name tests it excluded.
-test_the_narrowing_refusal_is_load_bearing() {
+# MUTATION, AND THE ONE THAT MATTERS MOST HERE. With `narrows_the_suite` never
+# recognising anything, a `--filter`ed lane adopts a whole-suite failure as its
+# own verdict — naming tests it deliberately excluded, which is the exact wrong
+# answer this interpretation exists to prevent.
+test_the_narrowed_verdict_discrimination_is_load_bearing() {
   local fix mutant; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
   mutant="$(mutant_of "$SCRIPT" 's/if narrows_the_suite .*; then/if false; then/')"
-  RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC=76 FAKE_REMOTE_VERIFY_RC=1
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC="76 3" FAKE_REMOTE_VERIFY_RC=1
            FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
   run_with_valve "$fix" "$mutant" --filter '^FooTests\.'
   RUN_ENV=()
-  assert_eq "without the refusal a filtered lane is dispatched whole-suite" "1" \
-    "$(remote_verify_dispatches "$fix")"
-  assert_eq "and its red whole-suite verdict fails the filtered run" "1" "$RUN_RC"
+  assert_eq "without the discrimination the remote 1 is adopted" "1" "$RUN_RC"
+  assert_eq "and the narrowed suite is never re-run" "1" "$(swift_invocations "$fix")"
+  assert_missing "with nothing said about attribution" "$RUN_OUT" "WHOLE-SUITE run failed"
   rmfix "$fix"
+}
+
+# The other half of the same mutation: a narrowed GREEN result must be labelled.
+# Without it the caller reads a whole-suite test count as their subset's — which
+# is precisely how a `pre-push` floor stops catching a filter that matched
+# nothing.
+test_the_whole_suite_label_is_load_bearing() {
+  local fix mutant; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  mutant="$(mutant_of "$SCRIPT" 's/if narrows_the_suite .*; then/if false; then/')"
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC=76 FAKE_REMOTE_VERIFY_RC=0
+           FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
+  run_with_valve "$fix" "$mutant" --filter '^FooTests\.'
+  RUN_ENV=()
+  assert_ok "the mutant still passes (the label is not a correctness gate)" "$RUN_RC"
+  assert_missing "but the whole-suite count goes unlabelled" "$RUN_OUT" \
+    "the remote run was the WHOLE suite"
+  rmfix "$fix"
+}
+
+# A NARROWED RUN'S 78 IS STILL JUST A REFUSAL. The interpretation only touches 0
+# and 1; a precondition that refused falls back exactly as it does unnarrowed,
+# and must not pick up the attribution message.
+test_a_narrowed_run_falls_back_on_a_refusal_like_any_other() {
+  local fix; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC="76 0" FAKE_REMOTE_VERIFY_RC=78
+           FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
+  run_with_valve "$fix" "$SCRIPT" --filter '^FooTests\.'
+  RUN_ENV=()
+  assert_ok "a refusal still falls back" "$RUN_RC"
+  assert_eq "with one local re-run" "2" "$(swift_invocations "$fix")"
+  assert_missing "and no attribution message" "$RUN_OUT" "WHOLE-SUITE run failed"
+  rmfix "$fix"
+}
+
+# THE FLOORS ARE MINIMUMS, WHICH IS WHY ADOPTING A WHOLE-SUITE GREEN IS SAFE FOR
+# `pre-push`. Both of its passes narrow, and the whole suite is a superset of
+# each, so a whole-suite count cannot fall below a count the narrowed pass would
+# have produced. Pinned here because the reasoning is what licenses the adoption:
+# were the check a ceiling, or an equality, a whole-suite count would trip it.
+test_pre_push_floors_are_minimums_a_superset_cannot_trip() {
+  local hook="$HERE/git-hooks/pre-push"
+  local body; body="$(cat "$hook" 2>/dev/null)"
+  assert_contains "the count check is a less-than against the floor" "$body" \
+    '[ "$count" -lt "$floor" ]'
+  assert_missing "and never a greater-than" "$body" '"$count" -gt'
+  assert_missing "nor an equality" "$body" '"$count" -eq "$floor"'
+  # Both passes narrow, so both are subsets of the whole suite.
+  assert_contains "the fast pass narrows with --skip" "$body" "--skip '^TBDDaemonLiveTests"
+  assert_contains "the tier-3 pass narrows with --filter" "$body" "--filter '^TBDDaemonLiveTests"
+  narrows_the_suite --no-fingerprint --parallel -j 2 --skip '^TBDDaemonLiveTests\.'
+  assert_ok "the fast pass is recognised as narrowed" "$?"
+  narrows_the_suite --no-fingerprint --no-parallel --filter '^TBDDaemonLiveTests\.'
+  assert_ok "the tier-3 pass is recognised as narrowed" "$?"
 }
 
 # MUTATION. Stop recognising 76 and the yield is reported as the run's exit

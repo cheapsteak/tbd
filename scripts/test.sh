@@ -183,13 +183,34 @@
 # status outside `{0, 1, 78}` is therefore treated exactly as 78 is, with the
 # status named on the way past.
 #
-# THE VALVE ALSO REFUSES A NARROWED RUN, and that is about soundness rather than
-# capacity. This wrapper forwards `--filter` and friends to `swift test` but the
-# dispatch has no way to carry them, so the remote run is always the whole
-# suite. Green whole-suite would still be sound for a filtered caller — it
-# implies the subset passed — but RED is not: it would report failures from
-# tests the caller deliberately excluded as if they were this run's result. A
-# narrowed run therefore waits for the local slot, and says so once.
+# A NARROWED RUN ROUTES, BUT ITS VERDICT IS READ DIFFERENTLY — AND THE
+# ASYMMETRY IS THE WHOLE MECHANISM. This wrapper forwards `--filter` and friends
+# to `swift test`, and the dispatch has no way to carry them, so a remote run is
+# always the WHOLE suite. The two outcomes are not equally transferable:
+#
+#   GREEN whole-suite IS sound for a narrowed caller. If every test passed, then
+#      every subset of them passed, whatever the caller selected. It is adopted,
+#      with one line saying the run was the whole suite so nobody reads its test
+#      count as their subset's.
+#   RED whole-suite IS NOT. The failures may lie entirely outside what the
+#      caller selected, and reporting them as this run's result would name tests
+#      it deliberately excluded. The narrowed suite is re-run locally instead and
+#      the LOCAL verdict is reported.
+#
+# WHY NOT JUST REFUSE TO ROUTE A NARROWED RUN, which would need no interpretation
+# at all: because it turns the valve off for every real caller. `pre-push`
+# narrows both of its passes, the nightly stress harness forwards a filter, and
+# four of five live queued test lanes were `--filter` runs. Interpreting the
+# verdict keeps all of them eligible, and costs a local re-run only on red — the
+# case that was going to run locally anyway.
+#
+# ONE CONSEQUENCE WORTH KNOWING, because it is a real loss and not a wash.
+# `pre-push` gives each pass a test-count floor, and a floor is a minimum, so a
+# whole-suite count clears a narrowed pass's floor for free — including the
+# tier-3 pass whose floor of 35 exists to catch `--filter` matching nothing. A
+# renamed live-suite type would slip past that pass when its verdict came from a
+# whole-suite remote run. The floors still catch a collapse; they stop catching a
+# vacuous filter. The follow-up below is what fixes it properly.
 #
 # TESTED BY `scripts/test.test.sh`, which drives the guards below against
 # fixture directories with a stub `swift` — no build, no real `~/tbd`. Every
@@ -304,24 +325,27 @@ valid_yield_bound() {
   return 0
 }
 
-# THE ARGUMENTS THAT REDUCE THE SUITE, AND WHY THE VALVE WILL NOT ROUTE PAST
-# THEM. Nothing on the dispatch carries a filter, so a routed run is always the
-# whole suite. For a filtered caller that makes a GREEN remote result sound — the
-# whole suite passing implies their subset did — and a RED one a false statement
-# about their run, naming failures in tests they deliberately excluded. Measured
-# contention says filtered runs are the common case rather than an exotic one:
-# of the seven queued lanes in the two snapshots behind the design, three were
-# `swift test --filter …`. So this is refused rather than tolerated.
+# THE ARGUMENTS THAT REDUCE THE SUITE. This does not decide WHETHER to route —
+# a narrowed run routes like any other — it decides how the answer is read. A
+# routed run is always the whole suite, and only its GREEN answer transfers to a
+# caller who asked for less (whole suite passed ⟹ every subset passed). Its red
+# answer does not, so a narrowed caller re-runs locally to attribute it. See
+# "A NARROWED RUN ROUTES" above.
 #
-# FOLLOW-UP, AND THE REASON THIS RESTRICTION IS TEMPORARY: give the dispatch a
-# filter input, have the workflow forward it to `swift test`, and route a
-# narrowed run against the same narrowing. Then the verdict describes the
-# caller's run again and this refusal can go away.
+# FOLLOW-UP: pass the caller's narrowing arguments to the dispatch, so a narrowed
+# run gets a narrowed remote verdict and there is nothing left to interpret. That
+# input is attacker-adjacent text — a filter is a regex that may legally contain
+# `$`, backticks and `;` — so it must be ALLOWLISTED against these same names and
+# handed to the workflow through `env:`, never interpolated into a `run:` body.
+# `.github/workflows/preflight-cleanup.yml` already does exactly that with a
+# branch name, and the comment there says why.
 #
-# The list is deliberately allowed to be over-broad. A false positive costs one
-# lane a trip through the valve — the optimisation not firing — while a false
-# negative reports failures the caller excluded, so anything that plausibly
-# reduces what runs belongs here.
+# The list is deliberately allowed to be over-broad, and the new reading makes
+# that cheaper than it was. A false positive now costs one local re-run, and only
+# on a red remote verdict — the case that was going to run locally anyway. A
+# false negative adopts a whole-suite failure as a narrowed run's result, naming
+# tests the caller excluded. So anything that plausibly reduces what runs belongs
+# here.
 SUITE_NARROWING_ARGS=(--filter --skip --disable-xctest --disable-swift-testing)
 
 narrows_the_suite() {
@@ -378,6 +402,7 @@ YIELDED_THE_QUEUE=76
 REMOTE_VERIFY_REFUSED=78
 
 remote_verify_enabled=0
+caller_narrowed=0
 fenced_env=()
 if [ "${TBD_REMOTE_VERIFY:-}" = "1" ]; then
   remote_verify_enabled=1
@@ -389,21 +414,15 @@ if [ "${TBD_REMOTE_VERIFY:-}" = "1" ]; then
     echo "         indistinguishable from a failing test suite." >&2
     exit 64
   fi
-  # DECIDED BEFORE THE BOUND IS FORWARDED, NOT AFTER THE RUN. Refusing later
-  # would be too late in the only way that matters: the bound would already have
-  # gone to `swift-safe`, which would answer 76 for a yield this run has now
-  # decided it cannot use — and 76 is not a test result. Turning the valve off
-  # here means no bound is forwarded, so there is no yield to strand.
+  # ASKED ONCE, HERE, WHILE THE ARGUMENTS ARE IN FRONT OF US, and consulted
+  # later when the remote answer arrives. It gates nothing: a narrowed run
+  # forwards the bound and routes exactly like any other, because a green
+  # whole-suite verdict is sound for it. What this decides is how a RED answer is
+  # read — see the `case` on `$remote_status` below.
   if narrows_the_suite ${swift_test_args[@]+"${swift_test_args[@]}"}; then
-    echo "test.sh: narrowing arguments present, so this run stays in the local" >&2
-    echo "         queue instead of verifying remotely. The dispatch cannot" >&2
-    echo "         carry a filter, so a remote run is always the whole suite —" >&2
-    echo "         and a red whole-suite verdict would report failures in tests" >&2
-    echo "         this run excluded. See TBD_REMOTE_VERIFY in scripts/test.sh." >&2
-    remote_verify_enabled=0
-  else
-    fenced_env=(TBD_SWIFT_QUEUE_YIELD_SECONDS="$yield_seconds")
+    caller_narrowed=1
   fi
+  fenced_env=(TBD_SWIFT_QUEUE_YIELD_SECONDS="$yield_seconds")
 fi
 
 # Resolved HERE, while `$HOME` and `$TBD_HOME` still hold the caller's real
@@ -680,10 +699,33 @@ if [ "$remote_verify_enabled" -eq 1 ] && [ "$test_status" -eq "$YIELDED_THE_QUEU
   # executable bit, 130 for a Ctrl-C, 2 for a syntax error. Adopting any of them
   # reports a suite that never ran as a suite that failed.
   case "$remote_status" in
-    0|1)
-      # THE REMOTE VERDICT, and the only thing here that is one. A red run has
-      # already printed its failing tests.
-      test_status=$remote_status
+    0)
+      # GREEN TRANSFERS TO EVERY SUBSET. The whole suite passed, so whatever the
+      # caller selected passed with it — the one direction the asymmetry runs in.
+      # The count is the only thing that does not transfer, hence the note.
+      if [ "$caller_narrowed" -eq 1 ]; then
+        echo "test.sh: verified remotely, and the remote run was the WHOLE suite." >&2
+        echo "         Its test count is not this run's narrowed subset — a green" >&2
+        echo "         whole suite implies the subset passed, which is why the" >&2
+        echo "         result is adopted." >&2
+      fi
+      test_status=0
+      ;;
+    1)
+      # RED DOES NOT TRANSFER. For an unnarrowed caller this is simply the
+      # verdict, with its failing tests already printed. For a narrowed one the
+      # failures may lie entirely outside what was selected, so adopting them
+      # would name tests this run excluded; the narrowed suite is re-run locally
+      # to get a verdict that describes what was asked for.
+      if [ "$caller_narrowed" -eq 1 ]; then
+        echo "test.sh: the remote WHOLE-SUITE run failed, and its failures cannot" >&2
+        echo "         be attributed to this narrowed run — they may lie entirely" >&2
+        echo "         outside it. Re-running the narrowed suite locally, and" >&2
+        echo "         reporting THAT verdict." >&2
+        fall_back_to_the_local_queue
+      else
+        test_status=1
+      fi
       ;;
     "$REMOTE_VERIFY_REFUSED")
       # A REFUSAL IS NOT A FAILURE. The remote path named its condition on
