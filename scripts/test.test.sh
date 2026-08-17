@@ -98,6 +98,19 @@ mkfix() {
   cat > "$d/bin/fake-swift" <<'STUB'
 #!/usr/bin/env bash
 # Stands in for `swift`, exec'd by scripts/swift-safe from inside the fence.
+#
+# IT COUNTS ITS INVOCATIONS AND CAN VERDICT EACH ONE DIFFERENTLY. The remote
+# verification valve's fallback runs the fenced invocation a SECOND time, so a
+# stub with one fixed exit code cannot express "yielded the queue, then passed
+# locally". FAKE_SWIFT_RC is a space-separated list indexed by invocation, with
+# the last value repeating for any run beyond its length — so an unset or
+# single value behaves exactly as it always has.
+#
+# The dump is still OVERWRITTEN each time, so it describes the LAST invocation.
+# That is what the fallback cases assert against: the re-run must be fenced
+# identically and must NOT carry the yield bound.
+printf 'invocation\n' >> "$FAKE_SWIFT_DUMP.count"
+fake_swift_invocation="$(wc -l < "$FAKE_SWIFT_DUMP.count" | tr -d ' ')"
 {
   echo "argv: $*"
   echo "HOME=${HOME:-<unset>}"
@@ -109,6 +122,7 @@ mkfix() {
   echo "TMUX_TMPDIR=${TMUX_TMPDIR:-<unset>}"
   echo "tmux-tmpdir-mode=$(stat -f '%Lp' "${TMUX_TMPDIR:-/nonexistent}" 2>/dev/null)"
   echo "TBD_SWIFT_LOCK_PATH=${TBD_SWIFT_LOCK_PATH:-<unset>}"
+  echo "TBD_SWIFT_QUEUE_YIELD_SECONDS=${TBD_SWIFT_QUEUE_YIELD_SECONDS:-<unset>}"
   for decoy in tbd .claude .codex; do
     echo "decoy-mode $decoy=$(stat -f '%Lp' "$HOME/$decoy" 2>/dev/null)"
   done
@@ -126,7 +140,13 @@ if [ -n "${FAKE_SWIFT_TMUX_SOCKETS:-}" ]; then
   mkdir -p "$socket_dir"
   for socket_name in $FAKE_SWIFT_TMUX_SOCKETS; do : > "$socket_dir/$socket_name"; done
 fi
-exit "${FAKE_SWIFT_RC:-0}"
+# Unquoted on purpose: FAKE_SWIFT_RC is a space-separated list.
+fake_swift_codes=(${FAKE_SWIFT_RC:-0})
+fake_swift_index=$((fake_swift_invocation - 1))
+if [ "$fake_swift_index" -ge "${#fake_swift_codes[@]}" ]; then
+  fake_swift_index=$(( ${#fake_swift_codes[@]} - 1 ))
+fi
+exit "${fake_swift_codes[$fake_swift_index]}"
 STUB
   chmod +x "$d/bin/fake-swift"
   echo "$d"
@@ -152,14 +172,26 @@ STUB
 # sockets throughout — the fingerprint cases would flake, and they would be
 # reporting the machine rather than the wrapper. It doubles as the bogus
 # inherited value the overwrite case asserts against.
+#
+# `RUN_CWD` names the directory to run from, and it is a seam of the same kind:
+# `scripts/test.sh` resolves `scripts/swift-safe`, `scripts/remote-verify.sh`
+# and the fingerprint script relative to `git rev-parse --show-toplevel`, so a
+# case that wants a stub in place of one of them puts the wrapper in a fixture
+# repository rather than asking the wrapper for an override it would never need
+# in production. Empty means "wherever the harness was invoked" — the real repo
+# — which is what every case outside section 7 wants.
+RUN_CWD=""
 run_script() {
   local script="$1" fix="$2"; shift 2
-  RUN_OUT="$(env -u CI -u TBD_HOME -u TBD_SOCKET_PATH -u TBD_CLAUDE_HOST_HOME \
+  RUN_OUT="$(cd "${RUN_CWD:-.}" && env -u CI -u TBD_HOME -u TBD_SOCKET_PATH -u TBD_CLAUDE_HOST_HOME \
                  -u TBD_TEST_CODEX_HOME -u TBD_SWIFT_LOCK_PATH -u CFFIXED_USER_HOME \
                  -u TBD_SWIFT_JOBS -u TBD_SWIFT_LOCK_TIMEOUT_SECONDS \
                  -u TBD_SWIFT_HEARTBEAT_SECONDS -u TBD_SWIFT_ALLOW_ORPHAN \
                  -u FAKE_SWIFT_DISARM -u FAKE_SWIFT_LEAK -u FAKE_SWIFT_RC \
                  -u FAKE_SWIFT_TMUX_SOCKETS \
+                 -u TBD_REMOTE_VERIFY -u TBD_REMOTE_VERIFY_YIELD_SECONDS \
+                 -u TBD_SWIFT_QUEUE_YIELD_SECONDS \
+                 -u FAKE_REMOTE_VERIFY_RC -u FAKE_REMOTE_VERIFY_LOG \
                  ${RUN_ENV[@]+"${RUN_ENV[@]}"} \
                  HOME="$fix/home" \
                  TMPDIR="$fix/tmp" \
@@ -192,6 +224,15 @@ mutant_of() {
 
 dump_of()      { cat "$1/swift-invocation" 2>/dev/null; }
 fake_home_of() { echo "$1/tmp/tbd-test-fakehome.$(id -u)"; }
+
+# How many times the fenced invocation actually ran. The valve's fallback is
+# the only thing that makes this exceed 1, and asserting the COUNT is what
+# distinguishes "fell back and re-ran locally" from "reported the remote
+# verdict" — both of which can end in the same exit status.
+swift_invocations() {
+  local counted="$1/swift-invocation.count"
+  if [ -f "$counted" ]; then wc -l < "$counted" | tr -d ' '; else echo 0; fi
+}
 
 # The fixture's stand-in for the developer's real `/tmp/tmux-<uid>` parent —
 # what the CALLER has in `TMUX_TMPDIR`, and therefore what the fingerprint
@@ -664,7 +705,7 @@ test_fenced_run_takes_the_shared_lock() {
 # taken, so it stays empty.
 test_shared_lock_pin_is_load_bearing() {
   local fix mutant; fix="$(mkfix)"
-  mutant="$(mutant_of "$SCRIPT" '/^  TBD_SWIFT_LOCK_PATH="\$swift_lock_path" \\$/d')"
+  mutant="$(mutant_of "$SCRIPT" '/^ +TBD_SWIFT_LOCK_PATH="\$swift_lock_path" \\$/d')"
   run_script "$mutant" "$fix"
   assert_ok "mutant run is green (the lock is not a correctness gate)" "$RUN_RC"
   local shared="$fix/home/tbd/runtime/swift-build.lock"
@@ -714,7 +755,7 @@ test_tmux_tmpdir_is_fenced_under_the_scratch_root() {
 # socket directory — every server it starts lands in the real one, forever.
 test_tmux_tmpdir_pin_is_load_bearing() {
   local fix mutant; fix="$(mkfix)"
-  mutant="$(mutant_of "$SCRIPT" '/^  TMUX_TMPDIR="\$tmux_tmpdir" \\$/d')"
+  mutant="$(mutant_of "$SCRIPT" '/^ +TMUX_TMPDIR="\$tmux_tmpdir" \\$/d')"
   run_script "$mutant" "$fix"
   local dump; dump="$(dump_of "$fix")"
   assert_contains "without the pin the caller's value survives" "$dump" \
@@ -841,6 +882,310 @@ test_fingerprint_detects_a_leaked_tmux_socket() {
     "THE TEST RUN WROTE INTO ~/tbd, ~/.claude, ~/.codex OR /tmp/tmux-<uid>"
   assert_contains "the entry is named" "$RUN_OUT" "+  <tmux-sockets>/tbd-leaked-socket"
   assert_contains "and the fix is named" "$RUN_OUT" "the fix is TMUX_TMPDIR"
+  rmfix "$fix"
+}
+
+# ---------------------------------------------------------------------------
+# 7. The remote verification valve
+#
+# `scripts/test.sh` is the only caller that opts in. When `TBD_REMOTE_VERIFY=1`
+# it bounds its queueing with `TBD_SWIFT_QUEUE_YIELD_SECONDS`, and `swift-safe`
+# answers 76 — "I gave up my place in the queue, having compiled nothing" — at
+# which point the verdict is fetched from CI instead.
+#
+# TWO EXIT CODES CARRY THE WHOLE DESIGN AND BOTH ARE EASY TO GET WRONG:
+#
+#   76 vs 75.  `swift-safe` exits 75 for a wait that TIMED OUT or was ABANDONED
+#              and 76 only for a yield it was ASKED for. Routing a 75 to CI
+#              would dispatch a run nobody is waiting for; treating a 76 as a
+#              test failure would report a red suite that never compiled.
+#   78 vs 1.   `remote-verify.sh` exits 78 for a REFUSED precondition, which
+#              must fall back to a local run — the valve is an optimisation,
+#              never a gate — and 1 for a remote run that genuinely FAILED,
+#              which is the verdict.
+#
+# AND ONE MISCONFIGURATION LOOKS EXACTLY LIKE A RED SUITE. `swift-safe` rejects
+# a non-positive, nan, inf or non-numeric yield bound with `SystemExit`, which
+# exits 1 — the same code a failing suite returns. `TBD_REMOTE_VERIFY_YIELD_SECONDS=0`
+# is the plausible way to spell "always go remote", so the bound is validated
+# here, before the run starts, and refused with its own code and its own name.
+# ---------------------------------------------------------------------------
+
+# The spec's threshold, sized against remote capacity rather than impatience:
+# two hours of sampled contention put T=60 at ~28 trips an hour against a
+# remote that sustains ~12 runs an hour, while T=300 trips four or five times
+# and fires only on the tail the valve exists for.
+DEFAULT_YIELD_SECONDS=300
+
+# A fixture repository, so the wrapper's own relative `scripts/remote-verify.sh`
+# resolves to a stub. `scripts/test.sh` cd's to `git rev-parse --show-toplevel`
+# before doing anything, so running it from here is all it takes — the real
+# `swift-safe` and fingerprint scripts are symlinked in so every other layer of
+# the wrapper behaves exactly as it does in the real tree. Echoes the repo path.
+mk_repo_fixture() {
+  local fix="$1" repo="$1/repo"
+  mkdir -p "$repo/scripts"
+  git init -q "$repo" >/dev/null 2>&1
+  ln -sf "$HERE/swift-safe" "$repo/scripts/swift-safe"
+  ln -sf "$FINGERPRINT" "$repo/scripts/tbd-home-fingerprint.sh"
+  cat > "$repo/scripts/remote-verify.sh" <<'STUB'
+#!/usr/bin/env bash
+# Stands in for the remote path. It records that it was reached — the valve
+# must consult it exactly once, and only when the queue was yielded — and
+# returns whichever verdict the case is exercising.
+echo "dispatched" >> "${FAKE_REMOTE_VERIFY_LOG:-/dev/null}"
+echo "remote-verify: stub reached" >&2
+exit "${FAKE_REMOTE_VERIFY_RC:-0}"
+STUB
+  chmod +x "$repo/scripts/remote-verify.sh"
+  echo "$repo"
+}
+
+remote_verify_dispatches() {
+  local log="$1/remote-verify-log"
+  if [ -f "$log" ]; then wc -l < "$log" | tr -d ' '; else echo 0; fi
+}
+
+# Run the wrapper from a fixture repo, with the remote path stubbed.
+run_with_valve() {
+  local fix="$1" script="${2:-$SCRIPT}" repo
+  repo="$fix/repo"
+  RUN_CWD="$repo"
+  run_script "$script" "$fix"
+  RUN_CWD=""
+}
+
+test_the_valve_is_off_by_default() {
+  local fix; fix="$(mkfix)"
+  run_wrapper "$fix"
+  assert_ok "a run with the flag unset is green" "$RUN_RC"
+  assert_contains "no yield bound reaches swift-safe" "$(dump_of "$fix")" \
+    "TBD_SWIFT_QUEUE_YIELD_SECONDS=<unset>"
+  rmfix "$fix"
+}
+
+# MUTATION. Force the flag on and the default-off case above is a lie: the same
+# unset environment starts bounding its queueing.
+test_the_valve_flag_is_load_bearing() {
+  local fix mutant; fix="$(mkfix)"
+  mutant="$(mutant_of "$SCRIPT" 's/\[ "\$\{TBD_REMOTE_VERIFY:-\}" = "1" \]/[ "1" = "1" ]/')"
+  run_script "$mutant" "$fix"
+  assert_contains "without the flag check an unset environment yields anyway" \
+    "$(dump_of "$fix")" "TBD_SWIFT_QUEUE_YIELD_SECONDS=$DEFAULT_YIELD_SECONDS"
+  rmfix "$fix"
+}
+
+test_the_valve_forwards_its_default_bound_when_enabled() {
+  local fix; fix="$(mkfix)"
+  RUN_ENV=(TBD_REMOTE_VERIFY=1)
+  run_wrapper "$fix"
+  RUN_ENV=()
+  assert_ok "an enabled run is green" "$RUN_RC"
+  assert_contains "the spec's threshold is forwarded" "$(dump_of "$fix")" \
+    "TBD_SWIFT_QUEUE_YIELD_SECONDS=$DEFAULT_YIELD_SECONDS"
+  rmfix "$fix"
+}
+
+test_the_valve_forwards_an_explicit_bound() {
+  local fix; fix="$(mkfix)"
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 TBD_REMOTE_VERIFY_YIELD_SECONDS=45.5)
+  run_wrapper "$fix"
+  RUN_ENV=()
+  assert_ok "an explicitly bounded run is green" "$RUN_RC"
+  assert_contains "the explicit bound is forwarded verbatim" "$(dump_of "$fix")" \
+    "TBD_SWIFT_QUEUE_YIELD_SECONDS=45.5"
+  rmfix "$fix"
+}
+
+# A bound the flag never uses must not fail a run that never consults it.
+test_a_bad_bound_is_ignored_while_the_valve_is_off() {
+  local fix; fix="$(mkfix)"
+  RUN_ENV=(TBD_REMOTE_VERIFY_YIELD_SECONDS=0)
+  run_wrapper "$fix"
+  RUN_ENV=()
+  assert_ok "a bad bound with the valve off changes nothing" "$RUN_RC"
+  assert_contains "and no bound is forwarded" "$(dump_of "$fix")" \
+    "TBD_SWIFT_QUEUE_YIELD_SECONDS=<unset>"
+  rmfix "$fix"
+}
+
+# THE MEASURED HAZARD. `swift-safe` rejects each of these with SystemExit, which
+# exits 1 — indistinguishable from a red suite. The wrapper must refuse first,
+# with its own code and its own name, and must not start a run at all.
+test_a_bad_bound_fails_loudly_rather_than_as_a_red_suite() {
+  local fix bound
+  for bound in 0 0.0 .0 00 -5 nan inf later ""; do
+    fix="$(mkfix)"
+    RUN_ENV=(TBD_REMOTE_VERIFY=1 TBD_REMOTE_VERIFY_YIELD_SECONDS="$bound")
+    run_wrapper "$fix"
+    RUN_ENV=()
+    assert_eq "a bound of [$bound] exits 64, not 1" "64" "$RUN_RC"
+    assert_contains "and names the variable" "$RUN_OUT" "TBD_REMOTE_VERIFY_YIELD_SECONDS"
+    assert_contains "and says what it must be" "$RUN_OUT" "must be a positive number"
+    assert_eq "and no suite is started" "0" "$(swift_invocations "$fix")"
+    rmfix "$fix"
+  done
+}
+
+# MUTATION. Without the check the same value reaches `swift-safe`, which exits
+# 1 with no mention of the variable the caller actually set — a typo wearing a
+# failing test suite's clothes.
+test_the_bound_validation_is_load_bearing() {
+  local fix mutant; fix="$(mkfix)"
+  mutant="$(mutant_of "$SCRIPT" 's/if ! valid_yield_bound "\$yield_seconds"; then/if false; then/')"
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 TBD_REMOTE_VERIFY_YIELD_SECONDS=0)
+  run_script "$mutant" "$fix"
+  RUN_ENV=()
+  assert_eq "without the check a zero bound exits 1, like a red suite" "1" "$RUN_RC"
+  assert_missing "and nothing names the variable the caller set" "$RUN_OUT" \
+    "TBD_REMOTE_VERIFY_YIELD_SECONDS must"
+  rmfix "$fix"
+}
+
+# The helper on its own, sourced — the table the case above cannot show without
+# running the whole wrapper nine times over.
+test_valid_yield_bound_accepts_only_positive_numbers() {
+  local value
+  for value in 300 60 0.5 .5 1.25 007; do
+    valid_yield_bound "$value"
+    assert_ok "[$value] is a usable bound" "$?"
+  done
+  for value in "" 0 0.0 .0 00 000.000 -1 +1 1e3 nan inf later 1.2.3 . " " "1 2"; do
+    valid_yield_bound "$value"
+    assert_nonzero "[$value] is refused" "$?"
+  done
+}
+
+test_a_yielded_queue_is_verified_remotely() {
+  local fix; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC=76 FAKE_REMOTE_VERIFY_RC=0
+           FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
+  run_with_valve "$fix"
+  RUN_ENV=()
+  assert_ok "a passing remote run is a passing run" "$RUN_RC"
+  assert_eq "the remote path was consulted once" "1" "$(remote_verify_dispatches "$fix")"
+  assert_eq "and the local suite was not re-run" "1" "$(swift_invocations "$fix")"
+  rmfix "$fix"
+}
+
+# 1 is a verdict, not a refusal: the failing tests are already printed by the
+# remote path, so the run reports them rather than starting over locally.
+test_a_failing_remote_run_is_the_runs_verdict() {
+  local fix; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC=76 FAKE_REMOTE_VERIFY_RC=1
+           FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
+  run_with_valve "$fix"
+  RUN_ENV=()
+  assert_eq "a red remote run fails the run" "1" "$RUN_RC"
+  assert_eq "and nothing is re-run locally" "1" "$(swift_invocations "$fix")"
+  rmfix "$fix"
+}
+
+# 78 IS THE ONE THAT MUST NOT FAIL THE RUN. A precondition the remote path
+# cannot meet — a dirty tree, no `gh` — returns this lane to the local queue.
+test_a_refused_precondition_falls_back_to_a_local_run() {
+  local fix; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC="76 0" FAKE_REMOTE_VERIFY_RC=78
+           FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
+  run_with_valve "$fix"
+  RUN_ENV=()
+  assert_ok "a refusal falls back rather than failing" "$RUN_RC"
+  assert_eq "the remote path was consulted once" "1" "$(remote_verify_dispatches "$fix")"
+  assert_eq "and the suite ran locally afterwards" "2" "$(swift_invocations "$fix")"
+  local dump; dump="$(dump_of "$fix")"
+  assert_contains "the fallback carries no yield bound" "$dump" \
+    "TBD_SWIFT_QUEUE_YIELD_SECONDS=<unset>"
+  # THE FENCE MUST NOT DRIFT BETWEEN THE TWO CALLS. That is why the invocation
+  # is a function rather than two copies of the same `env` prefix.
+  assert_contains "the fallback is still fenced (TBD_HOME)" "$dump" "TBD_HOME=/tmp/tbd-test-home."
+  assert_contains "the fallback is still fenced (host claude)" "$dump" "/sanctioned/tbd/claude-host"
+  assert_contains "the fallback is still fenced (codex)" "$dump" "/sanctioned/tbd/codex-host"
+  assert_contains "the fallback is still fenced (tmux)" "$dump" "TMUX_TMPDIR=/tmp/tbd-test-home."
+  assert_contains "and still pinned to the shared lock" "$dump" \
+    "TBD_SWIFT_LOCK_PATH=$fix/home/tbd/runtime/swift-build.lock"
+  rmfix "$fix"
+}
+
+# A BROKEN CHECKOUT IS A REFUSAL TOO. Without the executability check the shell
+# answers 127, which would be adopted as the run's exit status — a missing file
+# reported as a failing test suite.
+test_a_missing_remote_path_falls_back_to_a_local_run() {
+  local fix; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  rm -f "$fix/repo/scripts/remote-verify.sh"
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC="76 0")
+  run_with_valve "$fix"
+  RUN_ENV=()
+  assert_ok "a missing remote path falls back rather than failing" "$RUN_RC"
+  assert_contains "and says why" "$RUN_OUT" "remote-verify.sh is missing or not executable"
+  assert_eq "and the suite ran locally afterwards" "2" "$(swift_invocations "$fix")"
+  rmfix "$fix"
+}
+
+# MUTATION. Without the check the shell's 127 becomes the run's verdict.
+test_the_missing_remote_path_check_is_load_bearing() {
+  local fix mutant; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  rm -f "$fix/repo/scripts/remote-verify.sh"
+  mutant="$(mutant_of "$SCRIPT" 's/if \[ ! -x scripts\/remote-verify\.sh \]; then/if false; then/')"
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC="76 0")
+  run_with_valve "$fix" "$mutant"
+  RUN_ENV=()
+  assert_eq "without the check a broken checkout exits 127" "127" "$RUN_RC"
+  assert_eq "and the suite never ran locally" "1" "$(swift_invocations "$fix")"
+  rmfix "$fix"
+}
+
+# MUTATION. Stop recognising 78 and a refusal becomes the run's verdict: a lane
+# that could not go remote reports a failure instead of testing anything.
+test_the_refusal_fallback_is_load_bearing() {
+  local fix mutant; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  mutant="$(mutant_of "$SCRIPT" 's/-eq "\$REMOTE_VERIFY_REFUSED"/-eq 999/')"
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC="76 0" FAKE_REMOTE_VERIFY_RC=78
+           FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
+  run_with_valve "$fix" "$mutant"
+  RUN_ENV=()
+  assert_eq "without the fallback a refusal fails the run" "78" "$RUN_RC"
+  assert_eq "and the suite never ran locally" "1" "$(swift_invocations "$fix")"
+  rmfix "$fix"
+}
+
+# MUTATION. Stop recognising 76 and the yield is reported as the run's exit
+# status — a lane that compiled nothing looks like a suite that failed.
+test_the_yield_routing_is_load_bearing() {
+  local fix mutant; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  mutant="$(mutant_of "$SCRIPT" 's/-eq "\$YIELDED_THE_QUEUE"/-eq 999/')"
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC=76 FAKE_REMOTE_VERIFY_RC=0
+           FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
+  run_with_valve "$fix" "$mutant"
+  RUN_ENV=()
+  assert_eq "without the routing a yield leaks out as the exit status" "76" "$RUN_RC"
+  assert_eq "and nothing is dispatched" "0" "$(remote_verify_dispatches "$fix")"
+  rmfix "$fix"
+}
+
+# 75 IS NOT 76. A timed-out or abandoned wait means nobody is waiting for this
+# verdict, or the slot simply never came free — neither is a request to verify
+# elsewhere, and dispatching one would spend a remote slot on nothing.
+test_a_timed_out_wait_is_not_routed_remotely() {
+  local fix; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC=75 FAKE_REMOTE_VERIFY_RC=0
+           FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
+  run_with_valve "$fix"
+  RUN_ENV=()
+  assert_eq "75 is propagated untouched" "75" "$RUN_RC"
+  assert_eq "and nothing is dispatched" "0" "$(remote_verify_dispatches "$fix")"
+  rmfix "$fix"
+}
+
+# With the flag off the routing must not fire even on a 76 the suite produced
+# for its own reasons — the off path is the pre-valve path, byte for byte.
+test_a_76_with_the_valve_off_is_propagated_untouched() {
+  local fix; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  RUN_ENV=(FAKE_SWIFT_RC=76 FAKE_REMOTE_VERIFY_RC=0
+           FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
+  run_with_valve "$fix"
+  RUN_ENV=()
+  assert_eq "76 is just an exit status when the valve is off" "76" "$RUN_RC"
+  assert_eq "and nothing is dispatched" "0" "$(remote_verify_dispatches "$fix")"
   rmfix "$fix"
 }
 

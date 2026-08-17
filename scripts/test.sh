@@ -147,6 +147,37 @@
 #   scripts/test.sh --no-fingerprint --parallel
 #   scripts/test.sh --fingerprint            # deliberate local leak hunt
 #
+# THE REMOTE VERIFICATION VALVE — OFF UNLESS `TBD_REMOTE_VERIFY=1`.
+# (docs/specs/2026-08-16-remote-verification-valve-design.md.) This wrapper is
+# the only caller that opts in, because it is the one whose entire output is a
+# verdict: nothing it produces has to exist on this disk, so the same bit can be
+# computed on GitHub. `scripts/restart.sh` and every other artifact build stay
+# local permanently and are untouched by any of this.
+#
+# Enabled, the run bounds its queueing: `TBD_SWIFT_QUEUE_YIELD_SECONDS` tells
+# `scripts/swift-safe` to give up its place in the queue after
+# `TBD_REMOTE_VERIFY_YIELD_SECONDS` (default 300) and answer 76. The threshold
+# measures QUEUE time, never run time, so a yield discards nothing — a wait that
+# never acquired the slot has compiled nothing. 300 is sized against remote
+# capacity rather than impatience: two hours of sampled contention put T=60 at
+# ~28 trips an hour against a remote that sustains ~12 runs an hour, while T=300
+# fires four or five times, on the tail this valve exists for.
+#
+# THREE EXIT CODES DECIDE WHAT HAPPENS NEXT, AND CONFLATING ANY TWO IS A SILENT
+# WRONG ANSWER:
+#
+#   76 from `swift-safe` — it yielded the queue at our request. Verify remotely.
+#   75 from `swift-safe` — the wait TIMED OUT, or was ABANDONED because nobody
+#      is left to read the result. Neither is a request to verify elsewhere, so
+#      75 is propagated untouched; dispatching one spends a scarce remote slot
+#      on a verdict nobody wants.
+#   78 from `remote-verify.sh` — a precondition refused (dirty tree, no `gh`,
+#      no pushable ref). The run falls back to the local queue. THE VALVE IS AN
+#      OPTIMISATION, NEVER A GATE: a refusal must never fail a run.
+#
+# Any other status from `remote-verify.sh` is the run's verdict — 0 for a green
+# remote run, 1 for a red one whose failing tests it has already printed.
+#
 # TESTED BY `scripts/test.test.sh`, which drives the guards below against
 # fixture directories with a stub `swift` — no build, no real `~/tbd`. Every
 # guard there is mutation-checked: the assertion is shown going red against a
@@ -231,6 +262,35 @@ resolve_swift_lock_path() {
   fi
 }
 
+# THE YIELD BOUND IS VALIDATED HERE BECAUSE A BAD ONE IS INVISIBLE DOWNSTREAM.
+# `scripts/swift-safe` refuses a non-positive, `nan`, `inf` or non-numeric
+# `TBD_SWIFT_QUEUE_YIELD_SECONDS` with a `SystemExit`, and a `SystemExit` carrying
+# a message exits **1** — which is exactly what a failing test suite returns. So
+# a forwarded typo does not look like a misconfiguration, it looks like a red
+# run, and the fix people would reach for is to go hunting through tests that
+# never ran. `TBD_REMOTE_VERIFY_YIELD_SECONDS=0` is the plausible way somebody
+# spells "always go remote", and it lands precisely there.
+#
+# The accepted grammar is deliberately narrower than `float()`: decimal digits
+# with at most one point, and not zero in any spelling. That refuses `1e3` and
+# `+1`, which `swift-safe` would have taken — loudly, at the call site, with the
+# variable named — rather than widening a validator whose whole job is to be
+# obviously right.
+valid_yield_bound() {
+  local value="$1"
+  case "$value" in
+    ''|*[!0-9.]*) return 1 ;;   # empty, or anything but digits and points
+    *.*.*)        return 1 ;;   # more than one point
+    .)            return 1 ;;   # a lone point
+  esac
+  # Zero in every spelling — `0`, `00`, `0.0`, `.0` — is what is left once the
+  # zeros and the point come out.
+  case "${value//0/}" in
+    ''|.) return 1 ;;
+  esac
+  return 0
+}
+
 # Sourced rather than executed: `scripts/test.test.sh` wants the helpers above
 # without the run below. The siblings in this directory express the same thing
 # as `main "$@"` under the inverse condition; this script stays straight-line
@@ -257,6 +317,34 @@ for arg in "$@"; do
     *) swift_test_args+=("$arg") ;;
   esac
 done
+
+# THE VALVE, CONFIGURED BEFORE ANYTHING ELSE HAPPENS. See "THE REMOTE
+# VERIFICATION VALVE" above. Deciding it here means a bad bound is refused
+# before a scratch home is minted, a lock file is touched or a fingerprint is
+# taken — there is nothing to unwind, and the caller finds out immediately
+# rather than half an hour into a wait.
+#
+# `TBD_REMOTE_VERIFY` unset leaves `remote_verify_enabled` at 0 and
+# `fenced_env` empty, so every path below is what it was before the valve
+# existed: no bound is forwarded, and 76 is just an exit status.
+DEFAULT_REMOTE_VERIFY_YIELD_SECONDS=300
+YIELDED_THE_QUEUE=76
+REMOTE_VERIFY_REFUSED=78
+
+remote_verify_enabled=0
+fenced_env=()
+if [ "${TBD_REMOTE_VERIFY:-}" = "1" ]; then
+  remote_verify_enabled=1
+  yield_seconds="${TBD_REMOTE_VERIFY_YIELD_SECONDS-$DEFAULT_REMOTE_VERIFY_YIELD_SECONDS}"
+  if ! valid_yield_bound "$yield_seconds"; then
+    echo "test.sh: TBD_REMOTE_VERIFY_YIELD_SECONDS must be a positive number" >&2
+    echo "         (decimal digits, at most one point), got: '$yield_seconds'" >&2
+    echo "         Forwarding it would make swift-safe exit 1, which is" >&2
+    echo "         indistinguishable from a failing test suite." >&2
+    exit 64
+  fi
+  fenced_env=(TBD_SWIFT_QUEUE_YIELD_SECONDS="$yield_seconds")
+fi
 
 # Resolved HERE, while `$HOME` and `$TBD_HOME` still hold the caller's real
 # values — the `env` prefix at the bottom rewrites both, and `swift-safe`
@@ -441,21 +529,85 @@ for decoy in "${decoys[@]}"; do
   chmod 000 "$fake_home/$decoy"
 done
 
+# THE FENCED INVOCATION LIVES IN ONE PLACE, AND THAT IS THE POINT. The valve's
+# fallback below runs it a second time, and a second copy of this `env` prefix
+# is a fence that can drift: the two copies would have to be kept in step by
+# hand forever, and the failure mode of missing one is a run that silently
+# writes into the developer's real `~/tbd`. There is exactly one prefix, so
+# there is nothing to keep in step.
+#
+# `fenced_env` carries per-call environment and comes FIRST, so a fence
+# variable can never be overridden by it — `env` takes the last assignment of a
+# name, and the fence must always be the last word.
+#
 # `${a[@]+"${a[@]}"}` — macOS ships bash 3.2, where a bare `"${a[@]}"` on an
 # EMPTY array is an unbound-variable error under `set -u`.
+run_fenced_suite() {
+  env \
+    ${fenced_env[@]+"${fenced_env[@]}"} \
+    TBD_HOME="$sanctioned_home" \
+    TBD_SOCKET_PATH="$sanctioned_home/sock" \
+    TBD_CLAUDE_HOST_HOME="$sanctioned_home/claude-host" \
+    TBD_TEST_CODEX_HOME="$sanctioned_home/codex-host" \
+    TMUX_TMPDIR="$tmux_tmpdir" \
+    TBD_SWIFT_LOCK_PATH="$swift_lock_path" \
+    HOME="$fake_home" \
+    CFFIXED_USER_HOME="$fake_home" \
+    scripts/swift-safe test ${swift_test_args[@]+"${swift_test_args[@]}"}
+}
+
 set +e
-env \
-  TBD_HOME="$sanctioned_home" \
-  TBD_SOCKET_PATH="$sanctioned_home/sock" \
-  TBD_CLAUDE_HOST_HOME="$sanctioned_home/claude-host" \
-  TBD_TEST_CODEX_HOME="$sanctioned_home/codex-host" \
-  TMUX_TMPDIR="$tmux_tmpdir" \
-  TBD_SWIFT_LOCK_PATH="$swift_lock_path" \
-  HOME="$fake_home" \
-  CFFIXED_USER_HOME="$fake_home" \
-  scripts/swift-safe test ${swift_test_args[@]+"${swift_test_args[@]}"}
+run_fenced_suite
 test_status=$?
 set -e
+
+# THE OVERFLOW PATH. 76 is `swift-safe` reporting that it gave up its place in
+# the queue at our request, having compiled nothing — so there is no work to
+# discard and no build to kill, and the same verdict can be fetched from CI.
+#
+# The flag is re-checked rather than inferred from the status. A bound is only
+# ever forwarded when the valve is on, so 76 cannot arise here otherwise — but
+# inferring it would mean a suite that exits 76 for reasons of its own silently
+# changed what this wrapper does, and "the flag is off" must mean the pre-valve
+# behavior exactly.
+if [ "$remote_verify_enabled" -eq 1 ] && [ "$test_status" -eq "$YIELDED_THE_QUEUE" ]; then
+  # A MISSING REMOTE PATH IS A REFUSAL, NOT A VERDICT. Without this the shell
+  # answers 127 for "command not found", which would be adopted below as the
+  # run's exit status — a broken checkout reported as a failing test suite, with
+  # nothing said about why. Everything else here exists to keep a misrouted exit
+  # code from masquerading as a test result; so does this.
+  if [ ! -x scripts/remote-verify.sh ]; then
+    echo "test.sh: scripts/remote-verify.sh is missing or not executable;" >&2
+    echo "         staying in the local queue instead of verifying remotely." >&2
+    remote_status=$REMOTE_VERIFY_REFUSED
+  else
+    # Deliberately NOT fenced: the remote path needs the caller's real `$HOME`
+    # to find `gh`'s credentials and the real repository to push from. It
+    # touches no TBD-owned path.
+    set +e
+    scripts/remote-verify.sh
+    remote_status=$?
+    set -e
+  fi
+
+  if [ "$remote_status" -eq "$REMOTE_VERIFY_REFUSED" ]; then
+    # A REFUSAL IS NOT A FAILURE. The remote path named its condition on stderr
+    # and declined; this lane returns to the local queue and waits it out, as it
+    # would have done before the valve existed. Anything else would make the
+    # valve a gate — a run that cannot go remote must still be able to test.
+    #
+    # The re-run drops the bound, so it queues without limit rather than
+    # yielding again and asking a precondition that just refused a second time.
+    fenced_env=()
+    set +e
+    run_fenced_suite
+    test_status=$?
+    set -e
+  else
+    # 0 or 1 — the remote verdict, with its failing tests already printed.
+    test_status=$remote_status
+  fi
+fi
 
 # THE TRIPWIRE HAS TO BE RE-CHECKED, not just armed. The code inside the run
 # owns these directories, so it can chmod them back — and a decoy that comes
