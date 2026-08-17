@@ -277,7 +277,13 @@ enum HoverCardPlacement {
     /// `.hoverCard` pass its container's frame, which fails silently for
     /// whoever forgets. So the constant carries the container's height itself:
     /// the tallest bar in this app plus a gap wide enough to read as a gap.
-    static let flippedBarClearance: CGFloat = 24
+    ///
+    /// Above a status-bar chip that leaves roughly 40pt of untouched window
+    /// content between the top of the strip and the bottom of the card — a band
+    /// wide enough to be unmistakable rather than merely measurable. It costs
+    /// nothing in fit: a flip is only chosen when the card had a whole window's
+    /// height above the anchor to sit in.
+    static let flippedBarClearance: CGFloat = 48
 
     /// Keep-out from the edge of the screen's visible frame.
     static let screenMargin: CGFloat = 4
