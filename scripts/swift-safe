@@ -44,7 +44,7 @@ the stderr line distinguishes them.  Nothing branches on the code today, and
 the shared value says the same thing to a caller that does: the slot was not
 obtained, nothing was compiled, retrying later is reasonable.
 
-A caller that has somewhere else to run can bound its queueing with
+A ``test`` run that has somewhere else to go can bound its queueing with
 ``TBD_SWIFT_QUEUE_YIELD_SECONDS``: once that many seconds have passed without
 ever acquiring, the wait gives up its place in the queue and exits 76.  That
 is a separate code from 75 precisely because the caller must be able to tell
@@ -53,6 +53,18 @@ this somewhere else".  The bound measures queue time, never run time, so a
 yield discards nothing: a wait that never acquired has compiled nothing.
 Unset or empty leaves the wait unbounded except by the timeout, which is the
 behavior every caller gets today.
+
+**Only ``test`` honours it, and the restriction is the point.**  76 means "I
+gave up my place, verify this elsewhere", and only a verdict can be verified
+elsewhere: ``scripts/test.sh`` is the one caller that understands the code and
+has a remote path to take.  A ``build`` or ``run`` produces a binary that must
+land on this disk, and its callers do not check this wrapper's status at all —
+``scripts/restart.sh`` would carry on and assemble a bundle around whatever
+stale binaries were already there, which is this repo's documented
+"stale daemon reverts the fleet" failure.  So an exported knob meant for the
+test lane cannot silently stop a developer's rebuild.  A build that finds the
+variable set says so once on stderr and queues as usual, because a knob that is
+ignored in silence is indistinguishable from one that does not work.
 """
 
 from __future__ import annotations
@@ -520,9 +532,22 @@ def main(arguments: list[str]) -> int:
         "TBD_SWIFT_HEARTBEAT_SECONDS", DEFAULT_HEARTBEAT_SECONDS
     )
     # Unset or empty means never yield, which is what every caller gets today.
+    # GATED TO `test`: 76 means "verify this elsewhere", only a verdict can be
+    # verified elsewhere, and only `scripts/test.sh` reads the code. A `build`
+    # that yielded would return 76 to `scripts/restart.sh`, which never checks —
+    # it would bundle stale binaries and revert the fleet. See the module
+    # docstring. Validation is gated with it: a typo in a knob this subcommand
+    # ignores must not fail an unrelated rebuild.
     yield_after = None
-    if os.environ.get("TBD_SWIFT_QUEUE_YIELD_SECONDS"):
+    requested_yield = os.environ.get("TBD_SWIFT_QUEUE_YIELD_SECONDS")
+    if requested_yield and subcommand == "test":
         yield_after = _positive_number("TBD_SWIFT_QUEUE_YIELD_SECONDS", 0.0)
+    elif requested_yield:
+        _report(
+            "swift-safe: TBD_SWIFT_QUEUE_YIELD_SECONDS is set, but only `test` "
+            f"yields its place in the queue; this `{subcommand}` will wait for "
+            "the shared build slot as usual"
+        )
 
     if subcommand == "run":
         # `run` execs SwiftPM, which stays alive for as long as the program

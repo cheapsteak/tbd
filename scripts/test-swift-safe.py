@@ -352,19 +352,60 @@ class SwiftSafeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("until the program exits", result.stderr)
 
-    def test_yielding_exits_with_its_own_code(self):
-        """76 is distinct from 75 so a caller can route the run elsewhere."""
+    def _contended(self, *arguments, **extra_env):
+        """Run the wrapper with the shared slot already held by this process."""
         lock_path = self.tbd_home / "runtime" / "swift-build.lock"
-        lock_path.parent.mkdir(parents=True)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
         with lock_path.open("a+", encoding="utf-8") as lock_file:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            result = self.run_runner(
-                "build",
-                TBD_SWIFT_QUEUE_YIELD_SECONDS="0.05",
-                TBD_SWIFT_LOCK_TIMEOUT_SECONDS="30",
-            )
+            return self.run_runner(*arguments, **extra_env)
+
+    def test_yielding_exits_with_its_own_code(self):
+        """76 is distinct from 75 so a caller can route the run elsewhere."""
+        result = self._contended(
+            "test",
+            TBD_SWIFT_QUEUE_YIELD_SECONDS="0.05",
+            TBD_SWIFT_LOCK_TIMEOUT_SECONDS="30",
+        )
         self.assertEqual(result.returncode, 76)
         self.assertIn("yield", result.stderr.lower())
+        self.assertEqual(result.stdout, "")
+
+    def test_a_build_ignores_the_queue_yield_knob(self):
+        """ONLY `test` MAY YIELD, because only its caller understands 76.
+
+        `scripts/restart.sh` never checks this wrapper's status, so a developer
+        who exported this knob in a shell profile would get a build that stops
+        after the bound and a bundle assembled around whatever stale binaries
+        were already on disk — the documented "a stale daemon reverts the fleet"
+        failure. A build queues as usual and says once that the knob is not for
+        it, because a knob ignored in silence looks like a knob that is broken.
+        """
+        result = self._contended(
+            "build",
+            TBD_SWIFT_QUEUE_YIELD_SECONDS="0.05",
+            TBD_SWIFT_LOCK_TIMEOUT_SECONDS="0.5",
+        )
+        self.assertNotEqual(result.returncode, 76, "a build yielded its place")
+        self.assertEqual(result.returncode, 75)
+        self.assertIn("timed out", result.stderr)
+        self.assertIn("only `test`", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_a_bad_yield_value_does_not_fail_a_build(self):
+        # The validation is gated with the behaviour: a typo in a knob this
+        # subcommand ignores must not turn an unrelated rebuild into a hard exit.
+        result = self.run_runner("build", TBD_SWIFT_QUEUE_YIELD_SECONDS="soon")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "build --jobs 2")
+        self.assertIn("only `test`", result.stderr)
+
+    def test_a_bad_yield_value_still_fails_a_test_run(self):
+        # Where the knob IS honoured, an unreadable value is refused by name
+        # rather than silently meaning "never yield".
+        result = self.run_runner("test", TBD_SWIFT_QUEUE_YIELD_SECONDS="soon")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("TBD_SWIFT_QUEUE_YIELD_SECONDS", result.stderr)
         self.assertEqual(result.stdout, "")
 
 

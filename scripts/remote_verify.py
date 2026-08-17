@@ -2,11 +2,18 @@
 the machine-global build slot.
 
 THE TICKET POOL IS LOCAL ON PURPOSE. Every contender runs on this one laptop,
-so a local lock file arbitrates GitHub's capacity authoritatively — there is no
-distributed consensus problem here. GitHub caps five concurrent macOS jobs per
+so a local lock file can bound how many remote runs exist at once with no
+distributed consensus anywhere. GitHub caps five concurrent macOS jobs per
 account and `test.yml` spends two per run, so roughly two runs fit; without this
 bound every queued lane would dispatch at once into a queue TBD cannot observe,
 prioritise, or abandon.
+
+That bound is only as strong as the slot count every lane reads, and it is worth
+stating honestly rather than claiming the pool arbitrates capacity outright: a
+lane probes tickets 1..N for its own N, so a lane configured higher than its
+siblings takes tickets they never look at and the effective pool is the largest
+N any lane configures. `configured_slots` is where that constraint is bounded,
+and why the setting has a ceiling.
 
 The ticket is an flock rather than a hand-rolled occupancy file: the kernel
 releases it when this process exits by any means, so a ticket cannot outlive its
@@ -35,6 +42,13 @@ failure. So the workflow uploads xUnit XML and this module parses it. The same
 files carry the run's population, which is why a green run downloads them too:
 the verdict a caller reads is `Test run with N tests`, and N has to come from
 somewhere that cannot make it up.
+
+A FAILED RUN IS NOT THE SAME CLAIM AS A FAILED SUITE. `test.yml` holds four jobs
+with no `needs:` between them — lint, the committed-plans guard, the review-script
+tests and the test job — plus a `swift build` step after the results are uploaded,
+and `scripts/test.sh` runs none of that locally. So the results decide what the
+tests did, not the run's conclusion: `verdict_from_results` is the one authority
+on that, and both subcommands read it.
 """
 
 from __future__ import annotations
@@ -56,6 +70,9 @@ import time
 
 SLOTS_SETTING = "TBD_REMOTE_VERIFY_SLOTS"
 DEFAULT_SLOTS = 2
+# The ceiling on that setting: GitHub's own per-account macOS job concurrency.
+# See `configured_slots` for why a per-lane setting needs one at all.
+MAX_SLOTS = 5
 
 WORKFLOW_FILE = "test.yml"
 RESULTS_ARTIFACT = "xunit-results"
@@ -119,6 +136,19 @@ def configured_slots(environ: Mapping[str, str] | None = None) -> int:
     the sizing the spec measured. An unreadable value is refused by name rather
     than quietly falling back: silently sizing the pool differently from what
     somebody asked for is how a stampede gets shipped.
+
+    THE POOL IS ONLY AS AUTHORITATIVE AS THE VALUE EVERY LANE READS, and this
+    setting is per-lane. A lane probes tickets 1..N for its own N, so a lane set
+    to 4 takes tickets 3 and 4 that default lanes never look at: the effective
+    pool across the fleet is the *largest* N anybody configures, not the
+    smallest and not an average. Nothing here can fix that — a lane cannot know
+    what its siblings chose — so the exposure is bounded instead. `MAX_SLOTS`
+    caps how far one lane's private pool can reach, and a value above it is
+    refused by name rather than clamped, because a clamp is exactly the "sizing
+    the pool differently from what somebody asked for" this function refuses to
+    do elsewhere. 5 is GitHub's own per-account macOS concurrency, so past it a
+    ticket bounds nothing anyway: the run it authorises simply queues on
+    GitHub's side, where TBD can neither see it nor abandon it.
     """
     environ = os.environ if environ is None else environ
     raw = environ.get(SLOTS_SETTING, "")
@@ -130,6 +160,12 @@ def configured_slots(environ: Mapping[str, str] | None = None) -> int:
         raise ValueError(f"{SLOTS_SETTING} must be a whole number, not {raw!r}") from None
     if slots < 0:
         raise ValueError(f"{SLOTS_SETTING} must not be negative, but is {slots}")
+    if slots > MAX_SLOTS:
+        raise ValueError(
+            f"{SLOTS_SETTING}={slots} exceeds {MAX_SLOTS}, GitHub's per-account "
+            "macOS job concurrency; a larger pool would dispatch runs that only "
+            "queue where TBD cannot see them"
+        )
     return slots
 
 
@@ -606,7 +642,9 @@ class _ResultParser(HTMLParser):
         self.fallback_classname = fallback_classname
         self.failures: list[Failure] = []
         self.root_opened = False
-        self.root_closed = False
+        # How many result elements are currently open: a `<testsuites>` wrapper
+        # and each `<testsuite>` inside it. See `root_closed`.
+        self._depth = 0
         # None until a `<testsuite tests=…>` says otherwise: a file that
         # declared no population must not be read as one declaring zero.
         self.tests: int | None = None
@@ -615,10 +653,28 @@ class _ResultParser(HTMLParser):
         self._message: str | None = None
         self._text: list[str] = []
 
+    @property
+    def root_closed(self) -> bool:
+        """True only when every result element that opened has closed again.
+
+        A DEPTH COUNTER, NOT A LATCH ON THE FIRST CLOSING TAG. A file holding
+        several `<testsuite>`s and truncated after the first one closes would
+        otherwise read as complete — and worse than merely complete, because the
+        second suite's `tests=` attribute is already summed into the population
+        by then, so the number reported would describe cases that never arrived.
+        Today's SwiftPM writes one `<testsuite>` per file, so no live artifact
+        reaches that shape and this is not a bug anybody has been bitten by; it
+        is fixed because `results_in` promises to detect truncation
+        unconditionally, and a promise that holds only for the current writer's
+        output holds by luck.
+        """
+        return self.root_opened and self._depth == 0
+
     def handle_starttag(self, tag, attrs):
         values = {name: value or "" for name, value in attrs}
         if tag in ("testsuites", "testsuite"):
             self.root_opened = True
+            self._depth += 1
             # Counted from `<testsuite>` alone. Both writers put the population
             # there, and a `<testsuites>` wrapper that repeats it would double
             # every number if it were added in too.
@@ -645,7 +701,9 @@ class _ResultParser(HTMLParser):
         elif tag == "testcase":
             self._case = {}
         elif tag in ("testsuites", "testsuite"):
-            self.root_closed = True
+            # Floored at zero so a stray closing tag cannot cancel out a later
+            # element that never closed, which would read as complete again.
+            self._depth = max(0, self._depth - 1)
 
     def _record(self, message: str) -> None:
         failure = Failure(
@@ -675,9 +733,10 @@ def results_in(path: Path) -> Results:
     Testing's own generator emits the same elements indented with `<skipped />`
     for a disabled test. A passing case carries no failure child and is ignored.
 
-    Raises `MalformedResults` for a file that opened no result element or never
-    closed one — an empty or half-written file, which a run that was killed
-    mid-pass leaves behind.
+    Raises `MalformedResults` for a file that opened no result element or left
+    one open — an empty or half-written file, which a run that was killed
+    mid-pass leaves behind. "Left one open" is counted rather than latched; see
+    `_ResultParser.root_closed`.
     """
     parser = _ResultParser(fallback_classname=path.stem)
     parser.feed(path.read_text(encoding="utf-8", errors="replace"))
@@ -774,6 +833,48 @@ def render_results(paths: Sequence[Path], *, limit: int = MAX_RENDERED_FAILURES)
     )
 
 
+def verdict_from_results(results: Report | None) -> int:
+    """What a run's result files support as a verdict about the tests.
+
+    THE ONE AUTHORITY, AND BOTH SUBCOMMANDS READ IT. `drive` and `render` look
+    at the same files and must not disagree about what they mean; `drive` is the
+    consumer that matters, because `scripts/test.sh` adopts its status as the
+    run's own, and `render` exists to show a human what `drive` saw. So the
+    mapping lives here rather than at either call site.
+
+    - **Failures recorded, or a file that cannot be believed** — `EXIT_FAILED`.
+      A truncated pass is unreadable rather than empty and must never be read as
+      a claim that nothing failed.
+    - **A stated population and nothing failing** — `EXIT_REFUSED`: no verdict.
+      Every pass that reported ran tests and none of them failed, so whatever
+      made the run red is not a test. `test.yml` holds four jobs with no
+      `needs:` between them and a `swift build` step after the results upload,
+      and `scripts/test.sh` runs none of that locally — so reporting red here
+      would fail a lane for a SwiftLint violation or a committed plan file it
+      cannot even see, and reporting green would adopt a pass the run never
+      gave. 78 sends the lane back to the local queue, where it gets an answer
+      to its own question. Inventing red is precisely what `verdict_for` refuses
+      to do for a cancelled run, on the same reasoning.
+    - **Nothing that states a population** — `EXIT_FAILED`. No artifact, or an
+      artifact silent about how many tests ran, is no evidence at all, so there
+      is nothing to set against the run's own conclusion and the conclusion
+      stands.
+
+    DELIBERATELY NOT KEYED ON WHICH JOBS WERE RED. Deciding this from job names
+    would hardcode `test.yml`'s job list here, and a renamed or added job is the
+    exact drift that made this function necessary; result files describe
+    themselves instead. Failing job names are still reported to the operator —
+    they just do not get to decide what the tests did.
+    """
+    if results is None:
+        return EXIT_FAILED
+    if results.total or results.unreadable:
+        return EXIT_FAILED
+    if results.tests is None:
+        return EXIT_FAILED
+    return EXIT_REFUSED
+
+
 def download_results(
     run_command: RunCommand, run_id: str, destination: Path
 ) -> tuple[list[Path], str | None]:
@@ -847,6 +948,7 @@ def drive(
     *,
     ref: str,
     sha: str,
+    narrowed: bool,
     runtime_dir: Path,
     slots: int,
     run_command: RunCommand,
@@ -864,6 +966,11 @@ def drive(
     Order is the point: ticket, then baseline, then push, then dispatch.
     Nothing durable and nothing metered happens until this lane is one of the
     two the pool allows.
+
+    `narrowed` says the caller selected a subset of the suite, so it will not
+    adopt a failing whole-suite verdict. It is required and keyword-only rather
+    than defaulted: a call site that forgot it would silently publish a test
+    count the caller's floor checks then misread — see `_write_failure_report`.
 
     NO ESCAPING EXCEPTION MAY BECOME EXIT 1. `scripts/test.sh` adopts this
     status as the run's own, so a `1` from an unhandled OSError, a killed
@@ -912,8 +1019,24 @@ def drive(
                     results, problem=problem, run_id=run_id, url=str(url), write=write
                 )
                 return EXIT_PASSED
+            # A RED RUN WHOSE TESTS ALL PASSED IS NOT A TEST FAILURE. The files,
+            # not the conclusion, are the authority here; `verdict_from_results`
+            # says why, and answering 78 rather than 1 is the difference between
+            # sending this lane back to the local queue and telling the operator
+            # a suite is red that `scripts/test.sh` never even runs the failing
+            # part of.
+            if verdict_from_results(results) == EXIT_REFUSED:
+                jobs = failed_job_names(completed)
+                attribution = f" (failing jobs: {', '.join(jobs)})" if jobs else ""
+                raise Refused(
+                    f"run {run_id} finished failure, but every one of the "
+                    f"{results.tests} tests it ran passed{attribution}, so the "
+                    "failure is outside the test passes and says nothing about "
+                    f"this suite {url}".rstrip()
+                )
             _write_failure_report(
-                results, problem=problem, url=str(url), completed=completed, write=write
+                results, problem=problem, url=str(url), completed=completed,
+                narrowed=narrowed, write=write,
             )
             return EXIT_FAILED
     except NoTicket:
@@ -995,8 +1118,25 @@ def _write_failure_report(
     problem: str | None,
     url: str,
     completed: Mapping[str, object],
+    narrowed: bool,
     write: Callable[[str], None],
 ) -> None:
+    """Print a red run's failures, and its population only if anybody may read it.
+
+    THE COUNT LINE IS SUPPRESSED FOR A NARROWED CALLER, and that is a guard
+    rather than tidiness. Six consumers grep `Test run with [0-9]+ tests?` and
+    take `head -1`, and `scripts/git-hooks/pre-push` captures both streams — so
+    this line would arrive *before*, and win over, the count printed by the local
+    re-run that a narrowed caller does next. A `--filter` naming a renamed type
+    selects zero tests, prints `Test run with 0 tests` locally, and would still
+    clear its floor on the remote whole-suite number: the exact vacuous-filter
+    failure the floor exists to catch. A narrowed caller is not adopting this
+    verdict, so the population here describes a run nobody is reporting.
+
+    The green path keeps the line on purpose. There the count is adopted, and a
+    whole-suite number legitimately clears a narrowed caller's floor — a floor is
+    a minimum and the whole suite is a superset of any subset of it.
+    """
     write(f"remote-verify: the remote run FAILED {url}".rstrip())
     jobs = failed_job_names(completed)
     if jobs:
@@ -1005,9 +1145,9 @@ def _write_failure_report(
         write(f"remote-verify: {problem}")
         write("remote-verify: open the run above for the failure")
         return
-    # Stated when it is known and silently omitted when it is not: a red run is
-    # already a verdict, and no caller reads the population off a failing run.
-    if results.tests is not None:
+    # Stated when it is known, this run is the one being reported, and it is not
+    # a narrowed caller's; omitted otherwise. See the docstring.
+    if results.tests is not None and not narrowed:
         write(_test_run_summary(results.tests, "failed"))
     for line in results.lines:
         write(line)
@@ -1032,9 +1172,25 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] | None = 
         help=f"the inert {INERT_NAMESPACE}* ref to push and dispatch",
     )
     driver.add_argument("--sha", required=True)
+    driver.add_argument(
+        "--narrowed",
+        action="store_true",
+        help=(
+            "the caller selected a subset of the suite (--filter/--skip), so it "
+            "will not adopt a failing whole-suite verdict; suppresses the test "
+            "count on a failure, which would otherwise be read as that subset's"
+        ),
+    )
 
     renderer = subcommands.add_parser(
-        "render", help="render already-downloaded xUnit results"
+        "render",
+        help="render already-downloaded xUnit results",
+        description=(
+            "Exits 1 when the results record failures or cannot be believed, and "
+            f"{EXIT_REFUSED} when they record a complete, empty set of failures "
+            "over a stated population — no test verdict. Same mapping the driver "
+            "uses; see verdict_from_results."
+        ),
     )
     renderer.add_argument("paths", nargs="+")
 
@@ -1048,7 +1204,13 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] | None = 
         report = render_results(paths)
         for line in report.lines:
             print(line)
-        return EXIT_FAILED if report.total or report.unreadable else EXIT_PASSED
+        # THE SAME AUTHORITY THE DRIVER USES, so the two cannot disagree about
+        # one artifact. This used to answer 0 for "no failures", which read as
+        # "the tests passed" for the state the driver calls no verdict at all —
+        # a red run whose passes all reported clean. `render` never answers 0
+        # now: it has no run conclusion to weigh, so the strongest thing a set of
+        # files can say on its own is "no failing test here".
+        return verdict_from_results(report)
 
     repo_dir = Path(options.repo_dir)
     try:
@@ -1069,6 +1231,7 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] | None = 
     return drive(
         ref=options.ref,
         sha=options.sha,
+        narrowed=options.narrowed,
         runtime_dir=runtime_dir,
         slots=slots,
         run_command=system_runner(repo_dir, timeout=command_timeout),

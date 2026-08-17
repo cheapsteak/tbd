@@ -13,6 +13,15 @@
 #   1   the remote run failed, and its failing tests are already printed
 #   78   refused — the caller must return to the local queue
 #
+# USAGE: scripts/remote-verify.sh [--narrowed]
+#
+# `--narrowed` says the caller selected a subset of the suite with `--filter` or
+# `--skip`, so it will re-run locally rather than adopt a failing whole-suite
+# verdict. It changes nothing about routing; it suppresses the `Test run with N
+# tests` line on a failure, because six consumers grep that line and take the
+# first match — a whole-suite count printed ahead of the local re-run's own would
+# clear the very floor that exists to catch a filter matching nothing.
+#
 # 78 is what keeps this an optimisation rather than a gate. Every refusal names
 # its condition on stderr: NO SILENT FALLBACK. A quiet fall-back to a local run
 # reintroduces the long stall at exactly the moment it is least visible.
@@ -102,6 +111,21 @@ default_branch() {
 
 main() {
   local repo_dir branch sha ref status=0
+  # AN UNRECOGNISED ARGUMENT REFUSES RATHER THAN BEING IGNORED. The caller passes
+  # `--narrowed` to change how its verdict may be read, so a flag this front-end
+  # silently dropped — a rename, a typo — would hand back a verdict the caller
+  # then reads under the wrong rule. 78 is free; a misread verdict is not.
+  local -a narrowing=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --narrowed) narrowing=(--narrowed) ;;
+      *)
+        log "remote-verify: unknown argument '$1'; refusing rather than guessing"
+        return $EXIT_REFUSED
+        ;;
+    esac
+    shift
+  done
 
   repo_dir="$(git rev-parse --show-toplevel 2>/dev/null)" || status=$?
   if [ $status -ne 0 ] || [ -z "$repo_dir" ]; then
@@ -139,7 +163,8 @@ main() {
   # `exec`: the driver holds the dispatch ticket for the whole remote run, and
   # its exit status is this script's contract verbatim.
   exec python3 "$HERE/remote_verify.py" drive \
-    --repo-dir "$repo_dir" --ref "$ref" --sha "$sha"
+    --repo-dir "$repo_dir" --ref "$ref" --sha "$sha" \
+    ${narrowing[@]+"${narrowing[@]}"}
 }
 
 # --- entrypoint (strict mode only when executed, not when sourced) -----------

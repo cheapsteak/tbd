@@ -159,6 +159,42 @@ class SlotCountTests(unittest.TestCase):
             remote_verify.configured_slots({"TBD_REMOTE_VERIFY_SLOTS": "-1"})
         self.assertIn("TBD_REMOTE_VERIFY_SLOTS", str(caught.exception))
 
+    def test_the_ceiling_itself_is_allowed(self):
+        self.assertEqual(
+            remote_verify.configured_slots(
+                {"TBD_REMOTE_VERIFY_SLOTS": str(remote_verify.MAX_SLOTS)}
+            ),
+            remote_verify.MAX_SLOTS,
+        )
+
+    def test_a_setting_above_the_ceiling_is_rejected_by_name(self):
+        # THE SETTING IS PER-LANE, so a lane that sizes its own pool larger takes
+        # tickets its siblings never probe and the effective pool is whatever the
+        # greediest lane chose. Nothing local can see the other lanes, so the
+        # exposure is bounded: past GitHub's own five-macOS-job concurrency a
+        # ticket authorises a run that only queues where TBD cannot see it.
+        # Refused by name rather than clamped — a silent clamp is the same sin as
+        # a silent default.
+        with self.assertRaises(ValueError) as caught:
+            remote_verify.configured_slots(
+                {"TBD_REMOTE_VERIFY_SLOTS": str(remote_verify.MAX_SLOTS + 1)}
+            )
+        self.assertIn("TBD_REMOTE_VERIFY_SLOTS", str(caught.exception))
+        self.assertIn(str(remote_verify.MAX_SLOTS), str(caught.exception))
+
+    def test_a_lane_above_the_ceiling_refuses_before_taking_any_ticket(self):
+        # End to end through `main`: the refusal reaches 78 rather than sizing a
+        # 40-ticket pool and dispatching into it.
+        with tempfile.TemporaryDirectory() as scratch:
+            status = remote_verify.main(
+                ["drive", "--repo-dir", scratch, "--ref", "preflight/tbd/lane", "--sha", "c0ffee"],
+                {"TBD_REMOTE_VERIFY_SLOTS": "40", "TBD_HOME": scratch},
+            )
+            # Asserted while the directory still exists: a glob under a deleted
+            # temp dir is empty whatever happened.
+            self.assertEqual(status, 78)
+            self.assertEqual(list(Path(scratch).glob("runtime/*.lock")), [])
+
 
 class BoundedCommandTests(unittest.TestCase):
     """Every subprocess is bounded, and none of them raise.
@@ -326,6 +362,28 @@ TRUNCATED = """<?xml version="1.0" encoding="UTF-8"?>
 <testsuites>
   <testsuite name="TestResults" errors="0" tests="9" failures="1" time="3.0">
     <testcase classname="TBDDaemonTests" name="died"""
+
+# The same thing one suite later: the file holds two `<testsuite>` elements and
+# dies inside the second. The first one closed, so a guard that latched on the
+# first closing tag reads the whole file as complete — while already having summed
+# the second suite's `tests=` into the population it reports.
+TRUNCATED_AFTER_THE_FIRST_SUITE = """<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="first" errors="0" tests="5" failures="2" time="3.0">
+    <testcase classname="A" name="one"><failure message="x"/></testcase>
+    <testcase classname="A" name="two"><failure message="y"/></testcase>
+  </testsuite>
+  <testsuite name="second" errors="0" tests="4" failures="1" time="2.0">
+    <testcase classname="B" name="three"><fail"""
+
+# A bare `<testsuite>` with no `<testsuites>` wrapper, closed properly. The depth
+# counter must still call this complete: the guard has to distinguish nesting
+# from truncation, not merely count closing tags.
+BARE_SUITE = """<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="TestResults" errors="0" tests="2" failures="0" time="1.0">
+  <testcase classname="A" name="one" time="0.1"/>
+</testsuite>
+"""
 
 
 def write_results(directory: Path, **files: str) -> Path:
@@ -532,6 +590,38 @@ class RenderingTests(unittest.TestCase):
         self.assertEqual(rendered.count("A.test"), 50, "the render was not bounded")
         self.assertIn("and 10 more failing tests", rendered)
 
+    def test_a_file_truncated_after_its_first_suite_closed_is_not_believed(self):
+        # THE TRUNCATION GUARD COUNTS DEPTH RATHER THAN LATCHING. Latching on the
+        # first `</testsuite>` read this file as complete and reported tests=9 —
+        # the population of both suites — while every case in the second one was
+        # missing. No SwiftPM writer emits two suites per file today, so nothing
+        # in the wild reaches this shape; the guard promises truncation detection
+        # unconditionally, and this is the case that makes the promise true.
+        path = write_results(self.dir, x=TRUNCATED_AFTER_THE_FIRST_SUITE) / "x.xml"
+        with self.assertRaises(remote_verify.MalformedResults) as caught:
+            remote_verify.results_in(path)
+        self.assertIn("truncated", str(caught.exception))
+
+    def test_a_bare_suite_with_no_wrapper_is_still_complete(self):
+        # The other half of the depth counter: it must not read ordinary nesting,
+        # or its absence, as a half-written file.
+        path = write_results(self.dir, x=BARE_SUITE) / "x.xml"
+        results = remote_verify.results_in(path)
+        self.assertEqual(results.tests, 2)
+        self.assertEqual(results.failures, ())
+
+    def test_a_stray_closing_tag_cannot_cancel_out_a_truncation(self):
+        # Depth floored at zero: without the floor the stray `</testsuite>` takes
+        # the count to -1, the real suite's open takes it back to 0, and a file
+        # that ends mid-case reads as complete.
+        body = (
+            '</testsuite><testsuite name="TestResults" tests="3">'
+            '<testcase classname="A" name="one"><fail'
+        )
+        path = write_results(self.dir, x=body) / "x.xml"
+        with self.assertRaises(remote_verify.MalformedResults):
+            remote_verify.results_in(path)
+
     def test_result_files_finds_nested_xml_and_nothing_else(self):
         write_results(self.dir / "xunit-results", **{"xunit-app": SWIFT_TESTING_STYLE})
         (self.dir / "notes.txt").write_text("not results", encoding="utf-8")
@@ -590,6 +680,51 @@ class VerdictTests(unittest.TestCase):
                 remote_verify.verdict_for(conclusion),
                 f"{conclusion!r} was read as a verdict",
             )
+
+
+class ResultsVerdictTests(unittest.TestCase):
+    """What the RESULT FILES say a red run means, which is not the conclusion.
+
+    `test.yml` holds four jobs with no `needs:` between them and a `swift build`
+    step after the results upload, so the run goes red for a SwiftLint violation
+    or a committed plan file while every test passed — none of which
+    `scripts/test.sh` runs locally.
+    """
+
+    def report(self, *, total=0, unreadable=(), tests=None):
+        return remote_verify.Report(
+            total=total, unreadable=tuple(unreadable), lines=(), tests=tests
+        )
+
+    def test_recorded_failures_are_a_test_failure(self):
+        self.assertEqual(
+            remote_verify.verdict_from_results(self.report(total=2, tests=9)), 1
+        )
+
+    def test_a_stated_population_with_nothing_failing_is_no_verdict(self):
+        # 78, NOT 1 and NOT 0: the passes ran and none failed, so the run's red
+        # came from something this suite does not run — there is no test verdict
+        # to adopt in either direction.
+        self.assertEqual(
+            remote_verify.verdict_from_results(self.report(total=0, tests=4593)), 78
+        )
+
+    def test_an_unreadable_file_keeps_the_conclusion(self):
+        # A truncated pass is not a claim that nothing failed.
+        self.assertEqual(
+            remote_verify.verdict_from_results(
+                self.report(total=0, unreadable=("xunit-quiet.xml",), tests=4593)
+            ),
+            1,
+        )
+
+    def test_results_that_state_no_population_keep_the_conclusion(self):
+        self.assertEqual(
+            remote_verify.verdict_from_results(self.report(total=0, tests=None)), 1
+        )
+
+    def test_no_results_at_all_keeps_the_conclusion(self):
+        self.assertEqual(remote_verify.verdict_from_results(None), 1)
 
 
 class CorrelationTests(unittest.TestCase):
@@ -726,9 +861,12 @@ class DriverTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def drive(self, runner, *, slots=2, ref="preflight/tbd/lane", sha="c0ffee", alive=None):
+    def drive(
+        self, runner, *, slots=2, ref="preflight/tbd/lane", sha="c0ffee",
+        alive=None, narrowed=False,
+    ):
         return remote_verify.drive(
-            ref=ref, sha=sha,
+            ref=ref, sha=sha, narrowed=narrowed,
             runtime_dir=self.runtime, slots=slots,
             run_command=runner,
             poll=5.0, correlate_timeout=60.0, run_timeout=600.0,
@@ -864,6 +1002,69 @@ class DriverTests(unittest.TestCase):
         self.assertIn("TBDAppTests.valveRoutesRemote()", rendered)
         self.assertIn("Test run with 9 tests failed", rendered)
 
+    def test_a_red_run_whose_tests_all_passed_is_no_verdict(self):
+        # THE FOUR JOBS OF `test.yml` HAVE NO `needs:` BETWEEN THEM, and a `swift
+        # build` step follows the results upload — so a SwiftLint violation or a
+        # committed plan file turns the run red while every test passed.
+        # `scripts/test.sh` runs none of that locally, so adopting 1 here would
+        # report a red suite for something the local suite cannot even see.
+        runner = self.failing_runner(**{"xunit-quiet": CLEAN_STYLE})
+        self.assertEqual(self.drive(runner), 78)
+        self.assertNotIn("Test run with", self.output())
+        self.assertNotIn("FAILED", self.output())
+        self.assertIn("outside the test passes", self.diagnostics())
+        # The attribution still reaches the operator, it just does not decide.
+        self.assertIn("failing jobs: Test", self.diagnostics())
+
+    def test_a_red_run_with_an_unreadable_pass_stays_red(self):
+        # The limit of the exoneration: one pass reported clean and another died
+        # mid-write, so nothing here says the tests passed.
+        runner = self.failing_runner(
+            **{"xunit-quiet": CLEAN_STYLE, "xunit-daemon": TRUNCATED}
+        )
+        self.assertEqual(self.drive(runner), 1)
+        self.assertIn("unreadable", self.output())
+
+    def test_a_red_run_whose_results_state_no_population_stays_red(self):
+        # Readable, no failures, and silent about how many tests ran: no evidence
+        # at all, so the run's own conclusion stands.
+        body = (
+            '<testsuites><testsuite name="TestResults">'
+            '<testcase classname="A" name="b"/></testsuite></testsuites>'
+        )
+        self.assertEqual(self.drive(self.failing_runner(**{"xunit-daemon": body})), 1)
+
+    def test_a_narrowed_caller_gets_no_test_count_on_a_failure(self):
+        # SIX CONSUMERS GREP `Test run with N tests` AND TAKE `head -1`, and
+        # `pre-push` captures both streams — so a whole-suite count printed here
+        # arrives before the local re-run's own and wins. A `--filter` naming a
+        # renamed type prints `Test run with 0 tests` locally and would still
+        # clear its floor on this number, which is the vacuous filter the floor
+        # exists to catch.
+        runner = self.failing_runner(
+            **{
+                "xunit-daemon": XCTEST_STYLE,
+                "xunit-app": SWIFT_TESTING_STYLE,
+                "xunit-quiet": CLEAN_STYLE,
+            }
+        )
+        self.assertEqual(self.drive(runner, narrowed=True), 1)
+        rendered = self.output()
+        self.assertNotIn("Test run with", rendered)
+        # The failures themselves are still printed: the caller re-runs locally,
+        # and knowing what the whole suite broke on is diagnostics either way.
+        self.assertIn("TBDDaemonTests.OrphanGCTests.quarantinesProfileDirs", rendered)
+
+    def test_a_narrowed_caller_still_gets_the_count_on_a_pass(self):
+        # The green path is adopted, and a whole-suite count clears a narrowed
+        # caller's floor legitimately — a floor is a minimum and the whole suite
+        # is a superset of any subset of it.
+        runner = self.passing_runner(
+            **{"xunit-daemon": XCTEST_STYLE, "xunit-quiet": CLEAN_STYLE}
+        )
+        self.assertEqual(self.drive(runner, narrowed=True), 0)
+        self.assertIn("Test run with 5 tests passed", self.output())
+
     def test_a_failing_run_with_no_artifact_still_fails_loudly(self):
         # An uncountable red run is still red: the verdict came from the run's
         # conclusion, and only the pass path needs a population it can state.
@@ -986,7 +1187,7 @@ class DriverTests(unittest.TestCase):
         blocked = self.root / "not-a-directory"
         blocked.write_text("", encoding="utf-8")
         status = remote_verify.drive(
-            ref="preflight/tbd/lane", sha="c0ffee",
+            ref="preflight/tbd/lane", sha="c0ffee", narrowed=False,
             runtime_dir=blocked / "runtime", slots=2,
             run_command=self.passing_runner(),
             poll=5.0, correlate_timeout=60.0, run_timeout=600.0,
@@ -1015,6 +1216,17 @@ class DriverTests(unittest.TestCase):
             dispatched,
             ["gh", "workflow", "run", "test.yml", "--ref", "preflight/tbd/lane", "-f", "scope=full"],
         )
+
+    def test_the_driver_and_render_answer_the_same_status_for_one_artifact(self):
+        # The reconciliation, pinned across the two subcommands rather than
+        # inside either: the same result files must not mean "red" to one and
+        # "green" to the other.
+        driven = self.drive(self.failing_runner(**{"xunit-quiet": CLEAN_STYLE}))
+        artifact = write_results(self.root / "artifact", **{"xunit-quiet": CLEAN_STYLE})
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            rendered = remote_verify.main(["render", str(artifact)], {})
+        self.assertEqual(driven, rendered, "drive and render disagree about one artifact")
 
     def test_the_ticket_is_released_once_the_run_is_over(self):
         self.drive(self.passing_runner())
@@ -1088,6 +1300,25 @@ class SettingsTests(unittest.TestCase):
             )
         self.assertEqual(status, 78)
 
+    def test_the_narrowing_flag_reaches_the_driver(self):
+        """`--narrowed` is plumbing, and plumbing that silently drops is the bug.
+
+        The flag decides whether a failing run publishes a test count that six
+        floor checks would misread, so it is asserted at the boundary rather than
+        only through its effect.
+        """
+        recorded: list[bool] = []
+        original = remote_verify.drive
+        remote_verify.drive = lambda **kwargs: recorded.append(kwargs["narrowed"]) or 78
+        try:
+            with tempfile.TemporaryDirectory() as scratch:
+                base = ["drive", "--repo-dir", scratch, "--ref", "preflight/x", "--sha", "c0ffee"]
+                remote_verify.main(base, {"TBD_HOME": scratch})
+                remote_verify.main([*base, "--narrowed"], {"TBD_HOME": scratch})
+        finally:
+            remote_verify.drive = original
+        self.assertEqual(recorded, [False, True])
+
     def test_the_runtime_dir_follows_tbd_home(self):
         self.assertEqual(
             remote_verify._resolve_runtime_dir({"TBD_HOME": "/tmp/fixture-home"}),
@@ -1117,11 +1348,25 @@ class RenderCommandTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("quarantinesProfileDirs", output)
 
-    def test_results_with_no_failures_exit_zero(self):
+    def test_results_with_no_failures_are_no_verdict_rather_than_a_pass(self):
+        # THE TWO SUBCOMMANDS READ THE SAME FILES AND MUST NOT DISAGREE. This
+        # used to exit 0 — read as "the tests passed" — for the very state the
+        # driver calls no verdict at all: a red run whose passes all reported
+        # clean. `render` has no run conclusion to weigh, so the strongest thing
+        # a set of files says on its own is "no failing test here", and 78 is how
+        # that is spelled everywhere else in the valve.
         write_results(self.dir, **{"xunit-quiet": CLEAN_STYLE})
         status, output = self.render(str(self.dir))
-        self.assertEqual(status, 0)
+        self.assertEqual(status, 78)
         self.assertIn("outside the test passes", output)
+
+    def test_render_and_the_driver_agree_about_one_artifact(self):
+        # Asserted against the driver's own answer rather than a literal, so the
+        # two cannot drift apart without this failing.
+        write_results(self.dir, **{"xunit-quiet": CLEAN_STYLE})
+        rendered, _ = self.render(str(self.dir))
+        report = remote_verify.render_results(remote_verify.result_files(self.dir))
+        self.assertEqual(rendered, remote_verify.verdict_from_results(report))
 
     def test_a_named_file_can_be_rendered_on_its_own(self):
         write_results(self.dir, **{"xunit-app": SWIFT_TESTING_STYLE})
