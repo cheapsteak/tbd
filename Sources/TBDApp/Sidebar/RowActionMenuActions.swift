@@ -65,6 +65,34 @@ struct RowActionMenuActions {
         ) != nil
     }
 
+    /// Capabilities the row's provider has declared, keyed by provider name —
+    /// the same idiom `AppState.pushRemoteRenameIfSupported` and
+    /// `RemoteSectionView` use. Empty for a local row or one whose provider
+    /// hasn't answered `describe` yet.
+    private var providerCapabilities: Set<String> {
+        guard let provider = worktree.providerBinding?.provider else { return [] }
+        let capabilities = appState.remoteProviders
+            .first { $0.config.name == provider }?.describe?.capabilities ?? []
+        return Set(capabilities)
+    }
+
+    /// Has the provider stopped enumerating this row's session? Read off the
+    /// mirror (`RemoteSessionInfo.gone`), the same source
+    /// `RemoteSessionDetailView` reads it from, rather than off the worktree
+    /// row — the row carries no such fact. `false` for a local row, which has
+    /// no mirror entry at all.
+    ///
+    /// This is what makes the menu's `gone` exemption reachable: the daemon
+    /// archives such a lane through `.rowOnlyGone` whatever the provider
+    /// declares, so a menu reading a hardcoded `false` here would disable the
+    /// one gesture the daemon will still perform.
+    private var isGone: Bool {
+        guard let binding = worktree.providerBinding else { return false }
+        return appState.remoteSessions.first {
+            $0.provider == binding.provider && $0.payload.id == binding.sessionID
+        }?.gone ?? false
+    }
+
     /// Build the pure model context from live `AppState`. Mirrors exactly the
     /// inputs the old `SidebarContextMenu` read inline.
     func context() -> RowActionMenu.Context {
@@ -90,7 +118,11 @@ struct RowActionMenuActions {
             isPromoted: worktree.promotedToRepoID != nil,
             branch: worktree.branch,
             claudeSessions: claudeSessions,
-            hasPreSessionHook: hasPreSessionHook
+            hasPreSessionHook: hasPreSessionHook,
+            location: worktree.location,
+            provider: worktree.providerBinding?.provider,
+            providerCapabilities: providerCapabilities,
+            isGone: isGone
         )
     }
 

@@ -601,6 +601,10 @@ public final class RPCRouter: Sendable {
                 return try await handleRemoteCreate(request.paramsData, actor: request.actor)
             case RPCMethod.remoteStop:
                 return try await handleRemoteStop(request.paramsData, actor: request.actor)
+            case RPCMethod.remoteArchive:
+                return try await handleRemoteArchive(request.paramsData, actor: request.actor)
+            case RPCMethod.remoteUnarchive:
+                return try await handleRemoteUnarchive(request.paramsData, actor: request.actor)
             case RPCMethod.remoteSend:
                 return try await handleRemoteSend(request.paramsData, actor: request.actor)
             case RPCMethod.remoteLog:

@@ -9,11 +9,10 @@ to a registered repo becomes a worktree row, nested under the lane named by
 carries a badge and the sidebar renders one surface per lane rather than two.
 Unbuilt: the CLI provider path (`--provider`, `--param`), provider default
 resolution inside `remote.create`, the outbound worktree id on `create`'s stdin,
-the retirement of the sidebar's flat `RemoteSectionView`, and the archive and
-revive semantics below — `worktree.archive`, `worktree.forget`, and the
-auto-archive-on-merge rail each refuse a remote row rather than acting on one,
-so an adopted lane cannot yet leave the active list.
-**Depends on:** [`docs/remote-provider-contract.md`](../remote-provider-contract.md) (contract v2 — the `stop`, `archive`, and `unarchive` capabilities archive composes over),
+and the retirement of the sidebar's flat `RemoteSectionView`. The archive and
+revive semantics below are carried into code paths, wire surface, and UI by
+[`2026-08-16-remote-lane-archive-design.md`](2026-08-16-remote-lane-archive-design.md).
+**Depends on:** [`docs/remote-provider-contract.md`](../remote-provider-contract.md) (contract v2 — the `archive` and `unarchive` capabilities archive and revive compose over),
 [`2026-07-24-remote-agent-backends-design.md`](2026-07-24-remote-agent-backends-design.md) (mirror, RPC family, provider manager),
 [`2026-08-01-provider-desk-read-only-design.md`](2026-08-01-provider-desk-read-only-design.md) (Provider Desk).
 
@@ -349,23 +348,33 @@ actually declares:
 - **Provider declares `archive`** — call it, then mark the row `archived`. The
   retirement is then a fact on the backend rather than TBD's private
   bookkeeping, so every other client of that backend sees it too.
-- **Provider declares `stop` but not `archive`** — stop the session, then mark
-  the row `archived`. Ending the compute is the closest such a backend comes to
-  retiring, and TBD's row carries the rest.
-- **Provider declares neither** — mark the row `archived` and do nothing else.
-  The provider-side session keeps running, and the UI says so rather than
-  implying a teardown that never happened.
+- **The session is `gone`** — mark the row `archived` and call nothing. A
+  session the provider has stopped enumerating cannot be reached by a verb, and
+  there is no live session for the row to misdescribe.
+- **Neither** — refused, naming `archive` as the capability the provider needs
+  to implement.
 
-`stop` and `archive` are both idempotent per contract, so archiving an
+`archive` and `unarchive` are both idempotent per contract, so archiving an
 already-archived or already-exited lane flips the row and nothing else.
 
+**TBD does not file a row for a lane it could not retire.** A row marked
+archived while the provider still reports the session active leaves two records
+disagreeing, and the one the user reads claims a retirement that did not happen.
+A provider may define archiving as narrowly as it likes — retiring an entry in
+its own inventory is enough, since `archived` is retirement from the working
+inventory rather than a statement about liveness — but it declares the
+capability and reports the result through `list`, so the claim sits where
+another client can verify it.
+
 **Terminating compute and retiring from inventory are separate acts, and the
-contract names them separately.** Fusing them would be sound only for a provider
-that can perform both in one call. A platform that reclaims idle sessions on its
+contract names them separately.** A platform that reclaims idle sessions on its
 own schedule, exposing no client-facing kill, can retire a session but cannot
 terminate one; another backend can kill a process and has no durable inventory
-to retire it from. Archive therefore reaches for whichever act a provider has,
-and where it has neither, the row state alone is the honest whole of it.
+to retire it from. So archive reaches for `archive` and for nothing else.
+Substituting `stop` where `archive` is undeclared would decide that a kill is a
+good enough synonym for a filing decision, discarding at the moment it matters
+the distinction the contract draws. `stop` stays available as its own gesture,
+asked for by name.
 
 The filing decision travels the other way too: a session the provider reports as
 `archived: true` flips its row to `archived`, and one reported back to
@@ -375,87 +384,75 @@ and it is the one fact both sides hold — so a lane retired on the provider's o
 surface or from another laptop leaves TBD's active list too, instead of
 persisting as a lane nobody will use.
 
+TBD reads that field only from a provider that declares `archive`, and only when
+it is present. A provider with no archiving concept never sets it, and an absent
+`archived` reads as `false` per contract, so an ungated reading would have every
+such snapshot carry an implicit "not archived" that returned rows to the active
+list about once a minute. Display still reads absent as `false`; only the filing
+sync abstains, because a rule about overwriting the user's own filing decision
+has to tell silence apart from denial.
+
 This holds while the row's location is remote, which is what makes it safe. A row
 whose files are on this machine takes its status from TBD alone, whatever a
 provider later says about a session that row once ran on.
 
-Where archive ends the session, it refuses on an active lane unless forced,
+Where archive invokes the verb, it refuses on an unsafe lane unless forced,
 paralleling how local archive refuses on uncommitted changes. Two guards:
 
-- `agentState == .working` — do not tear down a session mid-task by accident.
+- `agentState == .working` — do not retire a session mid-task by accident.
 - A dirty remote checkout, reported through an optional well-known `meta` key.
 
-The second guard exists because TBD cannot see a remote working tree. Ending a
+The second guard exists because TBD cannot see a remote working tree. Retiring a
 box session can destroy work that was never pushed, and the `working` guard does
-not help: an idle agent sitting on a dirty tree looks safe to stop. A provider
+not help: an idle agent sitting on a dirty tree looks safe to retire. A provider
 that knows its checkout is dirty reports it; TBD then treats the lane like a
-local one with uncommitted changes. Providers that report nothing degrade to a
-warning, so the guard is inert until a provider adopts it. It is additive at
-either contract major, which lets providers add response fields at any time.
+local one with uncommitted changes. Providers that report nothing degrade to the
+`working` guard alone, so the guard is inert until a provider adopts it. It is
+additive at either contract major, which lets providers add response fields at
+any time.
 
-**Both guards apply only where archive actually ends the session,** because
-destroying unpushed work is the only thing they defend against. A retire-only
-archive destroys nothing: the session keeps running, `unarchive` brings it back
-where the provider declares it, and refusing it would block a harmless gesture on
-a hazard that is not present. So:
-
-- **The `stop` path is always guarded.** TBD is asking for termination.
-- **The `archive`-verb path is guarded when the same provider also declares
-  `stop`.** The contract does not require `archive` to terminate anything, but it
-  permits termination as a side effect of retiring, and a provider whose one
-  operation does both is the common shape — it declares `stop` and `archive`
-  pointed at that single operation. Declared `stop` is the observable that says
-  this backend can end compute, so TBD treats its archive as possibly doing so.
-- **A provider that declares `archive` without `stop` is taken at its word.**
-  It has said it cannot terminate a session; archiving through it is a filing
-  change, and TBD does not guard it. Withholding `stop` while archiving tears the
-  box down is a misdeclaration, not a case this design defends against.
-- **The row-state-only path is never refused.** Nothing on the box is touched.
+**Both guards apply to the verb path alone.** The `gone` path calls nothing and
+touches nothing on the provider, so it has nothing to defend against. The
+contract permits termination as a side effect of retiring, so a declared
+`archive` is reason enough to check — one rule for both locations, rather than an
+inference drawn from which other capabilities a provider happens to declare.
 
 `--force` overrides both.
 
 ### Revive
 
-Revive returns a lane to the working set, and how far it reaches is decided by
-what archive did to the session.
+Revive returns a lane to the working set. It attempts the verb where one is
+declared, degrades on what comes back, and reports it. Two cases:
 
-**A `gone` row is checked first, before any of the cases below.** A row that is
-both `archived` and `gone` has a session the provider has stopped listing, so
-there is nothing to unarchive whatever the provider declares — reviving it flips
-the row alone and says the session is no longer there. Without that precedence
-such a row would fall into a capability-keyed case and issue a provider call
-that can only come back `not_found`: not a data-loss risk, but a confusing
-error where a plain statement belongs. This is the same precedence the
-terminated case already takes, for the same reason — what happened to the
-session outranks what the provider can be asked.
+- **Provider declares `unarchive`** — call it, flip the row back to `active`, and
+  report the session's condition: running, exited, or no longer there. Both verbs
+  are idempotent, so an already-active session, an exited one, and a `gone` one
+  all flip cleanly, with a `not_found` response degrading to a row-only flip
+  rather than surfacing an error.
+- **No `unarchive`, and the provider still reports the session archived** — the
+  retirement stands on the backend and TBD cannot lift it. The contract declares
+  the two verbs separately precisely because a backend may retire without being
+  able to restore, so revive is unavailable and says which half is missing.
+- **No `unarchive`, and the provider does not report it archived** — flip the
+  row and call nothing. This is a lane filed under the `gone` exemption: TBD's
+  own decision, which a TBD gesture reverses, so a `gone` archive is never a
+  one-way door.
 
-Four cases then remain, mirroring archive's own:
+The discriminator is what the provider reports now, not how the row came to be
+archived, so nothing about the archive has to be persisted to decide it.
 
-- **Nothing was retired on the provider** — archive flipped the row alone. Revive
-  flips it back. The session never left the provider's working set, so there is
-  nothing to undo there.
-- **Provider declares `unarchive`** — call it, then flip the row back to
-  `active`. This restores the lane whole: the session is still there, and both
-  sides agree it is back in play.
-- **The session was terminated** — archive took the `stop` path, or the
-  provider's archive tore down the compute as a side effect. There is nothing to
-  return to, and revive says so. Recreating a session on the same branch and
-  rebinding the row — the shape `ReviveFresh` already uses locally — is additive
-  and needs no model change, so it can follow if the absence chafes.
-- **Provider declares `archive` without `unarchive`, and the session still
-  exists** — the retirement stands on the backend and TBD cannot lift it. The
-  contract declares the two verbs separately precisely because a backend may
-  retire without being able to restore, so revive is unavailable and says which
-  half is missing.
+**Attempting the verb is worth a call TBD expects to fail.** `gone` means only
+that a session stopped being enumerated — after two consecutive absences from a
+snapshot, or at once on an explicit `removed` event — and a provider may list it
+again; an exited session may still be a record the provider can unarchive. What
+comes back is better evidence than what TBD believed beforehand, and idempotence
+means the attempt costs a round trip and never a wrong outcome.
 
-**These are evaluated in order, and termination is checked before capability.**
-The common `archive`+`stop`-without-`unarchive` shape satisfies both of the last
-two conditions at once, so the order is what decides which message the user sees.
-Termination wins because it is the stronger fact: if the compute is gone, an
-`unarchive` verb would not have helped either, and telling someone which half of
-a verb pair is missing invites them to go looking for a restore that could not
-work. "There is nothing to return to" is the accurate answer whenever it is
-true, whatever the provider declares.
+**The refusal is mechanical rather than a matter of taste.** With no verb to
+call and the provider still reporting `archived: true`, a row-only flip would be
+re-archived by the filing sync on the next snapshot, and again on every snapshot
+after. Refusing keeps the two records from fighting. Where the provider reports
+nothing, no such contradiction exists to create.
 
 ### `gone` and `archived` compose
 
@@ -604,23 +601,27 @@ Behavior:
 
 - Parameter resolution honors all four layers, including a user default beating
   ambient derivation.
-- Archive takes each of its three paths against the capabilities declared: a
-  provider declaring `archive` is archived through the verb, one declaring only
-  `stop` is stopped, and one declaring neither has its row flipped with no
-  provider call at all. Each ends with the row `archived`, and an
-  already-archived or already-exited lane flips without error.
-- The guards are scoped to the terminating paths: archive refuses on `working`
-  and on a provider-reported dirty checkout when the path is `stop`, and when it
-  is the `archive` verb from a provider that also declares `stop`; it refuses on
-  neither when the provider declares `archive` without `stop`, nor when no verb
-  is called at all. `--force` overrides both wherever they apply.
+- Archive takes each of its paths against the capabilities declared: a provider
+  declaring `archive` is archived through the verb, a `gone` lane has its row
+  flipped with no provider call, and a provider declaring neither is refused with
+  the row untouched. A provider declaring only `stop` is refused too, and `stop`
+  is never invoked. An already-archived or already-exited lane flips without
+  error.
+- The guards are scoped to the verb path: archive refuses on `working` and on a
+  provider-reported dirty checkout when it calls `archive`, and refuses on
+  neither when it files a `gone` lane. `--force` overrides both wherever they
+  apply.
 - A session reported `archived: true` flips its row to `archived`, and one
   reported back to `archived: false` returns it to `active`, without either
-  touching `state`.
-- Revive takes each of its four cases: it flips the row back alone where archive
-  called nothing, unarchives through the verb where it is declared, and reports
-  the reason it cannot proceed both where `archive` was declared without
-  `unarchive` and where the session was terminated.
+  touching `state`. A provider that does not declare `archive` moves no row
+  whatever it reports, and an absent `archived` moves no row while still reading
+  as not-archived for display.
+- Revive takes each of its cases: it unarchives through the verb where declared —
+  for a running, an exited, and a `gone` session alike, with `not_found`
+  degrading to a row-only flip; it reports which half is missing where `archive`
+  was declared without `unarchive` and the session is still reported archived;
+  and it flips the row alone for a `gone`-exemption lane whose provider declares
+  neither verb.
 - Adoption places an unparented session at top level in its matched repo,
   creates no row for an unmatched session, and does not re-derive an existing
   row.

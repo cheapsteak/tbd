@@ -115,9 +115,19 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
     public let agentStateReason: String?
     public let agentStateAt: String?
     public let meta: [String: String]?
+    /// Retirement-from-inventory claim, per the provider contract's
+    /// `archived` field. `nil` means the provider made no claim (absent);
+    /// `.some(false)`/`.some(true)` is an explicit claim. Deliberately NOT
+    /// collapsed to a non-optional `Bool` — the filing-sync authority rule
+    /// (docs/specs/2026-08-16-remote-lane-archive-design.md §"Whose report
+    /// counts") must distinguish "no claim" from "explicit false", and
+    /// collapsing this at decode would destroy that distinction. Use
+    /// `isArchived` for display, which supplies the contract's
+    /// absent-reads-as-false semantics.
+    public let archived: Bool?
 
     enum CodingKeys: String, CodingKey {
-        case id, title, state, meta
+        case id, title, state, meta, archived
         case createdAt = "created_at"
         case exitCode = "exit_code"
         case agentState = "agent_state"
@@ -129,11 +139,11 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
                 state: RemoteProcessState, exitCode: Int? = nil,
                 agentState: RemoteAgentState = .unknown,
                 agentStateReason: String? = nil, agentStateAt: String? = nil,
-                meta: [String: String]? = nil) {
+                meta: [String: String]? = nil, archived: Bool? = nil) {
         self.id = id; self.title = title; self.createdAt = createdAt
         self.state = state; self.exitCode = exitCode
         self.agentState = agentState; self.agentStateReason = agentStateReason
-        self.agentStateAt = agentStateAt; self.meta = meta
+        self.agentStateAt = agentStateAt; self.meta = meta; self.archived = archived
     }
 
     public init(from decoder: Decoder) throws {
@@ -147,7 +157,13 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
         agentStateReason = try c.decodeIfPresent(String.self, forKey: .agentStateReason)
         agentStateAt = try c.decodeIfPresent(String.self, forKey: .agentStateAt)
         meta = try c.decodeIfPresent([String: String].self, forKey: .meta)
+        archived = try c.decodeIfPresent(Bool.self, forKey: .archived)
     }
+
+    /// The contract's absent-reads-as-`false` display semantics. The sync
+    /// path must NOT use this — it needs to distinguish "no claim" (nil) from
+    /// an explicit `false`, so it reads `archived` directly.
+    public var isArchived: Bool { archived ?? false }
 
     /// A presentation-safe projection for a cached row whose provider has
     /// failed to produce a fresh inventory. The mirror keeps the last good
@@ -158,12 +174,22 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
     /// only non-terminal/unknown rows are demoted. In every demoted case the
     /// agent axis also becomes unknown so a cached `working` or
     /// `waiting_input` value cannot keep rendering as current activity.
+    ///
+    /// This projection demotes only the liveness axis (`state`,
+    /// `agentState`, `agentStateReason`) to `.unknown` — the fact this
+    /// snapshot is stale says nothing about the filing axis, so `archived`
+    /// must be threaded through unchanged. Filing and liveness are separate
+    /// axes throughout this feature; a field that collapses them here lies
+    /// about one of them. When adding a field to this type, decide which
+    /// axis it belongs to before deciding whether it survives this
+    /// projection.
     public func projectedForStaleSnapshot() -> RemoteSessionPayload {
         guard state != .exited else { return self }
         return RemoteSessionPayload(
             id: id, title: title, createdAt: createdAt,
             state: .unknown, exitCode: exitCode, agentState: .unknown,
-            agentStateReason: nil, agentStateAt: agentStateAt, meta: meta)
+            agentStateReason: nil, agentStateAt: agentStateAt, meta: meta,
+            archived: archived)
     }
 }
 

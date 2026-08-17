@@ -18,6 +18,13 @@ public actor RemoteProviderManager {
     private let runner: any RemoteProviderInvoking
     private let registryURL: URL
     private let clock: any Clock<Duration>
+    /// Where the filing sync records the archives and revives it performs.
+    /// Optional only so the many fixtures that construct this actor for
+    /// mirror/adoption coverage need not supply one; the daemon always does.
+    /// The sync FAILS CLOSED without it — an act nobody can record does not
+    /// happen (`docs/specs/2026-08-16-remote-lane-archive-design.md`
+    /// §"Never silent").
+    private let actuationLog: ActuationLog?
     static let pollInterval: TimeInterval = 60
 
     private var providers: [String: RemoteProviderConfig] = [:]
@@ -47,10 +54,24 @@ public actor RemoteProviderManager {
     /// never cleared — shutdown is terminal for this actor's lifetime. See
     /// `shutdown()`'s doc comment for the race this closes.
     private var shuttingDown = false
+    /// Worktree id → the moment TBD last locally archived or revived that
+    /// remote row. The stale-snapshot watermark: a provider response whose
+    /// request began *before* one of these entries provably could not have
+    /// accounted for it, so the filing sync abstains rather than reversing a
+    /// decision the user just made.
+    ///
+    /// In memory on purpose. The window it defends is open only while a
+    /// provider request is outstanding, and no such request survives a
+    /// restart — after one, every request start is later than every prior
+    /// decision, so there is nothing left to suppress
+    /// (`docs/specs/2026-08-16-remote-lane-archive-design.md` §"Stale
+    /// snapshots"). Swept on every apply so it cannot grow without bound.
+    private var filingDecisions: [UUID: Date] = [:]
 
     init(
         db: TBDDatabase, subscriptions: StateSubscriptionManager,
         runner: any RemoteProviderInvoking, registryURL: URL,
+        actuationLog: ActuationLog? = nil,
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.db = db
@@ -58,6 +79,7 @@ public actor RemoteProviderManager {
         self.adopter = RemoteSessionAdopter(db: db)
         self.runner = runner
         self.registryURL = registryURL
+        self.actuationLog = actuationLog
         self.clock = clock
         // RPC becomes available before `start()` runs, so seed the registry
         // synchronously. The first status or mutation-gate read can then recover
@@ -256,6 +278,11 @@ public actor RemoteProviderManager {
         // both call it directly) — register on first use so providerStatuses()
         // reflects it.
         registerIfNeeded(provider)
+        // Stamped BEFORE the provider is asked anything. `snapshotAt` below is
+        // arrival — it says when this response landed, not when the question
+        // was posed, and only the latter can prove a response could not have
+        // accounted for a local filing decision. See `syncFilingDecisions`.
+        let requestStartedAt = Date()
         do {
             let result = try await runner.run(provider, verb: ["list"], stdin: nil, timeout: 30)
             if let failure = result.failureClass {
@@ -264,7 +291,9 @@ public actor RemoteProviderManager {
             }
             let envelope = try result.decoded(RemoteSessionListEnvelope.self)
             let snapshotAt = Date()
-            try await apply(snapshot: envelope.sessions, provider: provider.name, now: snapshotAt)
+            try await apply(
+                snapshot: envelope.sessions, provider: provider.name, now: snapshotAt,
+                requestStartedAt: requestStartedAt)
         } catch {
             remoteLogger.debug(
                 "poll \(provider.name, privacy: .public) failed: \(String(describing: error), privacy: .public)"
@@ -275,9 +304,19 @@ public actor RemoteProviderManager {
     }
 
     /// Shared by the poll path and the events snapshot path (Task 6).
-    func apply(snapshot sessions: [RemoteSessionPayload], provider: String, now: Date = Date())
-        async throws
-    {
+    ///
+    /// `now` is arrival — when this response landed. `requestStartedAt` is
+    /// when the question behind it was posed: the poll stamps it before
+    /// `runner.run`, and the events supervisor supplies the moment it opened
+    /// the connection the `snapshot` event arrived on. The filing sync needs
+    /// the second, not the first (see `syncFilingDecisions`). It defaults to
+    /// arrival so a caller with a response that is fresh by construction —
+    /// `applyUpsert`'s pushed `session` line — reads correctly without
+    /// inventing a start time.
+    func apply(
+        snapshot sessions: [RemoteSessionPayload], provider: String, now: Date = Date(),
+        requestStartedAt: Date? = nil
+    ) async throws {
         let outcome = try await db.remoteSessions.applySnapshot(
             provider: provider, sessions: sessions, now: now)
         // After the mirror, never before: adoption reads the repo association
@@ -287,6 +326,12 @@ public actor RemoteProviderManager {
         // mirror re-attempts resolution on every poll while its pin is null,
         // and the poll after the user registers the repo is exactly that case.
         broadcastAdoptions(await adopter.adopt(sessions: sessions, provider: provider))
+        // After adoption, never before: a session first sighted in this very
+        // snapshot already reporting `archived: true` must be filed on the
+        // row adoption just minted, not skipped for lack of one.
+        await syncFilingDecisions(
+            sessions: sessions, provider: provider,
+            requestStartedAt: requestStartedAt ?? now, now: now)
         lastSuccessfulSnapshotAt[provider] = now
         // A live snapshot supersedes whatever the persisted row would have
         // said, so an earlier unreadable read no longer gates anything.
@@ -308,11 +353,25 @@ public actor RemoteProviderManager {
     /// Single-session upsert from an events `session` line. No absence
     /// bookkeeping happens here — only `apply(snapshot:)` drives the
     /// two-absence rule, since only a full snapshot can tell what's missing.
-    func applyUpsert(_ session: RemoteSessionPayload, provider: String) async {
+    ///
+    /// A pushed `session` line is fresh by construction — the provider wrote
+    /// it because something changed just now — so the filing sync takes
+    /// arrival as the request start. There is no earlier moment to appeal to
+    /// and none is needed: nothing was in flight across a local decision.
+    ///
+    /// `date` is arrival, and it is **compared** rather than displayed — it is
+    /// the request start the watermark is measured against — so it comes
+    /// through the date seam rather than a bare `Date()`
+    /// (`Tests/CLAUDE.md`, "Clock and date seams": `Duration` is behavior,
+    /// `Date` is data). Defaulted, so no call site changes.
+    func applyUpsert(
+        _ session: RemoteSessionPayload, provider: String, date: Date = Date()
+    ) async {
+        let arrivedAt = date
         let outcome: SnapshotOutcome
         do {
             outcome = try await db.remoteSessions.upsertOne(
-                provider: provider, session: session, now: Date())
+                provider: provider, session: session, now: arrivedAt)
         } catch {
             remoteLogger.error(
                 "events upsert failed for \(provider, privacy: .public)/\(session.id, privacy: .public): \(String(describing: error), privacy: .public)"
@@ -325,6 +384,9 @@ public actor RemoteProviderManager {
         if let created = await adopter.adopt(session: session, provider: provider) {
             broadcastAdoptions([created])
         }
+        await syncFilingDecisions(
+            sessions: [session], provider: provider,
+            requestStartedAt: arrivedAt, now: arrivedAt)
         if outcome.changed {
             subscriptions.broadcast(delta: .remoteSessionsChanged)
         }
@@ -371,6 +433,388 @@ public actor RemoteProviderManager {
         }
     }
 
+    // MARK: - The filing decision travels back
+
+    /// Records that TBD itself just archived or revived the remote row bound
+    /// to `worktreeID`, so a provider response composed before `at` cannot
+    /// undo it.
+    ///
+    /// Called by the worktree archive/revive handlers, the merge rail, and the
+    /// filing sync's own two writing paths, after the row's status is written —
+    /// every place TBD makes a filing decision of its own about a remote lane.
+    /// The sync is not exempt from its own rule: a row it files is as
+    /// reversible by a poll still in flight as one a gesture filed.
+    /// **The map only ever moves forward.** The instants arriving here are not
+    /// ordered by the order of the calls: the sync stamps a snapshot's
+    /// *arrival*, which precedes its own write by an adoption and an actuation
+    /// append, so a sync that started before a gesture can finish after it
+    /// carrying the older instant. A blind assignment would then hand a
+    /// still-outstanding poll a watermark it predates, which is exactly the
+    /// window this map exists to close. Keeping the later of the two is always
+    /// sound: every recorded instant belongs to a decision that really was
+    /// made, and the newest one bounds them all.
+    ///
+    /// Returns whatever was on file before, so a caller whose decision then
+    /// fails can put it back through `withdrawFilingDecision`.
+    @discardableResult
+    func noteFilingDecision(worktreeID: UUID, at date: Date) -> Date? {
+        let prior = filingDecisions[worktreeID]
+        if let prior, prior >= date { return prior }
+        filingDecisions[worktreeID] = date
+        return prior
+    }
+
+    /// Takes back a watermark recorded in anticipation of a decision that then
+    /// did not happen — a retirement verb that failed, or a row write that
+    /// threw — leaving the row untouched. Keeping it would suppress a
+    /// legitimate snapshot-driven flip for two poll intervals over a decision
+    /// TBD never made.
+    ///
+    /// **Restoring, not deleting.** A row can carry a watermark from an
+    /// earlier decision that did happen, and that decision's window is still
+    /// open; dropping the entry outright would reopen it because a later
+    /// gesture failed, which has nothing to do with it.
+    ///
+    /// **And only while the map still holds what this caller wrote.** If
+    /// another path has recorded its own decision in the meantime, that
+    /// decision is newer than both and its watermark is the one that must
+    /// survive — including the case where `noteFilingDecision` declined to
+    /// write at all because a newer instant was already there.
+    func withdrawFilingDecision(worktreeID: UUID, restoring prior: Date?, ifStillAt written: Date) {
+        guard filingDecisions[worktreeID] == written else { return }
+        if let prior {
+            filingDecisions[worktreeID] = prior
+        } else {
+            filingDecisions.removeValue(forKey: worktreeID)
+        }
+    }
+
+    /// Whether a response whose request began at `requestStartedAt` may still
+    /// move this row: it may, unless TBD made a filing decision of its own
+    /// *after* that request began. The boundary belongs to the response — a
+    /// decision taken at the very instant the request began is one that
+    /// request could have accounted for.
+    private func filingDecisionAllowsFlip(_ worktreeID: UUID, requestStartedAt: Date) -> Bool {
+        guard let decidedAt = filingDecisions[worktreeID] else { return true }
+        return decidedAt <= requestStartedAt
+    }
+
+    /// Test seam: the watermark on file for one row, or nil when none is (or
+    /// none survived the sweep). Nothing in production reads this.
+    func filingDecision(for worktreeID: UUID) -> Date? {
+        filingDecisions[worktreeID]
+    }
+
+    /// Test seam: awaited inside the check-then-act window, immediately before
+    /// `recheckBeforeFiling` re-reads the row and the watermark. Nil in
+    /// production; nothing outside the suite ever sets it.
+    private var midFlipHook: (@Sendable () async -> Void)?
+
+    /// Test seam: installs `midFlipHook`.
+    ///
+    /// The window it opens onto is reachable only from *inside* the sync, and
+    /// every other seam within it — the actuation log's `write` syscall, its
+    /// `now` closure — is synchronous, so a test that waited from one would
+    /// park a cooperative-pool thread until a second task released it. Under a
+    /// narrow pool shared with the rest of the suite, nothing is left to do the
+    /// releasing and the run wedges with no failing test. A gesture run inline
+    /// on the sync's own task needs no second task at all, so it is exactly as
+    /// deterministic and cannot starve.
+    func setMidFlipHook(_ hook: (@Sendable () async -> Void)?) {
+        midFlipHook = hook
+    }
+
+    /// Applies the provider's own `archived` claims to the worktree rows
+    /// bound to its sessions, so a lane retired on the provider's surface or
+    /// from another machine leaves TBD's active list too, and one returned to
+    /// the inventory comes back
+    /// (`docs/specs/2026-08-16-remote-lane-archive-design.md` §"The filing
+    /// decision travels back").
+    ///
+    /// Three gates, none of them removable:
+    ///
+    /// - **Capability.** `archived` is read only from a provider that
+    ///   declares `archive`. The contract makes an absent field read as
+    ///   `false`, so without this a provider with no archiving concept would
+    ///   carry an implicit "not archived" on every snapshot and drag archived
+    ///   rows back into the active list about once a minute, forever.
+    /// - **Presence.** A provider that declares the capability and omits the
+    ///   field anyway made no claim, and silence must not overwrite the
+    ///   user's own filing decision. Display still reads absent as `false`
+    ///   via `isArchived`; only the sync abstains.
+    /// - **Watermark.** A response whose request began before a local filing
+    ///   decision provably could not have accounted for it, in either
+    ///   direction, so it is dropped rather than allowed to reverse the user.
+    ///
+    /// `state` is never touched here. Filing and liveness are separate axes,
+    /// and the mirror already owns the second.
+    private func syncFilingDecisions(
+        sessions: [RemoteSessionPayload], provider: String,
+        requestStartedAt: Date, now: Date
+    ) async {
+        defer { sweepFilingDecisions(now: now) }
+        guard describes[provider]?.capabilities.contains("archive") == true else { return }
+        guard let actuationLog else {
+            remoteLogger.debug(
+                "filing sync skipped for \(provider, privacy: .public): no actuation log on this manager"
+            )
+            return
+        }
+        for session in sessions {
+            // Presence gate: nil is "no claim", which is not the same fact as
+            // an explicit `false` and must not move anything.
+            guard let archived = session.archived else { continue }
+            let row: Worktree?
+            do {
+                row = try await db.worktrees.findRemote(provider: provider, sessionID: session.id)
+            } catch {
+                remoteLogger.error(
+                    "filing sync could not resolve \(provider, privacy: .public)/\(session.id, privacy: .public): \(String(describing: error), privacy: .public)"
+                )
+                continue
+            }
+            guard let row else { continue }
+            // A row whose files are on this machine takes its status from TBD
+            // alone, whatever a provider reports about it.
+            guard !row.location.isLocal else { continue }
+            guard filingDecisionAllowsFlip(row.id, requestStartedAt: requestStartedAt) else {
+                remoteLogger.debug(
+                    "filing sync skipped \(row.id.uuidString, privacy: .public): response predates the local decision"
+                )
+                continue
+            }
+            if archived, row.status == .active {
+                await fileRowArchived(
+                    row, provider: provider, log: actuationLog,
+                    requestStartedAt: requestStartedAt, now: now)
+            } else if !archived, row.status == .archived {
+                await returnRowToActive(
+                    row, provider: provider, log: actuationLog,
+                    requestStartedAt: requestStartedAt, now: now)
+            }
+        }
+    }
+
+    /// What the re-read immediately before a filing write found.
+    private enum FlipRecheck {
+        /// The world still looks the way it did when the flip was decided.
+        case proceed
+        /// It does not, and the flip must be abandoned rather than restated.
+        /// Carries the vocabulary term and the free-text detail for the record.
+        case abandon(RefusedReason, String)
+        /// The row could not be read back at all.
+        case unreadable(any Error)
+    }
+
+    /// Narrows the check-then-act window between `syncFilingDecisions` reading
+    /// a row and one of the two filing paths writing it.
+    ///
+    /// Between those two moments the sync suspends twice — once resolving the
+    /// row, once appending the request row to the record — and a user gesture
+    /// landing in that window writes both the status and a watermark. Acting on
+    /// state read three suspensions ago would reverse the user's own action, so
+    /// both facts are read again here, immediately before the write, and a flip
+    /// that no longer holds is abandoned.
+    ///
+    /// **It narrows the window rather than closing it.** `db.worktrees.archive`
+    /// is itself a suspension point on this actor, so a gesture can still land
+    /// between this re-read and that write — what shrinks is the exposure, from
+    /// two awaits plus a record append down to one DB write. The watermark is
+    /// what makes the remainder safe: a gesture landing in that last sliver
+    /// stamps a decision later than this response's request start, and the poll
+    /// carrying the reversal is refused at the outer gate on its next arrival.
+    ///
+    /// `expecting` is the status the flip was decided against — still holding
+    /// it means nobody else has filed this row in the meantime — and `becoming`
+    /// is the status it was going to write, which is what tells an idempotent
+    /// no-op apart from a row this act may not touch at all.
+    private func recheckBeforeFiling(
+        _ worktreeID: UUID, expecting expected: WorktreeStatus, becoming target: WorktreeStatus,
+        requestStartedAt: Date
+    ) async -> FlipRecheck {
+        await midFlipHook?()
+        let current: Worktree?
+        do {
+            current = try await db.worktrees.get(id: worktreeID)
+        } catch {
+            return .unreadable(error)
+        }
+        guard let current else {
+            return .abandon(.notFound, "the worktree row no longer exists")
+        }
+        guard current.status == expected else {
+            // Only the flip's own target is a genuine no-op — somebody else
+            // did exactly what this flip was about to do. `main`, `creating`
+            // and `failed` are not that: they are states the sync may not file
+            // at all, and recording them as `noop` would put "already done" in
+            // the record over a row that was never eligible.
+            guard current.status == target else {
+                return .abandon(
+                    .notEligible, "the row is \(current.status.rawValue), which the sync may not file")
+            }
+            return .abandon(.noop, "the row is already \(current.status.rawValue)")
+        }
+        guard filingDecisionAllowsFlip(worktreeID, requestStartedAt: requestStartedAt) else {
+            return .abandon(
+                .notEligible, "a local filing decision landed while this flip was being recorded")
+        }
+        return .proceed
+    }
+
+    /// The provider reports this lane retired: file the row, and say so.
+    ///
+    /// A lane that leaves the active list without a gesture has to explain
+    /// itself, so this writes a notification record as well as broadcasting
+    /// the delta — the shape `AutoArchiveOnMergeCoordinator` established for
+    /// the other case where a worktree is retired without the user asking at
+    /// that moment. The daemon-rail actuation row is written first and
+    /// fail-closed, for the reason that coordinator spells out: an
+    /// unrecordable archive does not happen, and the next snapshot retries it.
+    private func fileRowArchived(
+        _ row: Worktree, provider: String, log: ActuationLog,
+        requestStartedAt: Date, now: Date
+    ) async {
+        var request = ActuationRow(
+            actor: .daemon(rail: ActuationRail.remoteFilingSync), kind: .dispose)
+        request.target = ActuationTarget(worktree: row.id.uuidString)
+        let actuationID: String
+        do {
+            actuationID = try await log.appendRequest(request)
+        } catch {
+            remoteLogger.warning(
+                "filing sync skipped \(row.id.uuidString, privacy: .public) (record unwritable): \(String(describing: error), privacy: .public)"
+            )
+            return
+        }
+        switch await recheckBeforeFiling(
+            row.id, expecting: .active, becoming: .archived,
+            requestStartedAt: requestStartedAt) {
+        case .proceed:
+            break
+        case .abandon(let reason, let detail):
+            await log.appendOutcome(
+                confirms: actuationID, result: .refused(reason), error: detail)
+            remoteLogger.debug(
+                "filing sync abandoned archiving \(row.id.uuidString, privacy: .public): \(detail, privacy: .public)"
+            )
+            return
+        case .unreadable(let error):
+            await log.appendOutcome(
+                confirms: actuationID, result: .transportFailed, error: "\(error)")
+            remoteLogger.error(
+                "filing sync could not re-read \(row.id.uuidString, privacy: .public): \(String(describing: error), privacy: .public)"
+            )
+            return
+        }
+        do {
+            try await db.worktrees.archive(id: row.id)
+        } catch {
+            await log.appendOutcome(
+                confirms: actuationID, result: .transportFailed, error: "\(error)")
+            remoteLogger.error(
+                "filing sync could not archive \(row.id.uuidString, privacy: .public): \(String(describing: error), privacy: .public)"
+            )
+            return
+        }
+        // The watermark goes on before anything else observes the write, so a
+        // poll already in flight with the provider's pre-archive word cannot
+        // un-file what this sync just filed. Every write to a remote row's
+        // status is watermarked, whichever path made it.
+        noteFilingDecision(worktreeID: row.id, at: now)
+        await log.appendOutcome(confirms: actuationID, result: .dispatched)
+        subscriptions.broadcast(delta: .worktreeArchived(WorktreeIDDelta(worktreeID: row.id)))
+        do {
+            let notification = try await db.notifications.create(
+                worktreeID: row.id, type: .taskComplete,
+                message: "Archived \(row.displayName) — \(provider) reports this session retired",
+                terminalID: nil)
+            subscriptions.broadcast(
+                delta: .notificationReceived(
+                    NotificationDelta(
+                        notificationID: notification.id, worktreeID: notification.worktreeID,
+                        type: notification.type, message: notification.message,
+                        terminalID: notification.terminalID, activate: false)))
+        } catch {
+            remoteLogger.error(
+                "filing sync archived \(row.id.uuidString, privacy: .public) but could not record a notification: \(String(describing: error), privacy: .public)"
+            )
+        }
+    }
+
+    /// The provider reports this lane back in its working inventory: return
+    /// the row to the active list.
+    ///
+    /// No notification: a lane reappearing in the list is visible on its own,
+    /// and the obligation the spec places on this sync is on the direction
+    /// that makes a lane vanish. The actuation row is still written — the
+    /// daemon acted, and the record names acts it performed.
+    private func returnRowToActive(
+        _ row: Worktree, provider: String, log: ActuationLog,
+        requestStartedAt: Date, now: Date
+    ) async {
+        var request = ActuationRow(
+            actor: .daemon(rail: ActuationRail.remoteFilingSync), kind: .spawn)
+        request.target = ActuationTarget(worktree: row.id.uuidString)
+        let actuationID: String
+        do {
+            actuationID = try await log.appendRequest(request)
+        } catch {
+            remoteLogger.warning(
+                "filing sync skipped \(row.id.uuidString, privacy: .public) (record unwritable): \(String(describing: error), privacy: .public)"
+            )
+            return
+        }
+        switch await recheckBeforeFiling(
+            row.id, expecting: .archived, becoming: .active,
+            requestStartedAt: requestStartedAt) {
+        case .proceed:
+            break
+        case .abandon(let reason, let detail):
+            await log.appendOutcome(
+                confirms: actuationID, result: .refused(reason), error: detail)
+            remoteLogger.debug(
+                "filing sync abandoned returning \(row.id.uuidString, privacy: .public) to active: \(detail, privacy: .public)"
+            )
+            return
+        case .unreadable(let error):
+            await log.appendOutcome(
+                confirms: actuationID, result: .transportFailed, error: "\(error)")
+            remoteLogger.error(
+                "filing sync could not re-read \(row.id.uuidString, privacy: .public): \(String(describing: error), privacy: .public)"
+            )
+            return
+        }
+        do {
+            try await db.worktrees.revive(id: row.id)
+        } catch {
+            await log.appendOutcome(
+                confirms: actuationID, result: .transportFailed, error: "\(error)")
+            remoteLogger.error(
+                "filing sync could not revive \(row.id.uuidString, privacy: .public): \(String(describing: error), privacy: .public)"
+            )
+            return
+        }
+        // Same watermark obligation as the archive direction: the un-filing is
+        // a local filing decision too, and an in-flight poll carrying the
+        // provider's pre-return word must not reverse it.
+        noteFilingDecision(worktreeID: row.id, at: now)
+        await log.appendOutcome(confirms: actuationID, result: .dispatched)
+        subscriptions.broadcast(
+            delta: .worktreeRevived(
+                WorktreeDelta(
+                    worktreeID: row.id, repoID: row.repoID, name: row.name,
+                    path: row.localPath, status: .active)))
+    }
+
+    /// Drops watermarks older than two poll intervals. Nothing needs them
+    /// past that: a provider request outstanding for longer has already
+    /// timed out (`list` is bounded at 30s), so no response can still be in
+    /// flight from before them.
+    private func sweepFilingDecisions(now: Date) {
+        let cutoff = now.addingTimeInterval(-2 * Self.pollInterval)
+        filingDecisions = filingDecisions.filter { $0.value >= cutoff }
+    }
+
     /// Test seam: whether a supervisor currently exists for `name` — used
     /// only to make the events-vs-poll capability gate in `startLoop`
     /// observable from tests without exposing `supervisors` itself.
@@ -409,6 +853,20 @@ public actor RemoteProviderManager {
     private func registerIfNeeded(_ config: RemoteProviderConfig) {
         if providers[config.name] == nil { providers[config.name] = config }
         if health[config.name] == nil { health[config.name] = (.ok, nil, nil) }
+    }
+
+    /// The capability set a provider declared in its cached `describe`
+    /// response, or the empty set when no describe was ever recorded for that
+    /// name (an unknown provider, or one whose describe failed).
+    ///
+    /// A caller MUST NOT invoke a verb whose capability a provider has not
+    /// declared (`docs/remote-provider-contract.md`), so this is the one read
+    /// every capability gate goes through — the router's `remote.*` handlers
+    /// and the remote lane's archive/revive routing alike. Failing closed on
+    /// an absent describe is deliberate: an unknown capability set is not
+    /// permission to try the verb and see.
+    func declaredCapabilities(provider: String) -> Set<String> {
+        Set(describes[provider]?.capabilities ?? [])
     }
 
     func providerStatuses() async -> [RemoteProviderStatus] {

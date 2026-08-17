@@ -25,6 +25,16 @@ final class FakeProviderInvoker: RemoteProviderInvoking, @unchecked Sendable {
     /// stdin bytes for each call, same index as `calls`. `nil` entries are
     /// calls made with no stdin (e.g. `stop`/`log`).
     private(set) var stdins: [Data?] = []
+    /// Runs after a verb is asked for and before its canned outcome is
+    /// returned — the seam for observing daemon state *mid-flight*, while the
+    /// provider call is still outstanding, without sleeping. Same shape as
+    /// `MidCallFilingInvoker.onListCall` in `RemoteFilingSyncTests`, generalized
+    /// to any verb: the caller reads `verb` and decides whether this is the call
+    /// it wants to interleave with. Nil for every test that does not.
+    ///
+    /// The action runs inline on the calling task, so nothing has to be
+    /// released by a second task and it cannot starve the cooperative pool.
+    var onCall: (@Sendable ([String]) async -> Void)?
 
     init(script: [ProviderResult]) {
         self.script = script.map { .result($0) }
@@ -39,7 +49,8 @@ final class FakeProviderInvoker: RemoteProviderInvoking, @unchecked Sendable {
         _ config: RemoteProviderConfig, verb: [String], stdin: Data?,
         timeout: TimeInterval
     ) async throws -> ProviderResult {
-        try popScript(verb, stdin: stdin)
+        if let onCall { await onCall(verb) }
+        return try popScript(verb, stdin: stdin)
     }
 
     /// Synchronous helper so the NSLock critical section isn't taken from an

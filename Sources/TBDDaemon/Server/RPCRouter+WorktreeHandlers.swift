@@ -207,27 +207,19 @@ extension RPCRouter {
     ) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeArchiveParams.self, from: paramsData)
 
-        // A remote lane is not archivable, and is refused here rather than
-        // allowed to fail downstream. Archiving a remote worktree would mean
-        // stopping the provider's session — deliberately unimplemented, not an
-        // oversight — so `beginArchiveWorktree` resolves its row through
-        // `getLocal` and throws for a remote one. Reaching it would mean this
-        // handler had already written a `.dispose` request for an act it
-        // structurally cannot perform, and the record may only claim acts that
-        // were attempted, so the gate belongs above the row.
-        //
-        // Loud, unlike the auto-archive rail's silent `false`: that is a
-        // background rail, this is a deliberate user gesture, and a gesture
-        // that does nothing deserves an answer saying so. This is a plain DB
-        // read, so it is pre-row validation — the same shape as the
-        // worktree-not-found guards on the sibling handlers. A *missing* row is
-        // deliberately not handled here: that stays `beginArchiveWorktree`'s
-        // throw, recorded as transport-failed, unchanged.
+        // A remote lane takes an entirely different path: its files are on
+        // another machine, so nothing below — `beginArchiveWorktree` (which
+        // resolves through `getLocal` and throws for a remote row), tmux
+        // teardown, scrollback capture, the directory removal in phase 2 —
+        // has any meaning for it. See `archiveRemoteLane` for the routing and
+        // the guards. This is a plain DB read, so it is pre-row validation,
+        // the same shape as the worktree-not-found guards on the sibling
+        // handlers. A *missing* row is deliberately not handled here: that
+        // stays `beginArchiveWorktree`'s throw, recorded as transport-failed,
+        // unchanged.
         if let existing = try await db.worktrees.get(id: params.worktreeID),
            !existing.location.isLocal {
-            logger.debug("worktree.archive refused (remote lane): \(params.worktreeID, privacy: .public)")
-            return RPCResponse(
-                error: "Cannot archive \(existing.name): it is a remote lane, and archiving one is not supported.")
+            return try await archiveRemoteLane(existing, force: params.force, actor: actor)
         }
 
         // One row per call, naming the worktree and no terminal: the caller
@@ -263,6 +255,96 @@ extension RPCRouter {
         }
 
         return .ok()
+    }
+
+    // MARK: - The remote branches of archive and revive
+
+    /// Retires a remote lane
+    /// (`docs/specs/2026-08-16-remote-lane-archive-design.md` §"Archive").
+    ///
+    /// Two things about the shape are load bearing. **Every refusal returns
+    /// above `beginActuation`** — the capability refusal, the two guards, and
+    /// the subsystem gate alike — because nothing was attempted and the record
+    /// may claim solely acts that were attempted; this is the same pre-row
+    /// shape the local handler's not-found guard uses. And the `gone` path
+    /// *does* write a row: no provider call was made, but the row genuinely
+    /// changed status, and that is the act the record names.
+    ///
+    /// `stop` is never reached from here. A provider declaring only `stop` is
+    /// refused, because ending compute and retiring a record are different
+    /// acts and TBD does not decide that a kill is a good enough synonym for a
+    /// filing decision.
+    private func archiveRemoteLane(
+        _ worktree: Worktree, force: Bool, actor: ActuationActor?
+    ) async throws -> RPCResponse {
+        guard let manager = try await remoteGate() else {
+            return Self.remoteBackendsDisabledResponse
+        }
+        let lanes = RemoteLaneLifecycle(db: db, subscriptions: subscriptions, manager: manager)
+        let step: RemoteLaneLifecycle.ArchiveStep
+        switch try await lanes.archiveDecision(for: worktree, force: force) {
+        case .refused(let message):
+            logger.debug("worktree.archive refused: \(message, privacy: .public)")
+            return RPCResponse(error: message)
+        case .proceed(let decided):
+            step = decided
+        }
+        let actuationID = try await beginActuation(
+            .worktreeArchive, actor: actor,
+            target: ActuationTarget(worktree: worktree.id.uuidString))
+        let failure: String?
+        do {
+            failure = try await lanes.performArchive(step, worktree: worktree)
+        } catch {
+            await finishActuation(actuationID, .transportFailed, error: "\(error)")
+            throw error
+        }
+        if let failure {
+            await finishActuation(actuationID, .transportFailed, error: failure)
+            return RPCResponse(error: failure)
+        }
+        await finishActuation(actuationID, .dispatched)
+        return .ok()
+    }
+
+    /// Returns a remote lane to the working set
+    /// (`docs/specs/2026-08-16-remote-lane-archive-design.md` §"Revive").
+    /// Same record shape as `archiveRemoteLane`: refusals above the row, acts
+    /// below it. Returns the refreshed worktree, exactly as the local path
+    /// does, so the caller sees the row it asked for rather than the archived
+    /// snapshot it passed in.
+    private func reviveRemoteLane(
+        _ worktree: Worktree, actor: ActuationActor?
+    ) async throws -> RPCResponse {
+        guard let manager = try await remoteGate() else {
+            return Self.remoteBackendsDisabledResponse
+        }
+        let lanes = RemoteLaneLifecycle(db: db, subscriptions: subscriptions, manager: manager)
+        let step: RemoteLaneLifecycle.ReviveStep
+        switch try await lanes.reviveDecision(for: worktree) {
+        case .refused(let message):
+            logger.debug("worktree.revive refused: \(message, privacy: .public)")
+            return RPCResponse(error: message)
+        case .proceed(let decided):
+            step = decided
+        }
+        let actuationID = try await beginActuation(
+            .worktreeRevive, actor: actor,
+            target: ActuationTarget(worktree: worktree.id.uuidString))
+        let failure: String?
+        do {
+            failure = try await lanes.performRevive(step, worktree: worktree)
+        } catch {
+            await finishActuation(actuationID, .transportFailed, error: "\(error)")
+            throw error
+        }
+        if let failure {
+            await finishActuation(actuationID, .transportFailed, error: failure)
+            return RPCResponse(error: failure)
+        }
+        await finishActuation(actuationID, .dispatched)
+        let revived = try await db.worktrees.get(id: worktree.id) ?? worktree
+        return try RPCResponse(result: revived)
     }
 
     /// Re-run the worktree's `preSession` hook. Returns as soon as the hook's
@@ -320,20 +402,29 @@ extension RPCRouter {
         let existing = try await db.worktrees.get(id: params.worktreeID)
         let path = existing?.localPath
 
-        // Same gate, and for the same reason, as `worktree.archive` above.
-        // Forget means "stop tracking this checkout but leave its files
-        // alone", and a remote lane has no checkout here to leave alone:
-        // `forgetWorktree` resolves its row through `getLocal` and throws
-        // `worktreeNotFound` for a remote one. Without this gate the handler
-        // would write a `.worktreeForget` request and then a `.transportFailed`
-        // outcome for an act it structurally cannot perform, and the record may
-        // only claim acts that were attempted — so the gate belongs above the
-        // row, not in the catch below it. A *missing* row stays
-        // `forgetWorktree`'s throw, unchanged.
+        // Forget keeps refusing a remote lane, and that is a scope decision
+        // rather than an unimplemented gap. Forget means "stop tracking this
+        // checkout but leave its files alone", and a remote lane has no
+        // checkout on this machine to leave alone; retiring a lane is
+        // `worktree.archive`'s job, which now has a remote path of its own
+        // (`docs/specs/2026-08-16-remote-lane-archive-design.md` §"Where the
+        // branches live"). Forget is also the wrong shape for the job: it
+        // hard-deletes the row, and adoption re-creates a row for any session
+        // it sees without one, so a forgotten lane would simply return on the
+        // next poll.
+        //
+        // Mechanically the gate is still necessary: `forgetWorktree` resolves
+        // its row through `getLocal` and throws `worktreeNotFound` for a
+        // remote one, so without it this handler would write a
+        // `.worktreeForget` request and a `.transportFailed` outcome for an
+        // act it structurally cannot perform — and the record may only claim
+        // acts that were attempted. A *missing* row stays `forgetWorktree`'s
+        // throw, unchanged.
         if let existing, !existing.location.isLocal {
             logger.debug("worktree.forget refused (remote lane): \(params.worktreeID, privacy: .public)")
             return RPCResponse(
-                error: "Cannot forget \(existing.name): it is a remote lane, and forgetting one is not supported.")
+                error: "Cannot forget \(existing.name): it is a remote lane, with no checkout on this "
+                    + "machine to leave alone. Archive it instead — that is what retires a lane.")
         }
 
         // Forget kills the same windows archive does, so it records the same
@@ -367,6 +458,17 @@ extension RPCRouter {
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeReviveParams.self, from: paramsData)
+
+        // A remote lane takes the provider path instead: there is nothing to
+        // spawn on this machine, and `beginReviveWorktree` resolves through
+        // `getLocal` and would throw for it. Pre-row validation, like
+        // archive's branch above; a *missing* row still falls through to the
+        // lifecycle's own throw.
+        if let existing = try await db.worktrees.get(id: params.worktreeID),
+           !existing.location.isLocal {
+            return try await reviveRemoteLane(existing, actor: actor)
+        }
+
         // The row names the worktree, not a terminal: revive spawns its
         // primary terminals inside the lifecycle's own (possibly detached,
         // pre-session-gated) phase, so no terminal ID exists to name yet.

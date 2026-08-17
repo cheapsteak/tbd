@@ -144,6 +144,28 @@ enum RowActionMenu {
         /// re-run and create items. Resolved by the surface via the shared
         /// `HookResolver`, so `items(...)` stays pure.
         var hasPreSessionHook: Bool
+        /// Where this worktree's files live. `.local` is unaffected by the
+        /// capability gate below; a `.remote` row is the one Archive checks
+        /// `providerCapabilities` for.
+        var location: WorktreeLocation
+        /// The remote lane's provider name (`location`'s associated
+        /// `provider`), or nil for a local row.
+        var provider: String?
+        /// Capabilities the row's provider has declared (`describe.capabilities`,
+        /// read by the surface via `AppState.remoteProviders`). Empty for a
+        /// local row, or a remote one whose provider hasn't answered `describe`
+        /// yet. Gates Archive: a remote lane whose provider has not declared
+        /// `archive` cannot retire the lane on the backend, so the action stays
+        /// disabled until it does.
+        var providerCapabilities: Set<String>
+        /// The provider has stopped enumerating this lane's session
+        /// (`RemoteSessionInfo.gone`). The `gone` exemption is the only route
+        /// out for a lane whose provider cannot archive
+        /// (`docs/specs/2026-08-16-remote-lane-archive-design.md` §"Archive"),
+        /// and the daemon takes it — so the menu must not disable the one
+        /// gesture the daemon will still perform. Always `false` for a local
+        /// row.
+        var isGone: Bool
 
         init(hasHibernatableClaude: Bool = false,
              hasHibernatedClaude: Bool = false,
@@ -160,7 +182,11 @@ enum RowActionMenu {
              isPromoted: Bool = false,
              branch: String = "",
              claudeSessions: [ClaudeSessionRef] = [],
-             hasPreSessionHook: Bool = false) {
+             hasPreSessionHook: Bool = false,
+             location: WorktreeLocation = .local,
+             provider: String? = nil,
+             providerCapabilities: Set<String> = [],
+             isGone: Bool = false) {
             self.hasHibernatableClaude = hasHibernatableClaude
             self.hasHibernatedClaude = hasHibernatedClaude
             self.hasUnpinnedClaude = hasUnpinnedClaude
@@ -177,6 +203,10 @@ enum RowActionMenu {
             self.branch = branch
             self.claudeSessions = claudeSessions
             self.hasPreSessionHook = hasPreSessionHook
+            self.location = location
+            self.provider = provider
+            self.providerCapabilities = providerCapabilities
+            self.isGone = isGone
         }
     }
 
@@ -189,6 +219,14 @@ enum RowActionMenu {
     /// stays visible (and destructive-styled) but is disabled, and the title
     /// itself explains why, since menu tooltips are easy to miss.
     static let archiveHasChildrenLabel = "Archive (has children)"
+    /// Archive title for a remote lane whose provider has not declared the
+    /// `archive` capability: same visible-but-disabled treatment as
+    /// `archiveHasChildrenLabel`, naming what's missing rather than
+    /// implying anything about the user or the session's own state.
+    static let archiveProviderCannotArchiveLabel = "Archive (provider can't archive)"
+    /// Disabled-help paired with `archiveProviderCannotArchiveLabel`: names the
+    /// capability that would need to exist, not an action for the user to take.
+    static let archiveNeedsProviderCapabilityHelp = "This provider hasn't implemented the archive capability yet"
     static let forkSessionLabel = "Fork session"
     static let newWorktreeFromBranchLabel = "New worktree from this branch…"
     static let hibernateNowLabel = "Hibernate now"
@@ -215,7 +253,10 @@ enum RowActionMenu {
     /// and scratch branches share a sectioned layout, top to bottom:
     ///
     /// 1. Identity — Rename, then Archive (destructive; disabled + retitled
-    ///    "Archive (has children)" for a regular row with active children).
+    ///    "Archive (has children)" for a regular row with active children, or
+    ///    "Archive (provider can't archive)" for a remote lane whose provider
+    ///    has not declared the `archive` capability — active children wins
+    ///    when a remote row hits both).
     /// 2. Hibernation — Wake / Hibernate now / keep-warm toggle (conditional).
     /// 3. Sessions & spawning — per-session Fork entries, plus (regular only)
     ///    Create Nested Worktree / New worktree from this branch.
@@ -355,7 +396,39 @@ enum RowActionMenu {
     }
 
     private static func regularItems(context: Context) -> [Item] {
-        let archiveBlocked = context.hasActiveChildren
+        // A remote lane whose provider has not declared `archive` cannot be
+        // retired on the backend (docs/specs/2026-08-16-remote-lane-archive-design.md
+        // "Archive"), so Archive gates on two independent conditions. When
+        // both apply — a remote lane with active children AND no `archive`
+        // capability — active children wins the title: it is the reason the
+        // user can act on right now (archive the children), while a missing
+        // provider capability is not something a gesture here can fix. Order
+        // in the `if`/`else if` below is the precedence.
+        //
+        // A `gone` lane is exempt from the capability gate entirely. The spec
+        // calls the `gone` exemption "the only route out for a lane whose
+        // provider cannot archive", and the daemon takes it — `archivePlan`
+        // returns `.rowOnlyGone` for exactly this shape and files the row
+        // without invoking any verb. Disabling Archive here would leave the
+        // surface blocking the one gesture the daemon will still perform, with
+        // no other way out. The exemption is narrow: a lane the provider still
+        // enumerates stays disabled, and active children still win above it.
+        let missingArchiveCapability = !context.location.isLocal
+            && !context.isGone
+            && !context.providerCapabilities.contains("archive")
+        let archiveBlocked = context.hasActiveChildren || missingArchiveCapability
+        let archiveTitle: String
+        let archiveHelp: String?
+        if context.hasActiveChildren {
+            archiveTitle = archiveHasChildrenLabel
+            archiveHelp = archiveNeedsChildrenGoneHelp
+        } else if missingArchiveCapability {
+            archiveTitle = archiveProviderCannotArchiveLabel
+            archiveHelp = archiveNeedsProviderCapabilityHelp
+        } else {
+            archiveTitle = "Archive"
+            archiveHelp = nil
+        }
 
         // Sessions & spawning: per-session fork entries, then the
         // nested-worktree creators.
@@ -375,10 +448,10 @@ enum RowActionMenu {
                 .action(Action(kind: .rename, title: "Rename...")),
                 .action(Action(
                     kind: .archive,
-                    title: archiveBlocked ? archiveHasChildrenLabel : "Archive",
+                    title: archiveTitle,
                     role: .destructive,
                     isEnabled: !archiveBlocked,
-                    disabledHelp: archiveBlocked ? archiveNeedsChildrenGoneHelp : nil
+                    disabledHelp: archiveHelp
                 )),
             ],
             pinActions(context: context).map(Item.action),

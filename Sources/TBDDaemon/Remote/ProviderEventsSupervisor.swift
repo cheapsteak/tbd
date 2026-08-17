@@ -169,12 +169,30 @@ actor ProviderEventsSupervisor {
     /// cycle on the same instance.
     private var generation = 0
     private var lastActivity = Date()
+    /// When the current `events` connection was opened. This is the request
+    /// start for every `snapshot` event that arrives on it: the provider
+    /// composes its reconnect snapshot from what it knew when TBD asked, so a
+    /// snapshot on a connection opened before a local filing decision cannot
+    /// have accounted for that decision. See
+    /// `RemoteProviderManager.syncFilingDecisions`.
+    ///
+    /// Internal rather than private so a test can read what the date seam
+    /// stamped; nothing in production reads it from outside this actor.
+    private(set) var connectionOpenedAt: Date
 
     /// Injectable timing so the live test runs in seconds, not minutes.
     let silenceLimit: TimeInterval
     let backoffCap: TimeInterval
     let healthyResetUptime: TimeInterval
     private let clock: any Clock<Duration>
+    /// The date seam. Separate from `clock` on purpose: `connectionOpenedAt`
+    /// is persisted-shaped data that gets **compared** against a filing
+    /// decision, not a delay — `Duration` is behavior, `Date` is data
+    /// (root `CLAUDE.md`, "New delays and timers take an injected clock").
+    /// The watchdog's own elapsed-time arithmetic deliberately stays on the
+    /// wall clock: it measures how long a child has been silent, which a
+    /// frozen date would disable outright.
+    private let now: @Sendable () -> Date
 
     /// Grace between SIGTERM and SIGKILL, and between observing the child's
     /// exit and finishing the line stream (so late bytes still get applied).
@@ -184,13 +202,16 @@ actor ProviderEventsSupervisor {
     init(config: RemoteProviderConfig, manager: RemoteProviderManager,
          silenceLimit: TimeInterval = 90, backoffCap: TimeInterval = 60,
          healthyResetUptime: TimeInterval = 300,
-         clock: any Clock<Duration> = ContinuousClock()) {
+         clock: any Clock<Duration> = ContinuousClock(),
+         now: @Sendable @escaping () -> Date = { Date() }) {
         self.config = config
         self.manager = manager
         self.silenceLimit = silenceLimit
         self.backoffCap = backoffCap
         self.healthyResetUptime = healthyResetUptime
         self.clock = clock
+        self.now = now
+        self.connectionOpenedAt = now()
     }
 
     func start() {
@@ -274,6 +295,7 @@ actor ProviderEventsSupervisor {
         process.terminationHandler = { _ in exitGate.markExited() }
 
         do {
+            connectionOpenedAt = now()
             try process.run()
         } catch {
             remoteLogger.error(
@@ -379,7 +401,9 @@ actor ProviderEventsSupervisor {
         case .hello, .ping:
             break   // activity timestamp already updated by the caller
         case .snapshot(let sessions):
-            try? await manager.apply(snapshot: sessions, provider: config.name)
+            try? await manager.apply(
+                snapshot: sessions, provider: config.name,
+                requestStartedAt: connectionOpenedAt)
         case .session(let session):
             await manager.applyUpsert(session, provider: config.name)
         case .removed(let id):

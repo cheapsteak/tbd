@@ -32,6 +32,81 @@ struct RemoteProviderTests {
         #expect(s.agentState == .unknown)
     }
 
+    // MARK: - RemoteSessionPayload — archived field (nil vs. false vs. true)
+    //
+    // The filing-sync authority rule (docs/specs/2026-08-16-remote-lane-archive-design.md
+    // §"Whose report counts") depends on distinguishing an absent `archived`
+    // (no claim made) from an explicit `false` (a claim). These tests would
+    // pass on a collapsed `archived: Bool = false` EXCEPT for
+    // `archivedFieldRoundTripsAllThreeStatesDistinctly`, which fails outright
+    // if `archived` is not `Bool?` — that is the one load-bearing case.
+
+    @Test func archivedAbsentDecodesAsNilAndIsArchivedReadsFalse() throws {
+        let json = #"{"id": "x", "state": "running"}"#.data(using: .utf8)!
+        let s = try JSONDecoder().decode(RemoteSessionPayload.self, from: json)
+        #expect(s.archived == nil)
+        #expect(s.isArchived == false)
+    }
+
+    @Test func archivedExplicitFalseDecodesAsSomeFalse() throws {
+        let json = #"{"id": "x", "state": "running", "archived": false}"#.data(using: .utf8)!
+        let s = try JSONDecoder().decode(RemoteSessionPayload.self, from: json)
+        #expect(s.archived == .some(false))
+        #expect(s.isArchived == false)
+    }
+
+    @Test func archivedTrueDecodesAsSomeTrue() throws {
+        let json = #"{"id": "x", "state": "running", "archived": true}"#.data(using: .utf8)!
+        let s = try JSONDecoder().decode(RemoteSessionPayload.self, from: json)
+        #expect(s.archived == .some(true))
+        #expect(s.isArchived == true)
+    }
+
+    /// The load-bearing case: if `archived` were collapsed to a non-optional
+    /// `Bool` defaulting to `false`, the absent and explicit-`false` states
+    /// would decode and re-encode identically and this test would fail to
+    /// distinguish them on round-trip.
+    @Test func archivedFieldRoundTripsAllThreeStatesDistinctly() throws {
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        let absent = RemoteSessionPayload(id: "x", state: .running)
+        let explicitFalse = RemoteSessionPayload(id: "x", state: .running, archived: false)
+        let explicitTrue = RemoteSessionPayload(id: "x", state: .running, archived: true)
+
+        let decodedAbsent = try decoder.decode(RemoteSessionPayload.self, from: try encoder.encode(absent))
+        let decodedFalse = try decoder.decode(RemoteSessionPayload.self, from: try encoder.encode(explicitFalse))
+        let decodedTrue = try decoder.decode(RemoteSessionPayload.self, from: try encoder.encode(explicitTrue))
+
+        #expect(decodedAbsent.archived == nil)
+        #expect(decodedFalse.archived == .some(false))
+        #expect(decodedTrue.archived == .some(true))
+        // All three must be pairwise distinguishable — a collapsed `Bool`
+        // would make the first two equal.
+        #expect(decodedAbsent.archived != decodedFalse.archived)
+        #expect(decodedFalse.archived != decodedTrue.archived)
+
+        #expect(decodedAbsent.isArchived == false)
+        #expect(decodedFalse.isArchived == false)
+        #expect(decodedTrue.isArchived == true)
+    }
+
+    /// A realistic payload fixture that predates the `archived` field (same
+    /// shape as `sessionPayloadDecodesSnakeCaseAndTolerantEnums` above) must
+    /// still decode — the field is additive.
+    @Test func realisticFixtureWithoutArchivedStillDecodes() throws {
+        let json = """
+        {"id": "fix-ci", "title": "fix CI", "created_at": "2026-07-24T18:02:11Z",
+         "state": "running", "agent_state": "waiting_input",
+         "agent_state_reason": "permission_prompt", "agent_state_at": "2026-07-24T18:40:00Z",
+         "meta": {"repo": "acme/api"}}
+        """.data(using: .utf8)!
+        let s = try JSONDecoder().decode(RemoteSessionPayload.self, from: json)
+        #expect(s.id == "fix-ci")
+        #expect(s.archived == nil)
+        #expect(s.isArchived == false)
+    }
+
     @Test func staleProjectionDemotesActiveStateWithoutMutatingTheSnapshot() {
         let original = RemoteSessionPayload(
             id: "x", title: "worker", state: .running,
@@ -49,6 +124,24 @@ struct RemoteProviderTests {
         let exited = RemoteSessionPayload(
             id: "x", state: .exited, exitCode: 0, agentState: .exited)
         #expect(exited.projectedForStaleSnapshot() == exited)
+    }
+
+    /// Filing and liveness are separate axes (docs/specs/2026-08-16-remote-lane-archive-design.md,
+    /// "The filing decision travels back"). This projection demotes only the
+    /// liveness axis — an archived-but-not-exited session must still read as
+    /// archived after projection, even though its state and agent state are
+    /// demoted to `.unknown`. Asserting both halves in one test means it
+    /// cannot pass by the projection simply doing nothing.
+    @Test func staleProjectionPreservesArchivedWhileDemotingLiveness() {
+        let original = RemoteSessionPayload(
+            id: "x", title: "worker", state: .running,
+            agentState: .working, agentStateReason: "tool", archived: true)
+        let projected = original.projectedForStaleSnapshot()
+
+        #expect(projected.archived == .some(true))
+        #expect(projected.isArchived == true)
+        #expect(projected.state == .unknown)
+        #expect(projected.agentState == .unknown)
     }
 
     @Test func providerStatusWithoutNewTimestampStillDecodes() throws {

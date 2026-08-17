@@ -4,6 +4,37 @@ import TBDShared
 
 private let remoteHandlerLogger = Logger(subsystem: "com.tbd.daemon", category: "remote")
 
+/// A filing decision recorded in anticipation of a retirement verb, held across
+/// the call so it can be re-stamped when the verb returns or taken back when it
+/// fails.
+///
+/// It carries `prior` and `decidedAt` because withdrawal is conditional on
+/// both: the map may hold an earlier decision that did happen and must survive,
+/// and a decision recorded by some other path after this one was written is
+/// newer than both and must not be clobbered by a late withdrawal. Deciding
+/// that at the withdrawal site would mean re-deriving what
+/// `noteFilingDecision` already told us.
+struct RemoteFilingWatermark {
+    let manager: RemoteProviderManager
+    let worktreeID: UUID
+    /// The instant written before the verb was invoked.
+    let decidedAt: Date
+    /// Whatever the map held before `decidedAt` was written, if anything.
+    let prior: Date?
+
+    /// The verb did not happen: put back what was there before.
+    func withdraw() async {
+        await manager.withdrawFilingDecision(
+            worktreeID: worktreeID, restoring: prior, ifStillAt: decidedAt)
+    }
+
+    /// The verb returned: move the watermark forward past every poll that could
+    /// have been launched while it ran.
+    func restamp(at date: Date) async {
+        await manager.noteFilingDecision(worktreeID: worktreeID, at: date)
+    }
+}
+
 /// RPC handlers for remote agent backends (`docs/remote-provider-contract.md`).
 /// Every `remote.*` verb gates on `config.remoteBackendsEnabled` AND on the
 /// `remoteManager` actor existing — the daemon only constructs it at boot
@@ -16,13 +47,18 @@ extension RPCRouter {
     /// a single shared value (rather than re-typed at each call site) so the
     /// exact string — which tests assert equality against — can't drift if
     /// one call site is edited and the others aren't.
-    private static let remoteBackendsDisabledResponse = RPCResponse(error: "remote backends disabled")
+    /// Internal rather than private because `worktree.archive` /
+    /// `worktree.revive` branch into the remote path too and must refuse with
+    /// the same words when the subsystem is off.
+    static let remoteBackendsDisabledResponse = RPCResponse(error: "remote backends disabled")
 
     private static func staleSnapshotMutationResponse(provider: String) -> RPCResponse {
         RPCResponse(error: "provider '\(provider)' inventory is stale; refresh must recover before changing remote sessions")
     }
 
-    private func remoteGate() async throws -> RemoteProviderManager? {
+    /// Internal for the same reason as `remoteBackendsDisabledResponse` above:
+    /// the worktree handlers' remote branches pass through the same gate.
+    func remoteGate() async throws -> RemoteProviderManager? {
         guard try await db.config.get().remoteBackendsEnabled else { return nil }
         return remoteManager
     }
@@ -184,6 +220,184 @@ extension RPCRouter {
         }
         await finishActuation(actuationID, .dispatched)
         return .ok()
+    }
+
+    /// The provider's declared capability set, read from the cached
+    /// `describe` response — the same data the app reads client-side via
+    /// `remoteProviders.first { ... }?.describe?.capabilities`
+    /// (`AppState+Remote.swift`). A read of existing state, not a probe.
+    ///
+    /// Delegates to the manager rather than deriving it a second time, so
+    /// this gate and the remote lane's archive/revive routing can never
+    /// disagree about what a provider declared.
+    private func declaredCapabilities(_ manager: RemoteProviderManager, provider: String) async -> Set<String> {
+        await manager.declaredCapabilities(provider: provider)
+    }
+
+    private static func missingCapabilityResponse(provider: String, capability: String) -> RPCResponse {
+        RPCResponse(error:
+            "provider '\(provider)' has not declared capability '\(capability)' " +
+            "(docs/remote-provider-contract.md § \(capability) <id>)")
+    }
+
+    /// Retires a session from the working inventory
+    /// (`docs/remote-provider-contract.md` § `archive <id>` / `unarchive
+    /// <id>`). Mirrors `handleRemoteStop`'s shape exactly: same gate, same
+    /// stale-snapshot guard, same timeout/failureClass handling, same
+    /// best-effort mirror upsert of whatever session object the provider
+    /// hands back — so the row reflects the new `archived` value immediately
+    /// rather than waiting for the next poll.
+    ///
+    /// The one addition is the capability check in `retire`. `archive` is
+    /// optional, and the contract states a caller "MUST NOT invoke a verb
+    /// whose capability the provider has not declared" — unlike `rename`
+    /// (whose doc comment explains why it skips this check: the app already
+    /// decides there), nothing upstream of this handler is trusted to have
+    /// checked, so it refuses before any process is spawned rather than
+    /// letting the refusal masquerade as an ordinary provider failure.
+    ///
+    /// The gate runs here rather than inside `retire` so a request arriving
+    /// with the subsystem off is refused before its params are decoded:
+    /// "remote backends disabled" is the truthful answer to a malformed
+    /// request too, and the decode would otherwise throw first.
+    ///
+    /// `now` supplies the filing watermark's instants, which are **compared**
+    /// against a poll's request start rather than displayed — the date seam
+    /// rather than the clock seam (`Tests/CLAUDE.md`, "Clock and date seams").
+    /// Defaulted, so no call site changes.
+    func handleRemoteArchive(
+        _ paramsData: Data, actor: ActuationActor? = nil,
+        now: @Sendable () -> Date = { Date() }
+    ) async throws -> RPCResponse {
+        guard let manager = try await remoteGate() else {
+            return Self.remoteBackendsDisabledResponse
+        }
+        let params = try decoder.decode(RemoteArchiveParams.self, from: paramsData)
+        return try await retire(
+            verb: "archive", surface: .remoteArchive, manager: manager,
+            provider: params.provider, sessionID: params.sessionID, actor: actor, now: now)
+    }
+
+    /// Returns an archived session to the working inventory. See
+    /// `handleRemoteArchive`'s doc comment for the shared shape and the
+    /// capability-check rationale; this differs only in verb and surface.
+    func handleRemoteUnarchive(
+        _ paramsData: Data, actor: ActuationActor? = nil,
+        now: @Sendable () -> Date = { Date() }
+    ) async throws -> RPCResponse {
+        guard let manager = try await remoteGate() else {
+            return Self.remoteBackendsDisabledResponse
+        }
+        let params = try decoder.decode(RemoteUnarchiveParams.self, from: paramsData)
+        return try await retire(
+            verb: "unarchive", surface: .remoteUnarchive, manager: manager,
+            provider: params.provider, sessionID: params.sessionID, actor: actor, now: now)
+    }
+
+    /// The body both retirement handlers share. One implementation rather than
+    /// two near-identical ones, because everything the two verbs differ by is a
+    /// name: the verb word doubles as the capability the contract requires be
+    /// declared, and the surface names the actuation.
+    ///
+    /// **The filing watermark is the reason this is not just `handleRemoteStop`
+    /// with another verb.** `archive` and `unarchive` move a session's filing
+    /// status, and every write to a remote row's status is watermarked
+    /// whichever path made it — the same obligation
+    /// `RemoteLaneLifecycle.performArchive` carries, discharged in the same
+    /// order and for the same reasons:
+    ///
+    /// 1. stamp **before** the verb, so a `list` already in flight cannot act on
+    ///    the bound row while the verb runs. The provider commits the retirement
+    ///    partway through a call that takes up to 30 seconds, and a poll landing
+    ///    in that window would otherwise read the provider's already-committed
+    ///    `archived: true` against a row nothing had watermarked and file it on
+    ///    the daemon's own `remote-filing-sync` rail — an extra actuation row,
+    ///    and a notification crediting the provider for the user's own gesture;
+    /// 2. stamp again once the verb has returned, before the response is
+    ///    mirrored. A poll launched *after* step 1 but before the verb returned
+    ///    still carries the provider's pre-gesture word, and a watermark that
+    ///    only covers step 1 does not cover it;
+    /// 3. mirror the response, whose `applyUpsert` runs the filing sync with an
+    ///    arrival later than both stamps — so this gesture's own report is the
+    ///    one the sync acts on.
+    ///
+    /// A verb that fails withdraws the watermark rather than deleting it
+    /// (`withdrawFilingDecision(worktreeID:restoring:ifStillAt:)`): the row may
+    /// carry an earlier decision that did happen and whose window is still
+    /// open, and a gesture that failed has no business closing it.
+    ///
+    /// Unlike the lane path there is no row write here — this surface is
+    /// addressed by `(provider, sessionID)`, not by worktree — so a session
+    /// nobody has adopted has no bound row, nothing to watermark, and takes the
+    /// unwatermarked path cleanly rather than erroring.
+    private func retire(
+        verb: String, surface: ActuationSurface, manager: RemoteProviderManager,
+        provider: String, sessionID: String, actor: ActuationActor?,
+        now: @Sendable () -> Date = { Date() }
+    ) async throws -> RPCResponse {
+        if await manager.hasStaleSnapshot(provider: provider) {
+            return Self.staleSnapshotMutationResponse(provider: provider)
+        }
+        guard await declaredCapabilities(manager, provider: provider).contains(verb) else {
+            return Self.missingCapabilityResponse(provider: provider, capability: verb)
+        }
+        let actuationID = try await beginActuation(
+            surface, actor: actor, target: .remote(provider: provider, session: sessionID))
+        let watermark = await beginFilingWatermark(
+            manager: manager, provider: provider, sessionID: sessionID, at: now())
+        let result: ProviderResult
+        do {
+            result = try await manager.invoke(
+                providerName: provider, verb: [verb, sessionID], stdin: nil, timeout: 30)
+        } catch let error as ProviderRunError {
+            remoteHandlerLogger.error(
+                "remote.\(verb, privacy: .public) provider=\(provider, privacy: .public) timed out")
+            let message = Self.friendlyMessage(for: error, provider: provider)
+            await watermark?.withdraw()
+            await finishActuation(actuationID, .transportFailed, error: message)
+            return RPCResponse(error: message)
+        }
+        if result.failureClass != nil {
+            let message = result.decodedError?.message ?? "\(verb) failed (exit \(result.exitCode))"
+            remoteHandlerLogger.error(
+                "remote.\(verb, privacy: .public) provider=\(provider, privacy: .public) failed: \(message, privacy: .public)")
+            await watermark?.withdraw()
+            await finishActuation(actuationID, .transportFailed, error: message)
+            return RPCResponse(error: message)
+        }
+        await watermark?.restamp(at: now())
+        if let session = try? result.decoded(RemoteSessionPayload.self) {
+            await manager.applyUpsert(session, provider: provider, date: now())
+        }
+        await finishActuation(actuationID, .dispatched)
+        return .ok()
+    }
+
+    /// Resolves the worktree row bound to `(provider, sessionID)` and records a
+    /// filing decision against it, returning the handle a caller withdraws or
+    /// re-stamps through.
+    ///
+    /// `nil` means there is nothing to watermark, and it is a normal outcome
+    /// twice over: a session nobody adopted has no bound row, and a row this
+    /// daemon cannot read right now is one no watermark could protect anyway.
+    /// Neither may fail the gesture — the provider verb is the act the user
+    /// asked for, and refusing it because a mirror lookup failed would trade a
+    /// working retirement for a bookkeeping detail.
+    private func beginFilingWatermark(
+        manager: RemoteProviderManager, provider: String, sessionID: String, at date: Date
+    ) async -> RemoteFilingWatermark? {
+        let bound: Worktree?
+        do {
+            bound = try await db.worktrees.findRemote(provider: provider, sessionID: sessionID)
+        } catch {
+            remoteHandlerLogger.warning(
+                "could not resolve the row bound to \(provider, privacy: .public)/\(sessionID, privacy: .public); proceeding unwatermarked: \(String(describing: error), privacy: .public)")
+            return nil
+        }
+        guard let bound else { return nil }
+        let prior = await manager.noteFilingDecision(worktreeID: bound.id, at: date)
+        return RemoteFilingWatermark(
+            manager: manager, worktreeID: bound.id, decidedAt: date, prior: prior)
     }
 
     func handleRemoteSend(
