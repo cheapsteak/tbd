@@ -336,6 +336,43 @@ struct PRBindingCoordinatorTests {
         #expect(recorded.first?.source == .hook)
     }
 
+    /// A tombstone for a PR outside the worktree's own repo would be permanent:
+    /// `bind` rejects a wrong-repo reference before it ever reaches the row, so
+    /// `pr.attach` could not clear it, and the `detachedCount` it leaves
+    /// suppresses the legacy-status fallback for that worktree forever. So the
+    /// insert arm carries the same repo guard `bind` does — one mistyped
+    /// `tbd pr detach <other-repo-url>` must not retire a worktree's real PR
+    /// indicator with no way back.
+    @Test("detaching an unbound PR from another repo records nothing")
+    func detachDoesNotTombstoneAForeignUnboundPR() async throws {
+        let fixture = try await Fixture(repo: ("acme", "other-repo"))
+        let wt = try await fixture.newWorktree()
+
+        #expect(try await fixture.coordinator.detach(worktreeID: wt, parsed: parsed) == false)
+
+        // Nothing written at all — in particular no tombstone, so detachedCount
+        // stays zero and the legacy-status fallback keeps working.
+        #expect(try await fixture.store.list(worktreeID: wt, includeDetached: true).isEmpty)
+    }
+
+    /// The guard covers creation, not modification. A row that already exists
+    /// is this worktree's own record of the PR, and detaching it must work
+    /// whatever the repo resolves to now — otherwise a repo rename would strand
+    /// every binding made before it.
+    @Test("detaching an existing row works even when the repo no longer matches")
+    func detachTombstonesAnExistingRowRegardlessOfRepo() async throws {
+        let fixture = try await Fixture()
+        let wt = try await fixture.newWorktree()
+        _ = await fixture.coordinator.bind(worktreeID: wt, parsed: parsed, source: .hook)
+
+        let renamed = PRBindingCoordinator(store: fixture.store,
+                                           resolveRepo: { _ in ("acme", "renamed-repo") })
+        #expect(try await renamed.detach(worktreeID: wt, parsed: parsed))
+
+        #expect(try await fixture.store.list(worktreeID: wt).isEmpty)
+        #expect(try await fixture.store.list(worktreeID: wt, includeDetached: true).count == 1)
+    }
+
     /// The gesture stays reversible whichever way the tombstone got there.
     @Test("a manual attach clears a tombstone that insert-on-miss created")
     func attachClearsAnInsertedTombstone() async throws {

@@ -261,6 +261,37 @@ struct PRBindingRPCTests {
                 == "https://github.com/acme/acme-prod/pull/412")
     }
 
+    /// The status bar names a PR by whatever its chip holds, and a chip lifted
+    /// from a cached `Worktree.prStatus` can hold a url `PRBindingExtractor`
+    /// will not accept — its pattern is host-locked to `https://github.com/`,
+    /// so on a worktree hosted anywhere else EVERY synthetic chip is in that
+    /// state. Sending url and number together is only worth anything if a url
+    /// that does not parse falls through to the number instead of failing.
+    @Test("a reference whose url does not parse falls through to its number")
+    func unparseableURLFallsThroughToNumber() async throws {
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod", "github.com"))
+
+        #expect(try await harness.detach(
+            url: "https://git.acme-corp.example/acme/acme-prod/pull/412", number: 412))
+
+        // Resolved against the worktree's own repo, exactly as a bare number is.
+        let recorded = try await harness.db.prBindings.list(
+            worktreeID: harness.worktreeID, includeDetached: true)
+        #expect(recorded.count == 1)
+        #expect(recorded.first?.number == 412)
+        #expect(recorded.first?.url == "https://github.com/acme/acme-prod/pull/412")
+    }
+
+    @Test("a reference with an unparseable url and no number is still an error")
+    func unparseableURLWithoutNumberIsAnError() async throws {
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod", "github.com"))
+        // Nothing is guessed — the fallthrough adds a second chance, not a
+        // default.
+        await #expect(throws: (any Error).self) {
+            try await harness.detach(url: "not a pr url at all")
+        }
+    }
+
     @Test("pr.attach reports a wrong-repo rejection instead of binding")
     func attachWrongRepo() async throws {
         let harness = try await PRBindingRPCHarness(repo: ("acme", "other-repo", "github.com"))

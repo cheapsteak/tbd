@@ -256,7 +256,7 @@ struct PRBindingStoreTests {
         let wt = try await fixture.newWorktree()
         let candidate = binding(9, worktreeID: wt, source: .manual)
 
-        #expect(try await fixture.store.tombstone(candidate))
+        #expect(try await fixture.store.tombstone(candidate, insertIfMissing: true))
 
         #expect(try await fixture.store.list(worktreeID: wt).isEmpty)
         let all = try await fixture.store.list(worktreeID: wt, includeDetached: true)
@@ -270,10 +270,10 @@ struct PRBindingStoreTests {
         let fixture = try await Fixture()
         let wt = try await fixture.newWorktree()
         let candidate = binding(9, worktreeID: wt, source: .manual)
-        #expect(try await fixture.store.tombstone(candidate))
+        #expect(try await fixture.store.tombstone(candidate, insertIfMissing: true))
         // Second call: no duplicate row, no unique-constraint error, and it says
         // it changed nothing.
-        #expect(try await fixture.store.tombstone(candidate) == false)
+        #expect(try await fixture.store.tombstone(candidate, insertIfMissing: true) == false)
         #expect(try await fixture.store.list(worktreeID: wt, includeDetached: true).count == 1)
     }
 
@@ -289,7 +289,7 @@ struct PRBindingStoreTests {
         let live = try #require(
             try await fixture.store.upsert(binding(9, worktreeID: wt, source: .hook)))
 
-        #expect(try await fixture.store.tombstone(binding(9, worktreeID: wt, source: .manual)))
+        #expect(try await fixture.store.tombstone(binding(9, worktreeID: wt, source: .manual), insertIfMissing: true))
 
         #expect(try await fixture.store.list(worktreeID: wt).isEmpty)
         let all = try await fixture.store.list(worktreeID: wt, includeDetached: true)
@@ -317,12 +317,41 @@ struct PRBindingStoreTests {
         #expect(try await fixture.store.list(worktreeID: wt).count == 20)
 
         #expect(try await fixture.store.tombstone(
-            binding(21, worktreeID: wt, source: .manual)))
+            binding(21, worktreeID: wt, source: .manual), insertIfMissing: true))
 
         let live = try await fixture.store.list(worktreeID: wt)
         #expect(live.count == 20)
         #expect(live.contains { $0.number == 20 })   // the evictable one survived
         #expect(try await fixture.store.list(worktreeID: wt, includeDetached: true).count == 21)
+    }
+
+    /// `insertIfMissing: false` is the caller saying "only touch a row that is
+    /// already here". It must write nothing and say so, rather than recording a
+    /// tombstone the caller declined to authorise.
+    @Test("tombstone declines to insert when the caller withholds permission")
+    func tombstoneWithoutPermissionWritesNothing() async throws {
+        let fixture = try await Fixture()
+        let wt = try await fixture.newWorktree()
+
+        #expect(try await fixture.store.tombstone(
+            binding(9, worktreeID: wt, source: .manual), insertIfMissing: false) == false)
+
+        #expect(try await fixture.store.list(worktreeID: wt, includeDetached: true).isEmpty)
+    }
+
+    /// …but an existing row is always fair game: it is this worktree's own
+    /// record, and the permission gate covers creation, not modification.
+    @Test("tombstone still detaches an existing row when insertion is withheld")
+    func tombstoneWithoutPermissionStillDetachesAnExistingRow() async throws {
+        let fixture = try await Fixture()
+        let wt = try await fixture.newWorktree()
+        _ = try await fixture.store.upsert(binding(9, worktreeID: wt, source: .hook))
+
+        #expect(try await fixture.store.tombstone(
+            binding(9, worktreeID: wt, source: .manual), insertIfMissing: false))
+
+        #expect(try await fixture.store.list(worktreeID: wt).isEmpty)
+        #expect(try await fixture.store.list(worktreeID: wt, includeDetached: true).count == 1)
     }
 
     @Test("setDetached reports false when the state did not actually change")

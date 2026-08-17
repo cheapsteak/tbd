@@ -115,12 +115,17 @@ struct StatusBarView: View {
 
     /// How many chips the bar shows before the rest collapse into `+N`.
     ///
-    /// Seven, because the cluster yields width rather than taking it: it
-    /// carries `layoutPriority(-1)` just as the path label beside it does, so a
-    /// narrow window degrades by collapsing chips into the overflow menu rather
-    /// than by squeezing the path. That is what makes the cap a question of how
-    /// many PRs are worth scanning at a glance rather than a bet on window
-    /// width. Past seven the dropdown is the better surface.
+    /// Seven is a judgement about how many numbers are worth scanning at a
+    /// glance; past that the dropdown is the better surface. It is not a width
+    /// calculation — nothing here consults the available width, and the
+    /// overflow count is a pure function of how many bindings there are.
+    ///
+    /// What the cluster yields under pressure is width, not chips: it carries
+    /// `layoutPriority(-1)` just as the path label beside it does, so a narrow
+    /// window compresses the strip rather than squeezing the path, and
+    /// compressing it truncates labels rather than folding chips into the
+    /// overflow menu. Width-aware collapsing would be the real answer and is
+    /// deliberately not built here.
     nonisolated static let prChipLimit = 7
 
     /// The chip row for `bindings`, plus how many did not fit. Pure: delegates
@@ -432,7 +437,13 @@ private struct PRChipView: View {
                 .padding(.leading, Self.iconTextGap)
                 // The gap beside the number is part of the open target.
                 .contentShape(Rectangle())
-                .help(StatusBarView.openLabel(chip))
+                // No `.help` here, deliberately: the hover overlay already
+                // names this PR, its state and the age of that reading, and a
+                // tooltip would surface a second, smaller box saying less on
+                // top of it. The icon slot keeps its tooltip because the
+                // overlay says nothing about what clicking the slot does.
+                // Accessibility is unaffected — the hint below carries the same
+                // sentence.
                 // Opens the DEFAULT BROWSER, not an in-app tab. Intentional,
                 // and the one place the status bar and the toolbar deliberately
                 // differ: the toolbar control and its dropdown open a webview

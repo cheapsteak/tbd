@@ -223,8 +223,16 @@ public struct PRBindingStore: Sendable {
     ///
     /// Returns whether the record **changed**: true when a live row was
     /// tombstoned or a tombstone was inserted, false when the PR was already
-    /// tombstoned. An existing row keeps its own `source` and `boundAt` — only
-    /// a tombstone with no prior row records nothing but the caller's decision.
+    /// tombstoned — and false when there is no row and `insertIfMissing` is
+    /// false, which is the truthful answer there: nothing was tracking it. An
+    /// existing row keeps its own `source` and `boundAt` — only a tombstone
+    /// with no prior row records nothing but the caller's decision.
+    ///
+    /// `insertIfMissing` is the caller's policy hook rather than a convenience:
+    /// tombstoning a PR the worktree has no row for is only safe when the
+    /// caller has established that the PR could belong to it. Marking an
+    /// existing row detached always is — the row is this worktree's own record
+    /// of the PR whatever any policy says about it now.
     ///
     /// Deliberately NOT routed through `upsert`. The cap counts only
     /// non-detached rows, so a tombstone can never breach it, but `upsert`
@@ -232,7 +240,7 @@ public struct PRBindingStore: Sendable {
     /// terminal binding — or drop the write entirely — to make room for a row
     /// that occupies none of the budget.
     @discardableResult
-    public func tombstone(_ binding: PRBinding) async throws -> Bool {
+    public func tombstone(_ binding: PRBinding, insertIfMissing: Bool) async throws -> Bool {
         try await writer.write { db in
             var record = PRBindingRecord(from: binding)
             record.detached = true
@@ -243,6 +251,7 @@ public struct PRBindingStore: Sendable {
                     .updateAll(db, Column("detached").set(to: true))
                 return true
             }
+            guard insertIfMissing else { return false }
             try record.insert(db)
             return true
         }

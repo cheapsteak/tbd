@@ -25,10 +25,18 @@ the overflow menu carries PRs that would have fit on screen.
 
 ### Cap
 
-Seven chips before `+N`, up from four. The cluster already yields width to the
-path label (`layoutPriority(-1)`), so a narrow window degrades by collapsing
-into the overflow menu rather than by squeezing its neighbours — which is what
-makes raising the cap safe rather than a gamble on window width.
+Seven chips before `+N`, up from four. The cap is a judgement about how many
+numbers are worth scanning at a glance, not a width calculation: nothing
+consults the available width, and the overflow count is a pure function of how
+many bindings there are.
+
+What the cluster does give up under pressure is width, not chips. It carries
+`layoutPriority(-1)` just as the path label beside it does, so a narrow window
+compresses the strip rather than squeezing the path — and compressing it
+truncates chip labels (`#41…`) rather than folding chips into the overflow
+menu. Seven chips reach that point at a wider window than four did. Width-aware
+collapsing would be the real answer and is deliberately not built here; it is a
+layout change to make on its own, with the window in front of you.
 
 ### Untracking from the chip
 
@@ -106,11 +114,43 @@ and the click becomes the silent no-op this whole section exists to remove. The
 store therefore exposes a single `tombstone` that detaches an existing row or
 inserts one, and reports whether the record changed.
 
-The app names the PR by **URL with its number as a fallback**, sending both. A
-chip lifted from a legacy cached status can carry a URL that does not parse, and
-a control that quietly declines on such a chip is the same failure in a
-different disguise; `pr.detach` already resolves a bare number against the
-worktree's own repo.
+The app names the PR by **URL with its number as a fallback**, sending both, and
+`pr.detach` falls through to the number when the URL does not parse. Both halves
+are needed and the second is the load-bearing one: `PRBindingExtractor`'s
+pattern is host-locked to `https://github.com/`, so on a worktree hosted
+anywhere else no binding can ever form, *every* chip is synthetic, and every one
+of them carries a URL the daemon will reject. Url-only, the xmark would fail on
+precisely the worktrees that have nothing but synthetic chips. A reference with
+a bad URL and no number is still an error; the fallthrough is a second chance,
+not a default.
+
+**The insert arm carries `bind`'s wrong-repo guard.** Tombstoning an existing
+row is always allowed — it is this worktree's own record of the PR, and a repo
+rename must not strand it. Creating one is not: `pr.attach` rejects a wrong-repo
+reference before it ever reaches a row, so a tombstone for a foreign PR could
+never be cleared, and the non-zero `detachedCount` it leaves would suppress that
+worktree's legacy-status fallback permanently. One mistyped
+`tbd pr detach <other-repo-url>` would retire a worktree's real PR indicator
+with no way back. Declining reports "changed nothing", which is the honest
+answer: this worktree was not tracking that PR.
+
+#### Removal reflows the strip, and no suppression window is added
+
+The chip leaves the bar within an RPC round trip, and its neighbour slides into
+the pixels the cursor is sitting on. A second click there — an impatient double
+click on the xmark — lands on the neighbour, and if `onHover` has reached it by
+then it untracks that PR too.
+
+The obvious cure is the wrong one. A suppression window after a detach would
+also block untracking two chips in a row, which is exactly the workflow a cap of
+seven invites: a worktree carrying a week of merged PRs is cleared by clicking
+several xmarks in sequence, and a control that ignores the second click is worse
+than one that occasionally acts on it. The gesture is reversible —
+`tbd pr attach` puts the binding back — and the neighbour's identity is on
+screen the whole time. The real fix is for the strip not to reflow under the
+cursor at all: hold a removed chip's slot until the pointer leaves the cluster.
+That is a layout change, and it belongs with the width-aware collapsing above
+rather than bolted onto this gesture.
 
 #### What insert-on-miss costs, and why the cost is accepted here
 
@@ -178,6 +218,11 @@ earlier. Every surface that renders it must render its age with it.
 - The same store call that would insert a tombstone detaches an existing live
   row in place instead, keeping that row's id and `source` — the arm that makes
   a concurrent bind harmless.
+- Detaching an unbound PR from another repo writes nothing and reports no
+  change, while detaching a row that already exists still works after the
+  worktree's repo has changed under it.
+- A reference whose URL does not parse resolves through its number, against the
+  worktree's own repo; one with neither is still an error.
 - The icon slot means untrack while hovered and open while not, so a click can
   never destroy an association the slot is not offering to remove.
 - Detaching the last chip of a worktree whose bindings were synthetic leaves the
