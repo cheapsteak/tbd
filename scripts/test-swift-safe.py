@@ -13,10 +13,14 @@ import importlib.machinery
 import importlib.util
 import os
 from pathlib import Path
+import shlex
+import signal
 import subprocess
 import tempfile
 import textwrap
+import time
 import unittest
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -291,6 +295,11 @@ class WaitReportingTests(unittest.TestCase):
                     self.lock_path,
                     timeout,
                     heartbeat,
+                    # This process's own live ancestry, as `main` would record
+                    # it: nothing here goes away, so the wait runs to timeout
+                    # and the reporting is what is under test.
+                    requester=os.getppid(),
+                    ancestors=(),
                     monotonic=clock.monotonic,
                     sleep=clock.sleep,
                     report=report,
@@ -415,6 +424,439 @@ class WaitReportingTests(unittest.TestCase):
         first = self.wait_messages()[0]
         self.assertIn("...", first)
         self.assertLess(len(first), 400)
+
+
+class AbandonedWaitTests(unittest.TestCase):
+    """Drive `_acquire`'s requester check with a fake clock and a fake getppid.
+
+    The flock underneath is really contended, as in `WaitReportingTests`, so a
+    wait that fails to notice its requester runs on to the full timeout.
+    """
+
+    INITIAL_PARENT = 4242
+
+    def setUp(self):
+        # `_acquire` reads the escape hatch from the ambient environment, and
+        # docs/reclaim-build.md invites a developer to export it. Every case
+        # below states for itself whether the hatch is set.
+        patcher = mock.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop("TBD_SWIFT_ALLOW_ORPHAN", None)
+        self.temp = tempfile.TemporaryDirectory()
+        self.lock_path = Path(self.temp.name) / "swift-build.lock"
+        self.holder = self.lock_path.open("a+", encoding="utf-8")
+        fcntl.flock(self.holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def tearDown(self):
+        self.holder.close()
+        self.temp.cleanup()
+
+    def slot_is_free(self) -> bool:
+        """Whether nobody — the waiter included — holds the lock right now."""
+        with self.lock_path.open("a+", encoding="utf-8") as probe:
+            try:
+                fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return False
+            fcntl.flock(probe.fileno(), fcntl.LOCK_UN)
+            return True
+
+    def wait(self, parents, *, ancestors=(), release_slot=False, timeout=125.0):
+        """One wait over the `parents` getppid readings; the last one repeats.
+
+        `ancestors` is the chain recorded at startup, given as real pids so
+        the shipped `kill(pid, 0)` liveness check is the one under test.
+
+        The requester passed is `parents[0]`, the first reading — the same
+        value `main` would have captured at startup. The escape-hatch cases
+        pass it too, rather than production's zero, so that they still red if
+        `_acquire`'s own `TBD_SWIFT_ALLOW_ORPHAN` gate is removed.
+
+        Returns the exception type that ended it, the virtual seconds it
+        lasted, and whether the slot was left untaken.
+        """
+        clock = FakeClock()
+        readings = list(parents)
+
+        def getppid() -> int:
+            value = readings.pop(0) if len(readings) > 1 else readings[0]
+            if release_slot and value != parents[0]:
+                # Free the slot at the moment the requester goes away, so a
+                # wait that failed to stop would take it and return happily.
+                fcntl.flock(self.holder.fileno(), fcntl.LOCK_UN)
+            return value
+
+        start = clock.monotonic()
+        with self.lock_path.open("a+", encoding="utf-8") as waiter:
+            outcome: BaseException | None = None
+            try:
+                swift_safe._acquire(
+                    waiter,
+                    self.lock_path,
+                    timeout,
+                    60.0,
+                    requester=parents[0],
+                    ancestors=tuple(ancestors),
+                    monotonic=clock.monotonic,
+                    sleep=clock.sleep,
+                    report=lambda *_: None,
+                    getppid=getppid,
+                )
+            except (swift_safe.Abandoned, TimeoutError) as error:
+                outcome = error
+            self.assertIsNotNone(outcome, "the wait acquired the build slot")
+            # Probed while the waiter's descriptor is still open, so a slot it
+            # had taken would still read as busy.
+            free = self.slot_is_free()
+        return type(outcome), clock.monotonic() - start, free
+
+    def test_the_wait_ends_when_the_requester_goes_away(self):
+        outcome, elapsed, _ = self.wait([self.INITIAL_PARENT, self.INITIAL_PARENT, 1])
+        self.assertIs(outcome, swift_safe.Abandoned)
+        # Promptly: within a poll or two, not at the far-off timeout.
+        self.assertLess(elapsed, 1.0)
+
+    def test_an_abandoned_wait_leaves_the_freed_slot_untaken(self):
+        outcome, _, free = self.wait([self.INITIAL_PARENT, 1], release_slot=True)
+        self.assertIs(outcome, swift_safe.Abandoned)
+        self.assertTrue(free, "the abandoned wait took the slot on its way out")
+
+    def test_a_wait_whose_requester_stays_runs_to_the_timeout(self):
+        """Mutation guard: the check must not fire while somebody is waiting."""
+        outcome, elapsed, _ = self.wait([self.INITIAL_PARENT])
+        self.assertIs(outcome, TimeoutError)
+        self.assertGreaterEqual(elapsed, 125.0)
+
+    def test_a_wait_that_started_detached_is_never_abandoned(self):
+        """Reparenting is the signal; being parented to pid 1 all along is not."""
+        outcome, elapsed, _ = self.wait([1])
+        self.assertIs(outcome, TimeoutError)
+        self.assertGreaterEqual(elapsed, 125.0)
+
+    def test_allow_orphan_keeps_a_reparented_wait_queued(self):
+        with mock.patch.dict(os.environ, {"TBD_SWIFT_ALLOW_ORPHAN": "1"}):
+            outcome, elapsed, _ = self.wait([self.INITIAL_PARENT, 1])
+        self.assertIs(outcome, TimeoutError)
+        self.assertGreaterEqual(elapsed, 125.0)
+
+    def test_a_dead_grandparent_ends_the_wait_though_the_parent_lives(self):
+        """The requester is rarely the direct parent — `env` execs in between.
+
+        The parent reading never moves here: only the recorded chain shows
+        that the process this build was being run for has gone.
+        """
+        # A live stand-in for the direct parent, then the dead grandparent.
+        outcome, elapsed, _ = self.wait(
+            [self.INITIAL_PARENT], ancestors=(os.getpid(), _dead_pid(), 1)
+        )
+        self.assertIs(outcome, swift_safe.Abandoned)
+        self.assertLess(elapsed, 1.0)
+
+    def test_a_wait_whose_whole_chain_lives_runs_to_the_timeout(self):
+        """Mutation guard: a living ancestry must never fire the check."""
+        outcome, elapsed, _ = self.wait(
+            [self.INITIAL_PARENT], ancestors=(os.getpid(), os.getppid(), 1)
+        )
+        self.assertIs(outcome, TimeoutError)
+        self.assertGreaterEqual(elapsed, 125.0)
+
+    def test_an_unavailable_chain_falls_back_to_the_direct_parent(self):
+        """A walk that failed records nothing, and must still behave."""
+        outcome, elapsed, _ = self.wait([self.INITIAL_PARENT, 1], ancestors=())
+        self.assertIs(outcome, swift_safe.Abandoned)
+        self.assertLess(elapsed, 1.0)
+
+        outcome, elapsed, _ = self.wait([self.INITIAL_PARENT], ancestors=())
+        self.assertIs(outcome, TimeoutError)
+        self.assertGreaterEqual(elapsed, 125.0)
+
+    def test_allow_orphan_keeps_waiting_though_a_recorded_ancestor_died(self):
+        with mock.patch.dict(os.environ, {"TBD_SWIFT_ALLOW_ORPHAN": "1"}):
+            outcome, elapsed, _ = self.wait(
+                [self.INITIAL_PARENT], ancestors=(os.getpid(), _dead_pid(), 1)
+            )
+        self.assertIs(outcome, TimeoutError)
+        self.assertGreaterEqual(elapsed, 125.0)
+
+
+class AncestorChainTests(unittest.TestCase):
+    """The startup walk that records who a build is being run for."""
+
+    def test_the_real_walk_reaches_pid_one_from_this_process(self):
+        chain = swift_safe._ancestor_pids()
+        self.assertEqual(chain[0], os.getppid())
+        self.assertEqual(chain[-1], 1)
+        self.assertEqual(len(set(chain)), len(chain), "the walk repeated a pid")
+        self.assertTrue(all(swift_safe._process_is_alive(pid) for pid in chain))
+
+    def test_the_real_process_table_maps_this_process_to_its_parent(self):
+        self.assertEqual(swift_safe._process_table().get(os.getpid()), os.getppid())
+
+    def test_the_walk_follows_the_table_up_to_pid_one(self):
+        chain = swift_safe._ancestor_pids(
+            getppid=lambda: 10, process_table=lambda: {10: 20, 20: 30, 30: 1, 1: 0}
+        )
+        self.assertEqual(chain, (10, 20, 30, 1))
+
+    def test_a_missing_table_entry_ends_the_walk_at_the_direct_parent(self):
+        chain = swift_safe._ancestor_pids(getppid=lambda: 10, process_table=dict)
+        self.assertEqual(chain, (10,))
+
+    def test_a_cyclic_table_terminates_the_walk(self):
+        chain = swift_safe._ancestor_pids(
+            getppid=lambda: 10, process_table=lambda: {10: 20, 20: 10}
+        )
+        self.assertEqual(chain, (10, 20))
+
+    def test_a_detached_process_records_only_pid_one(self):
+        chain = swift_safe._ancestor_pids(getppid=lambda: 1, process_table=dict)
+        self.assertEqual(chain, (1,))
+
+    def test_an_unusable_parent_records_nothing(self):
+        self.assertEqual(
+            swift_safe._ancestor_pids(getppid=lambda: 0, process_table=dict), ()
+        )
+
+    def test_an_unavailable_ps_leaves_an_empty_table(self):
+        """No table means no chain, which is the pre-walk behavior, not a crash."""
+        for failure in (
+            OSError("no ps here"),
+            subprocess.CalledProcessError(1, "ps"),
+            subprocess.TimeoutExpired("ps", 10),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                with mock.patch.object(
+                    swift_safe.subprocess, "run", side_effect=failure
+                ):
+                    self.assertEqual(swift_safe._process_table(), {})
+                    self.assertEqual(
+                        swift_safe._ancestor_pids(getppid=lambda: 10), (10,)
+                    )
+
+    def test_unparsable_process_table_rows_are_skipped(self):
+        completed = subprocess.CompletedProcess(
+            ["ps"], 0, stdout="  1     0\nnot a row\n7 x\n8\n 9 10 11\n", stderr=""
+        )
+        with mock.patch.object(swift_safe.subprocess, "run", return_value=completed):
+            self.assertEqual(swift_safe._process_table(), {1: 0})
+
+
+class OrphanedWrapperTests(unittest.TestCase):
+    """End to end: kill a queued wrapper's requester, through the real script.
+
+    A killer signals the process it knows about, so the wrapper it started is
+    never told.  Each case runs real shells that fork a real `swift-safe`
+    against a real contended lock, then SIGKILLs one of them — by a pid this
+    test recorded at spawn, never by a pattern, which once matched and killed
+    unrelated live sessions.
+    """
+
+    DEADLINE_SECONDS = 3.0
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.lock_path = root / "swift-build.lock"
+        self.compiled_marker = root / "swift-ran"
+        self.wrapper_stderr = root / "wrapper.stderr"
+        self.wrapper_pid_file = root / "wrapper.pid"
+        self.intermediate_pid_file = root / "intermediate.pid"
+        self.fake_swift = root / "swift"
+        self.fake_swift.write_text(
+            textwrap.dedent(
+                f"""\
+                #!/bin/sh
+                printf '%s\\n' "$*" > {shlex.quote(str(self.compiled_marker))}
+                sleep 30
+                """
+            ),
+            encoding="utf-8",
+        )
+        self.fake_swift.chmod(0o755)
+        # This process keeps the slot for the whole test, so the wrapper below
+        # genuinely queues instead of compiling straight away.
+        self.holder = self.lock_path.open("a+", encoding="utf-8")
+        fcntl.flock(self.holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.shells: list[subprocess.Popen] = []
+        # Only pids these tests recorded at spawn are ever signalled: a
+        # pattern kill here once matched, and killed, unrelated live sessions.
+        self.recorded_pids: list[int] = []
+        self.wrapper_pid = 0
+
+    def tearDown(self):
+        # Unconditional: a failed assertion must not strand a queued wrapper.
+        for pid in self.recorded_pids:
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
+        for shell in self.shells:
+            with contextlib.suppress(OSError):
+                shell.kill()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                shell.wait(timeout=5)
+        self.holder.close()
+        self.temp.cleanup()
+
+    def until(self, condition) -> bool:
+        """Poll `condition` up to the deadline rather than sleeping blind."""
+        deadline = time.monotonic() + self.DEADLINE_SECONDS
+        while time.monotonic() < deadline:
+            if condition():
+                return True
+            time.sleep(0.02)
+        return condition()
+
+    def wrapper_env(self, **extra_env) -> dict[str, str]:
+        env = os.environ.copy()
+        # A developer who exported the escape hatch — docs/reclaim-build.md
+        # invites it — must not silently disarm the check under test. The
+        # hatch case below sets it back explicitly.
+        env.pop("TBD_SWIFT_ALLOW_ORPHAN", None)
+        env.update(
+            {
+                "TBD_HOME": str(Path(self.temp.name) / "tbd"),
+                "TBD_SWIFT_LOCK_PATH": str(self.lock_path),
+                "TBD_SWIFT_BIN": str(self.fake_swift),
+                "TBD_SWIFT_LOCK_TIMEOUT_SECONDS": "60",
+                "TBD_SWIFT_HEARTBEAT_SECONDS": "0.05",
+                **extra_env,
+            }
+        )
+        return env
+
+    def reported_pid(self, pid_file: Path, description: str) -> int:
+        """The pid a shell wrote for the child it forked, once it appears."""
+
+        def pid_reported() -> bool:
+            try:
+                return pid_file.read_text().strip().isdigit()
+            except OSError:
+                return False
+
+        self.assertTrue(
+            self.until(pid_reported), f"no pid was reported for {description}"
+        )
+        pid = int(pid_file.read_text().strip())
+        self.recorded_pids.append(pid)
+        return pid
+
+    def parent_of(self, pid: int) -> int:
+        """This pid's parent, straight from `ps`, to verify the process tree."""
+        completed = subprocess.run(
+            ["ps", "-o", "ppid=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return int(completed.stdout.strip() or -1)
+
+    def await_queued_wrapper(self) -> None:
+        # Only once it is queued has it captured the requester it will lose.
+        self.assertTrue(
+            self.until(lambda: "waiting for the shared build slot" in self.reported()),
+            "the wrapper never reached the wait",
+        )
+
+    def wrapper_script(self) -> str:
+        """Fork the wrapper, report its pid, and stay alive around it.
+
+        `&` so the shell forks rather than exec-optimizing the wrapper into
+        itself: killing the shell then leaves a live wrapper behind, which is
+        the leak being reproduced.
+        """
+        return (
+            f"{shlex.quote(str(RUNNER))} build "
+            f"2> {shlex.quote(str(self.wrapper_stderr))} & "
+            f"echo $! > {shlex.quote(str(self.wrapper_pid_file))}; wait"
+        )
+
+    def start_queued_wrapper(self, **extra_env) -> subprocess.Popen:
+        shell = subprocess.Popen(
+            ["/bin/sh", "-c", self.wrapper_script()], env=self.wrapper_env(**extra_env)
+        )
+        self.shells.append(shell)
+        self.wrapper_pid = self.reported_pid(self.wrapper_pid_file, "the wrapper")
+        self.await_queued_wrapper()
+        return shell
+
+    def start_queued_wrapper_under_a_grandparent(self) -> subprocess.Popen:
+        """grandparent shell -> intermediate shell -> queued wrapper.
+
+        The shape `scripts/test.sh` produces: the wrapper's direct parent is
+        an intermediate that outlives whoever asked for the build.  Every
+        level must genuinely fork — a shell exec-optimizes the last simple
+        command of `-c`, which would collapse the tree and make the test
+        vacuous — so each backgrounds its child with `&` and stays in `wait`.
+        """
+        outer = (
+            f"/bin/sh -c {shlex.quote(self.wrapper_script())} & "
+            f"echo $! > {shlex.quote(str(self.intermediate_pid_file))}; wait"
+        )
+        grandparent = subprocess.Popen(["/bin/sh", "-c", outer], env=self.wrapper_env())
+        self.shells.append(grandparent)
+        intermediate_pid = self.reported_pid(
+            self.intermediate_pid_file, "the intermediate shell"
+        )
+        self.wrapper_pid = self.reported_pid(self.wrapper_pid_file, "the wrapper")
+        self.await_queued_wrapper()
+        # Prove the three levels are distinct processes before killing any.
+        self.assertEqual(self.parent_of(self.wrapper_pid), intermediate_pid)
+        self.assertEqual(self.parent_of(intermediate_pid), grandparent.pid)
+        self.assertNotIn(grandparent.pid, (intermediate_pid, self.wrapper_pid))
+        return grandparent
+
+    def reported(self) -> str:
+        """Everything the wrapper has said on stderr so far."""
+        try:
+            return self.wrapper_stderr.read_text(errors="replace")
+        except OSError:
+            return ""
+
+    def kill_the_requester(self, shell: subprocess.Popen) -> None:
+        shell.kill()
+        shell.wait(timeout=5)
+
+    def test_a_wrapper_whose_requester_is_killed_stops_competing(self):
+        shell = self.start_queued_wrapper()
+        self.kill_the_requester(shell)
+        self.assertTrue(
+            self.until(lambda: not swift_safe._process_is_alive(self.wrapper_pid)),
+            "the orphaned wrapper kept waiting for the shared build slot",
+        )
+        self.assertFalse(
+            self.compiled_marker.exists(), "the orphan started a build nobody reads"
+        )
+        # The slot record still names this test's holder, never the orphan.
+        self.assertNotIn(f"pid={self.wrapper_pid}", self.lock_path.read_text())
+        self.assertIn("exited while it was queued", self.reported())
+
+    def test_a_wrapper_whose_grandparent_is_killed_stops_competing(self):
+        """The direct parent survives, so only the recorded chain can notice.
+
+        `scripts/test.sh` reaches the wrapper through `env`, which execs: kill
+        the agent's shell and test.sh stays alive, blocked in `wait`.
+        """
+        grandparent = self.start_queued_wrapper_under_a_grandparent()
+        # Exactly one pid, recorded when this test spawned it.
+        self.kill_the_requester(grandparent)
+        self.assertTrue(
+            self.until(lambda: not swift_safe._process_is_alive(self.wrapper_pid)),
+            "the wrapper kept waiting because its direct parent was still alive",
+        )
+        self.assertFalse(
+            self.compiled_marker.exists(), "the orphan started a build nobody reads"
+        )
+        self.assertNotIn(f"pid={self.wrapper_pid}", self.lock_path.read_text())
+        self.assertIn("exited while it was queued", self.reported())
+
+    def test_allow_orphan_keeps_a_deliberately_detached_wrapper_waiting(self):
+        shell = self.start_queued_wrapper(TBD_SWIFT_ALLOW_ORPHAN="1")
+        self.kill_the_requester(shell)
+        self.assertFalse(
+            self.until(lambda: not swift_safe._process_is_alive(self.wrapper_pid)),
+            "the escape hatch did not keep the detached wrapper waiting",
+        )
+        self.assertNotIn("exited while it was queued", self.reported())
 
 
 if __name__ == "__main__":

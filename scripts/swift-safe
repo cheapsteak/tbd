@@ -12,6 +12,23 @@ output sees nothing from this wrapper.  The holder writes ``pid``/``cwd``/
 say who it is queued behind; a heartbeat then repeats the wait's elapsed time
 so a human can tell a queued build from a hung one and an automated caller's
 stall watchdog sees liveness.
+
+A wait also ends when whoever requested the build goes away.  Killing a shell
+or an agent session signals only that process, so a wrapper queued behind the
+lock is never told; left waiting it stays in the queue and in time takes the
+machine-global slot and compiles a tree nobody will read, while a real
+requester waits behind it.  The whole ancestor chain is recorded at startup
+and any of those processes dying ends the wait, because the requester is
+rarely the direct parent: ``scripts/test.sh`` runs this wrapper through
+``env``, which execs, so killing the agent's shell leaves test.sh alive and
+blocked in ``wait`` and a direct-parent check would never fire.  Set
+``TBD_SWIFT_ALLOW_ORPHAN=1`` to keep waiting anyway, for a build deliberately
+launched detached from a shell that will exit later.
+
+An abandoned wait and a timed-out wait both exit 75 (``EX_TEMPFAIL``); only
+the stderr line distinguishes them.  Nothing branches on the code today, and
+the shared value says the same thing to a caller that does: the slot was not
+obtained, nothing was compiled, retrying later is reasonable.
 """
 
 from __future__ import annotations
@@ -21,6 +38,7 @@ import math
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import time
 
@@ -70,6 +88,10 @@ RUN_OPTIONS_WITH_VALUES = {
     "-debug-info-format",
     "-j",
 }
+
+
+class Abandoned(Exception):
+    """The requester exited while we were queued, so the wait has no reader."""
 
 
 def _positive_number(name: str, default: float) -> float:
@@ -231,6 +253,66 @@ def _process_is_alive(pid: int) -> bool:
     return True
 
 
+def _process_table() -> dict[int, int]:
+    """child pid -> parent pid for every visible process, from one `ps`.
+
+    macOS has no ``/proc``, so an ancestor walk needs the process table, and
+    one ``ps`` call answers every step of it.  Best effort: a table we could
+    not read leaves the caller with the direct parent alone, which is the
+    behavior that shipped before the walk existed.
+    """
+    try:
+        completed = subprocess.run(
+            ["ps", "-Ao", "pid=,ppid="],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    table: dict[int, int] = {}
+    for line in completed.stdout.splitlines():
+        fields = line.split()
+        if len(fields) != 2:
+            continue
+        try:
+            child, parent = int(fields[0]), int(fields[1])
+        except ValueError:
+            continue
+        table[child] = parent
+    return table
+
+
+def _ancestor_pids(
+    *, getppid=os.getppid, process_table=_process_table
+) -> tuple[int, ...]:
+    """This process's ancestors, nearest first, ending at pid 1 if reachable.
+
+    Walked once, at startup: afterwards liveness is `kill(pid, 0)` per poll,
+    with no further subprocesses.  A run launched detached records a short
+    chain — possibly just pid 1 — and so is never abandoned by it.
+    """
+    parent = getppid()
+    if parent <= 0:
+        return ()
+    chain = [parent]
+    seen = {parent}
+    table = process_table()
+    current = parent
+    while current > 1:
+        # A missing entry (the process table raced us, or `ps` failed) or a
+        # cycle (impossible, but a corrupt table must not hang the build)
+        # ends the walk with whatever was recorded so far.
+        nextpid = table.get(current)
+        if nextpid is None or nextpid <= 0 or nextpid in seen:
+            break
+        chain.append(nextpid)
+        seen.add(nextpid)
+        current = nextpid
+    return tuple(chain)
+
+
 def _holder_description(lock_path: Path) -> str:
     """Describe the lock holder without ever claiming one we cannot see."""
     fields = _holder_fields(lock_path)
@@ -268,12 +350,20 @@ def _acquire(
     timeout_seconds: float,
     heartbeat_seconds: float,
     *,
+    requester: int,
+    ancestors: tuple[int, ...],
     monotonic=time.monotonic,
     sleep=time.sleep,
     report=_report,
+    getppid=os.getppid,
 ) -> None:
+    # Who asked for this build, and the chain above them: `main` records both
+    # before any other work (see the comment there). They are required and
+    # keyword-only on purpose — a default would let a future call site drop the
+    # abandonment check silently, with nothing to compile against or test.
     start = monotonic()
     deadline = start + timeout_seconds
+    watch_requester = os.environ.get("TBD_SWIFT_ALLOW_ORPHAN") != "1"
     announced = False
     next_heartbeat = 0.0
     while True:
@@ -281,6 +371,25 @@ def _acquire(
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             return
         except BlockingIOError:
+            # Two readings of the same fact, because neither covers the other:
+            # a reparent is visible even while the old parent lingers as an
+            # unreaped zombie, and a dead ancestor further up the chain never
+            # moves this process's own ppid at all. A dead pid that has been
+            # reused reads as alive and we keep waiting — the behavior that
+            # shipped before this check, so the failure is the safe one.
+            #
+            # The zombie immunity covers only the direct parent, whose death
+            # reparents us regardless of when it is reaped. A *higher* ancestor
+            # left unreaped still answers `kill(pid, 0)`, so a chain whose
+            # middle is an un-waited-for zombie reads as alive and that wait
+            # runs to the timeout. Closing it would need `ps -o stat=` in the
+            # poll loop; the design rejects that cost for a narrow case whose
+            # failure mode is only the pre-existing one.
+            if watch_requester and (
+                getppid() != requester
+                or not all(_process_is_alive(pid) for pid in ancestors)
+            ):
+                raise Abandoned
             now = monotonic()
             if not announced:
                 report(
@@ -302,6 +411,28 @@ def _acquire(
 
 
 def main(arguments: list[str]) -> int:
+    # Recorded here, before argument parsing, `shutil.which` and opening the
+    # lock file: a requester that dies during that window would otherwise be
+    # recorded after the reparent has already happened, and the check could
+    # then never fire. Python's own startup is still outside this point, so
+    # the window shrinks rather than closes — but do not tidy this back down
+    # into `_acquire`, which is where it used to sit.
+    #
+    # No test pins that position: every end-to-end case kills its requester
+    # only after the wrapper has reached the wait loop, and there is no clean
+    # seam to delay argument parsing, so moving the capture back down leaves
+    # the suite green. Treat this as a deliberate choice, not a verified one.
+    #
+    # `TBD_SWIFT_ALLOW_ORPHAN=1` disables the check, and with it the one `ps`
+    # this costs. The case it serves is `nohup scripts/swift-safe build &`
+    # from a live shell that exits later: that shell is a recorded ancestor,
+    # so its exit would otherwise end a wait that was meant to outlive it. A
+    # run already parented to pid 1 needs no hatch — it records no ancestor
+    # that can die, and a test in scripts/test-swift-safe.py pins that.
+    watching_requester = os.environ.get("TBD_SWIFT_ALLOW_ORPHAN") != "1"
+    requester = os.getppid() if watching_requester else 0
+    ancestors = _ancestor_pids() if watching_requester else ()
+
     if not arguments or arguments[0] not in SUPPORTED_SUBCOMMANDS:
         supported = "|".join(sorted(SUPPORTED_SUBCOMMANDS))
         print(
@@ -339,7 +470,22 @@ def main(arguments: list[str]) -> int:
 
     with path.open("a+", encoding="utf-8") as lock_file:
         try:
-            _acquire(lock_file, path, timeout, heartbeat)
+            _acquire(
+                lock_file,
+                path,
+                timeout,
+                heartbeat,
+                requester=requester,
+                ancestors=ancestors,
+            )
+        except Abandoned:
+            print(
+                "swift-safe: the process that requested this build exited while "
+                f"it was queued for {path}; abandoning the wait without starting "
+                "a build",
+                file=sys.stderr,
+            )
+            return 75
         except TimeoutError:
             print(
                 f"swift-safe: timed out after {timeout:g}s waiting for {path} "
