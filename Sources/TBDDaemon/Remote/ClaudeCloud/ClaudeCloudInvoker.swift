@@ -39,6 +39,12 @@ struct ClaudeCloudInvoker: RemoteProviderInvoking {
             return try await create(stdin: stdin, timeout: timeout)
         case "list":
             return try await list()
+        case "send":
+            guard verb.count >= 2 else {
+                return Self.errorResult(
+                    exitCode: 2, code: "invalid_params", message: "send requires a session id")
+            }
+            return try await send(sessionID: verb[1], stdin: stdin)
         case "archive", "unarchive", "land":
             // Declared by `describe` and implemented by the archive and land
             // steps of this same delivery. Until then this fails loudly as a

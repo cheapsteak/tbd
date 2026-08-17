@@ -626,4 +626,100 @@ struct ClaudeCloudInvokerTests {
         // session outlives the judgement that it did not.
         #expect(row.idempotencyKey == "k")
     }
+
+    // MARK: - send
+
+    private let sendOK = #"{"ok":true,"session_id":"session_01AAA","url":"https://claude.ai/code/session_01AAA"}"#
+
+    /// The contract's `send` takes stdin bytes destined for a terminal and
+    /// requires the caller to append `\r` when it means Enter. A session with
+    /// no terminal takes that trailing submit gesture off and treats the rest
+    /// as ONE message — so interior newlines stay one multi-line message
+    /// rather than becoming several.
+    @Test func theSubmitGestureIsStrippedAndInteriorNewlinesSurvive() {
+        #expect(ClaudeCloudSendPayload.message(fromStdin: Data("hello\r".utf8)) == "hello")
+        #expect(ClaudeCloudSendPayload.message(fromStdin: Data("hello\n".utf8)) == "hello")
+        #expect(ClaudeCloudSendPayload.message(fromStdin: Data("hello".utf8)) == "hello")
+        #expect(ClaudeCloudSendPayload.message(fromStdin: Data("one\ntwo\r".utf8)) == "one\ntwo")
+        // Exactly ONE trailing terminator, so a deliberate blank last line
+        // survives the strip.
+        #expect(ClaudeCloudSendPayload.message(fromStdin: Data("one\n\n".utf8)) == "one\n")
+        #expect(ClaudeCloudSendPayload.message(fromStdin: Data("\r".utf8)) == nil)
+        #expect(ClaudeCloudSendPayload.message(fromStdin: Data()) == nil)
+    }
+
+    @Test func sendPostsOneMessageOnAPipeAndReportsSuccess() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: sendOK)])
+        let result = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["send", "session_01AAA"], stdin: Data("try again\r".utf8),
+            timeout: 30, contractVersion: 2)
+        #expect(result.exitCode == 0)
+        let request = try #require(spawner.requestsSnapshot().first)
+        #expect(request.arguments
+            == ["-p", "try again", "--cloud", "session_01AAA", "--output-format", "json"])
+        // `--print` is explicitly a NON-interactive invocation and returns
+        // JSON on an ordinary pipe. A pty here would merge stderr into that
+        // JSON.
+        #expect(request.usesPseudoTerminal == false)
+        // The contract's `send` answers `{}`; exit 0 means the bytes were
+        // handed to the transport, not that the agent acted on them.
+        #expect(try JSONSerialization.jsonObject(with: result.stdout) is [String: Any])
+    }
+
+    /// `ok` plus a `session_id` matching the id sent is the success
+    /// condition — a reply about a DIFFERENT session is not a success.
+    @Test func aMismatchedSessionIDInTheReplyIsAFailure() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let spawner = FakeClaudeSpawner(outcomes: [
+            .completed(status: 0, output: #"{"ok":true,"session_id":"session_01ZZZ"}"#)
+        ])
+        let result = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["send", "session_01AAA"], stdin: Data("hi\r".utf8),
+            timeout: 30, contractVersion: 2)
+        #expect(result.exitCode == 1)
+        #expect(result.decodedError?.message.contains("session_01ZZZ") == true)
+    }
+
+    @Test func anOkFalseReplyIsAFailure() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let spawner = FakeClaudeSpawner(outcomes: [
+            .completed(status: 0, output: #"{"ok":false,"session_id":"session_01AAA"}"#)
+        ])
+        let result = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["send", "session_01AAA"], stdin: Data("hi\r".utf8),
+            timeout: 30, contractVersion: 2)
+        #expect(result.exitCode == 1)
+    }
+
+    @Test func unparseableSendOutputIsAFailureCarryingWhatArrived() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: "not json")])
+        let result = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["send", "session_01AAA"], stdin: Data("hi\r".utf8),
+            timeout: 30, contractVersion: 2)
+        #expect(result.exitCode == 1)
+        #expect(result.decodedError?.message.contains("not json") == true)
+    }
+
+    @Test func anEmptyMessageIsRefusedBeforeAnythingIsSpawned() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let spawner = FakeClaudeSpawner(outcomes: [])
+        let result = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["send", "session_01AAA"], stdin: Data("\r".utf8),
+            timeout: 30, contractVersion: 2)
+        #expect(result.exitCode == 2)
+        #expect(result.decodedError?.code == "invalid_params")
+        #expect(spawner.requestsSnapshot().isEmpty)
+    }
+
+    @Test func aSendTimeoutIsTransientRatherThanPermanent() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let spawner = FakeClaudeSpawner(outcomes: [.timedOut])
+        let result = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["send", "session_01AAA"], stdin: Data("hi\r".utf8),
+            timeout: 30, contractVersion: 2)
+        #expect(result.exitCode == 3)
+        #expect(result.failureClass == .transient)
+    }
 }
