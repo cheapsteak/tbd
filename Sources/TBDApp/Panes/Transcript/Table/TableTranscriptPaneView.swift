@@ -45,6 +45,17 @@ struct TableTranscriptPaneView: View {
     /// streaming update (follow the tail).
     @State private var activityToggleToken: Int = 0
 
+    /// Per-pane memo for `TranscriptPresentation.build`, which is called from
+    /// inside `tableTranscript` and so re-ran on every body evaluation — and
+    /// this view observes `AppState`, so any unrelated publish paid for it.
+    /// A reference-type holder in `@State`, the same shape as `openTiming`
+    /// below: the default expression re-runs on every memberwise init, but
+    /// `@State` keeps the first instance, and allocating an empty box is free
+    /// where recomputing the projection is not. Per-pane rather than the
+    /// process-wide `.shared` so the live pane and Session History cannot
+    /// evict each other out of a size-1 cache.
+    @State private var presentationMemo = TranscriptPresentationMemo()
+
     private static let log = Logger(subsystem: "com.tbd.app", category: "live-transcript")
 
     /// OPEN-PATH BOUNDARY TIMING (#129 freeze hunt). Permanent-but-off: emitted
@@ -178,7 +189,8 @@ struct TableTranscriptPaneView: View {
     private var tableTranscript: some View {
         let presentation = TranscriptPresentation.build(
             items: displayedMessages,
-            expansionOverrides: activityGroupExpansion
+            expansionOverrides: activityGroupExpansion,
+            memo: presentationMemo
         )
         let cardContext = TranscriptCardContext(
             terminalID: terminalID,

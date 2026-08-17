@@ -1335,11 +1335,13 @@ extension AppState {
     /// spaces can never be children — nesting requires a `repoID`
     /// (`createNestedWorktree` guards on it), and `createScratch` never sets
     /// `parentWorktreeID` — so no child ever lives outside the dict.
+    ///
+    /// Served from the memoized `childrenIndex()` (`AppState.swift`), which the
+    /// `worktrees` `didSet` invalidates. The sidebar calls this once per row
+    /// while rendering, so recomputing the flatMap/filter/sort per call made a
+    /// render pass O(N²).
     func children(of parentID: UUID) -> [Worktree] {
-        worktrees.values
-            .flatMap { $0 }
-            .filter { $0.parentWorktreeID == parentID && ($0.status == .active || $0.status == .creating) }
-            .sorted { $0.sortOrder < $1.sortOrder }
+        childrenIndex()[parentID] ?? []
     }
 
     /// Find a worktree by id across all repos, including repo-less scratch

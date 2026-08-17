@@ -374,6 +374,13 @@ struct SessionTranscriptView: View {
     /// streaming update (follow the tail).
     @State private var activityToggleToken: Int = 0
 
+    /// Per-pane memo for `TranscriptPresentation.build`, which is called inline
+    /// in `body` and so re-ran on every body evaluation — and this view observes
+    /// `AppState`, so any unrelated publish paid for it. Per-pane rather than
+    /// the process-wide `.shared` so this pane and the live transcript cannot
+    /// evict each other out of a size-1 cache.
+    @State private var presentationMemo = TranscriptPresentationMemo()
+
     @State private var isFreshBranchReviveInFlight = false
 
     private var messages: [TranscriptItem] {
@@ -451,7 +458,8 @@ struct SessionTranscriptView: View {
             } else {
                 let presentation = TranscriptPresentation.build(
                     items: messages,
-                    expansionOverrides: activityGroupExpansion
+                    expansionOverrides: activityGroupExpansion,
+                    memo: presentationMemo
                 )
                 SessionWorkbenchView(
                     sections: presentation.indexSections,

@@ -157,7 +157,19 @@ private struct AddTabButton: View {
     let onAddCodex: () -> Void
     let onAddNote: () -> Void
     @State private var isHovering = false
-    @State private var availability = AgentExecutableAvailability.detect()
+    /// Optimistic placeholder, deliberately NOT `.detect()`.
+    ///
+    /// A `@State` default-value expression runs on EVERY call to the memberwise
+    /// initializer — `@State` only preserves the stored value after first
+    /// mount, it does not stop the expression from re-evaluating. `AddTabButton`
+    /// is built inside `TabBar.body`, itself built inside `SingleWorktreeView.body`,
+    /// and `WorktreePager` keeps one of those mounted per kept-alive worktree, all
+    /// observing `AppState` — so any `@Published` change (the 2 s poll, terminal
+    /// churn, `mainAreaSize` during a window resize) re-ran `detect()` for every
+    /// mounted worktree, each doing `2 × (PATH dirs + 8)` synchronous `stat`s on
+    /// the main thread. The two real refresh paths below cover the value: `.task`
+    /// on appear, and a synchronous re-detect in `showMenu()`.
+    @State private var availability = AgentExecutableAvailability.allAvailable
 
     var body: some View {
         Image(systemName: "plus")
@@ -179,7 +191,11 @@ private struct AddTabButton: View {
     }
 
     private func showMenu() {
-        availability = AgentExecutableAvailability.detect()
+        // Re-detect synchronously, and build the menu from the value just
+        // measured rather than reading `availability` back — the menu can never
+        // be built from the optimistic placeholder.
+        let detected = AgentExecutableAvailability.detect()
+        availability = detected
         let coordinator = MenuCoordinator(
             onShell: onAddShell,
             onClaude: onAddClaude,
@@ -190,7 +206,7 @@ private struct AddTabButton: View {
         )
         let menu = AddTabMenu.build(
             profiles: profiles,
-            availability: availability,
+            availability: detected,
             coordinator: coordinator
         )
 
