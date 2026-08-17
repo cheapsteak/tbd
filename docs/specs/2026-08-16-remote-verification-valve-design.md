@@ -184,14 +184,21 @@ is spent and then the local run happens anyway. On a tree whose whole suite is
 reliably green this is rare; on a tree where it is not, a narrowed lane degrades
 toward always running locally, which is where it started.
 
-**One existing guard is weakened, and it is the reason the follow-up matters.**
-A floor serves two purposes: catching a truncated run, and catching a filter that
-matched nothing — the failure where `--filter` names a renamed type, selects zero
-tests, and exits green. A whole-suite count satisfies a narrow pass's floor
-trivially, so it still proves a run happened but no longer proves the caller's
-filter selected anything. The pre-push hook's tier-3 pass, whose floor of 35
-exists precisely to catch a vacuous filter, therefore stops catching one whenever
-its verdict came from a remote run.
+**One existing guard is weakened on the green path, and it is the reason the
+follow-up matters.** A floor serves two purposes: catching a truncated run, and
+catching a filter that matched nothing — the failure where `--filter` names a
+renamed type, selects zero tests, and exits green. A whole-suite count satisfies a
+narrow pass's floor trivially, so it still proves a run happened but no longer
+proves the caller's filter selected anything. The pre-push hook's tier-3 pass,
+whose floor of 35 exists precisely to catch a vacuous filter, therefore stops
+catching one when it adopts a **green** remote verdict.
+
+A red one is different, because a floor consumer reads the *first* count in a
+log and the remote report is printed before the local re-run's. A narrowed caller
+therefore tells the driver so, and a failing report omits its count entirely: the
+only population in the log is the one the re-run actually selected, so the floor
+judges the run whose verdict is being reported. Without that, a vacuous filter
+would clear a floor of 35 with several thousand tests it never selected.
 
 The backstop is that CI never enables the valve, so its filtered passes run
 directly with their floors intact and a rename is still caught before a merge.
