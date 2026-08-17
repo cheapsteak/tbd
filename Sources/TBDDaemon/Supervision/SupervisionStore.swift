@@ -741,13 +741,30 @@ public actor SupervisionStore {
     /// operator copy must not silently duplicate that copy one level down; the
     /// gesture means "give me the tool's default to edit".
     ///
-    /// **No reconciler is owed for the file this creates** (repo `CLAUDE.md`,
-    /// "Every durable external resource needs a named reconciler"). It is
-    /// operator-authored content in the same standing as `notes.md` and the
-    /// per-repo hooks beside it, and a sweep that deleted a playbook whose
-    /// project stopped resolving would destroy the one thing the design
-    /// promises never to touch again. A stranded copy costs a file; a reclaimed
-    /// one costs the operator's conduct.
+    /// **Who reclaims the file this creates** (repo `CLAUDE.md`, "Every durable
+    /// external resource needs a named reconciler"), by level, because the
+    /// three levels are three different questions.
+    ///
+    /// - The **repo level** writes into the operator's own checkout. TBD does
+    ///   not own that directory or its lifetime — git versions the file and
+    ///   removing the repo from TBD leaves the checkout untouched — so no
+    ///   orphan of TBD's making can arise there. Reclaiming it would be the
+    ///   bug.
+    /// - A **singleton's operator level** adds one file to
+    ///   `~/tbd/repos/<id>/`, the existing per-repo family that already holds
+    ///   `notes.md`, the hooks and the settings overlay. It is a call site in a
+    ///   family whose treatment predates this gesture, not a new kind of
+    ///   resource.
+    /// - A **declared project's operator level** lives in that project's
+    ///   directory, which design §7 makes permanent by decision: nothing
+    ///   reclaims it, because "the project no longer resolves" is not an orphan
+    ///   signal (a renamed repo stops resolution with the mark still standing,
+    ///   §9), because one directory per human-declared project has no
+    ///   unbounded-growth mode, and because its contents are the one thing §5
+    ///   promises the tool writes once and never touches again.
+    ///
+    /// A stranded copy costs a file; a reclaimed one costs the operator's
+    /// conduct.
     public func customizePlaybook(
         project: String, level: SupervisionPlaybookLevel
     ) async throws -> SupervisePlaybookCustomizeResult {
