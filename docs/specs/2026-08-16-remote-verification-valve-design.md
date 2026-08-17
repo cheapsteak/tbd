@@ -36,6 +36,12 @@ snapshot were `--filter`ed runs, which is the worst case for staying local:
 `--filter` selects which tests execute *after* the whole package compiles, so
 each was paying a full package build to run a handful of tests.
 
+Narrowed runs are the common case rather than an edge one, and the valve has to
+serve them. Four of the five queued test lanes across both snapshots narrowed the
+suite, `scripts/git-hooks/pre-push` runs with `--skip`, and the nightly stress
+harness passes a filter — a valve that declined a narrowed run would decline
+almost every real caller.
+
 ## Why fairness alone does not fix this
 
 Ordering the queue is worth doing and is not designed here. It does not
@@ -155,6 +161,32 @@ silent about their population refuses rather than emitting a number, because six
 floor checks would take that number as evidence. The cost of refusing is one
 local re-run.
 
+## A narrowed caller reads the verdict differently
+
+The remote run is always the whole suite, so a caller that narrowed its own run
+with `--filter` or `--skip` did not ask the question the remote answered. One
+half of that mismatch is free and the other is not, and the asymmetry is what
+lets narrowed runs use the valve at all:
+
+- **A green whole-suite verdict is sound for a narrowed caller.** If every test
+  passes, every subset of them passes. The count reported is the whole suite's,
+  which clears a narrowed caller's floor because that floor is a minimum and the
+  whole suite is a superset of what the caller asked for.
+- **A red whole-suite verdict says nothing about the caller's subset.** The
+  failures may lie entirely outside it. Adopting that verdict would report
+  failures the caller deliberately excluded as its own result, so a narrowed run
+  that comes back red is re-run locally to get its true answer.
+
+The cost lands only on red, and only for narrowed callers: the remote round trip
+is spent and then the local run happens anyway. On a tree whose whole suite is
+reliably green this is rare; on a tree where it is not, a narrowed lane degrades
+toward always running locally, which is where it started.
+
+Passing the caller's narrowing arguments through to the dispatch would remove the
+mismatch and make a red verdict directly usable. That input must be allowlisted
+and delivered through the environment rather than interpolated into a workflow's
+`run:` block, since a dispatch input is attacker-influenced text.
+
 **Scraping the job log is rejected, on evidence.** A single failed `test.yml` run
 produces **5.3 MB across 32,228 lines** — far past what any agent can read — in
 which each line carries a job/step/timestamp prefix and ANSI codes, several
@@ -236,7 +268,13 @@ the default once the soak shows the routing behaves.
   reintroduce the stale-marker problem this repo has already paid for.
 - **Inert refs** — a genuine new durable resource, and the one thing here that
   needs a named sweep. They are deleted when the PR closes, with a periodic pass
-  reclaiming any the close path missed.
+  reclaiming any the close path missed. Because a ref now exists whether or not a
+  PR does, that pass spares anything under an hour old rather than reclaiming on
+  PR state alone, so a sweep cannot delete a ref a live run is about to check out.
+  The age it can observe is the commit's date, which bounds the ref's age from
+  below — a young commit implies a young ref, though an old commit re-pushed today
+  is not spared. The sweep reads the namespace into `FETCH_HEAD`, creating no
+  local ref of its own to reclaim, and keeps any ref it cannot date.
 - **A dispatched run whose requester dies** — deliberately not reclaimed. It is
   free, self-terminating, and bounded at the observed 32-minute worst case, which
   makes it categorically different from a lock holder that blocks others without
