@@ -27,6 +27,20 @@ extension RPCRouter {
     /// exclusive until Nightwatch is retired. **`.off` is never refused**, in
     /// this direction or the other: an operator must always be able to stop
     /// either path.
+    ///
+    /// **The gate is check-then-act, and nothing serializes it against its twin
+    /// in `handleSuperviseSetProjectMark`.** The two facts live in separate
+    /// stores — the marks in `SupervisionStore`, the mode in a DB config row —
+    /// and each handler reads the other's store before writing its own.
+    /// `RPCRouter` is a plain class, not an actor, so two calls in flight at the
+    /// same instant can both pass their precondition before either write lands,
+    /// and the fleet ends up under both paths at once: precisely the state these
+    /// two gates exist to prevent, and one no later read repairs by itself — an
+    /// operator turns one path off. The window is narrow, because reaching it
+    /// takes two operator gestures in the same instant, one per path. Closing it
+    /// needs a lock shared across both handlers, which is a design decision
+    /// about where supervision's writes serialize rather than a fix, and it is
+    /// deliberately not made here.
     func handleSetNightwatchMode(_ data: Data) async throws -> RPCResponse {
         let params = try decoder.decode(NightwatchSetModeParams.self, from: data)
         if params.mode != .off, let supervision {
