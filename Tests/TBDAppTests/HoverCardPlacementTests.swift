@@ -90,7 +90,7 @@ struct HoverCardPlacementTests {
         let barTopAboveChip: CGFloat = 8
         // A band that is unmistakable rather than merely measurable — the whole
         // strip stays legible with window content visible above it.
-        let breathingRoom: CGFloat = 32
+        let breathingRoom: CGFloat = 16
         let anchor = CGRect(x: 300, y: 414, width: 22, height: 14)
         let barTop = anchor.maxY + barTopAboveChip
         let visible = card(place(anchor: anchor, window: window, screen: screen))

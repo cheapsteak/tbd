@@ -373,10 +373,11 @@ clearing the anchor by a hair. The reader is looking at the bar, not at the
 chip: a chip is a 14pt row inside a strip that pads it, seats it beside taller
 controls and draws its own background, and a card that clears only the chip
 still sits on the row it is describing. Above a status-bar chip the flipped
-clearance leaves roughly 40pt of untouched window content between the top of the
+clearance leaves roughly 24pt of untouched window content between the top of the
 strip and the bottom of the card — a band wide enough to be unmistakable rather
-than merely measurable, and free: a flip is only chosen when the card had a
-whole window's height above the anchor to sit in.
+than merely measurable, while the card stays near enough to the chip to read as
+belonging to it. It is free: a flip is only chosen when the card had a whole
+window's height above the anchor to sit in.
 
 The flipped clearance is a constant carrying the container's height rather than
 the container's measured frame, because the anchor has no container to measure:
