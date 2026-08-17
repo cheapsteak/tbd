@@ -154,6 +154,16 @@ xmark therefore works, while `tbd pr detach <some other PR>` on an unresolvable
 worktree writes nothing. A worktree with no cached status offers no evidence and
 gets no tombstone.
 
+One case is beyond that corroboration and is reported rather than papered over:
+a reference whose URL does not parse **and** whose worktree's repo cannot be
+resolved. There is nothing left to name the PR's host, owner and repo with — the
+number alone cannot be turned into a row — so `pr.detach` answers `unknownRepo`
+and the chip's toast says the gesture did not go through. That is an error, not
+a silent decline, which is the property this design cares about. Reaching it
+needs a non-github.com worktree *and* `gh` unavailable at the same moment; the
+first alone still detaches by number, and the second alone still detaches by
+URL.
+
 Declining reports "changed nothing", which is the honest answer: this worktree
 is not tracking that PR. The CLI says exactly that, because the same false also
 means "already tombstoned" and one sentence has to be true of both.

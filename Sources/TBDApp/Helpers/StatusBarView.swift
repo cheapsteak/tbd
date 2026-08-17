@@ -239,9 +239,13 @@ struct StatusBarView: View {
 
     /// Tooltip and accessibility hint for the chip's own click target, e.g.
     /// `Open PR #412 — Checks failing`.
+    ///
+    /// Reads the same carried `reason` the hover overlay does. Deriving it from
+    /// `state` here instead would put the generic label in the tooltip and in
+    /// VoiceOver while the card beside them showed the status's own words.
     nonisolated static func openLabel(_ chip: PRChip) -> String {
-        guard let state = chip.state else { return "Open \(chip.refLabel)" }
-        return "Open \(chip.refLabel) — \(state.displayReason)"
+        guard let reason = chip.reason else { return "Open \(chip.refLabel)" }
+        return "Open \(chip.refLabel) — \(reason)"
     }
 
     /// What the leading icon slot's tooltip says, and therefore what clicking it

@@ -177,6 +177,28 @@ struct PRBindingRefreshTests {
         }
     }
 
+    /// The seam `detachPR` judges its outcome through. The published maps are
+    /// whole-fleet, so a refresh already in flight can land afterwards and
+    /// publish its older snapshot over the top — returning what THIS call
+    /// fetched is what makes an outcome check immune to that.
+    @MainActor
+    @Test("refreshPRBindings returns the state it fetched, and nil when it failed")
+    func refreshReportsWhatItFetched() async {
+        await withStateAsync { state in
+            let wt = UUID()
+            state.prBindingsFetcher = {
+                PRBindingsAllResult(worktrees: [entry(wt, [binding(412, worktreeID: wt)])])
+            }
+            let fetched = await state.refreshPRBindings()
+            #expect(fetched?.bindings[wt]?.map(\.number) == [412])
+
+            state.prBindingsFetcher = { throw PRBindingRefreshTestError.boom }
+            #expect(await state.refreshPRBindings() == nil)
+            // …and the published map is untouched by the failure.
+            #expect(state.prBindings[wt]?.map(\.number) == [412])
+        }
+    }
+
     // MARK: - The untrack gesture
 
     /// `detachPR` judges its outcome by re-reading the bindings rather than by

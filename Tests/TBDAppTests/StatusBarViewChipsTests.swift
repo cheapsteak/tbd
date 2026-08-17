@@ -186,6 +186,10 @@ struct StatusBarViewChipsTests {
         // …and it is the same string the overflow menu row is built from.
         #expect(PRBindingPresentation.menuRows([binding])[0].title
             .contains("Changes requested by reviewer"))
+        // …and the tooltip and VoiceOver hint beside the card agree with it,
+        // rather than falling back to the generic state label.
+        #expect(StatusBarView.openLabel(chip)
+            == "Open PR #412 — Changes requested by reviewer")
     }
 
     @Test("a chip with no observed status still gets a number, and says the age is unknown")

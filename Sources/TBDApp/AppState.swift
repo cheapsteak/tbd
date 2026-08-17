@@ -3024,12 +3024,16 @@ final class AppState: ObservableObject {
     /// - a worktree ABSENT from a SUCCESSFUL response loses its entry, so a
     ///   `tbd pr detach` is observed. `PRBindingRefresh.state(from:)` owns that,
     ///   which is how it can be asserted without a daemon.
-    /// Returns whether the fetch actually landed. Callers that judge an
-    /// outcome by re-reading these maps must check it: on failure the maps
-    /// still hold the pre-call values, which look identical to "the write did
-    /// nothing".
+    /// Returns **the state this call fetched**, or nil when the fetch failed.
+    ///
+    /// A caller that judges an outcome must read the returned value rather than
+    /// the published maps, for two reasons. On failure the maps still hold the
+    /// pre-call values, which look identical to "the write did nothing". And
+    /// these maps are whole-fleet: another refresh already in flight can resolve
+    /// after this one and publish its older snapshot over the top, so the maps
+    /// are not reliably what this call saw even on success.
     @discardableResult
-    func refreshPRBindings() async -> Bool {
+    func refreshPRBindings() async -> PRBindingRefresh.State? {
         let result: PRBindingsAllResult
         do {
             result = try await prBindingsFetcher()
@@ -3037,12 +3041,12 @@ final class AppState: ObservableObject {
             // Leave the previous values in place — a failed fetch is not
             // evidence that any worktree lost its PRs.
             logger.error("Failed to list PR bindings: \(String(describing: error), privacy: .public)")
-            return false
+            return nil
         }
         let next = PRBindingRefresh.state(from: result)
         if next.bindings != prBindings { prBindings = next.bindings }
         if next.detachedCounts != prDetachedCounts { prDetachedCounts = next.detachedCounts }
-        return true
+        return next
     }
 
     /// Untrack one PR from one worktree — the status bar chip's xmark.
@@ -3081,13 +3085,20 @@ final class AppState: ObservableObject {
             handleConnectionError(error)
             return
         }
-        // Only a refresh that LANDED is evidence. A failed one leaves the maps
-        // holding their pre-call values, which read exactly like a detach that
-        // did nothing — and reporting a landed detach as a failure is its own
-        // kind of lie.
-        guard await refreshPRBindings(),
-              effectivePRBindings(worktreeID: worktreeID).contains(where: { $0.number == number })
-        else { return }
+        // Judged on WHAT THIS CALL FETCHED, never on the published maps. A
+        // failed refresh leaves them holding their pre-call values, which read
+        // exactly like a detach that did nothing; and a whole-fleet refresh
+        // already in flight can land afterwards and publish its older snapshot
+        // over the top. Either would report a detach that succeeded as a
+        // failure, which is its own kind of lie.
+        guard let refreshed = await refreshPRBindings() else { return }
+        let stillTracked = PRBindingPresentation.effectiveBindings(
+            refreshed.bindings[worktreeID] ?? [],
+            legacyStatus: prStatuses[worktreeID],
+            worktreeID: worktreeID,
+            detachedCount: refreshed.detachedCounts[worktreeID] ?? 0
+        ).contains { $0.number == number }
+        guard stillTracked else { return }
         logger.error("""
             Detach of PR #\(number, privacy: .public) from worktree \
             \(worktreeID, privacy: .public) left the binding in place
