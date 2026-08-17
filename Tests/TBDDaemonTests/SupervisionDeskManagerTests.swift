@@ -19,8 +19,24 @@ struct SupervisionDeskManagerTests {
     private final class DeadWindows: @unchecked Sendable {
         private let lock = NSLock()
         private var dead: Set<String> = []
+        private var deadOnce: Set<String> = []
         func markDead(_ windowID: String) { lock.withLock { _ = dead.insert(windowID) } }
-        func isDead(_ windowID: String) -> Bool { lock.withLock { dead.contains(windowID) } }
+
+        /// Report the window dead on the **first** read and alive on every read
+        /// after it. That is the seam that makes two reads of one desk differ:
+        /// `isLive` is documented to answer "not live" to a read that merely
+        /// glitched, and the recheck before the archive then sees the session
+        /// that was there all along.
+        func markDeadUntilFirstRead(_ windowID: String) {
+            lock.withLock { _ = deadOnce.insert(windowID) }
+        }
+
+        func isDead(_ windowID: String) -> Bool {
+            lock.withLock {
+                if dead.contains(windowID) { return true }
+                return deadOnce.remove(windowID) != nil
+            }
+        }
     }
 
     /// Something else touching the desk record, standing by to land mid-spawn.
@@ -484,6 +500,80 @@ struct SupervisionDeskManagerTests {
         // And the desk that now serves the project is untouched.
         let live = try #require(try await fixture.db.worktrees.get(id: successor.worktree))
         #expect(live.status == .active)
+        // Nothing was raised: handing back a desk that really is gone is the
+        // quiet path, and the anomaly notification below must not fire here.
+        let raised = try await fixture.db.notifications.unread(worktreeID: predecessor.worktree)
+        #expect(raised.isEmpty)
+    }
+
+    @Test("A predecessor that reads live at the recheck keeps its scratch space")
+    func livePredecessorIsNotArchived() async throws {
+        let fixture = try Self.makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        let first = try await fixture.manager.ensureDesk(project: Self.inputs())
+        guard case .spawned(let predecessor) = first else {
+            Issue.record("expected a spawn, got \(first)")
+            return
+        }
+        let terminal = try #require(try await fixture.db.terminals.get(id: predecessor.terminal))
+        // The window reads dead once and alive after: the transient read that
+        // makes `isLive` say "not live" about a session that is running. A
+        // whole spawn happens between that judgement and the archive, so the
+        // archive must not inherit it.
+        fixture.deadWindows.markDeadUntilFirstRead(terminal.tmuxWindowID)
+
+        let outcome = try await fixture.manager.ensureDesk(project: Self.inputs())
+        guard case .replaced(let successor, _) = outcome else {
+            Issue.record("expected a replacement, got \(outcome)")
+            return
+        }
+
+        // Archiving it would have taken the live session's tmux window with it:
+        // `WorktreeLifecycle+Reconcile` computes tracked windows from
+        // non-archived rows and kills the rest.
+        let old = try #require(try await fixture.db.worktrees.get(id: predecessor.worktree))
+        #expect(old.status == .active)
+        // The decline is not silent — the operator is told on the very row that
+        // is left behind, because nothing will reclaim it later.
+        let raised = try await fixture.db.notifications.unread(worktreeID: predecessor.worktree)
+        #expect(raised.count == 1)
+        let message = try #require(raised.first?.message)
+        #expect(message.contains("still live"))
+        // The successor is unaffected either way: the project has a supervisor.
+        let live = try #require(try await fixture.db.worktrees.get(id: successor.worktree))
+        #expect(live.status == .active)
+    }
+
+    @Test("A predecessor that cannot be read as gone keeps its scratch space too")
+    func undeterminedPredecessorIsNotArchived() async throws {
+        let fixture = try Self.makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        let first = try await fixture.manager.ensureDesk(project: Self.inputs())
+        guard case .spawned(let predecessor) = first else {
+            Issue.record("expected a spawn, got \(first)")
+            return
+        }
+        // A parked desk is not live — nothing can be delivered to it — but it
+        // is wakeable by design, so it is not evidence of a session that is
+        // gone. Replacing it is right; archiving the space it can wake into is
+        // not.
+        try await fixture.db.terminals.setSuspended(
+            id: predecessor.terminal, sessionID: UUID().uuidString)
+
+        let outcome = try await fixture.manager.ensureDesk(project: Self.inputs())
+        guard case .replaced = outcome else {
+            Issue.record("expected a replacement, got \(outcome)")
+            return
+        }
+
+        let old = try #require(try await fixture.db.worktrees.get(id: predecessor.worktree))
+        #expect(old.status == .active)
+        let raised = try await fixture.db.notifications.unread(worktreeID: predecessor.worktree)
+        #expect(raised.count == 1)
+        let message = try #require(raised.first?.message)
+        #expect(message.contains("confidently"))
     }
 
     // MARK: - Appointment

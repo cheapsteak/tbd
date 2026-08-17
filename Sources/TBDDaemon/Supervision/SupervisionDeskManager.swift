@@ -126,6 +126,12 @@ public typealias SupervisionDeskSpawn = @Sendable (
 ///   collector, which walks `desks.json` and finds nothing. So this type
 ///   archives the scratch row itself on every such exit (`abandon`), which puts
 ///   it under `OrphanGC`'s deletion-queue leg instead.
+///
+/// One residual is deliberate rather than covered: a predecessor whose liveness
+/// recheck refuses to call it gone is left `.active` and reclaimed by nobody,
+/// because handing back a space whose session is alive costs that session its
+/// terminal on the next reconcile pass. `abandonPredecessor` states the whole
+/// tradeoff, and the operator is told rather than left to find it.
 public actor SupervisionDeskManager {
     private let db: TBDDatabase
     private let spawnSession: SupervisionDeskSpawn
@@ -329,25 +335,74 @@ public actor SupervisionDeskManager {
 
     // MARK: - Liveness
 
-    /// Whether a recorded desk is really there: a terminal row that is not
-    /// parked, its worktree still active, and a tmux window that still exists.
+    /// What one read of a recorded desk found.
+    ///
+    /// The three cases exist because two different decisions act on this answer
+    /// in **opposite** directions, and each needs its own failure direction.
+    /// Deciding whether to *spawn* a replacement fails toward "not live" — a
+    /// spare desk costs tokens, a project with no supervisor costs coverage.
+    /// Deciding whether to *archive* the predecessor fails toward keeping — an
+    /// archived worktree loses its tmux window to the next reconcile pass, so
+    /// getting that one wrong destroys a live agent session. Collapsing "no
+    /// evidence" into "gone", which a `Bool` forces, is precisely how the
+    /// second decision goes wrong; `SupervisionDeskCollector.WorktreeLookup`
+    /// keeps the same two apart for the same reason.
+    private enum DeskLiveness: Equatable {
+        /// The session is there and can be delivered to.
+        case live
+        /// Affirmative evidence the desk is not there: a terminal row that is
+        /// gone, a worktree row that is gone or already archived, or a tmux
+        /// window that is not there.
+        case gone
+        /// Nothing was established. A read that did not answer, or a session
+        /// that is parked — asleep but wakeable, so a record of a session that
+        /// is coming back rather than evidence of one that is not.
+        case undetermined
+    }
+
+    /// Read a recorded desk: a terminal row that is not parked, its worktree
+    /// still active, and a tmux window that still exists.
     ///
     /// **Read from TBD's records and tmux's own metadata**, never from anything
     /// rendered in the pane. A screen is a display surface, not an API (root
     /// `CLAUDE.md`).
     ///
+    /// One limitation is worth stating, because it bounds what `.gone` proves:
+    /// `TmuxManager.windowExists` answers `false` both for a window that is not
+    /// there and for a tmux it could not reach, so an unreachable tmux reads as
+    /// `.gone`. That is the same evidence this type has always decided on, and
+    /// narrowing it needs a distinguishable answer from `TmuxManager` itself.
+    private func liveness(_ entry: SupervisionDeskEntry) async -> DeskLiveness {
+        let terminal: Terminal?
+        do {
+            terminal = try await db.terminals.get(id: entry.terminal)
+        } catch {
+            return .undetermined
+        }
+        guard let terminal else { return .gone }
+        guard terminal.hibernatedAt == nil, terminal.suspendedAt == nil else {
+            return .undetermined
+        }
+        let worktree: LocalWorktree?
+        do {
+            worktree = try await db.worktrees.getLocal(id: entry.worktree)
+        } catch {
+            return .undetermined
+        }
+        guard let worktree, worktree.status == .active else { return .gone }
+        let windowExists = await tmux.windowExists(
+            server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
+        return windowExists ? .live : .gone
+    }
+
+    /// Whether a recorded desk is really there.
+    ///
     /// Every failure direction is toward *not live*, which costs a replacement
     /// desk. The opposite direction costs a project with no supervisor and
     /// nothing to say so.
     private func isLive(_ entry: SupervisionDeskEntry) async -> Bool {
-        guard let terminal = try? await db.terminals.get(id: entry.terminal),
-              terminal.hibernatedAt == nil, terminal.suspendedAt == nil,
-              let worktree = try? await db.worktrees.getLocal(id: entry.worktree),
-              worktree.status == .active else {
-            return false
-        }
-        return await tmux.windowExists(
-            server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
+        let state = await liveness(entry)
+        return state == .live
     }
 
     // MARK: - Spawn
@@ -597,27 +652,89 @@ public actor SupervisionDeskManager {
     /// failed leaves the predecessor exactly as it was rather than letting go
     /// of the one desk the project still has. A row that is already archived,
     /// or gone, is left alone — there is nothing to hand back.
+    ///
+    /// **The predecessor is read again here, and only affirmative evidence that
+    /// it is gone archives it.** The judgement that started this replacement was
+    /// made before a whole spawn — a worktree created, a session started, a
+    /// record written — and it was made by `isLive`, which answers "not live" to
+    /// a read that merely failed. Two paths therefore reach a session that is
+    /// alive: a transient read that glitched the first judgement, and a desk
+    /// that was stood down at the decision and woken before this line (a
+    /// stood-down desk stays wakeable by design). Archiving either is not
+    /// cosmetic: `WorktreeLifecycle+Reconcile` computes its tracked tmux windows
+    /// from non-archived rows, so an archived-but-live desk loses its window on
+    /// the next reconcile pass — a live agent session destroyed through ordinary
+    /// control flow. This recheck is the same shape and the same direction as
+    /// `SupervisionDeskCollector`'s fresh-liveness pass immediately before a
+    /// reap, and it is why every reap direction in this subsystem fails toward
+    /// keeping.
+    ///
+    /// **The tradeoff when the recheck declines is real, and is not papered
+    /// over.** The successor already holds the project's key in `desks.json`, so
+    /// the predecessor is enumerated by nothing: `SupervisionDeskCollector`
+    /// walks that record and reads the successor there, the agent-worktree leg
+    /// walks only repo-backed rows, and the archived legs only touch rows
+    /// already archived. A predecessor kept here is therefore a scratch space no
+    /// reconciler will reclaim later. It is left `.active`, logged, and
+    /// announced to the operator on its own worktree, which makes it the same
+    /// shape as the crash-window residual the spawn path already carries: a
+    /// visible row an operator can see and close. That is strictly better than
+    /// the alternative, which is killing a live agent session.
     private func abandonPredecessor(
         _ predecessor: SupervisionDeskEntry, project: String
     ) async {
         guard let row = ((try? await db.worktrees.get(id: predecessor.worktree)) ?? nil),
               row.status == .active else { return }
+        let state = await liveness(predecessor)
+        guard state == .gone else {
+            let detail = state == .live
+                ? "its session is still live"
+                : "its session could not be confidently read as gone"
+            let message = """
+                Supervision: "\(project)" replaced its hosted desk, and the desk it replaced kept \
+                its scratch space — \(detail). That space at \(row.localPath) is left active, and \
+                no sweep will reclaim it, because the project's record now names the replacement. \
+                Close it by hand once you have confirmed nothing is running in it. Handing it back \
+                would have cost a live session its terminal on the next reconcile pass.
+                """
+            deskLogger.error("\(message, privacy: .public)")
+            await announce(message, worktree: row.id)
+            return
+        }
         await abandon(row, project: project, because: "the desk it held was replaced")
     }
 
+    /// Raise an operator notification from a synchronous caller. Detached
+    /// because the callers that need it return a decision rather than awaiting
+    /// one, and a notification is a report, never a gate.
     private func notify(_ message: String, worktree: UUID) {
         let db = self.db
         let subscriptions = self.subscriptions
         Task {
-            guard let notification = try? await db.notifications.create(
-                worktreeID: worktree, type: .error, message: message) else { return }
-            subscriptions?.broadcast(delta: .notificationReceived(NotificationDelta(
-                notificationID: notification.id,
-                worktreeID: notification.worktreeID,
-                type: notification.type,
-                message: notification.message,
-                terminalID: notification.terminalID,
-                activate: false)))
+            await Self.announce(message, worktree: worktree, db: db, subscriptions: subscriptions)
         }
+    }
+
+    /// The same report, awaited. An async caller uses this so the notification
+    /// has landed by the time the call returns — one less escaping task, and the
+    /// fact is observable at the point it is made.
+    private func announce(_ message: String, worktree: UUID) async {
+        await Self.announce(
+            message, worktree: worktree, db: db, subscriptions: subscriptions)
+    }
+
+    private static func announce(
+        _ message: String, worktree: UUID, db: TBDDatabase,
+        subscriptions: StateSubscriptionManager?
+    ) async {
+        guard let notification = try? await db.notifications.create(
+            worktreeID: worktree, type: .error, message: message) else { return }
+        subscriptions?.broadcast(delta: .notificationReceived(NotificationDelta(
+            notificationID: notification.id,
+            worktreeID: notification.worktreeID,
+            type: notification.type,
+            message: notification.message,
+            terminalID: notification.terminalID,
+            activate: false)))
     }
 }
