@@ -24,6 +24,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -157,6 +158,133 @@ class SlotCountTests(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             remote_verify.configured_slots({"TBD_REMOTE_VERIFY_SLOTS": "-1"})
         self.assertIn("TBD_REMOTE_VERIFY_SLOTS", str(caught.exception))
+
+
+class BoundedCommandTests(unittest.TestCase):
+    """Every subprocess is bounded, and none of them raise.
+
+    A `gh` that never returns is the failure that matters: the bounded waits
+    only test their deadline between calls, so one hung call would hold a
+    dispatch ticket past every timeout in the module — and with two tickets,
+    two of them wedge the valve for the whole fleet.
+    """
+
+    def test_a_command_that_overruns_is_reported_rather_than_awaited(self):
+        run = remote_verify.system_runner(Path.cwd(), timeout=0.05)
+        result = run([sys.executable, "-c", "import time; time.sleep(30)"])
+        self.assertNotEqual(result.status, 0, "a hung command was reported as success")
+        self.assertEqual(result.status, remote_verify.STATUS_TIMED_OUT)
+        self.assertIn("did not answer within", result.stderr)
+
+    def test_a_command_that_cannot_start_is_a_status_not_an_exception(self):
+        run = remote_verify.system_runner(Path.cwd(), timeout=5.0)
+        result = run(["./definitely-not-a-program-remote-verify"])
+        self.assertEqual(result.status, remote_verify.STATUS_NOT_RUNNABLE)
+        self.assertIn("could not run", result.stderr)
+
+    def test_an_ordinary_command_still_returns_its_output(self):
+        run = remote_verify.system_runner(Path.cwd(), timeout=30.0)
+        result = run([sys.executable, "-c", "print('hello')"])
+        self.assertEqual(result.status, 0)
+        self.assertEqual(result.stdout.strip(), "hello")
+
+    def test_a_hung_gh_ends_the_wait_instead_of_holding_the_ticket(self):
+        # The bound composes with the deadline: a call that answers "timed out"
+        # is a failed call, and a failed `gh run list` is already a refusal.
+        runner = RecordingRunner().reply(
+            "gh", "run", "list",
+            status=remote_verify.STATUS_TIMED_OUT,
+            stderr="gh did not answer within 300s",
+        )
+        with self.assertRaises(remote_verify.Refused) as caught:
+            remote_verify.await_dispatched_run(
+                runner, "c0ffee", timeout=30.0, poll=5.0,
+                requester_alive=lambda: True,
+                sleep=lambda _: None, monotonic=lambda: 0.0,
+                report=lambda *_: None,
+            )
+        self.assertIn("did not answer", str(caught.exception))
+
+
+class RequesterLivenessTests(unittest.TestCase):
+    """A verdict nobody is waiting for is not worth a dispatch ticket.
+
+    The chain is test.sh -> remote-verify.sh -> `exec python3`, so a killed
+    agent session kills a shell several steps up and never moves this process's
+    own ppid. Both readings are needed, and neither covers the other.
+    """
+
+    def test_a_live_requester_keeps_the_run_going(self):
+        alive = remote_verify.requester_watch({})
+        self.assertTrue(alive(), "this test's own parent is running")
+
+    def test_a_dead_ancestor_ends_the_watch(self):
+        holder = subprocess.Popen(
+            [sys.executable, "-c", "import sys; sys.stdin.readline()"],
+            text=True,
+            stdin=subprocess.PIPE,
+        )
+        holder_pid = holder.pid
+        try:
+            alive = remote_verify.requester_watch({}, ancestors=(holder_pid,))
+            self.assertTrue(alive())
+            # Killed by the exact pid recorded at spawn; a pattern kill would
+            # match unrelated sessions on this machine.
+            os.kill(holder_pid, signal.SIGKILL)
+            holder.wait(timeout=10)
+            self.assertFalse(alive(), "a dead ancestor was read as alive")
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(holder_pid, signal.SIGKILL)
+            holder.wait(timeout=10)
+            if holder.stdin is not None:
+                holder.stdin.close()
+
+    def test_a_reparented_process_ends_the_watch(self):
+        parent = os.getppid()
+        alive = remote_verify.requester_watch({}, getppid=lambda: parent, ancestors=())
+        self.assertTrue(alive())
+        moved = remote_verify.requester_watch(
+            {}, getppid=iter([parent, parent + 1]).__next__, ancestors=()
+        )
+        self.assertFalse(moved(), "a reparent was not noticed")
+
+    def test_the_escape_hatch_disarms_the_watch(self):
+        alive = remote_verify.requester_watch(
+            {remote_verify.ALLOW_ORPHAN_SETTING: "1"},
+            getppid=lambda: 999999,
+            ancestors=(999999,),
+        )
+        self.assertTrue(alive(), "a deliberately detached run was abandoned")
+
+    # The clock advances so that a wait which stopped watching the requester
+    # ends on its own deadline instead of spinning: the assertion has to be
+    # `Abandoned` specifically, not merely "something was raised eventually".
+    def test_a_dead_requester_ends_the_correlation_wait(self):
+        clock = FakeClock()
+        runner = RecordingRunner().reply("gh", "run", "list", stdout="[]")
+        with self.assertRaises(remote_verify.Abandoned) as caught:
+            remote_verify.await_dispatched_run(
+                runner, "c0ffee", timeout=30.0, poll=5.0,
+                requester_alive=lambda: False,
+                sleep=clock.sleep, monotonic=clock.monotonic,
+                report=lambda *_: None,
+            )
+        self.assertIn("exited", str(caught.exception))
+        self.assertEqual(runner.ran("gh", "run", "list"), [], "GitHub was asked anyway")
+
+    def test_a_dead_requester_ends_the_completion_wait(self):
+        clock = FakeClock()
+        runner = RecordingRunner().reply(
+            "gh", "run", "view", stdout=json.dumps({"status": "in_progress"})
+        )
+        with self.assertRaises(remote_verify.Abandoned):
+            remote_verify.await_completion(
+                runner, "4242", timeout=30.0, poll=5.0,
+                requester_alive=lambda: False,
+                sleep=clock.sleep, monotonic=clock.monotonic,
+                report=lambda *_: None,
+            )
 
 
 # --- fixtures ----------------------------------------------------------------
@@ -437,6 +565,17 @@ class RunSelectionTests(unittest.TestCase):
     def test_nothing_matching_yields_nothing(self):
         self.assertIsNone(remote_verify.select_run([], "c0ffee"))
 
+    def test_a_run_that_predates_the_dispatch_is_skipped(self):
+        runs = [run_json(databaseId=1000), run_json(databaseId=1001)]
+        chosen = remote_verify.select_run(runs, "c0ffee", exclude=frozenset({1000}))
+        self.assertEqual(chosen["databaseId"], 1001)
+
+    def test_every_run_being_stale_yields_nothing_rather_than_the_newest(self):
+        runs = [run_json(databaseId=1000), run_json(databaseId=999)]
+        self.assertIsNone(
+            remote_verify.select_run(runs, "c0ffee", exclude=frozenset({999, 1000}))
+        )
+
 
 class VerdictTests(unittest.TestCase):
     def test_success_is_a_pass(self):
@@ -457,10 +596,11 @@ class CorrelationTests(unittest.TestCase):
     def setUp(self):
         self.clock = FakeClock()
 
-    def wait(self, runner, *, timeout=30.0):
+    def wait(self, runner, *, timeout=30.0, exclude=frozenset()):
         return remote_verify.await_dispatched_run(
             runner, "c0ffee",
             timeout=timeout, poll=5.0,
+            requester_alive=lambda: True, exclude=exclude,
             sleep=self.clock.sleep, monotonic=self.clock.monotonic,
             report=lambda *_: None,
         )
@@ -502,6 +642,7 @@ class CorrelationTests(unittest.TestCase):
         )
         finished = remote_verify.await_completion(
             runner, "4242", timeout=600.0, poll=10.0,
+            requester_alive=lambda: True,
             sleep=self.clock.sleep, monotonic=self.clock.monotonic,
             report=lambda *_: None,
         )
@@ -514,10 +655,46 @@ class CorrelationTests(unittest.TestCase):
         with self.assertRaises(remote_verify.Refused) as caught:
             remote_verify.await_completion(
                 runner, "4242", timeout=60.0, poll=10.0,
+                requester_alive=lambda: True,
                 sleep=self.clock.sleep, monotonic=self.clock.monotonic,
                 report=lambda *_: None,
             )
         self.assertIn("4242", str(caught.exception))
+
+    def test_a_run_dispatched_before_this_lane_is_not_adopted(self):
+        # THE STALE-RUN TRAP. `gh run list` answers instantly with the older
+        # dispatch of the same commit and only registers the new one seconds
+        # later, so an unfiltered first poll adopts the wrong run every time —
+        # reporting its verdict while the run this lane paid for burns a macOS
+        # slot unwatched.
+        stale = run_json(databaseId=1000, conclusion="failure")
+        fresh = run_json(databaseId=1001, conclusion="success")
+        answers = [
+            json.dumps([stale]),
+            json.dumps([stale]),
+            json.dumps([fresh, stale]),
+        ]
+        runner = RecordingRunner().reply(
+            "gh", "run", "list", handler=lambda argv: completed(stdout=answers.pop(0))
+        )
+        chosen = self.wait(runner, exclude=frozenset({1000}))
+        self.assertEqual(chosen["databaseId"], 1001, "a stale run was adopted")
+
+    def test_the_baseline_names_only_dispatched_runs_for_this_sha(self):
+        runner = RecordingRunner().reply(
+            "gh", "run", "list",
+            stdout=json.dumps(
+                [
+                    run_json(databaseId=1),
+                    run_json(databaseId=2, headSha="other"),
+                    run_json(databaseId=3, event="pull_request"),
+                    run_json(databaseId=True),
+                ]
+            ),
+        )
+        self.assertEqual(
+            remote_verify.baseline_run_ids(runner, "c0ffee"), frozenset({1})
+        )
 
 
 class FailedJobTests(unittest.TestCase):
@@ -544,63 +721,132 @@ class DriverTests(unittest.TestCase):
         self.runtime = self.root / "runtime"
         self.clock = FakeClock()
         self.printed: list[str] = []
+        self.reported: list[str] = []
 
     def tearDown(self):
         self.temp.cleanup()
 
-    def drive(self, runner, *, slots=2, inert=False, ref="tbd/lane", sha="c0ffee"):
+    def drive(self, runner, *, slots=2, ref="preflight/tbd/lane", sha="c0ffee", alive=None):
         return remote_verify.drive(
-            ref=ref, sha=sha, inert=inert,
+            ref=ref, sha=sha,
             runtime_dir=self.runtime, slots=slots,
             run_command=runner,
             poll=5.0, correlate_timeout=60.0, run_timeout=600.0,
+            requester_alive=alive or (lambda: True),
             sleep=self.clock.sleep, monotonic=self.clock.monotonic,
-            report=lambda *_: None, write=self.printed.append,
+            report=self.reported.append, write=self.printed.append,
         )
 
     def output(self) -> str:
         return "\n".join(self.printed)
 
-    def passing_runner(self):
-        return (
-            RecordingRunner()
-            .reply("gh", "run", "list", stdout=json.dumps([run_json()]))
-            .reply(
-                "gh", "run", "view",
-                stdout=json.dumps(
-                    {"status": "completed", "conclusion": "success", "url": "https://example.invalid/runs/4242"}
-                ),
-            )
-        )
+    def diagnostics(self) -> str:
+        return "\n".join(self.reported)
 
-    def failing_runner(self, **files):
+    def results_runner(self, conclusion, **files):
+        """A `gh` whose run reaches `conclusion` and publishes `files`.
+
+        Both verdicts download the artifact: a red run needs the failures, and
+        a green one needs the population, because a caller reading `Test run
+        with N tests` cannot be handed a number no result file supports.
+        """
+
         def download(argv):
+            if not files:
+                return completed(1, stderr="no artifact matches xunit-results")
             destination = Path(argv[argv.index("--dir") + 1])
             write_results(destination, **files)
             return completed()
 
+        # The first listing is the baseline, taken before the dispatch, and a
+        # commit nobody has dispatched yet has no run — which is what makes the
+        # run that appears afterwards identifiable as this lane's.
+        listed = json.dumps([run_json(conclusion=conclusion)])
+        answers = ["[]"]
+
+        def run_list(argv):
+            return completed(stdout=answers.pop(0) if answers else listed)
+
         return (
             RecordingRunner()
-            .reply("gh", "run", "list", stdout=json.dumps([run_json(conclusion="failure")]))
+            .reply("gh", "run", "list", handler=run_list)
             .reply(
                 "gh", "run", "view",
                 stdout=json.dumps(
                     {
                         "status": "completed",
-                        "conclusion": "failure",
+                        "conclusion": conclusion,
                         "url": "https://example.invalid/runs/4242",
-                        "jobs": [{"name": "Test", "conclusion": "failure"}],
+                        "jobs": [{"name": "Test", "conclusion": conclusion}],
                     }
                 ),
             )
             .reply("gh", "run", "download", handler=download)
         )
 
-    def test_a_passing_run_exits_zero_and_downloads_nothing(self):
+    def passing_runner(self, **files):
+        return self.results_runner("success", **(files or {"xunit-quiet": CLEAN_STYLE}))
+
+    def passing_runner_without_results(self):
+        """A green run whose artifact never arrived — nothing to count."""
+        return self.results_runner("success")
+
+    def failing_runner(self, **files):
+        return self.results_runner("failure", **files)
+
+    def test_a_passing_run_exits_zero(self):
         runner = self.passing_runner()
         self.assertEqual(self.drive(runner), 0)
         self.assertIn("passed", self.output())
-        self.assertEqual(runner.ran("gh", "run", "download"), [])
+
+    def test_a_passing_run_states_the_population_it_executed(self):
+        # SIX CALL SITES GREP FOR THIS EXACT LINE — `scripts/git-hooks/pre-push`,
+        # `scripts/nightly-flake-stress.sh` and three steps of `test.yml` — and
+        # read its absence as a collapsed or truncated suite. Without it a GREEN
+        # remote verdict blocks the push naming the wrong cause.
+        runner = self.passing_runner(
+            **{"xunit-daemon": XCTEST_STYLE, "xunit-app": SWIFT_TESTING_STYLE, "xunit-quiet": CLEAN_STYLE}
+        )
+        self.assertEqual(self.drive(runner), 0)
+        matched = re.search(r"Test run with (\d+) tests?", self.output())
+        self.assertIsNotNone(matched, f"no summary line in {self.output()!r}")
+        # 3 + 4 + 2, summed across the passes exactly as the files declare them.
+        self.assertEqual(matched.group(1), "9")
+
+    def test_a_single_test_is_named_in_the_singular(self):
+        one = (
+            '<testsuites><testsuite name="TestResults" tests="1">'
+            '<testcase classname="A" name="b"/></testsuite></testsuites>'
+        )
+        self.assertEqual(self.drive(self.passing_runner(**{"xunit-one": one})), 0)
+        self.assertIn("Test run with 1 test passed", self.output())
+
+    def test_a_pass_whose_results_are_missing_refuses_rather_than_inventing(self):
+        # A count nobody can support is worse than no verdict: it would be read
+        # as the run's real population by every floor check downstream.
+        runner = self.passing_runner_without_results()
+        self.assertEqual(self.drive(runner), 78)
+        self.assertNotIn("Test run with", self.output())
+        # Named, not merely refused: a refusal that says something else is a
+        # refusal for a different reason, and this one has to be readable.
+        self.assertIn("could not be counted", self.diagnostics())
+
+    def test_a_pass_whose_results_are_unreadable_refuses(self):
+        runner = self.passing_runner(**{"xunit-daemon": TRUNCATED})
+        self.assertEqual(self.drive(runner), 78)
+        self.assertNotIn("Test run with", self.output())
+        self.assertIn("could not be counted", self.diagnostics())
+
+    def test_a_pass_whose_results_declare_no_population_refuses(self):
+        # Readable, well-formed, and silent about how many tests ran: there is
+        # no number to state, so there is no verdict to report.
+        body = (
+            '<testsuites><testsuite name="TestResults">'
+            '<testcase classname="A" name="b"/></testsuite></testsuites>'
+        )
+        self.assertEqual(self.drive(self.passing_runner(**{"xunit-daemon": body})), 78)
+        self.assertNotIn("Test run with", self.output())
+        self.assertIn("could not be counted", self.diagnostics())
 
     def test_a_failing_run_renders_the_failing_tests(self):
         runner = self.failing_runner(
@@ -616,19 +862,16 @@ class DriverTests(unittest.TestCase):
         self.assertIn("failing jobs: Test", rendered)
         self.assertIn("TBDDaemonTests.OrphanGCTests.quarantinesProfileDirs", rendered)
         self.assertIn("TBDAppTests.valveRoutesRemote()", rendered)
+        self.assertIn("Test run with 9 tests failed", rendered)
 
     def test_a_failing_run_with_no_artifact_still_fails_loudly(self):
+        # An uncountable red run is still red: the verdict came from the run's
+        # conclusion, and only the pass path needs a population it can state.
         runner = self.failing_runner()
-        runner.replies.insert(
-            0,
-            (
-                ("gh", "run", "download"),
-                lambda argv: completed(1, stderr="no artifact matches xunit-results"),
-            ),
-        )
         self.assertEqual(self.drive(runner), 1)
         self.assertIn("could not download", self.output())
         self.assertIn("https://example.invalid/runs/4242", self.output())
+        self.assertNotIn("Test run with", self.output())
 
     def test_no_ticket_refuses_without_pushing_or_dispatching(self):
         # The ordering guarantee: a lane that never got a ticket must leave no
@@ -662,15 +905,96 @@ class DriverTests(unittest.TestCase):
         )
         self.assertEqual(self.drive(runner), 78)
 
-    def test_an_inert_ref_is_forced_and_a_branch_is_not(self):
+    def test_an_inert_ref_is_pushed_and_forced(self):
         runner = self.passing_runner()
-        self.drive(runner, inert=True, ref="preflight/tbd/lane")
+        self.drive(runner, ref="preflight/tbd/lane")
         self.assertIn("--force", runner.ran("git", "push")[0])
         self.assertIn("c0ffee:refs/heads/preflight/tbd/lane", runner.ran("git", "push")[0])
 
-        branch_runner = self.passing_runner()
-        self.drive(branch_runner, ref="tbd/lane")
-        self.assertNotIn("--force", branch_runner.ran("git", "push")[0])
+    def test_a_branch_is_refused_before_it_can_be_pushed(self):
+        # THE GUARD THAT MAKES "NEVER THE BRANCH" TRUE, at the one place that
+        # moves a ref. Pushing the branch would publish the very commits a
+        # pre-push hook is gating, and on the default branch it would
+        # fast-forward `origin/main` and fire main's CI and the Pages deploy.
+        for ref in ("tbd/lane", "main", "refs/heads/preflight/x", "preflight/"):
+            with self.subTest(ref=ref):
+                self.printed = []
+                runner = self.passing_runner()
+                self.assertEqual(self.drive(runner, ref=ref), 78)
+                self.assertEqual(runner.ran("git", "push"), [], f"{ref} was pushed")
+                self.assertEqual(runner.ran("gh", "workflow", "run"), [])
+
+    def test_the_baseline_is_taken_before_the_dispatch(self):
+        # Order is the guarantee: a baseline read after the dispatch could
+        # already contain this lane's own run and would exclude it forever.
+        phases = {
+            ("gh", "run", "list"): "baseline",
+            ("git", "push"): "push",
+            ("gh", "workflow", "run"): "dispatch",
+        }
+        runner = self.passing_runner()
+        self.drive(runner)
+        order = [
+            name
+            for call in runner.calls
+            for prefix, name in phases.items()
+            if tuple(call[: len(prefix)]) == prefix
+        ]
+        self.assertEqual(order[:3], ["baseline", "push", "dispatch"], order)
+
+    def test_a_stale_run_for_the_same_sha_is_not_adopted(self):
+        # End to end: the run that exists before the dispatch is red, the one
+        # this lane asked for is green. Adopting the stale one reports a
+        # failure the lane never caused.
+        stale = run_json(databaseId=1000, conclusion="failure")
+        fresh = run_json(databaseId=1001, conclusion="success")
+        listings = [json.dumps([stale]), json.dumps([fresh, stale])]
+
+        def listed(argv):
+            return completed(stdout=listings.pop(0) if listings else json.dumps([fresh, stale]))
+
+        runner = self.passing_runner().reply("gh", "run", "list", handler=listed)
+        # Replies match in order, so the scripted listing must win over the
+        # helper's default.
+        runner.replies.insert(0, runner.replies.pop())
+        self.assertEqual(self.drive(runner), 0)
+        viewed = runner.ran("gh", "run", "view")
+        self.assertTrue(viewed, "no run was watched")
+        self.assertIn("1001", viewed[0], f"the stale run was adopted: {viewed[0]}")
+
+    def test_a_dead_requester_releases_the_ticket_without_a_verdict(self):
+        runner = self.passing_runner()
+        self.assertEqual(self.drive(runner, alive=lambda: False), 78)
+        self.assertEqual(runner.ran("git", "push"), [], "a ref was pushed for nobody")
+        self.assertEqual(runner.ran("gh", "workflow", "run"), [])
+        with remote_verify.take_dispatch_ticket(self.runtime, 1) as index:
+            self.assertEqual(index, 1, "the ticket outlived the requester")
+
+    def test_an_unexpected_exception_is_a_refusal_and_never_a_failure(self):
+        # 78, NOT 1. `scripts/test.sh` adopts this status as the run's own, so
+        # a 1 from an unhandled OSError tells the operator the suite is red
+        # when zero tests ran.
+        def explode(argv):
+            raise OSError("the disk filled up mid-push")
+
+        runner = self.passing_runner().reply("git", "push", handler=explode)
+        self.assertEqual(self.drive(runner), 78)
+
+    def test_an_unusable_runtime_directory_refuses_rather_than_failing(self):
+        # The ticket pool cannot be created, which is an OSError out of `mkdir`
+        # from inside the context manager — the path that used to exit 1.
+        blocked = self.root / "not-a-directory"
+        blocked.write_text("", encoding="utf-8")
+        status = remote_verify.drive(
+            ref="preflight/tbd/lane", sha="c0ffee",
+            runtime_dir=blocked / "runtime", slots=2,
+            run_command=self.passing_runner(),
+            poll=5.0, correlate_timeout=60.0, run_timeout=600.0,
+            requester_alive=lambda: True,
+            sleep=self.clock.sleep, monotonic=self.clock.monotonic,
+            report=lambda *_: None, write=self.printed.append,
+        )
+        self.assertEqual(status, 78)
 
     def test_a_run_with_no_verdict_returns_the_lane_to_the_local_queue(self):
         runner = (
@@ -685,7 +1009,7 @@ class DriverTests(unittest.TestCase):
 
     def test_the_dispatch_names_the_ref_and_the_scope(self):
         runner = self.passing_runner()
-        self.drive(runner, ref="preflight/tbd/lane", inert=True)
+        self.drive(runner, ref="preflight/tbd/lane")
         dispatched = runner.ran("gh", "workflow", "run")[0]
         self.assertEqual(
             dispatched,
@@ -718,6 +1042,40 @@ class SettingsTests(unittest.TestCase):
                 {remote_verify.POLL_SETTING: "soon"}, remote_verify.POLL_SETTING, 10.0
             )
         self.assertIn(remote_verify.POLL_SETTING, str(caught.exception))
+
+    def test_a_zero_duration_is_rejected_rather_than_obeyed(self):
+        # A zero poll is not a smaller bound, it is a tight loop hammering `gh`
+        # until the API rate-limits the whole account; a zero timeout refuses
+        # before the first answer could arrive.
+        for raw in ("0", "0.0", "-0", "nan"):
+            with self.subTest(raw=raw):
+                with self.assertRaises(ValueError) as caught:
+                    remote_verify._positive_seconds(
+                        {remote_verify.POLL_SETTING: raw}, remote_verify.POLL_SETTING, 10.0
+                    )
+                self.assertIn(remote_verify.POLL_SETTING, str(caught.exception))
+
+    def test_a_zero_duration_refuses_before_anything_happens(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            status = remote_verify.main(
+                ["drive", "--repo-dir", scratch, "--ref", "preflight/tbd/lane", "--sha", "c0ffee"],
+                {remote_verify.POLL_SETTING: "0", "TBD_HOME": scratch},
+            )
+        self.assertEqual(status, 78)
+
+    def test_the_command_timeout_is_configurable_and_positive(self):
+        self.assertEqual(
+            remote_verify._positive_seconds(
+                {}, remote_verify.COMMAND_SETTING, remote_verify.DEFAULT_COMMAND_SECONDS
+            ),
+            remote_verify.DEFAULT_COMMAND_SECONDS,
+        )
+        with self.assertRaises(ValueError):
+            remote_verify._positive_seconds(
+                {remote_verify.COMMAND_SETTING: "0"},
+                remote_verify.COMMAND_SETTING,
+                remote_verify.DEFAULT_COMMAND_SECONDS,
+            )
 
     def test_an_unreadable_setting_refuses_before_anything_happens(self):
         # 78, and nothing pushed or dispatched: the repo directory here is not

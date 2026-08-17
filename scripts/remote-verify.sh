@@ -26,7 +26,10 @@
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # The remote itself is named once, in the driver: this front-end never pushes.
+REMOTE="origin"
 INERT_NAMESPACE="preflight/"
+# Used only when the remote's own HEAD cannot be read; see `default_branch`.
+FALLBACK_DEFAULT_BRANCH="main"
 EXIT_REFUSED=78
 
 log() { printf '%s\n' "$*" >&2; }
@@ -53,32 +56,48 @@ check_preconditions() {
   return 0
 }
 
-# dispatch_ref_for BRANCH -> the ref to push and dispatch.
-# Status 2 means the question could not be answered and the lane must refuse.
+# dispatch_ref_for BRANCH -> the ref to push and dispatch. Always inert, never
+# the branch, and deliberately answerable without asking GitHub anything.
 #
-# `test.yml` fires on `pull_request`, and on `push` only to main — so a branch
-# with no PR is already inert and needs no separate ref. Once a PR is open a
-# push to that branch fires `pull_request_target: synchronize`, which runs the
-# claude-review fan-out on every iteration; GitHub minutes are free but Claude
-# quota is not, and it is the only metered resource left in this loop. So that
-# case gets a throwaway `preflight/<branch>` ref instead, reclaimed by
-# `scripts/sweep-preflight-refs.sh`.
+# THE BRANCH ITSELF IS NEVER PUSHED, for three independent reasons:
 #
-# A FAILED QUERY IS NOT "NO PR". Treating it as one would push the PR branch
-# and spend the quota this branch exists to protect, which is the expensive
-# direction to be wrong in.
+#   - A PUSH IS WHAT THE PRE-PUSH HOOK IS GATING. `scripts/git-hooks/pre-push`
+#     runs the suite before the commits are published; a verification path that
+#     publishes them to the branch to get its verdict has bypassed the gate it
+#     was running inside.
+#   - THE DEFAULT BRANCH NEVER HAS AN OPEN PR. A ref choice keyed on "is there a
+#     PR?" therefore fast-forwards `origin/main`, and nothing refuses it: the
+#     protection on `main` was read at the time of writing and enforces against
+#     neither admins nor pushers. The result is main's CI and the Pages deploy
+#     firing on unreviewed commits.
+#   - AN INERT REF HAS A NAMED RECONCILER AND A BRANCH DOES NOT.
+#     `scripts/sweep-preflight-refs.sh` matches `refs/heads/preflight/` and
+#     nothing else, so a branch pushed from here would be a durable resource
+#     nobody reclaims.
+#
+# A push to a branch with an open PR would also fire `pull_request_target:
+# synchronize` and run the claude-review fan-out on every iteration; GitHub
+# minutes are free but Claude quota is not, and it is the only metered resource
+# left in this loop. One namespace covers every one of those cases, so this
+# needs no `gh pr list` and cannot be wrong about the answer.
 dispatch_ref_for() {
-  local branch="$1" open status=0
-  open="$(gh pr list --head "$branch" --state open --json number --jq '.[].number' 2>&1)" || status=$?
-  if [ $status -ne 0 ]; then
-    log "remote-verify: gh pr list failed for $branch (exit $status): $open"
-    return 2
+  printf '%s%s\n' "$INERT_NAMESPACE" "$1"
+}
+
+# default_branch -> the branch this repository treats as its trunk.
+#
+# Read from the remote's own HEAD, which is what `git remote set-head` records,
+# and falling back to a name rather than to "no protected branch": a repository
+# whose `origin/HEAD` was never fetched is the common case on a fresh clone, and
+# the fallback must fail towards refusing rather than towards verifying trunk.
+default_branch() {
+  local head=""
+  head="$(git symbolic-ref --quiet --short "refs/remotes/$REMOTE/HEAD" 2>/dev/null)" || head=""
+  if [ -n "$head" ]; then
+    printf '%s\n' "${head#"$REMOTE/"}"
+    return 0
   fi
-  if [ -z "${open//[[:space:]]/}" ]; then
-    printf '%s\n' "$branch"
-  else
-    printf '%s%s\n' "$INERT_NAMESPACE" "$branch"
-  fi
+  printf '%s\n' "$FALLBACK_DEFAULT_BRANCH"
 }
 
 main() {
@@ -96,6 +115,17 @@ main() {
     return $EXIT_REFUSED
   fi
 
+  # DEFENCE IN DEPTH, and the only guard here that is deliberately redundant.
+  # `dispatch_ref_for` already answers `preflight/<branch>` for every branch, so
+  # trunk is safe by construction — but the cost of that construction ever
+  # regressing is a push to `origin/main` that fires main's CI and the Pages
+  # deploy, which is worth a second, independent stop.
+  local trunk; trunk="$(default_branch)"
+  if [ "$branch" = "$trunk" ]; then
+    log "remote-verify: refusing to verify $branch, the default branch; commit to a lane branch instead"
+    return $EXIT_REFUSED
+  fi
+
   check_preconditions || return $?
 
   status=0
@@ -106,15 +136,10 @@ main() {
 
   sha="$(git rev-parse HEAD)"
 
-  local inert=()
-  if [ "$ref" != "$branch" ]; then
-    inert=(--inert)
-  fi
-
   # `exec`: the driver holds the dispatch ticket for the whole remote run, and
   # its exit status is this script's contract verbatim.
   exec python3 "$HERE/remote_verify.py" drive \
-    --repo-dir "$repo_dir" --ref "$ref" --sha "$sha" ${inert[@]+"${inert[@]}"}
+    --repo-dir "$repo_dir" --ref "$ref" --sha "$sha"
 }
 
 # --- entrypoint (strict mode only when executed, not when sourced) -----------

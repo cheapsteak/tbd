@@ -24,13 +24,17 @@ GitHub's two-run allowance.
 PUSHING HAPPENS HERE, AFTER THE TICKET, and not in the front-end. A ref pushed
 before a ticket was granted is a durable resource created for a run that never
 happened; taking the ticket first means the only refs that exist are ones a
-dispatch was authorised for.
+dispatch was authorised for. The only ref this module will move is an inert
+`preflight/*` one — `push_ref` refuses anything else, and says why there.
 
 THE VERDICT IS READ FROM STRUCTURED RESULTS, NEVER FROM THE JOB LOG. One failed
 run of `test.yml` produces 5.3 MB across 32,228 lines in which parallel passes
 interleave and compiler diagnostics print source context that reads exactly like
 test output; two extraction attempts over a real failed log both named the wrong
-failure. So the workflow uploads xUnit XML and this module parses it.
+failure. So the workflow uploads xUnit XML and this module parses it. The same
+files carry the run's population, which is why a green run downloads them too:
+the verdict a caller reads is `Test run with N tests`, and N has to come from
+somewhere that cannot make it up.
 """
 
 from __future__ import annotations
@@ -56,6 +60,10 @@ DEFAULT_SLOTS = 2
 WORKFLOW_FILE = "test.yml"
 RESULTS_ARTIFACT = "xunit-results"
 DEFAULT_REMOTE = "origin"
+# The one namespace this driver may move. `scripts/remote-verify.sh` builds the
+# ref and `push_ref` enforces the namespace; see its docstring for why nothing
+# else is pushable.
+INERT_NAMESPACE = "preflight/"
 
 # Exit codes, and the contract every caller reads.  78 is the one that matters:
 # it means "no verdict, go back to the local queue", which is what keeps the
@@ -74,6 +82,26 @@ RUN_SETTING = "TBD_REMOTE_VERIFY_RUN_SECONDS"
 # The observed worst-case remote run is 32 minutes; 45 leaves room without
 # letting a wedged run hold a dispatch ticket indefinitely.
 DEFAULT_RUN_SECONDS = 2700.0
+# EVERY SUBPROCESS IS BOUNDED, because the bounded waits above only check their
+# deadline *between* calls: a `gh` that never returns would hold a dispatch
+# ticket past every timeout here, and with two tickets, two of them wedge the
+# valve for the whole fleet.  The bound is per call and generous — a push of a
+# cold repository and an artifact download both live under it.
+COMMAND_SETTING = "TBD_REMOTE_VERIFY_COMMAND_SECONDS"
+DEFAULT_COMMAND_SECONDS = 300.0
+
+# A command that timed out or could not be started reports a status rather than
+# an exception, so the ordinary "this call failed" refusals name it.  124 is the
+# shell's convention for a timeout and 127 for a missing program.
+STATUS_TIMED_OUT = 124
+STATUS_NOT_RUNNABLE = 127
+
+# THE REQUESTER IS WATCHED FOR THE WHOLE ROUND TRIP, on the same reasoning as
+# `scripts/swift-safe`: the chain here is test.sh -> remote-verify.sh -> exec
+# python3, so a killed agent session leaves this driver holding a ticket for up
+# to `DEFAULT_RUN_SECONDS` with nobody left to read the verdict.  Set to "1" for
+# a deliberately detached run.
+ALLOW_ORPHAN_SETTING = "TBD_REMOTE_VERIFY_ALLOW_ORPHAN"
 
 # A red run naming three thousand tests is the 5.3 MB problem again in a
 # smaller font, so the render is bounded and says how much it withheld.
@@ -138,7 +166,15 @@ class Refused(Exception):
 
 
 def _positive_seconds(environ: Mapping[str, str], name: str, default: float) -> float:
-    """A duration setting, refused by name rather than quietly defaulted."""
+    """A duration setting, refused by name rather than quietly defaulted.
+
+    Strictly positive, and `not seconds > 0` rather than `seconds <= 0` so a
+    NaN is refused too.  Zero is not a smaller bound, it is a different
+    behaviour: a zero poll turns every wait into a tight loop hammering `gh`
+    until the API rate-limits the whole account, and a zero timeout refuses
+    before the first answer could arrive.  Neither is what anybody setting a
+    duration to 0 is asking for, so it is named rather than obeyed.
+    """
     raw = environ.get(name, "")
     if not raw:
         return default
@@ -146,8 +182,8 @@ def _positive_seconds(environ: Mapping[str, str], name: str, default: float) -> 
         seconds = float(raw)
     except ValueError:
         raise ValueError(f"{name} must be a number of seconds, not {raw!r}") from None
-    if seconds < 0:
-        raise ValueError(f"{name} must not be negative, but is {seconds}")
+    if not seconds > 0:
+        raise ValueError(f"{name} must be greater than zero, but is {raw!r}")
     return seconds
 
 
@@ -166,25 +202,152 @@ class Completed:
 RunCommand = Callable[[Sequence[str]], Completed]
 
 
-def system_runner(directory: Path) -> RunCommand:
-    """Run commands inside the repository, capturing both streams.
+def system_runner(directory: Path, *, timeout: float = DEFAULT_COMMAND_SECONDS) -> RunCommand:
+    """Run commands inside the repository, capturing both streams, bounded.
 
     `gh` resolves which repository it is talking to from the working directory,
     so binding that here rather than at each call site keeps every subprocess on
     the same repo the preconditions were checked against.
+
+    EVERY CALL IS BOUNDED AND NONE OF THEM RAISE. A hung `gh` is the failure
+    that matters — it holds a dispatch ticket that the waits above cannot
+    reclaim, because they only test their deadline between calls — so the
+    timeout is mandatory rather than a parameter a call site may omit. A
+    timeout and a program that will not start are both reported as an ordinary
+    non-zero status, so the refusal that already exists for "this call failed"
+    names them instead of a traceback escaping the driver.
     """
 
     def run(argv: Sequence[str]) -> Completed:
-        finished = subprocess.run(  # noqa: S603 - argv is built here, never a shell string
-            list(argv),
-            cwd=str(directory),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            finished = subprocess.run(  # noqa: S603 - argv is built here, never a shell string
+                list(argv),
+                cwd=str(directory),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as expired:
+            said = _as_text(expired.stderr).strip()
+            return Completed(
+                STATUS_TIMED_OUT,
+                _as_text(expired.stdout),
+                f"{argv[0]} did not answer within {timeout:g}s"
+                + (f": {said}" if said else ""),
+            )
+        except OSError as error:
+            return Completed(STATUS_NOT_RUNNABLE, "", f"could not run {argv[0]}: {error}")
         return Completed(finished.returncode, finished.stdout, finished.stderr)
 
     return run
+
+
+def _as_text(captured: object) -> str:
+    """Whatever a killed subprocess had written so far, as text."""
+    if captured is None:
+        return ""
+    if isinstance(captured, bytes):
+        return captured.decode("utf-8", errors="replace")
+    return str(captured)
+
+
+# --- is anybody still waiting for this verdict? ------------------------------
+
+
+def _process_is_alive(pid: int) -> bool:
+    """Liveness of a single positive pid; callers screen out 0 and negatives."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    # A number too large for the platform's pid_t raises OverflowError, which is
+    # not an OSError; left uncaught it would end a healthy run.
+    except (OSError, OverflowError):
+        return False
+    return True
+
+
+def _process_table() -> dict[int, int]:
+    """child pid -> parent pid for every visible process, from one `ps`.
+
+    macOS has no `/proc`, so an ancestor walk needs the process table, and one
+    `ps` answers every step of it. Best effort: a table we could not read leaves
+    the caller watching the direct parent alone.
+    """
+    try:
+        completed = subprocess.run(
+            ["ps", "-Ao", "pid=,ppid="],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    table: dict[int, int] = {}
+    for line in completed.stdout.splitlines():
+        fields = line.split()
+        if len(fields) != 2:
+            continue
+        try:
+            child, parent = int(fields[0]), int(fields[1])
+        except ValueError:
+            continue
+        table[child] = parent
+    return table
+
+
+def _ancestor_pids(*, getppid=os.getppid, process_table=_process_table) -> tuple[int, ...]:
+    """This process's ancestors, nearest first, ending at pid 1 if reachable.
+
+    Walked once, at startup: afterwards liveness is `kill(pid, 0)` per poll,
+    with no further subprocesses. The chain matters because `remote-verify.sh`
+    `exec`s this module — killing the agent's session kills a shell several
+    steps up, which never moves this process's own ppid.
+    """
+    parent = getppid()
+    if parent <= 0:
+        return ()
+    chain = [parent]
+    seen = {parent}
+    table = process_table()
+    current = parent
+    while current > 1:
+        nextpid = table.get(current)
+        if nextpid is None or nextpid <= 0 or nextpid in seen:
+            break
+        chain.append(nextpid)
+        seen.add(nextpid)
+        current = nextpid
+    return tuple(chain)
+
+
+def requester_watch(
+    environ: Mapping[str, str], *, getppid=os.getppid, ancestors=None
+) -> Callable[[], bool]:
+    """Is anybody still waiting for this verdict?
+
+    Recorded once, here, and asked on every poll. Two readings of the same fact,
+    because neither covers the other: a reparent is visible even while the old
+    parent lingers as an unreaped zombie, and an ancestor further up dying never
+    moves this process's own ppid at all. A dead pid that has been reused reads
+    as alive and the run continues — the pre-valve behaviour, so the failure is
+    the safe one.
+    """
+    if environ.get(ALLOW_ORPHAN_SETTING) == "1":
+        return lambda: True
+    requester = getppid()
+    if requester <= 0:
+        return lambda: True
+    chain = _ancestor_pids(getppid=getppid) if ancestors is None else tuple(ancestors)
+
+    def alive() -> bool:
+        return getppid() == requester and all(_process_is_alive(pid) for pid in chain)
+
+    return alive
 
 
 def _report(message: str) -> None:
@@ -195,11 +358,16 @@ def _report(message: str) -> None:
 # --- correlating a dispatch to its run ---------------------------------------
 
 
-def select_run(runs: Sequence[Mapping[str, object]], sha: str) -> dict[str, object] | None:
-    """The newest dispatched run for `sha`, or None.
+def select_run(
+    runs: Sequence[Mapping[str, object]],
+    sha: str,
+    *,
+    exclude: Sequence[int] | frozenset[int] = (),
+) -> dict[str, object] | None:
+    """The newest dispatched run for `sha` that this lane has not already seen.
 
     `gh workflow run` returns no run id, so the run has to be found by what it
-    is running.  Two guards earn their place:
+    is running.  Three guards earn their place:
 
     - **`event == "workflow_dispatch"`.** The same commit may also have a
       `pull_request` run; watching that one would report a verdict the valve
@@ -208,11 +376,16 @@ def select_run(runs: Sequence[Mapping[str, object]], sha: str) -> dict[str, obje
       `true` satisfies `isinstance(x, int)` in python and would coerce to run
       id 1 — a real, unrelated run whose verdict would be reported as this
       lane's.
-
-    A completed older dispatch of the same sha is a legitimate answer: the
-    verdict is a statement about the commit, and two lanes on one commit
-    deliberately share it.
+    - **`exclude` holds every run that already existed when this lane
+      dispatched.** Without it a lane verifying a commit that was dispatched
+      before — an earlier lane on the same sha, or this lane's own previous
+      attempt — adopts that older run on the very first poll, because it is
+      already registered and the new one is not. It would then report a stale
+      verdict while the run it paid for burned a macOS slot with nobody
+      watching. The baseline is taken before the dispatch, so anything left is
+      necessarily newer.
     """
+    seen = frozenset(exclude)
     for run in runs:
         if run.get("headSha") != sha:
             continue
@@ -220,6 +393,8 @@ def select_run(runs: Sequence[Mapping[str, object]], sha: str) -> dict[str, obje
             continue
         identifier = run.get("databaseId")
         if isinstance(identifier, bool) or not isinstance(identifier, int):
+            continue
+        if identifier in seen:
             continue
         return dict(run)
     return None
@@ -250,12 +425,45 @@ def list_runs(run_command: RunCommand, *, limit: int = 40) -> list[Mapping[str, 
     return [entry for entry in parsed if isinstance(entry, Mapping)]
 
 
+def baseline_run_ids(run_command: RunCommand, sha: str) -> frozenset[int]:
+    """Every dispatched run for `sha` that exists *before* this lane dispatches.
+
+    Taken as a set of ids rather than a `createdAt` floor on purpose: the clock
+    that stamps a run is GitHub's and the clock that would compare it is this
+    laptop's, and a laptop minutes ahead would exclude the very run it just
+    asked for.  Identity needs no clocks.
+    """
+    ids = set()
+    for run in list_runs(run_command):
+        if run.get("headSha") != sha or run.get("event") != "workflow_dispatch":
+            continue
+        identifier = run.get("databaseId")
+        if isinstance(identifier, bool) or not isinstance(identifier, int):
+            continue
+        ids.add(identifier)
+    return frozenset(ids)
+
+
+class Abandoned(Refused):
+    """Nobody is waiting for this verdict any more, so stop holding a ticket."""
+
+
+def _still_wanted(requester_alive: Callable[[], bool]) -> None:
+    if not requester_alive():
+        raise Abandoned(
+            "the process that asked for this verification has exited; "
+            "releasing the dispatch ticket rather than waiting out the run"
+        )
+
+
 def await_dispatched_run(
     run_command: RunCommand,
     sha: str,
     *,
     timeout: float,
     poll: float,
+    requester_alive: Callable[[], bool],
+    exclude: frozenset[int] = frozenset(),
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
     report: Callable[[str], None] = _report,
@@ -265,11 +473,15 @@ def await_dispatched_run(
     GitHub creates the run asynchronously, so it is normal for the first look
     to find nothing.  The bound exists so a dispatch that never registers ends
     as a named refusal rather than a process that waits forever holding a
-    ticket.
+    ticket, and `requester_alive` ends the wait early when the lane that asked
+    for the verdict is gone — up to 45 minutes of ticket, otherwise, held for
+    nobody.  Both are keyword-only and `requester_alive` is required, so a
+    future call site cannot drop the check silently.
     """
     deadline = monotonic() + timeout
     while True:
-        run = select_run(list_runs(run_command), sha)
+        _still_wanted(requester_alive)
+        run = select_run(list_runs(run_command), sha, exclude=exclude)
         if run is not None:
             return run
         if monotonic() >= deadline:
@@ -286,13 +498,15 @@ def await_completion(
     *,
     timeout: float,
     poll: float,
+    requester_alive: Callable[[], bool],
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
     report: Callable[[str], None] = _report,
 ) -> dict[str, object]:
-    """Wait for a run to reach `completed`, bounded."""
+    """Wait for a run to reach `completed`, bounded, and only while wanted."""
     deadline = monotonic() + timeout
     while True:
+        _still_wanted(requester_alive)
         result = run_command(
             ["gh", "run", "view", run_id, "--json", "status,conclusion,url,jobs"]
         )
@@ -393,6 +607,9 @@ class _ResultParser(HTMLParser):
         self.failures: list[Failure] = []
         self.root_opened = False
         self.root_closed = False
+        # None until a `<testsuite tests=…>` says otherwise: a file that
+        # declared no population must not be read as one declaring zero.
+        self.tests: int | None = None
         self._seen: set[Failure] = set()
         self._case: dict[str, str] = {}
         self._message: str | None = None
@@ -402,6 +619,12 @@ class _ResultParser(HTMLParser):
         values = {name: value or "" for name, value in attrs}
         if tag in ("testsuites", "testsuite"):
             self.root_opened = True
+            # Counted from `<testsuite>` alone. Both writers put the population
+            # there, and a `<testsuites>` wrapper that repeats it would double
+            # every number if it were added in too.
+            if tag == "testsuite":
+                with contextlib.suppress(ValueError):
+                    self.tests = (self.tests or 0) + int(values.get("tests", ""))
         elif tag == "testcase":
             self._case = values
         elif tag in ("failure", "error"):
@@ -436,8 +659,16 @@ class _ResultParser(HTMLParser):
         self.failures.append(failure)
 
 
-def failures_in(path: Path) -> list[Failure]:
-    """Failing tests in one xUnit file, in document order, without duplicates.
+@dataclass(frozen=True)
+class Results:
+    """One xUnit file, read: how many tests it ran and which of them failed."""
+
+    tests: int | None
+    failures: tuple[Failure, ...]
+
+
+def results_in(path: Path) -> Results:
+    """One xUnit file's population and failures.
 
     Both writers this repo meets are handled: SwiftPM's XCTest generator emits
     `<testcase classname=… name=…><failure message=…>` unindented, and Swift
@@ -455,16 +686,29 @@ def failures_in(path: Path) -> list[Failure]:
         raise MalformedResults("no test results in the file")
     if not parser.root_closed:
         raise MalformedResults("truncated: the result element never closed")
-    return parser.failures
+    return Results(tests=parser.tests, failures=tuple(parser.failures))
+
+
+def failures_in(path: Path) -> list[Failure]:
+    """Failing tests in one xUnit file, in document order, without duplicates."""
+    return list(results_in(path).failures)
 
 
 @dataclass(frozen=True)
 class Report:
-    """What the result files said, and how to print it."""
+    """What the result files said, and how to print it.
+
+    `tests` is the population the run actually executed, summed across the
+    files, and is None when no file said — an artifact that never arrived, or
+    one whose every file was unreadable.  None is not zero: a caller that needs
+    to state how many tests ran must refuse rather than publish a number no
+    file supports.
+    """
 
     total: int
     unreadable: tuple[str, ...]
     lines: tuple[str, ...]
+    tests: int | None = None
 
 
 def render_results(paths: Sequence[Path], *, limit: int = MAX_RENDERED_FAILURES) -> Report:
@@ -478,12 +722,16 @@ def render_results(paths: Sequence[Path], *, limit: int = MAX_RENDERED_FAILURES)
     sections: list[tuple[Path, list[Failure]]] = []
     unreadable: list[tuple[Path, str]] = []
     total = 0
+    tests: int | None = None
     for path in paths:
         try:
-            failures = failures_in(path)
+            results = results_in(path)
         except (MalformedResults, OSError) as error:
             unreadable.append((path, str(error)))
             continue
+        failures = list(results.failures)
+        if results.tests is not None:
+            tests = (tests or 0) + results.tests
         total += len(failures)
         if failures:
             sections.append((path, failures))
@@ -522,6 +770,7 @@ def render_results(paths: Sequence[Path], *, limit: int = MAX_RENDERED_FAILURES)
         total=total,
         unreadable=tuple(path.name for path, _ in unreadable),
         lines=tuple(lines),
+        tests=tests,
     )
 
 
@@ -546,19 +795,34 @@ def download_results(
 
 
 def push_ref(
-    run_command: RunCommand, *, sha: str, ref: str, inert: bool, remote: str = DEFAULT_REMOTE
+    run_command: RunCommand, *, sha: str, ref: str, remote: str = DEFAULT_REMOTE
 ) -> None:
     """Put `sha` on `<remote>/<ref>`, or refuse by name.
 
-    An inert `preflight/*` ref is a throwaway that any lane may move to any
-    commit, so it is forced.  A real branch is not: a non-fast-forward push
-    there would discard somebody's work to run a test, so it is allowed to fail
-    and the lane goes back to the local queue.
+    ONLY THE INERT NAMESPACE IS PUSHABLE, and this is the guard that makes that
+    true — it sits at the one place that actually moves a ref, so no ref choice
+    upstream of it can publish a branch by accident. Three things follow from
+    pushing `preflight/<branch>` and never `<branch>`:
+
+    - A pre-push hook gates the commits on the branch; publishing them to the
+      branch first is a bypass of the very check that was running.
+    - The default branch never has an open PR, so a ref choice keyed on "is
+      there a PR?" fast-forwards it — firing main's CI and the Pages deploy on
+      unreviewed commits.
+    - `scripts/sweep-preflight-refs.sh` reclaims `refs/heads/preflight/` and
+      nothing else, so a branch pushed from here would be a durable resource
+      with no named reconciler.
+
+    The push is forced because a `preflight/*` ref is a throwaway that any lane
+    may move to any commit: without that, a lane could never verify again after
+    an amend or a rebase.
     """
-    argv = ["git", "push"]
-    if inert:
-        argv.append("--force")
-    argv += [remote, f"{sha}:refs/heads/{ref}"]
+    if not ref.startswith(INERT_NAMESPACE) or ref == INERT_NAMESPACE:
+        raise Refused(
+            f"refusing to push {ref!r}: this driver only ever moves "
+            f"{INERT_NAMESPACE}* refs"
+        )
+    argv = ["git", "push", "--force", remote, f"{sha}:refs/heads/{ref}"]
     result = run_command(argv)
     if result.status != 0:
         raise Refused(
@@ -583,13 +847,13 @@ def drive(
     *,
     ref: str,
     sha: str,
-    inert: bool,
     runtime_dir: Path,
     slots: int,
     run_command: RunCommand,
     poll: float,
     correlate_timeout: float,
     run_timeout: float,
+    requester_alive: Callable[[], bool],
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
     report: Callable[[str], None] = _report,
@@ -597,18 +861,33 @@ def drive(
 ) -> int:
     """Hold a ticket for one whole remote verification, and return its verdict.
 
-    Order is the point: ticket, then push, then dispatch.  Nothing durable and
-    nothing metered happens until this lane is one of the two the pool allows.
+    Order is the point: ticket, then baseline, then push, then dispatch.
+    Nothing durable and nothing metered happens until this lane is one of the
+    two the pool allows.
+
+    NO ESCAPING EXCEPTION MAY BECOME EXIT 1. `scripts/test.sh` adopts this
+    status as the run's own, so a `1` from an unhandled OSError, a killed
+    subprocess or a full disk would tell the operator that the suite is red
+    when zero tests ran. Everything unforeseen lands on 78 — no verdict, back
+    to the local queue — which is the only honest answer this function can give
+    about code it never managed to test.
     """
     try:
         with take_dispatch_ticket(runtime_dir, slots) as ticket:
             report(f"remote-verify: took dispatch ticket {ticket} of {slots}")
-            push_ref(run_command, sha=sha, ref=ref, inert=inert)
+            # Asked before anything durable happens: a lane whose requester has
+            # already gone wants no ref pushed and no dispatch spent.
+            _still_wanted(requester_alive)
+            # Taken before the dispatch, so every run it names is one this lane
+            # did not ask for; see `select_run`.
+            already_ran = baseline_run_ids(run_command, sha)
+            push_ref(run_command, sha=sha, ref=ref)
             dispatch_run(run_command, ref=ref)
             report(f"remote-verify: dispatched {WORKFLOW_FILE} on {ref} at {sha}")
             found = await_dispatched_run(
                 run_command, sha,
                 timeout=correlate_timeout, poll=poll,
+                requester_alive=requester_alive, exclude=already_ran,
                 sleep=sleep, monotonic=monotonic, report=report,
             )
             run_id = str(found["databaseId"])
@@ -617,6 +896,7 @@ def drive(
             completed = await_completion(
                 run_command, run_id,
                 timeout=run_timeout, poll=poll,
+                requester_alive=requester_alive,
                 sleep=sleep, monotonic=monotonic, report=report,
             )
             url = completed.get("url") or url or ""
@@ -626,12 +906,14 @@ def drive(
                     f"run {run_id} finished {completed.get('conclusion')}, "
                     f"which is no verdict {url}".rstrip()
                 )
+            results, problem = read_run_results(run_command, run_id)
             if verdict == EXIT_PASSED:
-                write(f"remote-verify: the remote run passed {url}".rstrip())
+                _write_pass_report(
+                    results, problem=problem, run_id=run_id, url=str(url), write=write
+                )
                 return EXIT_PASSED
             _write_failure_report(
-                run_command, run_id=run_id, url=str(url),
-                completed=completed, write=write,
+                results, problem=problem, url=str(url), completed=completed, write=write
             )
             return EXIT_FAILED
     except NoTicket:
@@ -643,12 +925,74 @@ def drive(
     except Refused as refusal:
         report(f"remote-verify: {refusal}")
         return EXIT_REFUSED
+    except Exception as error:  # noqa: BLE001 - see the docstring: 78, never 1
+        report(f"remote-verify: {type(error).__name__}: {error}")
+        report("remote-verify: no verdict could be had; staying in the local queue")
+        return EXIT_REFUSED
+
+
+def read_run_results(
+    run_command: RunCommand, run_id: str
+) -> tuple[Report | None, str | None]:
+    """Download and read a run's xUnit artifact, or say why it could not be had.
+
+    The download lives no longer than this call: `Report` holds counts, file
+    names and rendered lines, so nothing it carries points into the scratch
+    directory that is deleted on the way out.
+    """
+    with tempfile.TemporaryDirectory(prefix="remote-verify-results.") as scratch:
+        paths, problem = download_results(run_command, run_id, Path(scratch))
+        if problem:
+            return None, problem
+        return render_results(paths), None
+
+
+def _test_run_summary(count: int, outcome: str) -> str:
+    """The line six call sites grep for, in the wording they grep for.
+
+    `scripts/git-hooks/pre-push`, `scripts/nightly-flake-stress.sh` and three
+    steps of `.github/workflows/test.yml` all read a run's population out of
+    `Test run with N tests` and treat its absence as a collapsed or truncated
+    suite. A remote verdict that omitted it would be read as a broken run and
+    block the push naming the wrong cause, so the remote path states the same
+    fact in the same words — derived from the xUnit files, never invented.
+    """
+    plural = "" if count == 1 else "s"
+    return f"remote-verify: Test run with {count} test{plural} {outcome} remotely."
+
+
+def _write_pass_report(
+    results: Report | None,
+    *,
+    problem: str | None,
+    run_id: str,
+    url: str,
+    write: Callable[[str], None],
+) -> None:
+    """Announce a green run, with the population it actually executed.
+
+    A pass whose count cannot be supported is refused rather than announced.
+    Emitting a number no result file backs would be the exact failure this line
+    exists to prevent, and claiming green with no line at all reaches the
+    caller as a truncated run. Both cost a local re-run; inventing a count
+    costs a wrong answer.
+    """
+    if results is None or results.tests is None:
+        detail = problem or (
+            f"the {RESULTS_ARTIFACT} artifact named no test population"
+        )
+        raise Refused(
+            f"run {run_id} passed but its results could not be counted "
+            f"({detail}), so the test population cannot be stated {url}".rstrip()
+        )
+    write(_test_run_summary(results.tests, "passed"))
+    write(f"remote-verify: the remote run passed {url}".rstrip())
 
 
 def _write_failure_report(
-    run_command: RunCommand,
+    results: Report | None,
     *,
-    run_id: str,
+    problem: str | None,
     url: str,
     completed: Mapping[str, object],
     write: Callable[[str], None],
@@ -657,14 +1001,16 @@ def _write_failure_report(
     jobs = failed_job_names(completed)
     if jobs:
         write(f"remote-verify: failing jobs: {', '.join(jobs)}")
-    with tempfile.TemporaryDirectory(prefix="remote-verify-results.") as scratch:
-        paths, problem = download_results(run_command, run_id, Path(scratch))
-        if problem:
-            write(f"remote-verify: {problem}")
-            write("remote-verify: open the run above for the failure")
-            return
-        for line in render_results(paths).lines:
-            write(line)
+    if results is None:
+        write(f"remote-verify: {problem}")
+        write("remote-verify: open the run above for the failure")
+        return
+    # Stated when it is known and silently omitted when it is not: a red run is
+    # already a verdict, and no caller reads the population off a failing run.
+    if results.tests is not None:
+        write(_test_run_summary(results.tests, "failed"))
+    for line in results.lines:
+        write(line)
 
 
 def _resolve_runtime_dir(environ: Mapping[str, str]) -> Path:
@@ -680,13 +1026,12 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] | None = 
 
     driver = subcommands.add_parser("drive", help="run one remote verification")
     driver.add_argument("--repo-dir", required=True)
-    driver.add_argument("--ref", required=True)
-    driver.add_argument("--sha", required=True)
     driver.add_argument(
-        "--inert",
-        action="store_true",
-        help="the ref is a throwaway preflight ref and may be force-pushed",
+        "--ref",
+        required=True,
+        help=f"the inert {INERT_NAMESPACE}* ref to push and dispatch",
     )
+    driver.add_argument("--sha", required=True)
 
     renderer = subcommands.add_parser(
         "render", help="render already-downloaded xUnit results"
@@ -711,19 +1056,26 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] | None = 
         poll = _positive_seconds(environ, POLL_SETTING, DEFAULT_POLL_SECONDS)
         correlate = _positive_seconds(environ, CORRELATE_SETTING, DEFAULT_CORRELATE_SECONDS)
         run_timeout = _positive_seconds(environ, RUN_SETTING, DEFAULT_RUN_SECONDS)
+        command_timeout = _positive_seconds(
+            environ, COMMAND_SETTING, DEFAULT_COMMAND_SECONDS
+        )
+        runtime_dir = _resolve_runtime_dir(environ)
+        # Recorded before the ticket, so a requester that dies during startup is
+        # already visible on the first poll rather than after the run.
+        alive = requester_watch(environ)
     except ValueError as error:
         _report(f"remote-verify: {error}")
         return EXIT_REFUSED
     return drive(
         ref=options.ref,
         sha=options.sha,
-        inert=options.inert,
-        runtime_dir=_resolve_runtime_dir(environ),
+        runtime_dir=runtime_dir,
         slots=slots,
-        run_command=system_runner(repo_dir),
+        run_command=system_runner(repo_dir, timeout=command_timeout),
         poll=poll,
         correlate_timeout=correlate,
         run_timeout=run_timeout,
+        requester_alive=alive,
     )
 
 

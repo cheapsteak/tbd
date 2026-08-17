@@ -87,12 +87,19 @@ XML
 
 # A `gh` that answers from the environment and records every call it was given,
 # so a case can assert that a dispatch did NOT happen as easily as that it did.
+#
+# RUNS EXIST ONLY ONCE THEY HAVE BEEN DISPATCHED, recorded in `$STUB_GH_RUNS`
+# with a fresh id each time. A stub that answered `run list` with a constant run
+# could not tell the run a lane just asked for from one that was already there,
+# which is exactly the confusion the driver's baseline exists to prevent — and a
+# case can seed that file to put a stale run in front of a lane.
 stub_gh() {
   local root="$1"
   cat > "$root/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 [ -n "${STUB_GH_LOG:-}" ] && printf '%s\n' "$*" >> "$STUB_GH_LOG"
 conclusion="${STUB_GH_CONCLUSION:-success}"
+runs="${STUB_GH_RUNS:-}"
 case "$1 ${2:-}" in
   "auth status")
     exit "${STUB_GH_AUTH_STATUS:-0}" ;;
@@ -101,14 +108,29 @@ case "$1 ${2:-}" in
     if [ -n "${STUB_GH_PR_OPEN:-}" ]; then echo 7; fi
     exit 0 ;;
   "workflow run")
-    exit "${STUB_GH_DISPATCH_STATUS:-0}" ;;
+    status="${STUB_GH_DISPATCH_STATUS:-0}"
+    if [ "$status" -ne 0 ]; then exit "$status"; fi
+    next=4242
+    if [ -f "$runs" ]; then next=$(( $(wc -l < "$runs") + 4242 )); fi
+    printf '%s %s\n' "$next" "$(git rev-parse HEAD)" >> "$runs"
+    exit 0 ;;
   "run list")
-    printf '[{"databaseId":4242,"headSha":"%s","status":"completed","conclusion":"%s","event":"workflow_dispatch","url":"https://example.invalid/runs/4242"}]\n' \
-      "$(git rev-parse HEAD)" "$conclusion"
+    ids=(); shas=()
+    if [ -f "$runs" ]; then
+      while read -r id sha; do ids+=("$id"); shas+=("$sha"); done < "$runs"
+    fi
+    out=""; i=$(( ${#ids[@]} - 1 ))
+    while [ $i -ge 0 ]; do
+      entry="$(printf '{"databaseId":%s,"headSha":"%s","status":"completed","conclusion":"%s","event":"workflow_dispatch","url":"https://example.invalid/runs/%s"}' \
+        "${ids[$i]}" "${shas[$i]}" "$conclusion" "${ids[$i]}")"
+      if [ -n "$out" ]; then out="$out,$entry"; else out="$entry"; fi
+      i=$((i - 1))
+    done
+    printf '[%s]\n' "$out"
     exit 0 ;;
   "run view")
-    printf '{"status":"completed","conclusion":"%s","url":"https://example.invalid/runs/4242","jobs":[{"name":"Test","conclusion":"%s"}]}\n' \
-      "$conclusion" "$conclusion"
+    printf '{"status":"completed","conclusion":"%s","url":"https://example.invalid/runs/%s","jobs":[{"name":"Test","conclusion":"%s"}]}\n' \
+      "$conclusion" "${3:-0}" "$conclusion"
     exit 0 ;;
   "run download")
     if [ -n "${STUB_GH_NO_ARTIFACT:-}" ]; then echo "no artifact matches xunit-results" >&2; exit 1; fi
@@ -138,6 +160,7 @@ run_verify() {
     PATH="$root/bin:$PATH" \
     TBD_HOME="$root/home" \
     STUB_GH_LOG="$root/gh.log" \
+    STUB_GH_RUNS="$root/runs" \
     STUB_GH_XML_DIR="$root/xml" \
     TBD_REMOTE_VERIFY_POLL_SECONDS=0.01 \
     TBD_REMOTE_VERIFY_CORRELATE_SECONDS=2 \
@@ -160,25 +183,36 @@ setup() {
 
 # --- ref choice, at the unit level -------------------------------------------
 
-test_dispatch_ref_for_uses_the_branch_when_no_pr_is_open() {
+test_dispatch_ref_for_always_answers_an_inert_ref() {
+  # THE BRANCH IS NEVER THE ANSWER, whether or not a PR is open. Pushing it
+  # would publish the commits a pre-push hook is gating, and it would leave a
+  # ref that `scripts/sweep-preflight-refs.sh` does not match.
   local root; root="$(setup)"
   local ref; ref="$(cd "$root/work" && PATH="$root/bin:$PATH" dispatch_ref_for "$BRANCH")"
-  assert_eq "no open PR dispatches the branch itself" "$BRANCH" "$ref"
+  assert_eq "a branch with no PR still dispatches a preflight ref" "preflight/$BRANCH" "$ref"
+  ref="$(cd "$root/work" && PATH="$root/bin:$PATH" STUB_GH_PR_OPEN=1 dispatch_ref_for "$BRANCH")"
+  assert_eq "and so does one with a PR open" "preflight/$BRANCH" "$ref"
   rm -rf "$root"
 }
 
-test_dispatch_ref_for_uses_an_inert_ref_when_a_pr_is_open() {
+test_dispatch_ref_for_asks_github_nothing() {
+  # The answer is the same in every case, so it needs no query — and a call
+  # that cannot happen cannot be answered wrongly, rate-limited, or read as
+  # "no PR" when it merely failed.
   local root; root="$(setup)"
-  local ref; ref="$(cd "$root/work" && PATH="$root/bin:$PATH" STUB_GH_PR_OPEN=1 dispatch_ref_for "$BRANCH")"
-  assert_eq "an open PR dispatches a preflight ref" "preflight/$BRANCH" "$ref"
+  (cd "$root/work" && PATH="$root/bin:$PATH" STUB_GH_LOG="$root/gh.log" dispatch_ref_for "$BRANCH") >/dev/null
+  assert_eq "the ref choice consults no gh call" "" "$(gh_calls "$root")"
   rm -rf "$root"
 }
 
-test_dispatch_ref_for_refuses_when_the_query_fails() {
+test_the_default_branch_is_read_from_the_remote_head() {
   local root; root="$(setup)"
-  local status=0
-  (cd "$root/work" && PATH="$root/bin:$PATH" STUB_GH_PR_FAIL=1 dispatch_ref_for "$BRANCH") >/dev/null 2>&1 || status=$?
-  assert_eq "a failed PR query is not read as 'no PR'" "2" "$status"
+  local trunk; trunk="$(cd "$root/work" && default_branch)"
+  assert_eq "an unfetched origin/HEAD falls back to main" "main" "$trunk"
+  git -C "$root/work" fetch -q origin
+  git -C "$root/work" symbolic-ref "refs/remotes/origin/HEAD" "refs/remotes/origin/$BRANCH"
+  trunk="$(cd "$root/work" && default_branch)"
+  assert_eq "and a recorded one is believed" "$BRANCH" "$trunk"
   rm -rf "$root"
 }
 
@@ -229,30 +263,39 @@ test_a_detached_head_refuses() {
   rm -rf "$root"
 }
 
-test_a_failed_pr_query_refuses_without_pushing() {
+test_the_default_branch_refuses_before_anything_is_pushed() {
+  # DEFENCE IN DEPTH. `dispatch_ref_for` already answers `preflight/main`, so
+  # this stop is redundant by construction — and worth having anyway, because
+  # what a regression there would cost is a fast-forward of `origin/main`
+  # firing main's CI and the Pages deploy on unreviewed commits.
   local root; root="$(setup)"
-  local before; before="$(remote_sha "$root" "$BRANCH")"
-  run_verify "$root" STUB_GH_PR_FAIL=1
-  assert_eq "an unanswerable PR query exits 78" "78" "$RC"
-  assert_eq "and the PR branch is untouched" "$before" "$(remote_sha "$root" "$BRANCH")"
+  git -C "$root/work" checkout -q main
+  local before; before="$(remote_sha "$root" main)"
+  run_verify "$root"
+  assert_eq "verifying the default branch exits 78" "78" "$RC"
+  assert_contains "and names it" "$OUT" "default branch"
+  assert_eq "main on the remote is untouched" "$before" "$(remote_sha "$root" main)"
+  assert_eq "and no preflight ref was created either" "" "$(remote_sha "$root" "preflight/main")"
   assert_missing "and nothing was dispatched" "$(gh_calls "$root")" "workflow run"
   rm -rf "$root"
 }
 
 # --- which ref gets pushed ---------------------------------------------------
 
-test_a_branch_with_no_pr_is_pushed_and_dispatched() {
+test_the_inert_ref_is_pushed_and_the_branch_is_left_alone() {
   local root; root="$(setup)"
-  local head; head="$(git -C "$root/work" rev-parse HEAD)"
+  local head before
+  head="$(git -C "$root/work" rev-parse HEAD)"
+  before="$(remote_sha "$root" "$BRANCH")"
   run_verify "$root"
   assert_eq "a passing remote run exits 0" "0" "$RC"
-  assert_eq "the branch itself was pushed" "$head" "$(remote_sha "$root" "$BRANCH")"
-  assert_eq "no inert ref was created" "" "$(remote_sha "$root" "preflight/$BRANCH")"
-  assert_contains "and the dispatch named the branch" "$(gh_calls "$root")" "workflow run test.yml --ref $BRANCH"
+  assert_eq "the inert ref carries the commit" "$head" "$(remote_sha "$root" "preflight/$BRANCH")"
+  assert_eq "the branch itself never moved" "$before" "$(remote_sha "$root" "$BRANCH")"
+  assert_contains "and the dispatch named the inert ref" "$(gh_calls "$root")" "--ref preflight/$BRANCH"
   rm -rf "$root"
 }
 
-test_an_open_pr_pushes_an_inert_ref_and_leaves_the_pr_branch_alone() {
+test_an_open_pr_changes_nothing_about_the_ref() {
   local root; root="$(setup)"
   local head before
   head="$(git -C "$root/work" rev-parse HEAD)"
@@ -261,7 +304,6 @@ test_an_open_pr_pushes_an_inert_ref_and_leaves_the_pr_branch_alone() {
   assert_eq "a passing remote run exits 0" "0" "$RC"
   assert_eq "the inert ref carries the commit" "$head" "$(remote_sha "$root" "preflight/$BRANCH")"
   assert_eq "the PR branch never moved" "$before" "$(remote_sha "$root" "$BRANCH")"
-  assert_contains "and the dispatch named the inert ref" "$(gh_calls "$root")" "--ref preflight/$BRANCH"
   rm -rf "$root"
 }
 
@@ -269,37 +311,61 @@ test_an_inert_ref_survives_a_rewritten_commit() {
   # Amending or rebasing between two verifications leaves the throwaway ref on
   # a commit the new HEAD does not descend from. The ref is inert and belongs
   # to nobody, so it is forced; without that this lane could never verify
-  # again after a rebase.
+  # again after a rebase — and the branch it shadows still never moves.
   local root; root="$(setup)"
-  run_verify "$root" STUB_GH_PR_OPEN=1
+  run_verify "$root"
+  local before; before="$(remote_sha "$root" "$BRANCH")"
   git -C "$root/work" reset -q --hard HEAD~1
   echo "a rewritten commit" > "$root/work/seed"
   "${GIT_FIXTURE[@]}" -C "$root/work" commit -q -am "rewritten"
   local head; head="$(git -C "$root/work" rev-parse HEAD)"
-  run_verify "$root" STUB_GH_PR_OPEN=1
+  run_verify "$root"
   assert_eq "the second run exits 0" "0" "$RC"
   assert_eq "and the inert ref moved to the rewritten commit" "$head" "$(remote_sha "$root" "preflight/$BRANCH")"
+  assert_eq "the branch itself still never moved" "$before" "$(remote_sha "$root" "$BRANCH")"
   rm -rf "$root"
 }
 
-test_a_real_branch_is_never_force_pushed() {
-  # The other half of the same rule. A branch somebody else may be reading is
-  # not this lane's to rewrite: a non-fast-forward push refuses and the lane
-  # goes back to the local queue rather than discarding work to run a test.
+test_a_stale_run_for_this_commit_is_not_adopted() {
+  # A run already registered for this sha — an earlier lane on the same commit,
+  # or this lane's own previous attempt — answers `gh run list` instantly while
+  # the run just dispatched takes seconds to register. Adopting it would report
+  # its verdict while the run this lane paid for burns a macOS slot unwatched.
   local root; root="$(setup)"
+  printf '4000 %s\n' "$(git -C "$root/work" rev-parse HEAD)" > "$root/runs"
   run_verify "$root"
-  local pushed; pushed="$(remote_sha "$root" "$BRANCH")"
-  git -C "$root/work" reset -q --hard HEAD~1
-  echo "a rewritten commit" > "$root/work/seed"
-  "${GIT_FIXTURE[@]}" -C "$root/work" commit -q -am "rewritten"
-  run_verify "$root"
-  assert_eq "a non-fast-forward branch push refuses" "78" "$RC"
-  assert_contains "and names it" "$OUT" "could not push"
-  assert_eq "the branch on the remote is untouched" "$pushed" "$(remote_sha "$root" "$BRANCH")"
+  assert_eq "the run exits 0" "0" "$RC"
+  assert_contains "the dispatched run is the one watched" "$(gh_calls "$root")" "run view 4243"
+  assert_missing "and the stale run is not" "$(gh_calls "$root")" "run view 4000"
   rm -rf "$root"
 }
 
 # --- the verdict -------------------------------------------------------------
+
+test_a_passing_remote_run_states_the_population_it_executed() {
+  # SIX CALL SITES GREP FOR THIS EXACT LINE — `scripts/git-hooks/pre-push`,
+  # `scripts/nightly-flake-stress.sh` and three steps of `.github/workflows/
+  # test.yml` — and read its absence as a truncated or collapsed suite. A GREEN
+  # remote verdict without it blocks the push naming the wrong cause.
+  local root; root="$(setup)"
+  run_verify "$root"
+  assert_eq "a passing remote run exits 0" "0" "$RC"
+  # 3 + 3 + 1, summed across the three passes exactly as the files declare them.
+  assert_contains "and states the population it ran" "$OUT" "Test run with 7 tests passed"
+  assert_contains "in the wording the callers grep for" \
+    "$(printf '%s' "$OUT" | grep -oE 'Test run with [0-9]+ tests?' | head -1)" "Test run with 7 tests"
+  rm -rf "$root"
+}
+
+test_a_passing_run_whose_results_are_missing_refuses_rather_than_inventing() {
+  # A count no result file supports is worse than no verdict: every floor check
+  # downstream would read it as the run's real population.
+  local root; root="$(setup)"
+  run_verify "$root" STUB_GH_NO_ARTIFACT=1
+  assert_eq "an uncountable pass exits 78" "78" "$RC"
+  assert_missing "and states no population" "$OUT" "Test run with"
+  rm -rf "$root"
+}
 
 test_a_failing_remote_run_renders_the_failing_tests() {
   local root; root="$(setup)"
