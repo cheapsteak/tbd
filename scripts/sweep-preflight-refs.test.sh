@@ -53,6 +53,19 @@ mkfixture() {
   done
 }
 
+# "backdated" / the age itself — whether a dated commit is the fixture's seed,
+# allowing the one-second slack three separate `date +%s` reads can introduce.
+# A verdict rather than a comparison so a failure prints the age that missed.
+seed_age_verdict() {
+  local age="$1"
+  if [ "$age" -ge "$FIXTURE_SEED_AGE_SECONDS" ] \
+     && [ "$age" -le $(( FIXTURE_SEED_AGE_SECONDS + 2 )) ]; then
+    echo "backdated"
+  else
+    echo "$age"
+  fi
+}
+
 # push_fresh_ref ROOT REF -> a ref pointing at a commit made just now, which is
 # what a lane that has this second pushed a preflight ref looks like.
 push_fresh_ref() {
@@ -378,8 +391,14 @@ test_commit_time_of_distinguishes_unreadable_from_old() {
   local sha; sha="$(git -C "$root/work" rev-parse HEAD)"
   local dated; dated="$(cd "$root/work" && commit_time_of "$sha")"
   assert_eq "a real commit dates to digits only" "" "${dated//[0-9]/}"
-  assert_eq "and it is the backdated seed" "$FIXTURE_SEED_AGE_SECONDS" \
-    "$(( $(date +%s) - dated ))"
+  # A WINDOW, NOT AN EQUALITY, and the slack is not laziness. `mkfixture` reads
+  # `date +%s` once for the author date and again for the committer date, and this
+  # line reads it a third time — a second ticking over between any two of them
+  # shifts the age by one, which is a red suite for nothing. What the case pins is
+  # that the seed is backdated by the fixture's constant, not the instant three
+  # clock reads happened to agree.
+  assert_eq "and it is the backdated seed" "backdated" \
+    "$(seed_age_verdict "$(( $(date +%s) - dated ))")"
   assert_eq "an object this clone cannot see dates to nothing" "" \
     "$(cd "$root/work" && commit_time_of 0000000000000000000000000000000000000001)"
   rm -rf "$root"
@@ -440,6 +459,159 @@ test_the_per_ref_fetch_retry_is_load_bearing() {
   assert_eq "and the namespace is never reclaimed" "main preflight/ghost preflight/stale " \
     "$(refs_on_origin "$root")"
   rm -rf "$root"
+}
+
+# --- the close path: one ref, through the same two guards ---------------------
+#
+# A PR closing reclaims its own `preflight/<branch>`, and it does so by narrowing
+# THIS sweep to that ref rather than deleting it itself. The age guard is the
+# reason: a lane that pushed a preflight ref seconds ago and dispatched a run
+# against it is racing whoever merges the PR next, and in a forty-worktree fleet
+# that race is ordinary rather than exotic. A close path with its own
+# `git push --delete` honours neither guard.
+
+test_a_named_branch_is_still_subject_to_the_age_guard() {
+  local root; root="$(mktmpd)"
+  mkfixture "$root" main
+  push_fresh_ref "$root" preflight/just-pushed
+  stub_gh "$root"
+  run_sweep "$root" --apply --branch just-pushed
+  assert_contains "the close path keeps a ref a live run may still check out" "$OUT" \
+    "KEEP too-young preflight/just-pushed"
+  assert_missing "and never plans it" "$OUT" "PLAN delete preflight/just-pushed"
+  assert_eq "so the ref survives the merge that closed the PR" "main preflight/just-pushed " \
+    "$(refs_on_origin "$root")"
+  assert_eq "and sparing it is not a problem" "0" "$RC"
+  rm -rf "$root"
+}
+
+# MUTATION. Drop the grace period and the close path deletes the ref a lane
+# pushed seconds ago — the run it dispatched then fails at `actions/checkout`.
+test_the_age_guard_is_load_bearing_for_a_named_branch() {
+  local root; root="$(mktmpd)"
+  mkfixture "$root" main
+  push_fresh_ref "$root" preflight/just-pushed
+  stub_gh "$root"
+  run_mutant_sweep "$root" 's/^MIN_AGE_SECONDS=3600$/MIN_AGE_SECONDS=0/' \
+    --apply --branch just-pushed
+  assert_contains "without the grace period the close path plans it" "$OUT" \
+    "PLAN delete preflight/just-pushed"
+  assert_eq "and takes it out from under the lane" "main " "$(refs_on_origin "$root")"
+  rm -rf "$root"
+}
+
+# The filter must not become a blanket KEEP either: the ordinary close, where the
+# ref has outlived any run, still reclaims.
+test_a_named_branch_that_is_inert_is_reclaimed() {
+  local root; root="$(mktmpd)"
+  mkfixture "$root" main preflight/closed-pr preflight/other
+  stub_gh "$root"
+  run_sweep "$root" --apply --branch closed-pr
+  assert_contains "the named ref goes" "$OUT" "PLAN delete preflight/closed-pr"
+  assert_contains "and every other ref is left to the weekly pass" "$OUT" \
+    "SKIP other-branch refs/heads/preflight/other"
+  assert_missing "with no verdict reached on it" "$OUT" "preflight/other ("
+  assert_eq "only the named ref was reclaimed" "main preflight/other " \
+    "$(refs_on_origin "$root")"
+  assert_eq "the close path exits clean" "0" "$RC"
+  rm -rf "$root"
+}
+
+# THE OTHER GUARD IS REUSED TOO. A branch can carry a second open PR — the one
+# that closed is not necessarily the only one — and the ref stays while any of
+# them could dispatch against it again.
+test_a_named_branch_with_another_open_pr_survives() {
+  local root; root="$(mktmpd)"
+  mkfixture "$root" main feature-a preflight/feature-a
+  stub_gh "$root" "feature-a"
+  run_sweep "$root" --apply --branch feature-a
+  assert_contains "kept for the open PR" "$OUT" "KEEP open-pr preflight/feature-a"
+  assert_eq "the ref survives" "feature-a main preflight/feature-a " "$(refs_on_origin "$root")"
+  rm -rf "$root"
+}
+
+# A CLOSE WITH NOTHING TO RECLAIM IS THE COMMON CASE — most PRs never had a
+# preflight ref pushed for them at all.
+test_a_named_branch_with_no_ref_says_so_and_exits_clean() {
+  local root; root="$(mktmpd)"
+  mkfixture "$root" main preflight/somebody-else
+  stub_gh "$root"
+  run_sweep "$root" --apply --branch never-verified
+  assert_contains "it says there was nothing to do" "$OUT" \
+    "no preflight ref for never-verified; nothing to reclaim"
+  assert_eq "nothing else is touched" "main preflight/somebody-else " "$(refs_on_origin "$root")"
+  assert_eq "and it exits clean" "0" "$RC"
+  rm -rf "$root"
+}
+
+# THE FILTER CANNOT WIDEN WHAT IS ELIGIBLE. Naming the default branch — which is
+# what a close event on a PR merged into `main` would hand a naive filter — reaches
+# the namespace guard exactly as it always did.
+test_a_named_branch_cannot_reach_outside_the_namespace() {
+  local root; root="$(mktmpd)"
+  mkfixture "$root" main
+  stub_gh "$root"
+  run_sweep "$root" --apply --branch main
+  assert_contains "main is skipped by the namespace guard" "$OUT" \
+    "SKIP outside-namespace refs/heads/main"
+  assert_contains "and the named branch has no preflight ref" "$OUT" \
+    "no preflight ref for main; nothing to reclaim"
+  assert_eq "main survives" "main " "$(refs_on_origin "$root")"
+  assert_eq "and the sweep exits clean" "0" "$RC"
+  rm -rf "$root"
+}
+
+# AN EMPTY NAME IS NOT "EVERY REF". The close path spells one ref as
+# `--branch "$HEAD_REF"`, so a variable that came out empty must refuse rather
+# than quietly widening into a whole-namespace apply.
+test_a_branch_filter_requires_a_name() {
+  local root; root="$(mktmpd)"
+  mkfixture "$root" main preflight/orphan
+  stub_gh "$root"
+  run_sweep "$root" --apply --branch ""
+  assert_contains "an empty name is refused" "$OUT" "--branch requires a branch name"
+  assert_eq "refuses with 2" "2" "$RC"
+  assert_eq "and nothing is swept" "main preflight/orphan " "$(refs_on_origin "$root")"
+  run_sweep "$root" --apply --branch
+  assert_contains "a missing name is refused too" "$OUT" "--branch requires a branch name"
+  assert_eq "also with 2" "2" "$RC"
+  assert_eq "and still nothing is swept" "main preflight/orphan " "$(refs_on_origin "$root")"
+  rm -rf "$root"
+}
+
+# MUTATION. Accept the empty name and `--branch "$HEAD_REF"` with an unset
+# variable sweeps the whole namespace under a close event.
+test_the_empty_branch_name_refusal_is_load_bearing() {
+  local root; root="$(mktmpd)"
+  mkfixture "$root" main preflight/orphan
+  stub_gh "$root"
+  run_mutant_sweep "$root" 's/if \[\[ \$# -eq 0 \|\| -z "\$1" \]\]; then/if false; then/' \
+    --apply --branch ""
+  assert_contains "an accepted empty name reaches every ref" "$OUT" "PLAN delete preflight/orphan"
+  assert_eq "and empties the namespace" "main " "$(refs_on_origin "$root")"
+  rm -rf "$root"
+}
+
+# --- the close path's wiring --------------------------------------------------
+#
+# The guards above are only reached if the workflow actually delegates. Pinned
+# here because the failure is invisible in this file otherwise: a close path that
+# went back to deleting the ref itself would leave every case above passing.
+test_the_workflow_close_path_delegates_to_this_sweep() {
+  local body; body="$(cat "$HERE/../.github/workflows/preflight-cleanup.yml" 2>/dev/null)"
+  assert_contains "the close leg narrows this sweep to the PR's ref" "$body" \
+    'bash scripts/sweep-preflight-refs.sh --apply --branch "$HEAD_REF"'
+  assert_missing "and deletes nothing itself" "$body" "git push origin --delete"
+  # The branch name arrives through `env:`, never interpolated into a `run:`
+  # body, and both legs need a token for `gh pr list`.
+  assert_contains "the branch name comes from the environment" "$body" \
+    'HEAD_REF: ${{ github.event.pull_request.head.ref }}'
+  assert_missing "never interpolated into the script" "$body" 'preflight/${{'
+  assert_eq "both legs carry a token" "2" "$(grep -c 'GH_TOKEN:' \
+    "$HERE/../.github/workflows/preflight-cleanup.yml")"
+  # Forks have no preflight ref here and a read-only token, so the leg is skipped.
+  assert_contains "the fork gate is intact" "$body" \
+    "github.event.pull_request.head.repo.full_name == github.repository"
 }
 
 test_an_unknown_argument_refuses() {

@@ -146,7 +146,17 @@ fake_swift_index=$((fake_swift_invocation - 1))
 if [ "$fake_swift_index" -ge "${#fake_swift_codes[@]}" ]; then
   fake_swift_index=$(( ${#fake_swift_codes[@]} - 1 ))
 fi
-exit "${fake_swift_codes[$fake_swift_index]}"
+fake_swift_rc="${fake_swift_codes[$fake_swift_index]}"
+# THE POPULATION LINE SIX FLOOR CONSUMERS GREP FOR, in the wording they grep
+# for. FAKE_SWIFT_TEST_COUNT unset prints nothing, which is what every case
+# outside the count ones wants. A 76 prints nothing either, whatever the count
+# says: 76 stands in for a queue yielded before anything compiled, and a summary
+# from a run that never ran would put a count in the log the fence never
+# produced.
+if [ -n "${FAKE_SWIFT_TEST_COUNT:-}" ] && [ "$fake_swift_rc" != "76" ]; then
+  echo "Test run with ${FAKE_SWIFT_TEST_COUNT} tests passed after 0.1 seconds."
+fi
+exit "$fake_swift_rc"
 STUB
   chmod +x "$d/bin/fake-swift"
   echo "$d"
@@ -188,10 +198,11 @@ run_script() {
                  -u TBD_SWIFT_JOBS -u TBD_SWIFT_LOCK_TIMEOUT_SECONDS \
                  -u TBD_SWIFT_HEARTBEAT_SECONDS -u TBD_SWIFT_ALLOW_ORPHAN \
                  -u FAKE_SWIFT_DISARM -u FAKE_SWIFT_LEAK -u FAKE_SWIFT_RC \
-                 -u FAKE_SWIFT_TMUX_SOCKETS \
+                 -u FAKE_SWIFT_TMUX_SOCKETS -u FAKE_SWIFT_TEST_COUNT \
                  -u TBD_REMOTE_VERIFY -u TBD_REMOTE_VERIFY_YIELD_SECONDS \
                  -u TBD_SWIFT_QUEUE_YIELD_SECONDS \
                  -u FAKE_REMOTE_VERIFY_RC -u FAKE_REMOTE_VERIFY_LOG \
+                 -u FAKE_REMOTE_VERIFY_COUNT -u FAKE_REMOTE_VERIFY_ARGV \
                  ${RUN_ENV[@]+"${RUN_ENV[@]}"} \
                  HOME="$fix/home" \
                  TMPDIR="$fix/tmp" \
@@ -931,11 +942,38 @@ mk_repo_fixture() {
   cat > "$repo/scripts/remote-verify.sh" <<'STUB'
 #!/usr/bin/env bash
 # Stands in for the remote path. It records that it was reached — the valve
-# must consult it exactly once, and only when the queue was yielded — and
-# returns whichever verdict the case is exercising.
+# must consult it exactly once, and only when the queue was yielded — records
+# the argv it was handed, and returns whichever verdict the case is exercising.
+#
+# IT MODELS THE ONE PART OF THE DRIVER'S OUTPUT ANYTHING DOWNSTREAM READS: the
+# `Test run with N tests` line, which six floor consumers grep out of a log and
+# take the FIRST of. `FAKE_REMOTE_VERIFY_COUNT` is the whole-suite population it
+# claims; unset prints nothing, which is what every case outside the count ones
+# wants.
+#
+# `--narrowed` is the caller declaring it asked for less than the whole suite,
+# and the driver's contract on that flag is to omit the count from a FAILING
+# report only. That caller is about to re-run locally and print a count of its
+# own, and the first count in the log has to be the run whose verdict is
+# reported. A PASSING report always states its population — there the remote
+# verdict is the one adopted, and a whole-suite count clears a narrowed floor
+# legitimately, being a minimum measured against a superset.
 echo "dispatched" >> "${FAKE_REMOTE_VERIFY_LOG:-/dev/null}"
+printf '%s\n' "$*" >> "${FAKE_REMOTE_VERIFY_ARGV:-/dev/null}"
+fake_remote_narrowed=0
+for fake_remote_arg in "$@"; do
+  case "$fake_remote_arg" in --narrowed) fake_remote_narrowed=1 ;; esac
+done
+fake_remote_rc="${FAKE_REMOTE_VERIFY_RC:-0}"
+if [ -n "${FAKE_REMOTE_VERIFY_COUNT:-}" ]; then
+  if [ "$fake_remote_rc" = "0" ]; then
+    echo "remote-verify: Test run with $FAKE_REMOTE_VERIFY_COUNT tests passed remotely." >&2
+  elif [ "$fake_remote_rc" = "1" ] && [ "$fake_remote_narrowed" -eq 0 ]; then
+    echo "remote-verify: Test run with $FAKE_REMOTE_VERIFY_COUNT tests failed remotely." >&2
+  fi
+fi
 echo "remote-verify: stub reached" >&2
-exit "${FAKE_REMOTE_VERIFY_RC:-0}"
+exit "$fake_remote_rc"
 STUB
   chmod +x "$repo/scripts/remote-verify.sh"
   echo "$repo"
@@ -944,6 +982,19 @@ STUB
 remote_verify_dispatches() {
   local log="$1/remote-verify-log"
   if [ -f "$log" ]; then wc -l < "$log" | tr -d ' '; else echo 0; fi
+}
+
+# The argv the wrapper handed the remote path, one dispatch per line.
+remote_verify_argv() { cat "$1/remote-verify-argv" 2>/dev/null; }
+
+# WHAT A FLOOR CONSUMER WOULD READ OUT OF THIS RUN'S LOG — the first
+# `Test run with N tests`, extracted exactly as `scripts/git-hooks/pre-push`,
+# `scripts/nightly-flake-stress.sh` and the three `test.yml` steps extract it,
+# `head -1` included. Asserting through the consumer's own reading is the point:
+# a count that is merely PRESENT somewhere in the log proves nothing, since the
+# floor only ever sees the first one.
+first_reported_test_count() {
+  printf '%s\n' "$1" | grep -oE 'Test run with [0-9]+ tests?' | grep -oE '[0-9]+' | head -1
 }
 
 # Run the wrapper from a fixture repo, with the remote path stubbed.
@@ -1402,6 +1453,158 @@ test_a_narrowed_run_falls_back_on_a_refusal_like_any_other() {
   assert_eq "with one local re-run" "2" "$(swift_invocations "$fix")"
   assert_missing "and no attribution message" "$RUN_OUT" "WHOLE-SUITE run failed"
   rmfix "$fix"
+}
+
+# ---------------------------------------------------------------------------
+# 7c. The count in the log has to describe the run being reported
+#
+# Six consumers decide whether a run is trustworthy by grepping its log for
+# `Test run with N tests` and taking the FIRST match — `scripts/git-hooks/
+# pre-push` (which pipes both streams into its log), `scripts/nightly-flake-
+# stress.sh`, and three floors in `.github/workflows/test.yml`.
+#
+# On the narrowed-red path two runs speak into one log, and only the second's
+# verdict is reported: the remote whole-suite report prints first, then the local
+# re-run. A remote count left in there is read as the reported run's population.
+# THE CONCRETE FAILURE that closes is pre-push's tier-3 pass — `--filter
+# '^TBDDaemonLiveTests\.'`, floor 35, a floor that exists precisely to catch a
+# filter that matched nothing. Rename the type, and the local re-run selects
+# zero tests, exits 0, and says `Test run with 0 tests`; with a whole-suite
+# count ahead of it in the log the floor sees four thousand, is satisfied, and
+# the push is allowed.
+#
+# The wrapper therefore declares its narrowing with `--narrowed`, and the driver
+# omits the count from a FAILING report only. Green keeps its count: there the
+# remote verdict is the one adopted, and a floor is a minimum measured against a
+# superset.
+# ---------------------------------------------------------------------------
+
+# The whole-suite population the stubbed remote path claims — the real number
+# from a recent full run, so the arithmetic below is the arithmetic in the wild.
+REMOTE_WHOLE_SUITE_COUNT=4593
+# What a vacuous filter's local re-run reports: it selected nothing and exited 0.
+VACUOUS_FILTER_COUNT=0
+
+# The tier-3 pass's floor, read out of the hook so this section cannot drift
+# from the number actually enforced.
+pre_push_tier3_floor() {
+  sed -n 's/^run_pass "quiet pass[^"]*" \([0-9][0-9]*\).*/\1/p' "$HERE/git-hooks/pre-push"
+}
+
+# "caught" / "undetected" — what the floor makes of the count a consumer read
+# out of a log, in `pre-push`'s own condition. A verdict rather than a number, so
+# the assertion reads as the consequence rather than as arithmetic.
+floor_verdict() {
+  local count="$1" floor="$2"
+  if [ -z "$count" ] || [ "$count" -lt "$floor" ]; then echo "caught"; else echo "undetected"; fi
+}
+
+test_the_tier3_floor_is_readable_from_the_hook() {
+  local floor; floor="$(pre_push_tier3_floor)"
+  assert_eq "the floor is digits only" "" "${floor//[0-9]/}"
+  assert_eq "a vacuous filter's count is below it" "caught" \
+    "$(floor_verdict "$VACUOUS_FILTER_COUNT" "$floor")"
+  assert_eq "and a whole-suite count is not" "undetected" \
+    "$(floor_verdict "$REMOTE_WHOLE_SUITE_COUNT" "$floor")"
+}
+
+# THE CASE THE FINDING IS ABOUT. A narrowed lane goes remote, the whole suite
+# comes back red on something outside the subset, the narrowed suite is re-run
+# locally and selects NOTHING — and the count a floor reads must be that re-run's
+# zero, not the remote suite's four thousand.
+test_a_narrowed_red_run_leaves_only_the_local_count_in_the_log() {
+  local fix; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC="76 0"
+           FAKE_SWIFT_TEST_COUNT="$VACUOUS_FILTER_COUNT"
+           FAKE_REMOTE_VERIFY_RC=1
+           FAKE_REMOTE_VERIFY_COUNT="$REMOTE_WHOLE_SUITE_COUNT"
+           FAKE_REMOTE_VERIFY_ARGV="$fix/remote-verify-argv"
+           FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
+  run_with_valve "$fix" "$SCRIPT" --no-parallel --filter '^TBDDaemonLiveTests\.'
+  RUN_ENV=()
+  assert_ok "the local re-run's verdict is the run's" "$RUN_RC"
+  assert_eq "and it really did re-run locally" "2" "$(swift_invocations "$fix")"
+  assert_contains "the narrowing is declared to the remote path" \
+    "$(remote_verify_argv "$fix")" "--narrowed"
+  assert_eq "the count a floor reads is the local re-run's" "$VACUOUS_FILTER_COUNT" \
+    "$(first_reported_test_count "$RUN_OUT")"
+  assert_missing "the remote suite's count is nowhere in the log" "$RUN_OUT" \
+    "$REMOTE_WHOLE_SUITE_COUNT tests"
+  assert_eq "so the vacuous filter is caught" "caught" \
+    "$(floor_verdict "$(first_reported_test_count "$RUN_OUT")" "$(pre_push_tier3_floor)")"
+  rmfix "$fix"
+}
+
+# MUTATION. Stop declaring the narrowing and the remote report keeps its count.
+# It is printed BEFORE the local re-run's, so `head -1` finds four thousand
+# tests, a floor of 35 is satisfied by a run that executed nothing, and the push
+# the floor exists to stop goes through.
+test_declaring_the_narrowing_is_load_bearing() {
+  local fix mutant; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  mutant="$(mutant_of "$SCRIPT" 's/remote_verify_args=\(--narrowed\)/remote_verify_args=()/')"
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC="76 0"
+           FAKE_SWIFT_TEST_COUNT="$VACUOUS_FILTER_COUNT"
+           FAKE_REMOTE_VERIFY_RC=1
+           FAKE_REMOTE_VERIFY_COUNT="$REMOTE_WHOLE_SUITE_COUNT"
+           FAKE_REMOTE_VERIFY_ARGV="$fix/remote-verify-argv"
+           FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
+  run_with_valve "$fix" "$mutant" --no-parallel --filter '^TBDDaemonLiveTests\.'
+  RUN_ENV=()
+  assert_missing "nothing declares the narrowing" "$(remote_verify_argv "$fix")" "--narrowed"
+  assert_eq "so the remote whole-suite count is the one a floor reads" \
+    "$REMOTE_WHOLE_SUITE_COUNT" "$(first_reported_test_count "$RUN_OUT")"
+  assert_eq "and the vacuous filter goes undetected" "undetected" \
+    "$(floor_verdict "$(first_reported_test_count "$RUN_OUT")" "$(pre_push_tier3_floor)")"
+  rmfix "$fix"
+}
+
+# THE OTHER TWO STATES, so "suppress the count whenever the valve fires" cannot
+# pass as this fix. A narrowed GREEN verdict is the one being reported, so its
+# count belongs in the log — a floor is a minimum and the whole suite is a
+# superset of the subset asked for.
+test_a_narrowed_green_run_keeps_the_remote_count() {
+  local fix; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC=76 FAKE_REMOTE_VERIFY_RC=0
+           FAKE_REMOTE_VERIFY_COUNT="$REMOTE_WHOLE_SUITE_COUNT"
+           FAKE_REMOTE_VERIFY_ARGV="$fix/remote-verify-argv"
+           FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
+  run_with_valve "$fix" "$SCRIPT" --filter '^FooTests\.'
+  RUN_ENV=()
+  assert_ok "a green whole-suite verdict is adopted" "$RUN_RC"
+  assert_contains "the narrowing is still declared" "$(remote_verify_argv "$fix")" "--narrowed"
+  assert_eq "and the adopted run's count is in the log" "$REMOTE_WHOLE_SUITE_COUNT" \
+    "$(first_reported_test_count "$RUN_OUT")"
+  rmfix "$fix"
+}
+
+# AN UNNARROWED CALLER DECLARES NOTHING, and its red verdict — which IS the
+# reported one — keeps the population it executed.
+test_an_unnarrowed_run_declares_nothing_and_keeps_its_count() {
+  local fix; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC=76 FAKE_REMOTE_VERIFY_RC=1
+           FAKE_REMOTE_VERIFY_COUNT="$REMOTE_WHOLE_SUITE_COUNT"
+           FAKE_REMOTE_VERIFY_ARGV="$fix/remote-verify-argv"
+           FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
+  run_with_valve "$fix" "$SCRIPT" --parallel -j 2
+  RUN_ENV=()
+  assert_eq "the remote verdict is the run's" "1" "$RUN_RC"
+  assert_eq "nothing is declared" "" "$(remote_verify_argv "$fix")"
+  assert_eq "and the reported run's count is in the log" "$REMOTE_WHOLE_SUITE_COUNT" \
+    "$(first_reported_test_count "$RUN_OUT")"
+  rmfix "$fix"
+}
+
+# THE FLAG IS A CONTRACT BETWEEN TWO FILES, so it is pinned against the real one
+# rather than only against the stub. `scripts/remote-verify.sh` refuses an
+# argument it does not recognise — 78, which this wrapper reads as a refusal and
+# answers with a local run — so a rename on either side would leave every
+# narrowed lane paying the remote round trip and then running locally anyway,
+# quietly, because a refusal is not a failure.
+test_the_narrowed_flag_is_one_the_remote_path_accepts() {
+  local remote; remote="$(cat "$HERE/remote-verify.sh" 2>/dev/null)"
+  assert_contains "the remote path parses the flag this wrapper sends" "$remote" "--narrowed)"
+  assert_contains "and this wrapper sends that one" "$(cat "$SCRIPT")" \
+    "remote_verify_args=(--narrowed)"
 }
 
 # THE FLOORS ARE MINIMUMS, WHICH IS WHY ADOPTING A WHOLE-SUITE GREEN IS SAFE FOR

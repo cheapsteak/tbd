@@ -15,9 +15,14 @@ name: Preflight ref cleanup
 #
 # Two legs, and the second is the one that carries the guarantee:
 #
-#   - CLOSE PATH — a PR closing deletes its own preflight ref immediately, so
-#     the common case is reclaimed within seconds and the weekly pass usually
-#     finds nothing.
+#   - CLOSE PATH — a PR closing reclaims its own preflight ref immediately, so
+#     the common case needs no weekly wait. It runs the SAME sweep, narrowed to
+#     that one ref, rather than deleting it itself: the sweep's age guard spares
+#     anything under an hour old precisely so a reclaim cannot take a ref out
+#     from under a run that is about to check it out, and in a forty-worktree
+#     fleet "another agent merges this PR while a lane verifies against it" is
+#     ordinary. A ref young enough to be spared here is inert an hour later and
+#     the weekly pass takes it.
 #   - SWEEP — a weekly pass over every `preflight/*` ref on the remote, keeping
 #     only those whose branch still has an open PR. This is what makes the
 #     close path best-effort rather than load-bearing: a cancelled run, a
@@ -70,20 +75,23 @@ jobs:
           github.event_name == 'pull_request' &&
           github.event.pull_request.head.repo.full_name == github.repository
         env:
+          # `gh pr list` decides what is still in use, so this leg needs a token
+          # as much as the sweep leg does.
+          GH_TOKEN: ${{ github.token }}
           # Via the environment, never interpolated into the script body: a
           # branch name is attacker-controlled text that may legally contain
           # `$`, backticks and `;`, so `${{ … }}` inside `run:` would be a
           # shell injection.
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        # ONE REF, THROUGH THE SWEEP, so the two guards that decide whether a
+        # preflight ref may be deleted — an open PR still naming it, and an age
+        # under the grace period — are written once and apply to both legs. A
+        # bare `git push --delete` here would honour neither, and the age one is
+        # load-bearing: it is what stops this leg deleting a ref seconds after a
+        # lane pushed it and before the run it dispatched has checked it out.
         run: |
           set -euo pipefail
-          ref="refs/heads/preflight/$HEAD_REF"
-          if git ls-remote --exit-code --heads origin "$ref" >/dev/null 2>&1; then
-            git push origin --delete "$ref"
-            echo "deleted $ref"
-          else
-            echo "no preflight ref for $HEAD_REF; nothing to reclaim"
-          fi
+          bash scripts/sweep-preflight-refs.sh --apply --branch "$HEAD_REF"
 
       - name: Sweep preflight refs with no open PR
         if: github.event_name != 'pull_request'

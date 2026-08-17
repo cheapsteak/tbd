@@ -208,9 +208,15 @@
 # `pre-push` gives each pass a test-count floor, and a floor is a minimum, so a
 # whole-suite count clears a narrowed pass's floor for free — including the
 # tier-3 pass whose floor of 35 exists to catch `--filter` matching nothing. A
-# renamed live-suite type would slip past that pass when its verdict came from a
-# whole-suite remote run. The floors still catch a collapse; they stop catching a
-# vacuous filter. The follow-up below is what fixes it properly.
+# renamed live-suite type slips past that pass whenever its verdict came from a
+# green whole-suite remote run. The floors still catch a collapse; they stop
+# catching a vacuous filter. The follow-up below is what fixes it properly.
+#
+# THE COUNT MUST DESCRIBE THE RUN BEING REPORTED, and on the narrowed-red path
+# that is the LOCAL re-run rather than the remote suite. Those consumers take
+# the FIRST count in the log, so a remote count printed on the way past would
+# answer for a verdict nobody adopted — see the `--narrowed` handoff at the
+# dispatch below, which is what keeps it out of the log.
 #
 # TESTED BY `scripts/test.test.sh`, which drives the guards below against
 # fixture directories with a stub `swift` — no build, no real `~/tbd`. Every
@@ -682,11 +688,31 @@ if [ "$remote_verify_enabled" -eq 1 ] && [ "$test_status" -eq "$YIELDED_THE_QUEU
     echo "         staying in the local queue instead of verifying remotely." >&2
     remote_status=$REMOTE_VERIFY_REFUSED
   else
+    # THE NARROWING IS DECLARED TO THE REMOTE PATH, AND IT IS THE COUNT LINE
+    # THAT MAKES IT NECESSARY. Six consumers read a run's population out of the
+    # first `Test run with N tests` in the log — `scripts/git-hooks/pre-push`
+    # pipes BOTH streams into its own — and a failing whole-suite report is
+    # printed BEFORE the local re-run below prints its own count. So without
+    # this the remote suite's number is the one `head -1` finds, standing in for
+    # a run whose verdict is not even being reported: a tier-3 pass whose
+    # `--filter` names a renamed type selects nothing, exits 0 saying `Test run
+    # with 0 tests`, and clears its floor of 35 on the remote's four thousand.
+    # The vacuous filter the floor exists to catch would go undetected.
+    #
+    # `--narrowed` tells the driver to omit the count from a FAILING report, so
+    # the only count in the log is the local re-run's. A PASSING report keeps
+    # its count: there the remote verdict is the one adopted and reported, and a
+    # whole-suite count clears a narrowed floor legitimately, a minimum against
+    # a superset. See "A NARROWED RUN ROUTES" above.
+    remote_verify_args=()
+    if [ "$caller_narrowed" -eq 1 ]; then
+      remote_verify_args=(--narrowed)
+    fi
     # Deliberately NOT fenced: the remote path needs the caller's real `$HOME`
     # to find `gh`'s credentials and the real repository to push from. It
     # touches no TBD-owned path.
     set +e
-    scripts/remote-verify.sh
+    scripts/remote-verify.sh ${remote_verify_args[@]+"${remote_verify_args[@]}"}
     remote_status=$?
     set -e
   fi

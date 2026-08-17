@@ -40,9 +40,25 @@
 # DRY RUN IS THE DEFAULT. This deletes refs on a shared remote, so it prints its
 # plan and does nothing until `--apply` says otherwise.
 #
+# `--branch <name>` NARROWS THE PASS TO ONE REF, AND IS WHY THE CLOSE PATH IS
+# NOT ITS OWN DELETE. A PR closing reclaims its own `preflight/<branch>` through
+# this script rather than with a `git push --delete` of its own, so both guards
+# above apply on both legs and live in exactly one place. The age guard is the
+# one that matters there: in a fleet of forty worktrees "another agent merges
+# this PR while a lane verifies against it" is ordinary, and an unguarded close
+# path deletes the ref between the dispatch and `actions/checkout`, failing a run
+# that was about to pass. A ref this leg spares for its age is inert by then and
+# the weekly pass takes it.
+#
+# The name only ever FILTERS. Every branch acted on is read back out of
+# `git ls-remote`, so an argument that names nothing deletes nothing — which
+# matters because the close path's value is a PR head branch, attacker-adjacent
+# text.
+#
 # Usage:
 #   scripts/sweep-preflight-refs.sh            # print the plan; delete nothing
 #   scripts/sweep-preflight-refs.sh --apply    # delete the refs planned above
+#   scripts/sweep-preflight-refs.sh --apply --branch tbd/foo   # that ref only
 #
 # Exit status: 0 clean, 1 something was kept or failed that should not have
 # been (a `gh` query failed, an age could not be read, a delete failed), 2 the
@@ -61,7 +77,7 @@ MIN_AGE_SECONDS=3600
 log() { printf '%s\n' "$*" >&2; }
 
 usage() {
-  log "usage: sweep-preflight-refs.sh [--apply | --dry-run]"
+  log "usage: sweep-preflight-refs.sh [--apply | --dry-run] [--branch <name>]"
 }
 
 # preflight_branch_of REF -> the branch this preflight ref shadows, or nothing.
@@ -174,11 +190,23 @@ fetch_namespace_objects() {
 }
 
 main() {
-  local apply=false
+  local apply=false only_branch=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --apply)   apply=true ;;
       --dry-run) apply=false ;;
+      # A `--branch` with nothing after it must not become a whole-namespace
+      # pass: the close path spells "this one ref" that way, and a caller whose
+      # variable came out empty would silently ask for every ref instead.
+      --branch)
+        shift
+        if [[ $# -eq 0 || -z "$1" ]]; then
+          log "--branch requires a branch name"
+          usage
+          return 2
+        fi
+        only_branch="$1"
+        ;;
       -h|--help) usage; return 0 ;;
       *) log "unknown argument: $1"; usage; return 2 ;;
     esac
@@ -208,13 +236,26 @@ main() {
       echo "SKIP outside-namespace $ref"
       continue
     fi
+    # The `--branch` filter, and the only thing that argument does. It cannot
+    # widen what is eligible — a name matching no ref on the remote leaves this
+    # loop with nothing to decide.
+    if [[ -n "$only_branch" && "$branch" != "$only_branch" ]]; then
+      echo "SKIP other-branch $ref"
+      continue
+    fi
     refs+=("$ref")
     shas+=("${line%%$'\t'*}")
   done <<< "$heads"
 
   # The objects the age check needs. A ref whose object never arrives has an
   # unknown age and is kept, not guessed at; see `fetch_namespace_objects`.
-  if [[ ${#refs[@]} -gt 0 ]]; then
+  if [[ ${#refs[@]} -eq 0 ]]; then
+    # Said only for a named branch, where "there is nothing here" is the answer
+    # to a question somebody asked. An empty namespace is not news.
+    if [[ -n "$only_branch" ]]; then
+      echo "no preflight ref for $only_branch; nothing to reclaim"
+    fi
+  else
     fetch_namespace_objects "${refs[@]}"
   fi
 
