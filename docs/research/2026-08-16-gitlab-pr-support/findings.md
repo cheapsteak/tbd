@@ -72,7 +72,7 @@ where the design work actually is. Three assumptions do not survive the move:
   rejection.
 - **Mergeability is `mergeStateStatus` + `reviewDecision` + a per-check
   `isRequired` rollup.** GitLab collapses all three into one enum,
-  `detailed_merge_status`, with 22 values that do not partition the way TBD's
+  `detailed_merge_status`, with 24 values that do not partition the way TBD's
   eight states do. Some GitLab states have no TBD expression; some TBD states
   have no GitLab answer.
 - **Required checks are a per-PR list you must fetch separately.** GitLab has no
@@ -103,6 +103,20 @@ all; it takes the host from configuration or `GITLAB_HOST` and assumes
 But an unauthenticated `GET /api/v4/version` discriminates cleanly: **401 on
 GitLab, 404 on every non-GitLab host tested**, including another forge. Whether
 TBD should make that request at all is still a decision, not a lookup.
+
+**Prior art agrees with itself, which is the most useful thing about it.**
+Renovate, git-spice, Git Town and `git-pkgs/forge` have each solved parts of
+this, and they converge: forge type comes from the remote URL with an explicit
+override for private instances; GitLab mergeability is read from
+`detailed_merge_status` alone; unknown enum values map to *unknown*, never to
+blocked; and instance variation is handled by version-gating and field-presence
+sniffing rather than by modelling editions. That last point reframes the
+CE/EE risk — **presence-sniffing is a REST affordance, and GraphQL rejects a
+whole query for one unknown field**, so choosing GraphQL couples an entire
+batch to the instance's schema. Codex, asked about specifically, turns out not
+to support GitLab at all
+([openai/codex#26963](https://github.com/openai/codex/issues/26963)). Details in
+[Part 9](#part-9--prior-art-what-other-tools-actually-do).
 
 A note on scope, because it changes the shape of the work: **GitHub Enterprise
 is a much smaller, separable case.** `gh` already speaks to it, the GraphQL
@@ -293,7 +307,7 @@ Against each fact TBD needs:
   ([merge requests API](https://docs.gitlab.com/api/merge_requests/)). Note
   `opened`, not GitHub's `OPEN`, and the extra `locked`.
 - **Mergeability** — `detailed_merge_status` (REST) / `detailedMergeStatus`
-  (GraphQL), a 22-value enum; plus a coarse `mergeable` boolean and a
+  (GraphQL), a 24-value enum; plus a coarse `mergeable` boolean and a
   `conflicts` boolean. The older `merge_status` (`unchecked`, `checking`,
   `can_be_merged`, `cannot_be_merged`, `cannot_be_merged_recheck`) is deprecated
   in favour of `detailed_merge_status` as of GitLab 15.6.
@@ -359,15 +373,26 @@ toolbar icon, the sidebar dot and the `Worktree.prStatus` column all read it.
   that way (`:1172-1173`).
 - `detailedMergeStatus = CI_MUST_PASS` → `.checksFailed`. This is the one that
   most needs a decision, and it is discussed below.
-- `detailedMergeStatus = NOT_APPROVED` → `.blocked` or `.changesRequested`,
-  depending on the answer to the review-decision question below.
+- `detailedMergeStatus = REQUESTED_CHANGES` → `.changesRequested`. The enum
+  carries a dedicated value — "Indicates a reviewer has requested changes" — so
+  the state TBD ranks at severity 4 has a direct single-field source, with no
+  paid-tier field and no per-reviewer scan.
+- `detailedMergeStatus = NOT_APPROVED` → `.mergeable`, matching how TBD already
+  treats GitHub's `BLOCKED` + `REVIEW_REQUIRED` as "Ready to merge"
+  (`PRStatusManager.swift:1166-1167`). With `REQUESTED_CHANGES` available
+  separately, `NOT_APPROVED` genuinely means "nobody has approved yet" rather
+  than conflating that with an objection.
 
 ### Where it breaks
 
-**GitLab states TBD cannot express.** The 22-value enum
-([source](https://gitlab.com/gitlab-org/gitlab/-/raw/master/app/graphql/types/merge_requests/detailed_merge_status_enum.rb),
-read 2026-08-16) includes several blockers that TBD can only flatten into
-`.blocked`, losing the reason:
+**GitLab states TBD cannot express.** The enum has **24 values**, read by live
+introspection of gitlab.com's schema on 2026-08-16. That count is worth stating
+precisely, because the
+[source file at `master`](https://gitlab.com/gitlab-org/gitlab/-/raw/master/app/graphql/types/merge_requests/detailed_merge_status_enum.rb)
+carried only 22 — `REQUESTED_CHANGES` and `SECURITY_POLICY_PIPELINE_CHECK` were
+absent from the tree read but present in the deployed schema. **The enum grows,
+and a design must assume it will grow again.** Several of its blockers are ones
+TBD can only flatten into `.blocked`, losing the reason:
 
 - `DISCUSSIONS_NOT_RESOLVED` — "Discussions must be resolved before merging."
   GitHub has no equivalent gate; TBD has no state for it.
@@ -375,8 +400,9 @@ read 2026-08-16) includes several blockers that TBD can only flatten into
   be merged." A cross-MR dependency; TBD models no such relation.
 - `EXTERNAL_STATUS_CHECKS` (`status_checks_must_pass`) — Ultimate-tier external
   checks ([status checks](https://docs.gitlab.com/user/project/merge_requests/status_checks/)).
-- `SECURITY_POLICIES_VIOLATIONS`, `JIRA_ASSOCIATION`, `TITLE_NOT_MATCHING`,
-  `LOCKED_PATHS`, `LOCKED_LFS_FILES`, `MERGE_TIME`, `COMMITS_STATUS`.
+- `SECURITY_POLICIES_VIOLATIONS`, `SECURITY_POLICY_PIPELINE_CHECK`,
+  `JIRA_ASSOCIATION`, `TITLE_NOT_MATCHING`, `LOCKED_PATHS`, `LOCKED_LFS_FILES`,
+  `MERGE_TIME`, `COMMITS_STATUS`.
 
 `.blocked` already carries a free-text `reason` string, so the *reason* survives
 in the tooltip. What does not survive is severity: all of these land at
@@ -385,6 +411,17 @@ merged until after the specified time") demands no action at all while ranking
 above a reviewer asking for changes. Whether the ordering needs a new tier — or
 whether some of these should map to a low-severity "waiting" rather than
 `.blocked` — is a design call, not a mechanical one.
+
+**And the unknown-value arm is a real defect, not a formality.** TBD's
+`mapStateAndReason` ends in `default: return (.blocked, "Blocked")`
+(`PRStatusManager.swift:1175`), so an enum value TBD has not heard of renders a
+merge blocker that may not exist — at severity 5, above changes-requested.
+Since two values appeared in the deployed schema that were not in the source
+tree, this is a state a shipped build will reach. git-spice returns *unknown*
+rather than blocked for precisely this case
+([Part 9](#part-9--prior-art-what-other-tools-actually-do)), and TBD has the
+vocabulary to do the same: `PRObservation.undetermined(cause:)` already means
+"we could not settle this", and is already rendered honestly.
 
 **TBD states GitLab cannot answer.**
 
@@ -404,17 +441,6 @@ whether some of these should map to a low-severity "waiting" rather than
   failed — which reports `SUCCESS`, so the state is simply invisible rather than
   mis-mapped. Acceptable, but it means the GitLab path can never show the amber
   "something failed but it doesn't block" signal.
-- **`.changesRequested` as a first-class decision.** GitHub's `reviewDecision`
-  is one field with three values. GitLab's nearest analogue is either
-  `detailedMergeStatus = NOT_APPROVED` (which conflates "nobody has approved
-  yet" with "someone objected") or the EE-only `changeRequesters` connection,
-  or a scan of every reviewer's `reviewState` for `REQUESTED_CHANGES`. The
-  first is available everywhere and is the wrong shape; the latter two are
-  either paid-tier or cost extra fields. Note that TBD's current rule treats
-  GitHub's `BLOCKED` + `REVIEW_REQUIRED` as `.mergeable`, deliberately
-  ("Ready to merge", `:1166-1167`) — the analogous GitLab call would be to treat
-  `NOT_APPROVED` with zero change-requesters as `.mergeable`, which needs the
-  paid-tier field to distinguish.
 - **`isTerminal`.** GitLab's `locked` state is a fourth value TBD's
   `PRMergeableState` has no case for. It is transient (the MR is mid-merge), so
   mapping it to `.pending` is probably right, but it must be mapped explicitly
@@ -816,6 +842,111 @@ Note that the internal vocabulary is already partly neutral —
 (`PRStatusManager.swift:13-34`) — so there is precedent for the neutral
 direction in the layer users do not see.
 
+## Part 9 — Prior art: what other tools actually do
+
+Five projects were examined because they have already solved some version of
+this. They agree with each other more than they disagree, and where they agree
+the convergence is worth more than any argument from first principles.
+
+**Renovate** has the widest real-world exposure to self-hosted GitLab of
+anything surveyed — it runs against thousands of instances of varying age and
+edition — and its GitLab platform module
+([`lib/modules/platform/gitlab/index.ts`](https://github.com/renovatebot/renovate/blob/main/lib/modules/platform/gitlab/index.ts))
+answers the CE/EE question by not asking it. It does three things instead:
+
+- **Fetches the server version once** and semver-gates version-dependent
+  behaviour: `const useMergeTrain = config.mergeTrainsEnabled && !semver.lt(defaults.version, '17.11.0')`,
+  degrading to the plain `/merge` endpoint with a logged warning when the
+  instance is older. The docs list the same pattern for several features —
+  `Draft:` prefix since 13.2.0, configurable reviewers since 13.9.0, merge
+  trains since 17.11.0.
+- **Presence-sniffs fields rather than predicting availability**:
+  `const use_detailed_merge_status = !!body.detailed_merge_status;`, falling back
+  to the deprecated `merge_status` when the field simply is not there.
+- **Degrades on tier at runtime**, e.g. applying only the first assignee when
+  multiple assignees turn out to be Premium/Ultimate-only, rather than
+  pre-computing what the tier allows
+  ([platform docs](https://docs.renovatebot.com/modules/platform/gitlab/)).
+
+**This reframes the CE/EE worry, and the reframing matters.** Nobody models CE
+versus EE. They model *version* and *field presence*. But presence-sniffing is a
+**REST affordance**: REST omits a field and the client copes, whereas GraphQL
+**rejects the entire query** for an unknown field. So the risk I flagged as
+"CE/EE" is really "GraphQL couples the whole batch to the instance's schema" —
+and it applies to any field that might be absent, not only EE ones. On a
+100-node batch, one unknown field returns nothing for every merge request in it.
+That is an argument for either splitting the risky fields into a second query,
+running a capability probe once per host, or using REST for the fields that vary.
+
+**git-spice** supports GitHub, GitLab, Bitbucket, Gitea and Forgejo, and its
+GitLab mergeability logic
+([`internal/forge/gitlab/mergeability.go`](https://github.com/abhinav/git-spice/blob/main/internal/forge/gitlab/mergeability.go))
+is the closest existing analogue to `mapStateAndReason`. It is instructive on
+three points TBD has to decide:
+
+- It reads **`DetailedMergeStatus` and nothing else** — no pipeline field, no
+  approvals field — mapping 23 values through one table.
+- Unrecognised values return `ChangeMergeabilityUnknown`, **not** a blocked
+  state. TBD's `default:` arm returns `(.blocked, "Blocked")`
+  (`PRStatusManager.swift:1175`), so a GitLab value TBD has not heard of would
+  show a user a blocker that may not exist. Given GitLab added two enum values
+  between the source tree read here and the live schema, "a value we do not
+  know" is a live possibility, not a hypothetical.
+- `UNCHECKED` and `CHECKING` map to a distinct **Waiting** state rather than to
+  a pending-checks state — the "third thing" Part 3 argues TBD lacks, built as a
+  first-class case by someone who hit the same problem.
+- One special case worth stealing outright: `NEED_REBASE` **plus**
+  `HasConflicts` reports conflicts rather than "behind", because the two are
+  reported through the same status but mean different things to a user.
+
+**Git Town** and **git-pkgs/forge** independently converged on the same answer to
+host identification, and it is a hybrid rather than either pole:
+
+- Git Town "determines the forge type by looking at the URL of the development
+  remote" and, when that fails "for example when using a private forge", takes
+  an explicit `forge-type` setting — `git config git-town.forge-type <value>` or
+  `GIT_TOWN_FORGE_TYPE`, over seven known values
+  ([forge type](https://www.git-town.com/preferences/forge-type)).
+- [`git-pkgs/forge`](https://github.com/git-pkgs/forge), a Go library exposing
+  one interface across GitHub, GitLab, Gitea/Forgejo, Bitbucket, Gerrit and
+  Tangled, detects from the git remote, accepts a `--forge-type` flag, and adds
+  a third option TBD's Part 5 list did not have: **a committed `.forge` file** in
+  the repo root declaring `forge-type = gitlab`. Its stated rationale answers the
+  friction objection directly — "so contributors don't each need `--forge-type`".
+
+A repo-committed declaration is a genuinely different option from a per-user
+setting: it is set once by whoever knows, travels with the repository, and costs
+a 40-worktree fleet nothing because every worktree of a repo shares it.
+
+**Codex is prior art for the gap, not the solution.** The user asked
+specifically, and the answer is that Codex has no GitLab merge-request support:
+[openai/codex#26963](https://github.com/openai/codex/issues/26963), open since
+June 2026, requests exactly this — "For GitHub repositories, Codex App surfaces a
+convenient PR link in the floating/sidebar UI. For GitLab repositories or
+branches associated with an MR, the equivalent GitLab Merge Request link is
+missing." The requester independently proposes hostname detection plus
+"configuring one or more GitLab hosts and access tokens, similar to how other
+integrations handle enterprise/self-hosted instances" — the same two options
+reached here. This is consistent with the multi-PR design's own survey, which
+found the Codex CLI recomputes a single `Option<PullRequest>` per render and
+persists nothing.
+
+**One transport option the survey turned up that Part 6 did not list:** GitLab
+ships an official **MCP server** as part of the platform (experiment in 18.3,
+beta in 18.6), which exposes merge-request reads to any MCP client. It is not
+obviously right for a daemon poll — MCP is a per-session agent protocol, and TBD
+polls from the daemon, not from inside an agent — but it is a supported,
+first-party read path that needs no CLI on PATH, and it is worth a sentence in
+the design rather than silent omission.
+
+**What nobody surveyed does:** use GitLab's GraphQL API for merge-request status.
+Renovate and git-spice both use REST, and GitLab's own Go SDK
+(`gitlab-org/api/client-go`) is REST-shaped. The measurements in Part 4 still
+say GraphQL is the cheaper batch on GitLab — that finding stands on its own
+evidence — but it is worth knowing that choosing GraphQL means leaving the
+path the ecosystem has worn, and taking the schema-coupling risk described
+above with it.
+
 ## What could not be verified
 
 Stated plainly rather than asserted anywhere above:
@@ -847,11 +978,11 @@ Stated plainly rather than asserted anywhere above:
   text says it resolves from `git remote`, `GITLAB_HOST` or configuration, and
   `--all` proves several instances can be configured at once, but the resolution
   was not exercised against two authenticated hosts.
-- **The `detailed_merge_status` value count.** The enum source was read twice;
-  one read reported "24 values" and one "21", while both listings enumerated the
-  same 22 entries. The values themselves agreed exactly across both reads and are
-  what Part 3 rests on, but the count should be re-derived before anything
-  exhaustive is built on it.
+- **Whether `REQUESTED_CHANGES` is reported on a Free-tier project.** The value
+  exists in the schema (see Part 3), but the sampled open merge requests never
+  returned it, so it was observed in the type system and not in the wild. If it
+  turns out to require a paid tier — GitLab's "request changes" reviewer action
+  is tier-gated in some forms — the Part 3 mapping loses its cleanest arm.
 - **Nothing was written.** No merge request was created by any route, so
   `glab mr create`'s end-to-end output was inferred from its source rather than
   observed, and the push-option path was never exercised. A throwaway project on
@@ -869,7 +1000,11 @@ bearing on it:* there is exactly one forge subprocess call site
 (`PRStatusManager.swift:2196`) and one injected seam (`:129-131`), so the
 abstraction is unusually cheap to introduce; but `PRStatusManager` is a
 2,293-line actor whose heal logic is deeply entangled with GitHub's viewer-batch
-shape, and the abstraction boundary would have to cut through it.
+shape, and the abstraction boundary would have to cut through it. Prior art
+leans toward the abstraction: Git Town, git-spice and `git-pkgs/forge` all
+carry an explicit forge interface with per-forge backends, and git-spice's
+GitLab mergeability file shows what the GitLab conformance actually costs — one
+lookup table over one enum, roughly a screen of code.
 
 **2. Should GitHub Enterprise land first?**
 GHE needs the URL regex generalised, the `host` column threaded through, and
@@ -892,6 +1027,17 @@ measured and works cleanly (401 on GitLab, 404 on four non-GitLab hosts
 including another forge), so the question is no longer "would a probe work" but
 "should a background daemon make unsolicited requests to hosts it read out of a
 user's git config".
+
+*Prior art narrows this more than anything else in the survey.* Git Town and
+`git-pkgs/forge` independently ship the same hybrid — infer from the remote URL,
+accept an explicit override when inference fails — and neither probes. And
+`git-pkgs/forge` adds an option not in Part 5's list: a **committed `.forge`
+file** declaring the forge type, so the declaration is made once per repository
+rather than once per user, which removes the per-worktree friction objection
+entirely. Against adopting it wholesale: TBD already has two established homes
+for per-repo settings (a `repo` column, or a file under
+`~/tbd/repos/<repoID>/`), and a file committed into the *user's* repository is a
+third thing TBD has never done.
 
 **4. What is a repository's identity, now that it is not `(owner, repo)`?**
 GitLab projects nest up to 20 levels. The choices are: keep two columns and
@@ -927,24 +1073,31 @@ not). Treating only the first as red preserves today's meaning; treating the
 second as red is what most GitLab users would expect from their own UI. These
 diverge exactly on projects that do not require pipelines to pass.
 
-**7. What stands in for `reviewDecision`?**
-`NOT_APPROVED` conflates "nobody has approved yet" with "a reviewer objected",
-and TBD currently treats the former as `.mergeable`
-(`PRStatusManager.swift:1166-1167`) and the latter as `.changesRequested` at a
-higher severity. Distinguishing them on GitLab needs either the EE-only
-`changeRequesters` field or a per-reviewer `reviewState` scan. *The fork:* accept
-that GitLab Free cannot express `.changesRequested` at all, or query paid-tier
-fields and degrade when they are unavailable. *Evidence bearing on it:* the
-degradation is graceful on gitlab.com — a free-tier project answered
-`approvalsLeft`/`approvalsRequired` with real numbers and `mergeTrainCar` with
-null, no error — so the "query them and cope" branch is viable there. Whether it
-survives a CE-built self-managed instance is still open, and that is the shape
-that would fail the *whole* query rather than one field.
+**7. Is a single `detailedMergeStatus` switch enough, or does anything else get
+queried?**
+This started as "what stands in for `reviewDecision`", and live introspection
+mostly dissolved it: `DetailedMergeStatus` carries a dedicated
+`REQUESTED_CHANGES` value, so `.changesRequested` has a single-field source with
+no paid-tier field and no per-reviewer scan. git-spice reaches the same
+conclusion in shipped code — its GitLab mergeability reads
+`DetailedMergeStatus` and *nothing else* (see
+[Part 9](#part-9--prior-art-what-other-tools-actually-do)).
 
-Note also that `NOT_APPROVED` is not a rare corner: three of six open merge
-requests sampled on a live public project reported it, and two more reported
-`DISCUSSIONS_NOT_RESOLVED` — a state TBD has no case for at all. Whatever this
-question resolves to will be visible constantly, not occasionally.
+What remains is narrower and still a real fork. TBD's icon also wants to say
+"CI is failing" on a project that does **not** gate merges on pipelines, and
+`detailedMergeStatus` is silent there by construction — it reports merge
+blockers, and a non-blocking pipeline failure is not one. So the question is
+whether to query `headPipeline { status }` alongside, and let it colour the icon
+when the merge status is otherwise clean. *Evidence bearing on it:* it is free
+to ask for, arriving in the same batched response; but adding it means the icon
+no longer means "GitLab will not let this merge", which is the one thing
+`detailedMergeStatus` says precisely. This is the same fork as question 6, seen
+from the other side.
+
+Note the live sampling: three of six open merge requests reported
+`NOT_APPROVED` and two reported `DISCUSSIONS_NOT_RESOLVED` — a state TBD has no
+case for at all. Whatever these questions resolve to will be visible constantly,
+not occasionally.
 
 **8. `glab` subprocess, or direct HTTPS?**
 Laid out in [Part 6](#part-6--the-cli-and-auth-story). The fork is really about
@@ -955,6 +1108,23 @@ route is nearly free to build; but a missing or unauthenticated `glab` fails the
 same silent way a missing forge declaration does, and TBD has no surface today
 that tells a user "your PRs are not updating because a CLI is missing" —
 `PRUndeterminedCause.cliUnavailable` exists (`:15`) but only reaches a tooltip.
+A third option surfaced late: GitLab ships a first-party **MCP server** (beta in
+18.6) that exposes merge-request reads with no CLI on PATH — awkward for a
+daemon poll, since MCP is a per-session agent protocol, but it exists and should
+be dismissed explicitly rather than by omission.
+
+**8b. REST or GraphQL — and this is not the same question as 8.**
+Part 4 measures GraphQL as the cheaper batch on GitLab by a wide margin, and
+that finding rests on its own evidence. But Part 9 finds that **nobody in the
+surveyed ecosystem uses GitLab GraphQL for this** — Renovate and git-spice are
+both REST, and GitLab's own Go SDK is REST-shaped — and supplies the reason it
+might not be mere habit: REST omits an unavailable field and lets the client
+sniff for it, which is exactly how Renovate survives instance variation, while
+GraphQL rejects the entire query for one unknown field. On a 100-node batch that
+turns one schema mismatch into zero merge requests. *The fork:* take the cheaper
+batch and manage the schema coupling (split volatile fields into a second query,
+or probe capability once per host), or take the worn path and pay the per-MR
+pipeline call REST forces.
 
 **9. Does the hook gain a `glab mr create` arm, and what covers push-created
 MRs?**
