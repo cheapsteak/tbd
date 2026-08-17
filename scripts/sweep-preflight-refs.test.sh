@@ -97,22 +97,66 @@ clone_without_namespace() {
   git clone -q --single-branch --branch main "file://$root/origin.git" "$root/clone"
 }
 
-# stub_gh ROOT [OPEN_PR_BRANCHES] — a `gh` on PATH that reports an open PR for
-# each space-separated branch named, and none for anything else. Two knobs stand
-# in for the two ways a real `gh` misbehaves:
+# stub_gh ROOT [OPEN_PR_BRANCHES] [LIVE_RUN_REFS] — a `gh` on PATH answering both
+# questions the sweep asks. `gh pr list --head X` reports an open PR for each
+# space-separated branch in OPEN_PR_BRANCHES; `gh run list --branch X` reports a
+# run for each ref in LIVE_RUN_REFS. Anything else gets no answer.
 #
-#   STUB_GH_FAIL=1  it fails outright — a rate limit, or a token that lost its
-#                   scope.
-#   STUB_GH_WARN=…  it succeeds, prints nothing on stdout, and writes the given
-#                   text to STDERR. That is the shape of every benign `gh`
-#                   message: a deprecation notice, an upgrade nag, a hint about
-#                   a missing default remote.
+# THE RUN LEG RUNS THE REAL `--jq` EXPRESSION. `gh` applies `--jq` internally, so a
+# stub that printed pre-filtered lines would leave the sweep's actual filter —
+# `select(.status != "completed")`, chosen so an unrecognised status reads as
+# in-use — never executed by anything. Instead the stub emits the JSON shape `gh
+# run list --json status` really produces and pipes it through `jq` with whatever
+# expression it was handed. `jq` ships with macOS; a machine without it skips
+# those cases rather than passing them vacuously.
+#
+# Four knobs stand in for the ways a real `gh` misbehaves:
+#
+#   STUB_GH_FAIL=1      every subcommand fails outright — a rate limit, or a
+#                       token that lost its scope.
+#   STUB_GH_WARN=…      `pr list` succeeds, prints nothing on stdout, and writes
+#                       the given text to STDERR. That is the shape of every
+#                       benign `gh` message: a deprecation notice, an upgrade
+#                       nag, a hint about a missing default remote.
+#   STUB_GH_RUN_FAIL=1  only `run list` fails — the `actions: read` scope missing
+#                       from a workflow while `pull-requests: read` is present.
+#   STUB_GH_RUN_WARN=…  only `run list` writes a benign notice to stderr.
+#
+# STUB_GH_RUN_STATUS picks which live status a matching ref reports; the default is
+# `in_progress`.
 stub_gh() {
-  local root="$1" open="${2:-}"
+  local root="$1" open="${2:-}" live="${3:-}"
   mkdir -p "$root/bin"
   cat > "$root/bin/gh" <<STUB
 #!/usr/bin/env bash
 if [[ -n "\${STUB_GH_FAIL:-}" ]]; then echo "API rate limit exceeded" >&2; exit 1; fi
+
+if [[ "\${1:-}" == "run" ]]; then
+  if [[ -n "\${STUB_GH_RUN_FAIL:-}" ]]; then
+    echo "gh: Resource not accessible by integration (HTTP 403)" >&2; exit 1
+  fi
+  if [[ -n "\${STUB_GH_RUN_WARN:-}" ]]; then echo "\$STUB_GH_RUN_WARN" >&2; exit 0; fi
+  branch=""; jq_expr=""
+  while [[ \$# -gt 0 ]]; do
+    case "\$1" in
+      --branch) branch="\$2"; shift ;;
+      --jq)     jq_expr="\$2"; shift ;;
+    esac
+    shift
+  done
+  # The runs this ref has. A matching ref gets one live run plus one completed
+  # one, so the filter has to do real work; a non-matching ref gets the completed
+  # one only.
+  json='[{"status":"completed"}]'
+  for live_ref in $live; do
+    if [[ "\$branch" == "\$live_ref" ]]; then
+      json='[{"status":"'"\${STUB_GH_RUN_STATUS:-in_progress}"'"},{"status":"completed"}]'
+    fi
+  done
+  printf '%s' "\$json" | jq -r "\$jq_expr"
+  exit 0
+fi
+
 if [[ -n "\${STUB_GH_WARN:-}" ]]; then echo "\$STUB_GH_WARN" >&2; exit 0; fi
 head=""
 while [[ \$# -gt 0 ]]; do
@@ -126,6 +170,10 @@ exit 0
 STUB
   chmod +x "$root/bin/gh"
 }
+
+# The run-leg cases need a real `jq`, since the stub applies the sweep's own `--jq`
+# expression rather than faking its output. Echoes "yes" or "no".
+have_jq() { if command -v jq >/dev/null 2>&1; then echo yes; else echo no; fi; }
 
 # refs_on_origin ROOT -> the fixture remote's branch names, sorted, space-joined.
 refs_on_origin() {
@@ -384,6 +432,187 @@ test_an_aged_ref_with_no_pr_is_still_reclaimed() {
   rm -rf "$root"
 }
 
+# --- the live-run guard ------------------------------------------------------
+#
+# THE GUARD THE AGE ONE CANNOT BE. The age a remote ref exposes is its COMMIT's
+# committer date, and the common case is a commit made well before the run that
+# verifies it: an agent commits, and the lane needing a verdict queues for the
+# local slot for minutes or hours first. Such a ref reports an age far past the
+# grace period while a run is checking it out right now. Asking `gh run list`
+# whether anything is using the ref answers that directly, and a ref with a live
+# run is kept however old its commit is.
+
+test_an_aged_ref_with_a_live_run_is_kept() {
+  local root; root="$(mktmpd)"
+  [[ "$(have_jq)" == yes ]] || { echo "ok   - (skipped: no jq)"; return 0; }
+  mkfixture "$root" main preflight/verifying
+  stub_gh "$root" "" "preflight/verifying"
+  run_sweep "$root" --apply
+  assert_contains "kept because a run is using it" "$OUT" "KEEP live-run preflight/verifying"
+  assert_missing "and never planned for deletion" "$OUT" "PLAN delete preflight/verifying"
+  assert_missing "its age was not the reason" "$OUT" "KEEP too-young preflight/verifying"
+  assert_eq "the ref survives its own aged commit" "main preflight/verifying " \
+    "$(refs_on_origin "$root")"
+  assert_eq "and an in-use ref is not a problem" "0" "$RC"
+  rm -rf "$root"
+}
+
+# MUTATION. Drop the live-run check — the shape this sweep shipped with, where the
+# age guard was the only second line — and a ref an in-flight run is about to check
+# out is deleted out from under it.
+test_the_live_run_guard_is_load_bearing() {
+  local root; root="$(mktmpd)"
+  [[ "$(have_jq)" == yes ]] || { echo "ok   - (skipped: no jq)"; return 0; }
+  mkfixture "$root" main preflight/verifying
+  stub_gh "$root" "" "preflight/verifying"
+  run_mutant_sweep "$root" 's/if \[\[ \$run -eq 0 \]\]; then/if false; then/' --apply
+  assert_contains "without it the ref is planned despite the live run" "$OUT" \
+    "PLAN delete preflight/verifying"
+  assert_eq "and taken out from under the run" "main " "$(refs_on_origin "$root")"
+  rm -rf "$root"
+}
+
+# The guard must not become a blanket KEEP. A ref whose runs have all COMPLETED is
+# inert, and a sweep that kept every ref that ever had a run would never reclaim
+# anything.
+test_a_ref_whose_runs_have_all_completed_is_reclaimed() {
+  local root; root="$(mktmpd)"
+  [[ "$(have_jq)" == yes ]] || { echo "ok   - (skipped: no jq)"; return 0; }
+  mkfixture "$root" main preflight/finished
+  # No live refs, so the stub answers with a completed run only.
+  stub_gh "$root"
+  run_sweep "$root" --apply
+  assert_contains "a finished run does not keep the ref" "$OUT" "PLAN delete preflight/finished"
+  assert_missing "and it is not reported as in use" "$OUT" "KEEP live-run"
+  assert_eq "only main is left" "main " "$(refs_on_origin "$root")"
+  assert_eq "and the sweep exits clean" "0" "$RC"
+  rm -rf "$root"
+}
+
+# A STATUS NOBODY HERE HAS HEARD OF READS AS IN USE. The filter negates the one
+# terminal value rather than listing the live ones, so a spelling GitHub adds later
+# fails towards KEEP — one surviving ref for a week — instead of towards a delete
+# under a live run.
+test_an_unrecognised_run_status_is_read_as_in_use() {
+  local root; root="$(mktmpd)"
+  [[ "$(have_jq)" == yes ]] || { echo "ok   - (skipped: no jq)"; return 0; }
+  mkfixture "$root" main preflight/verifying
+  stub_gh "$root" "" "preflight/verifying"
+  export STUB_GH_RUN_STATUS="some_status_invented_in_2027"
+  run_sweep "$root" --apply
+  unset STUB_GH_RUN_STATUS
+  assert_contains "an unknown status keeps the ref" "$OUT" "KEEP live-run preflight/verifying"
+  assert_eq "the ref survives" "main preflight/verifying " "$(refs_on_origin "$root")"
+  rm -rf "$root"
+}
+
+# MUTATION. Name the live statuses instead of negating the terminal one and the
+# same ref is deleted, because its status is not on the list.
+test_negating_the_terminal_status_is_load_bearing() {
+  local root; root="$(mktmpd)"
+  [[ "$(have_jq)" == yes ]] || { echo "ok   - (skipped: no jq)"; return 0; }
+  mkfixture "$root" main preflight/verifying
+  stub_gh "$root" "" "preflight/verifying"
+  export STUB_GH_RUN_STATUS="some_status_invented_in_2027"
+  run_mutant_sweep "$root" \
+    's/select\(\.status != "completed"\)/select(.status == "queued" or .status == "in_progress")/' \
+    --apply
+  unset STUB_GH_RUN_STATUS
+  assert_contains "an allowlist deletes a ref whose status it does not know" "$OUT" \
+    "PLAN delete preflight/verifying"
+  assert_eq "and the run loses its ref" "main " "$(refs_on_origin "$root")"
+  rm -rf "$root"
+}
+
+# A FAILED RUN QUERY IS NOT AN IDLE REF — the same rule `has_open_pr` follows, and
+# the concrete way to hit it is a workflow with `pull-requests: read` but no
+# `actions: read`, where the PR question answers and the run question 403s.
+test_a_failed_run_query_keeps_the_ref_and_reports() {
+  local root; root="$(mktmpd)"
+  [[ "$(have_jq)" == yes ]] || { echo "ok   - (skipped: no jq)"; return 0; }
+  mkfixture "$root" main preflight/orphan
+  stub_gh "$root"
+  export STUB_GH_RUN_FAIL=1
+  run_sweep "$root" --apply
+  unset STUB_GH_RUN_FAIL
+  assert_contains "kept, run state unknown" "$OUT" "KEEP unknown-run-state preflight/orphan"
+  assert_contains "the failure is reported" "$OUT" "gh run list failed for preflight/orphan"
+  assert_eq "the ref survives" "main preflight/orphan " "$(refs_on_origin "$root")"
+  assert_eq "and the sweep exits non-zero" "1" "$RC"
+  rm -rf "$root"
+}
+
+# MUTATION. Fold the failure into "nothing is using it" and a missing `actions:
+# read` scope empties the namespace on the first scheduled pass.
+test_treating_a_failed_run_query_as_unknown_is_load_bearing() {
+  local root; root="$(mktmpd)"
+  [[ "$(have_jq)" == yes ]] || { echo "ok   - (skipped: no jq)"; return 0; }
+  mkfixture "$root" main preflight/orphan
+  stub_gh "$root"
+  export STUB_GH_RUN_FAIL=1
+  run_mutant_sweep "$root" \
+    '/^has_live_run\(\)/,/^\}/ s/if \[\[ \$status -ne 0 \]\]; then/if false; then/' --apply
+  unset STUB_GH_RUN_FAIL
+  assert_contains "a 403 read as 'no run' plans the deletion" "$OUT" \
+    "PLAN delete preflight/orphan"
+  assert_eq "and the namespace is emptied by a permissions mistake" "main " \
+    "$(refs_on_origin "$root")"
+  rm -rf "$root"
+}
+
+# STDOUT ONLY DECIDES HERE TOO. A benign `gh` notice on stderr must not read as a
+# live run — it would still fail safe (KEEP), but the first `gh` release printing
+# one would quietly stop the sweep reclaiming anything.
+test_a_gh_run_stderr_notice_is_not_read_as_a_live_run() {
+  local root; root="$(mktmpd)"
+  [[ "$(have_jq)" == yes ]] || { echo "ok   - (skipped: no jq)"; return 0; }
+  mkfixture "$root" main preflight/orphan
+  stub_gh "$root"
+  export STUB_GH_RUN_WARN="gh: A new release of gh is available"
+  run_sweep "$root" --apply
+  unset STUB_GH_RUN_WARN
+  assert_contains "the orphan is still planned" "$OUT" "PLAN delete preflight/orphan"
+  assert_missing "and not mistaken for a live run" "$OUT" "KEEP live-run"
+  assert_eq "only main is left" "main " "$(refs_on_origin "$root")"
+  assert_eq "the sweep exits clean" "0" "$RC"
+  rm -rf "$root"
+}
+
+# THE CLOSE PATH GETS THE GUARD TOO, and this is the race the finding is about: a
+# lane pushed a preflight ref for a commit made hours ago, dispatched a run, and
+# another agent merges the PR while it is in flight. The commit-date age guard
+# cannot see that; the run query can.
+test_the_close_path_keeps_a_ref_with_a_live_run() {
+  local root; root="$(mktmpd)"
+  [[ "$(have_jq)" == yes ]] || { echo "ok   - (skipped: no jq)"; return 0; }
+  mkfixture "$root" main preflight/verifying
+  stub_gh "$root" "" "preflight/verifying"
+  run_sweep "$root" --apply --branch verifying
+  assert_contains "the close path spares a ref a run is using" "$OUT" \
+    "KEEP live-run preflight/verifying"
+  assert_missing "and never plans it" "$OUT" "PLAN delete preflight/verifying"
+  assert_eq "so the in-flight run keeps its code" "main preflight/verifying " \
+    "$(refs_on_origin "$root")"
+  assert_eq "and sparing it is not a problem" "0" "$RC"
+  rm -rf "$root"
+}
+
+# THE RUN IS ASKED ABOUT UNDER THE REF'S OWN NAME. The valve dispatches against
+# `preflight/<branch>`, never `<branch>`, so a query on the stripped name would
+# find nothing for every ref in the namespace and the guard would be decorative.
+test_the_run_query_uses_the_full_ref_name() {
+  local root; root="$(mktmpd)"
+  [[ "$(have_jq)" == yes ]] || { echo "ok   - (skipped: no jq)"; return 0; }
+  mkfixture "$root" main preflight/verifying
+  # A live run recorded against the STRIPPED name only — which is not where the
+  # valve's run lives, so nothing should match.
+  stub_gh "$root" "" "verifying"
+  run_sweep "$root" --apply
+  assert_contains "a run on the stripped name does not keep the ref" "$OUT" \
+    "PLAN delete preflight/verifying"
+  rm -rf "$root"
+}
+
 # AN AGE THAT CANNOT BE READ IS NOT AN OLD AGE, at the unit level.
 test_commit_time_of_distinguishes_unreadable_from_old() {
   local root; root="$(mktmpd)"
@@ -597,8 +826,23 @@ test_the_empty_branch_name_refusal_is_load_bearing() {
 # The guards above are only reached if the workflow actually delegates. Pinned
 # here because the failure is invisible in this file otherwise: a close path that
 # went back to deleting the ref itself would leave every case above passing.
+WORKFLOW="$HERE/../.github/workflows/preflight-cleanup.yml"
+
+# The trigger the close leg runs on, as a verdict rather than a grep: "base-code"
+# when it is `pull_request_target` and the head-code trigger is absent, "head-code"
+# when `pull_request:` appears as a trigger key, "none" when neither does. Taking a
+# file argument is what lets the mutation case below run it against a copy.
+close_leg_trigger_of() {
+  local body; body="$(cat "$1" 2>/dev/null)"
+  case "$body" in
+    *$'\n  pull_request:'*)        echo "head-code" ;;
+    *$'\n  pull_request_target:'*) echo "base-code" ;;
+    *)                             echo "none" ;;
+  esac
+}
+
 test_the_workflow_close_path_delegates_to_this_sweep() {
-  local body; body="$(cat "$HERE/../.github/workflows/preflight-cleanup.yml" 2>/dev/null)"
+  local body; body="$(cat "$WORKFLOW" 2>/dev/null)"
   assert_contains "the close leg narrows this sweep to the PR's ref" "$body" \
     'bash scripts/sweep-preflight-refs.sh --apply --branch "$HEAD_REF"'
   assert_missing "and deletes nothing itself" "$body" "git push origin --delete"
@@ -607,11 +851,61 @@ test_the_workflow_close_path_delegates_to_this_sweep() {
   assert_contains "the branch name comes from the environment" "$body" \
     'HEAD_REF: ${{ github.event.pull_request.head.ref }}'
   assert_missing "never interpolated into the script" "$body" 'preflight/${{'
-  assert_eq "both legs carry a token" "2" "$(grep -c 'GH_TOKEN:' \
-    "$HERE/../.github/workflows/preflight-cleanup.yml")"
-  # Forks have no preflight ref here and a read-only token, so the leg is skipped.
+  assert_eq "both legs carry a token" "2" "$(grep -c 'GH_TOKEN:' "$WORKFLOW")"
+  # Forks have no preflight ref here, and under `pull_request_target` a fork's
+  # close event would otherwise reach a write-scoped step, so the gate carries
+  # more weight than it did under `pull_request`.
   assert_contains "the fork gate is intact" "$body" \
     "github.event.pull_request.head.repo.full_name == github.repository"
+}
+
+# THE CLOSE LEG MUST RUN THE BASE BRANCH'S CODE. It is the repo's only close-
+# triggered job wanting `contents: write`, and under `pull_request` a same-repo PR
+# would run the workflow AND this sweep as they exist on the PR's HEAD — unreviewed
+# code holding a write-scoped token, outside the review gate. `pull_request_target`
+# runs `main`'s copy of both.
+test_the_close_leg_runs_the_base_branchs_code() {
+  assert_eq "the close leg triggers on pull_request_target" "base-code" \
+    "$(close_leg_trigger_of "$WORKFLOW")"
+  local body; body="$(cat "$WORKFLOW" 2>/dev/null)"
+  # Both `if:` gates have to move with the trigger, or one leg runs never and the
+  # other runs twice.
+  assert_contains "the close leg gates on the new event name" "$body" \
+    "github.event_name == 'pull_request_target'"
+  assert_contains "and the sweep leg excludes the same one" "$body" \
+    "github.event_name != 'pull_request_target'"
+  assert_missing "with no gate left on the old event name" "$body" \
+    "event_name == 'pull_request'"
+  # And no `ref:` on the checkout, which would put the head's code back in the
+  # job that holds the token. Comment lines are stripped first: the workflow names
+  # that mistake in prose in order to warn about it, and a substring search over
+  # the whole file would find its own warning.
+  assert_eq "the checkout takes no explicit head ref" "0" \
+    "$(grep -v '^[[:space:]]*#' "$WORKFLOW" | grep -c 'pull_request\.head\.sha')"
+}
+
+# MUTATION. Put the head-code trigger back and the verdict flips, so the pin above
+# is reading the trigger rather than merely finding the word somewhere in a comment.
+test_the_base_code_trigger_check_discriminates() {
+  local copy; copy="$MUTANT_DIR/workflow.yml"
+  sed -e 's/^  pull_request_target:$/  pull_request:/' "$WORKFLOW" > "$copy"
+  assert_eq "a workflow triggered on pull_request reads as head-code" "head-code" \
+    "$(close_leg_trigger_of "$copy")"
+  assert_eq "and the real one does not" "base-code" "$(close_leg_trigger_of "$WORKFLOW")"
+}
+
+# THE SWEEP'S QUESTIONS NEED SCOPES, AND A DECLARED `permissions:` BLOCK SETS
+# EVERY UNLISTED ONE TO `none`. `gh run list` is the guard that covers the window
+# a commit date cannot see, and without `actions: read` every one of its queries
+# 403s — which lands as "unknown", keeping every ref, so the sweep silently stops
+# reclaiming rather than failing loudly.
+test_the_workflow_grants_the_scopes_both_queries_need() {
+  local body; body="$(cat "$WORKFLOW" 2>/dev/null)"
+  assert_contains "contents: write, to delete refs" "$body" "contents: write"
+  assert_contains "pull-requests: read, for gh pr list" "$body" "pull-requests: read"
+  assert_contains "actions: read, for gh run list" "$body" "actions: read"
+  # And the sweep really does ask that question, so the scope is not decorative.
+  assert_contains "the sweep asks about runs" "$(cat "$SWEEP")" "gh run list --branch"
 }
 
 test_an_unknown_argument_refuses() {

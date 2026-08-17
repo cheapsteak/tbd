@@ -75,6 +75,47 @@ BUILD_DEADLINE_S=1800
 SWIFT_LOCK_TIMEOUT_S=1800
 SWIFT_DEADLINE_GRACE_S=30
 
+# THE REMOTE VERIFICATION VALVE IS TURNED OFF FOR EVERY RUN THIS HARNESS
+# GOVERNS, AND THE RIGHT FIX WAS "DON'T", NOT "WIDEN THE DEADLINE".
+# (docs/specs/2026-08-16-remote-verification-valve-design.md.)
+#
+# `scripts/test.sh` opts into the valve when `TBD_REMOTE_VERIFY=1` is in its
+# environment, and this harness invokes `test.sh`. So a night started from a shell
+# that had the valve exported would route iterations to GitHub — and that is wrong
+# on the merits before it is wrong on any deadline:
+#
+#   THIS HARNESS MEASURES LOCAL FLAKINESS UNDER CONTENTION. That is its entire
+#   purpose: reproduce #503's regime — spinners pinning the cores, several agents'
+#   compiles queueing on the machine-global lock — and see which suites come apart
+#   under it. An iteration that leaves the local queue and gets its verdict from a
+#   quiet CI runner measures NOTHING this program was built to measure, and it
+#   scores a green for a regime nobody was testing.
+#
+# Two concrete ways the routed iteration also breaks the reporting, recorded so
+# nobody "fixes" them by widening a bound instead:
+#
+#   THE OUTER DEADLINE CANNOT COVER A ROUND TRIP. `governed_outer_deadline` is
+#   sized for lock wait + local execution — 1800 + 600 + 30 = 2430s. A valve round
+#   trip is the yield (up to 300s), then correlating the dispatched run (up to
+#   180s), then the run itself (ceiling ~2700s): past 3100s. The iteration is
+#   killed at 2430, scored rc=124, and reported as "FAIL wedged" — a false red
+#   attributed to a wedged test, which is exactly the diagnosis this harness exists
+#   to produce truthfully.
+#
+#   THE SIGNATURES WOULD NAME THE WRONG TESTS. `failing_tests_from` greps the
+#   iteration log for failure markers, and on the narrowed-red path the valve
+#   prints the WHOLE suite's failures into that same log before the local re-run
+#   happens. A failing iteration's "Signatures" block would then name tests outside
+#   the target's filter and attach them to that target's GitHub issue.
+#
+# `TBD_REMOTE_VERIFY=0` because `test.sh` tests it against the literal `1`;
+# clearing `TBD_SWIFT_QUEUE_YIELD_SECONDS` because it is a documented `swift-safe`
+# knob in its own right, and an inherited one would make the test leg yield 76
+# with the valve off — a status `test.sh` then propagates, and `judge_iteration`
+# reads as a truncated log. Both are ASSIGNED rather than left alone: an inherited
+# value must not decide what this harness measures.
+NO_VALVE_ENV=(TBD_REMOTE_VERIFY=0 TBD_SWIFT_QUEUE_YIELD_SECONDS=)
+
 SPINNER_PIDS=()
 REPORT_DIR=""
 FAILED_TARGETS=0
@@ -182,6 +223,7 @@ run_governed_swift() {
   local command_deadline_s="$1" log="$2"; shift 2
   local outer_deadline_s; outer_deadline_s="$(governed_outer_deadline "$command_deadline_s")"
   run_with_deadline "$outer_deadline_s" "$log" env \
+    "${NO_VALVE_ENV[@]}" \
     TBD_SWIFT_LOCK_TIMEOUT_SECONDS="$SWIFT_LOCK_TIMEOUT_S" \
     "$SCRIPT_DIR/swift-safe" "$@"
 }
@@ -197,10 +239,15 @@ run_governed_swift() {
 # sibling worktree's, which is the load this harness is trying to CONTROL rather
 # than add to. This harness is documented for local use, where an unfenced run
 # would write into the real config dirs.
+#
+# `NO_VALVE_ENV` matters most on THIS leg, because `test.sh` is the only caller
+# that opts into the remote verification valve. See its definition above for why
+# an iteration must never route.
 run_governed_fenced() {
   local command_deadline_s="$1" log="$2"; shift 2
   local outer_deadline_s; outer_deadline_s="$(governed_outer_deadline "$command_deadline_s")"
   run_with_deadline "$outer_deadline_s" "$log" env \
+    "${NO_VALVE_ENV[@]}" \
     TBD_SWIFT_LOCK_TIMEOUT_SECONDS="$SWIFT_LOCK_TIMEOUT_S" \
     "$SCRIPT_DIR/test.sh" "$@"
 }

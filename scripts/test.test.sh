@@ -1071,7 +1071,9 @@ test_a_bad_bound_is_ignored_while_the_valve_is_off() {
 # with its own code and its own name, and must not start a run at all.
 test_a_bad_bound_fails_loudly_rather_than_as_a_red_suite() {
   local fix bound
-  for bound in 0 0.0 .0 00 -5 nan inf later ""; do
+  # The EMPTY value is deliberately not in this list; see
+  # `test_an_empty_bound_means_unset_rather_than_a_refusal`.
+  for bound in 0 0.0 .0 00 -5 nan inf later; do
     fix="$(mkfix)"
     RUN_ENV=(TBD_REMOTE_VERIFY=1 TBD_REMOTE_VERIFY_YIELD_SECONDS="$bound")
     run_wrapper "$fix"
@@ -1082,6 +1084,45 @@ test_a_bad_bound_fails_loudly_rather_than_as_a_red_suite() {
     assert_eq "and no suite is started" "0" "$(swift_invocations "$fix")"
     rmfix "$fix"
   done
+}
+
+# EMPTY IS THE ABSENCE OF A VALUE, NOT A TYPO, and it is the one spelling that
+# must NOT join the list above. `TBD_REMOTE_VERIFY_YIELD_SECONDS=` is how a shell
+# clears an inherited value, how `env VAR=` arrives, and what an unquoted
+# `"$maybe_unset"` expands to — and it is not how the valve gets turned off, which
+# is `TBD_REMOTE_VERIFY` unset and never reaches the bound at all. So a refusal
+# here could only be answering a caller who meant "use the default", and the price
+# would be paid somewhere else entirely: `scripts/git-hooks/pre-push` runs this
+# wrapper to decide whether a push may proceed, and an exit of 64 there BLOCKS THE
+# PUSH.
+test_an_empty_bound_means_unset_rather_than_a_refusal() {
+  local fix; fix="$(mkfix)"
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 TBD_REMOTE_VERIFY_YIELD_SECONDS=)
+  run_wrapper "$fix"
+  RUN_ENV=()
+  assert_ok "an empty bound runs rather than exiting 64" "$RUN_RC"
+  assert_missing "and nothing is said about the variable" "$RUN_OUT" \
+    "TBD_REMOTE_VERIFY_YIELD_SECONDS must"
+  assert_contains "the default is used" "$(dump_of "$fix")" \
+    "TBD_SWIFT_QUEUE_YIELD_SECONDS=$DEFAULT_YIELD_SECONDS"
+  rmfix "$fix"
+}
+
+# MUTATION, IN THE DIRECTION THIS DECISION WAS MADE AGAINST. Spell the expansion
+# `-` instead of `:-` — substituting only for an UNSET variable — and the empty
+# string reaches the validator, which refuses it with the code that blocks a push.
+test_the_empty_bound_defaulting_is_load_bearing() {
+  local fix mutant; fix="$(mkfix)"
+  mutant="$(mutant_of "$SCRIPT" \
+    's/\$\{TBD_REMOTE_VERIFY_YIELD_SECONDS:-\$DEFAULT_REMOTE_VERIFY_YIELD_SECONDS\}/${TBD_REMOTE_VERIFY_YIELD_SECONDS-$DEFAULT_REMOTE_VERIFY_YIELD_SECONDS}/')"
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 TBD_REMOTE_VERIFY_YIELD_SECONDS=)
+  run_script "$mutant" "$fix"
+  RUN_ENV=()
+  assert_eq "with a bare dash an empty bound exits 64" "64" "$RUN_RC"
+  assert_contains "and a pre-push would be blocked over it" "$RUN_OUT" \
+    "TBD_REMOTE_VERIFY_YIELD_SECONDS must"
+  assert_eq "with no suite started at all" "0" "$(swift_invocations "$fix")"
+  rmfix "$fix"
 }
 
 # MUTATION. Without the check the same value reaches `swift-safe`, which exits
@@ -1318,7 +1359,8 @@ test_the_fallback_bound_clearing_is_load_bearing() {
 
 test_narrows_the_suite_recognises_both_spellings() {
   local arg
-  for arg in --filter --skip --disable-xctest --disable-swift-testing; do
+  for arg in --filter --skip --specifier -s --disable-xctest --disable-swift-testing \
+             --test-product --list-tests list; do
     narrows_the_suite "$arg"
     assert_ok "[$arg] narrows" "$?"
     narrows_the_suite "$arg=Foo"
@@ -1326,7 +1368,8 @@ test_narrows_the_suite_recognises_both_spellings() {
     narrows_the_suite --parallel -j 2 "$arg" Foo
     assert_ok "[$arg] narrows wherever it appears" "$?"
   done
-  for arg in --parallel --no-parallel -j --enable-code-coverage --verbose; do
+  for arg in --parallel --no-parallel -j --enable-code-coverage --verbose \
+             --enable-xctest --enable-swift-testing --num-workers --xunit-output; do
     narrows_the_suite "$arg"
     assert_nonzero "[$arg] does not narrow" "$?"
   done
@@ -1335,6 +1378,84 @@ test_narrows_the_suite_recognises_both_spellings() {
   # A value that merely looks like one of the names is not one of them.
   narrows_the_suite --parallel '^--filterTests\.'
   assert_nonzero "a regex mentioning a flag name does not narrow" "$?"
+}
+
+# THE LIST IS CHECKED AGAINST THE TOOLCHAIN, NOT AGAINST MEMORY. Every name here
+# is one this `swift-test` binary actually accepts — read out of its own strings,
+# since invoking SwiftPM to ask would take the machine-global build slot. A name
+# that does not exist costs nothing; a name that exists and is MISSING is the
+# expensive direction, because the run it fails to recognise adopts a whole-suite
+# failure as its own and reports tests the caller excluded.
+#
+# `--test-product` was the omission this case was written for: it restricts the
+# run to one test product, which on a multi-product package is the largest
+# reduction on offer, and SwiftPM names the flag itself in its "found multiple
+# test products" diagnostic.
+test_the_narrowing_list_names_only_real_swift_test_options() {
+  local swift_test missing=""
+  swift_test="$(xcrun -f swift-test 2>/dev/null || command -v swift-test || true)"
+  if [ -z "$swift_test" ] || [ ! -e "$swift_test" ]; then
+    echo "ok   - (skipped: no swift-test binary to read)"
+    return 0
+  fi
+  # ArgumentParser derives a long name from a property name or a `customLong`, so
+  # the string in the binary is sometimes the camelCase property (`testProduct`)
+  # and sometimes the flag's own stem (`specifier`, `xctest`). Each entry is
+  # looked for in whichever shape that toolchain stores it.
+  #
+  # STRINGS GOES TO A FILE FIRST, and that is not tidiness. This harness runs
+  # under `pipefail`, and `strings … | grep -q` closes the pipe on the first match
+  # — `strings` then dies of SIGPIPE and the PIPELINE reports 141 even though grep
+  # matched, so every needle would look missing. That failure looked exactly like
+  # a toolchain with none of these options.
+  local dump; dump="$(mktmpd)/swift-test.strings"
+  strings -a "$swift_test" > "$dump"
+  local -a needles=(testProduct specifier --list-tests filter skip xctest swift-testing)
+  local needle
+  for needle in "${needles[@]}"; do
+    grep -xF -- "$needle" "$dump" >/dev/null || missing="$missing $needle"
+  done
+  assert_eq "every narrowing name has a counterpart in the toolchain" "" "$missing"
+  # And the list in the script really carries them, so the check above is not
+  # asserting against a list that has drifted away from the one in use.
+  local body; body="$(cat "$SCRIPT")"
+  assert_contains "the script's list carries --test-product" "$body" "--test-product"
+  assert_contains "and --list-tests" "$body" "--list-tests"
+  assert_contains "and the deprecated --specifier with its short form" "$body" \
+    "--specifier -s"
+}
+
+# END TO END, THROUGH THE VERDICT INTERPRETATION. `--test-product` has to reach
+# the same reading `--filter` gets: a red whole-suite verdict is unattributable, so
+# the narrowed suite is re-run locally and THAT verdict is the run's.
+test_a_test_product_narrowed_run_reads_a_red_verdict_as_unattributable() {
+  local fix; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC="76 3" FAKE_REMOTE_VERIFY_RC=1
+           FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
+  run_with_valve "$fix" "$SCRIPT" --test-product TBDPackageTests
+  RUN_ENV=()
+  assert_eq "the LOCAL verdict is reported, not the remote 1" "3" "$RUN_RC"
+  assert_eq "the narrowed suite was re-run locally" "2" "$(swift_invocations "$fix")"
+  assert_contains "and the reason names the mismatch" "$RUN_OUT" \
+    "remote WHOLE-SUITE run failed"
+  rmfix "$fix"
+}
+
+# MUTATION. Drop `--test-product` back out of the list — the state this case was
+# written against — and the same run adopts a whole-suite failure as one test
+# product's result, naming tests the caller never asked to run.
+test_including_test_product_in_the_narrowing_list_is_load_bearing() {
+  local fix mutant; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  mutant="$(mutant_of "$SCRIPT" 's/^  --test-product$//')"
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC="76 3" FAKE_REMOTE_VERIFY_RC=1
+           FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
+  run_with_valve "$fix" "$mutant" --test-product TBDPackageTests
+  RUN_ENV=()
+  assert_eq "without the entry the remote 1 is adopted" "1" "$RUN_RC"
+  assert_eq "and the one product is never re-run" "1" "$(swift_invocations "$fix")"
+  assert_missing "with nothing said about attribution" "$RUN_OUT" \
+    "WHOLE-SUITE run failed"
+  rmfix "$fix"
 }
 
 # NARROWED + GREEN — the sound direction, adopted. The whole suite passing

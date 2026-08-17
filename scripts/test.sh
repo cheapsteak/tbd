@@ -352,7 +352,38 @@ valid_yield_bound() {
 # false negative adopts a whole-suite failure as a narrowed run's result, naming
 # tests the caller excluded. So anything that plausibly reduces what runs belongs
 # here.
-SUITE_NARROWING_ARGS=(--filter --skip --disable-xctest --disable-swift-testing)
+#
+# THE ENTRIES, AND WHY EACH ONE IS ON THE LIST. Read out of this toolchain's own
+# `swift-test` binary rather than remembered, because a name that does not exist
+# costs nothing and a name that does and is missing is the expensive direction:
+#
+#   --filter / --skip           select and deselect test cases by regex.
+#   --specifier / -s            the deprecated spelling of `--filter` (the
+#                               binary still carries `'--specifier' option is
+#                               deprecated; use '--filter' instead`), so a
+#                               caller using it narrows exactly as much.
+#   --disable-xctest            drops a whole testing library's cases.
+#   --disable-swift-testing
+#   --test-product              restricts the run to ONE test product, which on
+#                               a multi-product package is the largest reduction
+#                               available. The binary names it itself: "found
+#                               multiple test products: …; use --test-product to
+#                               select one".
+#   --list-tests                the extreme case — it runs NOTHING and only
+#                               prints method names. A whole-suite verdict is not
+#                               an answer to that question in either direction.
+#   list                        `swift test list` is the same thing as a
+#                               subcommand. It is a bare word rather than a
+#                               flag, so it matches a `--filter list` value too;
+#                               that is a false positive, and false positives
+#                               are the cheap direction.
+SUITE_NARROWING_ARGS=(
+  --filter --skip
+  --specifier -s
+  --disable-xctest --disable-swift-testing
+  --test-product
+  --list-tests list
+)
 
 narrows_the_suite() {
   local arg known
@@ -412,7 +443,29 @@ caller_narrowed=0
 fenced_env=()
 if [ "${TBD_REMOTE_VERIFY:-}" = "1" ]; then
   remote_verify_enabled=1
-  yield_seconds="${TBD_REMOTE_VERIFY_YIELD_SECONDS-$DEFAULT_REMOTE_VERIFY_YIELD_SECONDS}"
+  # `:-`, SO AN EMPTY VALUE MEANS "NOT SET" RATHER THAN FAILING THE RUN. The
+  # alternative — a bare `-`, which substitutes only for an UNSET variable — sends
+  # the empty string to the validator, which refuses it and exits 64. That is the
+  # wrong trade in three directions:
+  #
+  #   - Empty conventionally means unset in shell. `TBD_REMOTE_VERIFY_YIELD_SECONDS=`
+  #     is how a script clears an inherited value, and how `env VAR=` and an
+  #     unquoted `"$maybe_unset"` both arrive. Refusing it makes clearing a knob
+  #     an error.
+  #   - Nothing needs empty to be an error, because empty is not how the valve is
+  #     turned off — that is `TBD_REMOTE_VERIFY` unset, which never reaches this
+  #     block at all. So a refusal here cannot be protecting a caller who meant
+  #     "do not go remote"; it can only be answering a caller who meant "use the
+  #     default".
+  #   - The cost of refusing is not confined to this script. `scripts/git-hooks/
+  #     pre-push` runs the suite to decide whether a push may proceed, and an exit
+  #     of 64 there BLOCKS THE PUSH — over an empty knob that asked for nothing.
+  #
+  # The validator still refuses empty, and that is deliberate: it is the guard for
+  # a value somebody actually typed. `0`, `nan` and `later` are typos with an
+  # intent behind them and must be named; empty is the absence of a value, and the
+  # two do not want the same answer.
+  yield_seconds="${TBD_REMOTE_VERIFY_YIELD_SECONDS:-$DEFAULT_REMOTE_VERIFY_YIELD_SECONDS}"
   if ! valid_yield_bound "$yield_seconds"; then
     echo "test.sh: TBD_REMOTE_VERIFY_YIELD_SECONDS must be a positive number" >&2
     echo "         (decimal digits, at most one point), got: '$yield_seconds'" >&2

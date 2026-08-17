@@ -13,42 +13,61 @@
 # PR closes; this sweep reclaims every ref that path missed.
 #
 # A `preflight/<branch>` ref is KEPT when it is still plausibly in use, which is
-# two conditions rather than one:
+# three conditions rather than one:
 #
 #   - **An open PR names it.** Either `<branch>` or the ref's own full name has
 #     one; see `has_open_pr_for_any` for why both are asked about. The lane may
 #     dispatch against it again at any moment.
+#   - **A workflow run is using it.** A run against `preflight/<branch>` that has
+#     not reached `completed` may not have checked out the code yet, so deleting
+#     the ref under it fails the run. This is asked directly rather than inferred;
+#     see `has_live_run`.
 #   - **It is younger than `MIN_AGE_SECONDS`.** The driver pushes
 #     `preflight/<branch>` for every lane, including one whose branch has no PR
 #     at all, so a brand-new ref is otherwise eligible for deletion the instant
-#     it exists — and this sweep could land between the push and the dispatch
-#     that consumes it.
+#     it exists.
 #
 # Everything else in the namespace is inert and gets deleted.
 #
-# WHAT THE AGE GUARD MEASURES, AND WHAT IT THEREFORE CANNOT SEE. There is no
-# push timestamp on a remote ref, so the age used here is the COMMIT's committer
-# date. That is a sound one-way implication: a ref cannot have been pushed before
-# its commit existed, so a commit younger than the grace period guarantees a ref
-# younger than it. The converse does not hold — a lane re-verifying a branch it
-# has not touched today pushes an old commit, and that ref is not spared. The
-# residual is small and its cost is bounded: the window is push → dispatch →
-# checkout (runner pickup is 3s at p90, and a ref deleted after checkout cannot
-# disturb a run that already has the code), and a lane whose dispatch fails
-# falls back to the local queue rather than reporting a wrong verdict.
+# THE TWO GUARDS COVER DISJOINT HALVES OF ONE WINDOW, WHICH IS WHY BOTH ARE HERE.
+# The exposure runs push → dispatch → checkout:
+#
+#   - Between the PUSH and the DISPATCH there is no run to ask about yet, so the
+#     live-run query answers "none" for a ref that is about to be used. Only the
+#     age guard spares it.
+#   - After the DISPATCH the run exists, and the age guard is the weaker half:
+#     the age it can observe is the COMMIT's committer date, since a remote ref
+#     carries no push timestamp. A commit younger than the grace period does
+#     imply a ref younger than it, but the converse fails, and it fails in the
+#     COMMON case rather than an exotic one — an agent commits, and the run
+#     needing verification happens minutes or hours later, so a ref pushed
+#     seconds ago reports an age well past the grace period. The live-run query
+#     is what spares that ref.
+#
+# HOW WIDE THAT WINDOW REALLY IS. Not seconds. Runner pickup measured at 3s at
+# p90 on an idle account, but the valve fires precisely when the local machine is
+# at capacity, and past roughly two concurrent runs everything queues on GitHub's
+# side — five concurrent macOS jobs per account, two per `test.yml` run. The
+# realistic dispatch → checkout window is minutes, which is why "the age guard
+# plus a short grace period" was not a sufficient bound on its own.
+#
+# WHAT A DELETED-TOO-EARLY REF ACTUALLY COSTS. The run fails at
+# `actions/checkout`, produces no results artifact, and the driver treats a
+# missing artifact as a refusal — so the lane falls back to a local run rather
+# than reporting a wrong verdict. The verdict is safe; what is wasted is a scarce
+# macOS slot and a lane's whole round trip, and that is worth a query to avoid.
 #
 # DRY RUN IS THE DEFAULT. This deletes refs on a shared remote, so it prints its
 # plan and does nothing until `--apply` says otherwise.
 #
 # `--branch <name>` NARROWS THE PASS TO ONE REF, AND IS WHY THE CLOSE PATH IS
 # NOT ITS OWN DELETE. A PR closing reclaims its own `preflight/<branch>` through
-# this script rather than with a `git push --delete` of its own, so both guards
-# above apply on both legs and live in exactly one place. The age guard is the
-# one that matters there: in a fleet of forty worktrees "another agent merges
-# this PR while a lane verifies against it" is ordinary, and an unguarded close
-# path deletes the ref between the dispatch and `actions/checkout`, failing a run
-# that was about to pass. A ref this leg spares for its age is inert by then and
-# the weekly pass takes it.
+# this script rather than with a `git push --delete` of its own, so all three
+# guards above apply on both legs and live in exactly one place. They matter most
+# there: in a fleet of forty worktrees "another agent merges this PR while a lane
+# verifies against it" is ordinary, and an unguarded close path deletes the ref
+# between the dispatch and `actions/checkout`, wasting a run that was about to
+# pass. A ref this leg spares is inert soon after and the weekly pass takes it.
 #
 # The name only ever FILTERS. Every branch acted on is read back out of
 # `git ls-remote`, so an argument that names nothing deletes nothing — which
@@ -67,11 +86,13 @@
 REMOTE="origin"
 NAMESPACE="preflight/"
 
-# THE GRACE PERIOD, SIZED AGAINST A RUN RATHER THAN AGAINST TIDINESS. The
-# valve's worst observed end-to-end remote run is 1910s and its ceiling is
-# ~2700s, so an hour clears a whole run with room to spare. Nothing is lost by
-# being generous: a ref that outlives its usefulness by an hour costs one line
-# in a namespace, and this sweep runs again.
+# THE GRACE PERIOD — THE SECOND LINE, AND THE ONLY ONE THAT COVERS PUSH →
+# DISPATCH. `has_live_run` answers the in-use question directly once a run exists;
+# before one does, this is what spares a ref. Sized against a run rather than
+# against tidiness: the valve's worst observed end-to-end remote run is 1910s and
+# its ceiling is ~2700s, so an hour clears a whole one with room to spare. Nothing
+# is lost by being generous — a ref that outlives its usefulness by an hour costs
+# one line in a namespace, and this sweep runs again.
 MIN_AGE_SECONDS=3600
 
 log() { printf '%s\n' "$*" >&2; }
@@ -148,6 +169,38 @@ has_open_pr_for_any() {
     return 2
   fi
   return 1
+}
+
+# has_live_run REF_BRANCH -> 0 a workflow run is using this ref, 1 none is, 2 the
+# query itself failed.
+#
+# THE QUESTION THE AGE GUARD CANNOT ANSWER, ASKED DIRECTLY. `gh run list --branch`
+# reports the runs GitHub has for a ref, so "is anything using it?" needs no
+# inference from a commit date at all. A ref with a live run is KEPT regardless of
+# how old its commit is, which is the case the age guard gets wrong every time an
+# agent verifies a commit it made an hour ago.
+#
+# THE FILTER IS `!= "completed"`, NOT A LIST OF THE LIVE STATUSES. The API's `status`
+# is one of `queued`, `in_progress`, `waiting`, `requested`, `pending` or
+# `completed`, and new spellings have been added before. Naming the live ones would
+# make a status nobody here has heard of read as "not in use" — a DELETE. Negating
+# the one terminal value makes every unknown read as "in use", which is a KEEP, and
+# the cost of a false keep is one surviving ref for a week.
+#
+# STDOUT ONLY DECIDES, and a failed query is its own outcome — the same two rules
+# `has_open_pr` is built on, and for the same reasons: a benign `gh` notice on
+# stderr must not read as a live run, and a rate limit must not read as an idle
+# ref. This one also needs `actions: read` in any workflow that calls it; without
+# it every query 403s, which lands here as "unknown" and keeps every ref.
+has_live_run() {
+  local live status=0
+  live="$(gh run list --branch "$1" --limit 50 --json status \
+            --jq '.[] | select(.status != "completed") | .status')" || status=$?
+  if [[ $status -ne 0 ]]; then
+    log "gh run list failed for $1 (exit $status); gh's own message is above"
+    return 2
+  fi
+  [[ -n "${live//[[:space:]]/}" ]]
 }
 
 # commit_time_of SHA -> the commit's committer time as a unix timestamp, or
@@ -259,9 +312,11 @@ main() {
     fetch_namespace_objects "${refs[@]}"
   fi
 
-  # PASS TWO — decide each ref. The PR question is asked before the age one so
-  # that an in-use ref is reported as such rather than as merely young.
-  local i sha pr committed now age
+  # PASS TWO — decide each ref. The questions are asked in order of how directly
+  # they answer "is this in use?", so a ref that is kept is reported with the
+  # strongest reason that applies rather than with whichever guard fired first: an
+  # open PR, then a live run, then merely being young.
+  local i sha pr run committed now age
   now="$(date +%s)"
   for (( i = 0; i < ${#refs[@]}; i++ )); do
     ref="${refs[$i]}"
@@ -275,6 +330,21 @@ main() {
     fi
     if [[ $pr -eq 2 ]]; then
       echo "KEEP unknown-pr-state $NAMESPACE$branch"
+      problems=1
+      continue
+    fi
+    # THE REF'S OWN NAME IS THE ONE A RUN IS ATTACHED TO. The valve dispatches
+    # against `preflight/<branch>`, never against `<branch>`, so this asks about
+    # the full ref name rather than the stripped one `has_open_pr_for_any` also
+    # tries.
+    run=0
+    has_live_run "$NAMESPACE$branch" || run=$?
+    if [[ $run -eq 0 ]]; then
+      echo "KEEP live-run $NAMESPACE$branch"
+      continue
+    fi
+    if [[ $run -eq 2 ]]; then
+      echo "KEEP unknown-run-state $NAMESPACE$branch"
       problems=1
       continue
     fi
