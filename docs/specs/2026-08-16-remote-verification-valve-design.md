@@ -111,9 +111,11 @@ its value:
   a solo compile ranges from seconds when warm to many minutes when cold — there
   is no defensible number. Queue time has no legitimate variance: every second
   spent queued is a second of nothing.
-- **The exit path already exists.** `_acquire` abandons a wait and returns
-  without starting a build when its requester dies. Crossing T is a second reason
-  to take that same path.
+- **The machinery already exists.** `_acquire` can already leave a wait without
+  starting a build, which is how it handles a requester that died. Crossing T
+  reuses that shape but reports it as its own status: an abandoned wait wants
+  nothing, while a yielded one wants a verdict from somewhere else, and a caller
+  that could not tell them apart would dispatch for a lane that has gone away.
 
 Because forty lanes run one uniform rule, the second pool is what prevents a
 stampede. Without it, every queued lane would dispatch at once into a queue two
@@ -255,8 +257,9 @@ fan-out on every iteration; GitHub minutes are free, but Claude quota is not, an
 it is the only metered resource in this loop.
 
 Because every pushable ref is a throwaway in a swept namespace, the push is
-always a force-push, and the driver additionally refuses outright when the
-current branch is the repository's default.
+always a force-push. The default-branch refusal sits further out still, in the
+front-end that checks preconditions, so it answers before anything contacts
+GitHub at all.
 
 `test.yml` gains a `workflow_dispatch` trigger. It has none otherwise, so nothing
 can ask for a run on demand.
@@ -268,10 +271,49 @@ daemon change, no `config` column. Per the placement rule in `CLAUDE.md`, the
 daemon compiles only what user-land cannot do well, and a wrapper script deciding
 where to run a build is squarely user-land.
 
-The valve ships behind an environment flag that defaults to off, so an unset
-environment behaves exactly as today. It acts without a user gesture and pushes
-refs, which is what the default-off rule exists for. Graduation is a change to
-the default once the soak shows the routing behaves.
+The valve ships behind `TBD_REMOTE_VERIFY`, which defaults to off: unset, every
+path behaves exactly as it did before the valve existed, and no bound is
+forwarded. It acts without a user gesture and force-pushes refs, which is what
+the default-off rule exists for.
+
+**Enabling it for the soak** is `export TBD_REMOTE_VERIFY=1` in the shell whose
+`scripts/test.sh` runs should be eligible. Four knobs tune it, each with the
+shipped default: `TBD_REMOTE_VERIFY_YIELD_SECONDS` (300) is T;
+`TBD_REMOTE_VERIFY_SLOTS` (2) is the dispatch ticket count, sized to the macOS
+job cap; `TBD_REMOTE_VERIFY_COMMAND_SECONDS` (300) bounds each `git` or `gh`
+call; and `TBD_REMOTE_VERIFY_ALLOW_ORPHAN=1` disables the requester-liveness
+check for a run deliberately detached. A run may take at most 45 minutes end to
+end, and at most 50 failures are rendered.
+
+**Graduation** flips that default only once a soak shows three things, because
+each is a way the valve can be quietly worse than waiting: that a green remote
+verdict never stood in for a suite that did not run, that a red one never named
+tests outside the caller's request, and that the ticket pool was the binding
+constraint rather than GitHub's queue. Until then it stays opt-in. The flag is
+deleted, rather than flipped, if the soak shows the valve fires too rarely to
+matter — at T=300 it is expected to fire four or five times an hour against
+roughly fifty-five queueing episodes.
+
+### The exit contract
+
+Three statuses carry the whole design, and conflating any two of them produces a
+wrong answer rather than a degraded one:
+
+- **75** — the wait timed out, or its requester died. Not a reason to go remote:
+  nobody is waiting for the result in the second case, and the first has already
+  spent its whole budget.
+- **76** — the wait yielded at T, having compiled nothing. This is the only status
+  that routes, and it is deliberately distinct from 75 so that a timeout can never
+  be mistaken for an invitation to dispatch.
+- **78** — the remote path refused, or returned no verdict at all. Always a
+  fallback to a local run, never a failure: the valve is an optimisation, and a
+  refusal that failed the run would make it a gate.
+
+Anything outside that contract — a missing driver's 127, an interrupt's 130 — is
+treated as a refusal rather than adopted, because the alternative is reporting an
+unrelated status as a test result. `TBD_SWIFT_QUEUE_YIELD_SECONDS` carries T to
+the wrapper and is honoured only for the `test` subcommand: `build` and `run`
+produce artifacts someone is waiting for, and their callers do not understand 76.
 
 ## Who reclaims the orphans
 
