@@ -70,7 +70,10 @@ extension ClaudeCloudInvoker {
             // armed by `ProviderRunError`, and the pending row above is what
             // makes that retry safe.
             throw ProviderRunError.timeout(verb: "create")
-        case let .completed(status, output):
+        // `create` runs on a pty, so the two streams already merged into
+        // `output`; the separate pipe-mode `stderr` field is always empty
+        // here and unused.
+        case let .completed(status, output, _):
             guard status == 0 else {
                 return Self.errorResult(
                     exitCode: 1, code: "unreachable",

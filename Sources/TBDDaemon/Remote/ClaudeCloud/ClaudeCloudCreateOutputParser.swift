@@ -99,7 +99,7 @@ enum ClaudeCloudCreateOutputParser {
     /// CLI's output is not a size TBD controls.
     static func failureMessage(_ failure: ParseFailure, received raw: String) -> String {
         let stripped = ANSIEscape.strip(raw).trimmingCharacters(in: .whitespacesAndNewlines)
-        let quoted = stripped.count > 400 ? String(stripped.prefix(399)) + "…" : stripped
+        let quoted = ClaudeCloudTextBounding.truncated(stripped, limit: 400)
         switch failure {
         case .noSessionID:
             return "claude --cloud printed no session id; received: \(quoted)"

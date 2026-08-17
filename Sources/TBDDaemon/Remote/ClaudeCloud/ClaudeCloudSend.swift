@@ -26,10 +26,9 @@ enum ClaudeCloudSendPayload {
 private struct ClaudeCloudSendReply: Decodable {
     let ok: Bool?
     let sessionID: String?
-    let url: String?
 
     enum CodingKeys: String, CodingKey {
-        case ok, url
+        case ok
         case sessionID = "session_id"
     }
 }
@@ -58,18 +57,24 @@ extension ClaudeCloudInvoker {
             return Self.errorResult(
                 exitCode: 3, code: "unreachable",
                 message: "claude -p --cloud did not answer before its deadline")
-        case let .completed(status, output):
+        case let .completed(status, output, stderr):
+            // `output` is stdout alone on this pipe (see `ClaudeCloudSpawning`'s
+            // doc comment) — the only thing decoded as strict JSON below, so
+            // incidental stderr chatter on an otherwise-successful call can
+            // never break that parse. Diagnostic MESSAGES still quote both
+            // streams, matching what a failing invocation actually printed.
+            let diagnostic = output + stderr
             guard status == 0 else {
                 return Self.errorResult(
                     exitCode: 1, code: "unreachable",
-                    message: "claude -p --cloud exited \(status): \(Self.bounded(output))")
+                    message: "claude -p --cloud exited \(status): \(Self.bounded(diagnostic))")
             }
             guard let reply = try? JSONDecoder().decode(
                 ClaudeCloudSendReply.self, from: Data(output.utf8))
             else {
                 return Self.errorResult(
                     exitCode: 1, code: "unreachable",
-                    message: "claude -p --cloud returned unparseable output: \(Self.bounded(output))")
+                    message: "claude -p --cloud returned unparseable output: \(Self.bounded(diagnostic))")
             }
             guard reply.ok == true, reply.sessionID == sessionID else {
                 return Self.errorResult(
@@ -86,6 +91,6 @@ extension ClaudeCloudInvoker {
 
     static func bounded(_ text: String, limit: Int = 400) -> String {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.count > limit ? String(trimmed.prefix(limit - 1)) + "…" : trimmed
+        return ClaudeCloudTextBounding.truncated(trimmed, limit: limit)
     }
 }

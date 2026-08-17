@@ -16,9 +16,17 @@ struct ClaudeCloudSpawnRequest: Sendable, Equatable {
 
 enum ClaudeCloudSpawnOutcome: Sendable, Equatable {
     /// `output` is the captured stdout, plus stderr when the two merged on a
-    /// pseudo-terminal. Decoded lossily so ANSI bytes survive to the parser's
-    /// strip step rather than failing the decode.
-    case completed(status: Int32, output: String)
+    /// pseudo-terminal — genuinely one descriptor there. On a plain pipe the
+    /// two streams are separate, so `output` carries stdout ALONE: `send`
+    /// parses `output` as strict JSON on a pipe, and incidental stderr
+    /// chatter from an otherwise-successful invocation must never land where
+    /// that parse can see it. `stderr` carries the pipe-mode diagnostic
+    /// stream on its own, for a caller that still wants it in a failure
+    /// message; it reads empty under a pseudo-terminal, where the streams
+    /// already merged into `output` and the runner reports it empty anyway.
+    /// Both decoded lossily so ANSI bytes survive to the parser's strip step
+    /// rather than failing the decode.
+    case completed(status: Int32, output: String, stderr: String)
     case timedOut
 }
 
@@ -74,14 +82,19 @@ struct BoundedProcessClaudeSpawner: ClaudeCloudSpawning {
         case .timedOut:
             return .timedOut
         case let .completed(status, stdoutData, stderrData):
-            // Under a pty `stderrData` is always empty (the streams merged);
-            // under pipes it carries the CLI's diagnostics, which belong in
-            // the message a failing verb reports.
+            // Under a pty `stderrData` is always empty (the streams merged
+            // onto stdout already); under pipes it carries the CLI's own
+            // diagnostics on a genuinely separate descriptor, kept apart from
+            // `output` so a strict-JSON consumer on a pipe never has to parse
+            // through it.
             // swiftlint:disable:next optional_data_string_conversion
             let stdout = String(decoding: stdoutData, as: UTF8.self)
             // swiftlint:disable:next optional_data_string_conversion
             let stderr = String(decoding: stderrData, as: UTF8.self)
-            return .completed(status: status, output: stdout + stderr)
+            return .completed(
+                status: status,
+                output: request.usesPseudoTerminal ? stdout + stderr : stdout,
+                stderr: request.usesPseudoTerminal ? "" : stderr)
         }
     }
 }

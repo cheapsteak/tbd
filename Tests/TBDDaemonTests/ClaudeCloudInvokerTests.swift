@@ -96,7 +96,7 @@ struct ClaudeCloudInvokerTests {
                 workingDirectory: tmp,
                 usesPseudoTerminal: true,
                 timeout: 5))
-        guard case let .completed(status, output) = outcome else {
+        guard case let .completed(status, output, _) = outcome else {
             Issue.record("expected .completed, got \(outcome)")
             return
         }
@@ -122,13 +122,59 @@ struct ClaudeCloudInvokerTests {
                 workingDirectory: tmp,
                 usesPseudoTerminal: false,
                 timeout: 5))
-        guard case let .completed(status, output) = outcome else {
+        guard case let .completed(status, output, _) = outcome else {
             Issue.record("expected .completed, got \(outcome)")
             return
         }
         #expect(status == 0)
         #expect(!output.contains("COLUMNS=400"))
         #expect(!output.contains("LINES=200"))
+    }
+
+    /// The discriminating case named in `ClaudeCloudSpawnOutcome`'s own doc
+    /// comment: on a plain pipe stdout and stderr are genuinely separate
+    /// descriptors, so `output` must carry stdout ALONE — stderr chatter on
+    /// an otherwise-successful call must never land where `send` parses
+    /// strict JSON.
+    @Test func spawnExcludesStderrFromOutputOnAPipedRun() async throws {
+        let tmp = FileManager.default.temporaryDirectory.path
+        let spawner = BoundedProcessClaudeSpawner(executable: "/bin/sh")
+        let outcome = try await spawner.spawn(
+            ClaudeCloudSpawnRequest(
+                arguments: ["-c", "printf 'out'; printf 'err' 1>&2"],
+                workingDirectory: tmp,
+                usesPseudoTerminal: false,
+                timeout: 5))
+        guard case let .completed(status, output, stderr) = outcome else {
+            Issue.record("expected .completed, got \(outcome)")
+            return
+        }
+        #expect(status == 0)
+        #expect(output == "out")
+        #expect(stderr == "err")
+    }
+
+    /// The pty side of the same pair: the two streams genuinely merge onto
+    /// one descriptor there, so `output` keeps carrying both — matching
+    /// `create`, which depends on that merge and is otherwise unaffected by
+    /// this task's fix.
+    @Test func spawnMergesStderrIntoOutputOnAPseudoTerminalRun() async throws {
+        let tmp = FileManager.default.temporaryDirectory.path
+        let spawner = BoundedProcessClaudeSpawner(executable: "/bin/sh")
+        let outcome = try await spawner.spawn(
+            ClaudeCloudSpawnRequest(
+                arguments: ["-c", "printf 'out'; printf 'err' 1>&2"],
+                workingDirectory: tmp,
+                usesPseudoTerminal: true,
+                timeout: 5))
+        guard case let .completed(status, output, stderr) = outcome else {
+            Issue.record("expected .completed, got \(outcome)")
+            return
+        }
+        #expect(status == 0)
+        #expect(output.contains("out"))
+        #expect(output.contains("err"))
+        #expect(stderr.isEmpty)
     }
 
     // MARK: - describe
@@ -232,7 +278,7 @@ struct ClaudeCloudInvokerTests {
     @Test func createSpawnsOnAPseudoTerminalInTheRepoCheckoutAndReturnsTheSession() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await seedRepo(db)
-        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput)])
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput, stderr: "")])
         let result = try await invoker(db: db, spawner: spawner).run(
             config(), verb: ["create"], stdin: createBody(), timeout: 60, contractVersion: 2)
 
@@ -261,7 +307,7 @@ struct ClaudeCloudInvokerTests {
     @Test func createWritesTheLedgerRowBeforeResolvingIt() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await seedRepo(db)
-        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput)])
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput, stderr: "")])
         _ = try await invoker(db: db, spawner: spawner).run(
             config(), verb: ["create"], stdin: createBody(), timeout: 60, contractVersion: 2)
         let row = try #require(try await db.claudeCloudSessions.rows().first)
@@ -282,7 +328,7 @@ struct ClaudeCloudInvokerTests {
         let db = try TBDDatabase(inMemory: true)
         try await seedRepo(db)
         let spawner = FakeClaudeSpawner(outcomes: [
-            .completed(status: 0, output: "Something went sideways")
+            .completed(status: 0, output: "Something went sideways", stderr: "")
         ])
         let result = try await invoker(db: db, spawner: spawner).run(
             config(), verb: ["create"], stdin: createBody(), timeout: 60, contractVersion: 2)
@@ -302,7 +348,7 @@ struct ClaudeCloudInvokerTests {
                 Created cloud session: two
                 View: https://claude.ai/code/session_01AAA?from=cli
                 Resume with: claude --teleport session_01BBB
-                """)
+                """, stderr: "")
         ])
         let result = try await invoker(db: db, spawner: spawner).run(
             config(), verb: ["create"], stdin: createBody(), timeout: 60, contractVersion: 2)
@@ -318,7 +364,7 @@ struct ClaudeCloudInvokerTests {
         try await seedRepo(db)
         let spawner = FakeClaudeSpawner(outcomes: [
             .completed(status: 0, output:
-                "Resume with: claude --teleport session_01AAAAAAAAAAAAAAAAAAAAAA")
+                "Resume with: claude --teleport session_01AAAAAAAAAAAAAAAAAAAAAA", stderr: "")
         ])
         let result = try await invoker(db: db, spawner: spawner).run(
             config(), verb: ["create"], stdin: createBody(), timeout: 60, contractVersion: 2)
@@ -336,8 +382,8 @@ struct ClaudeCloudInvokerTests {
         let db = try TBDDatabase(inMemory: true)
         try await seedRepo(db)
         let spawner = FakeClaudeSpawner(outcomes: [
-            .completed(status: 0, output: successOutput),
-            .completed(status: 0, output: successOutput),
+            .completed(status: 0, output: successOutput, stderr: ""),
+            .completed(status: 0, output: successOutput, stderr: ""),
         ])
         let inv = invoker(db: db, spawner: spawner)
         _ = try await inv.run(config(), verb: ["create"], stdin: createBody(),
@@ -351,7 +397,7 @@ struct ClaudeCloudInvokerTests {
         let db = try TBDDatabase(inMemory: true)
         try await seedRepo(db)
         let spawner = FakeClaudeSpawner(outcomes: [
-            .completed(status: 1, output: "Error: not logged in")
+            .completed(status: 1, output: "Error: not logged in", stderr: "")
         ])
         let result = try await invoker(db: db, spawner: spawner).run(
             config(), verb: ["create"], stdin: createBody(), timeout: 60, contractVersion: 2)
@@ -412,7 +458,7 @@ struct ClaudeCloudInvokerTests {
     @Test func branchAndEnvironmentAreRecordedNotPassedToTheCLI() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await seedRepo(db)
-        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput)])
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput, stderr: "")])
         _ = try await invoker(db: db, spawner: spawner).run(
             config(), verb: ["create"], stdin: createBody(), timeout: 60, contractVersion: 2)
         let request = try #require(spawner.requestsSnapshot().first)
@@ -430,7 +476,7 @@ struct ClaudeCloudInvokerTests {
     @Test func createIncludesEnvironmentInMetaWhenSupplied() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await seedRepo(db)
-        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput)])
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput, stderr: "")])
         let result = try await invoker(db: db, spawner: spawner).run(
             config(), verb: ["create"],
             stdin: createBody(environment: "prod"), timeout: 60, contractVersion: 2)
@@ -446,7 +492,7 @@ struct ClaudeCloudInvokerTests {
     @Test func createOmitsEnvironmentFromMetaWhenNotSupplied() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await seedRepo(db)
-        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput)])
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput, stderr: "")])
         let result = try await invoker(db: db, spawner: spawner).run(
             config(), verb: ["create"], stdin: createBody(), timeout: 60, contractVersion: 2)
         let session = try result.decoded(RemoteSessionPayload.self)
@@ -460,7 +506,7 @@ struct ClaudeCloudInvokerTests {
     @Test func createOmitsBranchFromMetaWhenNotSupplied() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await seedRepo(db)
-        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput)])
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput, stderr: "")])
         let result = try await invoker(db: db, spawner: spawner).run(
             config(), verb: ["create"],
             stdin: createBody(branch: nil), timeout: 60, contractVersion: 2)
@@ -476,7 +522,7 @@ struct ClaudeCloudInvokerTests {
     @Test func createThreadsTheCallersTimeoutIntoTheSpawnRequest() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await seedRepo(db)
-        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput)])
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput, stderr: "")])
         _ = try await invoker(db: db, spawner: spawner).run(
             config(), verb: ["create"], stdin: createBody(), timeout: 137, contractVersion: 2)
         let request = try #require(spawner.requestsSnapshot().first)
@@ -512,7 +558,7 @@ struct ClaudeCloudInvokerTests {
     @Test func listNeverSpawnsTheVendorCLI() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await seedRepo(db)
-        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput)])
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput, stderr: "")])
         let inv = invoker(db: db, spawner: spawner)
         _ = try await inv.run(config(), verb: ["create"], stdin: createBody(),
                               timeout: 60, contractVersion: 2)
@@ -526,7 +572,7 @@ struct ClaudeCloudInvokerTests {
     @Test func aResolvedRowIsListedUnknownOnBothAxesCarryingItsRepoAndTitle() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await seedRepo(db)
-        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput)])
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput, stderr: "")])
         let inv = invoker(db: db, spawner: spawner)
         _ = try await inv.run(config(), verb: ["create"], stdin: createBody(),
                               timeout: 60, contractVersion: 2)
@@ -556,7 +602,7 @@ struct ClaudeCloudInvokerTests {
     @Test func listEmitsArchivedExplicitlyEvenWhenFalse() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await seedRepo(db)
-        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput)])
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput, stderr: "")])
         let inv = invoker(db: db, spawner: spawner)
         _ = try await inv.run(config(), verb: ["create"], stdin: createBody(),
                               timeout: 60, contractVersion: 2)
@@ -573,7 +619,7 @@ struct ClaudeCloudInvokerTests {
     @Test func anArchivedLedgerRowStaysEnumeratedWithItsFlagSet() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await seedRepo(db)
-        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput)])
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput, stderr: "")])
         let inv = invoker(db: db, spawner: spawner)
         _ = try await inv.run(config(), verb: ["create"], stdin: createBody(),
                               timeout: 60, contractVersion: 2)
@@ -650,7 +696,7 @@ struct ClaudeCloudInvokerTests {
 
     @Test func sendPostsOneMessageOnAPipeAndReportsSuccess() async throws {
         let db = try TBDDatabase(inMemory: true)
-        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: sendOK)])
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: sendOK, stderr: "")])
         let result = try await invoker(db: db, spawner: spawner).run(
             config(), verb: ["send", "session_01AAA"], stdin: Data("try again\r".utf8),
             timeout: 30, contractVersion: 2)
@@ -667,12 +713,43 @@ struct ClaudeCloudInvokerTests {
         #expect(try JSONSerialization.jsonObject(with: result.stdout) is [String: Any])
     }
 
+    /// The fix this round of findings exists for: incidental stderr chatter
+    /// on an otherwise-successful pipe invocation must never break the
+    /// strict JSON parse `send` runs against `output` alone.
+    @Test func stderrChatterOnASuccessfulSendDoesNotBreakTheParse() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let spawner = FakeClaudeSpawner(outcomes: [
+            .completed(status: 0, output: sendOK, stderr: "warning: something incidental\n")
+        ])
+        let result = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["send", "session_01AAA"], stdin: Data("hi\r".utf8),
+            timeout: 30, contractVersion: 2)
+        #expect(result.exitCode == 0)
+    }
+
+    /// The non-zero-exit branch — named in the review brief's own
+    /// "check with particular care" list as one of the four cases a `send`
+    /// implementation must distinguish from success, and the one the brief's
+    /// own Step 1 test list omitted.
+    @Test func aNonZeroSendExitIsAPermanentFailureCarryingWhatArrived() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let spawner = FakeClaudeSpawner(outcomes: [
+            .completed(status: 1, output: "Error: not logged in", stderr: "")
+        ])
+        let result = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["send", "session_01AAA"], stdin: Data("hi\r".utf8),
+            timeout: 30, contractVersion: 2)
+        #expect(result.exitCode == 1)
+        #expect(result.failureClass == .permanent)
+        #expect(result.decodedError?.message.contains("not logged in") == true)
+    }
+
     /// `ok` plus a `session_id` matching the id sent is the success
     /// condition — a reply about a DIFFERENT session is not a success.
     @Test func aMismatchedSessionIDInTheReplyIsAFailure() async throws {
         let db = try TBDDatabase(inMemory: true)
         let spawner = FakeClaudeSpawner(outcomes: [
-            .completed(status: 0, output: #"{"ok":true,"session_id":"session_01ZZZ"}"#)
+            .completed(status: 0, output: #"{"ok":true,"session_id":"session_01ZZZ"}"#, stderr: "")
         ])
         let result = try await invoker(db: db, spawner: spawner).run(
             config(), verb: ["send", "session_01AAA"], stdin: Data("hi\r".utf8),
@@ -684,7 +761,23 @@ struct ClaudeCloudInvokerTests {
     @Test func anOkFalseReplyIsAFailure() async throws {
         let db = try TBDDatabase(inMemory: true)
         let spawner = FakeClaudeSpawner(outcomes: [
-            .completed(status: 0, output: #"{"ok":false,"session_id":"session_01AAA"}"#)
+            .completed(status: 0, output: #"{"ok":false,"session_id":"session_01AAA"}"#, stderr: "")
+        ])
+        let result = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["send", "session_01AAA"], stdin: Data("hi\r".utf8),
+            timeout: 30, contractVersion: 2)
+        #expect(result.exitCode == 1)
+    }
+
+    /// Distinct from `ok:false`: the key is entirely ABSENT from the reply.
+    /// `ClaudeCloudSendReply.ok` is `Bool?`, so a missing key must fail the
+    /// `reply.ok == true` guard exactly like an explicit `false` — this pins
+    /// that the decode's optionality, not a value comparison, is what makes
+    /// that so.
+    @Test func aReplyWithNoOkKeyAtAllIsAFailure() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let spawner = FakeClaudeSpawner(outcomes: [
+            .completed(status: 0, output: #"{"session_id":"session_01AAA"}"#, stderr: "")
         ])
         let result = try await invoker(db: db, spawner: spawner).run(
             config(), verb: ["send", "session_01AAA"], stdin: Data("hi\r".utf8),
@@ -694,7 +787,7 @@ struct ClaudeCloudInvokerTests {
 
     @Test func unparseableSendOutputIsAFailureCarryingWhatArrived() async throws {
         let db = try TBDDatabase(inMemory: true)
-        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: "not json")])
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: "not json", stderr: "")])
         let result = try await invoker(db: db, spawner: spawner).run(
             config(), verb: ["send", "session_01AAA"], stdin: Data("hi\r".utf8),
             timeout: 30, contractVersion: 2)
