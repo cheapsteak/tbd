@@ -307,6 +307,112 @@ struct RemoteCreateDefaultsTests {
         #expect(plan.missingRequired == ["ticket"])
     }
 
+    /// The field failure this rule exists for: the provider declares `repo` as
+    /// an enum whose only permitted value is a DIFFERENT repository. One-click
+    /// on this repo's `+` must not fire, and the form it opens instead must
+    /// leave `repo` unset rather than pre-selecting the other repository.
+    @Test func oneClickRefusesWhenTheAmbientRepoMatchesNoDeclaredValue() {
+        let describe = ProviderDescribe(name: "acme", createParams: providerShapedFields)
+        let launch = RemoteCreateFormLogic.launch(
+            describe: describe, repoPrefill: "acme-org/unrelated-repo",
+            repoDefaults: [:], globalDefaults: [:],
+            generatedSlug: "20260816-consistent-reptile")
+        guard case .openForm(let plan) = launch else {
+            Issue.record("expected .openForm, got \(launch)")
+            return
+        }
+        #expect(plan.stringValues["repo"] == "")
+        #expect(plan.repoUnanswered)
+        // Everything else it DID know is still prefilled — the refusal is
+        // about one field, not about the form.
+        #expect(plan.stringValues["slug"] == "20260816-consistent-reptile")
+        #expect(plan.stringValues["cmd"] == "claude")
+    }
+
+    /// The same refusal when the `+` carried no ambient repo at all: a repo
+    /// with no parseable remote URL, or a caller with no repo context. There is
+    /// still no repo-scoped answer, so still no one-click.
+    @Test func oneClickRefusesWhenThereIsNoAmbientRepoAtAll() {
+        let describe = ProviderDescribe(name: "acme", createParams: providerShapedFields)
+        let launch = RemoteCreateFormLogic.launch(
+            describe: describe, repoPrefill: nil,
+            repoDefaults: [:], globalDefaults: [:], generatedSlug: "s")
+        guard case .openForm(let plan) = launch else {
+            Issue.record("expected .openForm, got \(launch)")
+            return
+        }
+        #expect(plan.repoUnanswered)
+    }
+
+    /// An OPTIONAL `repo` blocks one-click just the same: a blank optional is
+    /// omitted from the params, and an omitted `repo` is answered by the
+    /// provider's own default — the same wrong repository by the other door.
+    @Test func oneClickRefusesWhenAnOptionalRepoFieldIsUnanswered() {
+        let describe = ProviderDescribe(name: "acme", createParams: [
+            ProviderCreateParamField(
+                name: "repo", type: "enum", defaultValue: "acme-org/other",
+                values: ["acme-org/other"]),
+        ])
+        let launch = RemoteCreateFormLogic.launch(
+            describe: describe, repoPrefill: "acme-org/acme-api",
+            repoDefaults: [:], globalDefaults: [:], generatedSlug: "s")
+        guard case .openForm(let plan) = launch else {
+            Issue.record("expected .openForm, got \(launch)")
+            return
+        }
+        #expect(plan.isComplete, "nothing REQUIRED is missing — the repo gate is what refuses")
+        #expect(plan.repoUnanswered)
+    }
+
+    /// Negative control: a repo the provider does declare still one-clicks, and
+    /// `repoUnanswered` stays false.
+    @Test func oneClickStillFiresWhenTheAmbientRepoIsRepresentable() throws {
+        let describe = ProviderDescribe(name: "acme", createParams: providerShapedFields)
+        let launch = RemoteCreateFormLogic.launch(
+            describe: describe, repoPrefill: "acme-org/acme-api",
+            repoDefaults: [:], globalDefaults: [:], generatedSlug: "s")
+        guard case .createNow(let json) = launch else {
+            Issue.record("expected .createNow, got \(launch)")
+            return
+        }
+        let object = try #require(
+            JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        #expect(object["repo"] as? String == "acme-org/acme-api")
+    }
+
+    /// The repo's own stored default is repo-scoped evidence, so it answers
+    /// `repo` and one-click fires on it — even when the ambient prefill matches
+    /// nothing the provider declares.
+    @Test func oneClickFiresOnARepoScopedStoredValue() throws {
+        let describe = ProviderDescribe(name: "acme", createParams: providerShapedFields)
+        let launch = RemoteCreateFormLogic.launch(
+            describe: describe, repoPrefill: "some/unparseable-thing",
+            repoDefaults: ["repo": "acme-org/acme-api"], globalDefaults: [:],
+            generatedSlug: "s")
+        guard case .createNow(let json) = launch else {
+            Issue.record("expected .createNow, got \(launch)")
+            return
+        }
+        let object = try #require(
+            JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        #expect(object["repo"] as? String == "acme-org/acme-api")
+    }
+
+    /// A provider that asks for no repository at all is unaffected — the gate
+    /// only fires when there is a `repo` field to answer.
+    @Test func oneClickStillFiresForAProviderThatAsksForNoRepo() {
+        let describe = ProviderDescribe(name: "acme", createParams: [
+            ProviderCreateParamField(name: "slug", type: "string", required: true),
+        ])
+        let launch = RemoteCreateFormLogic.launch(
+            describe: describe, repoPrefill: nil,
+            repoDefaults: [:], globalDefaults: [:], generatedSlug: "s")
+        guard case .createNow = launch else {
+            Issue.record("expected .createNow, got \(launch)")
+            return
+        }
+    }
+
     @Test func theFormOpensWhenTheProviderHasNotReportedItsCreateForm() {
         let launch = RemoteCreateFormLogic.launch(
             describe: nil, repoPrefill: "acme-org/acme-api",
