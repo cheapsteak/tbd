@@ -22,8 +22,46 @@ struct SuperviseCommandParsingTests {
         // The operating verbs a human uses, plus the sweep program's three
         // contract surfaces (`readout`, `brief`, `ledger`).
         #expect(names.sorted() == [
-            "brief", "ledger", "mode", "off", "on", "project", "readout", "status",
+            "brief", "ledger", "mode", "off", "on", "playbook", "project", "readout", "status",
         ])
+    }
+
+    @Test func playbookGroupRegistersShowAndCustomize() {
+        let names = SupervisePlaybook.configuration.subcommands.map { $0._commandName }
+        #expect(names.sorted() == ["customize", "show"])
+        // There is no `reset` or `update`: the operator and repository levels
+        // are written exactly once, and TBD never writes them again (design §5).
+        #expect(!names.contains("reset"))
+        #expect(!names.contains("update"))
+    }
+
+    // MARK: playbook
+
+    @Test func playbookShowRequiresAProjectAndDefaultsItsFlagsOff() throws {
+        let parsed = try SupervisePlaybookShow.parse(["--project", "acme-checkout"])
+        #expect(parsed.project == "acme-checkout")
+        #expect(parsed.content == false)
+        #expect(parsed.json == false)
+        #expect(throws: (any Error).self) { try SupervisePlaybookShow.parse([]) }
+    }
+
+    @Test func playbookCustomizeDefaultsToTheOperatorLevel() throws {
+        let operatorLevel = try SupervisePlaybookCustomize.parse(["--project", "acme-checkout"])
+        #expect(operatorLevel.repoLevel == false)
+        let repoLevel = try SupervisePlaybookCustomize.parse(
+            ["--project", "acme-checkout", "--repo-level"])
+        #expect(repoLevel.repoLevel == true)
+        #expect(throws: (any Error).self) { try SupervisePlaybookCustomize.parse([]) }
+    }
+
+    /// `--repo` names *which repo* everywhere else in this CLI — `tbd worktree
+    /// list --repo <name>`, `tbd gc --repo <path>`. The level selector must not
+    /// take that spelling, or a typed-out repo id gets an opaque
+    /// "unexpected argument" instead of doing anything.
+    @Test func playbookCustomizeDoesNotClaimTheRepoNamingFlag() {
+        #expect(throws: (any Error).self) {
+            try SupervisePlaybookCustomize.parse(["--project", "acme-checkout", "--repo"])
+        }
     }
 
     @Test func projectGroupRegistersOnlyTheRestrictedVocabulary() {

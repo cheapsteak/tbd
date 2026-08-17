@@ -398,4 +398,58 @@ public enum TBDConstants {
     public static func supervisionProjectDir(project: String) -> URL? {
         supervisionProjectDir(project: project, environment: ProcessInfo.processInfo.environment)
     }
+
+    /// A declared project's operator-level playbook:
+    /// `~/tbd/supervision/projects/<name>/supervision.md`.
+    ///
+    /// Nil for the same reason `supervisionProjectDir` is nil — a name that is
+    /// not one safe path component has no directory to hold it, so there is no
+    /// path to compose and the operator level is simply unavailable for that
+    /// project until the repo is renamed.
+    public static func supervisionPlaybookPath(
+        project: String, environment: [String: String]
+    ) -> String? {
+        supervisionProjectDir(project: project, environment: environment)?
+            .appendingPathComponent(supervisionPlaybookFileName).path
+    }
+    public static func supervisionPlaybookPath(project: String) -> String? {
+        supervisionPlaybookPath(project: project, environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// A singleton project's operator-level playbook:
+    /// `~/tbd/repos/<repoID>/supervision.md`.
+    ///
+    /// Keyed by repo id rather than by the project's name, which is the repo's
+    /// **display name** and may be anything at all — so unlike the declared
+    /// case this path always composes. Same file-backed per-repo pattern as
+    /// `hookPath` and `notesPath`: a user-authored editable blob lives in a
+    /// file, never in a DB column.
+    public static func repoPlaybookPath(repoID: UUID, environment: [String: String]) -> String {
+        reposDir(environment: environment)
+            .appendingPathComponent(repoID.uuidString)
+            .appendingPathComponent(supervisionPlaybookFileName)
+            .path
+    }
+    public static func repoPlaybookPath(repoID: UUID) -> String {
+        repoPlaybookPath(repoID: repoID, environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// The one filename a playbook has, at every level. Named once so the
+    /// operator levels and the in-repo level cannot drift apart.
+    public static let supervisionPlaybookFileName = "supervision.md"
+
+    /// The in-repo playbook, relative to a repo's main checkout:
+    /// `.agents/supervision.md`. The directory name describes its audience —
+    /// local process guidance for any tool that drives agents — and TBD owns
+    /// particular filenames inside it, never the directory.
+    public static func repoAgentsPlaybookPath(checkout: String) -> String {
+        URL(fileURLWithPath: checkout, isDirectory: true)
+            .appendingPathComponent(agentsDirectoryName)
+            .appendingPathComponent(supervisionPlaybookFileName)
+            .path
+    }
+
+    /// The in-repo directory holding local process guidance for agent-driving
+    /// tools.
+    public static let agentsDirectoryName = ".agents"
 }

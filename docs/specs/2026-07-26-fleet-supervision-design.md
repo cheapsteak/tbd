@@ -1680,6 +1680,28 @@ account, not a wrong action. The third category is **human-authored process**.
     projects running the shipped default ceremony.
   The playbook tiers (§5) are also durable files — and the playbook is where
   knowledge that must outlive any one session lives, changed by reviewed PR (§8).
+
+  **A project's directory is permanent, and that is a decision rather than an
+  omission.** `~/tbd/supervision/projects/<name>/` holds operator-authored
+  prose and programs — the playbook, the journal, the proposals doc, the
+  project's own sweep and transition scripts — and nothing reclaims it. No
+  sweep enumerates it, no gesture deletes it, and a project removed from
+  `supervision.json` leaves its directory standing. Three things decide that,
+  and the first is the one that binds: **"no longer resolves" is not an orphan
+  signal.** A project stops resolving for reasons no supervision gesture caused
+  — a member repo renamed or unregistered — with its mark still standing and
+  able to take effect again if the name resolves once more (§5, §9), so a
+  collector keyed on resolution would reclaim a live project's conduct on a
+  rename. Second, the directory is created only by an operator gesture and
+  there is one per declared project, so it has no unbounded-growth mode: the
+  failure the named-reconciler doctrine exists to prevent is a machine-minted
+  resource accumulating per event, and this accumulates per human decision.
+  Third, its contents are the one thing §5 promises the tool writes exactly
+  once and never touches again; reclaiming them would destroy authored work to
+  tidy a directory nobody was running out of. The operator's own file manager
+  is the reclamation path, which is the same standing `notes.md` and the
+  per-repo hooks already have under `~/tbd/repos/<id>/`. A project directory
+  that outlives its project is therefore expected, not a leak.
 - **In-memory, deliberately not durable**: active one-minute re-check timers
   and the brief pipe's liveness bookkeeping. Timers may live in memory *because*
   everything they encode derives from the durable record — an actuation

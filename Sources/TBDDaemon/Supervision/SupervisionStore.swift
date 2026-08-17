@@ -126,6 +126,7 @@ public actor SupervisionStore {
     private let files: SupervisionFileStore
     private let ledger: SupervisionLedgerWriter
     private let fleet: any SupervisionFleetReading
+    private let playbooks: SupervisionPlaybookResolver
     private let now: @Sendable () -> Date
 
     /// The operator's file as last read from disk. Every read goes through
@@ -180,11 +181,13 @@ public actor SupervisionStore {
         files: SupervisionFileStore,
         ledger: SupervisionLedgerWriter,
         fleet: any SupervisionFleetReading,
+        playbooks: SupervisionPlaybookResolver = SupervisionPlaybookResolver(),
         now: @Sendable @escaping () -> Date = { Date() }
     ) {
         self.files = files
         self.ledger = ledger
         self.fleet = fleet
+        self.playbooks = playbooks
         self.now = now
     }
 
@@ -696,6 +699,146 @@ public actor SupervisionStore {
             project: project, from: previous, to: mode, at: now()))
         return SuperviseSetModeResult(
             project: project, mode: mode, declaredModes: resolved.declaredModes, changed: true)
+    }
+
+    // MARK: - The playbook
+
+    /// The project's resolved playbook: which level stands, where it is, its
+    /// hash, and its bytes.
+    ///
+    /// Read-only, and it resolves through the same topology every other gesture
+    /// uses — so the operator level a *declared* project reads and the one a
+    /// singleton reads are decided from the file this store already holds,
+    /// never guessed from the name.
+    ///
+    /// An unknown project is refused rather than answered with the shipped
+    /// default. A caller that mistook "there is no such project" for "this
+    /// project has no customized playbook" would report the tool's own conduct
+    /// as the project's.
+    public func playbook(project: String) async throws -> SupervisionPlaybookView {
+        let repos = try await prepare()
+        let file = try freshFile()
+        let projects = try SupervisionTopology.resolve(file: file, repos: repos)
+        guard let resolved = projects.first(where: { $0.name == project }) else {
+            throw SupervisionStoreError.unknownProject(project)
+        }
+        return SupervisionPlaybookView(
+            playbooks.resolve(project: resolved, in: file, repos: repos))
+    }
+
+    /// The "Customize playbook…" gesture: copy the current shipped default into
+    /// one level, once.
+    ///
+    /// **Refused when the target already exists, and that refusal is the whole
+    /// contract.** The operator and repository levels are written exactly once
+    /// and TBD never writes them again — no overwrite, no merge, and no
+    /// reconciliation at startup (design §5). Tool-provided content lives only
+    /// in the level the tool owns, the shipped default, which updates may
+    /// freely replace.
+    ///
+    /// **The bytes copied are the shipped default's, not the resolved
+    /// playbook's.** Customizing the repo level of a project that already has an
+    /// operator copy must not silently duplicate that copy one level down; the
+    /// gesture means "give me the tool's default to edit".
+    ///
+    /// **Who reclaims the file this creates** (repo `CLAUDE.md`, "Every durable
+    /// external resource needs a named reconciler"), by level, because the
+    /// three levels are three different questions.
+    ///
+    /// - The **repo level** writes into the operator's own checkout. TBD does
+    ///   not own that directory or its lifetime — git versions the file and
+    ///   removing the repo from TBD leaves the checkout untouched — so no
+    ///   orphan of TBD's making can arise there. Reclaiming it would be the
+    ///   bug.
+    /// - A **singleton's operator level** adds one file to
+    ///   `~/tbd/repos/<id>/`, the existing per-repo family that already holds
+    ///   `notes.md`, the hooks and the settings overlay. It is a call site in a
+    ///   family whose treatment predates this gesture, not a new kind of
+    ///   resource.
+    /// - A **declared project's operator level** lives in that project's
+    ///   directory, which design §7 makes permanent by decision: nothing
+    ///   reclaims it, because "the project no longer resolves" is not an orphan
+    ///   signal (a renamed repo stops resolution with the mark still standing,
+    ///   §9), because one directory per human-declared project has no
+    ///   unbounded-growth mode, and because its contents are the one thing §5
+    ///   promises the tool writes once and never touches again.
+    ///
+    /// A stranded copy costs a file; a reclaimed one costs the operator's
+    /// conduct.
+    public func customizePlaybook(
+        project: String, level: SupervisionPlaybookLevel
+    ) async throws -> SupervisePlaybookCustomizeResult {
+        let repos = try await prepare()
+        let file = try freshFile()
+        let projects = try SupervisionTopology.resolve(file: file, repos: repos)
+        guard let resolved = projects.first(where: { $0.name == project }) else {
+            throw SupervisionStoreError.unknownProject(project)
+        }
+        let site = playbooks.site(for: resolved, in: file, repos: repos)
+
+        let target: String
+        switch level {
+        case .operator:
+            guard let path = site.operatorPath else {
+                throw SupervisionPlaybookError.noOperatorLevel(project: project)
+            }
+            target = path
+        case .repo:
+            guard let path = site.repoPath else {
+                switch resolved.policy {
+                case .operator:
+                    throw SupervisionPlaybookError.noRepoLevel(project: project)
+                case .repo(let repoID):
+                    throw SupervisionPlaybookError.unknownRepoCheckout(
+                        project: project, repo: repoID)
+                }
+            }
+            // The repo level is the only one that writes outside `~/tbd`, and a
+            // checkout on record can be gone from disk — that drift is why
+            // `WorktreeLifecycle+Reconcile` exists. Without this the write below
+            // would conjure `<gone-checkout>/.agents/` out of nothing, report
+            // success, and then refuse forever because the file it invented is
+            // there. Refusing while the ground truth is missing is the honest
+            // answer, and it leaves the gesture available once it is back.
+            if case .repo(let repoID) = resolved.policy,
+               let checkout = repos.first(where: { $0.id == repoID })?.path,
+               !FileManager.default.fileExists(atPath: checkout) {
+                throw SupervisionPlaybookError.missingRepoCheckout(
+                    project: project, checkout: checkout)
+            }
+            target = path
+        }
+
+        guard !FileManager.default.fileExists(atPath: target) else {
+            throw SupervisionPlaybookError.alreadyCustomized(
+                project: project, level: level, path: target)
+        }
+
+        let bytes = SupervisionPlaybookContent.bytes
+        let url = URL(fileURLWithPath: target)
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            // `withoutOverwriting` closes the window between the check above and
+            // the write: a second gesture that got past the same check writes
+            // nothing rather than clobbering the first one's bytes.
+            try bytes.write(to: url, options: .withoutOverwriting)
+        } catch CocoaError.fileWriteFileExists {
+            throw SupervisionPlaybookError.alreadyCustomized(
+                project: project, level: level, path: target)
+        } catch {
+            throw SupervisionPlaybookError.writeFailed(
+                path: target, detail: error.localizedDescription)
+        }
+        storeLogger.notice(
+            """
+            Wrote the shipped playbook to \(target, privacy: .public) for \
+            "\(project, privacy: .public)"; TBD will never write that level again.
+            """)
+
+        return SupervisePlaybookCustomizeResult(
+            project: project, level: level, path: target,
+            hash: SupervisionPlaybook.hash(of: bytes))
     }
 
     // MARK: - The brake

@@ -19,6 +19,7 @@ struct SuperviseCommand: ParsableCommand {
             SuperviseStatusCommand.self,
             SuperviseMode.self,
             SuperviseProject.self,
+            SupervisePlaybook.self,
             SuperviseReadoutCommand.self,
             SuperviseBriefCommand.self,
             SuperviseLedgerCommand.self,
@@ -299,6 +300,122 @@ struct SuperviseProjectMove: AsyncParsableCommand {
             params: SuperviseProjectMoveParams(repo: repo, to: target.argument),
             resultType: SuperviseProjectListResult.self)
         print(renderSupervisionProjectList(result))
+    }
+}
+
+// MARK: - playbook
+
+/// `tbd supervise playbook` — read the standing conduct a project's supervisor
+/// stands on, and take ownership of a level of it.
+///
+/// Both subcommands route through the daemon: it is the single reader of
+/// `supervision.json`, so it is the only place that knows whether a project is
+/// declared — which decides where its operator level lives — and the single
+/// writer of `~/tbd/supervision/`.
+struct SupervisePlaybook: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "playbook",
+        abstract: "Show a project's resolved playbook, or take ownership of a level of it",
+        subcommands: [
+            SupervisePlaybookShow.self,
+            SupervisePlaybookCustomize.self,
+        ]
+    )
+}
+
+struct SupervisePlaybookShow: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "show",
+        abstract: "Show which playbook level stands for a project, its path and its hash",
+        discussion: """
+            Resolution runs per project, three levels, first existing \
+            non-empty file wins: the operator's copy, then the project's \
+            designated repo file, then the shipped default. The whole file is \
+            used and levels are never merged.
+
+            TBD never parses a playbook. It resolves the path, hashes the \
+            bytes, and installs them verbatim as the supervisor's standing \
+            conduct; the hash is what a delivery records as the conduct it ran \
+            under.
+            """
+    )
+
+    @Option(name: .long, help: "Project name")
+    var project: String
+
+    @Flag(name: .long, help: "Print the playbook's bytes after the header")
+    var content = false
+
+    @Flag(name: .long, help: "Output JSON (always carries the content)")
+    var json = false
+
+    mutating func run() async throws {
+        let name = try requireSupervisionProjectName(project)
+        let view: SupervisionPlaybookView = try SocketClient().call(
+            method: RPCMethod.supervisePlaybook,
+            params: SupervisePlaybookParams(project: name),
+            resultType: SupervisionPlaybookView.self)
+        if json {
+            printJSON(view)
+            return
+        }
+        print(renderSupervisionPlaybook(view, includeContent: content))
+        for line in supervisionPlaybookSkipLines(view) {
+            printToStandardError(line)
+        }
+    }
+}
+
+/// The "Customize playbook…" action: copy the current shipped default into a
+/// level the operator then owns.
+///
+/// **Write-once, and refused if the file is already there.** TBD writes these
+/// levels exactly once and never again — it does not overwrite them, merge into
+/// them, or reconcile them at startup. The copy is yours from that moment.
+struct SupervisePlaybookCustomize: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "customize",
+        abstract:
+            "Copy the shipped playbook into the operator level, or with --repo-level the repo level",
+        discussion: """
+            Writes the current shipped default and prints the path. Refused if \
+            that level already exists: TBD writes it exactly once and never \
+            touches it again, so an existing copy is edited directly.
+
+            Without --repo-level the copy goes to the operator level — beside a \
+            declared project's definition, or in a singleton's per-repo config \
+            directory. With --repo-level it goes to the project's designated \
+            repo file, .agents/supervision.md in that repo's main checkout, \
+            where it is committed and shared with everyone working in the repo.
+            """
+    )
+
+    @Option(name: .long, help: "Project name")
+    var project: String
+
+    /// Named for the *level*, not the repo. Everywhere else in this CLI
+    /// `--repo` takes a value naming one — `tbd worktree list --repo <name>`,
+    /// `tbd gc --repo <path>` — so a boolean `--repo` here would answer a
+    /// typed-out repo id with an opaque "unexpected argument".
+    @Flag(name: .long,
+          help: "Write the project's designated repo file instead of the operator level")
+    var repoLevel = false
+
+    @Flag(name: .long, help: "Output JSON")
+    var json = false
+
+    mutating func run() async throws {
+        let name = try requireSupervisionProjectName(project)
+        let result: SupervisePlaybookCustomizeResult = try SocketClient().call(
+            method: RPCMethod.supervisePlaybookCustomize,
+            params: SupervisePlaybookCustomizeParams(
+                project: name, level: repoLevel ? .repo : .operator),
+            resultType: SupervisePlaybookCustomizeResult.self)
+        if json {
+            printJSON(result)
+        } else {
+            print(renderSupervisionPlaybookCustomize(result))
+        }
     }
 }
 
