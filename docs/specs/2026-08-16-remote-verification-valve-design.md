@@ -228,8 +228,20 @@ when a compiler changes how it renders a warning.
 ## Preconditions, and no silent fallback
 
 The valve refuses and stays local, naming the condition, when the tree is dirty,
-`gh` is unauthenticated, or no ref can be pushed. It never falls back silently: a
-quiet fallback reintroduces the long stall at the moment it is least visible.
+`gh` is missing or unauthenticated, the current branch is the repository's
+default, or the preflight ref it would push belongs to somebody. It never falls
+back silently: a quiet fallback reintroduces the long stall at the moment it is
+least visible. The local checks run before any of the GitHub ones, so the most
+common refusal costs no network round trip.
+
+**A ref belongs to somebody if a pull request is open against it.** Nothing stops
+a person from working on a branch genuinely named `preflight/<something>`, and the
+valve force-pushes, so it asks before it writes and refuses when the answer is
+yes, or when the question cannot be answered. That signal is narrower than the
+hazard: a preflight ref merely existing proves nothing, because every previous
+valve run leaves one behind, so a human branch in that namespace with no pull
+request is not distinguishable from a throwaway and is still overwritten. The
+sweep makes the same judgment on the delete side, for the same reason.
 
 The dirty-tree stop is a semantic requirement, not a convenience.
 `scripts/test.sh` runs against the working tree, uncommitted edits included;
@@ -264,8 +276,9 @@ fan-out on every iteration; GitHub minutes are free, but Claude quota is not, an
 it is the only metered resource in this loop.
 
 Because every pushable ref is a throwaway in a swept namespace, the push is
-always a force-push. The default-branch refusal sits further out still, in the
-front-end that checks preconditions, so it answers before anything contacts
+always a force-push — which is why the ref is checked for an owner first, as the
+preconditions describe. The default-branch refusal sits further out still, in the
+front-end, and the local half of that front-end answers before anything contacts
 GitHub at all.
 
 `test.yml` gains a `workflow_dispatch` trigger. It has none otherwise, so nothing
