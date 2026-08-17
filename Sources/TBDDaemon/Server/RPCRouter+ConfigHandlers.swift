@@ -185,6 +185,22 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the supervision-desk collector gate — the default-off soak
+    /// switch for reclaiming a hosted desk whose session is gone, read on top
+    /// of the GC master switch. The sweep re-reads it per pass, so flipping it
+    /// off does not cancel one already running.
+    ///
+    /// **This is how the flag is turned on for its soak.** A default-off gate
+    /// with no surface that can set it is not soaking; it is dead code.
+    func handleConfigSetGCSupervisionDesksEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetGCSupervisionDesksEnabledParams.self, from: paramsData)
+        try await db.config.setGCSupervisionDesksEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the fleet supervision brake (design 2026-07-26 §3, §7) — the
     /// fleet-wide on/off switch for supervision. Shipped OFF; nothing in the
     /// daemon reads this column to gate an actuation yet, because the acting

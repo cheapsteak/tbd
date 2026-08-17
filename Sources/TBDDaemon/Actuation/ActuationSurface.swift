@@ -221,6 +221,15 @@ enum ActuationRail {
     /// judge session, and the close that kills that session's windows — all
     /// acts the desk performs on its own, with no RPC behind them.
     static let nightwatchDesk = "nightwatch-desk"
+    /// `SupervisionDeskManager` spawning a project's hosted desk. `on <project>`
+    /// is the gesture behind it, but the desk is TBD's own arrangement rather
+    /// than something the caller asked for by name — the operator asked for
+    /// coverage, and a desk is how coverage is carried out — so it is a rail
+    /// with its own row rather than a branch of the `supervise.*` door. One row
+    /// per spawn, naming the scratch worktree and no terminal, the shape
+    /// `worktree.revive` uses: the terminal is minted inside
+    /// `spawnPrimaryTerminals`.
+    static let supervisionDesk = "supervision-desk"
     /// The boot-time (and post-`cleanup`) reconcile sweep: it kills the windows
     /// of worktrees that left disk, parks sessions whose window is gone, and
     /// reaps orphaned windows and dead servers. One row per act — each is an

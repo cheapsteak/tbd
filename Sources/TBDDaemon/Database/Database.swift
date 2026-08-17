@@ -1431,6 +1431,20 @@ public final class TBDDatabase: Sendable {
                 table: "reap_records", column: "quarantinePath", type: .text)
         }
 
+        // Gate for `SupervisionDeskCollector` — the reconciler for a hosted
+        // supervision desk's scratch space and its `desks.json` entry
+        // (docs/specs/2026-07-26-fleet-supervision-design.md §9). Ships OFF and
+        // soaks, following v78: reclaiming a desk archives a worktree and drops
+        // a record, so the classifier proves itself before it graduates.
+        // Tri-state like v70/v77/v78 — no SQL default, so a pre-migration row
+        // reads NULL ("never chose") rather than 0, and NULL resolves through
+        // `Config.gcSupervisionDesksEnabledDefault` in `ConfigRecord.toModel()`,
+        // the single place graduation changes.
+        migrator.registerMigration("v80_config_gc_supervision_desks") { db in
+            try db.addColumnIfMissing(
+                table: "config", column: "gc_supervision_desks_enabled", type: .boolean)
+        }
+
         return migrator
     }
 }

@@ -361,6 +361,22 @@ public enum TBDConstants {
         supervisionStatusPath(environment: ProcessInfo.processInfo.environment)
     }
 
+    /// The hosted desks TBD is running: `~/tbd/supervision/desks.json`.
+    ///
+    /// **Derived state TBD owns, deliberately not beside the operator's
+    /// selections.** `supervision.json` holds what an operator chose and
+    /// nothing else (design §7, §8) — its `supervisors` map is the *appointed*
+    /// binding, a selection. Which terminal TBD spawned to serve as a project's
+    /// hosted desk is TBD's own bookkeeping, rewritten without an operator
+    /// gesture, so it lives in its own file where a hand edit to one can never
+    /// clobber the other.
+    public static func supervisionDesksPath(environment: [String: String]) -> String {
+        supervisionDir(environment: environment).appendingPathComponent("desks.json").path
+    }
+    public static var supervisionDesksPath: String {
+        supervisionDesksPath(environment: ProcessInfo.processInfo.environment)
+    }
+
     /// A project's own directory: `~/tbd/supervision/projects/<name>`. Holds
     /// the operator-level playbook, the journal, the proposals doc, and any
     /// customized sweep or transition program.

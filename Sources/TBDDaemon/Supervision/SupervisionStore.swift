@@ -726,6 +726,42 @@ public actor SupervisionStore {
             playbooks.resolve(project: resolved, in: file, repos: repos))
     }
 
+    /// Everything `SupervisionDeskManager.ensureDesk` needs, read in one pass
+    /// through the file this store owns: the project's active mode, its
+    /// resolved playbook, and its appointed supervisor binding if one stands.
+    ///
+    /// Exists so the desk manager resolves no topology of its own. This store is
+    /// the single reader of `supervision.json`, and a second reader would be a
+    /// second answer to a question with exactly one.
+    public func deskInputs(project: String) async throws -> SupervisionDeskInputs {
+        let repos = try await prepare()
+        let file = try freshFile()
+        let projects = try SupervisionTopology.resolve(file: file, repos: repos)
+        guard let resolved = projects.first(where: { $0.name == project }) else {
+            throw SupervisionStoreError.unknownProject(project)
+        }
+        return SupervisionDeskInputs(
+            project: project,
+            mode: resolved.activeMode,
+            playbook: playbooks.resolve(project: resolved, in: file, repos: repos),
+            appointed: file.supervisors[project])
+    }
+
+    /// The names of every project whose mark stands right now.
+    ///
+    /// Read-only, and it exists for exactly one caller: the Nightwatch
+    /// coexistence gate, which must refuse turning Nightwatch on while any
+    /// project is supervised. Kept narrow deliberately — `status` computes
+    /// warnings and a whole readout, none of which that gate has any business
+    /// evaluating.
+    public func markedProjects() async throws -> [String] {
+        let repos = try await prepare()
+        let file = try freshFile()
+        return try SupervisionTopology.resolve(file: file, repos: repos)
+            .filter(\.mark)
+            .map(\.name)
+    }
+
     /// The "Customize playbook…" gesture: copy the current shipped default into
     /// one level, once.
     ///

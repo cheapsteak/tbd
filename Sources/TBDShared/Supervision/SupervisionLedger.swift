@@ -16,6 +16,28 @@ public enum SupervisionLifecycleEvent: String, Codable, Sendable {
     case brakeEngaged
     case brakeReleased
     case modeChanged
+    /// A hosted desk was spawned for a project that had none.
+    case deskSpawned
+    /// A hosted desk was spawned to replace one that had died — the successor
+    /// line names its predecessor, so a reader can follow one project's desks
+    /// back through every replacement.
+    case deskReplaced
+}
+
+/// The desk a lifecycle line is about: the session TBD spawned and the scratch
+/// space it lives in, both by id.
+///
+/// **Ids, never display strings.** A line that named "Watch Desk" would stop
+/// resolving the moment somebody renamed the space; a terminal id resolves for
+/// as long as the row exists and is unambiguous after it does not.
+public struct SupervisionDeskRef: Codable, Sendable, Equatable {
+    public let terminal: UUID
+    public let worktree: UUID
+
+    public init(terminal: UUID, worktree: UUID) {
+        self.terminal = terminal
+        self.worktree = worktree
+    }
 }
 
 /// One agent inside a project's perimeter, as the `projectOn` roster snapshot
@@ -107,6 +129,14 @@ public enum SupervisionLedgerPayload: Sendable, Equatable {
     case brakeEngaged
     case brakeReleased
     case modeChanged(from: String, to: String)
+    /// A hosted desk spawned for a project that had none, and the conduct hash
+    /// of the playbook installed as its standing layer.
+    case deskSpawned(desk: SupervisionDeskRef, conductHash: String)
+    /// A hosted desk spawned to replace one that had died. `predecessor` is the
+    /// desk this one succeeds, which is what makes a project's desk history a
+    /// chain rather than a set of unrelated spawns.
+    case deskReplaced(
+        desk: SupervisionDeskRef, predecessor: SupervisionDeskRef, conductHash: String)
     /// A line whose envelope this build understands and whose body it does
     /// not — a `delivery`, `enrollment` or `anomaly` line, or a lifecycle event
     /// a later build writes.
@@ -127,6 +157,8 @@ public enum SupervisionLedgerPayload: Sendable, Equatable {
         case .brakeEngaged: return .brakeEngaged
         case .brakeReleased: return .brakeReleased
         case .modeChanged: return .modeChanged
+        case .deskSpawned: return .deskSpawned
+        case .deskReplaced: return .deskReplaced
         case .unrecognized: return nil
         }
     }
@@ -198,6 +230,32 @@ public struct SupervisionLedgerLine: Codable, Sendable, Equatable {
             kind: .lifecycle, payload: .modeChanged(from: from, to: to))
     }
 
+    /// A hosted desk spawned for a project that had none.
+    public static func deskSpawned(
+        project: String, mode: String, desk: SupervisionDeskRef, conductHash: String,
+        at date: Date, id: String = SupervisionLedgerLine.newID()
+    ) -> SupervisionLedgerLine {
+        SupervisionLedgerLine(
+            id: id, ts: SupervisionInstant(date), mode: mode, project: project,
+            kind: .lifecycle, payload: .deskSpawned(desk: desk, conductHash: conductHash))
+    }
+
+    /// A hosted desk spawned to replace one that died, linking successor to
+    /// predecessor. Both are required: a replacement line that could omit its
+    /// predecessor would be indistinguishable from a first spawn, and "which
+    /// desk did this one succeed" is the question the line exists to answer.
+    public static func deskReplaced(
+        project: String, mode: String, desk: SupervisionDeskRef,
+        predecessor: SupervisionDeskRef, conductHash: String,
+        at date: Date, id: String = SupervisionLedgerLine.newID()
+    ) -> SupervisionLedgerLine {
+        SupervisionLedgerLine(
+            id: id, ts: SupervisionInstant(date), mode: mode, project: project,
+            kind: .lifecycle,
+            payload: .deskReplaced(
+                desk: desk, predecessor: predecessor, conductHash: conductHash))
+    }
+
     /// Fleet-wide: takes no project and no mode, because the brake has neither.
     public static func brakeEngaged(
         at date: Date, id: String = SupervisionLedgerLine.newID()
@@ -221,6 +279,7 @@ public struct SupervisionLedgerLine: Codable, Sendable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case id, ts, mode, project, kind
         case event, roster, coverage, from, to
+        case desk, predecessor, conductHash
     }
 
     /// Encoding a `.unrecognized` line throws rather than writing a line whose
@@ -252,6 +311,15 @@ public struct SupervisionLedgerLine: Codable, Sendable, Equatable {
             try container.encode(SupervisionLifecycleEvent.modeChanged, forKey: .event)
             try container.encode(from, forKey: .from)
             try container.encode(to, forKey: .to)
+        case .deskSpawned(let desk, let conductHash):
+            try container.encode(SupervisionLifecycleEvent.deskSpawned, forKey: .event)
+            try container.encode(desk, forKey: .desk)
+            try container.encode(conductHash, forKey: .conductHash)
+        case .deskReplaced(let desk, let predecessor, let conductHash):
+            try container.encode(SupervisionLifecycleEvent.deskReplaced, forKey: .event)
+            try container.encode(desk, forKey: .desk)
+            try container.encode(predecessor, forKey: .predecessor)
+            try container.encode(conductHash, forKey: .conductHash)
         case .unrecognized:
             throw EncodingError.invalidValue(payload, EncodingError.Context(
                 codingPath: container.codingPath,
@@ -295,6 +363,16 @@ public struct SupervisionLedgerLine: Codable, Sendable, Equatable {
             payload = .modeChanged(
                 from: try container.decode(String.self, forKey: .from),
                 to: try container.decode(String.self, forKey: .to))
+        case .deskSpawned:
+            payload = .deskSpawned(
+                desk: try container.decode(SupervisionDeskRef.self, forKey: .desk),
+                conductHash: try container.decode(String.self, forKey: .conductHash))
+        case .deskReplaced:
+            payload = .deskReplaced(
+                desk: try container.decode(SupervisionDeskRef.self, forKey: .desk),
+                predecessor: try container.decode(
+                    SupervisionDeskRef.self, forKey: .predecessor),
+                conductHash: try container.decode(String.self, forKey: .conductHash))
         case nil:
             payload = .unrecognized
         }

@@ -41,6 +41,11 @@ public final class RPCRouter: Sendable {
     /// every router a test constructs would share the developer's real
     /// `~/tbd/supervision`.
     public nonisolated(unsafe) var supervision: SupervisionStore?
+    /// The hosted-desk lifecycle (design §9): `on <project>` ensures a live
+    /// supervisor through it. Wired post-construction beside `supervision` and
+    /// `nil` in mock mode and in tests that do not need it — where `on` still
+    /// sets the mark, which is the half the gesture actually promises.
+    public nonisolated(unsafe) var supervisionDesks: SupervisionDeskManager?
     /// The out-of-band `status.json` heartbeat. The brake handler publishes an
     /// edge through it and arms or disarms its timer to match, so the timer's
     /// lifetime is tied to the brake rather than to daemon boot. Wired
@@ -591,6 +596,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetGCEnabled(request.paramsData)
             case RPCMethod.configSetGCProfileDirsEnabled:
                 return try await handleConfigSetGCProfileDirsEnabled(request.paramsData)
+            case RPCMethod.configSetGCSupervisionDesksEnabled:
+                return try await handleConfigSetGCSupervisionDesksEnabled(request.paramsData)
             case RPCMethod.configSetSupervisionEnabled:
                 return try await handleConfigSetSupervisionEnabled(request.paramsData)
             case RPCMethod.remoteProviders:

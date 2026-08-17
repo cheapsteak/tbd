@@ -639,15 +639,32 @@ public final class Daemon: Sendable {
         // Skipped in mock mode like every other rail: a fixture render must not
         // read the operator's real supervision file, and `supervise.*` refuses
         // with a named condition there rather than answering from it.
+        //
+        // The ledger writer is built once and shared by the store and the desk
+        // manager: it is a single-writer append-only file, and two writers on
+        // two descriptors would each be checking a different one against the
+        // path.
+        let supervisionLedger = SupervisionLedgerWriter(
+            path: TBDConstants.supervisionLedgerPath)
         let supervisionStore: SupervisionStore? = mockMode == nil
             ? SupervisionStore(
                 files: SupervisionFileStore(),
-                ledger: SupervisionLedgerWriter(path: TBDConstants.supervisionLedgerPath),
+                ledger: supervisionLedger,
                 fleet: DatabaseSupervisionFleetReader(db: database))
             : nil
         if let supervisionStore {
             self.supervision = supervisionStore
             rpcRouter.supervision = supervisionStore
+            // The hosted-desk lifecycle (design §9). Same mock-mode gate as the
+            // store: a fixture render must never spawn a session.
+            rpcRouter.supervisionDesks = SupervisionDeskManager(
+                db: database,
+                lifecycle: lifecycle,
+                tmux: tmux,
+                desks: SupervisionDesksStore(),
+                ledger: supervisionLedger,
+                actuationLog: actuationLog,
+                subscriptions: subs)
             do {
                 try await supervisionStore.load()
             } catch {
