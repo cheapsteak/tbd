@@ -116,10 +116,23 @@ jobs:
       - name: Check for committed implementation plans
         run: scripts/check-no-committed-plans.sh
 
-      - name: Test agent guardrails and Swift admission wrapper
+      # Every script harness that needs nothing but bash, git and python lives
+      # here — a test file no workflow runs is worth nothing, and three of
+      # these shipped that way before this step collected them. They are on
+      # `ubuntu-latest` because none of them reads a BSD-only tool; the fence
+      # harness (`scripts/test.test.sh`) is the exception and stays in the
+      # macOS `lint` job because its guards read BSD `stat -f`.
+      #
+      # Nothing here touches the network, a real remote, `~/tbd`, or a real
+      # `gh`: each harness builds a fixture repo in a temp dir and puts a stub
+      # `gh` first on PATH.
+      - name: Test agent guardrails and the script harnesses
         run: |
           python3 .claude/hooks/guardrails/dispatch.py --self-test
           python3 scripts/test-swift-safe.py
+          python3 scripts/test-remote-verify.py
+          bash scripts/remote-verify.test.sh
+          bash scripts/sweep-preflight-refs.test.sh
 
   review-scripts-tests:
     name: Review scripts tests
