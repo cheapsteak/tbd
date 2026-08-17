@@ -197,6 +197,30 @@ struct StatusBarViewChipsTests {
         #expect(state?.caption == PRFreshness.checkedLabel(observedAt: nil, now: Date()))
     }
 
+    /// The toolbar and sidebar both append "last check did not resolve" after
+    /// the age. A chip that dropped it would render the more confident of two
+    /// readings of one fact — the exact drift `PRFreshness` exists to prevent.
+    @Test("the overlay says when the last poll attempt did not resolve")
+    func overlayCarriesTheUndeterminedClause() {
+        let now = Date(timeIntervalSince1970: 1_700_007_200)
+        let observed = now.addingTimeInterval(-7200)
+        let observation = PRObservation(
+            outcome: .undetermined(cause: "gh unauthenticated"), observedAt: observed)
+        let model = StatusBarView.prChips(
+            [binding(412, .mergeable, observedAt: observed)], observation: observation)
+
+        let caption = StatusBarView.chipHoverCard(model.chips[0], now: now)
+            .rows.first { $0.label == "State" }?.caption
+        #expect(caption == "checked 2h ago · last check did not resolve (gh unauthenticated)")
+
+        // A settled attempt adds nothing — the clause is a caveat, not a field.
+        let settled = StatusBarView.prChips(
+            [binding(412, .mergeable, observedAt: observed)],
+            observation: PRObservation(outcome: .none, observedAt: observed))
+        #expect(StatusBarView.chipHoverCard(settled.chips[0], now: now)
+            .rows.first { $0.label == "State" }?.caption == "checked 2h ago")
+    }
+
     // MARK: - The two click targets
 
     @Test("the untrack target says it removes the PR from THIS worktree")

@@ -35,6 +35,7 @@ public actor PRBindingCoordinator {
     private let store: PRBindingStore
     private let resolveRepo: @Sendable (UUID) async -> (owner: String, name: String, host: String)?
     private let isGitLabHost: @Sendable (UUID, String) async -> Bool?
+    private let cachedPRNumber: @Sendable (UUID) async -> Int?
 
     /// - Parameter resolveRepo: the worktree's own `owner`/`name` and host, or
     ///   nil when they cannot be determined (no remote, git failure, unknown
@@ -46,12 +47,20 @@ public actor PRBindingCoordinator {
     ///   put at all (no directory on this machine to ask in). Only the
     ///   `github.com` exemption in `hostAgreement` consults it, so a worktree
     ///   whose host already matches the URL's never pays for the answer.
+    /// - Parameter cachedPRNumber: the PR number the worktree's cached
+    ///   `Worktree.prStatus` names, or nil when it holds none. This is the only
+    ///   evidence about a worktree's PRs that survives `gh` being unavailable,
+    ///   and `detach` uses it to corroborate a reference it cannot check
+    ///   against a repo. Defaults to "no evidence", which is the conservative
+    ///   reading.
     public init(store: PRBindingStore,
                 resolveRepo: @escaping @Sendable (UUID) async -> (owner: String, name: String, host: String)?,
-                isGitLabHost: @escaping @Sendable (UUID, String) async -> Bool?) {
+                isGitLabHost: @escaping @Sendable (UUID, String) async -> Bool?,
+                cachedPRNumber: @escaping @Sendable (UUID) async -> Int? = { _ in nil }) {
         self.store = store
         self.resolveRepo = resolveRepo
         self.isGitLabHost = isGitLabHost
+        self.cachedPRNumber = cachedPRNumber
     }
 
     public func bind(worktreeID: UUID, parsed: ParsedPRURL,
@@ -218,34 +227,40 @@ public actor PRBindingCoordinator {
     /// must work whatever the repo says now, or a repo rename would strand
     /// every binding made before it.
     ///
-    /// **An unresolved repo is not a mismatch, and must not be treated as one.**
-    /// `resolveRepo` is `gh repo view` behind a TTL cache, so it answers nil
-    /// exactly when `gh` is unauthenticated, offline or missing — which is the
-    /// same condition that leaves the bindings table empty and makes the
-    /// synthetic legacy-status chip the only PR on screen. Declining there
-    /// would disable insert-on-miss precisely in the scenario it was written
-    /// for and hand the xmark back its silent no-op. `bind` distinguishes the
-    /// two the same way (`.deferredUnknownRepo` versus `.rejectedWrongRepo`);
-    /// this reads the nil as "no reason to refuse".
+    /// **An unresolved repo is neither a match nor a mismatch, so it is decided
+    /// on other evidence.** `resolveRepo` is `gh repo view` behind a TTL cache,
+    /// so it answers nil exactly when `gh` is unauthenticated, offline or
+    /// missing — which is also the condition that leaves the bindings table
+    /// empty and makes the synthetic legacy-status chip the only PR on screen.
+    /// Refusing on nil would disable insert-on-miss in the very scenario it was
+    /// written for; accepting on nil would let a mistyped foreign URL mint the
+    /// permanent tombstone the guard exists to prevent. So a nil falls back to
+    /// the one fact about this worktree's PRs that survives `gh` being gone:
+    /// the number its cached `Worktree.prStatus` names. That is exactly what a
+    /// synthetic chip is built from, so the xmark keeps working offline, while
+    /// `tbd pr detach <some other PR>` on an unresolvable worktree writes
+    /// nothing.
     ///
     /// Declining reports `false`, which is the honest answer — this worktree
     /// was not tracking that PR.
     @discardableResult
     public func detach(worktreeID: UUID, parsed: ParsedPRURL) async throws -> Bool {
-        let own = await resolveRepo(worktreeID)
-        let wrongRepo = own.map {
-            $0.owner.lowercased() != parsed.owner.lowercased()
-                || $0.name.lowercased() != parsed.repo.lowercased()
-        } ?? false
+        let insertIfMissing: Bool
+        if let own = await resolveRepo(worktreeID) {
+            insertIfMissing = own.owner.lowercased() == parsed.owner.lowercased()
+                && own.name.lowercased() == parsed.repo.lowercased()
+        } else {
+            insertIfMissing = await cachedPRNumber(worktreeID) == parsed.number
+        }
         let tombstone = PRBinding(
             worktreeID: worktreeID, host: parsed.host, owner: parsed.owner,
             repo: parsed.repo, number: parsed.number, url: parsed.url,
             source: .manual, detached: true)
-        let changed = try await store.tombstone(tombstone, insertIfMissing: !wrongRepo)
+        let changed = try await store.tombstone(tombstone, insertIfMissing: insertIfMissing)
         if changed {
             logger.debug("tombstoned PR #\(parsed.number, privacy: .public) for worktree \(worktreeID.uuidString, privacy: .public)")
-        } else if wrongRepo {
-            logger.debug("not tombstoning unbound PR #\(parsed.number, privacy: .public) for worktree \(worktreeID.uuidString, privacy: .public): PR is in \(parsed.owner, privacy: .public)/\(parsed.repo, privacy: .public), which is not this worktree's repo")
+        } else if !insertIfMissing {
+            logger.debug("not tombstoning unbound PR #\(parsed.number, privacy: .public) for worktree \(worktreeID.uuidString, privacy: .public): nothing ties \(parsed.owner, privacy: .public)/\(parsed.repo, privacy: .public) to this worktree")
         }
         return changed
     }

@@ -176,6 +176,94 @@ struct PRBindingRefreshTests {
             #expect(state.prDetachedCounts.isEmpty)
         }
     }
+
+    // MARK: - The untrack gesture
+
+    /// `detachPR` judges its outcome by re-reading the bindings rather than by
+    /// trusting `detached`, because false covers both "already tombstoned" and
+    /// "the daemon declined". Each of the three ways out gets a case.
+
+    @MainActor
+    @Test("a detach whose chip is gone afterwards says nothing")
+    func detachThatLandedIsSilent() async {
+        await withStateAsync { state in
+            let wt = UUID()
+            state.prBindings = [wt: [binding(412, worktreeID: wt)]]
+            state.prDetacher = { _, _, _ in PRDetachResult(detached: true) }
+            state.prBindingsFetcher = {
+                PRBindingsAllResult(worktrees: [entry(wt, [], detachedCount: 1)])
+            }
+
+            await state.detachPR(worktreeID: wt, url: nil, number: 412)
+
+            #expect(state.prBindings[wt] == nil)
+            #expect(state.activeToast == nil)
+        }
+    }
+
+    /// `detached: false` is not itself a failure — a second click on the same
+    /// xmark reports it — so what matters is whether the chip survived.
+    @MainActor
+    @Test("a detach whose chip survives is reported, even when the RPC did not throw")
+    func detachThatDeclinedIsReported() async {
+        await withStateAsync { state in
+            let wt = UUID()
+            state.prBindings = [wt: [binding(412, worktreeID: wt)]]
+            // The daemon declined: nothing was written, so the refresh returns
+            // the binding unchanged.
+            state.prDetacher = { _, _, _ in PRDetachResult(detached: false) }
+            state.prBindingsFetcher = {
+                PRBindingsAllResult(worktrees: [entry(wt, [binding(412, worktreeID: wt)])])
+            }
+
+            await state.detachPR(worktreeID: wt, url: nil, number: 412)
+
+            #expect(state.prBindings[wt]?.map(\.number) == [412])
+            #expect(state.activeToast?.style == .error)
+            #expect(state.activeToast?.message == "PR #412 is still tracked here")
+        }
+    }
+
+    /// The trap the outcome check has to avoid: a refresh that never landed
+    /// leaves the maps holding their pre-call values, which read exactly like a
+    /// detach that did nothing. Reporting a landed detach as a failure is its
+    /// own kind of lie.
+    @MainActor
+    @Test("a detach followed by a failed refresh is not reported as a failure")
+    func detachWithAFailedRefreshIsSilent() async {
+        await withStateAsync { state in
+            let wt = UUID()
+            state.prBindings = [wt: [binding(412, worktreeID: wt)]]
+            state.prDetacher = { _, _, _ in PRDetachResult(detached: true) }
+            state.prBindingsFetcher = { throw PRBindingRefreshTestError.boom }
+
+            await state.detachPR(worktreeID: wt, url: nil, number: 412)
+
+            // The stale map still shows the chip, and that is precisely why it
+            // is not evidence.
+            #expect(state.prBindings[wt]?.map(\.number) == [412])
+            #expect(state.activeToast == nil)
+        }
+    }
+
+    @MainActor
+    @Test("a thrown detach toasts and never reaches the outcome check")
+    func detachThatThrewIsReported() async {
+        await withStateAsync { state in
+            let wt = UUID()
+            state.prBindings = [wt: [binding(412, worktreeID: wt)]]
+            state.prDetacher = { _, _, _ in throw PRBindingRefreshTestError.boom }
+            state.prBindingsFetcher = {
+                Issue.record("a failed detach must not refresh")
+                return PRBindingsAllResult(worktrees: [])
+            }
+
+            await state.detachPR(worktreeID: wt, url: nil, number: 412)
+
+            #expect(state.activeToast?.style == .error)
+            #expect(state.activeToast?.message == "Could not stop tracking PR #412")
+        }
+    }
 }
 
 private enum PRBindingRefreshTestError: Error { case boom }

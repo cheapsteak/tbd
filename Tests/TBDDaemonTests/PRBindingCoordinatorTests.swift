@@ -23,7 +23,8 @@ struct PRBindingCoordinatorTests {
         ///   worktree's forge at all.
         init(repo: (owner: String, name: String, host: String)? =
             ("acme", "acme-prod", "github.com"),
-             gitLabHosts: Set<String>? = []) async throws {
+             gitLabHosts: Set<String>? = [],
+             cachedPRNumber: Int? = nil) async throws {
             db = try TBDDatabase(inMemory: true)
             let created = try await db.repos.create(
                 path: "/tmp/prbinding-coord-repo-\(UUID().uuidString)",
@@ -32,7 +33,8 @@ struct PRBindingCoordinatorTests {
             store = db.prBindings
             coordinator = PRBindingCoordinator(
                 store: store, resolveRepo: { _ in repo },
-                isGitLabHost: { _, host in gitLabHosts.map { $0.contains(host.lowercased()) } })
+                isGitLabHost: { _, host in gitLabHosts.map { $0.contains(host.lowercased()) } },
+                cachedPRNumber: { _ in cachedPRNumber })
         }
 
         func newWorktree() async throws -> UUID {
@@ -359,10 +361,12 @@ struct PRBindingCoordinatorTests {
     /// swallow: `resolveRepo` is `gh repo view` behind a cache, so it answers
     /// nil exactly when `gh` is unauthenticated or offline — the same condition
     /// that leaves the bindings table empty and makes the synthetic chip the
-    /// only PR on screen. An unresolved repo is not a mismatch.
-    @Test("detaching an unbound PR still tombstones when the repo cannot be resolved")
-    func detachTombstonesWhenRepoIsUnresolved() async throws {
-        let fixture = try await Fixture(repo: nil)
+    /// only PR on screen. With no repo to check against, the worktree's cached
+    /// status is the evidence that decides it, and a synthetic chip is built
+    /// from exactly that status.
+    @Test("detaching the cached PR still tombstones when the repo cannot be resolved")
+    func detachTombstonesTheCachedPRWhenRepoIsUnresolved() async throws {
+        let fixture = try await Fixture(repo: nil, cachedPRNumber: 412)
         let wt = try await fixture.newWorktree()
 
         #expect(try await fixture.coordinator.detach(worktreeID: wt, parsed: parsed))
@@ -371,6 +375,30 @@ struct PRBindingCoordinatorTests {
         #expect(recorded.count == 1)
         #expect(recorded.first?.detached == true)
         #expect(recorded.first?.source == .manual)
+    }
+
+    /// …but an unresolved repo must not become a licence to tombstone anything.
+    /// A tombstone for a PR in another repo is permanent — `pr.attach` rejects
+    /// the reference before it reaches the row — so with no repo to check
+    /// against and nothing tying the PR to this worktree, nothing is written.
+    @Test("an unresolved repo does not license tombstoning an unrelated PR")
+    func detachDeclinesAnUncorroboratedPRWhenRepoIsUnresolved() async throws {
+        let fixture = try await Fixture(repo: nil, cachedPRNumber: 999)
+        let wt = try await fixture.newWorktree()
+
+        #expect(try await fixture.coordinator.detach(worktreeID: wt, parsed: parsed) == false)
+
+        #expect(try await fixture.store.list(worktreeID: wt, includeDetached: true).isEmpty)
+    }
+
+    @Test("an unresolved repo with no cached status writes nothing")
+    func detachDeclinesWhenNoEvidenceAtAll() async throws {
+        let fixture = try await Fixture(repo: nil)
+        let wt = try await fixture.newWorktree()
+
+        #expect(try await fixture.coordinator.detach(worktreeID: wt, parsed: parsed) == false)
+
+        #expect(try await fixture.store.list(worktreeID: wt, includeDetached: true).isEmpty)
     }
 
     /// The guard covers creation, not modification. A row that already exists

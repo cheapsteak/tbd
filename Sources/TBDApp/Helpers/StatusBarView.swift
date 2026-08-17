@@ -116,6 +116,11 @@ struct StatusBarView: View {
         /// When `state` was read. nil = never, which the overlay says out loud
         /// rather than passing the cached state off as current.
         let observedAt: Date?
+        /// The clause naming a last poll attempt that did not resolve, or nil
+        /// when the last attempt settled the question either way. The toolbar
+        /// and sidebar both append it; a chip that omitted it would render the
+        /// more confident of two readings of one fact.
+        let undetermined: String?
     }
 
     /// How many chips the bar shows before the rest collapse into `+N`.
@@ -156,11 +161,17 @@ struct StatusBarView: View {
         readback?.phase.undeliverableReason != nil
     }
 
+    /// `observation` is the worktree's last poll attempt, carried so the
+    /// overlay can say when that attempt did not resolve — the same clause the
+    /// toolbar and sidebar append. Without it a chip would render the more
+    /// confident of two readings of one fact.
     nonisolated static func prChips(
         _ bindings: [PRBinding],
-        limit: Int = prChipLimit
+        limit: Int = prChipLimit,
+        observation: PRObservation? = nil
     ) -> (chips: [PRChip], overflow: Int) {
         let selected = PRBindingPresentation.statusBarChips(bindings, limit: limit)
+        let undetermined = PRFreshness.undeterminedClause(observation)
         let chips = selected.chips.map { binding in
             PRChip(
                 id: binding.id,
@@ -172,7 +183,8 @@ struct StatusBarView: View {
                 state: binding.status?.state,
                 reason: binding.status.map { $0.reason ?? $0.state.displayReason },
                 title: binding.title,
-                observedAt: binding.status?.observedAt
+                observedAt: binding.status?.observedAt,
+                undetermined: undetermined
             )
         }
         return (chips, selected.overflow)
@@ -203,7 +215,12 @@ struct StatusBarView: View {
                 // The status's own words when it has any, exactly as the
                 // overflow menu and the toolbar dropdown render them.
                 value: chip.reason ?? unobservedStateValue,
-                caption: PRFreshness.checkedLabel(observedAt: chip.observedAt, now: now)
+                // Age first, then whether the last attempt to reconfirm it
+                // failed — the same two clauses in the same order the toolbar
+                // and sidebar compose from `PRFreshness`.
+                caption: ([PRFreshness.checkedLabel(observedAt: chip.observedAt, now: now)]
+                    + [chip.undetermined].compactMap { $0})
+                    .joined(separator: " · ")
             )
         ]
         return model
@@ -304,7 +321,8 @@ struct StatusBarView: View {
                 // three surfaces cannot show different PRs for one worktree.
                 let bindings = appState.effectivePRBindings(worktreeID: selected.id)
                 if !bindings.isEmpty {
-                    PRChipCluster(bindings: bindings)
+                    PRChipCluster(bindings: bindings,
+                                  observation: appState.prObservations[selected.id])
                         // Same reason as the path cluster: yield width to the
                         // version/display-name label rather than squeezing it.
                         .layoutPriority(-1)
@@ -367,9 +385,12 @@ private struct StatusBarHoverAffordance: ViewModifier {
 /// `StatusBarView.prChipLimit`, then a `+N` chip listing the rest.
 private struct PRChipCluster: View {
     let bindings: [PRBinding]
+    /// The worktree's last poll attempt, so a chip's overlay can say when that
+    /// attempt did not resolve — the clause the toolbar and sidebar append.
+    let observation: PRObservation?
 
     var body: some View {
-        let model = StatusBarView.prChips(bindings)
+        let model = StatusBarView.prChips(bindings, observation: observation)
         HStack(spacing: 6) {
             ForEach(model.chips) { chip in
                 PRChipView(chip: chip)

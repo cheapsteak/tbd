@@ -2456,10 +2456,15 @@ public actor PRStatusManager {
 
     /// The per-PR field selection shared by the viewer batch and the by-number
     /// aliased query, so the two can't drift and both parse into `PRNode`.
-    /// `title` rides along because it is one short string on a query that
-    /// already runs per PR, and it is what turns a bare `#21156` into something
-    /// a person can decide about. `openPRsQuery` has always selected it; this
-    /// closes the gap rather than opening a new cost.
+    /// `title` rides along because it is what turns a bare `#21156` into
+    /// something a person can decide about. It is a real addition to the poll's
+    /// payload, not a free one: this selection is shared with the viewer batch,
+    /// which pulls up to 100 PRs, so it costs one short string per PR per pass
+    /// there — and those titles are discarded, since only the by-number path
+    /// has a binding row to persist them onto. One title is a rounding error
+    /// beside the check rollup the same node already carries, and splitting the
+    /// selection in two to avoid it would give up the guarantee that the two
+    /// queries cannot drift and both parse into `PRNode`.
     static let prNodeFieldSelection =
         "number url title state mergeStateStatus reviewDecision headRefName baseRefName createdAt isDraft "
         + "statusCheckRollup { state } mergeQueueEntry { position }"

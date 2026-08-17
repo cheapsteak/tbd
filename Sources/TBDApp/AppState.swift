@@ -1379,6 +1379,13 @@ final class AppState: ObservableObject {
     /// without a daemon.
     lazy var prBindingsFetcher: @MainActor () async throws -> PRBindingsAllResult =
         { [daemonClient] in try await daemonClient.listAllPRBindings() }
+    /// How `detachPR` untracks one PR — injectable for the same reason as
+    /// `prBindingsFetcher`, so the status bar's untrack gesture and each of its
+    /// outcomes can be driven without a daemon.
+    lazy var prDetacher: @MainActor (UUID, String?, Int) async throws -> PRDetachResult =
+        { [daemonClient] worktreeID, url, number in
+            try await daemonClient.detachPR(worktreeID: worktreeID, url: url, number: number)
+        }
     /// How `loadTabStates` fetches a worktree's persisted tab order / labels /
     /// active tab — injectable for the same reason as `daemonCapabilitiesFetcher`
     /// (`DaemonClient` is concrete, no protocol), so hydration tests can drive
@@ -3063,7 +3070,7 @@ final class AppState: ObservableObject {
     /// resolves a bare number against the worktree's own repo.
     func detachPR(worktreeID: UUID, url: String?, number: Int) async {
         do {
-            _ = try await daemonClient.detachPR(worktreeID: worktreeID, url: url, number: number)
+            _ = try await prDetacher(worktreeID, url, number)
         } catch {
             logger.error("""
                 Failed to detach PR #\(number, privacy: .public) from worktree \
