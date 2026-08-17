@@ -20,9 +20,24 @@ enum ClaudeCloudCreateOutputParser {
     /// `Sendable` conformance instead of reaching for `nonisolated(unsafe)`.
     private static var idPattern: Regex<Substring> { /session_[A-Za-z0-9]+/ }
 
-    enum ParseFailure: Error, Equatable {
+    // `LocalizedError` on the declaration, not a later extension: without an
+    // `errorDescription`, `localizedDescription` returns the NSError bridge
+    // string and the ids that made a create ambiguous — the whole reason this
+    // failure is worth reporting — never reach the log line.
+    enum ParseFailure: LocalizedError, Equatable {
         case noSessionID
         case conflictingSessionIDs([String])
+
+        var errorDescription: String? {
+            switch self {
+            case .noSessionID:
+                return
+                    "No session id in the create output: `claude --cloud` printed no `session_…` token, so the lane has no identity to record."
+            case .conflictingSessionIDs(let ids):
+                return
+                    "Conflicting session ids in the create output: \(ids.joined(separator: ", ")). The three printed lines must agree on one id."
+            }
+        }
     }
 
     /// Strict, and cross-checked against every match in the output. An
