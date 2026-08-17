@@ -31,6 +31,9 @@ The probes were:
   multi-project-aliased.
 - **A REST `iids[]` batch** against the same project.
 - **A host-fingerprint sweep** of `/api/v4/version` across five hosts.
+- **Schema introspection** of the live GraphQL endpoint, and a query naming a
+  field that does not exist, to observe the failure shape.
+- **Response-header inspection** on both a REST `GET` and a GraphQL `POST`.
 
 Facts about `glab` come from the installed binary's help output and from its
 source; facts about GitLab's API come from documentation, from GitLab's own
@@ -920,7 +923,66 @@ field GitLab removes in future — which is the property a version-keyed table
 does not have.
 
 The remaining judgement is what "remember" means — process lifetime, a TTL, or a
-persisted per-host capability row — and that is a design call, not a fact.
+persisted per-host capability row — and that is a design call, not a fact. What
+follows is the evidence bearing on it, because a persisted row raises a question
+a process-lifetime cache does not: when is it wrong, and what notices?
+
+**The two directions are not symmetric, which halves the problem.**
+
+- **Capability lost** — the instance is downgraded, or GitLab removes a field —
+  is **self-healing at zero cost**. The next poll's rich query returns
+  `undefinedField`, the row is rewritten, and the staleness window is one poll.
+  Nothing needs to trigger it.
+- **Capability gained** — the instance is upgraded, or a license is added — is
+  **silent indefinitely**, because the lean query keeps succeeding and no error
+  ever reports that the field became available.
+
+Only the second direction needs a mechanism, so the question is not cache
+coherence but "how often is one optimistic attempt re-armed".
+
+**The version cannot ride along free — measured.** GitLab sends no instance
+version header. Response headers on both a REST `GET` and a GraphQL `POST`
+carry `x-gitlab-meta: {"correlation_id":"…","version":"1"}`, but that `version`
+is the meta envelope's own schema version, not the GitLab release; nothing else
+in the header set names a release. So keying a capability row on version costs a
+deliberate extra call to `/api/v4/metadata`.
+
+**And a hostname is not necessarily one version — measured.** Consecutive
+requests to gitlab.com reported `gitlab-sv: gke-cny-api` and then
+`gitlab-sv: api-gke-us-east1-b`, i.e. they landed on different backends, one of
+them labelled as a canary. On a deployment that runs mixed versions behind one
+name, a version-keyed row can thrash between two answers for a host that is, as
+far as the user is concerned, one host.
+
+That leaves three shapes, and TBD has direct precedent for the second:
+
+- **Version-keyed** — store the observed version beside the capability and
+  discard the row when it moves. Causally correct, and it is what Renovate does
+  (fetching the server version once per run, not per request). Costs one
+  authenticated call per host per daemon run, and inherits the canary hazard
+  above.
+- **TTL re-arm** — after some interval, attempt the rich query again regardless
+  of what the row says. **No extra call at all**: the retry is the poll, and the
+  cost is one failed round trip per host per interval. Immune to version skew,
+  needs no version tracking, and self-heals for causes nobody enumerated.
+  `PRStatusManager.headRefVerifiedIDs` (`:107-122`) is the same trade already
+  made in this codebase — a negative remembered per daemon run rather than
+  forever, with the rationale stated on the property: a transient failure "costs
+  re-verification until the next daemon run. On a path that polls continuously,
+  that is the right side to err on."
+- **Explicit gesture** — a `--recheck` flag that clears the row. Worth having as
+  an escape hatch either way, but it cannot be the primary mechanism, because
+  nobody knows to run it.
+
+Two repo rules bear on the persisted form specifically. If the capability lives
+in a **DB column**, the flag rule in the root `CLAUDE.md` applies and is
+unusually apt: add it with **no SQL default**, so `NULL` means "never tested" and
+stays distinguishable from `0` ("the rich query was rejected") and `1` ("it
+worked") — exactly the three states a capability record needs, and exactly what
+`ADD COLUMN … DEFAULT` would destroy by backfilling. And a persisted row is
+durable derived state, so the PR-review gate will ask **who refreshes it**; the
+natural answer is the PR poll, which already runs on its own clock, but it wants
+naming rather than leaving implicit.
 
 **git-spice** supports GitHub, GitLab, Bitbucket, Gitea and Forgejo, and its
 GitLab mergeability logic
@@ -1211,3 +1273,21 @@ ceiling — so on the GitLab path the cap buys essentially nothing below the
 removing it: it still bounds the GitHub path, where cost genuinely is per-alias,
 and a cap that differs per forge is a worse thing to reason about than one that
 is merely redundant on one side.
+
+**12. If the schema capability is persisted per host, what re-arms it?**
+The full evidence is in
+[Part 9](#is-ce-or-ee-the-question-and-can-one-api-call-settle-it); the short
+form is that only one direction needs a trigger. A *lost* capability is
+rediscovered free on the next poll, so the question is solely how often a
+*gained* one is retried. *Evidence bearing on it:* GitLab sends no version
+header, so version-keying costs a deliberate extra call per host; consecutive
+requests to one hostname were measured landing on different backends including a
+canary, so a version key can thrash on large deployments; and a TTL re-arm costs
+no extra call at all, because the retry is the poll. TBD has already made the
+same trade once, in `headRefVerifiedIDs` (`PRStatusManager.swift:107-122`),
+scoping a remembered negative to a daemon run rather than to forever.
+
+Two constraints come from the repo rather than from GitLab: a capability column
+must be added with **no SQL default** so `NULL` ("never tested") stays distinct
+from `0` and `1`, and the persisted row needs a **named refresher** for the
+review gate — most plausibly the PR poll itself.
