@@ -64,18 +64,39 @@ but I cannot talk to it" — the state every other option permits, and the one
 whose symptom (no binding ever forms, silently) is the bug being fixed. It also
 needs no configuration column and therefore no migration.
 
-Three constraints on the derivation:
+**TBD reads the host list only, never the authentication verdict.** This
+distinction carries the design. A host appears because someone declared it, and
+that is the only fact being extracted. Whether credentials currently work is
+proven by an API call succeeding, never by status text — which is measurably
+unreliable: on a self-managed instance the block for a working host printed
+`✓ Logged in to <host>` and `! Invalid token provided in configuration file`
+together, while every REST and GraphQL call with that token succeeded (#673).
 
-- **Parse the output, never the exit status.** `glab auth status` exits `0` while
-  reporting that it could not authenticate to any configured instance.
+Four constraints on the derivation:
+
+- **Ignore the exit status entirely; parse the per-host blocks.** `glab auth
+  status` exits `1` if *any* configured host fails to authenticate, so a
+  perfectly working setup reports failure whenever an unused `gitlab.com` entry
+  sits in the same config. The exit code is uninformative in both directions.
 - **`gitlab.com` appears in the list even with no credentials**, so its presence
   proves nothing. Only a non-default host is evidence.
 - **Attempt it only when the remote host is not `github.com`.** A GitHub-only
   fleet then spawns no `glab` subprocess at all, so the common case pays
   nothing.
+- **Pass `--hostname` explicitly on every `glab` invocation.** Outside a
+  repository directory `glab api` silently defaults to `gitlab.com`, so relying
+  on ambient repo context would send a self-managed instance's queries to the
+  public one.
 
 The derived host set is cached in memory for the daemon run. Nothing is
 persisted, so nothing needs invalidating, and no clock seam is required.
+
+**Credential expiry is a reporting requirement, not a recovery one.** Tokens are
+personal access tokens with an expiry and no refresh, so a host that worked
+yesterday can start refusing today. When calls against a known GitLab host begin
+failing on authentication, the failure names that host. It must not degrade into
+"this is not a GitLab repo", because that is indistinguishable from the bug this
+work exists to remove.
 
 `RemoteRepoMatching` deliberately discards the host when normalising remotes and
 documents the resulting collision — "a self-hosted GitLab mirror of a GitHub
@@ -125,8 +146,10 @@ the lower unauthenticated ceiling.
 
 The tier-1 field set is `iid`, `state`, `draft`, `detailedMergeStatus`,
 `conflicts`, `sourceBranch`, `targetBranch`, `createdAt`, `webUrl`, and
-`headPipeline { status }`. Every one of these is Free-tier and predates any
-instance likely to be in service.
+`headPipeline { status }`, plus one project-level field,
+`onlyAllowMergeIfPipelineSucceeds`. Every one of these is Free-tier and predates
+any instance likely to be in service. The project-level field is what makes a
+faithful CI signal possible — see "State mapping".
 
 **No paid-tier fields are requested.** GraphQL rejects an entire query for one
 unknown field, returning `"data": null` — on a hundred-node batch that turns a
@@ -139,6 +162,25 @@ machine-readable `extensions.code: "undefinedField"` naming the offending field,
 supporting a retry-lean-and-remember fallback that costs nothing on the happy
 path.
 
+**A REST call accompanies the GraphQL read, for one narrow purpose.** GitLab
+computes mergeability asynchronously and does not recompute it on read, so a
+merge request can report `UNCHECKED` indefinitely — 21 of 71 open merge requests
+on a self-managed instance, including some open for months (#673). GraphQL offers
+no way to ask for a recomputation; both plausible argument spellings are rejected
+as `argumentNotAccepted`. REST's list endpoint does, via
+`with_merge_status_recheck=true`, and accepts it alongside `iids[]`.
+
+So each poll pass issues one additional REST call per project, naming only the
+merge requests TBD actually has bindings for, whose sole purpose is to request a
+recomputation. Its response is discarded; the next GraphQL tick reads the
+refreshed value. The cost is one call per project rather than per merge request,
+and the scoping to bound merge requests matters — it queues background work on
+someone else's server, so TBD asks about the handful it tracks rather than every
+open merge request in the project.
+
+This is not a fallback transport and does not reopen the transport decision. The
+poll remains GraphQL; the REST call carries no data TBD reads.
+
 **Branch matching queries the server, not the viewer.** GitHub forces TBD to
 fetch the authenticated user's own pull requests and match branches locally,
 which is why a merge request opened by anyone else is invisible to branch
@@ -150,7 +192,11 @@ through the web UI or by `git push -o merge_request.create`.
 ## Project identity
 
 A GitLab namespace nests up to twenty levels, so a project path is
-`acme/platform/backend/api-gateway` rather than `owner/name`. The two existing
+`acme/platform/backend/api-gateway` rather than `owner/name`. Nesting is the
+common case rather than an edge case: of 100 projects sampled on a self-managed
+instance, 72 had one intermediate subgroup and 7 had two, leaving 21 flat as the
+minority (#673). A design that treated `owner/name` as normal and nesting as an
+exception would be calibrated backwards. The two existing
 columns hold it unchanged, reframed as namespace and project: the namespace path
 goes in `owner`, the project name in `repo`. GitHub's `owner` is simply a
 one-segment namespace, so the concept is already shared; only the column's name
@@ -212,12 +258,47 @@ solely by an ungiven review maps to `.mergeable`, "Ready to merge", commented as
 deliberate: checks are settled, and awaiting a review nobody has performed is not
 something demanding the author's attention.
 
+### The CI signal is separate from the merge status
+
+`detailedMergeStatus` reports **one** blocker, chosen by a precedence GitLab
+owns, and continuous-integration failure sits low in that order. Field
+measurement makes this unmissable: across 71 open merge requests on a project
+configured with `only_allow_merge_if_pipeline_succeeds`, 33 had a failing head
+pipeline and **not one** reported `CI_MUST_PASS` (#673). Approval, draft and
+unchecked states masked every one of them.
+
+Two consequences follow, and together they rule out reading CI state off
+`detailedMergeStatus` at all. Colouring red only on `CI_MUST_PASS` would show red
+essentially never on such an instance. Worse, combined with `NOT_APPROVED`
+mapping to `.mergeable`, a merge request with a failing pipeline would render as
+"Ready to merge".
+
+So the GitLab arm mirrors the structure GitHub's arm already has: a CI signal
+computed independently of the merge status, and evaluated in the same precedence
+position — after draft, before the merge-status switch.
+
+- The signal is **gated on the project's `onlyAllowMergeIfPipelineSucceeds`**,
+  which is the faithful analogue of GitHub's "required check". A failing pipeline
+  on a project that does not gate merges on pipelines is the same situation as
+  GitHub's `UNSTABLE`, which TBD deliberately does not colour red.
+- `FAILED` on a gating project yields `.checksFailed`; `RUNNING` and `PENDING`
+  yield `.pending`.
+- `MANUAL` yields `.pending`, "Pipeline awaiting manual action" — neither failing
+  nor passing, and common enough to need its own wording (5 of the 71).
+- A **null `headPipeline`** yields no CI signal at all, and the merge status
+  decides. Very old merge requests have none.
+
+Draft precedence is what makes this safe rather than noisy. Because `isDraft` is
+evaluated first (`:1153`), a draft with a failing pipeline stays `.draft` — which
+matters, since 15 of 17 drafts in the sample had failing pipelines. Work in
+progress does not turn the fleet red.
+
 - `MERGEABLE` maps to `.mergeable`.
 - `NOT_APPROVED` maps to `.mergeable`, "Ready to merge". It is the precise
   analogue of GitHub's `BLOCKED` plus `REVIEW_REQUIRED`. This matters in
-  practice: of six open merge requests sampled live, three reported
-  `NOT_APPROVED`, so mapping it to `.blocked` would paint most of a healthy
-  GitLab fleet as needing attention.
+  practice: it is the single most common state observed in the field, so mapping
+  it to `.blocked` would paint most of a healthy GitLab fleet as needing
+  attention.
 - `DISCUSSIONS_NOT_RESOLVED` maps to `.changesRequested`, "Unresolved
   discussions". A human is waiting on the author, which is what that state
   already means. Two of the same six merge requests reported it.
@@ -225,7 +306,14 @@ something demanding the author's attention.
   dedicated `detailedMergeStatus` value, so no per-reviewer scan and no
   paid-tier field is needed to express it.
 - `DRAFT_STATUS`, and the `draft` boolean, map to `.draft`.
-- `CHECKING`, `UNCHECKED` and `PREPARING` map to `.pending`.
+- `CHECKING` and `PREPARING` map to `.pending`, "Checks pending". These are
+  genuinely transient.
+- `UNCHECKED` maps to `.pending` with the distinct reason **"Mergeability not
+  checked"**, because it is *not* transient: GitLab computes mergeability
+  asynchronously and leaves a stale merge request unchecked until something
+  re-triggers it, so 21 of 71 sampled merge requests sat in it, some for months
+  (#673). The reason string must not imply the state is about to resolve. The
+  recheck request described under "GitLab I/O" is what actually moves it.
 - `CONFLICT` maps to `.blocked`, "Merge conflicts"; `NEED_REBASE` to `.blocked`,
   "Behind base branch"; `BLOCKED_STATUS` to `.blocked`, "Blocked by another
   merge request".
@@ -237,6 +325,36 @@ something demanding the author's attention.
   attention. Unknown means unknown. This is the one place the GitLab arm
   deliberately differs from the GitHub arm's `default: return (.blocked,
   "Blocked")` (`:1175`).
+
+### Observed distribution
+
+Every mapping choice above is calibrated against one measurement rather than
+against the enum's shape: 71 open merge requests on one active project of a
+self-managed 19.0.3-ee instance that requires both passing pipelines and resolved
+discussions (#673).
+
+| `detailedMergeStatus` | count |
+|---|---|
+| `NOT_APPROVED` | 26 |
+| `UNCHECKED` | 21 |
+| `DRAFT_STATUS` | 17 |
+| `DISCUSSIONS_NOT_RESOLVED` | 3 |
+| `NEED_REBASE` | 3 |
+| `MERGEABLE` | 1 |
+
+| `headPipeline.status` | count |
+|---|---|
+| `FAILED` | 33 |
+| `SUCCESS` | 32 |
+| `MANUAL` | 5 |
+| null | 1 |
+
+Three facts fall out of those two columns and none of them is visible from the
+schema alone. `MERGEABLE` is rare, so any design that treats it as the normal
+case is calibrated wrong. The states TBD renders most often are precisely the two
+with no GitHub equivalent, `NOT_APPROVED` and `UNCHECKED`. And 33 failing
+pipelines produced zero `CI_MUST_PASS`, which is the measurement that forced the
+CI signal to be computed independently.
 
 ## Terminology
 
@@ -252,32 +370,28 @@ when a worktree spans forges, and "PR" is the one already in place. The daemon's
 own vocabulary is already forge-neutral where it matters — `PRUndeterminedCause`
 speaks of a forge rather than of GitHub (`PRStatusManager.swift:13-34`).
 
-## Decisions this design defers
+## Discovery: the hook arm
 
-Two questions are answerable by a GitLab user's report rather than by reasoning,
-and the design records both branches with the fact that selects each. Neither
-blocks the rest of the work.
+The `PostToolUse:Bash` hook gains a `glab mr create` arm alongside the
+`gh pr create` one. Under a non-TTY `Bash` call `glab mr create` emits the bare
+web URL, so the extractor has less to sift than on the GitHub side.
 
-**What makes a GitLab chip red.** `.checksFailed` currently fires only on a
-failing *required* check, and TBD deliberately does not colour on non-required
-failures (`PRStatusManager.swift:1244-1256`). GitLab has no "required check"
-concept; its analogue is `detailedMergeStatus == CI_MUST_PASS`, meaning the
-pipeline blocks the merge. The strict analogue therefore colours red only when
-the pipeline both blocks merge and failed, which preserves today's meaning
-exactly — a failed non-blocking pipeline on GitLab is the same situation as
-GitHub's `UNSTABLE`, which TBD already shows as not red. The alternative colours
-red on any `headPipeline.status == FAILED`, which is what a GitLab user's own web
-UI leads them to expect. *Selecting fact:* whether the instance in question gates
-merges on pipelines. If it does, the two branches never diverge.
+The arm earns its place on evidence rather than symmetry: merge requests in the
+field are created almost entirely through `glab mr create`, much of it
+agent-driven, which is exactly the case the hook exists to catch — an agent
+opening a merge request that the fleet would otherwise not notice until the next
+poll. The web UI accounts for the rest, and `git push -o merge_request.create`
+is not used at all (#673).
 
-**Whether the hook gains a `glab mr create` arm.** Adding it is mechanical, and
-cleaner than the GitHub side because under a non-TTY `Bash` call `glab mr create`
-emits a bare web URL. Because GitLab branch matching is author-blind, merge
-requests created outside the hook's view are already discovered, so the arm is a
-latency improvement rather than the only route — which is the opposite of its
-role on GitHub. *Selecting fact:* how merge requests are actually created in
-practice. Widening the gate to bare `git push` is not on the table: the gate
-fails closed because a false bind can auto-archive a worktree.
+Because GitLab branch matching is author-blind, every route is discovered
+eventually even without the hook, so the arm buys latency rather than coverage —
+the opposite of its role on GitHub, where a pull request opened by anyone else is
+invisible to branch matching.
+
+Widening the gate to bare `git push` remains off the table. The gate fails closed
+because a false bind can auto-archive a worktree
+(`PRBindingExtractor.swift:64-79`), and no gate can admit the push option without
+admitting every push.
 
 ## Testing
 
@@ -295,8 +409,21 @@ tested.
   `identityKey`, the four-part parse, and the unique index without collapsing
   into a different binding.
 - `glab auth status` parsing: a host list with one authenticated and one
-  unauthenticated host, a run that reports failure while exiting `0`, and absent
-  or unconfigured `glab`.
+  unauthenticated host still yields both hosts despite the command exiting `1`, a
+  block that reports "Logged in" and "Invalid token" simultaneously still yields
+  the host, and absent or unconfigured `glab` yields none.
+- Every `glab` invocation carries `--hostname`, asserted by an injected
+  `GLRunner` that inspects the arguments.
+- A GitLab host whose calls fail on authentication reports that host, and does
+  not degrade to "not a GitLab repo".
+- The CI signal: `FAILED` on a pipeline-gating project gives `.checksFailed`;
+  `FAILED` on a non-gating project does not; a draft with `FAILED` stays
+  `.draft`; `MANUAL` gives `.pending` with its own reason; a null
+  `headPipeline` leaves the merge status to decide.
+- `UNCHECKED` yields `.pending` with a reason distinct from the transient
+  `CHECKING` and `PREPARING` cases.
+- The recheck request names only bound merge requests, and a failure or an
+  unparseable response from it does not disturb the poll's own result.
 - Forge derivation is not attempted for a GitHub remote, asserted by an injected
   `GLRunner` that fails the test if invoked.
 - GitLab node parsing, including an absent `headPipeline`.
@@ -359,12 +486,28 @@ they cannot.
 Rejected because it is wrong precisely in the self-hosted case that motivates
 this work, and wrong in the silent direction.
 
-**REST instead of GraphQL.** REST is the worn path — the surveyed tools and
-GitLab's own Go SDK all use it — and it tolerates instance variation by omitting
-unknown fields rather than failing the whole request. Rejected because its
-`iids[]` batch omits pipeline status, forcing one additional call per merge
-request per poll pass, and because confining the query to fields available on
-every edition removes the failure mode REST's tolerance protects against.
+**REST for the whole poll, not just the recheck.** REST is the worn path — the
+surveyed tools and GitLab's own Go SDK all use it — it tolerates instance
+variation by omitting unknown fields rather than failing the whole request, and
+it is the only transport that can request a mergeability recomputation. Rejected
+because its `iids[]` batch omits pipeline status, forcing one additional call per
+merge request per poll pass, where the recheck costs one call per *project*.
+Confining the GraphQL query to fields available on every edition also removes the
+failure mode REST's tolerance protects against. Using each transport for what it
+alone does well costs less than committing to either.
+
+**Rendering `UNCHECKED` as unknown and leaving it there.** Zero extra calls, and
+no background work queued on someone else's instance. Rejected because roughly a
+third of observed merge requests sit in that state, some for months, so a
+substantial part of a GitLab fleet would permanently display a status that
+communicates nothing — and the state is reachable out of TBD's own poll, which
+makes leaving it a choice rather than a limitation.
+
+**Rate-limiting the recheck behind a staleness timer.** Politest to the server,
+and rejected for now only because it buys little over scoping the request to bound
+merge requests, while introducing a timer and therefore an injected clock seam. If
+field use shows the per-tick request is too much load, this is the change to
+make.
 
 **Growing `PRMergeableState`.** Dedicated cases for GitLab's distinct states
 would be more faithful to what GitLab reports. Rejected because every new tier
