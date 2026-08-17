@@ -259,7 +259,14 @@ struct RepoSectionView: View {
                         content: WorktreeProfilePickerView(
                             repoID: repo.id,
                             highlightDefaultProfile: newWorktreeMenu.isTriggerHovered,
-                            onClose: { newWorktreeMenu.closeNow() }
+                            onClose: { newWorktreeMenu.closeNow() },
+                            onSelectCloudSession: CloudCreateEntryPresentation.cloudProvider(
+                                appState.remoteProviders,
+                                claudeCloudEnabled: appState.daemonCapabilities?
+                                    .claudeCloudEnabled ?? false
+                            ).map { provider in
+                                { openRemoteCreateSheet(for: provider) }
+                            }
                         )
                         .environmentObject(appState)
                         .background(.ultraThickMaterial)
@@ -420,21 +427,29 @@ struct RepoSectionView: View {
         }
     }
 
-    /// Task 10: a repo-scoped entry point into the create sheet, prefilled
-    /// with this repo — omitted (not disabled) when no remote provider is
-    /// registered at all, mirroring how `RemoteSessionActionMenu` omits
-    /// capability-gated items rather than graying them out. A single
-    /// provider skips straight to the sheet; more than one asks which
-    /// provider first.
+    /// A repo-scoped entry point into the create sheet, prefilled with this
+    /// repo — omitted (not disabled) when no remote provider is offerable at
+    /// all, mirroring how `RemoteSessionActionMenu` omits capability-gated
+    /// items rather than graying them out. A single provider skips straight
+    /// to the sheet; more than one asks which provider first.
+    ///
+    /// The compiled cloud provider joins this list for free once the daemon
+    /// registers it; `CloudCreateEntryPresentation` is what takes it back out
+    /// when the flag has been turned off since boot, and the fast-path count
+    /// is decided AFTER that filter so a hidden entry cannot leave a
+    /// two-entry submenu with a dead row in it.
     @ViewBuilder
     private var newRemoteSessionMenuItem: some View {
-        if !appState.remoteProviders.isEmpty {
-            if appState.remoteProviders.count == 1, let only = appState.remoteProviders.first {
+        let providers = CloudCreateEntryPresentation.createProviders(
+            appState.remoteProviders,
+            claudeCloudEnabled: appState.daemonCapabilities?.claudeCloudEnabled ?? false)
+        if !providers.isEmpty {
+            if providers.count == 1, let only = providers.first {
                 Button("New Remote Session…") { openRemoteCreateSheet(for: only) }
                     .disabled(only.hasStaleSnapshot)
             } else {
                 Menu("New Remote Session…") {
-                    ForEach(appState.remoteProviders, id: \.config.name) { provider in
+                    ForEach(providers, id: \.config.name) { provider in
                         Button(provider.describe?.name ?? provider.config.name) {
                             openRemoteCreateSheet(for: provider)
                         }

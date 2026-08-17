@@ -133,4 +133,30 @@ struct ClaudeCloudSettingsTests {
             #expect(state.alertMessage != nil)
         }
     }
+
+    // MARK: - The scope caption, state-independent (Design §3)
+
+    /// Design §3: sessions TBD did not start have no ledger row, so they are
+    /// never listed, never adopted, and have no lane. The caption is what
+    /// makes that absence read as a property of the feature.
+    ///
+    /// Asserted on the COMPOSED string rather than against a blacklist of
+    /// forbidden words, so a rewording that drops the claim fails here.
+    @Test func theScopeCaptionSaysOnlySessionsStartedInTBDAppear() {
+        let caption = AppState.claudeCloudScopeCaption
+        #expect(caption.lowercased().contains("started"))
+        #expect(caption.lowercased().contains("claude.ai"))
+        #expect(!caption.isEmpty)
+    }
+
+    /// It is state-independent, which is why it is its own value: the seven
+    /// arms of `claudeCloudStatusCaption` stay byte-identical.
+    @Test func theStatusCaptionArmsAreUnchangedByTheScopeCaption() {
+        #expect(AppState.claudeCloudStatusCaption(
+            enabled: true, live: true, remoteBackendsEnabled: true)
+            == "On and running — cloud sessions are being polled.")
+        #expect(!AppState.claudeCloudStatusCaption(
+            enabled: true, live: true, remoteBackendsEnabled: true)
+            .contains("claude.ai"))
+    }
 }

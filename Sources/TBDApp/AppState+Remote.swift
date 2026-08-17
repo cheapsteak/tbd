@@ -351,4 +351,21 @@ extension AppState {
     nonisolated static func claudeCloudToggleOperable(remoteBackendsEnabled: Bool) -> Bool {
         remoteBackendsEnabled
     }
+
+    /// What cloud sessions TBD can see, stated once and independently of
+    /// which flag state the user is in.
+    ///
+    /// `list` answers from the ledger of what THIS machine started, because no
+    /// supported interface enumerates an account's cloud sessions. So a
+    /// session begun on claude.ai, in the mobile app, or by `claude --cloud`
+    /// in a terminal TBD did not spawn has no row here at all — not a partial
+    /// one, not a stale one, simply none. Saying so makes the absence read as
+    /// a property of the feature rather than as a bug.
+    ///
+    /// A separate value from `claudeCloudStatusCaption` deliberately: that
+    /// function's seven arms answer "which state am I in", they are pinned
+    /// byte-for-byte by tests, and this sentence is true in all seven.
+    nonisolated static let claudeCloudScopeCaption =
+        "Only sessions started from TBD on this Mac appear here — one begun on claude.ai, in the "
+        + "mobile app, or from a terminal TBD did not spawn is not listed."
 }

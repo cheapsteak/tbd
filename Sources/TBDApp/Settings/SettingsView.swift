@@ -536,6 +536,9 @@ struct GeneralSettingsTab: View {
         Text(AppState.claudeCloudStatusCaption(enabled: enabled, live: live, remoteBackendsEnabled: remoteEnabled))
             .font(.caption)
             .foregroundStyle(.secondary)
+        Text(AppState.claudeCloudScopeCaption)
+            .font(.caption)
+            .foregroundStyle(.secondary)
     }
 
     /// The registry file row — tilde-abbreviated path + copy-path button,
