@@ -35,25 +35,55 @@ struct RPCRouterRemoteArchiveTests: ~Copyable {
         try? FileManager.default.removeItem(at: dir)
     }
 
-    private func router(manager: RemoteProviderManager?) -> RPCRouter {
+    private func router(
+        manager: RemoteProviderManager?, actuationLog: ActuationLog = makeTestActuationLog()
+    ) -> RPCRouter {
         RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+                subscriptions: subs),
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             subscriptions: subs,
-            remoteManager: manager, actuationLog: makeTestActuationLog())
+            remoteManager: manager, actuationLog: actuationLog)
     }
 
     /// `describeOutcome` is popped FIRST by the fake invoker (`loadRegistryAndDescribe`
     /// runs before the verb under test), so callers order their script
     /// `[describe, verb...]`.
+    ///
+    /// The manager gets the SAME actuation log as the router, exactly as
+    /// `Daemon.swift` shares one — and, like `RemoteLaneFixture`, it gets one
+    /// at all. `syncFilingDecisions` fails closed when the manager's log is
+    /// nil, so a manager built without one silently disables every row-filing
+    /// side effect the handlers' `applyUpsert` reaches, leaving the mirror
+    /// payload (which updates unconditionally) as the only observable.
     private func router(invoker: FakeProviderInvoker) async -> RPCRouter {
+        let log = makeTestActuationLog(tag: "rpc-remote-archive")
         let manager = RemoteProviderManager(
-            db: db, subscriptions: subs, runner: invoker, registryURL: registryURL)
+            db: db, subscriptions: subs, runner: invoker, registryURL: registryURL,
+            actuationLog: log)
         await manager.loadRegistryAndDescribe()
-        return router(manager: manager)
+        return router(manager: manager, actuationLog: log)
+    }
+
+    /// Pre-adopts the remote worktree row bound to the session under test.
+    ///
+    /// Without it `findRemote(provider:sessionID:)` resolves nothing and the
+    /// filing sync skips the session entirely — so the row-status assertions
+    /// below would be vacuous and only the mirror payload would be under test.
+    @discardableResult
+    private func seedLane(sessionID: String = "a", status: WorktreeStatus) async throws -> Worktree {
+        let repo = try await db.repos.create(
+            path: "/tmp/acme-\(UUID().uuidString)", displayName: "acme", defaultBranch: "main")
+        return try await db.worktrees.createRemote(
+            repoID: repo.id, name: "acme-remote", branch: "acme-branch",
+            provider: "fake", sessionID: sessionID, status: status)
+    }
+
+    private func status(of worktree: Worktree) async throws -> WorktreeStatus? {
+        try await db.worktrees.get(id: worktree.id)?.status
     }
 
     private func call(_ router: RPCRouter, _ method: String, _ params: String = "{}") async -> RPCResponse {
@@ -92,8 +122,13 @@ struct RPCRouterRemoteArchiveTests: ~Copyable {
 
     // MARK: - declared capability: invokes and upserts
 
+    /// Two observables, and only the second can regress silently: the mirror
+    /// payload records what the provider said (`applyUpsert` writes it
+    /// unconditionally), while the worktree row's status is the filing
+    /// decision travelling back through `syncFilingDecisions`. Assert both.
     @Test func archiveInvokesVerbAndAdoptsReturnedSessionWhenDeclared() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
+        let lane = try await seedLane(status: .active)
         let invoker = FakeProviderInvoker(script: [
             describeDeclaring(["archive", "unarchive"]),
             providerOK(#"{"id": "a", "state": "running", "archived": true}"#),
@@ -104,10 +139,14 @@ struct RPCRouterRemoteArchiveTests: ~Copyable {
         #expect(invoker.calls == [["describe"], ["archive", "a"]])
         let rows = try await db.remoteSessions.list()
         #expect(rows.first?.decodedPayload?.isArchived == true)
+        #expect(try await status(of: lane) == .archived)
     }
 
+    /// The mirror-plus-row pair again, in the other direction. See
+    /// `archiveInvokesVerbAndAdoptsReturnedSessionWhenDeclared`.
     @Test func unarchiveInvokesVerbAndAdoptsReturnedSessionWhenDeclared() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
+        let lane = try await seedLane(status: .archived)
         let invoker = FakeProviderInvoker(script: [
             describeDeclaring(["archive", "unarchive"]),
             providerOK(#"{"id": "a", "state": "running", "archived": false}"#),
@@ -118,6 +157,7 @@ struct RPCRouterRemoteArchiveTests: ~Copyable {
         #expect(invoker.calls == [["describe"], ["unarchive", "a"]])
         let rows = try await db.remoteSessions.list()
         #expect(rows.first?.decodedPayload?.isArchived == false)
+        #expect(try await status(of: lane) == .active)
     }
 
     // MARK: - undeclared capability: refused, provider never spawned
