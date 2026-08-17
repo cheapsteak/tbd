@@ -262,4 +262,107 @@ struct StatusBarViewChipsTests {
         #expect(StatusBarView.iconSlotLabel(one, isHovering: true)
                 != StatusBarView.iconSlotLabel(one, isHovering: false))
     }
+
+    // MARK: - Naming the click under the pointer
+
+    /// The chip packs two click targets into about twenty points, and the
+    /// tooltip that would have distinguished them loses a race it cannot win:
+    /// the macOS help-tag delay is longer than the card's 0.55s floor, so the
+    /// card is already up by the time a tag would appear. The card therefore
+    /// has to say it itself.
+    @Test("the overlay names the untrack gesture while the pointer is on the xmark")
+    func overlayNamesTheUntrackAction() {
+        let card = StatusBarView.chipHoverCard(chip(title: "Fix the login timeout"),
+                                               untrackTarget: true)
+        #expect(card.rows.last?.value == "Click to stop tracking this PR in this worktree")
+        // It names the worktree scope for the same reason `untrackLabel` does:
+        // the gesture removes an association, not the pull request.
+        #expect(card.rows.last?.value.contains("this worktree") == true)
+    }
+
+    @Test("the overlay names the open gesture anywhere else on the chip")
+    func overlayNamesTheOpenAction() {
+        let card = StatusBarView.chipHoverCard(chip(title: "Fix the login timeout"))
+        #expect(card.rows.last?.value == "Click to open this PR on GitHub")
+        // Default: a chip is an open target until the pointer reaches the slot.
+        #expect(card.rows.last?.value
+                == StatusBarView.chipHoverCard(chip(title: "Fix the login timeout"),
+                                               untrackTarget: false).rows.last?.value)
+    }
+
+    /// A row that appeared and disappeared would resize the card under the
+    /// pointer — the jitter this line exists to cure. So the row is always
+    /// there, in the same place, and only its sentence swaps.
+    @Test("only the action row's text differs between the two states")
+    func onlyTheActionRowDiffers() {
+        let now = Date(timeIntervalSince1970: 1_700_007_200)
+        let one = chip(state: .checksFailed,
+                       title: "Fix the login timeout",
+                       observedAt: now.addingTimeInterval(-7200))
+        let open = StatusBarView.chipHoverCard(one, untrackTarget: false, now: now)
+        let untrack = StatusBarView.chipHoverCard(one, untrackTarget: true, now: now)
+
+        #expect(open.title == untrack.title)
+        #expect(open.rows.count == untrack.rows.count)
+        #expect(open.rows.count == 3)
+        // The PR row, the state row and its age are untouched…
+        #expect(open.rows[0] == untrack.rows[0])
+        #expect(open.rows[1] == untrack.rows[1])
+        #expect(open.rows[1].caption == "checked 2h ago")
+        // …and the action row is the last one in both, never inserted midway.
+        #expect(open.rows[2].value != untrack.rows[2].value)
+        // The card is re-rendered on model INEQUALITY, so the swap only reaches
+        // the screen because the two models genuinely differ.
+        #expect(open != untrack)
+    }
+
+    /// The card is sized to fit its content, so two sentences of different
+    /// length would resize it as the pointer crossed onto the slot. Each state
+    /// carries the other sentence as a laid-out-but-hidden peer, which pins the
+    /// row — and therefore the card — to the larger of the two in both axes.
+    @Test("each action row reserves room for the sentence it can swap to")
+    func actionRowReservesBothSentences() {
+        let open = StatusBarView.chipHoverCard(chip()).rows.last
+        let untrack = StatusBarView.chipHoverCard(chip(), untrackTarget: true).rows.last
+        #expect(open?.alternateValue == untrack?.value)
+        #expect(untrack?.alternateValue == open?.value)
+        // The reservation is worth having only because the two differ enough to
+        // reflow — a peer equal to the value would be decoration.
+        #expect(open?.value != untrack?.value)
+        // Nothing else on the card reserves an alternate, so no other row can
+        // resize either.
+        #expect(StatusBarView.chipHoverCard(chip()).rows.dropLast()
+            .allSatisfy { $0.alternateValue == nil })
+    }
+
+    @Test("the action line is a function of which target the pointer is on")
+    func chipActionValueFollowsTheTarget() {
+        #expect(StatusBarView.chipActionValue(untrackTarget: true)
+                == StatusBarView.chipUntrackActionValue)
+        #expect(StatusBarView.chipActionValue(untrackTarget: false)
+                == StatusBarView.chipOpenActionValue)
+        #expect(StatusBarView.chipActionValue(untrackTarget: true)
+                != StatusBarView.chipActionValue(untrackTarget: false))
+        // Both describe the click rather than restating the PR's number or
+        // state, which the rows above them already carry.
+        #expect(StatusBarView.chipOpenActionValue.hasPrefix("Click to"))
+        #expect(StatusBarView.chipUntrackActionValue.hasPrefix("Click to"))
+        #expect(StatusBarView.chipOpenActionValue.contains("#412") == false)
+    }
+
+    /// A synthetic chip has no title and a never-polled one has no status, and
+    /// both are still clickable — the line that says what the click does cannot
+    /// be a passenger of the rows that happen to be missing.
+    @Test("a chip with no title and one with no status still say what a click does")
+    func actionRowSurvivesAbsentFields() {
+        let untitled = StatusBarView.chipHoverCard(chip(title: nil), untrackTarget: true)
+        #expect(untitled.title == nil)
+        #expect(untitled.rows.last?.value == StatusBarView.chipUntrackActionValue)
+
+        let unobserved = StatusBarView.chipHoverCard(chip(state: nil, observedAt: nil))
+        #expect(unobserved.rows.first { $0.label == "State" }?.value
+                == StatusBarView.unobservedStateValue)
+        #expect(unobserved.rows.last?.value == StatusBarView.chipOpenActionValue)
+        #expect(unobserved.rows.last?.alternateValue == StatusBarView.chipUntrackActionValue)
+    }
 }

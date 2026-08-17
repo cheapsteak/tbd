@@ -60,6 +60,33 @@ repository or the session is touched, which is what makes the trade acceptable
 rather than costless. An in-app undo on the success path is the obvious
 improvement and is deliberately left for its own change.
 
+Two things narrow that cost rather than merely accepting it, and both work on
+the same problem: two click targets share about twenty points of width, and
+nothing about the pointer's position tells you which one it is on.
+
+- **The hover overlay names the click under the cursor** — see below. It is the
+  surface already showing when a hand is on the chip, and it has room for a
+  sentence.
+- **The xmark takes on a button's appearance while the pointer is actually over
+  it**: full-strength foreground over a faint circular disc, drawn at exactly
+  the size of the click region, so no pixel that looks like the control fails to
+  act as one. Emphasis is reached through a `background` with its own fixed
+  frame, which is sized by itself and never proposed to the layout, so the chip
+  is the same width at rest, hovered, and emphasised.
+
+A tooltip on the untrack target is not the mitigation, though the slot carries
+one for the accessibility phrasing it shares. The macOS help-tag delay is longer
+than the overlay's 0.55s floor, so the card is already up by the time a tag
+would appear, and a second, smaller box saying less would arrive on top of it —
+if it arrived at all.
+
+Emphasis and wording read a **separate** hover flag, true only for the icon
+slot, while the glyph stays on the whole-chip flag. That split is what keeps a
+pointer travelling from the number onto the slot from flickering the xmark back
+to a dot. It also inherits the rule above unchanged: the untrack wording is
+shown only where the slot is *drawing* the xmark, so nothing on screen can offer
+to untrack while the slot is a status dot that would open.
+
 Two constraints govern the implementation:
 
 - **The layout must not move between the two states.** The icon slot is a fixed
@@ -282,6 +309,25 @@ The overlay states the observation's age because the cached `PRStatus` is
 display-tier and has been measured reading "Ready to merge" for PRs merged days
 earlier. Every surface that renders it must render its age with it.
 
+#### The overlay also says what the click will do
+
+A last row names the action under the pointer: *Click to open this PR on GitHub*
+anywhere on the chip, *Click to stop tracking this PR in this worktree* while
+the pointer is on the xmark. The sentences describe the gesture and nothing
+else — the number and the state are on the rows above them — and the untrack
+half names the worktree scope for the same reason the slot's label does: what is
+removed is an association TBD inferred, not the pull request.
+
+The row is **always present and its text swaps**, never a row that appears when
+the pointer reaches the slot. A card that gained a line would grow under the
+hand that summoned it, which is the jitter this is meant to cure rather than
+cause. The card is sized to its content, so the two sentences would resize it on
+their own: each state therefore carries the other as a laid-out-but-hidden peer,
+pinning the row — and with it the card — to the larger of the two in both axes.
+The peer is a general property of an overlay row rather than something the chip
+does for itself, because any row whose text swaps while a card is up has this
+problem.
+
 ## Testing
 
 - Chip cap — seven bindings produce seven chips and no overflow; eight produce
@@ -316,6 +362,12 @@ earlier. Every surface that renders it must render its age with it.
 - Title round-trips through the row, the RPC, and back.
 - Overlay content for a binding with a title, without one, and with no observed
   status.
+- The overlay's action row: the untrack sentence while the icon slot is the
+  target and the open sentence otherwise; the rest of the card — title, PR row,
+  state row and age — byte-identical between the two, with the two models still
+  unequal so the swap actually reaches the panel; each state reserving the
+  other's sentence; and both sentences surviving a chip with no title and one
+  with no observed status.
 
 ## Rejected alternatives
 

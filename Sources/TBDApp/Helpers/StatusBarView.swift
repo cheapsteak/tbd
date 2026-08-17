@@ -201,7 +201,14 @@ struct StatusBarView: View {
     /// A chip with no observed title renders no title line, and one with no
     /// observed status still gets its number and an honest "unknown time".
     /// Pure, so the whole overlay can be asserted without a panel.
-    nonisolated static func chipHoverCard(_ chip: PRChip, now: Date = Date()) -> HoverCardModel {
+    ///
+    /// `untrackTarget` says the pointer is over the icon slot *while that slot
+    /// is drawing the xmark*, and only changes the wording of the action row —
+    /// the row is always present, so the card cannot grow or shrink under a
+    /// pointer travelling between the chip's two click targets.
+    nonisolated static func chipHoverCard(
+        _ chip: PRChip, untrackTarget: Bool = false, now: Date = Date()
+    ) -> HoverCardModel {
         var model = HoverCardModel()
         if let title = chip.title?.trimmingCharacters(in: .whitespacesAndNewlines),
            !title.isEmpty {
@@ -220,10 +227,34 @@ struct StatusBarView: View {
                 caption: PRFreshness.clauses(
                     observedAt: chip.observedAt, observation: chip.observation, now: now
                 ).joined(separator: " · ")
+            ),
+            // Last, and always present: the chip has two click targets in about
+            // twenty points of width, and nothing else on screen says which one
+            // the pointer is on. The alternate wording rides along so the row is
+            // laid out for both sentences at once — see `HoverCardRow`.
+            HoverCardRow(
+                value: chipActionValue(untrackTarget: untrackTarget),
+                valueStyle: .mutedItalic,
+                alternateValue: chipActionValue(untrackTarget: !untrackTarget)
             )
         ]
         return model
     }
+
+    /// What the overlay's action row says the click under the pointer will do.
+    ///
+    /// Two sentences rather than a reuse of `untrackLabel` / `openLabel`: those
+    /// name the PR by number and the open one appends its state, both of which
+    /// the card has already said on its own rows. Here the subject is the click,
+    /// so the sentences start with the gesture and say nothing twice. The
+    /// untrack half still names the worktree scope, for the same reason
+    /// `untrackLabel` does — the gesture removes an association, not the PR.
+    nonisolated static func chipActionValue(untrackTarget: Bool) -> String {
+        untrackTarget ? chipUntrackActionValue : chipOpenActionValue
+    }
+
+    nonisolated static let chipOpenActionValue = "Click to open this PR on GitHub"
+    nonisolated static let chipUntrackActionValue = "Click to stop tracking this PR in this worktree"
 
     /// What the overlay's state row says for a binding nothing has polled yet.
     /// Named so a test can pin it without restating the copy.
@@ -423,6 +454,11 @@ private struct PRChipView: View {
     let chip: StatusBarView.PRChip
 
     @State private var isHovering = false
+    /// The pointer is over the icon slot specifically, rather than anywhere on
+    /// the chip. Read ONLY for emphasis and for what the overlay says the click
+    /// will do — never for the glyph, which stays on `isHovering` so travelling
+    /// from the number onto the slot cannot flicker the xmark back to a dot.
+    @State private var isSlotHovered = false
 
     /// The fixed square the status dot and the untrack xmark share.
     ///
@@ -495,10 +531,23 @@ private struct PRChipView: View {
         // Hover is read on the WHOLE chip, so travelling from the number onto
         // the xmark cannot flip the icon back under the cursor.
         .modifier(StatusBarHoverAffordance(isHovering: $isHovering))
+        // Leaving the chip clears the slot too. `onHover(false)` normally does
+        // it, but a chip torn down or reflowed under a stationary cursor need
+        // not receive one, and a stranded `true` would emphasise the xmark of
+        // the next chip to appear under the pointer.
+        .onChange(of: isHovering) { _, hovering in
+            if !hovering { isSlotHovered = false }
+        }
         // Anchored to the whole chip, so the overlay survives the pointer
         // moving from the number onto the xmark.
-        .hoverCard(StatusBarView.chipHoverCard(chip))
+        .hoverCard(StatusBarView.chipHoverCard(chip, untrackTarget: isUntrackTarget))
     }
+
+    /// The pointer is over the untrack target *and* the slot is drawing the
+    /// xmark — the same conjunction `iconSlotLabel` gates the slot's action on.
+    /// Anything the user is told about the click is derived from it, so the card
+    /// can never advertise untracking while the slot is showing a status dot.
+    private var isUntrackTarget: Bool { isHovering && isSlotHovered }
 
     /// The fixed-size leading slot: the status dot at rest, the untrack xmark
     /// while the chip is hovered. Both centred in the same square.
@@ -507,7 +556,21 @@ private struct PRChipView: View {
             if isHovering {
                 Image(systemName: "xmark")
                     .font(.system(size: Self.xmarkPointSize, weight: .bold))
-                    .foregroundStyle(.secondary)
+                    // Full strength over a faint disc once the pointer is on
+                    // the target itself, so the glyph about to be clicked reads
+                    // as a button rather than as decoration beside the number.
+                    .foregroundStyle(isSlotHovered ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                    .background {
+                        // Drawn at exactly `untrackHitSide`: the disc is the
+                        // clickable region, so no pixel that looks like the
+                        // button fails to act as one. A `background` with its
+                        // own fixed frame is sized by itself and never proposed
+                        // to the layout, so the chip's width is identical in
+                        // all three states — at rest, chip-hovered, and here.
+                        Circle()
+                            .fill(Color.primary.opacity(isSlotHovered ? 0.11 : 0))
+                            .frame(width: Self.untrackHitSide, height: Self.untrackHitSide)
+                    }
             } else {
                 Circle()
                     .fill(dotColor)
@@ -526,6 +589,11 @@ private struct PRChipView: View {
                 // the glyph, so the click can never mean something other than
                 // what the slot is drawing — see `iconSlotLabel`.
                 .help(StatusBarView.iconSlotLabel(chip, isHovering: isHovering))
+                // Drives the emphasis and the overlay's action row, and nothing
+                // else: the glyph and the click both stay on the whole-chip
+                // `isHovering`, so this can only change what the user is TOLD,
+                // never what the slot does.
+                .onHover { isSlotHovered = $0 }
                 .onTapGesture {
                     if isHovering { detach() } else { open() }
                 }
