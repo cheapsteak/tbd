@@ -284,13 +284,28 @@ forwarded. It acts without a user gesture and force-pushes refs, which is what
 the default-off rule exists for.
 
 **Enabling it for the soak** is `export TBD_REMOTE_VERIFY=1` in the shell whose
-`scripts/test.sh` runs should be eligible. Four knobs tune it, each with the
-shipped default: `TBD_REMOTE_VERIFY_YIELD_SECONDS` (300) is T;
-`TBD_REMOTE_VERIFY_SLOTS` (2) is the dispatch ticket count, sized to the macOS
-job cap; `TBD_REMOTE_VERIFY_COMMAND_SECONDS` (300) bounds each `git` or `gh`
-call; and `TBD_REMOTE_VERIFY_ALLOW_ORPHAN=1` disables the requester-liveness
-check for a run deliberately detached. A run may take at most 45 minutes end to
-end, and at most 50 failures are rendered.
+`scripts/test.sh` runs should be eligible. Seven knobs tune it, each with its
+shipped default:
+
+- `TBD_REMOTE_VERIFY_YIELD_SECONDS` (300) — T, the queue time after which a lane
+  stops waiting.
+- `TBD_REMOTE_VERIFY_SLOTS` (2) — the dispatch ticket count, sized to the macOS
+  job cap. Values above 5 are refused by name rather than clamped, because
+  silently sizing the pool differently from what an operator asked for is the
+  failure this bound exists to make visible.
+- `TBD_REMOTE_VERIFY_CORRELATE_SECONDS` (180) — how long to wait for a dispatched
+  run to become visible.
+- `TBD_REMOTE_VERIFY_RUN_SECONDS` (2700) — the ceiling on the run itself.
+- `TBD_REMOTE_VERIFY_POLL_SECONDS` (10) — the gap between polls.
+- `TBD_REMOTE_VERIFY_COMMAND_SECONDS` (300) — the bound on any single `git` or
+  `gh` call.
+- `TBD_REMOTE_VERIFY_ALLOW_ORPHAN=1` — disables the requester-liveness check, for
+  a run deliberately detached.
+
+Those bounds compose rather than cap each other, so the ticket-hold ceiling is
+the run ceiling plus correlation plus whatever a final bounded call spends —
+roughly 48 minutes at the shipped defaults, not 45. At most 50 failures are
+rendered.
 
 **Graduation** flips that default only once a soak shows three things, because
 each is a way the valve can be quietly worse than waiting: that a green remote
@@ -329,19 +344,34 @@ produce artifacts someone is waiting for, and their callers do not understand 76
   sweep required and no marker to leak. A hand-rolled occupancy file would
   reintroduce the stale-marker problem this repo has already paid for.
 - **Inert refs** — a genuine new durable resource, and the one thing here that
-  needs a named sweep. They are deleted when the PR closes, with a periodic pass
-  reclaiming any the close path missed. Because a ref now exists whether or not a
-  PR does, that pass spares anything under an hour old rather than reclaiming on
-  PR state alone, so a sweep cannot delete a ref a live run is about to check out.
-  The age it can observe is the commit's date, which bounds the ref's age from
-  below — a young commit implies a young ref, though an old commit re-pushed today
-  is not spared. The sweep reads the namespace into `FETCH_HEAD`, creating no
-  local ref of its own to reclaim, and keeps any ref it cannot date.
+  needs a named sweep. A ref is reclaimed when its PR closes and by a periodic
+  pass, and because a ref now exists whether or not a PR does, neither may decide
+  on PR state alone.
+
+  What protects a ref a run is still using is the run itself: a ref with a queued
+  or in-progress run against it is kept regardless of anything else. An age guard
+  keeps anything under an hour as a cheap second line, but it is a weak one and
+  should not be mistaken for the guarantee — the only age observable on a remote
+  ref is its commit's date, which bounds the ref's age from below rather than
+  above. A commit authored yesterday and pushed to a preflight ref a second ago
+  reads as a day old, and that is the ordinary case rather than an exotic one,
+  because a lane commits and then verifies some minutes or hours later.
+
+  The sweep reads the namespace into `FETCH_HEAD`, creating no local ref of its
+  own to reclaim, and keeps any ref whose PR state or age it cannot determine.
+
+  Losing this race costs a wasted macOS slot and one local fallback, not a wrong
+  answer: a run whose checkout fails produces no results, and a run with no
+  results is no verdict.
 - **A dispatched run whose requester dies** — deliberately not reclaimed. It is
-  free, self-terminating, and bounded at the observed 32-minute worst case, which
-  makes it categorically different from a lock holder that blocks others without
-  limit. Cancelling on abandonment is best-effort at exactly the moment the
-  requester is gone, and it buys back a slot that would have freed itself.
+  free and self-terminating: GitHub ends it at its own timeout, and the observed
+  worst case is 32 minutes, which makes it categorically different from a lock
+  holder that blocks others without limit. Cancelling on abandonment is
+  best-effort at exactly the moment the requester is gone, and it buys back a slot
+  that would have freed itself. The ticket the abandoned lane was holding is
+  reclaimed rather than waiting on the run: the driver notices its requester is
+  gone and exits, releasing the flock, so the pool recovers even while the run it
+  started plays out.
 
 ## What this does not do
 
