@@ -15,11 +15,10 @@ struct ParkedPromptReadback: Identifiable, Equatable {
     /// Whether delivery ends with Enter. Carried through Deliver-now so
     /// re-parking cannot silently flip a staged message into a sent one.
     ///
-    /// Mirrors the column rather than the composer's own default: every row
-    /// that holds a prompt was written with an explicit bit, so the fallback
-    /// below is for rows that have no prompt to show and never fires here.
-    /// Showing anything but the stored bit would misreport what delivery will
-    /// actually do.
+    /// Mirrors the column rather than the composer's own default, and resolves
+    /// an absent bit through `Worktree.pendingPromptSubmitResolved` — the same
+    /// property the daemon's delivery path reads. Showing anything else would
+    /// misreport what delivery will actually do.
     let submit: Bool
     /// Where this message is in its life. The one discriminator behind both
     /// surfaces, computed here so they cannot disagree about the same text.
@@ -50,7 +49,7 @@ struct ParkedPromptReadback: Identifiable, Equatable {
         self.id = worktree.id
         self.worktreeName = worktree.displayName
         self.text = text
-        self.submit = worktree.pendingPromptSubmit ?? true
+        self.submit = worktree.pendingPromptSubmitResolved
         self.worktreeIsArchived = worktree.status == .archived
         self.phase = ParkedPromptPhase.resolve(
             isArchived: worktreeIsArchived, terminals: terminals)

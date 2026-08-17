@@ -275,13 +275,29 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     /// Not a queue: parking a second prompt replaces the first.
     public var pendingPrompt: String?
 
-    /// Whether delivering `pendingPrompt` ends with Enter. `nil` on rows
-    /// written before v74 and on rows that never parked anything; consumers
-    /// resolve it to `true`, the shipped behavior the modal's checkbox
-    /// expresses. Unlike `Config.queuedPromptEnabled` this is data rather than
-    /// a feature gate — there is no third state to preserve, so its column
-    /// carries an ordinary SQL default.
+    /// Whether delivering `pendingPrompt` ends with Enter, as recorded. `nil`
+    /// on any row saved without naming the bit — the initializer defaults it to
+    /// nil and `WorktreeRecord` writes that through as SQL NULL, which is what
+    /// an ordinarily created worktree row holds. It is never `nil` alongside a
+    /// prompt: `setPendingPrompt` is the only writer of either column and names
+    /// both. Nobody resolves this optional at a call site: read
+    /// `pendingPromptSubmitResolved` instead.
+    /// Unlike `Config.queuedPromptEnabled` this is data rather than a feature
+    /// gate — there is no third state to preserve, so its column carries an
+    /// ordinary SQL default.
     public var pendingPromptSubmit: Bool?
+
+    /// **The** resolution of `pendingPromptSubmit` — the one the delivery path
+    /// acts on and the one every display surface must state. A single property
+    /// so the two cannot answer differently about the same row: a read-back
+    /// promising Enter over a prompt the daemon will merely stage is precisely
+    /// the misreport the read-back exists to prevent.
+    ///
+    /// Absent resolves to `false`. Submitting is opt-in, and a row with nothing
+    /// recorded is a prompt nobody asked to send; the asymmetry settles it —
+    /// staging costs the operator one keypress, while an unasked-for turn
+    /// cannot be taken back.
+    public var pendingPromptSubmitResolved: Bool { pendingPromptSubmit ?? false }
 
     /// A scratch space is a repo-less worktree. Derived — no separate column.
     public var isScratch: Bool { repoID == nil }
@@ -401,8 +417,11 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         } else {
             location = .local
         }
-        // Absent in JSON written before v74 — nothing was ever parked, and
-        // `nil` submit resolves to the shipped `true`.
+        // The two keys are absent together, or not at all: a daemon old enough
+        // to omit the submit bit omits the prompt too, so an absent bit here
+        // never describes a prompt that is present. Nothing decides the
+        // optional at this site either way — every consumer reads
+        // `pendingPromptSubmitResolved`, which answers `false`.
         pendingPrompt = try c.decodeIfPresent(String.self, forKey: .pendingPrompt)
         pendingPromptSubmit = try c.decodeIfPresent(Bool.self, forKey: .pendingPromptSubmit)
         // Absent in JSON written before the PR-observation column: no attempt

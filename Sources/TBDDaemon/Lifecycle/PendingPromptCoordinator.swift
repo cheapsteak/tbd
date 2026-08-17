@@ -532,10 +532,10 @@ actor PendingPromptCoordinator {
     private func deliverParkedPrompt(worktreeID: UUID, terminalID: UUID, armID: UUID) async {
         guard let worktree = try? await db.worktrees.get(id: worktreeID),
               let text = worktree.pendingPrompt, !text.isEmpty else { return }
-        // Submitting is opt-in. A row with nothing recorded is a prompt nobody
-        // asked to send, and staging costs the operator one keypress while an
-        // unasked-for turn cannot be taken back.
-        let submit = worktree.pendingPromptSubmit ?? false
+        // Submitting is opt-in, and `Worktree.pendingPromptSubmitResolved` is
+        // where that is decided once — for this send and for the read-back
+        // sheet that tells the operator what this send will do.
+        let submit = worktree.pendingPromptSubmitResolved
 
         guard let deliver else {
             await notifyIfCurrent(

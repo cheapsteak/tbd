@@ -1,5 +1,6 @@
 import Clocks
 import Foundation
+import GRDB
 import TestSupport
 import Testing
 @testable import TBDDaemonLib
@@ -759,6 +760,46 @@ struct QueuedPromptDeliveryTests {
             // be known, and it is what the column is cleared on.
             #expect(try await pendingPrompt(fixture.db, fixture.worktree.id) == nil)
         }
+    }
+
+    /// A row holding a prompt with **no** submit bit recorded. Delivery stages
+    /// it: submitting is opt-in, and nothing here asked for it.
+    ///
+    /// **No production writer makes this row.** `setPendingPrompt` names both
+    /// columns on every write, and the two arrived in one migration, so a
+    /// prompt never outlives its submit bit — which is why the column is nulled
+    /// by hand here rather than through `park`. What the test pins is the
+    /// resolution, not a state the daemon can reach: the read-back sheet reads
+    /// that same resolution over that same row shape
+    /// (`ParkedPromptReadbackTests.resolvedBitIsWhatTheSheetShows`), so the two
+    /// surfaces cannot answer differently about it.
+    @Test("a row with no submit bit recorded is staged, not sent")
+    func absentSubmitBitIsStagedNotSent() async throws {
+        let clock = TestClock()
+        let fixture = try await makeSpawnFixture(clock: clock)
+        try await fixture.db.config.setQueuedPrompt(true)
+        let terminal = try await fixture.db.terminals.create(
+            worktreeID: fixture.worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            kind: .claude)
+
+        #expect(await fixture.coordinator.park(
+            worktreeID: fixture.worktree.id, text: "no submit bit on this row",
+            submit: true) == .awaitingReady)
+        try await fixture.db.writerForTests.write { db in
+            try db.execute(
+                sql: "UPDATE worktree SET pending_prompt_submit = NULL WHERE id = ?",
+                arguments: [fixture.worktree.id.uuidString])
+        }
+        let staged = try await fixture.db.worktrees.get(id: fixture.worktree.id)
+        #expect(staged?.pendingPromptSubmit == nil)
+
+        await fixture.coordinator.noteSessionReady(
+            worktreeID: fixture.worktree.id, terminalID: terminal.id)
+        await advancePastSettle(clock, fixture)
+        await awaitDeliveries(fixture.coordinator)
+
+        #expect(fixture.sends.calls == [SendRecorder.Call(
+            terminalID: terminal.id, text: "no submit bit on this row", submit: false)])
     }
 
     // MARK: - Verbatim, with the envelope suppressed
