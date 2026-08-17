@@ -12,10 +12,14 @@ names the page or file it came from. Claims that could not be verified are
 listed in [What could not be verified](#what-could-not-be-verified) rather than
 asserted.
 
-Nothing here was measured against a live GitLab instance. `glab` is not
-installed on the probe machine (`which glab` → not found), so no command
-surface was exercised; the CLI section rests on documentation and on `glab`'s
-own source.
+**`glab` inspected:** 1.113.0 (`d62881304`), installed locally, with its
+`--help` surfaces read directly. Its *source* was read at `main`, which may sit
+slightly ahead of 1.113.0.
+
+Nothing here was measured against a live GitLab instance: no merge request was
+created, fetched, or polled, and no authenticated call was made. Facts about
+`glab` come from the installed binary's help output and from its source; facts
+about GitLab's API come from documentation and from GitLab's own source.
 
 ## Summary
 
@@ -37,7 +41,10 @@ in the daemon is `gh` (`PRStatusManager.resolvedGHPath`,
 forge subprocess in `Sources/` — there is exactly one call site to redirect.
 `glab` turns out to be a close counterpart: `glab api graphql -f query='…'`
 takes the same subcommand, the same flag spelling, and the same semantics as
-`gh api graphql -f query='…'`.
+`gh api graphql -f query='…'`; it authenticates several instances at once and
+resolves the right one per repository, as `gh` does; and `glab mr create` prints
+the bare merge-request URL when stdout is not a TTY, which is exactly the
+condition a hook payload is captured under.
 
 **An assumption about GitHub's data model** is the expensive layer, and it is
 where the design work actually is. Three assumptions do not survive the move:
@@ -585,15 +592,18 @@ independence would suggest.
   requires an OAuth application registered on that instance with redirect URI
   `http://localhost:7171/auth/redirect` — a token is the simpler route for a
   daemon.
-- **The multi-host question is where `gh` and `glab` differ in a way that
-  matters.** `gh` auth is host-scoped and ambient, which is why TBD can run any
-  `gh` call from any checkout and rely on the auth being right
-  (`PRStatusManager.swift:434-438`). Whether `glab` holds credentials for several
-  hosts simultaneously and picks per-repo, or whether `GITLAB_HOST` must be set
-  per invocation, is **not clearly documented** and would need testing. If it is
-  the latter, `refreshBindingGroup`'s existing per-`(host, owner, repo)` grouping
-  (`:792-809`) is already the right shape to carry a `--hostname` per group —
-  the code comment at `:818-820` anticipates exactly this.
+- **Multi-host works the same ambient way `gh` does.** This matters because TBD
+  runs every `gh` call from whatever checkout is handy and relies on the auth
+  being right (`PRStatusManager.swift:434-438`). `glab auth status --help`
+  (1.113.0) states it "checks the authentication state of the GitLab instance
+  determined by your current context (`git remote`, `GITLAB_HOST` environment
+  variable, or configuration)", offers `--all` to "check all configured
+  instances" and `--hostname` to name one. So several instances can be
+  authenticated at once and the right one is selected per repository — the same
+  model TBD already depends on. `refreshBindingGroup`'s existing
+  per-`(host, owner, repo)` grouping (`:792-809`) can still carry an explicit
+  `--hostname` per group if the ambient resolution proves unreliable; the code
+  comment at `:818-820` anticipates exactly that.
 
 **Is shelling out still the right move?** Three considerations, none of them
 decided here:
@@ -631,9 +641,27 @@ own flags rather than assumed identical). The prefilter grep
 that comment warns about at `:144-148`. A second alternation is needed, and the
 same "prefilter is a cost optimisation, never a gate" discipline applies.
 
-Whether `glab mr create` prints the created MR's URL to stdout — which is what
-makes the GitHub hook work — is **unverified**; the manpage documents no output
-format and no JSON option.
+**`glab mr create` does print the URL, and its non-TTY output is better shaped
+than `gh`'s.** On success it calls `mrutils.DisplayMR`, which is:
+
+```go
+func DisplayMR(c *iostreams.ColorPalette, mr *gitlab.BasicMergeRequest, isTTY bool) string {
+	mrID := MRState(c, mr)
+	if isTTY {
+		return fmt.Sprintf("%s %s (%s)\n %s\n", mrID, mr.Title, mr.SourceBranch, mr.WebURL)
+	} else {
+		return mr.WebURL
+	}
+}
+```
+
+([`internal/commands/mr/mrutils/mrutils.go`](https://gitlab.com/gitlab-org/cli/-/raw/main/internal/commands/mr/mrutils/mrutils.go)).
+Under a Claude Code `Bash` tool call stdout is not a TTY, so the branch that
+runs emits **the bare web URL and nothing else** — no title, no branch name, no
+decoration for a regex to survive. `mr_create.go` additionally prints a
+"Creating merge request for … into … in …" progress line and, with
+`--auto-merge`, an "Auto-merge enabled" line, so the payload is not URL-only,
+but the URL itself arrives clean.
 
 **A discovery path with no GitHub analogue, and no hook counterpart.** GitLab
 lets a plain `git push` create a merge request via push options:
@@ -725,9 +753,6 @@ direction in the layer users do not see.
 
 Stated plainly rather than asserted anywhere above:
 
-- **Whether `glab mr create` prints the created merge request's URL to stdout.**
-  `glab` is not installed here, and its manpage documents no output format. The
-  entire hook-binding path depends on this.
 - **The exact remote message after `git push -o merge_request.create`,** and
   whether it contains the created MR's URL or only the "new merge request" form
   URL. GitLab's docs page for push options redirected to an authentication gate
@@ -749,8 +774,11 @@ Stated plainly rather than asserted anywhere above:
   long-standing open issue titled "Make project paths case-insensitive on
   database level", which suggests they are not — but the evidence found was
   mostly about GitLab Pages, not project lookup, so this is unresolved.
-- **Whether `glab` can hold credentials for several hosts at once and select
-  per-repo,** or whether `GITLAB_HOST` must be set per invocation.
+- **Whether `glab`'s ambient host resolution actually picks the right instance**
+  for a checkout whose remote host is authenticated alongside others. The help
+  text says it resolves from `git remote`, `GITLAB_HOST` or configuration, and
+  `--all` proves several instances can be configured at once, but the resolution
+  was not exercised against two authenticated hosts.
 - **The `detailed_merge_status` value count.** The enum source was read twice;
   one read reported "24 values" and one "21", while both listings enumerated the
   same 22 entries. The values themselves agreed exactly across both reads and are
@@ -846,7 +874,9 @@ that tells a user "your PRs are not updating because a CLI is missing" —
 
 **9. Does the hook gain a `glab mr create` arm, and what covers push-created
 MRs?**
-Adding the arm is mechanical. The gap is `git push -o merge_request.create`,
+Adding the arm is mechanical, and cleaner than the GitHub side: under a
+non-TTY `Bash` call `glab mr create` emits the bare web URL, so the extractor
+has less to sift. The gap is `git push -o merge_request.create`,
 which no hook gate can admit without admitting every `git push`. *The fork:*
 accept that push-created MRs are found only by branch matching (which cannot see
 a subagent's branch — the case the hook exists for), or find a different signal.
