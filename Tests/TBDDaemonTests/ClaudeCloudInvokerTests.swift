@@ -482,4 +482,148 @@ struct ClaudeCloudInvokerTests {
         let request = try #require(spawner.requestsSnapshot().first)
         #expect(request.timeout == 137)
     }
+
+    // MARK: - list
+
+    private func listSessions(_ result: ProviderResult) throws -> [[String: Any]] {
+        let object = try #require(
+            try JSONSerialization.jsonObject(with: result.stdout) as? [String: Any])
+        return try #require(object["sessions"] as? [[String: Any]])
+    }
+
+    private func listEnvelope(_ result: ProviderResult) throws -> [String: Any] {
+        try #require(try JSONSerialization.jsonObject(with: result.stdout) as? [String: Any])
+    }
+
+    /// Permanently `complete: false`, by construction and not by care. The
+    /// ledger is a record of what THIS machine started and never a claim
+    /// about the account's inventory — no supported interface enumerates one.
+    /// A provider that never claims completeness cannot cause a false
+    /// retirement however wrong its view is.
+    @Test func listIsAlwaysIncompleteEvenWhenEmpty() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let result = try await invoker(db: db, spawner: FakeClaudeSpawner(outcomes: [])).run(
+            config(), verb: ["list"], stdin: nil, timeout: 30, contractVersion: 2)
+        #expect(result.exitCode == 0)
+        #expect(try listEnvelope(result)["complete"] as? Bool == false)
+        #expect(try listSessions(result).isEmpty)
+    }
+
+    @Test func listNeverSpawnsTheVendorCLI() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await seedRepo(db)
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput)])
+        let inv = invoker(db: db, spawner: spawner)
+        _ = try await inv.run(config(), verb: ["create"], stdin: createBody(),
+                              timeout: 60, contractVersion: 2)
+        _ = try await inv.run(config(), verb: ["list"], stdin: nil,
+                              timeout: 30, contractVersion: 2)
+        // Exactly the one create spawn; `list` reads the ledger and nothing
+        // else, so there is no discovery call to make.
+        #expect(spawner.requestsSnapshot().count == 1)
+    }
+
+    @Test func aResolvedRowIsListedUnknownOnBothAxesCarryingItsRepoAndTitle() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await seedRepo(db)
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput)])
+        let inv = invoker(db: db, spawner: spawner)
+        _ = try await inv.run(config(), verb: ["create"], stdin: createBody(),
+                              timeout: 60, contractVersion: 2)
+        let sessions = try listSessions(
+            try await inv.run(config(), verb: ["list"], stdin: nil,
+                              timeout: 30, contractVersion: 2))
+        #expect(sessions.count == 1)
+        let session = try #require(sessions.first)
+        #expect(session["id"] as? String == "session_01AAAAAAAAAAAAAAAAAAAAAA")
+        #expect(session["title"] as? String == "Add probe pong reply")
+        #expect(session["state"] as? String == "unknown")
+        #expect(session["agent_state"] as? String == "unknown")
+        let meta = try #require(session["meta"] as? [String: String])
+        #expect(meta["repo"] == "acme/api")
+        #expect(meta["branch"] == "fix-ci")
+    }
+
+    /// **`archived` is emitted EXPLICITLY on every session, `false` included.**
+    /// The wire field is three-valued: absent means "no claim made" and moves
+    /// no row, which is what stops a provider with no archiving concept from
+    /// dragging archived rows back into the active list every minute. Omitting
+    /// it when unarchived would mean TBD never observes the `false`
+    /// transition, and unarchiving through this ledger would not return the
+    /// row to the active list at all. Asserting on the RAW JSON is what
+    /// discriminates — a decoded `Bool?` would read `nil` and `false` alike
+    /// through `isArchived`.
+    @Test func listEmitsArchivedExplicitlyEvenWhenFalse() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await seedRepo(db)
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput)])
+        let inv = invoker(db: db, spawner: spawner)
+        _ = try await inv.run(config(), verb: ["create"], stdin: createBody(),
+                              timeout: 60, contractVersion: 2)
+        let session = try #require(try listSessions(
+            try await inv.run(config(), verb: ["list"], stdin: nil,
+                              timeout: 30, contractVersion: 2)).first)
+        #expect(session.keys.contains("archived"), "the field must be PRESENT, not omitted")
+        #expect(session["archived"] as? Bool == false)
+    }
+
+    /// The contract requires archived sessions to stay enumerated: one
+    /// filtered out of successive snapshots is indistinguishable from a
+    /// deleted one, and would be silently marked gone.
+    @Test func anArchivedLedgerRowStaysEnumeratedWithItsFlagSet() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await seedRepo(db)
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput)])
+        let inv = invoker(db: db, spawner: spawner)
+        _ = try await inv.run(config(), verb: ["create"], stdin: createBody(),
+                              timeout: 60, contractVersion: 2)
+        try await db.writerForTests.write { conn in
+            try conn.execute(sql: "UPDATE claude_cloud_session SET archived = 1")
+        }
+        let sessions = try listSessions(
+            try await inv.run(config(), verb: ["list"], stdin: nil,
+                              timeout: 30, contractVersion: 2))
+        #expect(sessions.count == 1)
+        #expect(sessions.first?["archived"] as? Bool == true)
+    }
+
+    /// A row with no session id names no session, so there is nothing to
+    /// list. It is still retained, and still visible as an unresolved create.
+    @Test func pendingAndFailedRowsAreNotListed() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        _ = try await db.claudeCloudSessions.upsertPending(
+            idempotencyKey: "k", repoKey: "a/b", repoPath: "/a", branch: nil,
+            environment: nil, paramsJSON: "{}", now: Date(timeIntervalSince1970: 1_000_000))
+        let result = try await invoker(db: db, spawner: FakeClaudeSpawner(outcomes: [])).run(
+            config(), verb: ["list"], stdin: nil, timeout: 30, contractVersion: 2)
+        #expect(try listSessions(result).isEmpty)
+        #expect(try await db.claudeCloudSessions.rows().count == 1)
+    }
+
+    /// A create whose output could not be read stays `pending` through the
+    /// window and only then becomes `failed` — retained either way.
+    @Test func aPendingRowFlipsToFailedOnlyOnceThePendingWindowHasElapsed() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let created = Date(timeIntervalSince1970: 1_000_000)
+        _ = try await db.claudeCloudSessions.upsertPending(
+            idempotencyKey: "k", repoKey: "a/b", repoPath: "/a", branch: nil,
+            environment: nil, paramsJSON: "{}", now: created)
+
+        _ = try await invoker(
+            db: db, spawner: FakeClaudeSpawner(outcomes: []),
+            now: { created.addingTimeInterval(599) }
+        ).run(config(), verb: ["list"], stdin: nil, timeout: 30, contractVersion: 2)
+        #expect(try await db.claudeCloudSessions.rows().first?.state
+            == ClaudeCloudLedgerState.pending.rawValue)
+
+        _ = try await invoker(
+            db: db, spawner: FakeClaudeSpawner(outcomes: []),
+            now: { created.addingTimeInterval(601) }
+        ).run(config(), verb: ["list"], stdin: nil, timeout: 30, contractVersion: 2)
+        let row = try #require(try await db.claudeCloudSessions.rows().first)
+        #expect(row.state == ClaudeCloudLedgerState.failed.rawValue)
+        // Retained: the record of a create that may have started a real
+        // session outlives the judgement that it did not.
+        #expect(row.idempotencyKey == "k")
+    }
 }
