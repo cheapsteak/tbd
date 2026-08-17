@@ -5,6 +5,22 @@ on:
     branches: [main]
   push:
     branches: [main]
+  # On-demand runs. The remote verification valve
+  # (docs/specs/2026-08-16-remote-verification-valve-design.md) asks for a run
+  # on a ref that fires nothing else, so a lane that has queued too long for
+  # the machine-global build slot can get its verdict from CI instead.
+  #
+  # `scope` has one option today and is kept anyway: it pins the input's name
+  # and type now, so adding a narrower scope later needs no change at the
+  # dispatch site.
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: 'Which suites to run'
+        required: false
+        default: full
+        type: choice
+        options: [full]
 
 concurrency:
   group: test-${{ github.head_ref || github.ref_name }}
@@ -375,6 +391,23 @@ jobs:
       # A CI runner has no `~/tbd` to pollute, so the guard reads as a no-op
       # there. It is not: an empty `~/tbd` makes it MORE sensitive, because the
       # fingerprint goes from "absent" to a listing on the first stray write.
+      #
+      # ---------------------------------------------------------------------
+      # Why every pass also writes xUnit XML
+      #
+      # A remote run has to tell whoever asked for it WHAT failed, and the job
+      # log cannot carry that: a single failed run of this workflow produces
+      # 5.3 MB across 32,228 lines, in which every line is prefixed with
+      # job/step/timestamp and ANSI codes, several parallel passes interleave,
+      # and compiler diagnostics print source context that looks exactly like
+      # test output. Two extraction passes over a real failed log both produced
+      # wrong answers — one surfaced a deliberate known-issue self-test, the
+      # other matched 22 `#require is redundant` warnings displaying source
+      # context. An extractor that silently reports the wrong failure is worse
+      # than no extractor, so the structured file is the interface:
+      # `--xunit-output` writes it and `--experimental-xunit-message-failure`
+      # puts the failure messages inside it. `scripts/test.sh` forwards
+      # unrecognised arguments straight through to `swift test`.
       # ---------------------------------------------------------------------
       - name: Test (fast parallel pass 1/2 — TBDDaemonTests)
         # A tier-1 test can still hang indefinitely: an over-long TestClock
@@ -392,7 +425,9 @@ jobs:
         timeout-minutes: 30
         run: |
           set -o pipefail
-          scripts/test.sh --fingerprint --parallel --filter '^TBDDaemonTests\.' 2>&1 | tee /tmp/fast-pass-daemon.log
+          scripts/test.sh --fingerprint --parallel --filter '^TBDDaemonTests\.' \
+            --xunit-output /tmp/xunit-daemon.xml --experimental-xunit-message-failure \
+            2>&1 | tee /tmp/fast-pass-daemon.log
           # `|| true`: with `set -o pipefail` (and GitHub's `bash -e`), a log
           # with no summary line makes the first `grep` exit 1 and a failing
           # command substitution in an assignment kills the shell — so the
@@ -426,7 +461,9 @@ jobs:
         timeout-minutes: 30
         run: |
           set -o pipefail
-          scripts/test.sh --fingerprint --parallel --skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.' 2>&1 | tee /tmp/fast-pass-app.log
+          scripts/test.sh --fingerprint --parallel --skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.' \
+            --xunit-output /tmp/xunit-app.xml --experimental-xunit-message-failure \
+            2>&1 | tee /tmp/fast-pass-app.log
           # `|| true`: with `set -o pipefail` (and GitHub's `bash -e`), a log
           # with no summary line makes the first `grep` exit 1 and a failing
           # command substitution in an assignment kills the shell — so the
@@ -456,7 +493,9 @@ jobs:
         timeout-minutes: 15
         run: |
           set -o pipefail
-          scripts/test.sh --fingerprint --filter '^TBDDaemonLiveTests\.' --no-parallel 2>&1 | tee /tmp/quiet-pass.log
+          scripts/test.sh --fingerprint --filter '^TBDDaemonLiveTests\.' --no-parallel \
+            --xunit-output /tmp/xunit-quiet.xml --experimental-xunit-message-failure \
+            2>&1 | tee /tmp/quiet-pass.log
           # `|| true`: with `set -o pipefail` (and GitHub's `bash -e`), a log
           # with no summary line makes the first `grep` exit 1 and a failing
           # command substitution in an assignment kills the shell — so the
@@ -478,6 +517,20 @@ jobs:
           name: retry-metrics
           path: /tmp/retry-metrics.jsonl
           if-no-files-found: warn
+
+      # `if: always()` is the whole point: a passing run's XML tells nobody
+      # anything, and a failing run's is the only machine-readable account of
+      # what failed. Without it the artifact would exist exactly when it is
+      # useless. `warn` on absence, matching the metrics upload above — a
+      # missing file means the wiring broke and that must be visible.
+      - name: Upload xUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xunit-results
+          path: /tmp/xunit-*.xml
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Build (verify TBDCLI and TBDDaemon executable targets compile)
         run: swift build -j "$TBD_SWIFT_JOBS"
