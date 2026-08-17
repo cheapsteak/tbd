@@ -355,6 +355,24 @@ struct PRBindingCoordinatorTests {
         #expect(try await fixture.store.list(worktreeID: wt, includeDetached: true).isEmpty)
     }
 
+    /// The scenario insert-on-miss exists for, and the one the guard must not
+    /// swallow: `resolveRepo` is `gh repo view` behind a cache, so it answers
+    /// nil exactly when `gh` is unauthenticated or offline — the same condition
+    /// that leaves the bindings table empty and makes the synthetic chip the
+    /// only PR on screen. An unresolved repo is not a mismatch.
+    @Test("detaching an unbound PR still tombstones when the repo cannot be resolved")
+    func detachTombstonesWhenRepoIsUnresolved() async throws {
+        let fixture = try await Fixture(repo: nil)
+        let wt = try await fixture.newWorktree()
+
+        #expect(try await fixture.coordinator.detach(worktreeID: wt, parsed: parsed))
+
+        let recorded = try await fixture.store.list(worktreeID: wt, includeDetached: true)
+        #expect(recorded.count == 1)
+        #expect(recorded.first?.detached == true)
+        #expect(recorded.first?.source == .manual)
+    }
+
     /// The guard covers creation, not modification. A row that already exists
     /// is this worktree's own record of the PR, and detaching it must work
     /// whatever the repo resolves to now — otherwise a repo rename would strand

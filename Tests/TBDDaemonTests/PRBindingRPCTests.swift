@@ -292,6 +292,22 @@ struct PRBindingRPCTests {
         }
     }
 
+    /// The fallthrough is detach-only. Re-reading a number against *this*
+    /// worktree's repo is a recoverable mistake when it removes an association
+    /// and an unrecoverable one when it creates one: an attach would bind this
+    /// repo's #412 in place of the #412 the caller named on some other host,
+    /// silently and with no error.
+    @Test("pr.attach does not fall through from an unparseable url to the number")
+    func attachDoesNotFallThroughToNumber() async throws {
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod"))
+
+        await #expect(throws: (any Error).self) {
+            try await harness.attach(
+                url: "https://git.acme-corp.example/acme/acme-prod/pull/412", number: 412)
+        }
+        #expect(try await harness.bindings().bindings.isEmpty)
+    }
+
     @Test("pr.attach reports a wrong-repo rejection instead of binding")
     func attachWrongRepo() async throws {
         let harness = try await PRBindingRPCHarness(repo: ("acme", "other-repo", "github.com"))

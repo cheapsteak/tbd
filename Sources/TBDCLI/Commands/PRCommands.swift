@@ -171,10 +171,11 @@ struct PRDetachCommand: AsyncParsableCommand {
         if result.detached {
             print("Detached.")
         } else {
-            // A detach now records a tombstone even for a PR nothing had bound,
-            // so the only way to change nothing is for the PR to be detached
-            // already.
-            print("Already detached; nothing to do.")
+            // Two ways to change nothing, and this wording is true of both: the
+            // PR was already tombstoned, or it belongs to another repo and the
+            // daemon declined to record a tombstone that `pr attach` could
+            // never clear. Either way this worktree is not tracking it.
+            print("Not tracked here; nothing to do.")
         }
     }
 }

@@ -3039,11 +3039,18 @@ final class AppState: ObservableObject {
     /// the way out rather than waiting for the next poll, so the chip leaves
     /// the bar as part of the gesture.
     ///
-    /// A `detached: false` result is success, not failure — it says the PR was
-    /// already tombstoned, which from the chips is reachable only by
-    /// double-clicking the same xmark. The user asked for the PR to be gone and
-    /// it is. Only a thrown error is a failure, and that one is worth a toast:
-    /// the chip would otherwise stay put with nothing said.
+    /// Success is judged on the **outcome, not the returned flag**. A
+    /// `detached: false` usually means the PR was already tombstoned — the user
+    /// asked for it to be gone and it is — but the daemon also reports false
+    /// when it declines to record a tombstone for a PR outside the worktree's
+    /// repo, and that one leaves the chip where it was. Rather than teach the
+    /// app which false is which, this re-reads the bindings it just refreshed
+    /// and speaks up only if the chip the user clicked is still there. That
+    /// also covers the case no flag could describe: a concurrent bind putting
+    /// the PR straight back.
+    ///
+    /// A thrown error is the other failure, and it gets the same toast: the
+    /// chip would otherwise stay put with nothing said.
     ///
     /// `url` is optional and `number` is not: a chip lifted from a legacy
     /// cached status can carry a url that will not parse, and the daemon
@@ -3057,11 +3064,18 @@ final class AppState: ObservableObject {
                 \(worktreeID, privacy: .public): \
                 \(String(describing: error), privacy: .public)
                 """)
-            showTransientToast("Could not stop tracking that PR", style: .error)
+            showTransientToast("Could not stop tracking PR #\(number)", style: .error)
             handleConnectionError(error)
             return
         }
         await refreshPRBindings()
+        guard effectivePRBindings(worktreeID: worktreeID).contains(where: { $0.number == number })
+        else { return }
+        logger.error("""
+            Detach of PR #\(number, privacy: .public) from worktree \
+            \(worktreeID, privacy: .public) left the binding in place
+            """)
+        showTransientToast("PR #\(number) is still tracked here", style: .error)
     }
 
     /// Trigger an immediate PR refresh for one worktree (on-select).

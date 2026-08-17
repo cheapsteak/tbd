@@ -124,15 +124,35 @@ precisely the worktrees that have nothing but synthetic chips. A reference with
 a bad URL and no number is still an error; the fallthrough is a second chance,
 not a default.
 
-**The insert arm carries `bind`'s wrong-repo guard.** Tombstoning an existing
-row is always allowed — it is this worktree's own record of the PR, and a repo
-rename must not strand it. Creating one is not: `pr.attach` rejects a wrong-repo
-reference before it ever reaches a row, so a tombstone for a foreign PR could
-never be cleared, and the non-zero `detachedCount` it leaves would suppress that
-worktree's legacy-status fallback permanently. One mistyped
+That fallthrough is **detach-only**. It re-reads the number against *this*
+worktree's repo, which for an attach would mean a URL naming #412 on some other
+host silently binding this repo's #412 — a different pull request, with no
+error. Removing a wrong association is recoverable; creating one quietly is
+what the wrong-repo guard exists to prevent.
+
+**The insert arm declines only on a repo mismatch it can prove.** Tombstoning an
+existing row is never gated — it is this worktree's own record of the PR, and a
+repo rename must not strand it. Creating one is: `pr.attach` rejects a
+wrong-repo reference before it ever reaches a row, so a tombstone for a foreign
+PR could never be cleared, and the non-zero `detachedCount` it leaves would
+suppress that worktree's legacy-status fallback permanently. One mistyped
 `tbd pr detach <other-repo-url>` would retire a worktree's real PR indicator
-with no way back. Declining reports "changed nothing", which is the honest
-answer: this worktree was not tracking that PR.
+with no way back.
+
+An **unresolved** repo is not a mismatch. The resolver is `gh repo view` behind
+a TTL cache, so it answers nil under exactly the conditions that produce the
+synthetic chip in the first place — `gh` unauthenticated, offline, or missing.
+Reading that nil as a refusal would disable insert-on-miss in the one scenario
+it was written for. It reads as "no reason to refuse".
+
+Declining reports "changed nothing", which is the honest answer: this worktree
+is not tracking that PR. The CLI says exactly that, because the same false also
+means "already tombstoned" and one sentence has to be true of both.
+
+**The app judges the outcome, not the flag.** Rather than teach the status bar
+which false is which, it re-reads the bindings it just refreshed and speaks up
+only if the chip the user clicked is still on screen — which also catches the
+case no flag could describe, a concurrent bind putting the PR straight back.
 
 #### Removal reflows the strip, and no suppression window is added
 
@@ -219,10 +239,12 @@ earlier. Every surface that renders it must render its age with it.
   row in place instead, keeping that row's id and `source` — the arm that makes
   a concurrent bind harmless.
 - Detaching an unbound PR from another repo writes nothing and reports no
-  change, while detaching a row that already exists still works after the
-  worktree's repo has changed under it.
-- A reference whose URL does not parse resolves through its number, against the
-  worktree's own repo; one with neither is still an error.
+  change; detaching one whose repo cannot be resolved at all still tombstones
+  it; and detaching a row that already exists works after the worktree's repo
+  has changed under it.
+- A `pr.detach` whose URL does not parse resolves through its number, against
+  the worktree's own repo; one with neither is still an error; and `pr.attach`
+  does not fall through at all.
 - The icon slot means untrack while hovered and open while not, so a click can
   never destroy an association the slot is not offering to remove.
 - Detaching the last chip of a worktree whose bindings were synthetic leaves the

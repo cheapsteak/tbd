@@ -206,32 +206,45 @@ public actor PRBindingCoordinator {
     /// two store calls would let the poll's branch matcher insert a live row in
     /// the gap and turn the user's click into a silent no-op.
     ///
-    /// **Insert-on-miss carries `bind`'s wrong-repo guard; tombstoning an
-    /// existing row does not.** A tombstone for a PR outside the worktree's own
-    /// repo would be permanent: `pr.attach` rejects a wrong-repo reference
-    /// before it ever reaches the row, so nothing could clear it, and the
-    /// non-zero `detachedCount` it leaves suppresses the legacy-status fallback
-    /// for that worktree forever — one mistyped `tbd pr detach <other-repo-url>`
-    /// would silently retire the worktree's real PR indicator with no way back.
-    /// A row that already exists is a different matter: it is this worktree's
-    /// own record, and detaching it must work whatever the repo says now.
-    /// Declining to insert reports `false`, which is the honest answer — this
-    /// worktree was not tracking that PR.
+    /// **Insert-on-miss declines only on a repo mismatch it can prove;
+    /// tombstoning an existing row is never gated.** A tombstone for a PR
+    /// outside the worktree's own repo would be permanent: `pr.attach` rejects
+    /// a wrong-repo reference before it ever reaches the row, so nothing could
+    /// clear it, and the non-zero `detachedCount` it leaves suppresses the
+    /// legacy-status fallback for that worktree forever — one mistyped
+    /// `tbd pr detach <other-repo-url>` would silently retire the worktree's
+    /// real PR indicator with no way back. A row that already exists is a
+    /// different matter: it is this worktree's own record, and detaching it
+    /// must work whatever the repo says now, or a repo rename would strand
+    /// every binding made before it.
+    ///
+    /// **An unresolved repo is not a mismatch, and must not be treated as one.**
+    /// `resolveRepo` is `gh repo view` behind a TTL cache, so it answers nil
+    /// exactly when `gh` is unauthenticated, offline or missing — which is the
+    /// same condition that leaves the bindings table empty and makes the
+    /// synthetic legacy-status chip the only PR on screen. Declining there
+    /// would disable insert-on-miss precisely in the scenario it was written
+    /// for and hand the xmark back its silent no-op. `bind` distinguishes the
+    /// two the same way (`.deferredUnknownRepo` versus `.rejectedWrongRepo`);
+    /// this reads the nil as "no reason to refuse".
+    ///
+    /// Declining reports `false`, which is the honest answer — this worktree
+    /// was not tracking that PR.
     @discardableResult
     public func detach(worktreeID: UUID, parsed: ParsedPRURL) async throws -> Bool {
         let own = await resolveRepo(worktreeID)
-        let isOwnRepo = own.map {
-            $0.owner.lowercased() == parsed.owner.lowercased()
-                && $0.name.lowercased() == parsed.repo.lowercased()
+        let wrongRepo = own.map {
+            $0.owner.lowercased() != parsed.owner.lowercased()
+                || $0.name.lowercased() != parsed.repo.lowercased()
         } ?? false
         let tombstone = PRBinding(
             worktreeID: worktreeID, host: parsed.host, owner: parsed.owner,
             repo: parsed.repo, number: parsed.number, url: parsed.url,
             source: .manual, detached: true)
-        let changed = try await store.tombstone(tombstone, insertIfMissing: isOwnRepo)
+        let changed = try await store.tombstone(tombstone, insertIfMissing: !wrongRepo)
         if changed {
             logger.debug("tombstoned PR #\(parsed.number, privacy: .public) for worktree \(worktreeID.uuidString, privacy: .public)")
-        } else if !isOwnRepo {
+        } else if wrongRepo {
             logger.debug("not tombstoning unbound PR #\(parsed.number, privacy: .public) for worktree \(worktreeID.uuidString, privacy: .public): PR is in \(parsed.owner, privacy: .public)/\(parsed.repo, privacy: .public), which is not this worktree's repo")
         }
         return changed
