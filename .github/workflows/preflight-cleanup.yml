@@ -1,0 +1,100 @@
+name: Preflight ref cleanup
+
+# THE NAMED RECONCILER FOR INERT `preflight/*` REFS.
+#
+# The remote verification valve
+# (docs/specs/2026-08-16-remote-verification-valve-design.md) pushes
+# `preflight/<branch>` when a lane needs a CI verdict on a branch that already
+# has an open PR — pushing the PR branch itself would fire
+# `pull_request_target: synchronize` and spend Claude quota on a review nobody
+# asked for. Those refs are a genuine new durable resource, and CLAUDE.md's
+# reconciler doctrine says who reclaims them must be named rather than left to
+# a best-effort cleanup on the happy path: every unbounded leak this repo has
+# found in the wild sat on a resource no sweep covered, including 2,804 leaked
+# git branches.
+#
+# Two legs, and the second is the one that carries the guarantee:
+#
+#   - CLOSE PATH — a PR closing deletes its own preflight ref immediately, so
+#     the common case is reclaimed within seconds and the weekly pass usually
+#     finds nothing.
+#   - SWEEP — a weekly pass over every `preflight/*` ref on the remote, keeping
+#     only those whose branch still has an open PR. This is what makes the
+#     close path best-effort rather than load-bearing: a cancelled run, a
+#     force-pushed rename, or a ref pushed for a branch that never opened a PR
+#     all land here.
+
+on:
+  pull_request:
+    types: [closed]
+  schedule:
+    # 12:00 UTC Sunday. Nothing here is urgent — the refs cost only namespace —
+    # and a weekly cadence keeps the sweep's own noise near zero.
+    - cron: '0 12 * * 0'
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: 'Actually delete the refs (unchecked = dry run)'
+        type: boolean
+        required: false
+        default: false
+
+# Declaring this block sets every scope NOT listed to `none`, so both entries
+# are load-bearing: `contents: write` to delete refs, and `pull-requests: read`
+# for the `gh pr list` the sweep uses to decide what is still in use. Without
+# the latter every query fails — which the sweep treats as "unknown", keeping
+# every ref, rather than as "no PR", which would empty the namespace.
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: preflight-cleanup
+  # NOT cancel-in-progress: two legs deleting disjoint refs do not conflict,
+  # and a cancelled sweep is a week with no reconciliation.
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: Reclaim preflight refs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Skipped for forks: the valve pushes preflight refs to this repo only, so
+      # a fork PR has none — and `pull_request` hands a fork a read-only token
+      # regardless of the `permissions` block above, so the attempt would fail
+      # rather than no-op.
+      - name: Delete this PR's preflight ref
+        if: >-
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          # Via the environment, never interpolated into the script body: a
+          # branch name is attacker-controlled text that may legally contain
+          # `$`, backticks and `;`, so `${{ … }}` inside `run:` would be a
+          # shell injection.
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          ref="refs/heads/preflight/$HEAD_REF"
+          if git ls-remote --exit-code --heads origin "$ref" >/dev/null 2>&1; then
+            git push origin --delete "$ref"
+            echo "deleted $ref"
+          else
+            echo "no preflight ref for $HEAD_REF; nothing to reclaim"
+          fi
+
+      - name: Sweep preflight refs with no open PR
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # A scheduled pass reclaims; a manual dispatch previews unless asked.
+          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
+        run: |
+          set -euo pipefail
+          if [ "$APPLY" = "true" ]; then
+            bash scripts/sweep-preflight-refs.sh --apply
+          else
+            bash scripts/sweep-preflight-refs.sh
+          fi
