@@ -334,11 +334,12 @@ struct ParkedPromptReadbackTests {
 
     // MARK: - Sending is opt-in
 
-    @Test("A new first message does not send itself")
+    @Test("Sending is opt-in: the shipped default is off")
     func sendingIsOptIn() {
-        // Delivery types the message into the composer and stops. Sending
-        // starts a turn nobody watched begin, and is the one half TBD cannot
-        // report on afterwards — so it is the operator's to ask for.
+        // Until an operator opts in, delivery types the message into the
+        // composer and stops. Sending starts a turn nobody watched begin, and
+        // is the one half TBD cannot report on afterwards — so it is the
+        // operator's to ask for.
         #expect(QueuedPromptComposer.sendImmediatelyDefault == false)
     }
 
