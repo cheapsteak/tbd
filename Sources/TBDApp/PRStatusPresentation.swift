@@ -53,7 +53,14 @@ enum PRFreshness {
     /// a missing stamp, which reads as an unknown check time rather than as
     /// silence.
     static func clauses(status: PRStatus?, observation: PRObservation?, now: Date) -> [String] {
-        var out = [checkedLabel(observedAt: status?.observedAt, now: now)]
+        clauses(observedAt: status?.observedAt, observation: observation, now: now)
+    }
+
+    /// The same two clauses for a surface that carries the stamp rather than a
+    /// whole `PRStatus` — the status-bar chip. Composing them there by hand
+    /// would be a fourth place that could drift from the other three.
+    static func clauses(observedAt: Date?, observation: PRObservation?, now: Date) -> [String] {
+        var out = [checkedLabel(observedAt: observedAt, now: now)]
         if let clause = undeterminedClause(observation) { out.append(clause) }
         return out
     }

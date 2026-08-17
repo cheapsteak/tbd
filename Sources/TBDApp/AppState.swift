@@ -782,6 +782,9 @@ final class AppState: ObservableObject {
     /// non-zero, which is precisely the signal that suppresses the
     /// legacy-status fallback below.
     @Published var prDetachedCounts: [UUID: Int] = [:]
+    /// Start order for `refreshPRBindings`, so a response that lost the race to
+    /// a later one cannot publish its older snapshot over the newer state.
+    private var prBindingsRefreshSeq = 0
     /// What every PR surface — toolbar split button, sidebar row indicator,
     /// status-bar chips — must read, so they cannot disagree about a worktree.
     /// Bindings when there are any; otherwise the legacy single `prStatuses`
@@ -3034,6 +3037,8 @@ final class AppState: ObservableObject {
     /// are not reliably what this call saw even on success.
     @discardableResult
     func refreshPRBindings() async -> PRBindingRefresh.State? {
+        prBindingsRefreshSeq += 1
+        let seq = prBindingsRefreshSeq
         let result: PRBindingsAllResult
         do {
             result = try await prBindingsFetcher()
@@ -3044,6 +3049,11 @@ final class AppState: ObservableObject {
             return nil
         }
         let next = PRBindingRefresh.state(from: result)
+        // A refresh that started later has already published, so this response
+        // is stale — return it to our own caller, who asked for it, but do not
+        // put an older snapshot back on screen. Without this a poll issued a
+        // moment before an untrack can land after it and bring the chip back.
+        guard seq == prBindingsRefreshSeq else { return next }
         if next.bindings != prBindings { prBindings = next.bindings }
         if next.detachedCounts != prDetachedCounts { prDetachedCounts = next.detachedCounts }
         return next

@@ -84,6 +84,26 @@ public struct AllWorktreeBindings: Sendable {
     }
 }
 
+/// Why a binding write could not be honoured at all — distinct from the
+/// ordinary "nothing changed" a `Bool` reports, which every caller renders as
+/// "this worktree is not tracking that PR".
+public enum PRBindingStoreError: Error, LocalizedError, CustomStringConvertible {
+    /// A worktree has accumulated `cap` tombstones, so `tombstone`'s insert arm
+    /// refused to mint another. Reaching this legitimately is not possible; it
+    /// means something is detaching PRs in a loop.
+    case tombstoneCapReached(worktreeID: String, cap: Int)
+
+    public var description: String {
+        switch self {
+        case .tombstoneCapReached(let worktreeID, let cap):
+            return "worktree \(worktreeID) already records \(cap) detached pull "
+                + "requests; nothing was written"
+        }
+    }
+
+    public var errorDescription: String? { description }
+}
+
 /// Persistence for PR bindings. Enforces first-source-wins deduplication,
 /// tombstone semantics, and the per-worktree cap.
 public struct PRBindingStore: Sendable {
@@ -274,8 +294,13 @@ public struct PRBindingStore: Sendable {
                 .filter(Column("detached") == true)
                 .fetchCount(db)
             guard tombstones < Self.maxTombstonesPerWorktree else {
-                logger.warning("dropping tombstone for PR #\(record.number, privacy: .public) on worktree \(record.worktreeID, privacy: .public): \(Self.maxTombstonesPerWorktree, privacy: .public) tombstones already recorded")
-                return false
+                // THROWN, not reported as "changed nothing". False means the PR
+                // is not tracked here, and every caller says so in those words;
+                // hitting the ceiling means the opposite — the request was not
+                // honoured and the PR may well still be tracked.
+                logger.warning("refusing tombstone for PR #\(record.number, privacy: .public) on worktree \(record.worktreeID, privacy: .public): \(Self.maxTombstonesPerWorktree, privacy: .public) tombstones already recorded")
+                throw PRBindingStoreError.tombstoneCapReached(
+                    worktreeID: record.worktreeID, cap: Self.maxTombstonesPerWorktree)
             }
             try record.insert(db)
             return true

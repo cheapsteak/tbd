@@ -116,11 +116,11 @@ struct StatusBarView: View {
         /// When `state` was read. nil = never, which the overlay says out loud
         /// rather than passing the cached state off as current.
         let observedAt: Date?
-        /// The clause naming a last poll attempt that did not resolve, or nil
-        /// when the last attempt settled the question either way. The toolbar
-        /// and sidebar both append it; a chip that omitted it would render the
-        /// more confident of two readings of one fact.
-        let undetermined: String?
+        /// The worktree's last poll attempt, carried whole rather than as a
+        /// rendered clause so the overlay composes its caption through the same
+        /// `PRFreshness` the toolbar and sidebar use. A chip that omitted it
+        /// would render the more confident of two readings of one fact.
+        let observation: PRObservation?
     }
 
     /// How many chips the bar shows before the rest collapse into `+N`.
@@ -171,7 +171,6 @@ struct StatusBarView: View {
         observation: PRObservation? = nil
     ) -> (chips: [PRChip], overflow: Int) {
         let selected = PRBindingPresentation.statusBarChips(bindings, limit: limit)
-        let undetermined = PRFreshness.undeterminedClause(observation)
         let chips = selected.chips.map { binding in
             PRChip(
                 id: binding.id,
@@ -184,7 +183,7 @@ struct StatusBarView: View {
                 reason: binding.status.map { $0.reason ?? $0.state.displayReason },
                 title: binding.title,
                 observedAt: binding.status?.observedAt,
-                undetermined: undetermined
+                observation: observation
             )
         }
         return (chips, selected.overflow)
@@ -216,11 +215,11 @@ struct StatusBarView: View {
                 // overflow menu and the toolbar dropdown render them.
                 value: chip.reason ?? unobservedStateValue,
                 // Age first, then whether the last attempt to reconfirm it
-                // failed — the same two clauses in the same order the toolbar
-                // and sidebar compose from `PRFreshness`.
-                caption: ([PRFreshness.checkedLabel(observedAt: chip.observedAt, now: now)]
-                    + [chip.undetermined].compactMap { $0})
-                    .joined(separator: " · ")
+                // failed — composed by `PRFreshness` itself, not restated here,
+                // so this cannot drift from the toolbar and sidebar.
+                caption: PRFreshness.clauses(
+                    observedAt: chip.observedAt, observation: chip.observation, now: now
+                ).joined(separator: " · ")
             )
         ]
         return model

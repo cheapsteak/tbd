@@ -367,9 +367,13 @@ struct PRBindingStoreTests {
                 binding(n, worktreeID: wt, source: .manual), insertIfMissing: true))
         }
 
-        // One past the cap writes nothing and says so.
-        #expect(try await fixture.store.tombstone(
-            binding(9_001, worktreeID: wt, source: .manual), insertIfMissing: true) == false)
+        // One past the cap THROWS rather than reporting "changed nothing":
+        // false means the PR is not tracked here, which callers say in those
+        // words, and hitting the ceiling means the opposite.
+        await #expect(throws: PRBindingStoreError.self) {
+            try await fixture.store.tombstone(
+                binding(9_001, worktreeID: wt, source: .manual), insertIfMissing: true)
+        }
         #expect(try await fixture.store.list(worktreeID: wt, includeDetached: true).count
             == PRBindingStore.maxTombstonesPerWorktree)
 

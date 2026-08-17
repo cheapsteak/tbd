@@ -1071,9 +1071,12 @@ public struct PRDetachResult: Codable, Sendable {
     /// recorded for a PR this worktree had no row for at all (a detach asserts
     /// that a PR does not belong here; it does not merely edit a row that
     /// happens to exist). False when the PR was already tombstoned, and when
-    /// there was nothing to tombstone and the reference named a PR outside the
-    /// worktree's own repo — in both of those the PR is not tracked here, which
-    /// is what the caller asked for.
+    /// there was nothing to tombstone and nothing tied the reference to this
+    /// worktree — in both of those the PR is not tracked here, which is what
+    /// the caller asked for, and callers may say exactly that.
+    ///
+    /// A request that could not be honoured at all is an RPC **error**, never a
+    /// false, precisely so that sentence stays true.
     public let detached: Bool
     public init(detached: Bool) { self.detached = detached }
 }

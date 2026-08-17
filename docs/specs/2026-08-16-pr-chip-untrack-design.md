@@ -45,11 +45,20 @@ Hovering a chip turns its **status dot into an `xmark`**, in place. Clicking the
 xmark detaches that PR from the worktree; clicking anywhere else on the chip
 keeps its present meaning and opens the PR in the default browser.
 
-The dot is the right host for this, and not merely the convenient one. It is the
-only part of the chip with no click behaviour of its own, so nothing is
-displaced; it is already the chip's leading affordance, so the cursor is
-travelling past it anyway; and swapping in place means the chip does not grow a
-control that has to be laid out somewhere.
+The dot is the right host for this, though not a free one. It is already the
+chip's leading affordance, so the cursor is travelling past it anyway, and
+swapping in place means the chip does not grow a control that has to be laid out
+somewhere.
+
+What it costs is worth stating plainly: those pixels were not inert. The whole
+chip carried one tap gesture that opened the PR, so the dot opened it too, and
+roughly a third of a chip's width changes meaning. That is why the slot's action
+follows its glyph — a dot still opens, only a drawn xmark untracks — and it is
+the reason a user who clicks without registering the swap gets the destructive
+action. The gesture is reversible with `tbd pr attach`, and nothing in the
+repository or the session is touched, which is what makes the trade acceptable
+rather than costless. An in-app undo on the success path is the obvious
+improvement and is deliberately left for its own change.
 
 Two constraints govern the implementation:
 

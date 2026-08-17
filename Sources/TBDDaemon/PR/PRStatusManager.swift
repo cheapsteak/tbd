@@ -1165,7 +1165,8 @@ public actor PRStatusManager {
                 // fields — they are independent of the check query that failed.
                 observations[binding.id] = PRBindingObservation(
                     status: previous, headBranch: Self.refOrNil(node.headRefName),
-                    baseRef: Self.refOrNil(node.baseRefName), title: node.title)
+                    baseRef: Self.refOrNil(node.baseRefName),
+                    title: Self.refOrNil(node.title ?? ""))
                 continue
             } else {
                 signals = Self.aggregateFallbackSignals(node.statusCheckRollupState)
@@ -1190,7 +1191,10 @@ public actor PRStatusManager {
                                  observedAt: now()),
                 headBranch: Self.refOrNil(node.headRefName),
                 baseRef: Self.refOrNil(node.baseRefName),
-                title: node.title)
+                // Through `refOrNil` for the same reason the refs are: an empty
+                // string must reach the caller as "not observed", or it would
+                // survive `title ?? self.title` and blank a stored title.
+                title: Self.refOrNil(node.title ?? ""))
         }
         return observations
     }
