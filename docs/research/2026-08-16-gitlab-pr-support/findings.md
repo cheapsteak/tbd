@@ -871,12 +871,56 @@ answers the CE/EE question by not asking it. It does three things instead:
 **This reframes the CE/EE worry, and the reframing matters.** Nobody models CE
 versus EE. They model *version* and *field presence*. But presence-sniffing is a
 **REST affordance**: REST omits a field and the client copes, whereas GraphQL
-**rejects the entire query** for an unknown field. So the risk I flagged as
-"CE/EE" is really "GraphQL couples the whole batch to the instance's schema" —
-and it applies to any field that might be absent, not only EE ones. On a
-100-node batch, one unknown field returns nothing for every merge request in it.
-That is an argument for either splitting the risky fields into a second query,
-running a capability probe once per host, or using REST for the fields that vary.
+**rejects the entire query** for an unknown field — measured: a query naming one
+non-existent field returned HTTP 200 with `"data": null` and no merge requests
+at all. So the risk is not "CE/EE", it is "GraphQL couples the whole batch to
+the instance's schema", and it applies to any field that might be absent, not
+only EE ones.
+
+### Is "CE or EE?" the question, and can one API call settle it?
+
+Both halves are worth answering directly, because the obvious answer is the
+wrong one.
+
+**Edition is a proxy, and a lossy one.** `GET /api/v4/metadata` does report it —
+the documented response carries `"version": "18.1.1-ee"` and `"enterprise":
+true` ([metadata API](https://docs.gitlab.com/api/version/)) — so one
+authenticated call genuinely answers "CE or EE". But edition does not determine
+field availability on its own. Measured on gitlab.com, which is an EE build: a
+free-tier project answered `approvalsLeft` and `approvalsRequired` with real
+numbers while `mergeTrainCar` came back null — so tier gates *values* on an EE
+build. And two enum values were present in the deployed schema but absent from
+the source tree at `master`, so *version* gates the schema independently of
+edition. An edition flag predicts neither.
+
+**Introspection is not a cheap probe here.** gitlab.com returns the **full 7.8 MB
+schema for any introspection query**, including a narrowly targeted
+`__type(name: "MergeRequest") { fields { name } }` — measured, byte-identical
+size to a bare `__schema` query. Asking "does this host have that field" costs a
+7.8 MB download per host.
+
+**The cheapest correct probe is no extra call at all.** An unknown field fails
+in a precisely machine-readable way — measured, 291 bytes total:
+
+```json
+{"data": null, "errors": [{
+  "message": "Field 'totallyNotAField' doesn't exist on type 'MergeRequest'",
+  "extensions": {"code": "undefinedField",
+                 "typeName": "MergeRequest",
+                 "fieldName": "totallyNotAField"}}]}
+```
+
+`extensions.code` is a stable discriminator and `fieldName` names exactly what to
+drop. So the shape available is: send the rich query; on `undefinedField`, drop
+the named field, retry lean, and remember the answer per host. Cost is zero
+round trips in the happy path and one wasted round trip, once, on a host that
+cannot serve the rich query. It needs no version table, no edition check and no
+introspection, and it degrades identically for a CE build, an old version, and a
+field GitLab removes in future — which is the property a version-keyed table
+does not have.
+
+The remaining judgement is what "remember" means — process lifetime, a TTL, or a
+persisted per-host capability row — and that is a design call, not a fact.
 
 **git-spice** supports GitHub, GitLab, Bitbucket, Gitea and Forgejo, and its
 GitLab mergeability logic
@@ -963,7 +1007,10 @@ Stated plainly rather than asserted anywhere above:
   runs the EE codebase with tier gating, so this shows *tier* degradation, not
   *codebase* degradation. A CE-built self-managed instance may not carry the
   fields in its schema at all, which would fail the whole query rather than one
-  field. Only a CE instance can settle it.
+  field. Only a CE instance can settle it — **but a design need not wait for
+  that answer.** The `undefinedField` fallback in Part 9 handles the CE case
+  without knowing in advance whether it will occur, which converts this from a
+  blocking unknown into a branch that wants a test.
 - **Whether authenticated behaviour differs from what was measured.** Every
   probe was unauthenticated. Rate limits, complexity ceiling (250 vs 200),
   private-project visibility and per-user throttling were all untested.
@@ -1121,10 +1168,16 @@ both REST, and GitLab's own Go SDK is REST-shaped — and supplies the reason it
 might not be mere habit: REST omits an unavailable field and lets the client
 sniff for it, which is exactly how Renovate survives instance variation, while
 GraphQL rejects the entire query for one unknown field. On a 100-node batch that
-turns one schema mismatch into zero merge requests. *The fork:* take the cheaper
-batch and manage the schema coupling (split volatile fields into a second query,
-or probe capability once per host), or take the worn path and pay the per-MR
-pipeline call REST forces.
+turns one schema mismatch into zero merge requests — measured, `"data": null`.
+*The fork:* take the cheaper batch and manage the schema coupling, or take the
+worn path and pay the per-MR pipeline call REST forces. *Evidence bearing on
+it:* managing the coupling turns out to be cheap. An unknown field returns a
+machine-readable `extensions.code: "undefinedField"` naming the offending field,
+so a retry-lean-and-remember fallback costs nothing in the happy path and needs
+no version or edition table — see
+[Part 9](#is-ce-or-ee-the-question-and-can-one-api-call-settle-it). That
+weakens the main argument against GraphQL considerably, though it does add a
+degraded path that must itself be tested on both branches.
 
 **9. Does the hook gain a `glab mr create` arm, and what covers push-created
 MRs?**
