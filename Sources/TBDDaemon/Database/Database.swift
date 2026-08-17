@@ -1337,12 +1337,21 @@ public final class TBDDatabase: Sendable {
         }
 
         // The parked prompt itself. `pending_prompt_submit` DOES carry a SQL
-        // default, and it is unreachable by construction: it is data rather
-        // than a feature gate, and `setPendingPrompt` — the only writer — always
-        // names both columns, so the default can only ever describe a row that
-        // has nothing parked and therefore no submit choice to remember.
-        // Delivery resolves an absent value to "do not press Enter", which is
-        // the shipped behavior; see `PendingPromptCoordinator`.
+        // default, because it is data rather than a feature gate: there is no
+        // third "nobody chose" state worth preserving. That default IS reached
+        // — `ADD COLUMN ... DEFAULT 1` backfills every row that already
+        // existed, which then reads a present `true` rather than NULL
+        // (`QueuedPromptSchemaTests.rowWrittenBeforeV71DecodesWithNothingParked`
+        // pins that). It is inert, not unreachable: the rows it lands on get a
+        // NULL `pending_prompt` in the same breath, so the bit describes a
+        // prompt that does not exist and nobody will ever deliver.
+        //
+        // Both columns are added here together and `setPendingPrompt` — their
+        // only writer — always names both, so a prompt with no recorded submit
+        // bit is a shape no writer produces. Where the bit is genuinely absent
+        // (a row saved from a `Worktree` that never named it),
+        // `Worktree.pendingPromptSubmitResolved` is the one place that decides
+        // what it means, for delivery and for the read-back alike.
         migrator.registerMigration("v74_worktree_pending_prompt") { db in
             try db.addColumnIfMissing(
                 table: "worktree", column: "pending_prompt", type: .text)

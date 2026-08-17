@@ -121,8 +121,10 @@ struct QueuedPromptSchemaTests {
 /// `v74_worktree_pending_prompt` — the parked text and its submit bit.
 ///
 /// Unlike the flag above, `pending_prompt_submit` is *data*, not a feature
-/// gate: "deliver with Enter" is the shipped behavior and there is no third
-/// state to preserve, so a SQL default is correct there.
+/// gate: there is no third "nobody chose" state worth preserving, so a SQL
+/// default is correct there. What an absent bit means is settled in exactly one
+/// place — `Worktree.pendingPromptSubmitResolved` — and it means "do not press
+/// Enter".
 @Suite("QueuedPromptWorktreeStore")
 struct QueuedPromptWorktreeStoreTests {
 
@@ -273,9 +275,10 @@ struct QueuedPromptWorktreeStoreTests {
             let model = try #require(record.toModel())
             #expect(model.pendingPrompt == nil)
             // `pending_prompt_submit` IS data, not a feature gate, so its SQL
-            // default is correct — and unreachable, because the row it
-            // backfills has nothing parked and therefore no submit choice to
-            // remember. `setPendingPrompt` always names both columns.
+            // default is correct — and the backfill it performs here is inert,
+            // because the row it lands on has nothing parked and therefore no
+            // submit choice to remember. `setPendingPrompt` always names both
+            // columns.
             #expect(record.pending_prompt_submit == true)
             #expect(model.pendingPromptSubmit == true)
         }

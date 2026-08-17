@@ -154,9 +154,12 @@ struct ParkedPromptReadbackTests {
         #expect(ParkedPromptReadback(worktree: worktree(repoID: repoID, prompt: nil)) == nil)
         // An empty string is not a parked prompt either.
         #expect(ParkedPromptReadback(worktree: worktree(repoID: repoID, prompt: "")) == nil)
-        // A row written before the migration has no submit bit; delivery ends
-        // with Enter, matching the column's own default.
-        #expect(ParkedPromptReadback(worktree: worktree(repoID: repoID, prompt: "x"))?.submit == true)
+        // A row with no submit bit recorded: the sheet must say what delivery
+        // will actually do, and delivery stages without pressing Enter. Both
+        // sides read `Worktree.pendingPromptSubmitResolved`, so this cannot
+        // drift from the daemon — see `resolvedBitIsWhatTheSheetShows`.
+        #expect(ParkedPromptReadback(
+            worktree: worktree(repoID: repoID, prompt: "x", submit: nil))?.submit == false)
     }
 
     // MARK: - Reveal
@@ -352,6 +355,26 @@ struct ParkedPromptReadbackTests {
             worktree: worktree(repoID: repoID, prompt: "x", submit: true))?.submit == true)
         #expect(ParkedPromptReadback(
             worktree: worktree(repoID: repoID, prompt: "x", submit: false))?.submit == false)
+    }
+
+    /// The agreement itself. The sheet's whole job is to state what delivery
+    /// will do, and delivery reads `Worktree.pendingPromptSubmitResolved`
+    /// (`PendingPromptCoordinator.deliverParkedPrompt`). So both are asserted
+    /// against the same *literal* per row shape, the absent bit included —
+    /// comparing the sheet to the resolver instead would be an identity that
+    /// stays green however the resolver is changed, and would pin nothing.
+    @Test("The sheet seeds the same resolution delivery acts on")
+    func resolvedBitIsWhatTheSheetShows() {
+        let repoID = UUID()
+        let contract: [(recorded: Bool?, pressesEnter: Bool)] =
+            [(nil, false), (false, false), (true, true)]
+        for (recorded, pressesEnter) in contract {
+            let wt = worktree(repoID: repoID, prompt: "x", submit: recorded)
+            // What delivery will do with this row.
+            #expect(wt.pendingPromptSubmitResolved == pressesEnter)
+            // And what the sheet tells the operator it will do.
+            #expect(ParkedPromptReadback(worktree: wt)?.submit == pressesEnter)
+        }
     }
 
     // MARK: - Where it surfaces
