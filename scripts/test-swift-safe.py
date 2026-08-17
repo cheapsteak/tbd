@@ -352,6 +352,21 @@ class SwiftSafeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("until the program exits", result.stderr)
 
+    def test_yielding_exits_with_its_own_code(self):
+        """76 is distinct from 75 so a caller can route the run elsewhere."""
+        lock_path = self.tbd_home / "runtime" / "swift-build.lock"
+        lock_path.parent.mkdir(parents=True)
+        with lock_path.open("a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = self.run_runner(
+                "build",
+                TBD_SWIFT_QUEUE_YIELD_SECONDS="0.05",
+                TBD_SWIFT_LOCK_TIMEOUT_SECONDS="30",
+            )
+        self.assertEqual(result.returncode, 76)
+        self.assertIn("yield", result.stderr.lower())
+        self.assertEqual(result.stdout, "")
+
 
 class WaitReportingTests(unittest.TestCase):
     """Drive `_acquire` against a real contended flock with a fake clock."""
@@ -673,6 +688,56 @@ class AbandonedWaitTests(unittest.TestCase):
             )
         self.assertIs(outcome, TimeoutError)
         self.assertGreaterEqual(elapsed, 125.0)
+
+
+class QueueYieldTests(unittest.TestCase):
+    """Yielding is a caller-requested giveup, distinct from abandonment."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.lock_path = Path(self.temp.name) / "swift-build.lock"
+        self.holder = self.lock_path.open("a+", encoding="utf-8")
+        fcntl.flock(self.holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.env = mock.patch.dict(os.environ, {}, clear=False)
+        self.env.start()
+        os.environ.pop("TBD_SWIFT_ALLOW_ORPHAN", None)
+
+    def tearDown(self):
+        self.env.stop()
+        self.holder.close()
+        self.temp.cleanup()
+
+    def wait(self, yield_seconds, timeout=600.0):
+        clock = FakeClock()
+        start = clock.monotonic()
+        with self.lock_path.open("a+", encoding="utf-8") as waiter:
+            outcome = None
+            try:
+                swift_safe._acquire(
+                    waiter, self.lock_path, timeout, 60.0,
+                    requester=os.getppid(), ancestors=(),
+                    yield_after_seconds=yield_seconds,
+                    monotonic=clock.monotonic, sleep=clock.sleep,
+                    report=lambda *_: None, getppid=lambda: os.getppid(),
+                )
+            except BaseException as error:      # noqa: BLE001 - asserting the type
+                outcome = error
+            self.assertIsNotNone(outcome, "the wait acquired the build slot")
+        return type(outcome), clock.monotonic() - start
+
+    def test_the_wait_yields_once_the_threshold_passes(self):
+        outcome, elapsed = self.wait(60.0)
+        self.assertIs(outcome, swift_safe.Yielded)
+        self.assertGreaterEqual(elapsed, 60.0)
+        self.assertLess(elapsed, 61.0)
+
+    def test_an_unset_threshold_never_yields(self):
+        outcome, _ = self.wait(None, timeout=120.0)
+        self.assertIs(outcome, TimeoutError)
+
+    def test_a_threshold_beyond_the_timeout_never_yields(self):
+        outcome, _ = self.wait(500.0, timeout=120.0)
+        self.assertIs(outcome, TimeoutError)
 
 
 class AncestorChainTests(unittest.TestCase):

@@ -43,6 +43,16 @@ An abandoned wait and a timed-out wait both exit 75 (``EX_TEMPFAIL``); only
 the stderr line distinguishes them.  Nothing branches on the code today, and
 the shared value says the same thing to a caller that does: the slot was not
 obtained, nothing was compiled, retrying later is reasonable.
+
+A caller that has somewhere else to run can bound its queueing with
+``TBD_SWIFT_QUEUE_YIELD_SECONDS``: once that many seconds have passed without
+ever acquiring, the wait gives up its place in the queue and exits 76.  That
+is a separate code from 75 precisely because the caller must be able to tell
+"nobody wants this any more" from "you asked to be released, now go and verify
+this somewhere else".  The bound measures queue time, never run time, so a
+yield discards nothing: a wait that never acquired has compiled nothing.
+Unset or empty leaves the wait unbounded except by the timeout, which is the
+behavior every caller gets today.
 """
 
 from __future__ import annotations
@@ -105,6 +115,15 @@ RUN_OPTIONS_WITH_VALUES = {
 
 class Abandoned(Exception):
     """The requester exited while we were queued, so the wait has no reader."""
+
+
+class Yielded(Exception):
+    """The caller asked us to stop queueing after a bound, and it elapsed.
+
+    Distinct from `Abandoned`, which means nobody is left to read the result.
+    Here the requester is alive and wants its place in the queue back so it can
+    verify somewhere else, so the caller must be able to tell the two apart.
+    """
 
 
 def _positive_number(name: str, default: float) -> float:
@@ -388,6 +407,7 @@ def _acquire(
     *,
     requester: int,
     ancestors: tuple[int, ...],
+    yield_after_seconds: float | None = None,
     monotonic=time.monotonic,
     sleep=time.sleep,
     report=_report,
@@ -441,6 +461,13 @@ def _acquire(
                     f"({_holder_description(lock_path)})"
                 )
                 next_heartbeat = now + heartbeat_seconds
+            # Checked after the abandonment clause on purpose: a requester that
+            # has died wants nothing, including a remote run. Checked before the
+            # deadline so the shorter of the two bounds is the one that fires,
+            # and after the reporting block so a yield still names the holder it
+            # was queued behind.
+            if yield_after_seconds is not None and now - start >= yield_after_seconds:
+                raise Yielded
             if now >= deadline:
                 raise TimeoutError
             sleep(min(0.25, max(0.01, deadline - now)))
@@ -492,6 +519,10 @@ def main(arguments: list[str]) -> int:
     heartbeat = _positive_number(
         "TBD_SWIFT_HEARTBEAT_SECONDS", DEFAULT_HEARTBEAT_SECONDS
     )
+    # Unset or empty means never yield, which is what every caller gets today.
+    yield_after = None
+    if os.environ.get("TBD_SWIFT_QUEUE_YIELD_SECONDS"):
+        yield_after = _positive_number("TBD_SWIFT_QUEUE_YIELD_SECONDS", 0.0)
 
     if subcommand == "run":
         # `run` execs SwiftPM, which stays alive for as long as the program
@@ -513,7 +544,16 @@ def main(arguments: list[str]) -> int:
                 heartbeat,
                 requester=requester,
                 ancestors=ancestors,
+                yield_after_seconds=yield_after,
             )
+        except Yielded:
+            print(
+                f"swift-safe: still queued for {path} after {yield_after:g}s; "
+                "yielding the local build slot so this run can be verified "
+                "elsewhere",
+                file=sys.stderr,
+            )
+            return 76
         except Abandoned:
             print(
                 "swift-safe: the process that requested this build exited while "
