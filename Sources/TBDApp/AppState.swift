@@ -313,7 +313,14 @@ final class AppState: ObservableObject {
                 selectedRepoID = nil
                 selectedScratchSection = false
                 selectedRemoteProvider = nil
-                selectedRemoteSession = nil
+                // Was a bare `selectedRemoteSession = nil`, which is still
+                // what happens for a local row or a multi-selection. A single
+                // ADOPTED REMOTE LANE is the exception: that row IS its
+                // provider session, so it points the remote surface at itself
+                // instead of clearing it — otherwise selecting the only row
+                // that leads to a remote session lands on an empty worktree
+                // pane. See `syncRemoteSurfaceToWorktreeSelection`.
+                syncRemoteSurfaceToWorktreeSelection()
                 recordNavigation(.worktrees(selectionOrder))
                 // Feed the jump menu's Recent section. Insertion-order LRU,
                 // most-recent-first; capped at 32 to bound memory. Only the
