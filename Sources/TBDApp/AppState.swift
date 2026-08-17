@@ -104,10 +104,69 @@ final class AppState: ObservableObject {
     private var themeStoreSubscription: AnyCancellable?
 
     @Published var repos: [Repo] = []
-    @Published var worktrees: [UUID: [Worktree]] = [:]
+    @Published var worktrees: [UUID: [Worktree]] = [:] {
+        didSet {
+            childrenIndexCache = nil
+            allWorktreesCache = nil
+        }
+    }
     /// Repo-less scratch spaces (`Worktree.isScratch`), surfaced separately
     /// in the sidebar's Scratch section rather than under any repo group.
-    @Published var scratchWorktrees: [Worktree] = []
+    @Published var scratchWorktrees: [Worktree] = [] {
+        // Only `allWorktrees` reads this — `childrenIndex()` is dict-only by
+        // design (see `children(of:)`), so its cache survives scratch churn.
+        didSet { allWorktreesCache = nil }
+    }
+
+    // MARK: - Derived worktree caches
+    //
+    // Both are plain stored properties, NOT `@Published`: their getters fill
+    // them lazily, and a `@Published` write from inside a SwiftUI `body`
+    // evaluation would fault with "Modifying state during view update".
+    // `AppState` is `@MainActor`, so plain storage is race-free here.
+    //
+    // Invalidation is the two `didSet`s above. Every mutation site in the app
+    // goes through these stored properties — including in-place element writes
+    // like `worktrees[key]?[idx].pinSortOrder = order`, which are a
+    // get-modify-set on the stored property and therefore fire `didSet` too —
+    // so there is no bypassing path.
+
+    /// Memoized parent-keyed child index; see `childrenIndex()`.
+    private var childrenIndexCache: [UUID: [Worktree]]?
+    /// Memoized flattening for `allWorktrees`.
+    private var allWorktreesCache: [Worktree]?
+
+    /// Every active/creating worktree bucketed by `parentWorktreeID`, in
+    /// `sortOrder`. Backs `children(of:)`, which the sidebar calls once per
+    /// row while rendering — recomputing the O(N) flatMap/filter/sort per call
+    /// made a render pass O(N²) (measured 79.5 ms at 127 worktrees; the index
+    /// costs 1.68 ms cold and ~0 warm).
+    ///
+    /// Deliberately dict-only, never `allWorktrees`: scratch spaces can never
+    /// be children (see `children(of:)`).
+    func childrenIndex() -> [UUID: [Worktree]] {
+        if let cached = childrenIndexCache { return cached }
+        var index: [UUID: [Worktree]] = [:]
+        for rows in worktrees.values {
+            for worktree in rows {
+                guard let parentID = worktree.parentWorktreeID,
+                      worktree.status == .active || worktree.status == .creating else { continue }
+                index[parentID, default: []].append(worktree)
+            }
+        }
+        // Same comparator as the pre-index implementation. `Dictionary.values`
+        // iteration order is nondeterministic and `sort` is not stable, so ties
+        // on equal `sortOrder` were already nondeterministic — deliberately not
+        // "fixed" with an id tie-break, which would change behavior.
+        // `Array(index.keys)` rather than `index.keys`: the lazy view holds a
+        // reference to the dictionary's storage, so mutating `index` inside
+        // the loop would force a full copy-on-write copy on every iteration.
+        for key in Array(index.keys) {
+            index[key]?.sort { $0.sortOrder < $1.sortOrder }
+        }
+        childrenIndexCache = index
+        return index
+    }
     @Published var terminals: [UUID: [Terminal]] = [:]
     @Published var notes: [UUID: [Note]] = [:]
     @Published var focusedTabCloseContext: TabCloseContext?
@@ -207,12 +266,30 @@ final class AppState: ObservableObject {
                 return
             }
 
+            // Rebuild the order in a local, then assign to `selectionOrder`
+            // EXACTLY ONCE. `selectionOrder`'s own `didSet` runs a full
+            // JSONEncoder + UserDefaults write, so mutating it in place — one
+            // `removeAll` plus one `append` per newly-selected id — cost N+1
+            // encodes and writes for a single selection change. The `Set`
+            // membership test also replaces an O(n) `Array.contains` inside
+            // the loop.
+            //
+            // Order semantics are unchanged: surviving ids keep their existing
+            // relative order and newly-selected ids are appended after them.
+            // The append loop still iterates `selectedWorktreeIDs`, a `Set`,
+            // so the relative order of several ids added by one gesture stays
+            // as nondeterministic as it always was — deliberately not
+            // stabilized here.
+            var newOrder = selectionOrder
             // Remove deselected items from order
-            selectionOrder.removeAll { !selectedWorktreeIDs.contains($0) }
+            newOrder.removeAll { !selectedWorktreeIDs.contains($0) }
             // Append newly selected items (maintains insertion order for cmd+click)
-            for id in selectedWorktreeIDs where !selectionOrder.contains(id) {
-                selectionOrder.append(id)
+            let alreadyOrdered = Set(newOrder)
+            for id in selectedWorktreeIDs where !alreadyOrdered.contains(id) {
+                newOrder.append(id)
             }
+            // Skip the write entirely when nothing moved.
+            if newOrder != selectionOrder { selectionOrder = newOrder }
             // When a single worktree becomes the focused selection, the user is
             // now viewing its active tab — clear that tab's unread-completion
             // bold. Single-select only: tab bars only render in single-select.
@@ -2292,8 +2369,15 @@ final class AppState: ObservableObject {
     /// Use this instead of re-flattening `worktrees.values` whenever a lookup
     /// must also resolve scratch spaces (e.g. notification banner titles,
     /// startup selection restore).
+    ///
+    /// Memoized (`allWorktreesCache`, invalidated by the `worktrees` /
+    /// `scratchWorktrees` `didSet`s): `SidebarView` reads it twice per body
+    /// evaluation, and each read was a full copy of every row.
     var allWorktrees: [Worktree] {
-        worktrees.values.flatMap { $0 } + scratchWorktrees
+        if let cached = allWorktreesCache { return cached }
+        let flattened = worktrees.values.flatMap { $0 } + scratchWorktrees
+        allWorktreesCache = flattened
+        return flattened
     }
 
     /// Runs `body` only if no poll cycle is currently in flight. Returns true if

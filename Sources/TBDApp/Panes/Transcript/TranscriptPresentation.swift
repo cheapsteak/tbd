@@ -233,9 +233,31 @@ struct TranscriptPresentation {
         indexSections.reduce(0) { $0 + $1.entries.count }
     }
 
+    /// Memoized entry point. `build` is called from inside two SwiftUI view
+    /// bodies (`TableTranscriptPaneView.tableTranscript` and `HistoryPaneView`),
+    /// each holding the result in a plain `let`, and both views observe
+    /// `AppState` — so an unrelated publish re-ran the whole projection,
+    /// including one `JSONSerialization` parse per tool call. Measured at
+    /// 2.4 ms / 200 items, 11.3 ms / 800, 70.8 ms / 3000, on the main thread.
+    ///
+    /// The memo is keyed on FULL value equality of both inputs, never a cheap
+    /// proxy: a tool call gets its result filled in later without the array
+    /// count or the last item's ID changing, so a count-or-last-ID key would
+    /// serve a stale transcript. Equality is cheap in the common case because
+    /// the same underlying array storage is re-read from
+    /// `appState.sessionTranscripts[sid]`, and `Array.==` short-circuits on
+    /// identical buffers.
     nonisolated static func build(
         items: [TranscriptItem],
-        expansionOverrides: [String: Bool] = [:]
+        expansionOverrides: [String: Bool] = [:],
+        memo: TranscriptPresentationMemo = .shared
+    ) -> TranscriptPresentation {
+        memo.presentation(items: items, expansionOverrides: expansionOverrides, compute: compute)
+    }
+
+    private nonisolated static func compute(
+        items: [TranscriptItem],
+        expansionOverrides: [String: Bool]
     ) -> TranscriptPresentation {
         let baseNodes = transcriptRenderNodes(from: items)
         var projected: [TranscriptRenderNode] = []
@@ -448,12 +470,22 @@ struct TranscriptPresentation {
             }
         }
 
+        // One pass to bucket, then emit. The previous shape rescanned the whole
+        // of `orderedKeys` once per category — O(categories × keys) — which on a
+        // long session was a measurable share of a main-thread rebuild. Ordering
+        // is unchanged and must stay so: sections come out in
+        // `SessionIndexCategory.allCases` order, entries within a section in
+        // first-seen `orderedKeys` order, and an empty category is omitted.
+        var bucketed: [SessionIndexCategory: [SessionIndexEntry]] = [:]
+        for key in orderedKeys {
+            guard let entry = entries[key] else { continue }
+            bucketed[key.category, default: []].append(entry)
+        }
+
         return SessionIndexCategory.allCases.compactMap { category in
-            let categoryEntries = orderedKeys.compactMap { key -> SessionIndexEntry? in
-                guard key.category == category else { return nil }
-                return entries[key]
+            guard let categoryEntries = bucketed[category], !categoryEntries.isEmpty else {
+                return nil
             }
-            guard !categoryEntries.isEmpty else { return nil }
             return SessionIndexSection(category: category, entries: categoryEntries)
         }
     }
@@ -499,5 +531,80 @@ struct TranscriptPresentation {
         return [
             "browser_navigate", "browser_open", "browser_search", "web_fetch", "web_search"
         ].contains(String(leaf))
+    }
+}
+
+/// Size-1 memo behind `TranscriptPresentation.build`.
+///
+/// Only the most recent `(items, expansionOverrides)` pair is retained: the
+/// access pattern is a single view re-reading one session's transcript many
+/// times in a row, so a deeper cache would buy nothing and pin transcript
+/// arrays alive.
+///
+/// Both view call sites hold their OWN instance in `@State` rather than using
+/// `.shared`, so the live pane and Session History cannot evict each other out
+/// of a size-1 cache when both are mounted. `.shared` is the default only for
+/// callers that pass no memo — chiefly tests.
+///
+/// `build` is `nonisolated static`, so the cache must be callable from any
+/// isolation. A lock is used rather than a `@MainActor` holder because a
+/// main-actor-isolated store would be unreachable from a `nonisolated`
+/// function without either an `await` (which `build` cannot introduce — its
+/// call sites are synchronous `let`s inside view bodies) or
+/// `MainActor.assumeIsolated`, which would trap in the many off-main unit
+/// tests that call `build` directly.
+final class TranscriptPresentationMemo: @unchecked Sendable {
+    static let shared = TranscriptPresentationMemo()
+
+    private struct Entry {
+        let items: [TranscriptItem]
+        let expansionOverrides: [String: Bool]
+        let presentation: TranscriptPresentation
+    }
+
+    private let lock = NSLock()
+    private var entry: Entry?
+    private var hitCount = 0
+    private var missCount = 0
+
+    func presentation(
+        items: [TranscriptItem],
+        expansionOverrides: [String: Bool],
+        compute: ([TranscriptItem], [String: Bool]) -> TranscriptPresentation
+    ) -> TranscriptPresentation {
+        lock.lock()
+        let cached = entry
+        lock.unlock()
+
+        // Full value equality on BOTH inputs. A tool call gains its result in
+        // place, leaving `count` and the last item's ID untouched, so any
+        // cheaper key would serve a stale transcript.
+        if let cached,
+           cached.items == items,
+           cached.expansionOverrides == expansionOverrides {
+            lock.lock()
+            hitCount += 1
+            lock.unlock()
+            return cached.presentation
+        }
+
+        // Computed outside the lock: two threads racing here recompute
+        // independently and the loser's identical result is simply discarded,
+        // which is cheaper than serializing a 70 ms projection.
+        let fresh = compute(items, expansionOverrides)
+
+        lock.lock()
+        entry = Entry(items: items, expansionOverrides: expansionOverrides, presentation: fresh)
+        missCount += 1
+        lock.unlock()
+        return fresh
+    }
+
+    /// Hit/miss tallies, for tests. Read under the lock so a test never races
+    /// the counters it is asserting on.
+    var statistics: (hits: Int, misses: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (hitCount, missCount)
     }
 }
