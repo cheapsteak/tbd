@@ -90,7 +90,7 @@ not a distributed consensus problem.
   remote run it authorizes.
 
 A lane queues for the local slot as it does now. Once it has waited **T seconds
-(T=60) without ever acquiring**, it attempts a remote ticket:
+(T=300) without ever acquiring**, it attempts a remote ticket:
 
 - **Ticket acquired and preconditions met** — it stops waiting locally, pushes,
   dispatches, waits for the verdict, and reports.
@@ -113,6 +113,18 @@ Because forty lanes run one uniform rule, the second pool is what prevents a
 stampede. Without it, every queued lane would dispatch at once into a queue two
 runs wide that TBD cannot observe, prioritize, or abandon.
 
+**T is sized against remote capacity, not against impatience.** Sampling the
+lock every two seconds for two hours of ordinary fleet activity recorded 110
+queueing episodes with a peak wait of 84s at the median, 268s at p90, and 1790s
+at the maximum — a lane riding the lock's own timeout out. Remote sustains
+roughly two concurrent runs of about ten minutes, so about twelve runs an hour.
+Trip rates follow from the episode distribution: T=60 trips 28 times an hour and
+oversubscribes the valve more than twofold, T=180 trips 14, and T=300 trips
+between four and five. A lane that trips, finds no ticket, and returns to the
+local queue has spent its trip for nothing, so a threshold below capacity buys
+churn rather than relief. T=300 also selects the right episodes: it ignores the
+median wait entirely and fires on the tail this valve exists for.
+
 ## Returning the verdict
 
 A red run must tell the lane what failed, or the valve makes agents worse at
@@ -123,6 +135,12 @@ The remote job writes machine-readable results and uploads them as an artifact.
 `--experimental-xunit-message-failure`, which puts failure messages in it. On a
 failure the local side downloads that artifact and renders it in the shape a
 local run would have printed.
+
+**The artifact holds several files, not one.** Each of the run's test passes
+writes its own, and SwiftPM may split a single pass again between its XCTest and
+Swift Testing writers, so the reader globs and merges whatever arrived. Fewer
+files than passes is normal rather than an error: a run that died early produces
+only what it reached.
 
 **Scraping the job log is rejected, on evidence.** A single failed `test.yml` run
 produces **5.3 MB across 32,228 lines** — far past what any agent can read — in
@@ -196,10 +214,15 @@ the default once the soak shows the routing behaves.
 
 ## What this does not do
 
-- **It does not order the local queue.** A lane that has waited longer still gets
-  no priority, so a lane can still be passed over repeatedly. Fairness needs its
-  own design, and the valve may lower the pressure enough to change what that
-  design should be — re-measure before building it.
+- **It does not order the local queue**, and that queue is measurably unfair.
+  Across two hours, 52 of 99 handoffs went to a lane while another that had
+  already waited at least 30 seconds was still queued; the worst passed over a
+  lane 24 minutes into its wait, and one worktree was jumped at 21, 22 and 24
+  minutes in the same stretch. The lock is memoryless, so seniority buys
+  nothing. Fairness needs its own design. This valve relieves only the tail it
+  fires on — at T=300, four or five episodes an hour out of roughly fifty-five —
+  so most of that unfairness survives it, and the two changes are complementary
+  rather than alternatives.
 - **It does not move artifact builds.** `restart.sh` and anything else whose
   output is a binary someone runs stays local permanently.
 - **It does not help a dirty tree**, which is a common state for the lane most
