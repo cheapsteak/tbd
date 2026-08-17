@@ -182,6 +182,19 @@ is spent and then the local run happens anyway. On a tree whose whole suite is
 reliably green this is rare; on a tree where it is not, a narrowed lane degrades
 toward always running locally, which is where it started.
 
+**One existing guard is weakened, and it is the reason the follow-up matters.**
+A floor serves two purposes: catching a truncated run, and catching a filter that
+matched nothing — the failure where `--filter` names a renamed type, selects zero
+tests, and exits green. A whole-suite count satisfies a narrow pass's floor
+trivially, so it still proves a run happened but no longer proves the caller's
+filter selected anything. The pre-push hook's tier-3 pass, whose floor of 35
+exists precisely to catch a vacuous filter, therefore stops catching one whenever
+its verdict came from a remote run.
+
+The backstop is that CI never enables the valve, so its filtered passes run
+directly with their floors intact and a rename is still caught before a merge.
+What is lost is the local, pre-push instance of that check.
+
 Passing the caller's narrowing arguments through to the dispatch would remove the
 mismatch and make a red verdict directly usable. That input must be allowlisted
 and delivered through the environment rather than interpolated into a workflow's
