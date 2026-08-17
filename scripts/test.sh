@@ -175,8 +175,21 @@
 #      no pushable ref). The run falls back to the local queue. THE VALVE IS AN
 #      OPTIMISATION, NEVER A GATE: a refusal must never fail a run.
 #
-# Any other status from `remote-verify.sh` is the run's verdict — 0 for a green
-# remote run, 1 for a red one whose failing tests it has already printed.
+# `remote-verify.sh` answers 0 for a green remote run and 1 for a red one whose
+# failing tests it has already printed. THOSE TWO, AND ONLY THOSE TWO, ARE
+# VERDICTS. Everything else it can produce — 127 for a mangled interpreter line,
+# 130 for a Ctrl-C, 2 for a syntax error in it — says nothing about the tests,
+# and adopting one would report a suite that never ran as a failing suite. Any
+# status outside `{0, 1, 78}` is therefore treated exactly as 78 is, with the
+# status named on the way past.
+#
+# THE VALVE ALSO REFUSES A NARROWED RUN, and that is about soundness rather than
+# capacity. This wrapper forwards `--filter` and friends to `swift test` but the
+# dispatch has no way to carry them, so the remote run is always the whole
+# suite. Green whole-suite would still be sound for a filtered caller — it
+# implies the subset passed — but RED is not: it would report failures from
+# tests the caller deliberately excluded as if they were this run's result. A
+# narrowed run therefore waits for the local slot, and says so once.
 #
 # TESTED BY `scripts/test.test.sh`, which drives the guards below against
 # fixture directories with a stub `swift` — no build, no real `~/tbd`. Every
@@ -291,6 +304,39 @@ valid_yield_bound() {
   return 0
 }
 
+# THE ARGUMENTS THAT REDUCE THE SUITE, AND WHY THE VALVE WILL NOT ROUTE PAST
+# THEM. Nothing on the dispatch carries a filter, so a routed run is always the
+# whole suite. For a filtered caller that makes a GREEN remote result sound — the
+# whole suite passing implies their subset did — and a RED one a false statement
+# about their run, naming failures in tests they deliberately excluded. Measured
+# contention says filtered runs are the common case rather than an exotic one:
+# of the seven queued lanes in the two snapshots behind the design, three were
+# `swift test --filter …`. So this is refused rather than tolerated.
+#
+# FOLLOW-UP, AND THE REASON THIS RESTRICTION IS TEMPORARY: give the dispatch a
+# filter input, have the workflow forward it to `swift test`, and route a
+# narrowed run against the same narrowing. Then the verdict describes the
+# caller's run again and this refusal can go away.
+#
+# The list is deliberately allowed to be over-broad. A false positive costs one
+# lane a trip through the valve — the optimisation not firing — while a false
+# negative reports failures the caller excluded, so anything that plausibly
+# reduces what runs belongs here.
+SUITE_NARROWING_ARGS=(--filter --skip --disable-xctest --disable-swift-testing)
+
+narrows_the_suite() {
+  local arg known
+  for arg in "$@"; do
+    for known in "${SUITE_NARROWING_ARGS[@]}"; do
+      # Both spellings: `--filter X` and `--filter=X`.
+      case "$arg" in
+        "$known"|"$known"=*) return 0 ;;
+      esac
+    done
+  done
+  return 1
+}
+
 # Sourced rather than executed: `scripts/test.test.sh` wants the helpers above
 # without the run below. The siblings in this directory express the same thing
 # as `main "$@"` under the inverse condition; this script stays straight-line
@@ -343,7 +389,21 @@ if [ "${TBD_REMOTE_VERIFY:-}" = "1" ]; then
     echo "         indistinguishable from a failing test suite." >&2
     exit 64
   fi
-  fenced_env=(TBD_SWIFT_QUEUE_YIELD_SECONDS="$yield_seconds")
+  # DECIDED BEFORE THE BOUND IS FORWARDED, NOT AFTER THE RUN. Refusing later
+  # would be too late in the only way that matters: the bound would already have
+  # gone to `swift-safe`, which would answer 76 for a yield this run has now
+  # decided it cannot use — and 76 is not a test result. Turning the valve off
+  # here means no bound is forwarded, so there is no yield to strand.
+  if narrows_the_suite ${swift_test_args[@]+"${swift_test_args[@]}"}; then
+    echo "test.sh: narrowing arguments present, so this run stays in the local" >&2
+    echo "         queue instead of verifying remotely. The dispatch cannot" >&2
+    echo "         carry a filter, so a remote run is always the whole suite —" >&2
+    echo "         and a red whole-suite verdict would report failures in tests" >&2
+    echo "         this run excluded. See TBD_REMOTE_VERIFY in scripts/test.sh." >&2
+    remote_verify_enabled=0
+  else
+    fenced_env=(TBD_SWIFT_QUEUE_YIELD_SECONDS="$yield_seconds")
+  fi
 fi
 
 # Resolved HERE, while `$HOME` and `$TBD_HOME` still hold the caller's real
@@ -556,6 +616,28 @@ run_fenced_suite() {
     scripts/swift-safe test ${swift_test_args[@]+"${swift_test_args[@]}"}
 }
 
+# RETURNING TO THE LOCAL QUEUE, WHICH IS WHAT EVERY NON-VERDICT ENDS IN. The
+# re-run must queue without limit: yielding a second time would strand the run
+# at 76 with nothing tested and nothing said, because the valve block has
+# already been passed.
+#
+# THE BOUND IS CLEARED, NOT DROPPED, AND THE DIFFERENCE IS THE WHOLE BUG.
+# `fenced_env=()` stops this script from *adding* the assignment; it does not
+# unset the variable, and `env` passes an inherited one straight through.
+# `scripts/swift-safe` documents `TBD_SWIFT_QUEUE_YIELD_SECONDS` as a supported
+# knob, so a caller exporting it alongside `TBD_REMOTE_VERIFY=1` is expected
+# rather than perverse — and that caller's value would survive into this re-run,
+# yield 76 again, and exit the wrapper at 76 having tested nothing. An explicit
+# empty value wins in `env` and is falsy in `swift-safe` ("never yield"), which
+# is exactly the pre-valve behavior this fallback is supposed to restore.
+fall_back_to_the_local_queue() {
+  fenced_env=(TBD_SWIFT_QUEUE_YIELD_SECONDS=)
+  set +e
+  run_fenced_suite
+  test_status=$?
+  set -e
+}
+
 set +e
 run_fenced_suite
 test_status=$?
@@ -590,23 +672,39 @@ if [ "$remote_verify_enabled" -eq 1 ] && [ "$test_status" -eq "$YIELDED_THE_QUEU
     set -e
   fi
 
-  if [ "$remote_status" -eq "$REMOTE_VERIFY_REFUSED" ]; then
-    # A REFUSAL IS NOT A FAILURE. The remote path named its condition on stderr
-    # and declined; this lane returns to the local queue and waits it out, as it
-    # would have done before the valve existed. Anything else would make the
-    # valve a gate — a run that cannot go remote must still be able to test.
-    #
-    # The re-run drops the bound, so it queues without limit rather than
-    # yielding again and asking a precondition that just refused a second time.
-    fenced_env=()
-    set +e
-    run_fenced_suite
-    test_status=$?
-    set -e
-  else
-    # 0 or 1 — the remote verdict, with its failing tests already printed.
-    test_status=$remote_status
-  fi
+  # ONLY THE CONTRACT'S OWN STATUSES DECIDE ANYTHING; THE REST FALL BACK. The
+  # branches are listed as a whitelist rather than "78 means refuse, everything
+  # else is the answer", because the set of things that can come out of running
+  # a script is open-ended and every one of them outside the contract is a
+  # non-answer: 127 for an interpreter that is not there, 126 for a lost
+  # executable bit, 130 for a Ctrl-C, 2 for a syntax error. Adopting any of them
+  # reports a suite that never ran as a suite that failed.
+  case "$remote_status" in
+    0|1)
+      # THE REMOTE VERDICT, and the only thing here that is one. A red run has
+      # already printed its failing tests.
+      test_status=$remote_status
+      ;;
+    "$REMOTE_VERIFY_REFUSED")
+      # A REFUSAL IS NOT A FAILURE. The remote path named its condition on
+      # stderr and declined; this lane returns to the local queue and waits it
+      # out, as it would have done before the valve existed. Anything else would
+      # make the valve a gate — a run that cannot go remote must still be able
+      # to test.
+      fall_back_to_the_local_queue
+      ;;
+    *)
+      # OUTSIDE THE CONTRACT ENTIRELY, so it is treated as a refusal and named.
+      # A refusal explains itself on stderr; this one cannot, so the wrapper
+      # says what it saw. Silence here would leave a broken remote path looking
+      # like an ordinary local run forever.
+      echo "test.sh: scripts/remote-verify.sh exited $remote_status, which is" >&2
+      echo "         outside its {0, 1, 78} contract and says nothing about the" >&2
+      echo "         tests; treating it as a refusal and staying in the local" >&2
+      echo "         queue." >&2
+      fall_back_to_the_local_queue
+      ;;
+  esac
 fi
 
 # THE TRIPWIRE HAS TO BE RE-CHECKED, not just armed. The code inside the run

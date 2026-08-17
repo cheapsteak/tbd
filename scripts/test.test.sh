@@ -947,11 +947,17 @@ remote_verify_dispatches() {
 }
 
 # Run the wrapper from a fixture repo, with the remote path stubbed.
+#
+#   run_with_valve FIX [SCRIPT [ARG...]]
+#
+# SCRIPT is spelled out rather than defaulted-around when arguments follow it,
+# because the narrowing cases need both at once: a mutant AND a `--filter`.
 run_with_valve() {
-  local fix="$1" script="${2:-$SCRIPT}" repo
-  repo="$fix/repo"
-  RUN_CWD="$repo"
-  run_script "$script" "$fix"
+  local fix="$1" script="$SCRIPT"
+  shift
+  if [ $# -gt 0 ]; then script="$1"; shift; fi
+  RUN_CWD="$fix/repo"
+  run_script "$script" "$fix" "$@"
   RUN_CWD=""
 }
 
@@ -1121,7 +1127,13 @@ test_a_missing_remote_path_falls_back_to_a_local_run() {
   rmfix "$fix"
 }
 
-# MUTATION. Without the check the shell's 127 becomes the run's verdict.
+# MUTATION. The two guards are LAYERED, and this is where that shows. Without
+# the executability check the shell answers 127 — but 127 is outside the
+# `{0, 1, 78}` contract, so the whitelist below catches it and the run still
+# falls back rather than reporting a broken checkout as a failing suite. What
+# the check buys on top is the DIAGNOSIS: it names the missing file instead of
+# leaving the reader an exit status to interpret, and it does so without
+# spending a dispatch attempt on a script that is not there.
 test_the_missing_remote_path_check_is_load_bearing() {
   local fix mutant; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
   rm -f "$fix/repo/scripts/remote-verify.sh"
@@ -1129,22 +1141,183 @@ test_the_missing_remote_path_check_is_load_bearing() {
   RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC="76 0")
   run_with_valve "$fix" "$mutant"
   RUN_ENV=()
-  assert_eq "without the check a broken checkout exits 127" "127" "$RUN_RC"
-  assert_eq "and the suite never ran locally" "1" "$(swift_invocations "$fix")"
+  assert_missing "without the check nothing names the missing file" "$RUN_OUT" \
+    "remote-verify.sh is missing or not executable"
+  assert_contains "the reader is left with a bare 127 instead" "$RUN_OUT" \
+    "exited 127, which is"
   rmfix "$fix"
 }
 
-# MUTATION. Stop recognising 78 and a refusal becomes the run's verdict: a lane
-# that could not go remote reports a failure instead of testing anything.
+# MUTATION. Widen the verdict branch to everything and the two fallbacks below
+# it become unreachable: a refusal is adopted as the run's exit status, so a
+# lane that could not go remote reports a failure instead of testing anything.
 test_the_refusal_fallback_is_load_bearing() {
   local fix mutant; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
-  mutant="$(mutant_of "$SCRIPT" 's/-eq "\$REMOTE_VERIFY_REFUSED"/-eq 999/')"
+  mutant="$(mutant_of "$SCRIPT" 's/^( *)0\|1\)$/\1*)/')"
   RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC="76 0" FAKE_REMOTE_VERIFY_RC=78
            FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
   run_with_valve "$fix" "$mutant"
   RUN_ENV=()
   assert_eq "without the fallback a refusal fails the run" "78" "$RUN_RC"
   assert_eq "and the suite never ran locally" "1" "$(swift_invocations "$fix")"
+  rmfix "$fix"
+}
+
+# THE CONTRACT IS A WHITELIST, AND EVERYTHING OUTSIDE IT IS A NON-ANSWER. The
+# set of statuses a script can produce is open-ended — 127 for an interpreter
+# that is not there, 126 for a lost executable bit, 130 for a Ctrl-C, 2 for a
+# syntax error — and not one of them says anything about the tests. Adopting one
+# reports a suite that never ran as a suite that failed.
+test_an_out_of_contract_status_is_a_refusal_not_a_verdict() {
+  local fix status
+  for status in 2 126 127 130; do
+    fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+    RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC="76 0" FAKE_REMOTE_VERIFY_RC="$status"
+             FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
+    run_with_valve "$fix"
+    RUN_ENV=()
+    assert_ok "an exit of $status falls back rather than failing the run" "$RUN_RC"
+    assert_contains "and names the status it saw" "$RUN_OUT" "exited $status, which is"
+    assert_contains "and says it is outside the contract" "$RUN_OUT" \
+      "outside its {0, 1, 78} contract"
+    assert_eq "the suite ran locally afterwards" "2" "$(swift_invocations "$fix")"
+    rmfix "$fix"
+  done
+}
+
+# MUTATION. The same widening as above, seen from the other side: with every
+# status treated as a verdict, a 127 from a mangled interpreter line becomes the
+# test suite's exit code and nothing is ever run.
+test_the_contract_whitelist_is_load_bearing() {
+  local fix mutant; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  mutant="$(mutant_of "$SCRIPT" 's/^( *)0\|1\)$/\1*)/')"
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC="76 0" FAKE_REMOTE_VERIFY_RC=127
+           FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
+  run_with_valve "$fix" "$mutant"
+  RUN_ENV=()
+  assert_eq "without the whitelist a 127 becomes the run's verdict" "127" "$RUN_RC"
+  assert_eq "and the suite never ran locally" "1" "$(swift_invocations "$fix")"
+  rmfix "$fix"
+}
+
+# THE INHERITED-BOUND TRAP, AND THE ONE CASE HERE THAT DELIBERATELY DOES NOT
+# UNSET `TBD_SWIFT_QUEUE_YIELD_SECONDS`. `scripts/swift-safe` documents it as a
+# supported knob, so a caller exporting it next to `TBD_REMOTE_VERIFY=1` is
+# expected. `fenced_env=()` on the fallback path omits the assignment but does
+# not unset the variable, and `env` passes the caller's value straight through —
+# so the re-run would yield 76 a second time, and since the valve block has
+# already been passed, the wrapper would exit 76 with nothing tested and nothing
+# said. `run_script`'s `-u` list would have hidden this exactly as it hid it
+# from review; the assignment below reaches the run because `env` applies
+# assignments after its options.
+test_an_inherited_yield_bound_does_not_survive_the_fallback() {
+  local fix; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 TBD_SWIFT_QUEUE_YIELD_SECONDS=10
+           FAKE_SWIFT_RC="76 0" FAKE_REMOTE_VERIFY_RC=78
+           FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
+  run_with_valve "$fix"
+  RUN_ENV=()
+  assert_ok "the fallback run is green" "$RUN_RC"
+  assert_eq "and it really did re-run locally" "2" "$(swift_invocations "$fix")"
+  # The dump describes the LAST invocation — the fallback. An inherited 10 here
+  # is the yield that would strand the run at 76.
+  assert_contains "the fallback carries no yield bound at all" "$(dump_of "$fix")" \
+    "TBD_SWIFT_QUEUE_YIELD_SECONDS=<unset>"
+  rmfix "$fix"
+}
+
+# MUTATION. Put the bare `fenced_env=()` back and the caller's 10 rides straight
+# into the re-run.
+test_the_fallback_bound_clearing_is_load_bearing() {
+  local fix mutant; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  mutant="$(mutant_of "$SCRIPT" \
+    's/fenced_env=\(TBD_SWIFT_QUEUE_YIELD_SECONDS=\)/fenced_env=()/')"
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 TBD_SWIFT_QUEUE_YIELD_SECONDS=10
+           FAKE_SWIFT_RC="76 0" FAKE_REMOTE_VERIFY_RC=78
+           FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
+  run_with_valve "$fix" "$mutant"
+  RUN_ENV=()
+  assert_contains "without the clearing the caller's bound survives the fallback" \
+    "$(dump_of "$fix")" "TBD_SWIFT_QUEUE_YIELD_SECONDS=10"
+  rmfix "$fix"
+}
+
+# ---------------------------------------------------------------------------
+# 7b. The valve refuses a narrowed run
+#
+# Nothing on the dispatch carries a filter, so a routed run is always the whole
+# suite. GREEN whole-suite is still sound for a filtered caller — the whole
+# suite passing implies their subset did — but RED is not: it would name
+# failures in tests the caller deliberately excluded as this run's result. The
+# refusal is therefore made BEFORE the bound is forwarded; deciding it after the
+# run would be too late, because `swift-safe` would already have answered 76 for
+# a yield the run has since decided it cannot use.
+# ---------------------------------------------------------------------------
+
+test_narrows_the_suite_recognises_both_spellings() {
+  local arg
+  for arg in --filter --skip --disable-xctest --disable-swift-testing; do
+    narrows_the_suite "$arg"
+    assert_ok "[$arg] narrows" "$?"
+    narrows_the_suite "$arg=Foo"
+    assert_ok "[$arg=Foo] narrows" "$?"
+    narrows_the_suite --parallel -j 2 "$arg" Foo
+    assert_ok "[$arg] narrows wherever it appears" "$?"
+  done
+  for arg in --parallel --no-parallel -j --enable-code-coverage --verbose; do
+    narrows_the_suite "$arg"
+    assert_nonzero "[$arg] does not narrow" "$?"
+  done
+  narrows_the_suite
+  assert_nonzero "no arguments at all does not narrow" "$?"
+  # A value that merely looks like one of the names is not one of them.
+  narrows_the_suite --parallel '^--filterTests\.'
+  assert_nonzero "a regex mentioning a flag name does not narrow" "$?"
+}
+
+test_a_narrowed_run_is_never_routed_remotely() {
+  local fix; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC=76 FAKE_REMOTE_VERIFY_RC=0
+           FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
+  run_with_valve "$fix" "$SCRIPT" --filter '^FooTests\.'
+  RUN_ENV=()
+  assert_eq "nothing is dispatched" "0" "$(remote_verify_dispatches "$fix")"
+  assert_contains "no bound is forwarded, so there is no yield to strand" \
+    "$(dump_of "$fix")" "TBD_SWIFT_QUEUE_YIELD_SECONDS=<unset>"
+  assert_contains "the filter still reaches swift test" "$(dump_of "$fix")" \
+    "argv: test --filter"
+  assert_contains "and the decision is stated once" "$RUN_OUT" \
+    "narrowing arguments present"
+  rmfix "$fix"
+}
+
+# The other side of the branch: with no narrowing argument the same fixture
+# routes. Without this the case above would pass against a valve that never
+# routes at all.
+test_an_unnarrowed_run_still_routes() {
+  local fix; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC=76 FAKE_REMOTE_VERIFY_RC=0
+           FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
+  run_with_valve "$fix" "$SCRIPT" --parallel -j 2
+  RUN_ENV=()
+  assert_ok "an unnarrowed run takes the remote verdict" "$RUN_RC"
+  assert_eq "and dispatches exactly once" "1" "$(remote_verify_dispatches "$fix")"
+  assert_missing "nothing is said about narrowing" "$RUN_OUT" "narrowing arguments present"
+  rmfix "$fix"
+}
+
+# MUTATION. Stop recognising narrowing arguments and a `--filter`ed lane routes
+# to a whole-suite remote run, whose red verdict would name tests it excluded.
+test_the_narrowing_refusal_is_load_bearing() {
+  local fix mutant; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  mutant="$(mutant_of "$SCRIPT" 's/if narrows_the_suite .*; then/if false; then/')"
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC=76 FAKE_REMOTE_VERIFY_RC=1
+           FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
+  run_with_valve "$fix" "$mutant" --filter '^FooTests\.'
+  RUN_ENV=()
+  assert_eq "without the refusal a filtered lane is dispatched whole-suite" "1" \
+    "$(remote_verify_dispatches "$fix")"
+  assert_eq "and its red whole-suite verdict fails the filtered run" "1" "$RUN_RC"
   rmfix "$fix"
 }
 
