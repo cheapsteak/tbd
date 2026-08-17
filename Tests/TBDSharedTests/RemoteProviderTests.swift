@@ -126,6 +126,24 @@ struct RemoteProviderTests {
         #expect(exited.projectedForStaleSnapshot() == exited)
     }
 
+    /// Filing and liveness are separate axes (docs/specs/2026-08-16-remote-lane-archive-design.md,
+    /// "The filing decision travels back"). This projection demotes only the
+    /// liveness axis — an archived-but-not-exited session must still read as
+    /// archived after projection, even though its state and agent state are
+    /// demoted to `.unknown`. Asserting both halves in one test means it
+    /// cannot pass by the projection simply doing nothing.
+    @Test func staleProjectionPreservesArchivedWhileDemotingLiveness() {
+        let original = RemoteSessionPayload(
+            id: "x", title: "worker", state: .running,
+            agentState: .working, agentStateReason: "tool", archived: true)
+        let projected = original.projectedForStaleSnapshot()
+
+        #expect(projected.archived == .some(true))
+        #expect(projected.isArchived == true)
+        #expect(projected.state == .unknown)
+        #expect(projected.agentState == .unknown)
+    }
+
     @Test func providerStatusWithoutNewTimestampStillDecodes() throws {
         let json = #"{"config":{"name":"acme","exec":"/x"},"health":"ok"}"#.data(using: .utf8)!
         let status = try JSONDecoder().decode(RemoteProviderStatus.self, from: json)

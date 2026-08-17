@@ -174,12 +174,22 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
     /// only non-terminal/unknown rows are demoted. In every demoted case the
     /// agent axis also becomes unknown so a cached `working` or
     /// `waiting_input` value cannot keep rendering as current activity.
+    ///
+    /// This projection demotes only the liveness axis (`state`,
+    /// `agentState`, `agentStateReason`) to `.unknown` — the fact this
+    /// snapshot is stale says nothing about the filing axis, so `archived`
+    /// must be threaded through unchanged. Filing and liveness are separate
+    /// axes throughout this feature; a field that collapses them here lies
+    /// about one of them. When adding a field to this type, decide which
+    /// axis it belongs to before deciding whether it survives this
+    /// projection.
     public func projectedForStaleSnapshot() -> RemoteSessionPayload {
         guard state != .exited else { return self }
         return RemoteSessionPayload(
             id: id, title: title, createdAt: createdAt,
             state: .unknown, exitCode: exitCode, agentState: .unknown,
-            agentStateReason: nil, agentStateAt: agentStateAt, meta: meta)
+            agentStateReason: nil, agentStateAt: agentStateAt, meta: meta,
+            archived: archived)
     }
 }
 
