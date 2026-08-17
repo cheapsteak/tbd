@@ -22,6 +22,66 @@ extension ClaudeCloudInvoker {
         }
         let params = body["params"] as? [String: Any] ?? [:]
         let idempotencyKey = (body["idempotency_key"] as? String) ?? UUID().uuidString
+
+        // A same-key replay must never spawn `claude --cloud` a second time —
+        // there is no discovery to reconcile a second live session with the
+        // first, so a duplicate spawn orphans one of them permanently. This
+        // has to run BEFORE `upsertPending` below: that call is itself
+        // idempotent on the key and returns the existing row unchanged, so
+        // reading its result could never distinguish "this row already
+        // existed" from "this row was just inserted, and of course it reads
+        // pending" — the two look identical the instant after either happens.
+        if let existing = try await db.claudeCloudSessions.rows()
+            .first(where: { $0.idempotencyKey == idempotencyKey }) {
+            switch existing.state {
+            case ClaudeCloudLedgerState.resolved.rawValue:
+                if let sessionID = existing.sessionID {
+                    // Return the recorded session rather than spawning again.
+                    // Re-spawning here would race `Store.resolve` and could
+                    // overwrite the first session's id on this very row,
+                    // erasing the only record of it (finding 4's "latent"
+                    // case) — so the replay is answered from what is already
+                    // on file, using the ORIGINAL call's repo/branch/environment
+                    // rather than whatever this replay's body happens to say.
+                    var meta = ["repo": existing.repoKey]
+                    if let branch = existing.branch, !branch.isEmpty { meta["branch"] = branch }
+                    if let environment = existing.environment, !environment.isEmpty {
+                        meta["environment"] = environment
+                    }
+                    let payload = ClaudeCloudSessionProjection.payload(
+                        sessionID: sessionID, title: existing.title, createdAt: existing.createdAt,
+                        archived: existing.archived, meta: meta)
+                    return ProviderResult(
+                        exitCode: 0,
+                        stdout: (try? JSONSerialization.data(withJSONObject: payload)) ?? Data(),
+                        stderr: "")
+                }
+            case ClaudeCloudLedgerState.pending.rawValue:
+                // The FIRST attempt under this key may still be running, or
+                // may have crashed before recording anything — there is no
+                // discovery to check whether a cloud session already exists,
+                // so this refuses to spawn a second one rather than guess
+                // (finding 4's "live" case: a retried timeout starting a
+                // second real session TBD can never list). The row itself,
+                // and `list`'s `pendingFailureWindow` sweep, are what keep
+                // this from being a dead end: once the window judges the
+                // first attempt failed, the SAME key falls through below and
+                // spawns fresh.
+                return Self.errorResult(
+                    exitCode: 3, code: "in_progress",
+                    message: "create with idempotency key '\(idempotencyKey)' is already "
+                        + "in flight; retry once it resolves or the pending window elapses")
+            default:
+                // `.failed`: the pending window already gave up on this key
+                // with no session ever recorded, so a replay is the closest
+                // thing to a fresh attempt available and is allowed to spawn
+                // — it reuses the same ledger row id, and `resolve` below
+                // turns it back to `resolved` on success exactly as it would
+                // for a brand-new row.
+                break
+            }
+        }
+
         let prompt = ((params["prompt"] as? String) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else {
@@ -75,11 +135,32 @@ extension ClaudeCloudInvoker {
         // here and unused.
         case let .completed(status, output, _):
             guard status == 0 else {
-                return Self.errorResult(
-                    exitCode: 1, code: "unreachable",
-                    message: "claude --cloud exited \(status): "
-                        + ClaudeCloudCreateOutputParser.failureMessage(
-                            .noSessionID, received: output))
+                // The status guard used to always report `.noSessionID`,
+                // which claims "printed no session id" even when the id is
+                // sitting right there in the quoted evidence, and discarded
+                // it instead of recording it — orphaning a session that was
+                // genuinely created before some later step made the verb
+                // exit non-zero. Parse first, so a readable id is recorded
+                // even though the verb still reports failure.
+                switch ClaudeCloudCreateOutputParser.sessionID(fromOutput: output) {
+                case .success(let sessionID):
+                    let title = ClaudeCloudCreateOutputParser.title(fromOutput: output)
+                    try await db.claudeCloudSessions.resolve(
+                        id: row.id, sessionID: sessionID, title: title, now: now())
+                    claudeCloudLogger.error(
+                        "claude-cloud create exited \(status, privacy: .public) after printing a session id; recording it before reporting failure")
+                    return Self.errorResult(
+                        exitCode: 1, code: "unreachable",
+                        message: "claude --cloud exited \(status): created \(sessionID) "
+                            + "but reported failure; received: "
+                            + ClaudeCloudCreateOutputParser.boundedQuote(output))
+                case .failure:
+                    return Self.errorResult(
+                        exitCode: 1, code: "unreachable",
+                        message: "claude --cloud exited \(status): "
+                            + ClaudeCloudCreateOutputParser.failureMessage(
+                                .noSessionID, received: output))
+                }
             }
             switch ClaudeCloudCreateOutputParser.sessionID(fromOutput: output) {
             case .failure(let failure):

@@ -206,13 +206,21 @@ struct ClaudeCloudInvokerTests {
         // `[2]` ALONE: nothing exposed terminates a running cloud session, so
         // the provider cannot implement `stop`, which major 1 requires.
         #expect(describe.contractVersions == [2])
-        #expect(describe.capabilities.sorted()
-            == ["archive", "attach", "land", "send", "unarchive"])
+        #expect(describe.capabilities.sorted() == ["attach", "send"])
         // Each absence is a fact about the surface, not an unimplemented verb.
         #expect(!describe.capabilities.contains("stop"))
         #expect(!describe.capabilities.contains("log"))
         #expect(!describe.capabilities.contains("transcript"))
         #expect(!describe.capabilities.contains("events"))
+        // `land`/`archive`/`unarchive` are a DIFFERENT kind of absence than
+        // the four above: `run` does implement a case for each (see
+        // `anUnwiredDeclaredVerbFailsAsAContractBug`), but a later slice of
+        // this feature owns re-adding the capability string together with a
+        // real implementation. Declaring them now would offer the app an
+        // action that always fails.
+        #expect(!describe.capabilities.contains("land"))
+        #expect(!describe.capabilities.contains("archive"))
+        #expect(!describe.capabilities.contains("unarchive"))
         #expect(describe.createParams.map(\.name) == ["repo", "branch", "prompt", "environment"])
         #expect(describe.createParams.first(where: { $0.name == "repo" })?.required == true)
         #expect(describe.createParams.first(where: { $0.name == "prompt" })?.required == true)
@@ -223,10 +231,12 @@ struct ClaudeCloudInvokerTests {
         #expect(describe.createParams.first(where: { $0.name == "prompt" })?.type == "text")
     }
 
-    /// A declared capability whose verb is not wired yet must say so as a
-    /// contract error rather than exiting 0 with nothing — these arms are
-    /// filled in by the archive and land steps of the same delivery.
-    @Test func anUnwiredDeclaredVerbFailsAsAContractBug() async throws {
+    /// Not (yet) a declared capability — see the note in
+    /// `describeIsStaticOfflineAndSpawnsNothing` — but `run` still refuses to
+    /// exit 0 with nothing if one of these verbs is reached anyway (a stale
+    /// capability cache, a call that skips the capability check). A later
+    /// slice fills these arms in together with re-declaring each capability.
+    @Test func anUnwiredUndeclaredVerbFailsAsAContractBug() async throws {
         let db = try TBDDatabase(inMemory: true)
         let spawner = FakeClaudeSpawner(outcomes: [])
         for verb in [["archive", "s"], ["unarchive", "s"], ["land", "s"]] {
@@ -237,6 +247,37 @@ struct ClaudeCloudInvokerTests {
             #expect(result.decodedError?.code == "not_implemented")
         }
         #expect(spawner.requestsSnapshot().isEmpty)
+    }
+
+    /// The regression this pins: a capability `describe` declares must be a
+    /// verb `run` actually answers, never `not_implemented`. Before this
+    /// finding was fixed, `ClaudeCloudDescribe` declared `land`/`archive`/
+    /// `unarchive` while `run` answered all three with `not_implemented` —
+    /// this iterates the REAL declared list, `ClaudeCloudDescribe.capabilities`,
+    /// rather than a hand-picked one, so a future capability declared ahead of
+    /// its implementation fails this test instead of only failing silently
+    /// for a user.
+    ///
+    /// `attach` is exercised too, even though it is never dispatched through
+    /// `run` in production (the contract's TTY passthrough is exec'd directly
+    /// on the pane, not through this JSON stdin/stdout path) — `run`'s
+    /// `default` arm answers an undeclared-verb `invalid_params`, which is
+    /// still correctly NOT `not_implemented`, so the assertion holds without
+    /// having to special-case it.
+    @Test func everyDeclaredCapabilityIsNotAnsweredAsNotImplemented() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        for capability in ClaudeCloudDescribe.capabilities {
+            let needsSend = capability == "send"
+            let spawner = FakeClaudeSpawner(
+                outcomes: needsSend ? [.completed(status: 0, output: sendOK, stderr: "")] : [])
+            let result = try await invoker(db: db, spawner: spawner).run(
+                config(), verb: [capability, "s"],
+                stdin: needsSend ? Data("hi\r".utf8) : nil,
+                timeout: 30, contractVersion: 2)
+            #expect(
+                result.decodedError?.code != "not_implemented",
+                "declared capability '\(capability)' is not implemented by run()")
+        }
     }
 
     /// An undeclared verb is a caller bug — the contract forbids invoking one
@@ -377,20 +418,78 @@ struct ClaudeCloudInvokerTests {
 
     /// The single same-key retry must find the row it already wrote, keeping
     /// the original timestamp — the failure window is measured from the
-    /// create, not from the retry.
+    /// create, not from the retry. And it must NOT spawn `claude --cloud` a
+    /// second time: finding 4. Only ONE outcome is scripted, so if the fix
+    /// regresses and `create` spawns again on the replay, `FakeClaudeSpawner`
+    /// crashes on its exhausted script — the spawn-count assertion below is
+    /// what would have caught it even if the script had a second outcome to
+    /// consume, which is exactly what the old two-outcome version of this
+    /// test hid.
     @Test func replayingTheSameIdempotencyKeyReusesTheSameLedgerRow() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await seedRepo(db)
         let spawner = FakeClaudeSpawner(outcomes: [
             .completed(status: 0, output: successOutput, stderr: ""),
-            .completed(status: 0, output: successOutput, stderr: ""),
         ])
         let inv = invoker(db: db, spawner: spawner)
-        _ = try await inv.run(config(), verb: ["create"], stdin: createBody(),
+        let first = try await inv.run(config(), verb: ["create"], stdin: createBody(),
                               timeout: 60, contractVersion: 2)
-        _ = try await inv.run(config(), verb: ["create"], stdin: createBody(),
+        let second = try await inv.run(config(), verb: ["create"], stdin: createBody(),
                               timeout: 60, contractVersion: 2)
         #expect(try await db.claudeCloudSessions.rows().count == 1)
+        #expect(spawner.requestsSnapshot().count == 1)
+        #expect(second.exitCode == 0)
+        let firstSession = try first.decoded(RemoteSessionPayload.self)
+        let secondSession = try second.decoded(RemoteSessionPayload.self)
+        #expect(secondSession.id == firstSession.id)
+    }
+
+    /// The decision this design makes for a replay of a STILL-PENDING key
+    /// (finding 4's "live" case): there is no discovery to check whether the
+    /// first attempt's spawn already started a real cloud session, so a
+    /// replay refuses to spawn a second one rather than guess — a retried
+    /// timeout that actually succeeded must never become two live sessions
+    /// this ledger can never reconcile. The failure is transient (exit 3):
+    /// once `list`'s `pendingFailureWindow` gives up on the row, the SAME key
+    /// is free to spawn fresh (see `aPendingRowFlipsToFailedOnlyOnceThePendingWindowHasElapsed`
+    /// for that half).
+    @Test func replayingAStillPendingKeyRefusesToSpawnAgain() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        _ = try await db.claudeCloudSessions.upsertPending(
+            idempotencyKey: "tbd-1", repoKey: "acme/api", repoPath: "/tmp/api",
+            branch: "fix-ci", environment: nil, paramsJSON: "{}",
+            now: Date(timeIntervalSince1970: 1_000_000))
+        let spawner = FakeClaudeSpawner(outcomes: [])
+        let result = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["create"], stdin: createBody(), timeout: 60, contractVersion: 2)
+        #expect(result.exitCode == 3)
+        #expect(result.failureClass == .transient)
+        #expect(spawner.requestsSnapshot().isEmpty)
+        #expect(try await db.claudeCloudSessions.rows().count == 1)
+    }
+
+    /// The other half of that decision: a key that already reached `failed`
+    /// (the pending window gave up with no session ever recorded) is treated
+    /// as a fresh attempt and IS allowed to spawn, reusing the same row.
+    @Test func replayingAFailedKeySpawnsFreshAndReusesTheRow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await seedRepo(db)
+        let row = try await db.claudeCloudSessions.upsertPending(
+            idempotencyKey: "tbd-1", repoKey: "acme/api", repoPath: "/tmp/api",
+            branch: "fix-ci", environment: nil, paramsJSON: "{}",
+            now: Date(timeIntervalSince1970: 1_000_000))
+        try await db.claudeCloudSessions.markFailed(ids: [row.id])
+        let spawner = FakeClaudeSpawner(outcomes: [
+            .completed(status: 0, output: successOutput, stderr: ""),
+        ])
+        let result = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["create"], stdin: createBody(), timeout: 60, contractVersion: 2)
+        #expect(result.exitCode == 0)
+        #expect(spawner.requestsSnapshot().count == 1)
+        #expect(try await db.claudeCloudSessions.rows().count == 1)
+        #expect(try await db.claudeCloudSessions.rows().first?.id == row.id)
+        #expect(try await db.claudeCloudSessions.rows().first?.state
+            == ClaudeCloudLedgerState.resolved.rawValue)
     }
 
     @Test func aNonZeroVendorExitIsAPermanentFailureCarryingItsOutput() async throws {
@@ -814,5 +913,145 @@ struct ClaudeCloudInvokerTests {
             timeout: 30, contractVersion: 2)
         #expect(result.exitCode == 3)
         #expect(result.failureClass == .transient)
+    }
+
+    /// Finding 8 (Minor): `send` used to hardcode `timeout: 30` instead of
+    /// threading `run`'s caller-supplied timeout the way `create` already
+    /// does. It worked today only because the sole production caller ALSO
+    /// hardcodes 30 — so, matching `createThreadsTheCallersTimeoutIntoTheSpawnRequest`,
+    /// a value that differs from both 30 and 60 is the only assertion that
+    /// discriminates real wiring from that coincidence.
+    @Test func sendThreadsTheCallersTimeoutIntoTheSpawnRequest() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: sendOK, stderr: "")])
+        _ = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["send", "session_01AAA"], stdin: Data("hi\r".utf8),
+            timeout: 91, contractVersion: 2)
+        let request = try #require(spawner.requestsSnapshot().first)
+        #expect(request.timeout == 91)
+    }
+
+    // MARK: - findings fixed in this pass
+
+    /// Finding 1 (CRITICAL): the session-id cross-check used to scan the
+    /// ENTIRE output, including the vendor's title line — and that line is
+    /// the vendor's own server-derived summary of the user's PROMPT. A
+    /// prompt that happens to mention a `session_`-shaped token (a filename,
+    /// here) produced a second, spurious match and failed a create that had
+    /// actually succeeded, permanently orphaning the real cloud session —
+    /// there is no discovery to recover it by any other means.
+    ///
+    /// Confirmed failing against the pre-fix implementation: with the id scan
+    /// running over the whole blob, this exact title yields
+    /// `.conflictingSessionIDs(["session_01AAAAAAAAAAAAAAAAAAAAAA", "session_store"])`
+    /// (the regex has no `_` in its character class, so it matches
+    /// `session_store` out of `session_store_test.py` and stops there) — the
+    /// create fails as a `contract_bug` even though `claude --cloud`
+    /// succeeded. Restricting the scan to the `View:` and `Resume with:`
+    /// lines — the two structurally-typed witnesses — is the fix: only the
+    /// real id appears on either, so there is exactly one distinct match.
+    @Test func aTitleThatEchoesAPromptMentioningASessionIDDoesNotFailTheCreate() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await seedRepo(db)
+        let output = """
+            Created cloud session: Fix the flake in session_store_test.py
+            View: https://claude.ai/code/session_01AAAAAAAAAAAAAAAAAAAAAA?from=cli&m=0
+            Resume with: claude --teleport session_01AAAAAAAAAAAAAAAAAAAAAA
+            """
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: output, stderr: "")])
+        let result = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["create"],
+            stdin: createBody(prompt: "fix the flake in session_store_test.py"),
+            timeout: 60, contractVersion: 2)
+        #expect(result.exitCode == 0)
+        #expect(result.failureClass == nil)
+        let session = try result.decoded(RemoteSessionPayload.self)
+        #expect(session.id == "session_01AAAAAAAAAAAAAAAAAAAAAA")
+        #expect(session.title == "Fix the flake in session_store_test.py")
+        let row = try #require(try await db.claudeCloudSessions.rows().first)
+        #expect(row.state == ClaudeCloudLedgerState.resolved.rawValue)
+        #expect(row.sessionID == "session_01AAAAAAAAAAAAAAAAAAAAAA")
+    }
+
+    /// Finding 2: `list` used to omit `environment` from `meta` while
+    /// `create` included it, so a value that safely round-tripped through the
+    /// database vanished from every caller after the very next poll, with no
+    /// discovery to ever re-supply it. `createIncludesEnvironmentInMetaWhenSupplied`
+    /// pins the `create` half; this is the `list` counterpart the review
+    /// found missing.
+    @Test func listIncludesEnvironmentInMetaWhenPresentOnTheRow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await seedRepo(db)
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput, stderr: "")])
+        let inv = invoker(db: db, spawner: spawner)
+        _ = try await inv.run(config(), verb: ["create"],
+                              stdin: createBody(environment: "prod"), timeout: 60, contractVersion: 2)
+        let session = try #require(try listSessions(
+            try await inv.run(config(), verb: ["list"], stdin: nil,
+                              timeout: 30, contractVersion: 2)).first)
+        let meta = try #require(session["meta"] as? [String: String])
+        #expect(meta["environment"] == "prod")
+    }
+
+    /// Finding 5: nothing pinned that `send`'s failure message carries the
+    /// vendor's STDERR. `send` runs on a pipe, where a CLI writes its errors
+    /// to stderr — but both existing failure tests
+    /// (`aNonZeroSendExitIsAPermanentFailureCarryingWhatArrived`,
+    /// `unparseableSendOutputIsAFailureCarryingWhatArrived`) put the error
+    /// text in `output` and leave `stderr` empty, so deleting `+ stderr` from
+    /// the diagnostic — the tempting "simplification" right after the
+    /// stdout/stderr-split fix landed, since `output` is what gets parsed —
+    /// would stay green and leave a logged-out user with
+    /// `claude -p --cloud exited 1: ` and nothing after the colon.
+    @Test func aNonZeroSendExitCarriesVendorStderrEvenWhenOutputIsEmpty() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let spawner = FakeClaudeSpawner(outcomes: [
+            .completed(status: 1, output: "", stderr: "Error: not logged in"),
+        ])
+        let result = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["send", "session_01AAA"], stdin: Data("hi\r".utf8),
+            timeout: 30, contractVersion: 2)
+        #expect(result.exitCode == 1)
+        #expect(result.failureClass == .permanent)
+        #expect(result.decodedError?.message.contains("not logged in") == true)
+    }
+
+    /// Finding 6 (Minor): a non-zero `create` exit used to always report
+    /// `.noSessionID` — claiming "printed no session id" even when the id was
+    /// sitting right there in the quoted evidence — and discarded it instead
+    /// of recording it, orphaning a session that was genuinely created before
+    /// some later step made the verb exit non-zero. The fix parses first and
+    /// records a readable id even though the verb still reports failure.
+    @Test func aNonZeroCreateExitThatStillPrintedASessionIDRecordsItRatherThanOrphaningIt() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await seedRepo(db)
+        let spawner = FakeClaudeSpawner(outcomes: [
+            .completed(status: 1, output: successOutput, stderr: ""),
+        ])
+        let result = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["create"], stdin: createBody(), timeout: 60, contractVersion: 2)
+        #expect(result.exitCode == 1)
+        #expect(result.failureClass == .permanent)
+        #expect(result.decodedError?.message.contains("session_01AAAAAAAAAAAAAAAAAAAAAA") == true)
+        #expect(result.decodedError?.message.contains("printed no session id") == false)
+        let row = try #require(try await db.claudeCloudSessions.rows().first)
+        #expect(row.state == ClaudeCloudLedgerState.resolved.rawValue)
+        #expect(row.sessionID == "session_01AAAAAAAAAAAAAAAAAAAAAA")
+    }
+
+    /// Finding 7 (Minor): `"\r\n"` is ONE `Character` (grapheme cluster) in
+    /// Swift, distinct from both `"\r"` and `"\n"` — the same trap the title
+    /// parser (`ClaudeCloudCreateOutputParser.title(fromOutput:)`) was
+    /// already bitten by and fixed for. Built by explicit concatenation, not
+    /// a triple-quoted literal: Swift's multiline string literals normalize
+    /// to bare `\n`, so a literal could never construct a real CRLF to catch
+    /// this regression.
+    @Test func theSubmitGestureStripsATrailingCRLFAsOneGrapheme() {
+        let crlf = "hello" + "\r\n"
+        #expect(ClaudeCloudSendPayload.message(fromStdin: Data(crlf.utf8)) == "hello")
+        // Interior CRLF must still survive, exactly like interior `\n` does.
+        let interiorAndTrailing = "one" + "\r\n" + "two" + "\r\n"
+        #expect(ClaudeCloudSendPayload.message(fromStdin: Data(interiorAndTrailing.utf8))
+            == "one" + "\r\n" + "two")
     }
 }

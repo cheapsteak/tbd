@@ -260,8 +260,8 @@ struct RepoSectionView: View {
                             repoID: repo.id,
                             highlightDefaultProfile: newWorktreeMenu.isTriggerHovered,
                             onClose: { newWorktreeMenu.closeNow() },
-                            onSelectCloudSession: CloudCreateEntryPresentation.cloudProvider(
-                                appState.remoteProviders,
+                            onSelectCloudSession: RepoSectionView.cloudSessionProvider(
+                                providers: appState.remoteProviders,
                                 claudeCloudEnabled: appState.daemonCapabilities?
                                     .claudeCloudEnabled ?? false
                             ).map { provider in
@@ -402,6 +402,33 @@ struct RepoSectionView: View {
         return ISO8601DateFormatter().date(from: raw)
     }
 
+    // MARK: - The cloud gate — pure, view-free forms of what the two owned
+    // create surfaces render, so a test can call the exact decision each
+    // surface makes rather than re-deriving it. See
+    // `CloudCreateEntryPresentationTests`'s cross-surface parity suite,
+    // which checks these two against `RemoteProviderHeaderRow.canCreate`
+    // (`RemoteSectionView.swift`) — the third owned surface — for agreement.
+
+    /// The providers `newRemoteSessionMenuItem`'s context menu lists. A thin,
+    /// named forward to `CloudCreateEntryPresentation.createProviders` so the
+    /// view has no inline gate logic of its own to drift from what this
+    /// function (and its test coverage) pins.
+    nonisolated static func remoteSessionMenuProviders(
+        providers: [RemoteProviderStatus], claudeCloudEnabled: Bool
+    ) -> [RemoteProviderStatus] {
+        CloudCreateEntryPresentation.createProviders(providers, claudeCloudEnabled: claudeCloudEnabled)
+    }
+
+    /// The provider `newWorktreePlusButton` opens the create sheet for, or
+    /// nil to omit the `+` picker's cloud row entirely. A thin, named forward
+    /// to `CloudCreateEntryPresentation.cloudProvider` for the same reason as
+    /// `remoteSessionMenuProviders` above.
+    nonisolated static func cloudSessionProvider(
+        providers: [RemoteProviderStatus], claudeCloudEnabled: Bool
+    ) -> RemoteProviderStatus? {
+        CloudCreateEntryPresentation.cloudProvider(providers, claudeCloudEnabled: claudeCloudEnabled)
+    }
+
     // MARK: - Context menu
 
     /// Extracted out of the row's `.contextMenu` — the nested conditionals
@@ -440,8 +467,8 @@ struct RepoSectionView: View {
     /// two-entry submenu with a dead row in it.
     @ViewBuilder
     private var newRemoteSessionMenuItem: some View {
-        let providers = CloudCreateEntryPresentation.createProviders(
-            appState.remoteProviders,
+        let providers = RepoSectionView.remoteSessionMenuProviders(
+            providers: appState.remoteProviders,
             claudeCloudEnabled: appState.daemonCapabilities?.claudeCloudEnabled ?? false)
         if !providers.isEmpty {
             if providers.count == 1, let only = providers.first {

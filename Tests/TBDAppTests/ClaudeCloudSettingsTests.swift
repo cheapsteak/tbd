@@ -140,13 +140,21 @@ struct ClaudeCloudSettingsTests {
     /// never listed, never adopted, and have no lane. The caption is what
     /// makes that absence read as a property of the feature.
     ///
-    /// Asserted on the COMPOSED string rather than against a blacklist of
-    /// forbidden words, so a rewording that drops the claim fails here.
+    /// Pinned byte-for-byte, the same way the seven `claudeCloudStatusCaption`
+    /// arms above are — a `contains("started")` / `contains("claude.ai")` /
+    /// non-empty check (the previous shape of this test) cannot tell the real
+    /// sentence from an OVERCLAIMING rewrite that inverts its whole point,
+    /// e.g. "Cloud sessions you started appear here, including ones from
+    /// claude.ai." — that string contains "started" and "claude.ai" and is
+    /// non-empty, so it would have passed all three old assertions, even
+    /// though it claims the opposite of what the feature actually does (it
+    /// says claude.ai sessions DO show up here). It is unequal to the real
+    /// string below, so the exact-match assertion fails on it and passes on
+    /// the genuine caption — the discrimination this test exists to provide.
     @Test func theScopeCaptionSaysOnlySessionsStartedInTBDAppear() {
-        let caption = AppState.claudeCloudScopeCaption
-        #expect(caption.lowercased().contains("started"))
-        #expect(caption.lowercased().contains("claude.ai"))
-        #expect(!caption.isEmpty)
+        #expect(AppState.claudeCloudScopeCaption ==
+            "Only sessions started from TBD on this Mac appear here — one begun on claude.ai, in the "
+            + "mobile app, or from a terminal TBD did not spawn is not listed.")
     }
 
     /// It is state-independent, which is why it is its own value: the seven

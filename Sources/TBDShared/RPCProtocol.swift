@@ -294,6 +294,29 @@ public enum RPCMethod {
     public static let remoteDismiss = "remote.dismiss"
     public static let remoteSetPin = "remote.setPin"
     public static let remoteReportAttachExit = "remote.reportAttachExit"
+
+    /// Every `remote.*` verb addressed by a `provider` field in its params (or,
+    /// for the two worktree-addressed retirement routes, by the worktree's
+    /// bound `location`) — as opposed to `remoteProviders`/`remoteSessions`,
+    /// which enumerate across every provider and take none.
+    ///
+    /// This is the single list the daemon's cloud gate (`RPCRouter.cloudGate`)
+    /// must cover and `ClaudeCloudGateTests` asserts against, so the two
+    /// cannot independently go stale against each other the way they did
+    /// before `remote.archive`/`remote.unarchive` were found ungated — the
+    /// test's list had quietly come to describe the bug instead of the
+    /// contract. It is still a hand-maintained array, not something the
+    /// compiler enforces: `RPCMethod` is a namespace of static string
+    /// constants, not a `CaseIterable` enum, so nothing stops a new
+    /// `remote.*` case from being added to `RPCRouter.handle`'s switch
+    /// without a matching entry here. Add any new provider-named `remote.*`
+    /// method to this array in the same commit that adds its RPC case.
+    public static let providerNamedRemoteMethods: [String] = [
+        remoteCreate, remoteStop, remoteArchive, remoteUnarchive,
+        remoteSend, remoteLog, remoteRename, remoteDismiss,
+        remoteSetPin, remoteReportAttachExit,
+    ]
+
     public static let configSetRemoteBackends = "config.setRemoteBackends"
     public static let panelGet = "panel.get"
     public static let panelApply = "panel.apply"

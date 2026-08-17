@@ -20,12 +20,21 @@ enum CloudCreateEntryPresentation {
         return providers.filter { $0.config.name != ClaudeCloudProvider.name }
     }
 
-    /// The compiled cloud provider, when there is one to offer. Nil both when
-    /// the flag is off and when the daemon never registered it.
+    /// The compiled cloud provider, when there is one to offer. Nil when the
+    /// flag is off, when the daemon never registered it, or when its
+    /// inventory is stale. The `+` picker's cloud row (this function's only
+    /// caller) has no disabled state of its own — unlike the context menu
+    /// and the Remote section header, which both disable their own `+` on
+    /// `hasStaleSnapshot` — so a stale snapshot has to remove the row the
+    /// same way an absent provider does, or the sheet would open onto a
+    /// create call the daemon refuses with "inventory is stale".
     static func cloudProvider(
         _ providers: [RemoteProviderStatus], claudeCloudEnabled: Bool
     ) -> RemoteProviderStatus? {
         guard claudeCloudEnabled else { return nil }
-        return providers.first { $0.config.name == ClaudeCloudProvider.name }
+        guard let provider = providers.first(where: { $0.config.name == ClaudeCloudProvider.name }) else {
+            return nil
+        }
+        return provider.hasStaleSnapshot ? nil : provider
     }
 }

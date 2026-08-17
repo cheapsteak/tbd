@@ -44,12 +44,15 @@ struct ClaudeCloudInvoker: RemoteProviderInvoking {
                 return Self.errorResult(
                     exitCode: 2, code: "invalid_params", message: "send requires a session id")
             }
-            return try await send(sessionID: verb[1], stdin: stdin)
+            return try await send(sessionID: verb[1], stdin: stdin, timeout: timeout)
         case "archive", "unarchive", "land":
-            // Declared by `describe` and implemented by the archive and land
-            // steps of this same delivery. Until then this fails loudly as a
-            // contract bug rather than exiting 0 with nothing, which is the
-            // failure a caller could not distinguish from success.
+            // Not (yet) declared by `describe` — a later slice adds each
+            // capability string together with its implementation here, in
+            // the same change. This case exists so that a caller reaching
+            // this verb anyway (a stale capability cache, a call that skips
+            // the capability check) fails loudly as a contract bug rather
+            // than exiting 0 with nothing, which is the failure a caller
+            // could not distinguish from success.
             return Self.notImplementedResult(verb: verb[0])
         default:
             let verbName = verb.first ?? ""

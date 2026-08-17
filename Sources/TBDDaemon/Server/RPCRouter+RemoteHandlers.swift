@@ -70,7 +70,14 @@ extension RPCRouter {
     /// becomes the sole gate for cloud.
     ///
     /// Returns the refusal to send, or nil when the invocation is permitted.
-    private func cloudGate(provider: String) async throws -> RPCResponse? {
+    ///
+    /// Internal rather than private for the same reason as `remoteGate()`
+    /// above: `worktree.archive` / `worktree.revive`'s remote branches
+    /// (`RPCRouter+WorktreeHandlers.swift`) reach a provider verb too — via
+    /// `RemoteLaneLifecycle+Actuate`'s `archiveDecision`/`reviveDecision` —
+    /// and must refuse with the same inner-gate message when cloud is off,
+    /// not just when the outer flag is.
+    func cloudGate(provider: String) async throws -> RPCResponse? {
         guard provider == ClaudeCloudProvider.name else { return nil }
         guard try await db.config.get().claudeCloudEnabled else {
             return Self.claudeCloudDisabledResponse
@@ -304,6 +311,7 @@ extension RPCRouter {
             return Self.remoteBackendsDisabledResponse
         }
         let params = try decoder.decode(RemoteArchiveParams.self, from: paramsData)
+        if let refusal = try await cloudGate(provider: params.provider) { return refusal }
         return try await retire(
             verb: "archive", surface: .remoteArchive, manager: manager,
             provider: params.provider, sessionID: params.sessionID, actor: actor, now: now)
@@ -320,6 +328,7 @@ extension RPCRouter {
             return Self.remoteBackendsDisabledResponse
         }
         let params = try decoder.decode(RemoteUnarchiveParams.self, from: paramsData)
+        if let refusal = try await cloudGate(provider: params.provider) { return refusal }
         return try await retire(
             verb: "unarchive", surface: .remoteUnarchive, manager: manager,
             provider: params.provider, sessionID: params.sessionID, actor: actor, now: now)

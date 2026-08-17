@@ -56,10 +56,16 @@ struct ClaudeCloudGateTests: ~Copyable {
     private let cloudParams = #"{"provider": "claude-cloud", "sessionID": "s", "text": "t", "title": "t", "paramsJSON": "{}", "pinned": true, "exitCode": 1}"#
     private let otherParams = #"{"provider": "fake", "sessionID": "s", "text": "t", "title": "t", "paramsJSON": "{}", "pinned": true, "exitCode": 1}"#
 
-    private let gatedMethods = [
-        "remote.create", "remote.stop", "remote.send", "remote.log",
-        "remote.rename", "remote.dismiss", "remote.setPin", "remote.reportAttachExit",
-    ]
+    /// Drawn from `RPCMethod.providerNamedRemoteMethods` — the production
+    /// list of every `remote.*` verb addressed by a provider — rather than
+    /// hand-duplicated here, so this suite cannot independently drift into
+    /// agreeing with a gap the way it did for `remote.archive`/
+    /// `remote.unarchive`: both being ungated and both being absent from this
+    /// list were the same mistake made twice, and a single source closes one
+    /// of the two ways to make it. See the doc comment on
+    /// `providerNamedRemoteMethods` for what still isn't mechanically
+    /// enforced.
+    private let gatedMethods = RPCMethod.providerNamedRemoteMethods
 
     /// Combination 1 of 4: outer OFF, inner OFF.
     @Test func bothFlagsOffRefusesWithTheOuterMessage() async throws {
@@ -117,5 +123,61 @@ struct ClaudeCloudGateTests: ~Copyable {
         let response = await call(r, "remote.send", cloudParams)
         #expect(response.success)
         #expect(cloud.calls == [["send", "s"]])
+    }
+
+    // MARK: - The worktree-addressed route
+
+    /// `worktree.archive` / `worktree.revive` reach the same `archive` /
+    /// `unarchive` provider verbs as `remote.archive` / `remote.unarchive`,
+    /// but address the provider by the worktree's bound `location` rather
+    /// than by a `provider` param — a second route to the identical hole
+    /// this suite's `gatedMethods` list cannot see, because that route never
+    /// calls a `remote.*` method at all. Seeds a lane bound to `claude-cloud`
+    /// and drives both verbs through it.
+    private func seedCloudLane() async throws -> Worktree {
+        let repo = try await db.repos.create(
+            path: "/tmp/acme-\(UUID().uuidString)", displayName: "acme", defaultBranch: "main")
+        let worktree = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "acme-remote", branch: "acme-branch",
+            provider: ClaudeCloudProvider.name, sessionID: "s")
+        _ = try await db.remoteSessions.upsertOne(
+            provider: ClaudeCloudProvider.name,
+            session: RemoteSessionPayload(id: "s", state: .running, agentState: .idle),
+            now: Date())
+        return worktree
+    }
+
+    /// Outer ON, inner OFF — the case the inner gate exists for. Neither verb
+    /// may reach the provider, and the refusal is the inner gate's message,
+    /// not a capability refusal or a not-yet-known-provider error.
+    @Test func worktreeAddressedArchiveAndReviveAreAlsoCloudGated() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        let cloud = FakeProviderInvoker(script: [])
+        let r = router(cloud: cloud)
+        let lane = try await seedCloudLane()
+
+        let archiveResponse = await r.handle(try RPCRequest(
+            method: RPCMethod.worktreeArchive, params: WorktreeArchiveParams(worktreeID: lane.id)))
+        #expect(archiveResponse.error == "claude cloud sessions disabled")
+
+        let reviveResponse = await r.handle(try RPCRequest(
+            method: RPCMethod.worktreeRevive, params: WorktreeReviveParams(worktreeID: lane.id)))
+        #expect(reviveResponse.error == "claude cloud sessions disabled")
+
+        #expect(cloud.calls.isEmpty, "no cloud verb, and no describe probe, may run while the inner flag is off")
+    }
+
+    /// Both flags off: the outer gate refuses first, same as every other
+    /// route.
+    @Test func worktreeAddressedArchiveRefusesWithTheOuterMessageWhenBothFlagsAreOff() async throws {
+        let cloud = FakeProviderInvoker(script: [])
+        let r = router(cloud: cloud)
+        let lane = try await seedCloudLane()
+
+        let response = await r.handle(try RPCRequest(
+            method: RPCMethod.worktreeArchive, params: WorktreeArchiveParams(worktreeID: lane.id)))
+
+        #expect(response.error == "remote backends disabled")
+        #expect(cloud.calls.isEmpty)
     }
 }

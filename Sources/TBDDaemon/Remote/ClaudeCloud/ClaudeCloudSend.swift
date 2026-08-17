@@ -18,7 +18,14 @@ enum ClaudeCloudSendPayload {
     static func message(fromStdin stdin: Data) -> String? {
         // swiftlint:disable:next optional_data_string_conversion
         var text = String(decoding: stdin, as: UTF8.self)
-        if text.hasSuffix("\r") || text.hasSuffix("\n") { text.removeLast() }
+        // `"\r\n"` is ONE `Character` (grapheme cluster) in Swift, distinct
+        // from both `"\r"` and `"\n"` — the same trap the title parser was
+        // bitten by. Checking `"\r\n"` explicitly, not just its two halves,
+        // is what makes a genuine CRLF terminator strip cleanly instead of
+        // surviving into the message body.
+        if text.hasSuffix("\r\n") || text.hasSuffix("\r") || text.hasSuffix("\n") {
+            text.removeLast()
+        }
         return text.isEmpty ? nil : text
     }
 }
@@ -41,7 +48,7 @@ extension ClaudeCloudInvoker {
     /// No pseudo-terminal: `--print` is explicitly a non-interactive
     /// invocation and returns JSON on an ordinary pipe, and a pty would merge
     /// stderr into that JSON.
-    func send(sessionID: String, stdin: Data?) async throws -> ProviderResult {
+    func send(sessionID: String, stdin: Data?, timeout: TimeInterval) async throws -> ProviderResult {
         guard let stdin, let message = ClaudeCloudSendPayload.message(fromStdin: stdin) else {
             return Self.errorResult(
                 exitCode: 2, code: "invalid_params",
@@ -51,7 +58,7 @@ extension ClaudeCloudInvoker {
             arguments: ["-p", message, "--cloud", sessionID, "--output-format", "json"],
             workingDirectory: FileManager.default.temporaryDirectory.path,
             usesPseudoTerminal: false,
-            timeout: 30)
+            timeout: timeout)
         switch try await spawner.spawn(request) {
         case .timedOut:
             return Self.errorResult(

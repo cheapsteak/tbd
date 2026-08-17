@@ -40,16 +40,35 @@ enum ClaudeCloudCreateOutputParser {
         }
     }
 
-    /// Strict, and cross-checked against every match in the output. An
-    /// unreadable id costs the lane its identity — there is no session to
-    /// record — so zero matches or more than one distinct id is a `create`
-    /// FAILURE rather than a silent empty string.
+    /// Strict, and cross-checked against every match — but ONLY on the two
+    /// lines whose id is structural: `View:` and `Resume with:`. The third
+    /// printed line, `Created cloud session: <title>`, is the vendor's own
+    /// server-derived summary of the user's submitted prompt, not a value
+    /// with a fixed shape — and a prompt that itself names a
+    /// `session_`-prefixed identifier (a filename, a variable, a session the
+    /// user asked to resume) makes that line match the id pattern too. Scanning
+    /// the whole blob would then see a second, spurious id and fail a create
+    /// that actually succeeded, orphaning a real cloud session with no
+    /// discovery to ever recover it. Restricting the scan to the two
+    /// structural lines keeps the cross-check — two independent witnesses
+    /// that must agree — without ever reading the user's own words as if they
+    /// were the vendor's identifier.
+    ///
+    /// An unreadable id costs the lane its identity — there is no session to
+    /// record — so zero matches or more than one distinct id is still a
+    /// `create` FAILURE rather than a silent empty string.
     static func sessionID(fromOutput raw: String) -> Result<String, ParseFailure> {
         let text = ANSIEscape.strip(raw)
+        let lines = text.split(omittingEmptySubsequences: false, whereSeparator: { $0.isNewline })
+            .map { String($0) }
         var seen: [String] = []
-        for match in text.matches(of: idPattern) {
-            let value = String(match.output)
-            if !seen.contains(value) { seen.append(value) }
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("View:") || trimmed.hasPrefix("Resume with:") else { continue }
+            for match in trimmed.matches(of: idPattern) {
+                let value = String(match.output)
+                if !seen.contains(value) { seen.append(value) }
+            }
         }
         switch seen.count {
         case 0: return .failure(.noSessionID)
@@ -94,12 +113,20 @@ enum ClaudeCloudCreateOutputParser {
         return joined.isEmpty ? nil : joined
     }
 
-    /// The message a `create` failure carries, quoting what was received so
-    /// the `contractBug` on screen names its evidence. Bounded, because the
-    /// CLI's output is not a size TBD controls.
-    static func failureMessage(_ failure: ParseFailure, received raw: String) -> String {
+    /// ANSI-stripped, trimmed, and bounded quoting of raw CLI output for
+    /// embedding in a message — shared by `failureMessage` below and by a
+    /// non-zero `create` exit that still managed to print a readable id
+    /// (`ClaudeCloudCreate.swift`). Bounded because the CLI's output is not a
+    /// size TBD controls.
+    static func boundedQuote(_ raw: String) -> String {
         let stripped = ANSIEscape.strip(raw).trimmingCharacters(in: .whitespacesAndNewlines)
-        let quoted = ClaudeCloudTextBounding.truncated(stripped, limit: 400)
+        return ClaudeCloudTextBounding.truncated(stripped, limit: 400)
+    }
+
+    /// The message a `create` failure carries, quoting what was received so
+    /// the `contractBug` on screen names its evidence.
+    static func failureMessage(_ failure: ParseFailure, received raw: String) -> String {
+        let quoted = boundedQuote(raw)
         switch failure {
         case .noSessionID:
             return "claude --cloud printed no session id; received: \(quoted)"

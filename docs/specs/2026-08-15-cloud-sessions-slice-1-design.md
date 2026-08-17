@@ -274,15 +274,26 @@ no terminal is the provider's business, and here it means enqueuing a message.
 Exit 0 keeps its contract meaning: handed to the transport, not acted upon.
 
 Create idempotency is the parent design's: the key and its state are written to
-the ledger before the invocation, and a pending row is expected during the
-daemon's single same-key retry rather than a reason to refuse it. What resolves a
-pending row here is the create that wrote it, since the parent design's
-discovery-driven resolution has no discovery to run against in this slice: a row
-whose create returned a readable session id resolves immediately, and one whose
-create failed both attempts stays `pending`, transitions to `failed` after ten
-minutes, and is surfaced as an unresolved create the user can act on. The row is
-retained rather than deleted on that transition, so the record of a create that
-may have started a real session outlives the judgement that it did not.
+the ledger before the invocation. A same-key replay never spawns the vendor CLI
+a second time — there is no discovery to reconcile two live cloud sessions
+started under one key, so a duplicate spawn would orphan whichever one the
+ledger does not end up naming, permanently. A replay against an already-
+`resolved` row returns the recorded session without spawning anything. A
+replay against a still-`pending` row — including the daemon's single same-key
+retry after a timeout — is refused with a transient (exit 3) failure instead,
+because the first attempt behind that row may still be running and there is no
+discovery to check either way; guessing by spawning again is exactly the
+duplicate this rule exists to prevent. What resolves a pending row is the
+create that wrote it, since the parent design's discovery-driven resolution has
+no discovery to run against in this slice: a row whose create returned a
+readable session id resolves immediately, and one whose create failed both
+attempts stays `pending`, transitions to `failed` after ten minutes, and is
+surfaced as an unresolved create the user can act on. Only once a row has
+reached `failed` — meaning the ledger has given up without ever recording a
+session — does a replay under the same key spawn again, reusing that row. The
+row is retained rather than deleted on the `failed` transition, so the record
+of a create that may have started a real session outlives the judgement that
+it did not.
 
 ### `list` is the ledger, and is permanently incomplete
 
@@ -429,16 +440,27 @@ that would resume it (§11). There is no JSON form — `--print` is refused
 alongside `--cloud` — so those lines are the only channel either the id or the
 title travels on.
 
-The provider strips ANSI control sequences from the captured output and takes
-the first token matching `session_[A-Za-z0-9]+`, requiring that every match in
-the output name the **same** id. All three printed lines carry it, so a single
-distinct id is the healthy case and disagreement is a signal, not noise.
+The provider strips ANSI control sequences from the captured output and reads
+the id only off the two lines whose id is structural — the ones beginning
+`View:` and `Resume with:` — taking the first token matching
+`session_[A-Za-z0-9]+` on each and requiring the two matches to agree. The
+first line, `Created cloud session: <title>`, is deliberately excluded from
+this scan even though it usually carries the same id: its `<title>` is the
+vendor's own server-derived summary of the user's submitted prompt, not a
+value with a fixed shape, and a prompt that itself names a
+`session_`-prefixed identifier — a filename, a variable, a session the user
+asked to resume — would otherwise produce a second, spurious match and fail a
+create that actually succeeded, orphaning a real cloud session with no
+discovery to ever recover it. Two independent witnesses that must agree is
+still the cross-check this design wants; it is just never in a position to
+read the user's own words as if they were the vendor's identifier.
 
 The same parse reads the title off the first line: everything after its
 `Created cloud session: ` prefix, trimmed. That line is prose, not a value with
 a shape to check, so the title parse cannot tell a reworded sentence from a
 missing one — it can only tell whether *this* prefix matched. Where the id parse
-protects itself with a strict shape checked three times over, the title parse
+protects itself with a strict shape checked twice over on the two structural
+lines, the title parse
 has no such cross-check, and it does not need one: below is why the two failure
 postures diverge instead of both failing loud.
 

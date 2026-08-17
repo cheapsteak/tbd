@@ -13,8 +13,13 @@ import TBDShared
 /// requires to answer without one, and would make the Attach segment appear
 /// and vanish rather than explain itself.
 ///
-/// Three capability names are deliberately ABSENT, and each absence is a fact
-/// about the vendor surface rather than an unimplemented verb:
+/// Capabilities are a promise a caller acts on — the app offers a
+/// corresponding action, and `retire()`'s capability check lets a declared
+/// verb reach this provider — so nothing is declared here that
+/// `ClaudeCloudInvoker.run` cannot actually carry out.
+///
+/// Several capability names are deliberately ABSENT, and each absence is a
+/// fact about the vendor surface rather than an unimplemented verb:
 ///
 /// - `stop` — nothing exposed terminates a running cloud session. That is
 ///   also why `contract_versions` is `[2]` alone: major 1 requires `stop`.
@@ -22,18 +27,21 @@ import TBDShared
 /// - `transcript` — no supported interface reads a cloud session's
 ///   conversation.
 ///
-/// `archive` and `unarchive` ARE declared, implemented against this
-/// provider's own ledger: the ledger is the only inventory this provider has,
-/// so retiring a row within it is a real retirement of the only inventory
-/// that exists here. Nothing is sent to Anthropic, and the row says so.
+/// `land`, `archive` and `unarchive` are ALSO absent, but for a different
+/// reason than the three above: this is a real gap in the current build, not
+/// a fact about the vendor. `ClaudeCloudInvoker.run` answers all three with
+/// `not_implemented` — they are a later slice of this feature, which will
+/// re-add each capability string together with its implementation in the
+/// same change. Declaring them ahead of that would offer the app an action
+/// (Land, Archive, Unarchive on a cloud lane) that always fails.
 enum ClaudeCloudDescribe {
-    static let capabilities = ["send", "attach", "land", "archive", "unarchive"]
+    static let capabilities = ["send", "attach"]
 
     static let json = Data(#"""
     {
       "contract_versions": [2],
       "name": "\#(ClaudeCloudProvider.name)",
-      "capabilities": ["send", "attach", "land", "archive", "unarchive"],
+      "capabilities": ["send", "attach"],
       "create_params": [
         {"name": "repo", "type": "string", "label": "Repository", "required": true},
         {"name": "branch", "type": "string", "label": "Branch"},

@@ -49,6 +49,14 @@ extension ClaudeCloudInvoker {
             else { return nil }
             var meta = ["repo": row.repoKey]
             if let branch = row.branch, !branch.isEmpty { meta["branch"] = branch }
+            // `create` includes `environment` in the `meta` it returns; this
+            // was the one field `list` dropped on the very next poll, so a
+            // value that had round-tripped safely through the database
+            // vanished from every caller permanently — there is no
+            // discovery to re-supply it later.
+            if let environment = row.environment, !environment.isEmpty {
+                meta["environment"] = environment
+            }
             return ClaudeCloudSessionProjection.payload(
                 sessionID: sessionID, title: row.title, createdAt: row.createdAt,
                 archived: row.archived, meta: meta)
