@@ -246,13 +246,15 @@ struct RPCRouterRemoteTests: ~Copyable {
     @Test func createPassesParamsThroughAndReturnsSession() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
         let invoker = FakeProviderInvoker(script: [
-            providerOK(#"{"id": "new-1", "state": "starting"}"#)
+            providerOK(#"{"id": "new-1", "state": "starting"}"#),
+            providerOK(#"{"complete": true, "sessions": [{"id": "new-1", "state": "running"}]}"#),
         ])
         let r = router(invoker: invoker)
         let response = await call(r, "remote.create",
             #"{"provider": "fake", "paramsJSON": "{\"repo\": \"acme/api\"}"}"#)
         #expect(response.success)
-        #expect(invoker.calls == [["create"]])
+        #expect(invoker.calls == [["create"], ["list"]],
+                "a successful create asks for exactly one immediate refresh")
         let session = try response.decodeResult(RemoteSessionPayload.self)
         #expect(session.id == "new-1")
     }
@@ -265,7 +267,8 @@ struct RPCRouterRemoteTests: ~Copyable {
     @Test func createBodyContainsCallerParamsAndOneIdempotencyKey() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
         let invoker = FakeProviderInvoker(script: [
-            providerOK(#"{"id": "new-1", "state": "starting"}"#)
+            providerOK(#"{"id": "new-1", "state": "starting"}"#),
+            providerOK(#"{"complete": true, "sessions": [{"id": "new-1", "state": "running"}]}"#),
         ])
         let r = router(invoker: invoker)
         let response = await call(r, "remote.create",
@@ -290,17 +293,55 @@ struct RPCRouterRemoteTests: ~Copyable {
         let invoker = FakeProviderInvoker(outcomes: [
             .timeout,
             .result(providerOK(#"{"id": "new-1", "state": "starting"}"#)),
+            .result(providerOK(#"{"complete": true, "sessions": [{"id": "new-1", "state": "running"}]}"#)),
         ])
         let r = router(invoker: invoker)
         let response = await call(r, "remote.create",
             #"{"provider": "fake", "paramsJSON": "{}"}"#)
         #expect(response.success)
-        #expect(invoker.calls == [["create"], ["create"]],
-                "a timeout must produce exactly two create calls")
-        let stdins = invoker.stdinsSnapshot()
+        #expect(invoker.calls == [["create"], ["create"], ["list"]],
+                "a timeout must produce exactly two create calls, then one refresh")
+        let stdins = invoker.stdinsSnapshot().prefix(2)
         #expect(stdins.count == 2)
         #expect(stdins[0] == stdins[1],
                 "the retry must reuse the SAME idempotency key, not mint a fresh one")
+    }
+
+    /// The row a create produces arrives by ADOPTION rather than being minted
+    /// by the create call, and the poll loop's interval is 60 seconds — so a
+    /// lane created from the `+` menu would otherwise sit invisible for up to
+    /// a minute after a create that already succeeded. One immediate refresh
+    /// closes that, in the same shape `recordAttachExit` already uses after a
+    /// locally-observed event.
+    @Test func aSuccessfulCreateTriggersExactlyOneRefreshAndNeverALoop() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        let invoker = FakeProviderInvoker(script: [
+            providerOK(#"{"id": "new-1", "state": "starting"}"#),
+            providerOK(#"{"complete": true, "sessions": [{"id": "new-1", "state": "running"}]}"#),
+        ])
+        let r = router(invoker: invoker)
+        let response = await call(r, "remote.create",
+            #"{"provider": "fake", "paramsJSON": "{}"}"#)
+        #expect(response.success)
+        #expect(invoker.calls == [["create"], ["list"]])
+    }
+
+    /// The discriminating half: a FAILED create must ask for nothing — the
+    /// refresh is bounded to one per successful create, never a poll flood on
+    /// a provider that is already failing.
+    @Test func aFailedCreateTriggersNoRefresh() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        let invoker = FakeProviderInvoker(script: [
+            ProviderResult(
+                exitCode: 1,
+                stdout: Data(#"{"error": {"code": "invalid_params", "message": "no"}}"#.utf8),
+                stderr: "")
+        ])
+        let r = router(invoker: invoker)
+        let response = await call(r, "remote.create",
+            #"{"provider": "fake", "paramsJSON": "{}"}"#)
+        #expect(response.success == false)
+        #expect(invoker.calls == [["create"]])
     }
 
     /// A timeout on both attempts must surface a readable message, not the
@@ -328,11 +369,14 @@ struct RPCRouterRemoteTests: ~Copyable {
     @Test func createNormalizesEmptyParamsJSONToEmptyObject() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
         let invoker = FakeProviderInvoker(script: [
-            providerOK(#"{"id": "new-1", "state": "starting"}"#)
+            providerOK(#"{"id": "new-1", "state": "starting"}"#),
+            providerOK(#"{"complete": true, "sessions": [{"id": "new-1", "state": "running"}]}"#),
         ])
         let r = router(invoker: invoker)
         let response = await call(r, "remote.create", #"{"provider": "fake", "paramsJSON": ""}"#)
         #expect(response.success)
+        #expect(invoker.calls == [["create"], ["list"]],
+                "a successful create asks for exactly one immediate refresh")
         let stdin = try #require(invoker.stdinsSnapshot().first ?? nil)
         let body = try #require(try JSONSerialization.jsonObject(with: stdin) as? [String: Any])
         #expect((body["params"] as? [String: Any])?.isEmpty == true)

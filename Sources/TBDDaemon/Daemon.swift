@@ -504,17 +504,46 @@ public final class Daemon: Sendable {
         var claudeCloudLive = false
         let bootConfig = try? await database.config.get()
         if mockMode == nil, bootConfig?.remoteBackendsEnabled == true {
-            let manager = RemoteProviderManager(
-                db: database, subscriptions: subs, runner: ProviderRunner(),
-                registryURL: URL(fileURLWithPath: TBDConstants.agentProvidersPath),
-                actuationLog: actuationLog)
-            self.remoteManager = manager
-            remoteManager = manager
             // Cloud requires BOTH gates, and both are read once here: the
             // built-in provider is registered into the dispatcher at this same
             // moment, so a manager built while the cloud flag was off has no
-            // `claude-cloud` entry at all.
-            claudeCloudLive = bootConfig?.claudeCloudEnabled == true
+            // `claude-cloud` entry at all and flipping the flag cannot conjure
+            // one into a running actor. `claudeCloudLive` is what lets the app
+            // say "on, but needs a restart" without calling a `remote.*` verb
+            // and parsing its error string.
+            var builtIns: [String: any RemoteProviderInvoking] = [:]
+            var builtInConfigs: [RemoteProviderConfig] = []
+            if bootConfig?.claudeCloudEnabled == true {
+                do {
+                    let claudePath = try ClaudeExecutableResolver.resolve()
+                    builtIns[ClaudeCloudProvider.name] = ClaudeCloudInvoker(
+                        db: database,
+                        spawner: BoundedProcessClaudeSpawner(executable: claudePath))
+                    // `RemoteProviderConfig` requires an `exec` the built-in
+                    // provider has no honest use for: the dispatcher routes the
+                    // reserved name in-process before `exec` is ever read. It
+                    // carries the resolved `claude` path because the app-side
+                    // attach path needs a real path to spawn.
+                    builtInConfigs = [
+                        RemoteProviderConfig(name: ClaudeCloudProvider.name, exec: claudePath)
+                    ]
+                } catch {
+                    // No `claude` on this box. Registering a provider whose
+                    // every verb would fail is worse than registering none, and
+                    // `claudeCloudLive` staying false is what says so on screen.
+                    daemonLogger.error(
+                        "claude cloud is enabled but no claude executable resolved: \(String(describing: error), privacy: .public)")
+                }
+            }
+            let manager = RemoteProviderManager(
+                db: database, subscriptions: subs,
+                runner: ProviderDispatcher(subprocess: ProviderRunner(), builtIns: builtIns),
+                registryURL: URL(fileURLWithPath: TBDConstants.agentProvidersPath),
+                actuationLog: actuationLog,
+                builtInProviders: builtInConfigs)
+            self.remoteManager = manager
+            remoteManager = manager
+            claudeCloudLive = !builtIns.isEmpty
         }
 
         let prManager = PRStatusManager()

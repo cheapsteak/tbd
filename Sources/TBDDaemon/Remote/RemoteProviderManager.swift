@@ -17,6 +17,12 @@ public actor RemoteProviderManager {
     private let adopter: RemoteSessionAdopter
     private let runner: any RemoteProviderInvoking
     private let registryURL: URL
+    /// Providers TBD compiles in rather than reading from the registry file.
+    /// Empty unless the daemon wired one at boot. They are registered and
+    /// described exactly like registry entries, so their health, negotiated
+    /// major and poll loop all work the same way — a built-in provider is a
+    /// provider.
+    private let builtInProviders: [RemoteProviderConfig]
     private let clock: any Clock<Duration>
     /// Where the filing sync records the archives and revives it performs.
     /// Optional only so the many fixtures that construct this actor for
@@ -76,6 +82,7 @@ public actor RemoteProviderManager {
         db: TBDDatabase, subscriptions: StateSubscriptionManager,
         runner: any RemoteProviderInvoking, registryURL: URL,
         actuationLog: ActuationLog? = nil,
+        builtInProviders: [RemoteProviderConfig] = [],
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.db = db
@@ -84,11 +91,16 @@ public actor RemoteProviderManager {
         self.runner = runner
         self.registryURL = registryURL
         self.actuationLog = actuationLog
+        self.builtInProviders = builtInProviders
         self.clock = clock
         // RPC becomes available before `start()` runs, so seed the registry
         // synchronously. The first status or mutation-gate read can then recover
         // persisted freshness instead of briefly treating an existing mirror as
         // current while the initial provider poll is pending.
+        for config in builtInProviders {
+            providers[config.name] = config
+            health[config.name] = (.ok, nil, nil)
+        }
         if let configs = try? RemoteProviderRegistry.load(from: registryURL) {
             for config in configs {
                 providers[config.name] = config
@@ -117,13 +129,22 @@ public actor RemoteProviderManager {
     /// bounds this to at most one `describe` child process in flight rather
     /// than one per remaining provider.
     func loadRegistryAndDescribe() async {
-        let configs: [RemoteProviderConfig]
+        var configs: [RemoteProviderConfig] = builtInProviders
         do {
-            configs = try RemoteProviderRegistry.load(from: registryURL)
+            let loaded = try RemoteProviderRegistry.loadEntries(from: registryURL)
+            for name in loaded.skippedReservedNames {
+                remoteLogger.error(
+                    """
+                    provider registry entry named \(name, privacy: .public) was skipped: \
+                    that name is reserved for a provider compiled into TBD
+                    """)
+            }
+            configs += loaded.configs
         } catch {
             remoteLogger.error(
                 "provider registry unreadable: \(String(describing: error), privacy: .public)")
-            return
+            // The built-ins are still described: a malformed registry FILE
+            // says nothing about a provider that does not come from it.
         }
         for config in configs {
             guard !Task.isCancelled else { return }
@@ -1041,6 +1062,19 @@ public actor RemoteProviderManager {
         let inheritable = previous?.state == .needsAuth ? previous : nil
         setHealth(provider: name, to: (.needsAuth, inheritable?.message, inheritable?.remediation))
         guard previous?.state != .needsAuth else { return }
+        await pollOnce(provider: config)
+    }
+
+    /// Exactly ONE out-of-band `list` after a locally-observed create.
+    ///
+    /// The row for a created session arrives by adoption on a snapshot rather
+    /// than being minted by the create call, and the poll loop's interval is
+    /// 60 seconds, so without this a lane created from the `+` menu can sit
+    /// invisible for up to a minute after a create that already succeeded.
+    /// Bounded exactly as `recordAttachExit`'s probe is: one extra `list` per
+    /// create, never a loop, and only on a create that succeeded.
+    func refreshAfterCreate(provider name: String) async {
+        guard let config = providers[name] else { return }
         await pollOnce(provider: config)
     }
 
