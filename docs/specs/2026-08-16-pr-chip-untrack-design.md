@@ -147,12 +147,36 @@ place — `gh` unauthenticated, offline, or missing. Reading that nil as a refus
 disables insert-on-miss in the one scenario it was written for. Reading it as
 consent lets a mistyped foreign URL mint the permanent tombstone above.
 
-So a nil is decided on other evidence: **the PR number the worktree's cached
+So a nil is decided on other evidence: **the PR the worktree's cached
 `Worktree.prStatus` names**, which is the only fact about its PRs that survives
 `gh` being gone, and is exactly what a synthetic chip is built from. The offline
 xmark therefore works, while `tbd pr detach <some other PR>` on an unresolvable
 worktree writes nothing. A worktree with no cached status offers no evidence and
 gets no tombstone.
+
+That corroboration compares **owner, repo and number**, never the number alone.
+Matching on the number would admit a pasted `other-org/other-repo/pull/412`
+whenever the worktree's own cached PR happened to be #412 — minting the
+permanent foreign tombstone on a coincidence. A synthetic chip's URL always
+names the worktree's own repo, so checking all three costs the offline path
+nothing.
+
+### Who reclaims a tombstone
+
+Every row here dies with its worktree: `worktree_pull_request.worktreeID` is a
+foreign key `ON DELETE CASCADE`, so no tombstone outlives the thing it describes
+and none can be orphaned. Within a live worktree they are permanent by design —
+a tombstone that aged out would resurrect a PR the user removed — and that is
+fine for rows that correspond to PRs something actually discovered, which the
+live cap bounds indirectly.
+
+Insert-on-miss is the exception worth bounding: it is the one path that writes a
+row for a PR nothing found, one per gesture and one per distinct number, into a
+table `pr.bindingsAll` decodes whole on every app refresh. So the insert arm
+stops at a per-worktree tombstone ceiling far above any legitimate count. It is
+a runaway stop rather than a budget, and it gates creation only — a live row is
+still detachable past it, or a worktree that hit the ceiling could never untrack
+anything again.
 
 One case is beyond that corroboration and is reported rather than papered over:
 a reference whose URL does not parse **and** whose worktree's repo cannot be

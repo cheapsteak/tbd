@@ -292,9 +292,13 @@ public final class RPCRouter: Sendable {
             store: db.prBindings, resolveRepo: repoResolver, isGitLabHost: forgeResolver,
             // The cached status is the only evidence about a worktree's PRs
             // that survives `gh` being unavailable, which is when `detach`
-            // needs it — see `PRBindingCoordinator.detach`.
-            cachedPRNumber: { [db] worktreeID in
-                try? await db.worktrees.get(id: worktreeID)?.prStatus?.number
+            // needs it — see `PRBindingCoordinator.detach`. Parsed to a full
+            // identity rather than passed as a bare number, so corroboration
+            // cannot be satisfied by a coincidence of numbering.
+            cachedPRIdentity: { [db] worktreeID in
+                guard let url = try? await db.worktrees.get(id: worktreeID)?.prStatus?.url
+                else { return nil }
+                return PRBindingExtractor.parsePRURLs(in: url).first
             })
         self.pendingQuestions = pendingQuestions
         self.repoSerializer = repoSerializer

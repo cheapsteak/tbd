@@ -92,6 +92,23 @@ public struct PRBindingStore: Sendable {
     /// cap keeps one runaway session from unbounded polling.
     static let maxBindingsPerWorktree = 20
 
+    /// Bounds rows created by `tombstone`'s INSERT arm — a detach of a PR the
+    /// worktree never bound.
+    ///
+    /// Every other row in this table corresponds to a PR something actually
+    /// discovered, so the live cap bounds them all indirectly. Insert-on-miss is
+    /// the one path that mints a row for a PR nothing found, one per gesture and
+    /// one per distinct number, and nothing ever deletes a tombstone — so a
+    /// scripted or fat-fingered loop could otherwise grow a worktree's slice of
+    /// a table that `listAllByWorktree` decodes whole on every app refresh.
+    ///
+    /// Deliberately far above the live cap rather than equal to it: tombstones
+    /// legitimately outnumber live bindings on a long-lived worktree, which
+    /// accumulates one per PR it ever opened and detached, and evicting any of
+    /// them would resurrect a PR the user removed. This is a runaway stop, not a
+    /// budget. Past it the detach still tombstones any row that exists.
+    static let maxTombstonesPerWorktree = 200
+
     let writer: any DatabaseWriter
 
     public init(writer: any DatabaseWriter) {
@@ -252,6 +269,14 @@ public struct PRBindingStore: Sendable {
                 return true
             }
             guard insertIfMissing else { return false }
+            let tombstones = try PRBindingRecord
+                .filter(Column("worktreeID") == record.worktreeID)
+                .filter(Column("detached") == true)
+                .fetchCount(db)
+            guard tombstones < Self.maxTombstonesPerWorktree else {
+                logger.warning("dropping tombstone for PR #\(record.number, privacy: .public) on worktree \(record.worktreeID, privacy: .public): \(Self.maxTombstonesPerWorktree, privacy: .public) tombstones already recorded")
+                return false
+            }
             try record.insert(db)
             return true
         }

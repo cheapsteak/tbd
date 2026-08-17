@@ -24,17 +24,18 @@ struct PRBindingCoordinatorTests {
         init(repo: (owner: String, name: String, host: String)? =
             ("acme", "acme-prod", "github.com"),
              gitLabHosts: Set<String>? = [],
-             cachedPRNumber: Int? = nil) async throws {
+             cachedPRURL: String? = nil) async throws {
             db = try TBDDatabase(inMemory: true)
             let created = try await db.repos.create(
                 path: "/tmp/prbinding-coord-repo-\(UUID().uuidString)",
                 displayName: "acme-prod", defaultBranch: "main")
             repoID = created.id
             store = db.prBindings
+            let cached = cachedPRURL.flatMap { PRBindingExtractor.parsePRURLs(in: $0).first }
             coordinator = PRBindingCoordinator(
                 store: store, resolveRepo: { _ in repo },
                 isGitLabHost: { _, host in gitLabHosts.map { $0.contains(host.lowercased()) } },
-                cachedPRNumber: { _ in cachedPRNumber })
+                cachedPRIdentity: { _ in cached })
         }
 
         func newWorktree() async throws -> UUID {
@@ -366,7 +367,8 @@ struct PRBindingCoordinatorTests {
     /// from exactly that status.
     @Test("detaching the cached PR still tombstones when the repo cannot be resolved")
     func detachTombstonesTheCachedPRWhenRepoIsUnresolved() async throws {
-        let fixture = try await Fixture(repo: nil, cachedPRNumber: 412)
+        let fixture = try await Fixture(
+            repo: nil, cachedPRURL: "https://github.com/acme/acme-prod/pull/412")
         let wt = try await fixture.newWorktree()
 
         #expect(try await fixture.coordinator.detach(worktreeID: wt, parsed: parsed))
@@ -383,10 +385,29 @@ struct PRBindingCoordinatorTests {
     /// against and nothing tying the PR to this worktree, nothing is written.
     @Test("an unresolved repo does not license tombstoning an unrelated PR")
     func detachDeclinesAnUncorroboratedPRWhenRepoIsUnresolved() async throws {
-        let fixture = try await Fixture(repo: nil, cachedPRNumber: 999)
+        let fixture = try await Fixture(
+            repo: nil, cachedPRURL: "https://github.com/acme/acme-prod/pull/999")
         let wt = try await fixture.newWorktree()
 
         #expect(try await fixture.coordinator.detach(worktreeID: wt, parsed: parsed) == false)
+
+        #expect(try await fixture.store.list(worktreeID: wt, includeDetached: true).isEmpty)
+    }
+
+    /// The corroboration compares owner, repo AND number. Matching on the
+    /// number alone would admit a pasted foreign URL whenever the worktree's
+    /// own cached PR happened to share its number — minting the permanent
+    /// tombstone the guard exists to prevent, on a coincidence.
+    @Test("a foreign PR sharing the cached number is not corroborated by it")
+    func detachDeclinesAForeignPRWithACoincidentalNumber() async throws {
+        let fixture = try await Fixture(
+            repo: nil, cachedPRURL: "https://github.com/acme/acme-prod/pull/412")
+        let wt = try await fixture.newWorktree()
+        let foreign = ParsedPRURL(
+            host: "github.com", owner: "other-org", repo: "other-repo", number: 412,
+            url: "https://github.com/other-org/other-repo/pull/412")
+
+        #expect(try await fixture.coordinator.detach(worktreeID: wt, parsed: foreign) == false)
 
         #expect(try await fixture.store.list(worktreeID: wt, includeDetached: true).isEmpty)
     }

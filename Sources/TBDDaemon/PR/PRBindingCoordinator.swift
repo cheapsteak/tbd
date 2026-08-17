@@ -35,7 +35,7 @@ public actor PRBindingCoordinator {
     private let store: PRBindingStore
     private let resolveRepo: @Sendable (UUID) async -> (owner: String, name: String, host: String)?
     private let isGitLabHost: @Sendable (UUID, String) async -> Bool?
-    private let cachedPRNumber: @Sendable (UUID) async -> Int?
+    private let cachedPRIdentity: @Sendable (UUID) async -> ParsedPRURL?
 
     /// - Parameter resolveRepo: the worktree's own `owner`/`name` and host, or
     ///   nil when they cannot be determined (no remote, git failure, unknown
@@ -47,20 +47,21 @@ public actor PRBindingCoordinator {
     ///   put at all (no directory on this machine to ask in). Only the
     ///   `github.com` exemption in `hostAgreement` consults it, so a worktree
     ///   whose host already matches the URL's never pays for the answer.
-    /// - Parameter cachedPRNumber: the PR number the worktree's cached
-    ///   `Worktree.prStatus` names, or nil when it holds none. This is the only
-    ///   evidence about a worktree's PRs that survives `gh` being unavailable,
-    ///   and `detach` uses it to corroborate a reference it cannot check
-    ///   against a repo. Defaults to "no evidence", which is the conservative
-    ///   reading.
+    /// - Parameter cachedPRIdentity: the PR the worktree's cached
+    ///   `Worktree.prStatus` names — owner, repo and number, not just the
+    ///   number — or nil when it holds none or names one that cannot be parsed.
+    ///   This is the only evidence about a worktree's PRs that survives `gh`
+    ///   being unavailable, and `detach` uses it to corroborate a reference it
+    ///   cannot check against a repo. Defaults to "no evidence", which is the
+    ///   conservative reading.
     public init(store: PRBindingStore,
                 resolveRepo: @escaping @Sendable (UUID) async -> (owner: String, name: String, host: String)?,
                 isGitLabHost: @escaping @Sendable (UUID, String) async -> Bool?,
-                cachedPRNumber: @escaping @Sendable (UUID) async -> Int? = { _ in nil }) {
+                cachedPRIdentity: @escaping @Sendable (UUID) async -> ParsedPRURL? = { _ in nil }) {
         self.store = store
         self.resolveRepo = resolveRepo
         self.isGitLabHost = isGitLabHost
-        self.cachedPRNumber = cachedPRNumber
+        self.cachedPRIdentity = cachedPRIdentity
     }
 
     public func bind(worktreeID: UUID, parsed: ParsedPRURL,
@@ -236,10 +237,17 @@ public actor PRBindingCoordinator {
     /// written for; accepting on nil would let a mistyped foreign URL mint the
     /// permanent tombstone the guard exists to prevent. So a nil falls back to
     /// the one fact about this worktree's PRs that survives `gh` being gone:
-    /// the number its cached `Worktree.prStatus` names. That is exactly what a
+    /// the PR its cached `Worktree.prStatus` names. That is exactly what a
     /// synthetic chip is built from, so the xmark keeps working offline, while
     /// `tbd pr detach <some other PR>` on an unresolvable worktree writes
     /// nothing.
+    ///
+    /// That corroboration compares **owner, repo and number**, never the number
+    /// alone. A number-only match would admit a pasted
+    /// `other-org/other-repo/pull/412` whenever the worktree's own cached PR
+    /// happened to be #412 — minting the permanent foreign tombstone on a
+    /// coincidence. A synthetic chip's URL always names the worktree's own
+    /// repo, so checking all three costs the offline path nothing.
     ///
     /// Declining reports `false`, which is the honest answer — this worktree
     /// was not tracking that PR.
@@ -250,7 +258,12 @@ public actor PRBindingCoordinator {
             insertIfMissing = own.owner.lowercased() == parsed.owner.lowercased()
                 && own.name.lowercased() == parsed.repo.lowercased()
         } else {
-            insertIfMissing = await cachedPRNumber(worktreeID) == parsed.number
+            let cached = await cachedPRIdentity(worktreeID)
+            insertIfMissing = cached.map {
+                $0.owner.lowercased() == parsed.owner.lowercased()
+                    && $0.repo.lowercased() == parsed.repo.lowercased()
+                    && $0.number == parsed.number
+            } ?? false
         }
         let tombstone = PRBinding(
             worktreeID: worktreeID, host: parsed.host, owner: parsed.owner,

@@ -354,6 +354,33 @@ struct PRBindingStoreTests {
         #expect(try await fixture.store.list(worktreeID: wt, includeDetached: true).count == 1)
     }
 
+    /// Insert-on-miss is the one path that mints a row for a PR nothing ever
+    /// discovered, and nothing ever deletes a tombstone — so a scripted or
+    /// fat-fingered loop would otherwise grow a worktree's slice of a table
+    /// that `listAllByWorktree` decodes whole on every app refresh.
+    @Test("the insert arm stops at the tombstone cap, and still detaches live rows past it")
+    func tombstoneInsertsAreBounded() async throws {
+        let fixture = try await Fixture()
+        let wt = try await fixture.newWorktree()
+        for n in 1...PRBindingStore.maxTombstonesPerWorktree {
+            #expect(try await fixture.store.tombstone(
+                binding(n, worktreeID: wt, source: .manual), insertIfMissing: true))
+        }
+
+        // One past the cap writes nothing and says so.
+        #expect(try await fixture.store.tombstone(
+            binding(9_001, worktreeID: wt, source: .manual), insertIfMissing: true) == false)
+        #expect(try await fixture.store.list(worktreeID: wt, includeDetached: true).count
+            == PRBindingStore.maxTombstonesPerWorktree)
+
+        // …but the cap is a runaway stop on CREATION only: a live row past it
+        // is still detachable, or a full worktree could never untrack anything.
+        _ = try await fixture.store.upsert(binding(9_002, worktreeID: wt, source: .hook))
+        #expect(try await fixture.store.tombstone(
+            binding(9_002, worktreeID: wt, source: .manual), insertIfMissing: true))
+        #expect(try await fixture.store.list(worktreeID: wt).isEmpty)
+    }
+
     @Test("setDetached reports false when the state did not actually change")
     func setDetachedReportsRealChange() async throws {
         // `updateAll` counts MATCHED rows, so the naive `> 0` made `tbd pr
