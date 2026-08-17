@@ -367,7 +367,7 @@ extension RPCRouter {
         }
         await watermark?.restamp(at: now())
         if let session = try? result.decoded(RemoteSessionPayload.self) {
-            await manager.applyUpsert(session, provider: provider)
+            await manager.applyUpsert(session, provider: provider, date: now())
         }
         await finishActuation(actuationID, .dispatched)
         return .ok()

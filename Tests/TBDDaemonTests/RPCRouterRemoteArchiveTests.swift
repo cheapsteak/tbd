@@ -445,6 +445,44 @@ struct RPCRouterRemoteArchiveTests: ~Copyable {
         #expect(await manager.filingDecision(for: laneID) == earlier)
     }
 
+    /// The watermark tests above prove `now()` is on file *while the verb
+    /// runs*, but that only exercises `beginFilingWatermark`'s call to
+    /// `now()` — it says nothing about whether the restamp
+    /// (`watermark?.restamp(at: now())`) and the mirror
+    /// (`manager.applyUpsert(session, provider:, date: now())`) share that
+    /// same instant. `call`/`router.handle` always supply the real-clock
+    /// default, so this calls `handleRemoteArchive` directly with an
+    /// injected `now` — the only way to reach that seam — and checks the
+    /// mirror's `firstSeen` (set from `applyUpsert`'s `date`) against the
+    /// watermark (set from the same call's restamp) for exact equality
+    /// rather than mere proximity. A build that reverts to `applyUpsert`'s
+    /// `Date()` default would still pass every test above (both stamps are
+    /// "recent") but fail this one, because `injected` is nowhere near the
+    /// real clock.
+    @Test("archive threads the same injected `now` through the restamp and the mirror")
+    func archiveThreadsInjectedNowThroughRestampAndMirror() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        let lane = try await seedLane(status: .active)
+        let invoker = FakeProviderInvoker(script: [
+            describeDeclaring(["archive", "unarchive"]),
+            providerOK(#"{"id": "a", "state": "running", "archived": true}"#),
+        ])
+        let (r, manager) = await wiring(invoker: invoker)
+        let laneID = lane.id
+        let injected = Date(timeIntervalSince1970: 946_684_800) // 2000-01-01, far from real "now"
+
+        let response = try await r.handleRemoteArchive(
+            Data(remoteParams().utf8), actor: nil, now: { injected })
+
+        #expect(response.success)
+        let watermark = await manager.filingDecision(for: laneID)
+        #expect(watermark == injected, "the restamp did not use the injected `now`")
+        let rows = try await db.remoteSessions.list()
+        #expect(
+            rows.first?.firstSeen == injected,
+            "the mirror's applyUpsert did not use the injected `now`")
+    }
+
     /// This surface is addressed by `(provider, sessionID)`, not by worktree, so
     /// it reaches sessions nobody has adopted. There is no row to watermark
     /// then, and that is an ordinary outcome rather than an error: the verb
