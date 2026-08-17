@@ -719,12 +719,24 @@ class ResultsVerdictTests(unittest.TestCase):
         )
 
     def test_results_that_state_no_population_keep_the_conclusion(self):
+        # Files DID arrive, they record nothing failing, and they will not say how
+        # many tests ran. Too little to overturn the conclusion — and distinct
+        # from no files at all, which is the case below.
         self.assertEqual(
             remote_verify.verdict_from_results(self.report(total=0, tests=None)), 1
         )
 
-    def test_no_results_at_all_keeps_the_conclusion(self):
-        self.assertEqual(remote_verify.verdict_from_results(None), 1)
+    def test_no_results_at_all_is_no_verdict_rather_than_a_failing_suite(self):
+        # 78, NOT 1. The test job runs eight fallible setup steps before the first
+        # `scripts/test.sh` — checkout, mtime restore, `brew install tmux`,
+        # `xcode-select`, toolchain capture, cache restore, workspace repair,
+        # force rebuild — so a `brew` flake means zero tests ran, no xUnit file
+        # exists and no artifact was uploaded. Adopting 1 there tells a caller its
+        # suite is red when nothing ever compiled, and `scripts/test.sh` has no
+        # local fallback for a 1. Every case that reaches here is answered by 78:
+        # setup died, the compile died, or the upload broke on a genuinely red run
+        # whose failures the local re-run finds properly.
+        self.assertEqual(remote_verify.verdict_from_results(None), 78)
 
 
 class CorrelationTests(unittest.TestCase):
@@ -975,6 +987,28 @@ class DriverTests(unittest.TestCase):
         self.assertNotIn("Test run with", self.output())
         self.assertIn("could not be counted", self.diagnostics())
 
+    def test_a_pass_that_lost_one_file_says_its_count_is_a_floor(self):
+        # THE COUNT IS SHORT HERE AND THE OUTPUT HAS TO SAY SO. `render_results`
+        # sums only the files it could parse, so a green run that published one
+        # half-written pass states fewer tests than it ran. Refusing would spend a
+        # local re-run to correct a number that can only fail a floor and never
+        # falsely clear one — so it is stated and qualified instead, because a
+        # caller whose floor trips on a green remote run needs to see why.
+        runner = self.passing_runner(
+            **{"xunit-quiet": CLEAN_STYLE, "xunit-daemon": TRUNCATED}
+        )
+        self.assertEqual(self.drive(runner), 0)
+        rendered = self.output()
+        self.assertIn("Test run with 2 tests passed", rendered)
+        self.assertIn("xunit-daemon.xml", rendered)
+        self.assertIn("floor", rendered)
+
+    def test_a_pass_whose_every_file_arrived_claims_no_floor(self):
+        # The other branch: nothing was lost, so the count is the whole run and
+        # qualifying it would teach a reader to distrust a sound number.
+        self.assertEqual(self.drive(self.passing_runner()), 0)
+        self.assertNotIn("floor", self.output())
+
     def test_a_pass_whose_results_declare_no_population_refuses(self):
         # Readable, well-formed, and silent about how many tests ran: there is
         # no number to state, so there is no verdict to report.
@@ -1065,14 +1099,22 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(self.drive(runner, narrowed=True), 0)
         self.assertIn("Test run with 5 tests passed", self.output())
 
-    def test_a_failing_run_with_no_artifact_still_fails_loudly(self):
-        # An uncountable red run is still red: the verdict came from the run's
-        # conclusion, and only the pass path needs a population it can state.
+    def test_a_failing_run_with_no_artifact_falls_back_to_the_local_queue(self):
+        # A RED RUN THAT PUBLISHED NOTHING IS NOT A RED SUITE. This is the shape a
+        # setup failure takes — `brew install tmux` flaking before the first
+        # `scripts/test.sh`, so zero tests ran and no xUnit file exists — and it is
+        # indistinguishable here from a red run whose upload broke. 78 fits both:
+        # the local re-run either compiles nothing new or finds the real failures,
+        # where a 1 would report a suite as red that never ran.
         runner = self.failing_runner()
-        self.assertEqual(self.drive(runner), 1)
-        self.assertIn("could not download", self.output())
-        self.assertIn("https://example.invalid/runs/4242", self.output())
+        self.assertEqual(self.drive(runner), 78)
         self.assertNotIn("Test run with", self.output())
+        self.assertNotIn("FAILED", self.output())
+        # Named on the way out, because a silent fallback is what this valve is
+        # not allowed to do.
+        self.assertIn("could not download", self.diagnostics())
+        self.assertIn("published no results", self.diagnostics())
+        self.assertIn("https://example.invalid/runs/4242", self.diagnostics())
 
     def test_no_ticket_refuses_without_pushing_or_dispatching(self):
         # The ordering guarantee: a lane that never got a ticket must leave no

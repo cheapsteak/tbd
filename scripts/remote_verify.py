@@ -46,9 +46,10 @@ somewhere that cannot make it up.
 A FAILED RUN IS NOT THE SAME CLAIM AS A FAILED SUITE. `test.yml` holds four jobs
 with no `needs:` between them — lint, the committed-plans guard, the review-script
 tests and the test job — plus a `swift build` step after the results are uploaded,
-and `scripts/test.sh` runs none of that locally. So the results decide what the
-tests did, not the run's conclusion: `verdict_from_results` is the one authority
-on that, and both subcommands read it.
+and eight fallible setup steps before the first `scripts/test.sh`; and
+`scripts/test.sh` runs none of that locally. So a red run only becomes a red
+suite if its results say so: `verdict_from_results` decides that, on the red
+path, for both subcommands.
 """
 
 from __future__ import annotations
@@ -834,13 +835,17 @@ def render_results(paths: Sequence[Path], *, limit: int = MAX_RENDERED_FAILURES)
 
 
 def verdict_from_results(results: Report | None) -> int:
-    """What a run's result files support as a verdict about the tests.
+    """Whether a run GitHub called red may be reported as a failing suite.
 
-    THE ONE AUTHORITY, AND BOTH SUBCOMMANDS READ IT. `drive` and `render` look
-    at the same files and must not disagree about what they mean; `drive` is the
-    consumer that matters, because `scripts/test.sh` adopts its status as the
-    run's own, and `render` exists to show a human what `drive` saw. So the
-    mapping lives here rather than at either call site.
+    WHAT THIS ACTUALLY GOVERNS IS THE RED PATH, and both subcommands consult it
+    there so the two cannot disagree about one artifact: `drive` reaches it only
+    after `verdict_for` said the run failed, and `render` — which has no run
+    conclusion of its own — reads every artifact through it. It deliberately
+    governs nothing on the green path. A run whose every test step exited 0 is
+    green even when a file records a `<failure>`, because a recorded failure
+    under a step that passed is a known-issue record rather than a real one; so
+    `_write_pass_report` reads `results.tests` straight off the report and asks
+    nothing here.
 
     - **Failures recorded, or a file that cannot be believed** — `EXIT_FAILED`.
       A truncated pass is unreadable rather than empty and must never be read as
@@ -855,10 +860,31 @@ def verdict_from_results(results: Report | None) -> int:
       gave. 78 sends the lane back to the local queue, where it gets an answer
       to its own question. Inventing red is precisely what `verdict_for` refuses
       to do for a cancelled run, on the same reasoning.
-    - **Nothing that states a population** — `EXIT_FAILED`. No artifact, or an
-      artifact silent about how many tests ran, is no evidence at all, so there
-      is nothing to set against the run's own conclusion and the conclusion
-      stands.
+    - **Readable results that state no population** — `EXIT_FAILED`. Files
+      arrived, they record nothing failing, and they will not say how many tests
+      ran; that is too little to set against the run's own conclusion, so the
+      conclusion stands.
+    - **No results at all** — `EXIT_REFUSED`, and this is the case that must not
+      be a failure. `test.yml`'s test job runs eight fallible setup steps before
+      it reaches the first `scripts/test.sh` — checkout, mtime restore, `brew
+      install tmux`, `xcode-select`, toolchain capture, cache restore, workspace
+      repair, force rebuild — and any one of them failing means zero tests ran,
+      no xUnit file was written and no artifact was uploaded. `brew install`
+      flaking on a hosted runner is ordinary weather, and reporting that as a red
+      suite tells a caller its tests failed when they never started, with no
+      local fallback to correct it. Every case that lands here is answered
+      correctly by 78: setup failed (nothing ran); the compile failed (the local
+      re-run reproduces the error properly); the tests really did fail but the
+      upload broke (the local re-run finds the real failures); cancelled (already
+      78, via `verdict_for`). The cost is one local re-run when a genuinely red
+      run loses its artifact, which is the trade every other refusal here makes,
+      and `unreadable` above still covers "a file exists and cannot be believed".
+
+      It also defuses a hazard that arrives from the other end of the valve: a
+      `preflight/*` ref swept out from under a run still queued on GitHub makes
+      that run fail at `actions/checkout`, before any test step and before any
+      artifact. That is now a benign fallback to the local queue rather than a
+      fabricated red suite.
 
     DELIBERATELY NOT KEYED ON WHICH JOBS WERE RED. Deciding this from job names
     would hardcode `test.yml`'s job list here, and a renamed or added job is the
@@ -867,7 +893,7 @@ def verdict_from_results(results: Report | None) -> int:
     they just do not get to decide what the tests did.
     """
     if results is None:
-        return EXIT_FAILED
+        return EXIT_REFUSED
     if results.total or results.unreadable:
         return EXIT_FAILED
     if results.tests is None:
@@ -1019,15 +1045,22 @@ def drive(
                     results, problem=problem, run_id=run_id, url=str(url), write=write
                 )
                 return EXIT_PASSED
-            # A RED RUN WHOSE TESTS ALL PASSED IS NOT A TEST FAILURE. The files,
-            # not the conclusion, are the authority here; `verdict_from_results`
-            # says why, and answering 78 rather than 1 is the difference between
+            # A RED RUN IS NOT THE SAME CLAIM AS A RED SUITE. The files, not the
+            # conclusion, decide that; `verdict_from_results` says why for each
+            # shape, and answering 78 rather than 1 is the difference between
             # sending this lane back to the local queue and telling the operator
             # a suite is red that `scripts/test.sh` never even runs the failing
-            # part of.
+            # part of — or never ran at all.
             if verdict_from_results(results) == EXIT_REFUSED:
                 jobs = failed_job_names(completed)
                 attribution = f" (failing jobs: {', '.join(jobs)})" if jobs else ""
+                if results is None:
+                    raise Refused(
+                        f"run {run_id} finished failure and published no results "
+                        f"({problem}){attribution}, so nothing says its tests ran "
+                        "at all, let alone failed; re-running locally is the only "
+                        f"honest answer {url}".rstrip()
+                    )
                 raise Refused(
                     f"run {run_id} finished failure, but every one of the "
                     f"{results.tests} tests it ran passed{attribution}, so the "
@@ -1035,7 +1068,7 @@ def drive(
                     f"this suite {url}".rstrip()
                 )
             _write_failure_report(
-                results, problem=problem, url=str(url), completed=completed,
+                results, url=str(url), completed=completed,
                 narrowed=narrowed, write=write,
             )
             return EXIT_FAILED
@@ -1099,6 +1132,16 @@ def _write_pass_report(
     exists to prevent, and claiming green with no line at all reaches the
     caller as a truncated run. Both cost a local re-run; inventing a count
     costs a wrong answer.
+
+    AN UNREADABLE FILE ALONGSIDE READABLE ONES SHORT-COUNTS THE LINE, AND IS
+    SAID OUT LOUD RATHER THAN REFUSED. `render_results` sums only the files it
+    could parse, so a green run that published one half-written file states a
+    population smaller than the one it ran. The direction is the safe one — a
+    number too small can only fail a floor, never falsely clear one — so
+    refusing here would spend a local re-run to correct an error that cannot
+    mislead anybody. It is still named, because a caller whose floor fails on a
+    green remote run would otherwise have no way to see why the number was
+    low.
     """
     if results is None or results.tests is None:
         detail = problem or (
@@ -1109,19 +1152,28 @@ def _write_pass_report(
             f"({detail}), so the test population cannot be stated {url}".rstrip()
         )
     write(_test_run_summary(results.tests, "passed"))
+    if results.unreadable:
+        write(
+            f"remote-verify: {len(results.unreadable)} result file(s) could not "
+            f"be read ({', '.join(results.unreadable)}), so the population above "
+            "counts only the passes that reported and is a floor, not the whole run"
+        )
     write(f"remote-verify: the remote run passed {url}".rstrip())
 
 
 def _write_failure_report(
-    results: Report | None,
+    results: Report,
     *,
-    problem: str | None,
     url: str,
     completed: Mapping[str, object],
     narrowed: bool,
     write: Callable[[str], None],
 ) -> None:
     """Print a red run's failures, and its population only if anybody may read it.
+
+    `results` is a real report rather than an optional one: a run that published
+    nothing is no evidence about the tests, so `drive` refuses it before reaching
+    here instead of announcing a failure it cannot describe.
 
     THE COUNT LINE IS SUPPRESSED FOR A NARROWED CALLER, and that is a guard
     rather than tidiness. Six consumers grep `Test run with [0-9]+ tests?` and
@@ -1141,10 +1193,6 @@ def _write_failure_report(
     jobs = failed_job_names(completed)
     if jobs:
         write(f"remote-verify: failing jobs: {', '.join(jobs)}")
-    if results is None:
-        write(f"remote-verify: {problem}")
-        write("remote-verify: open the run above for the failure")
-        return
     # Stated when it is known, this run is the one being reported, and it is not
     # a narrowed caller's; omitted otherwise. See the docstring.
     if results.tests is not None and not narrowed:
@@ -1204,8 +1252,10 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] | None = 
         report = render_results(paths)
         for line in report.lines:
             print(line)
-        # THE SAME AUTHORITY THE DRIVER USES, so the two cannot disagree about
-        # one artifact. This used to answer 0 for "no failures", which read as
+        # THE SAME MAPPING THE DRIVER READS ON THE RED PATH, so the two cannot
+        # disagree about one artifact. `render` has no conclusion to weigh, so it
+        # applies that mapping to every artifact it is given. This used to answer
+        # 0 for "no failures", which read as
         # "the tests passed" for the state the driver calls no verdict at all —
         # a red run whose passes all reported clean. `render` never answers 0
         # now: it has no run conclusion to weigh, so the strongest thing a set of

@@ -49,17 +49,24 @@ log() { printf '%s\n' "$*" >&2; }
 # statement about the code in hand — and an untracked file is the worst case,
 # because a brand-new test that never left this disk would be reported as
 # passing. Squash merge absorbs the cost of committing more often.
+#
+# THE FREE LOCAL CHECKS COME FIRST, and the dirty tree is checked before `gh` is
+# even looked for. `gh auth status` is a network round-trip, and a dirty tree is
+# the most common refusal by far — the lane most likely to be starving is the one
+# with uncommitted work — so answering it locally spends nothing and keeps the
+# refusal instant. The order is a property of the whole function rather than any
+# one line, which is why a case asserts that a dirty tree asks GitHub nothing.
 check_preconditions() {
+  if [ -n "$(git status --porcelain)" ]; then
+    log "remote-verify: the tree has uncommitted changes; a remote run would test a different commit"
+    return $EXIT_REFUSED
+  fi
   if ! command -v gh >/dev/null 2>&1; then
     log "remote-verify: gh is not installed, so no run can be dispatched"
     return $EXIT_REFUSED
   fi
   if ! gh auth status >/dev/null 2>&1; then
     log "remote-verify: gh is not authenticated, so no run can be dispatched"
-    return $EXIT_REFUSED
-  fi
-  if [ -n "$(git status --porcelain)" ]; then
-    log "remote-verify: the tree has uncommitted changes; a remote run would test a different commit"
     return $EXIT_REFUSED
   fi
   return 0
@@ -87,10 +94,50 @@ check_preconditions() {
 # A push to a branch with an open PR would also fire `pull_request_target:
 # synchronize` and run the claude-review fan-out on every iteration; GitHub
 # minutes are free but Claude quota is not, and it is the only metered resource
-# left in this loop. One namespace covers every one of those cases, so this
-# needs no `gh pr list` and cannot be wrong about the answer.
+# left in this loop. One namespace covers every one of those cases, so the CHOICE
+# of ref asks GitHub nothing and cannot be wrong about it. Whether the ref that
+# choice lands on is already somebody's branch is a different question, asked
+# separately in `ref_is_unowned`.
 dispatch_ref_for() {
   printf '%s%s\n' "$INERT_NAMESPACE" "$1"
+}
+
+# ref_is_unowned REF -> 0 when REF is free to force-push, $EXIT_REFUSED otherwise.
+#
+# THE NAMESPACE IS A CONVENTION, NOT A RESERVATION. Every ref the valve moves is
+# force-pushed, because a `preflight/*` ref is a throwaway that any lane may
+# repoint after an amend — but nothing stops a human from working on a branch
+# actually named `preflight/flaky-repro`, and a lane on `flaky-repro` computes
+# exactly that ref. Force-pushing it destroys their commits, and if it carries an
+# open PR the push also fires `pull_request_target: synchronize` and spends the
+# claude-review fan-out, the one metered resource the inert-ref design exists to
+# protect. `scripts/sweep-preflight-refs.sh` already refuses this same collision
+# on the delete side, in the same words; this is that defence on the push side.
+#
+# AN OPEN PR IS THE SIGNAL, because it is the one that can be read without
+# guessing. A `preflight/*` ref existing on the remote proves nothing — every
+# previous run of this valve left one — so ref existence cannot separate a
+# throwaway from somebody's work, while a pull request is a human gesture that
+# only a branch somebody is using ever receives.
+#
+# A QUERY THAT FAILED IS NOT A "NO". Reading a rate limit or a token that lost
+# its scope as "nobody owns this ref" would turn the guard off exactly when
+# GitHub is unhealthy, so an unanswerable question refuses. Same reasoning, and
+# the same fail-closed direction, as the sweep's `has_open_pr`. Only stdout
+# decides: `gh`'s own stderr flows to ours, where an operator reads it verbatim,
+# and folding it into the value would make any deprecation notice read as a PR.
+ref_is_unowned() {
+  local ref="$1" numbers status=0
+  numbers="$(gh pr list --head "$ref" --state open --json number --jq '.[].number')" || status=$?
+  if [ $status -ne 0 ]; then
+    log "remote-verify: could not ask whether a pull request is open for $ref (gh exit $status); refusing rather than force-pushing a ref somebody may own"
+    return $EXIT_REFUSED
+  fi
+  if [ -n "${numbers//[[:space:]]/}" ]; then
+    log "remote-verify: $ref has an open pull request (#${numbers//[[:space:]]/ }), so it is somebody's branch rather than an inert ref; refusing rather than force-pushing over it"
+    return $EXIT_REFUSED
+  fi
+  return 0
 }
 
 # default_branch -> the branch this repository treats as its trunk.
@@ -157,6 +204,11 @@ main() {
   if [ $status -ne 0 ] || [ -z "$ref" ]; then
     return $EXIT_REFUSED
   fi
+
+  # Asked before anything is pushed, and it is the only `gh` call this front-end
+  # makes about the ref: the driver force-pushes whatever it is handed, so the
+  # question of whether the ref is somebody's branch has to be answered here.
+  ref_is_unowned "$ref" || return $?
 
   sha="$(git rev-parse HEAD)"
 

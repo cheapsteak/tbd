@@ -105,7 +105,19 @@ case "$1 ${2:-}" in
     exit "${STUB_GH_AUTH_STATUS:-0}" ;;
   "pr list")
     if [ -n "${STUB_GH_PR_FAIL:-}" ]; then echo "API rate limit exceeded" >&2; exit 1; fi
-    if [ -n "${STUB_GH_PR_OPEN:-}" ]; then echo 7; fi
+    # HEAD-AWARE ON PURPOSE. The valve asks about one specific ref, and a stub
+    # that answered "a PR is open" whatever it was asked could not tell a lane
+    # branch with a PR — which changes nothing — from a human working on the very
+    # `preflight/` ref the valve is about to force-push. `STUB_GH_PR_OPEN_HEADS`
+    # is the space-separated list of head refs that have one.
+    head=""
+    while [ $# -gt 0 ]; do
+      if [ "$1" = "--head" ]; then head="${2:-}"; fi
+      shift
+    done
+    for owned in ${STUB_GH_PR_OPEN_HEADS:-}; do
+      if [ "$owned" = "$head" ]; then echo 7; fi
+    done
     exit 0 ;;
   "workflow run")
     status="${STUB_GH_DISPATCH_STATUS:-0}"
@@ -190,7 +202,7 @@ test_dispatch_ref_for_always_answers_an_inert_ref() {
   local root; root="$(setup)"
   local ref; ref="$(cd "$root/work" && PATH="$root/bin:$PATH" dispatch_ref_for "$BRANCH")"
   assert_eq "a branch with no PR still dispatches a preflight ref" "preflight/$BRANCH" "$ref"
-  ref="$(cd "$root/work" && PATH="$root/bin:$PATH" STUB_GH_PR_OPEN=1 dispatch_ref_for "$BRANCH")"
+  ref="$(cd "$root/work" && PATH="$root/bin:$PATH" STUB_GH_PR_OPEN_HEADS="$BRANCH" dispatch_ref_for "$BRANCH")"
   assert_eq "and so does one with a PR open" "preflight/$BRANCH" "$ref"
   rm -rf "$root"
 }
@@ -225,6 +237,10 @@ test_a_dirty_tree_refuses_and_stays_local() {
   assert_eq "dirty tree exits 78" "78" "$RC"
   assert_contains "and names the condition" "$OUT" "uncommitted"
   assert_missing "and dispatches nothing" "$(gh_calls "$root")" "workflow run"
+  # THE FREE CHECK COMES FIRST. `gh auth status` is a network round-trip and the
+  # dirty tree is the most common refusal there is, so this one must be answered
+  # without asking GitHub anything at all — not even whether we are logged in.
+  assert_eq "and asks GitHub nothing whatsoever" "" "$(gh_calls "$root")"
   rm -rf "$root"
 }
 
@@ -300,7 +316,7 @@ test_an_open_pr_changes_nothing_about_the_ref() {
   local head before
   head="$(git -C "$root/work" rev-parse HEAD)"
   before="$(remote_sha "$root" "$BRANCH")"
-  run_verify "$root" STUB_GH_PR_OPEN=1
+  run_verify "$root" STUB_GH_PR_OPEN_HEADS="$BRANCH"
   assert_eq "a passing remote run exits 0" "0" "$RC"
   assert_eq "the inert ref carries the commit" "$head" "$(remote_sha "$root" "preflight/$BRANCH")"
   assert_eq "the PR branch never moved" "$before" "$(remote_sha "$root" "$BRANCH")"
@@ -337,6 +353,63 @@ test_a_stale_run_for_this_commit_is_not_adopted() {
   assert_eq "the run exits 0" "0" "$RC"
   assert_contains "the dispatched run is the one watched" "$(gh_calls "$root")" "run view 4243"
   assert_missing "and the stale run is not" "$(gh_calls "$root")" "run view 4000"
+  rm -rf "$root"
+}
+
+test_a_preflight_ref_somebody_else_owns_is_never_force_pushed() {
+  # THE NAMESPACE IS A CONVENTION, NOT A RESERVATION. A lane on `flaky-repro`
+  # computes `preflight/flaky-repro`, and nothing stops a human from working on a
+  # branch by exactly that name: the push is unconditionally forced, so it would
+  # destroy their commits — and firing `pull_request_target: synchronize` on their
+  # PR would spend the claude-review fan-out, the one metered resource the
+  # inert-ref design exists to protect. `scripts/sweep-preflight-refs.sh` already
+  # refuses this collision on the delete side; this is the push side of it.
+  local root; root="$(setup)"
+  git -C "$root/work" checkout -q -b "flaky-repro"
+  local human; human="$(remote_sha "$root" "preflight/flaky-repro")"
+  run_verify "$root" STUB_GH_PR_OPEN_HEADS="preflight/flaky-repro"
+  assert_eq "a ref with an open PR exits 78" "78" "$RC"
+  assert_contains "and names the collision" "$OUT" "open pull request"
+  assert_eq "the ref is exactly as it was" "$human" "$(remote_sha "$root" "preflight/flaky-repro")"
+  assert_missing "and nothing was dispatched" "$(gh_calls "$root")" "workflow run"
+  rm -rf "$root"
+}
+
+test_a_pr_on_the_lane_branch_itself_still_verifies() {
+  # The other side of the same guard: the open PR that matters is the one on the
+  # ref about to be force-pushed, not the one on the branch being verified. A
+  # check that could not tell them apart would refuse every lane with a PR — which
+  # is nearly all of them — and turn the valve off in practice.
+  local root; root="$(setup)"
+  local head; head="$(git -C "$root/work" rev-parse HEAD)"
+  run_verify "$root" STUB_GH_PR_OPEN_HEADS="$BRANCH"
+  assert_eq "a PR on the lane branch still exits 0" "0" "$RC"
+  assert_eq "and the inert ref carries the commit" "$head" "$(remote_sha "$root" "preflight/$BRANCH")"
+  rm -rf "$root"
+}
+
+test_the_owner_check_happens_before_anything_is_pushed() {
+  # The ordering, from the call log: the question is asked before the dispatch,
+  # which the driver only reaches after its push.
+  local root; root="$(setup)"
+  run_verify "$root"
+  assert_contains "the computed ref is the one asked about" \
+    "$(gh_calls "$root")" "pr list --head preflight/$BRANCH"
+  assert_contains "and it is asked before the dispatch" \
+    "$(gh_calls "$root" | grep -E '^(pr list|workflow run)' | head -1)" "pr list"
+  rm -rf "$root"
+}
+
+test_an_unanswerable_pr_query_refuses_rather_than_assuming_nobody_owns_the_ref() {
+  # FAIL CLOSED. Reading a rate limit or an expired token as "no PR here" would
+  # disarm the guard exactly when GitHub is unhealthy, and the cost of being wrong
+  # is somebody's branch.
+  local root; root="$(setup)"
+  run_verify "$root" STUB_GH_PR_FAIL=1
+  assert_eq "an unanswerable query exits 78" "78" "$RC"
+  assert_contains "and says the question could not be answered" "$OUT" "could not ask"
+  assert_eq "no inert ref was created" "" "$(remote_sha "$root" "preflight/$BRANCH")"
+  assert_missing "and nothing was dispatched" "$(gh_calls "$root")" "workflow run"
   rm -rf "$root"
 }
 
@@ -401,12 +474,22 @@ test_a_truncated_result_file_is_named_rather_than_read_as_green() {
   rm -rf "$root"
 }
 
-test_a_failing_run_with_no_results_artifact_still_fails_loudly() {
+test_a_failing_run_with_no_results_artifact_falls_back_to_a_local_run() {
+  # A RED RUN THAT PUBLISHED NOTHING IS NOT A RED SUITE. `test.yml`'s test job
+  # runs eight fallible setup steps — checkout, mtime restore, `brew install
+  # tmux`, `xcode-select`, toolchain capture, cache restore, workspace repair,
+  # force rebuild — before it reaches the first `scripts/test.sh`, so a `brew`
+  # flake or a swept ref failing `actions/checkout` means zero tests ran and no
+  # artifact exists. 78 sends this lane back to the local queue, where it gets a
+  # real answer; 1 would tell it its suite is red with nothing to show and no
+  # fallback left.
   local root; root="$(setup)"
   run_verify "$root" STUB_GH_CONCLUSION=failure STUB_GH_NO_ARTIFACT=1
-  assert_eq "a failing run with no artifact still exits 1" "1" "$RC"
+  assert_eq "a failing run with no artifact exits 78, not 1" "78" "$RC"
   assert_contains "says the results could not be had" "$OUT" "could not download"
+  assert_contains "and that nothing says the tests ran" "$OUT" "published no results"
   assert_contains "and points at the run" "$OUT" "https://example.invalid/runs/4242"
+  assert_missing "and never claims a failure it cannot describe" "$OUT" "run FAILED"
   rm -rf "$root"
 }
 
