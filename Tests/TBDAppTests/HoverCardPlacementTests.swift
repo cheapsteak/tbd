@@ -38,13 +38,17 @@ struct HoverCardPlacementTests {
 
     // MARK: - Which side of the anchor
 
-    @Test("an anchor with room beneath it inside the window keeps its card below")
+    @Test("an anchor with room beneath it inside the window keeps its card below, hugging it")
     func belowIsThePreferredSide() {
         // A tab-bar item: near the top of the window, plenty of window below it.
         let anchor = CGRect(x: 260, y: 770, width: 90, height: 28)
         let visible = card(place(anchor: anchor, window: window, screen: screen))
         #expect(visible.maxY == anchor.minY - HoverCardPlacement.anchorGap)
         #expect(visible.minX == anchor.minX)
+        // A card hanging under its anchor should read as attached to it, so
+        // this gap stays small — and much smaller than the one a flipped card
+        // needs to escape the bar it was pushed off.
+        #expect(HoverCardPlacement.anchorGap <= 8)
     }
 
     /// The status-bar chip: the card would fit on screen below it — there is a
@@ -55,7 +59,7 @@ struct HoverCardPlacementTests {
         let anchor = CGRect(x: 300, y: 414, width: 22, height: 14)
         let frame = place(anchor: anchor, window: window, screen: screen)
         let visible = card(frame)
-        #expect(visible.minY == anchor.maxY + HoverCardPlacement.anchorGap)
+        #expect(visible.minY == anchor.maxY + HoverCardPlacement.flippedBarClearance)
         // The whole card is above the anchor, so the bar it is anchored to —
         // the chip included — stays readable underneath it.
         #expect(visible.minY > anchor.maxY)
@@ -71,18 +75,27 @@ struct HoverCardPlacementTests {
                                cardSize: CGSize(width: 200, height: 40),
                                window: window,
                                screen: screen))
-        #expect(short.minY == anchor.maxY + HoverCardPlacement.anchorGap)
+        #expect(short.minY == anchor.maxY + HoverCardPlacement.flippedBarClearance)
     }
 
-    /// The flip must clear the padding a bar puts around its content, not just
-    /// the anchored control: the chip sits 4pt inside the status strip.
-    @Test("the flipped card clears the bar its anchor sits in, not just the anchor")
-    func flippedCardClearsTheBarPadding() {
-        let barPadding: CGFloat = 4
+    /// The reader is looking at the *bar*, not at the chip. A chip is a 14pt
+    /// row inside a strip that pads it, sits it beside taller controls and
+    /// draws its own background, so the flip has to clear the strip's top edge
+    /// with a gap wide enough to see — clearing the anchor by a hair leaves the
+    /// card glued to the row it is describing.
+    @Test("a flipped card clears the whole bar its anchor sits in, with room to spare")
+    func flippedCardClearsTheWholeBar() {
+        // Modelled generously: the strip's own 4pt padding plus the difference
+        // between the chip and the tallest control sharing the row with it.
+        let barTopAboveChip: CGFloat = 8
+        let breathingRoom: CGFloat = 12
         let anchor = CGRect(x: 300, y: 414, width: 22, height: 14)
-        let barTop = anchor.maxY + barPadding
+        let barTop = anchor.maxY + barTopAboveChip
         let visible = card(place(anchor: anchor, window: window, screen: screen))
-        #expect(visible.minY > barTop)
+        #expect(visible.minY >= barTop + breathingRoom)
+        // And the asymmetry is structural rather than a nudge: a flipped card
+        // is escaping something, a card below its anchor is attached to it.
+        #expect(HoverCardPlacement.flippedBarClearance >= HoverCardPlacement.anchorGap * 2)
     }
 
     @Test("a card with no room below on screen flips above")
@@ -91,7 +104,7 @@ struct HoverCardPlacementTests {
         let bottomed = CGRect(x: 100, y: screen.minY, width: 1200, height: 700)
         let anchor = CGRect(x: 300, y: screen.minY + 14, width: 22, height: 14)
         let visible = card(place(anchor: anchor, window: bottomed, screen: screen))
-        #expect(visible.minY == anchor.maxY + HoverCardPlacement.anchorGap)
+        #expect(visible.minY == anchor.maxY + HoverCardPlacement.flippedBarClearance)
     }
 
     /// The window is a preference, not a hard constraint. A card anchored in a

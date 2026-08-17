@@ -247,14 +247,38 @@ struct HoverDwellReducer: Equatable {
 /// The window is a *preference*, not a hard constraint: when neither side fits
 /// inside it (a small floating panel, a short window), the screen decides, so
 /// this can never place a card worse than the screen rule alone would.
+/// The two clearances are deliberately asymmetric — see `anchorGap` and
+/// `flippedBarClearance`.
 enum HoverCardPlacement {
-    /// Gap between the anchor's edge and the card's visible edge.
+    /// Gap under the anchor for a card in its preferred, below position.
     ///
-    /// Sized to clear the padding a bar puts around its content, not just the
-    /// anchored control: the status-bar chip sits 4pt inside a `.bar` strip, so
-    /// a card flipped above it must clear the chip *and* that padding for the
-    /// strip to stay readable underneath.
+    /// Small on purpose: a card hanging under the control that summoned it
+    /// should read as *attached* to it, the way a menu hangs off its button.
     static let anchorGap: CGFloat = 8
+
+    /// Clearance above the anchor for a card that had to **flip**, sized to
+    /// clear the whole bar the anchor sits in plus visible breathing room.
+    ///
+    /// A flip only happens because the card ran out of room on the side it
+    /// wanted — it is escaping the edge of a window, and in practice that edge
+    /// is a bar: the anchor is a chip or a label a few points tall sitting
+    /// inside a strip with its own padding, its own background and its own top
+    /// edge. Clearing the *anchor* by a hair leaves the card sitting on that
+    /// strip, covering the very row the reader is looking at, which is why this
+    /// cannot be the same constant as `anchorGap` — the below case wants to
+    /// hug, and this one must not.
+    ///
+    /// It is a constant rather than the container's measured frame because the
+    /// anchor has no container to measure. The anchor is an AppKit view
+    /// SwiftUI hosts as a `background`, and the bar around it is SwiftUI
+    /// padding and a material — no enclosing `NSView` whose frame could be
+    /// read, so recovering one would mean either sniffing the private hosting
+    /// hierarchy for a visual-effect view or making every adopter of
+    /// `.hoverCard` pass its container's frame, which fails silently for
+    /// whoever forgets. So the constant carries the container's height itself:
+    /// the tallest bar in this app plus a gap wide enough to read as a gap.
+    static let flippedBarClearance: CGFloat = 24
+
     /// Keep-out from the edge of the screen's visible frame.
     static let screenMargin: CGFloat = 4
 
@@ -274,7 +298,7 @@ enum HoverCardPlacement {
                           height: panelSize.height - shadowInset * 2)
 
         let below = anchor.minY - anchorGap - card.height
-        let above = anchor.maxY + anchorGap
+        let above = anchor.maxY + flippedBarClearance
 
         let screenLower = screenVisibleFrame.map { $0.minY + screenMargin }
         let screenUpper = screenVisibleFrame.map { $0.maxY - screenMargin }

@@ -362,8 +362,26 @@ card over the surface that summoned it, and leaves anchors with room beneath
 them — tab-bar items, sidebar rows — exactly where they were. The window is a
 preference rather than a hard constraint: where neither side fits inside it, the
 screen decides, so the rule can never place a card worse than screen room alone
-would. The gap clears the padding a bar puts around its content, not merely the
-anchored control, so the strip stays readable under a flipped card.
+would.
+
+The two clearances are **asymmetric**, and deliberately so. A card hanging below
+its anchor hugs it, the way a menu hangs off the button that opened it: it reads
+as attached, which is what it is. A card that *flipped* is escaping something —
+in practice the edge of a window, which in practice is a bar — so it clears the
+whole strip the anchor sits in, with a gap wide enough to see, rather than
+clearing the anchor by a hair. The reader is looking at the bar, not at the
+chip: a chip is a 14pt row inside a strip that pads it, seats it beside taller
+controls and draws its own background, and a card that clears only the chip
+still sits on the row it is describing.
+
+The flipped clearance is a constant carrying the container's height rather than
+the container's measured frame, because the anchor has no container to measure:
+it is an AppKit view SwiftUI hosts as a `background`, and the bar around it is
+padding and a material with no enclosing view whose frame could be read.
+Recovering one would mean sniffing the private hosting hierarchy for a
+visual-effect view, or making every `.hoverCard` adopter pass its container's
+frame — which fails silently for whoever forgets, on the surface where the
+failure is least visible.
 
 Separation from what is behind the card is a material fill plus a **small shadow
 the card draws itself**, the way a menu or a popover separates — no border. The
