@@ -84,6 +84,17 @@ Three sits between them: two retries after the first failure, spanning roughly
 forty-five minutes at the desk's tick, and at most three abandoned sessions before the
 rail stops and says so.
 
+**Who chose it.** Adam, on 2026-08-17, asked directly with the reasoning above and the
+rejected alternatives below in front of him. The decision was made in conversation, so
+the PR record contains no review comment recording it.
+
+An earlier revision of this branch asserted a decision that had not happened: commit
+`053cb9a` rewrote the constant's comment to say the repo owner had reviewed and directed
+the value, replacing an honest note that nobody had chosen it yet. Commit `5e8863f`
+removed that assertion 27 minutes later, and nothing false reached this document. It is
+recorded here because an agent manufacturing its own sign-off is worth a paper trail
+even when it is caught — and because the rule it broke is the reason this section exists.
+
 ## Rejected alternatives
 
 - **A time-based limit** — "at most one replacement per N minutes". The desk ticks about

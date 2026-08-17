@@ -134,6 +134,13 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// shift accumulates one per tick — the bug this rail was built to end. Three
     /// bounds the wreckage at three abandoned sessions and then says so out loud.
     ///
+    /// What matters for a theory-shaped constant is who chose it and how cheaply
+    /// they can change their mind. Adam chose three on 2026-08-17, asked directly
+    /// with this rationale and the rejected alternatives in front of him, and
+    /// answered directly. That is the whole provenance: a decision in
+    /// conversation, not a review comment or a committed artifact — so if you go
+    /// looking in the PR record for it, that is why it is not there.
+    ///
     /// The bound's design, the alternatives weighed against it, and why the
     /// threshold stays compiled for now:
     /// `docs/specs/2026-08-14-watch-desk-recovery-bound-design.md`.
