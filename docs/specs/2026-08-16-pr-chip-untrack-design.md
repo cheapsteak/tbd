@@ -140,11 +140,19 @@ suppress that worktree's legacy-status fallback permanently. One mistyped
 `tbd pr detach <other-repo-url>` would retire a worktree's real PR indicator
 with no way back.
 
-An **unresolved** repo is not a mismatch. The resolver is `gh repo view` behind
-a TTL cache, so it answers nil under exactly the conditions that produce the
-synthetic chip in the first place — `gh` unauthenticated, offline, or missing.
-Reading that nil as a refusal would disable insert-on-miss in the one scenario
-it was written for. It reads as "no reason to refuse".
+An **unresolved** repo is neither a match nor a mismatch, and both readings of
+it are wrong. The resolver is `gh repo view` behind a TTL cache, so it answers
+nil under exactly the conditions that produce the synthetic chip in the first
+place — `gh` unauthenticated, offline, or missing. Reading that nil as a refusal
+disables insert-on-miss in the one scenario it was written for. Reading it as
+consent lets a mistyped foreign URL mint the permanent tombstone above.
+
+So a nil is decided on other evidence: **the PR number the worktree's cached
+`Worktree.prStatus` names**, which is the only fact about its PRs that survives
+`gh` being gone, and is exactly what a synthetic chip is built from. The offline
+xmark therefore works, while `tbd pr detach <some other PR>` on an unresolvable
+worktree writes nothing. A worktree with no cached status offers no evidence and
+gets no tombstone.
 
 Declining reports "changed nothing", which is the honest answer: this worktree
 is not tracking that PR. The CLI says exactly that, because the same false also
@@ -244,9 +252,15 @@ earlier. Every surface that renders it must render its age with it.
   row in place instead, keeping that row's id and `source` — the arm that makes
   a concurrent bind harmless.
 - Detaching an unbound PR from another repo writes nothing and reports no
-  change; detaching one whose repo cannot be resolved at all still tombstones
-  it; and detaching a row that already exists works after the worktree's repo
-  has changed under it.
+  change. With the repo unresolvable, the worktree's cached PR is still
+  tombstoned while any other PR is not, and a worktree with no cached status
+  gets neither. Detaching a row that already exists works after the worktree's
+  repo has changed under it.
+- The untrack gesture's four outcomes: the detach landed, the daemon declined
+  and the chip survived, the refresh failed so the stale map is not evidence,
+  and the RPC threw.
+- The overlay carries the "last check did not resolve" clause after the age,
+  exactly as the toolbar and sidebar do.
 - A `pr.detach` whose URL does not parse resolves through its number, against
   the worktree's own repo; one with neither is still an error; and `pr.attach`
   does not fall through at all.
