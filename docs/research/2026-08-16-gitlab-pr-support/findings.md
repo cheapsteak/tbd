@@ -16,10 +16,25 @@ asserted.
 `--help` surfaces read directly. Its *source* was read at `main`, which may sit
 slightly ahead of 1.113.0.
 
-Nothing here was measured against a live GitLab instance: no merge request was
-created, fetched, or polled, and no authenticated call was made. Facts about
-`glab` come from the installed binary's help output and from its source; facts
-about GitLab's API come from documentation and from GitLab's own source.
+**Measured against gitlab.com:** 2026-08-16, **unauthenticated**, by cloning two
+public projects and querying the public API. Sections resting on a live
+measurement say so. No merge request was created, no write was made, and no
+account was used — so everything requiring authentication or write access
+remains open, and is listed in
+[What could not be verified](#what-could-not-be-verified).
+
+The probes were:
+
+- **A top-level clone** (`gitlab-org/cli`) and a **four-segment nested clone**
+  (`gitlab-org/ruby/gems/gitlab-styles`), to exercise both namespace shapes.
+- **Batched GraphQL reads** by `iids` and by `state: opened`, single-project and
+  multi-project-aliased.
+- **A REST `iids[]` batch** against the same project.
+- **A host-fingerprint sweep** of `/api/v4/version` across five hosts.
+
+Facts about `glab` come from the installed binary's help output and from its
+source; facts about GitLab's API come from documentation, from GitLab's own
+source, and — where marked — from these probes.
 
 ## Summary
 
@@ -72,17 +87,22 @@ so N merge requests in a project come back from one *field*, not N aliases —
 and `detailedMergeStatus` and `headPipeline { status }` ride in the same
 response, eliminating TBD's per-PR check query. Per-tick round trips on a
 40-worktree fleet go from roughly 11–51 down to roughly 5–6. REST batches too:
-`GET /projects/:id/merge_requests?iids[]=…`. The real cost question is not the
-number of calls but the server-side price of the fields, several of which are
-`calls_gitaly: true`, against a documented complexity ceiling of 250 for an
-authenticated GraphQL query.
+`GET /projects/:id/merge_requests?iids[]=…`. **Measured:** 88 merge requests
+across 5 aliased projects, 12 fields each, came back in one unauthenticated
+round trip in 7.8 s / 30 KB — and 100 merge requests with 11 fields, including
+every `calls_gitaly` field, returned HTTP 200 against the *unauthenticated*
+complexity ceiling of 200. Complexity is therefore scored per query field, not
+multiplied by page size, which was the one number that could have made this
+approach unaffordable.
 
-**Host identification is the genuinely unsolved part.** Self-hosted GitLab lives
-on arbitrary domains, and nothing in a git remote says which forge answers
-there. `glab` does not solve this — it does not probe at all; it takes the host
-from configuration or `GITLAB_HOST` and assumes
+**Host identification remains a decision, but a cheap probe is now measured.**
+Self-hosted GitLab lives on arbitrary domains, and nothing in a git remote says
+which forge answers there. `glab` does not solve this — it does not probe at
+all; it takes the host from configuration or `GITLAB_HOST` and assumes
 ([`internal/glinstance/host.go`](https://gitlab.com/gitlab-org/cli/-/raw/main/internal/glinstance/host.go)).
-Whatever TBD does here is a decision, not a lookup.
+But an unauthenticated `GET /api/v4/version` discriminates cleanly: **401 on
+GitLab, 404 on every non-GitLab host tested**, including another forge. Whether
+TBD should make that request at all is still a decision, not a lookup.
 
 A note on scope, because it changes the shape of the work: **GitHub Enterprise
 is a much smaller, separable case.** `gh` already speaks to it, the GraphQL
@@ -406,17 +426,41 @@ documented as 1-indexed with "front of queue == 1" (`Models.swift:1643`);
 reads that number directly, so the mapping must add one — or the field's
 contract must change, which touches the GitHub side too.
 
-**Mergeability may be stale on a list read.** GitLab's merge-request list
-endpoint documentation notes that listing "might not proactively update the
-`merge_status` field, as this represents an expensive operation", and offers
-`with_merge_status_recheck` to request (but not guarantee) an asynchronous
-recomputation. TBD's `PRObservation` vocabulary already has the right shape for
-this — an `.undetermined(cause:)` distinct from a value — but a
-`detailedMergeStatus` of `UNCHECKED` arriving from a batch read is a *third*
+**Mergeability is routinely stale, on GraphQL too — measured.** GitLab's
+merge-request list endpoint documentation notes that listing "might not
+proactively update the `merge_status` field, as this represents an expensive
+operation", and offers `with_merge_status_recheck` to request (but not
+guarantee) an asynchronous recomputation. The GraphQL path is **not** exempt: a
+live batch read of three open merge requests on a public project returned
+`detailedMergeStatus: "UNCHECKED"` for two of them and `"NOT_APPROVED"` for the
+third, in the same response. So a poll will see `UNCHECKED` regularly, not
+rarely.
+
+TBD's `PRObservation` vocabulary already has the right shape for this — an
+`.undetermined(cause:)` distinct from a value — but `UNCHECKED` is a *third*
 thing again: the forge answered, and the answer is "I have not computed it".
-Mapping that to `.pending` is plausible; mapping it to
-`.undetermined(cause: …)` may be more honest. Whether the GraphQL path has the
-same laziness is unverified.
+Mapping it to `.pending` is plausible; mapping it to `.undetermined(cause: …)`
+may be more honest, and would keep the previous value on screen rather than
+flipping a settled PR to amber every time GitLab's cache expires.
+
+**A merged or closed MR reports `NOT_OPEN`, not a merge verdict — measured.**
+Every merged merge request in the live batch came back with
+`detailedMergeStatus: "NOT_OPEN"`. So `state` must be read first and
+`detailedMergeStatus` consulted only when `state == "opened"` — which is
+structurally the same shape as `mapStateAndReason` switching on `ghState`
+before it looks at `mergeStateStatus` (`PRStatusManager.swift:1149-1153`).
+Note also that `mergeable` is `false` on a merged MR, so that field must not be
+read as "was mergeable".
+
+**Node order does not follow the `iids` argument — measured.** The response
+returned nodes newest-first regardless of the order requested, and **a requested
+`iid` that does not resolve is silently absent from `nodes`** rather than
+appearing as a null (a 20-iid request against one project returned 8 nodes).
+TBD's alias-keyed approach gets its binding correspondence from the alias table;
+a GitLab port must match on `iid` and treat absence as "did not resolve" — which
+is exactly what `refreshBindingGroup` already does when
+`nodesByBindingID[binding.id]` misses (`:872-877`), so the existing
+keep-previous-status behaviour carries over unchanged.
 
 ## Part 4 — Batching and fleet cost
 
@@ -481,10 +525,11 @@ strength here, not a risk.
 **REST batches too**, if a design prefers it:
 `GET /projects/:id/merge_requests?iids[]=1&iids[]=2`, and the list response
 carries `detailed_merge_status`, `draft`, `source_branch`, `target_branch`,
-`web_url`, `has_conflicts` and `blocking_discussions_resolved`. It does **not**
-appear to carry `head_pipeline` — that is documented on the single-MR response —
-so a REST design would reintroduce a per-MR call for pipeline status, or accept
-`detailed_merge_status` alone. This asymmetry is the strongest argument for
+`web_url`, `has_conflicts` and `blocking_discussions_resolved`. **Measured:** a
+two-iid REST batch returned in 0.5 s with `detailed_merge_status` present
+(`not_approved`, `mergeable`) and **`head_pipeline` absent entirely**. So a REST
+design reintroduces a per-MR call for pipeline status — the exact per-PR term
+the GraphQL path deletes. This measured asymmetry is the strongest argument for
 GraphQL on the GitLab side.
 
 ### The real cost ceilings
@@ -497,16 +542,29 @@ GraphQL on the GitLab side.
   [`gitlab_schema.rb`](https://gitlab.com/gitlab-org/gitlab/-/raw/master/app/graphql/gitlab_schema.rb)).
   Docs state "each field in a query adds `1` to the complexity score, although
   this can be higher or lower for particular fields", and do not document how
-  connections or `calls_gitaly` fields are scored. A batch of 20 merge requests
-  with 10 fields each is either 10 (if connections cost per-field) or 200+ (if
-  per-node) — a factor of twenty apart, and the answer decides whether the
-  20-binding cap is comfortable or already over budget. **This must be measured
-  against a real instance before a cadence is chosen.**
-- **Gitaly-backed fields.** `detailedMergeStatus`, `mergeable`, `approved`,
-  `approvalsLeft` and `approvalsRequired` are all declared `calls_gitaly: true`.
-  Each is a git-layer operation server-side. Asking for all of them across 20
-  merge requests every 30 seconds, per project, per fleet, is a load question
-  that no rate limit will surface until an administrator complains.
+  connections or `calls_gitaly` fields are scored. **Measured, and the answer is
+  the good one:** `mergeRequests(first: 100)` selecting 11 fields per node —
+  including every `calls_gitaly` field — returned HTTP 200 *unauthenticated*,
+  against the lower ceiling of 200. Per-node scoring would have put that query
+  above 1,000. So complexity counts query-AST fields and is **not** multiplied
+  by page size, and batch width is bounded by page size (100) and query text
+  (10,000 characters), not by the complexity budget. A 5-project × 20-iid ×
+  12-field query measured 1,561 characters — roughly 6× headroom on the text
+  limit.
+- **Gitaly-backed fields are affordable, but the first read is not.**
+  `detailedMergeStatus`, `mergeable`, `approved`, `approvalsLeft` and
+  `approvalsRequired` are all declared `calls_gitaly: true`. Measured warm, each
+  is cheap: 6 open merge requests with `detailedMergeStatus` took 0.42 s,
+  `mergeable` 0.36 s, `approved` 0.18 s. But the **first** query combining all of
+  them against a cold cache took over two minutes before returning, while every
+  repeat was sub-second. One observation is not a pattern, and this was
+  unauthenticated against gitlab.com's busiest namespace — but a first-poll
+  latency spike is worth expecting, and TBD's existing discipline already covers
+  it: a slow or failed fetch keeps the previous cached status rather than
+  guessing.
+- **Bulk timings, for cadence sizing.** 100 merge requests × 11 fields: 2.6 s.
+  88 merge requests across 5 aliased projects × 12 fields: 7.8 s, 30 KB. Both
+  unauthenticated and uncached.
 - **Rate limits are generous.** gitlab.com allows **2,000 authenticated API
   requests per minute per user** and 500 unauthenticated per IP
   ([gitlab.com limits](https://docs.gitlab.com/user/gitlab_com/)). At the 5-minute
@@ -536,15 +594,24 @@ user must first have run `glab auth login --hostname <host>`, which is itself
 the declaration. **`glab`'s answer to "how do you know it's GitLab" is "the user
 told us."**
 
-**A cheap probe does exist, if a design wants one.** `GET
-https://<host>/api/v4/version` returns **HTTP 401** unauthenticated — verified
-directly against gitlab.com on 2026-08-16, which returned 401 with no body
-readable. Authentication is required for that endpoint and for `/api/v4/metadata`
-([version/metadata API](https://docs.gitlab.com/api/version/)). A 401 from
-`/api/v4/version` is therefore a strong positive fingerprint: a non-GitLab host
-almost certainly 404s. But it is an unauthenticated outbound request to an
-arbitrary domain read from a user's git config, made by a background daemon, and
-that is a decision with a privacy dimension, not a lookup.
+**A cheap probe does exist, and it discriminates cleanly — measured.**
+`GET https://<host>/api/v4/version` requires authentication
+([version/metadata API](https://docs.gitlab.com/api/version/)), so on GitLab it
+answers 401 rather than 404. Swept across five hosts on 2026-08-16,
+unauthenticated:
+
+- `gitlab.com` → **401**, body `{"message":"401 Unauthorized"}`
+- `github.com` → 404, body `Not Found`
+- `codeberg.org` (Forgejo) → 404, body `Not found.`
+- `git.kernel.org` (cgit) → 404, an HTML page
+- `example.com` → 404, an HTML page
+
+The 401-versus-404 split is crisp, and notably does **not** false-positive on
+another forge. One request, no auth, no state. But it is still an outbound
+request to an arbitrary domain read from a user's git config, made by a
+background daemon on the user's behalf — a decision with a privacy dimension,
+not a lookup. It also cannot distinguish a GitLab instance the user can reach
+from one they cannot, since 401 is exactly what "no credentials" looks like.
 
 **The options, stated without choosing between them:**
 
@@ -757,17 +824,18 @@ Stated plainly rather than asserted anywhere above:
   whether it contains the created MR's URL or only the "new merge request" form
   URL. GitLab's docs page for push options redirected to an authentication gate
   and could not be read.
-- **How GitLab scores GraphQL complexity for connections and for
-  `calls_gitaly: true` fields.** The 250 ceiling is documented; the arithmetic
-  that consumes it is not. This decides whether a 20-MR batch fits.
-- **Whether the GraphQL `detailedMergeStatus` is computed on read or is as lazy
-  as REST's `merge_status`.** The REST laziness is documented; the GraphQL
-  behaviour is not.
-- **How EE-only fields behave on a Free instance.** `approvalsLeft`,
-  `approvalsRequired`, `approvalState`, `mergeTrainCar` and `changeRequesters`
-  are declared in `ee/`. Whether they are absent from the schema (query error) or
-  present-and-null (graceful) on a Free self-managed instance was not tested, and
-  a query that errors wholesale on one instance shape is a real failure mode.
+- **How EE-only fields behave on a self-managed instance built without the EE
+  code.** On gitlab.com they degrade gracefully: querying `approvalsLeft`,
+  `approvalsRequired` and `mergeTrainCar` against a free-tier public project
+  (`veloren/veloren`) returned `1`, `1` and `null` respectively with no error,
+  and the same fields on a licensed project returned real values. But gitlab.com
+  runs the EE codebase with tier gating, so this shows *tier* degradation, not
+  *codebase* degradation. A CE-built self-managed instance may not carry the
+  fields in its schema at all, which would fail the whole query rather than one
+  field. Only a CE instance can settle it.
+- **Whether authenticated behaviour differs from what was measured.** Every
+  probe was unauthenticated. Rate limits, complexity ceiling (250 vs 200),
+  private-project visibility and per-user throttling were all untested.
 - **Whether GitLab project paths are case-insensitive.** TBD lowercases owner and
   repo on write and on comparison specifically because GitHub is
   (`PRBindingStore.swift:29-31`, `PRBinding.swift:96-99`). GitLab has a
@@ -784,8 +852,11 @@ Stated plainly rather than asserted anywhere above:
   same 22 entries. The values themselves agreed exactly across both reads and are
   what Part 3 rests on, but the count should be re-derived before anything
   exhaustive is built on it.
-- **Nothing was run against a live GitLab instance.** No latency figure, no
-  measured complexity score, no observed response body for a merge request.
+- **Nothing was written.** No merge request was created by any route, so
+  `glab mr create`'s end-to-end output was inferred from its source rather than
+  observed, and the push-option path was never exercised. A throwaway project on
+  any instance would settle both, plus the CE question above if the instance is
+  self-managed.
 
 ## Open questions for the design session
 
@@ -816,7 +887,11 @@ bearing on it:* `glab` itself does not probe, and the repo's own doctrine
 edits rather than an inference the daemon computes. Against that: a fleet of 40
 worktrees across many repos makes a per-repo setup step real friction, and a
 wrong or absent declaration fails silently — no binding ever forms, which is
-exactly the symptom that prompted this research.
+exactly the symptom that prompted this research. The probe option is now
+measured and works cleanly (401 on GitLab, 404 on four non-GitLab hosts
+including another forge), so the question is no longer "would a probe work" but
+"should a background daemon make unsolicited requests to hosts it read out of a
+user's git config".
 
 **4. What is a repository's identity, now that it is not `(owner, repo)`?**
 GitLab projects nest up to 20 levels. The choices are: keep two columns and
@@ -859,8 +934,17 @@ and TBD currently treats the former as `.mergeable`
 higher severity. Distinguishing them on GitLab needs either the EE-only
 `changeRequesters` field or a per-reviewer `reviewState` scan. *The fork:* accept
 that GitLab Free cannot express `.changesRequested` at all, or query paid-tier
-fields and degrade when they are unavailable — which requires knowing how those
-fields behave on a Free instance, listed above as unverified.
+fields and degrade when they are unavailable. *Evidence bearing on it:* the
+degradation is graceful on gitlab.com — a free-tier project answered
+`approvalsLeft`/`approvalsRequired` with real numbers and `mergeTrainCar` with
+null, no error — so the "query them and cope" branch is viable there. Whether it
+survives a CE-built self-managed instance is still open, and that is the shape
+that would fail the *whole* query rather than one field.
+
+Note also that `NOT_APPROVED` is not a rare corner: three of six open merge
+requests sampled on a live public project reported it, and two more reported
+`DISCUSSIONS_NOT_RESOLVED` — a state TBD has no case for at all. Whatever this
+question resolves to will be visible constantly, not occasionally.
 
 **8. `glab` subprocess, or direct HTTPS?**
 Laid out in [Part 6](#part-6--the-cli-and-auth-story). The fork is really about
@@ -896,8 +980,11 @@ layer users do not read.
 
 **11. Does the 20-binding cap still make sense?**
 It exists to bound per-poll GraphQL cost (`PRBindingStore.swift:87-90`), and on
-GitLab that cost is a single `iids: [...]` argument rather than 20 aliases — so
-the justification weakens considerably. *Evidence bearing on it:* whether it
-weakens or vanishes depends on GitLab's connection complexity arithmetic, which
-is unverified. If a connection costs per-node, the cap matters more on GitLab,
-not less.
+GitLab that cost is a single `iids: [...]` argument rather than 20 aliases.
+*Evidence bearing on it:* the complexity arithmetic is now measured and does not
+scale with node count — 100 nodes × 11 fields passed the *lower* unauthenticated
+ceiling — so on the GitLab path the cap buys essentially nothing below the
+100-node page limit. That is an argument for leaving it alone rather than
+removing it: it still bounds the GitHub path, where cost genuinely is per-alias,
+and a cap that differs per forge is a worse thing to reason about than one that
+is merely redundant on one side.
