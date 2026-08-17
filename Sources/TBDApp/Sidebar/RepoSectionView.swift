@@ -491,7 +491,10 @@ struct RepoSectionView: View {
             // from here round-trips into THIS repo's section instead of
             // landing unmatched.
             repoPrefill: RemoteCreateFormLogic.repoPrefill(remoteURL: repo.remoteURL),
-            repoDefaults: repo.remoteCreateDefaults
+            repoDefaults: repo.remoteCreateDefaults,
+            // The section the optimistic lane row belongs to while the
+            // provider is starting the session.
+            repoID: repo.id
         )
     }
 
@@ -513,7 +516,7 @@ struct RepoSectionView: View {
         case .createNow(let paramsJSON):
             Task {
                 await appState.createRemoteSession(
-                    provider: provider.config.name, paramsJSON: paramsJSON)
+                    provider: provider.config.name, paramsJSON: paramsJSON, repoID: repo.id)
             }
         case .openForm:
             // The sheet re-resolves from the same inputs, so it opens on the

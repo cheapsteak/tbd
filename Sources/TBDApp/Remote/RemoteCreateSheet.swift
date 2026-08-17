@@ -41,6 +41,13 @@ struct RemoteCreateSheet: View {
     /// request, and the daemon applies it when it adopts the session. A parent
     /// the parent rules refuse costs the edge, never the session.
     var parentWorktreeID: UUID?
+    /// The repo section the optimistic lane row is drawn in while the provider
+    /// starts the session, or nil when the sheet was opened with no repo
+    /// context (the Remote section's own provider header) — then no row is
+    /// drawn and creation behaves exactly as it did before placeholders.
+    /// Distinct from `repoPrefill`, which is a create-param value the provider
+    /// sees; this one never leaves the app.
+    var repoID: UUID?
 
     @EnvironmentObject var appState: AppState
     @Environment(\.dismiss) private var dismiss
@@ -204,9 +211,15 @@ struct RemoteCreateSheet: View {
         isSubmitting = true
         Task {
             do {
-                _ = try await appState.daemonClient.remoteCreate(
+                // Through `AppState` rather than the client directly, so the
+                // optimistic lane row is drawn, swapped and — on the failure
+                // below — removed by the same path every other create uses.
+                // The sheet still stays up until the provider answers: its
+                // inline error next to the offending field is a better report
+                // than a toast, and it keeps the typed values for a retry.
+                _ = try await appState.createRemoteLane(
                     provider: provider.name, paramsJSON: paramsJSON,
-                    parentWorktreeID: parentWorktreeID)
+                    parentWorktreeID: parentWorktreeID, repoID: repoID)
                 isSubmitting = false
                 dismiss()
             } catch {

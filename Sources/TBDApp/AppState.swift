@@ -734,6 +734,13 @@ final class AppState: ObservableObject {
     @Published var draggingTabID: UUID? = nil
     @Published var repoFilter: UUID? = nil
     @Published var pendingWorktreeIDs: Set<UUID> = []
+    /// Remote lanes drawn optimistically while `remote.create` is in flight,
+    /// one entry per placeholder row (whose id is also in `pendingWorktreeIDs`,
+    /// so a poll landing mid-create preserves the row like any other
+    /// placeholder). Not `@Published` — no view reads it; it is the bookkeeping
+    /// `AppState+Remote`'s create path uses to retire each placeholder on the
+    /// `(provider, sessionID)` pair. See `PendingRemoteLane`.
+    var pendingRemoteLanes: [PendingRemoteLane] = []
     /// Worktree IDs optimistically removed by an archive that has not yet been
     /// confirmed by daemon data. `refreshWorktrees` filters these out so a
     /// `listWorktrees` poll issued before the daemon flipped the status cannot
@@ -1453,6 +1460,22 @@ final class AppState: ObservableObject {
             try await daemonClient.setRemoteSessionPin(
                 provider: provider, sessionID: sessionID, pinned: pinned)
         }
+
+    /// How `createRemoteLane` starts a provider session — injectable for the
+    /// same reason as `remoteRenamePusher` (`DaemonClient` is concrete, no
+    /// protocol), so the optimistic-placeholder paths are testable without a
+    /// real daemon (tests must never touch `~/tbd`).
+    lazy var remoteSessionCreator: @MainActor (String, String, UUID?) async throws -> RemoteSessionPayload =
+        { [daemonClient] provider, paramsJSON, parentWorktreeID in
+            try await daemonClient.remoteCreate(
+                provider: provider, paramsJSON: paramsJSON, parentWorktreeID: parentWorktreeID)
+        }
+    /// How `createRemoteLane` re-reads the worktree list once `remote.create`
+    /// has answered. A plain refresh in production; a seam because a test that
+    /// exercises the placeholder swap must be able to decide whether the
+    /// adopted row shows up, without a daemon to adopt anything.
+    lazy var remoteLaneRowsRefresher: @MainActor () async -> Void =
+        { [weak self] in await self?.refreshWorktrees() }
 
     /// How `reportRemoteAttachExit` tells the daemon an app-spawned `attach`
     /// exited — injectable for the same reason as `remoteSessionPinSetter`

@@ -168,7 +168,10 @@ struct WorktreeRowView: View {
             describe: provider.describe,
             repoPrefill: RemoteCreateFormLogic.repoPrefill(remoteURL: owningRepo?.remoteURL),
             repoDefaults: owningRepo?.remoteCreateDefaults ?? [:],
-            parentWorktreeID: worktree.id
+            parentWorktreeID: worktree.id,
+            // The optimistic lane row nests under THIS row, in this row's own
+            // repo section — the nested `+` promises exactly that placement.
+            repoID: worktree.repoID
         )
     }
 
@@ -195,7 +198,7 @@ struct WorktreeRowView: View {
             Task {
                 await appState.createRemoteSession(
                     provider: provider.config.name, paramsJSON: paramsJSON,
-                    parentWorktreeID: worktree.id)
+                    parentWorktreeID: worktree.id, repoID: worktree.repoID)
             }
         case .openForm:
             remoteCreateSheetProvider = provider

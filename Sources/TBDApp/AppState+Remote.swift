@@ -247,16 +247,169 @@ extension AppState {
     /// click that creates nothing and says nothing is indistinguishable from a
     /// click that missed.
     func createRemoteSession(
-        provider: String, paramsJSON: String, parentWorktreeID: UUID? = nil
+        provider: String, paramsJSON: String, parentWorktreeID: UUID? = nil, repoID: UUID? = nil
     ) async {
         do {
-            _ = try await daemonClient.remoteCreate(
-                provider: provider, paramsJSON: paramsJSON, parentWorktreeID: parentWorktreeID)
+            _ = try await createRemoteLane(
+                provider: provider, paramsJSON: paramsJSON,
+                parentWorktreeID: parentWorktreeID, repoID: repoID)
         } catch {
             remoteLogger.error(
                 "one-click remoteCreate failed for provider=\(provider, privacy: .public): \(error, privacy: .public)")
             showErrorToast("Couldn't start remote session: \(error.localizedDescription)")
         }
+    }
+
+    // MARK: - The optimistic lane
+
+    /// Start a remote session behind an optimistic sidebar row, and retire that
+    /// row once the real one lands. The single create path — the one-click `+`,
+    /// the nested `+` and `RemoteCreateSheet` all come through here, so a lane
+    /// looks the same however it was started. Rethrows so the sheet can keep
+    /// reporting a failure inline, next to the field that caused it.
+    ///
+    /// A local create is swapped on the id `worktree.create` returns
+    /// (`AppState.replaceCreationPlaceholder`). This one cannot be: the RPC
+    /// answers with the PROVIDER's session payload, while the worktree row is
+    /// minted separately by `RemoteSessionAdopter` under an unrelated UUID.
+    /// The `(provider, sessionID)` pair the row carries in its
+    /// `Worktree.location` is the only fact both sides share, so that is what
+    /// retires the placeholder — see `RemoteLanePlaceholder.adoptedRow`.
+    ///
+    /// `repoID` is the section the placeholder belongs in. nil means the caller
+    /// has no repo context (the Remote section's own provider header), and then
+    /// there is nowhere to draw a row: the create still happens, with exactly
+    /// the behavior it had before there were placeholders at all.
+    @discardableResult
+    func createRemoteLane(
+        provider: String, paramsJSON: String, parentWorktreeID: UUID? = nil, repoID: UUID?
+    ) async throws -> RemoteSessionPayload {
+        let placeholderID = beginRemoteLanePlaceholder(
+            provider: provider, paramsJSON: paramsJSON,
+            parentWorktreeID: parentWorktreeID, repoID: repoID)
+        do {
+            let session = try await remoteSessionCreator(provider, paramsJSON, parentWorktreeID)
+            if let placeholderID {
+                await settleRemoteLanePlaceholder(placeholderID, sessionID: session.id)
+            }
+            return session
+        } catch {
+            // A thrown create means there is no session and no row coming:
+            // both `remote.create` attempts timed out, the provider refused, or
+            // the daemon did. Whoever called this reports it — the placeholder
+            // must not outlive the attempt, because a lane that never resolves
+            // is worse than the wait it was drawn to cover.
+            if let placeholderID { dropRemoteLanePlaceholder(placeholderID) }
+            throw error
+        }
+    }
+
+    /// Draw the placeholder row, select it, and start tracking it. Returns the
+    /// placeholder's id, or nil when there is no repo section to draw it in.
+    ///
+    /// Deliberately mirrors `createWorktree`'s opening: a `.creating` row with
+    /// no path and no tmux server, added to `pendingWorktreeIDs` so
+    /// `refreshWorktrees` preserves it across every poll until it is retired.
+    /// It carries `parentWorktreeID` for the same reason a local placeholder
+    /// does — a lane started from a row's nested `+` must appear under that
+    /// row, not at top level.
+    ///
+    /// Unlike a local placeholder it does NOT arm rename-on-create: the name
+    /// here is a guess at what the provider will title the session, and the
+    /// adopted row's own `displayName` replaces it — typing into a field that
+    /// is about to be overwritten would lose the rename.
+    private func beginRemoteLanePlaceholder(
+        provider: String, paramsJSON: String, parentWorktreeID: UUID?, repoID: UUID?
+    ) -> UUID? {
+        guard let repoID else { return nil }
+        let name = RemoteLanePlaceholder.displayName(
+            paramsJSON: paramsJSON, fallback: NameGenerator.generate())
+        let placeholder = Worktree(
+            repoID: repoID,
+            name: name,
+            displayName: name,
+            branch: "",
+            path: "",
+            status: .creating,
+            tmuxServer: "",
+            parentWorktreeID: parentWorktreeID,
+            location: .remote(provider: provider, sessionID: "")
+        )
+        pendingWorktreeIDs.insert(placeholder.id)
+        worktrees[repoID, default: []].append(placeholder)
+        selectedWorktreeIDs = [placeholder.id]
+        pendingRemoteLanes.append(
+            PendingRemoteLane(
+                id: placeholder.id, repoID: repoID, provider: provider, sessionID: nil))
+        return placeholder.id
+    }
+
+    /// Retire the placeholder now that `remote.create` has named the session.
+    ///
+    /// Both arrival orders end with exactly one row, and neither depends on
+    /// which happened:
+    ///
+    ///  - The row is already here — a poll landed in the window between the
+    ///    daemon adopting the session and this call — so the swap happens
+    ///    immediately, on the session id that just became knowable.
+    ///  - The row is not here yet. `remote.create` adopts before it answers
+    ///    (`RPCRouter+RemoteHandlers.handleRemoteCreate`), so a refresh STARTED
+    ///    now is authoritative: it either brings the row or tells us no row is
+    ///    coming.
+    ///
+    /// "No row is coming" is a real outcome, not a bug — a session whose repo
+    /// TBD cannot resolve is never adopted and lives in the Remote section
+    /// alone. The placeholder goes either way, and the user is told, because a
+    /// lane that stays `.creating` forever is exactly the ghost this whole path
+    /// must not produce.
+    private func settleRemoteLanePlaceholder(_ placeholderID: UUID, sessionID: String) async {
+        guard let index = pendingRemoteLanes.firstIndex(where: { $0.id == placeholderID })
+        else { return }
+        pendingRemoteLanes[index].sessionID = sessionID
+        if swapRemoteLanePlaceholderIfAdopted(placeholderID) { return }
+        await remoteLaneRowsRefresher()
+        if swapRemoteLanePlaceholderIfAdopted(placeholderID) { return }
+        dropRemoteLanePlaceholder(placeholderID)
+        showTransientToast(
+            "Remote session started, but no lane appeared for it — look for it in the Remote section.",
+            style: .notice)
+    }
+
+    /// Replace the placeholder with the adopted row if it has arrived, moving
+    /// the selection along with it. Answers false when nothing matches yet.
+    ///
+    /// The selection only follows when it was still on the placeholder: a
+    /// remote create can take a minute, and a user who clicked elsewhere while
+    /// waiting must not be yanked back.
+    @discardableResult
+    private func swapRemoteLanePlaceholderIfAdopted(_ placeholderID: UUID) -> Bool {
+        guard let lane = pendingRemoteLanes.first(where: { $0.id == placeholderID }),
+              let row = RemoteLanePlaceholder.adoptedRow(for: lane, in: allWorktrees)
+        else { return false }
+        removeRemoteLanePlaceholderRow(lane)
+        if selectedWorktreeIDs == [placeholderID] {
+            selectedWorktreeIDs = [row.id]
+        }
+        return true
+    }
+
+    /// Remove the placeholder with no row to put in its place — a failed
+    /// create, or a session nothing adopted. Clears a selection left pointing
+    /// at it so the detail pane doesn't sit on a row that no longer exists.
+    private func dropRemoteLanePlaceholder(_ placeholderID: UUID) {
+        guard let lane = pendingRemoteLanes.first(where: { $0.id == placeholderID }) else { return }
+        removeRemoteLanePlaceholderRow(lane)
+        if selectedWorktreeIDs == [placeholderID] {
+            selectedWorktreeIDs = []
+        }
+    }
+
+    /// Drop the placeholder row and every trace of it — the row itself, the
+    /// pending marker `refreshWorktrees` preserves it by, and its lane entry.
+    private func removeRemoteLanePlaceholderRow(_ lane: PendingRemoteLane) {
+        worktrees[lane.repoID]?.removeAll { $0.id == lane.id }
+        pendingWorktreeIDs.remove(lane.id)
+        pendingRemoteLanes.removeAll { $0.id == lane.id }
     }
 
     // MARK: - Settings toggle (Task 11)
