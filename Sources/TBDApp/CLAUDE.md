@@ -2,33 +2,9 @@
 
 SwiftUI app target. See the repo-root `CLAUDE.md` and the `tbd-project` skill for architecture.
 
-## Tuning a visual constant: don't run the full suite per nudge
+## Tuning a visual constant
 
-A gap, an inset, a corner radius, an opacity, an animation duration — anything
-whose correct value is settled by looking at it — is tuned in a loop with a
-human at the other end. For each iteration run **`scripts/swift-safe build`, the
-one filtered suite that pins the constant, then `scripts/restart.sh`**. Skip the
-full `scripts/test.sh`, skip `swiftlint` when the diff is a numeric literal and
-its doc comment, and skip re-running a mutation check whose discriminating power
-you already established at an earlier value.
-
-The full run costs ~110s and cannot answer the only open question, which is
-whether the number looks right. Spending it per nudge turns a ten-second
-decision into a multi-minute round trip while the person who has to judge it
-sits waiting. **Run the full suite once, on the final tree, before pushing** —
-that is what catches anything the loop disturbed.
-
-This is scoped to magnitudes and styling. A change to *behavior* — what a
-control does, when it appears, which branch runs — is not a nudge, however small
-the diff, and takes the ordinary discipline.
-
-**Pick a decisive value rather than creeping toward one.** If a bump moves the
-thing visibly and the reviewer still says "more", the next step should be large
-enough to overshoot, because landing past the mark and coming back costs one
-look while three timid steps cost three. `8 → 24 → 48 → 32` is a real example
-from `HoverCardPlacement.flippedBarClearance`: four rebuilds and four rounds of
-someone's attention to reach a value a single decisive jump would have bracketed
-in two.
+While a purely visual value — a gap, inset, opacity, duration — is being eyeballed, iterate with `scripts/swift-safe build`, the one filtered suite that pins it, and `scripts/restart.sh`; the full `scripts/test.sh` costs ~110s, cannot tell you whether the number looks right, and belongs once on the final tree before pushing.
 
 ## macOS 26 (Tahoe) Liquid Glass toolbars — grouping rules
 
