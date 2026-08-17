@@ -295,6 +295,11 @@ class WaitReportingTests(unittest.TestCase):
                     self.lock_path,
                     timeout,
                     heartbeat,
+                    # This process's own live ancestry, as `main` would record
+                    # it: nothing here goes away, so the wait runs to timeout
+                    # and the reporting is what is under test.
+                    requester=os.getppid(),
+                    ancestors=(),
                     monotonic=clock.monotonic,
                     sleep=clock.sleep,
                     report=report,
@@ -463,6 +468,11 @@ class AbandonedWaitTests(unittest.TestCase):
         `ancestors` is the chain recorded at startup, given as real pids so
         the shipped `kill(pid, 0)` liveness check is the one under test.
 
+        The requester passed is `parents[0]`, the first reading — the same
+        value `main` would have captured at startup. The escape-hatch cases
+        pass it too, rather than production's zero, so that they still red if
+        `_acquire`'s own `TBD_SWIFT_ALLOW_ORPHAN` gate is removed.
+
         Returns the exception type that ended it, the virtual seconds it
         lasted, and whether the slot was left untaken.
         """
@@ -486,11 +496,12 @@ class AbandonedWaitTests(unittest.TestCase):
                     self.lock_path,
                     timeout,
                     60.0,
+                    requester=parents[0],
+                    ancestors=tuple(ancestors),
                     monotonic=clock.monotonic,
                     sleep=clock.sleep,
                     report=lambda *_: None,
                     getppid=getppid,
-                    ancestors=tuple(ancestors),
                 )
             except (swift_safe.Abandoned, TimeoutError) as error:
                 outcome = error

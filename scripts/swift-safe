@@ -350,23 +350,20 @@ def _acquire(
     timeout_seconds: float,
     heartbeat_seconds: float,
     *,
+    requester: int,
+    ancestors: tuple[int, ...],
     monotonic=time.monotonic,
     sleep=time.sleep,
     report=_report,
     getppid=os.getppid,
-    requester: int | None = None,
-    ancestors: tuple[int, ...] = (),
 ) -> None:
+    # Who asked for this build, and the chain above them: `main` records both
+    # before any other work (see the comment there). They are required and
+    # keyword-only on purpose — a default would let a future call site drop the
+    # abandonment check silently, with nothing to compile against or test.
     start = monotonic()
     deadline = start + timeout_seconds
     watch_requester = os.environ.get("TBD_SWIFT_ALLOW_ORPHAN") != "1"
-    if not watch_requester:
-        ancestors = ()
-    # Who asked for this build: `main` records it before any other work (see
-    # the comment there). Falling back to reading it here keeps `_acquire`
-    # callable on its own.
-    if requester is None:
-        requester = getppid() if watch_requester else 0
     announced = False
     next_heartbeat = 0.0
     while True:
@@ -380,6 +377,14 @@ def _acquire(
             # moves this process's own ppid at all. A dead pid that has been
             # reused reads as alive and we keep waiting — the behavior that
             # shipped before this check, so the failure is the safe one.
+            #
+            # The zombie immunity covers only the direct parent, whose death
+            # reparents us regardless of when it is reaped. A *higher* ancestor
+            # left unreaped still answers `kill(pid, 0)`, so a chain whose
+            # middle is an un-waited-for zombie reads as alive and that wait
+            # runs to the timeout. Closing it would need `ps -o stat=` in the
+            # poll loop; the design rejects that cost for a narrow case whose
+            # failure mode is only the pre-existing one.
             if watch_requester and (
                 getppid() != requester
                 or not all(_process_is_alive(pid) for pid in ancestors)
@@ -412,6 +417,11 @@ def main(arguments: list[str]) -> int:
     # then never fire. Python's own startup is still outside this point, so
     # the window shrinks rather than closes — but do not tidy this back down
     # into `_acquire`, which is where it used to sit.
+    #
+    # No test pins that position: every end-to-end case kills its requester
+    # only after the wrapper has reached the wait loop, and there is no clean
+    # seam to delay argument parsing, so moving the capture back down leaves
+    # the suite green. Treat this as a deliberate choice, not a verified one.
     #
     # `TBD_SWIFT_ALLOW_ORPHAN=1` disables the check, and with it the one `ps`
     # this costs. The case it serves is `nohup scripts/swift-safe build &`
