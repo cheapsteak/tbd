@@ -2761,6 +2761,47 @@ struct PRStatusManagerRepoIdentityTests {
             ghRunner: { _, _ in GHCommandResult(stdout: "", stderr: loginPrompt, exitStatus: 1) },
             remoteURLReader: { _ in gitLabRemote })
         #expect(await rejected.repoIdentity(repoPath: "/wt/api-gateway") == nil)
+
+        // …and the same credential-less gh over a `github.com` remote names
+        // NOTHING. gh would have been the authoritative source for that host —
+        // on a fork it names the parent while `origin` names the fork — so its
+        // silence about the machine is not licence for `origin` to answer.
+        let onGitHub = PRStatusManager(
+            ghRunner: { _, _ in GHCommandResult(stdout: "", stderr: loginPrompt, exitStatus: 4) },
+            remoteURLReader: { _ in Self.forkRemote })
+        #expect(await onGitHub.repoIdentity(repoPath: "/wt/acme-prod") == nil)
+    }
+
+    @Test("a credential-less gh cannot let a fork's origin clear its parent's cached PR")
+    func unauthenticatedGHDoesNotPoisonAForkCheckout() async {
+        // The reason the parse is withheld for `github.com`, stated as the
+        // damage it would do rather than as a preference. `poisonedCacheEntries`
+        // judges an entry cross-repo when BOTH sides resolved; a fork identity
+        // read off `origin` makes the parent's pull request — where a fork's
+        // pull requests actually live — look like another repo's, and the clear
+        // is persisted, so a restart cannot bring it back.
+        let wt = UUID()
+        let manager = PRStatusManager(
+            ghRunner: { _, _ in
+                GHCommandResult(stdout: "",
+                                stderr: "To get started with GitHub CLI, please run:  gh auth login",
+                                exitStatus: 4)
+            },
+            remoteURLReader: { _ in Self.forkRemote })
+        await manager.seedForTesting(
+            worktreeID: wt,
+            status: PRStatus(number: 412, url: "https://github.com/acme/acme-prod/pull/412",
+                             state: .mergeable))
+        let recorder = PersistedClearRecorder()
+        await manager.setOnStatusPersist { id, status in
+            await recorder.record(id, isClear: status == nil)
+        }
+
+        let outcome = await manager.fetchAll(worktrees: [Self.pollWorktree(wt)])
+
+        #expect(await manager.allStatuses()[wt]?.number == 412)
+        #expect(await recorder.clears.isEmpty)
+        #expect(outcome.disproved.isEmpty)
     }
 
     @Test("a hostless remote cannot fabricate an identity that clears a cached PR")

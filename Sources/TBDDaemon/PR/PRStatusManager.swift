@@ -2614,33 +2614,78 @@ public actor PRStatusManager {
     private nonisolated func resolveNameWithOwner(
         repoPath: String
     ) async -> (owner: String, name: String, host: String)? {
+        let unservable: GHUnservable
         switch await resolveViaGH(repoPath: repoPath) {
         case .resolved(let owner, let name, let host):
             return (owner: owner, name: name, host: host)
         case .transientFailure:
             logger.debug("gh could not name the repo at \(repoPath, privacy: .public) this time; deferring rather than reading its origin remote")
             return nil
-        case .unservable:
-            break
+        case .unservable(let reason):
+            unservable = reason
         }
         guard let remote = await readRemoteURL(repoPath: repoPath),
               let identity = Self.parseRemoteIdentity(remote) else {
             logger.debug("could not name the repo at \(repoPath, privacy: .public) from gh or from its origin remote")
             return nil
         }
+        if unservable == .noCredentials, Self.ghWouldServe(host: identity.host) {
+            // gh holds no credentials, and the remote names the one host gh is
+            // certain to speak for — so gh, not `origin`, was the right source
+            // and it simply could not answer. Defer, exactly as before the
+            // exit-4 clause existed. See `ghExitNoCredentials` for why naming
+            // the fork here is worse than naming nothing.
+            logger.debug("gh holds no credentials and \(repoPath, privacy: .public) is on \(identity.host, privacy: .public), which gh would have answered for; deferring rather than letting origin name it")
+            return nil
+        }
         return identity
+    }
+
+    /// Whether gh would have been the authoritative source for this host, had
+    /// it any credentials.
+    ///
+    /// `github.com` and nothing else, deliberately. A gh configured for a
+    /// GitHub Enterprise host would speak for that host too, but with no
+    /// credentials there is no configuration to read it out of, and a GHES
+    /// hostname is indistinguishable from any other self-hosted forge in a
+    /// remote URL. That residual is accepted: a GHES checkout on a machine
+    /// whose gh has never been logged in still resolves through the remote
+    /// parse and can still name a fork instead of its parent. GHES cannot form
+    /// a binding today, and the alternative — treating every unknown host as
+    /// gh's — is the fabricated `github.com` identity this whole path exists to
+    /// refuse.
+    private static func ghWouldServe(host: String) -> Bool {
+        host.lowercased() == "github.com"
     }
 
     /// What one `gh repo view` settled about a checkout.
     private enum GHRepoResolution {
         case resolved(owner: String, name: String, host: String)
-        /// gh cannot serve this checkout at all: no binary, or it ran and said
-        /// none of the checkout's remotes name a GitHub host it knows. The only
-        /// state in which the `origin` remote may speak for the repo instead.
-        case unservable
+        /// gh cannot serve this checkout, for one of two reasons that are NOT
+        /// interchangeable — see `GHUnservable`. The only state in which the
+        /// `origin` remote may speak for the repo instead.
+        case unservable(GHUnservable)
         /// gh ran and failed at something it does serve. Says nothing about the
         /// checkout, so it settles nothing about the checkout.
         case transientFailure
+    }
+
+    /// Why gh cannot serve a checkout. Both license the `origin` parse, but
+    /// only one of them licenses it for a host gh itself would have answered
+    /// for.
+    private enum GHUnservable {
+        /// There is no gh binary, or gh ran with credentials in hand and said
+        /// none of this checkout's remotes name a GitHub host it knows. Either
+        /// way the answer is about the CHECKOUT: gh will never speak for it, on
+        /// this host or any other, so `origin` may. This is the route every
+        /// GitLab checkout with a working gh takes, and it must keep behaving
+        /// exactly as it does.
+        case cannotServeThisCheckout
+        /// gh holds no credentials for anywhere, so it never got as far as the
+        /// checkout. The answer is about the MACHINE, and it is silence about
+        /// this repo — which is why the parse it licenses is withheld for a
+        /// host gh would have served.
+        case noCredentials
     }
 
     private nonisolated func resolveViaGH(repoPath: String) async -> GHRepoResolution {
@@ -2648,13 +2693,17 @@ public actor PRStatusManager {
         guard let result = await runGHResult(args: args, repoPath: repoPath) else {
             // gh never launched — it is absent, or the spawn itself failed.
             // There is nobody to ask, on this checkout or any other.
-            return .unservable
+            return .unservable(.cannotServeThisCheckout)
         }
         let errSuffix = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
         guard result.exitStatus == 0 else {
-            if result.exitStatus == Self.ghExitNoCredentials || Self.ghDisownsCheckout(errSuffix) {
-                logger.debug("gh does not speak for the repo at \(repoPath, privacy: .public) (exit \(result.exitStatus, privacy: .public)): \(errSuffix, privacy: .public)")
-                return .unservable
+            if result.exitStatus == Self.ghExitNoCredentials {
+                logger.debug("gh holds no credentials at all, so it speaks for no checkout including \(repoPath, privacy: .public): \(errSuffix, privacy: .public)")
+                return .unservable(.noCredentials)
+            }
+            if Self.ghDisownsCheckout(errSuffix) {
+                logger.debug("gh does not speak for the repo at \(repoPath, privacy: .public): \(errSuffix, privacy: .public)")
+                return .unservable(.cannotServeThisCheckout)
             }
             logger.debug("gh repo view exited \(result.exitStatus, privacy: .public) for \(repoPath, privacy: .public): \(errSuffix, privacy: .public)")
             return .transientFailure
@@ -2689,26 +2738,23 @@ public actor PRStatusManager {
     /// exit 1. That stays transient, which is what keeps a fork checkout from
     /// being renamed by a flaky token.
     ///
-    /// **The trade-off, accepted deliberately, and its one sharp edge:** on a
-    /// GITHUB fork checkout with no credentials, resolution falls through to
-    /// the `origin` parse and names the fork rather than the parent gh would
-    /// have named. Every gh query on that checkout fails anyway, so no PR
-    /// feature works there under either reading and the identity buys nothing —
-    /// while for a GitLab checkout the remote parse is the ONLY route that ever
-    /// works. The cost is a wrong answer nobody can act on; the benefit is the
-    /// whole feature for the people it was built for.
+    /// **What this exit code does NOT license:** naming a `github.com` checkout
+    /// from its `origin` remote. On a fork, gh names the parent — where the
+    /// fork's pull requests live — and `origin` names the fork, and that
+    /// disagreement is not harmless. `poisonedCacheEntries` rests on "both
+    /// sides resolved" meaning both are KNOWN, so a fork identity makes a
+    /// cached pull request living in the parent read as cross-repo: it is
+    /// cleared, the clear is PERSISTED, and the heal reports a binding it never
+    /// disproved. Deferring costs that checkout nothing, because with no
+    /// credentials every gh query fails anyway. So `resolveNameWithOwner`
+    /// withholds the parse on this route for any host gh would have served
+    /// (`ghWouldServe`), and grants it everywhere else — which is where the
+    /// whole benefit is: for a GitLab checkout the remote parse is the ONLY
+    /// route that ever works.
     ///
-    /// The edge is that the answer is not quite inert: `poisonedCacheEntries`
-    /// rests on "both sides resolved" meaning both are KNOWN, so on such a
-    /// checkout a cached pull request living in the PARENT now reads as
-    /// cross-repo against the fork and is cleared, persistently, and reported
-    /// as a disproved binding. It is bounded — only while gh holds no
-    /// credentials at all, only for a worktree with no stored PR number, and a
-    /// re-login re-finds any pull request still inside the 100-PR viewer batch
-    /// — and the same edge already existed for a checkout with no `gh`
-    /// installed. Narrowing it (declining the parse when the parsed host is one
-    /// gh would have served) is a separate change to `poisonedCacheEntries`'s
-    /// premise, not to this discriminator.
+    /// The disownment route below is untouched by that rule and must stay so:
+    /// there gh has credentials and is speaking about the checkout, so its
+    /// silence really is a fact about the repo.
     private static let ghExitNoCredentials: Int32 = 4
 
     /// Whether gh's own refusal says it does not serve this checkout, as opposed
