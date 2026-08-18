@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDDaemonLib
 
@@ -65,7 +66,7 @@ struct GitLabHostResolverTests {
         #expect(await resolver.isGitLabHost("git.acme.example", repoPath: "/tmp/x") == false)
     }
 
-    /// A derivation that produced nothing is not an answer, it is a failed
+    /// A `glab` that never launched produced no answer, only a failed
     /// question. `glab` may be installed, or authenticated against a new host,
     /// at any point during a daemon run that lasts days — and one transient
     /// launch failure on the first poll after boot must not disable GitLab
@@ -80,6 +81,93 @@ struct GitLabHostResolverTests {
             return seen == 1 ? nil : GHCommandResult(stdout: Self.realOutput)
         })
         #expect(await resolver.isGitLabHost("git.acme.example", repoPath: "/tmp/x") == false)
+        #expect(await resolver.isGitLabHost("git.acme.example", repoPath: "/tmp/x"))
+        #expect(await attempts.count == 2)
+    }
+
+    /// The steady state of every fleet that has `glab` installed and no GitLab
+    /// host configured. `glab` ran, answered, and named nobody — an
+    /// observation, unlike a launch failure — so asking again on the next call
+    /// buys nothing. `github.com` short-circuits before the probe, but a GitHub
+    /// Enterprise, Bitbucket, gitea or codeberg host does not, so without this
+    /// the fleet pays one `glab auth status` per worktree per poll tick forever.
+    @Test("a configured-nothing answer is not re-probed on every call")
+    func emptyStatusIsNotReprobedEveryCall() async {
+        let probed = Probe()
+        let resolver = GitLabHostResolver(glRunner: { _, _ in
+            await probed.mark()
+            return GHCommandResult(stdout: "",
+                                   stderr: "You are not logged into any GitLab hosts. Run glab auth login\n",
+                                   exitStatus: 1)
+        })
+        for _ in 0..<3 {
+            #expect(await resolver.isGitLabHost("ghe.acme.example", repoPath: "/tmp/x") == false)
+        }
+        #expect(await probed.count == 1)
+    }
+
+    /// The other half of the same knob: the answer is remembered for a bounded
+    /// window, never for the run, so `glab auth login --hostname …` mid-run
+    /// still takes effect without restarting TBD. Driven through the `now:`
+    /// date seam — the value is compared, not slept on.
+    @Test("a configured-nothing answer is re-derived once its window passes")
+    func emptyStatusAgesOut() async {
+        let dates = TestDateSource()
+        let attempts = Probe()
+        let resolver = GitLabHostResolver(glRunner: { _, _ in
+            let seen = await attempts.mark()
+            // The user runs `glab auth login --hostname git.acme.example`
+            // somewhere between the first probe and the second.
+            return seen == 1
+                ? GHCommandResult(stdout: "", exitStatus: 1)
+                : GHCommandResult(stdout: Self.realOutput)
+        }, now: dates.provider)
+
+        #expect(await resolver.isGitLabHost("git.acme.example", repoPath: "/tmp/x") == false)
+
+        dates.advance(by: GitLabHostResolver.emptyStatusLifetime - 1)
+        #expect(await resolver.isGitLabHost("git.acme.example", repoPath: "/tmp/x") == false)
+        #expect(await attempts.count == 1)
+
+        dates.advance(by: 2)
+        #expect(await resolver.isGitLabHost("git.acme.example", repoPath: "/tmp/x"))
+        #expect(await attempts.count == 2)
+    }
+
+    /// The window covers only an answer. A `glab` that did not launch is
+    /// retried on the very next call even with the clock held still, because
+    /// nothing was observed — and in the case that dominates, `glab` absent,
+    /// the retry resolves a static nil path and spawns nothing.
+    @Test("a launch failure is retried inside the window an answer would hold")
+    func launchFailureIsNotHeldByTheWindow() async {
+        let dates = TestDateSource()
+        let attempts = Probe()
+        let resolver = GitLabHostResolver(glRunner: { _, _ in
+            let seen = await attempts.mark()
+            return seen == 1 ? nil : GHCommandResult(stdout: Self.realOutput)
+        }, now: dates.provider)
+
+        #expect(await resolver.isGitLabHost("git.acme.example", repoPath: "/tmp/x") == false)
+        #expect(await resolver.isGitLabHost("git.acme.example", repoPath: "/tmp/x"))
+        #expect(await attempts.count == 2)
+    }
+
+    /// The window is a magnitude, so a wall clock that steps backwards
+    /// re-derives early rather than pinning the empty answer in place until the
+    /// clock catches up.
+    @Test("a backwards wall-clock step re-derives rather than extending the window")
+    func backwardsClockStepRederives() async {
+        let dates = TestDateSource()
+        let attempts = Probe()
+        let resolver = GitLabHostResolver(glRunner: { _, _ in
+            let seen = await attempts.mark()
+            return seen == 1
+                ? GHCommandResult(stdout: "", exitStatus: 1)
+                : GHCommandResult(stdout: Self.realOutput)
+        }, now: dates.provider)
+
+        #expect(await resolver.isGitLabHost("git.acme.example", repoPath: "/tmp/x") == false)
+        dates.advance(by: -(GitLabHostResolver.emptyStatusLifetime + 1))
         #expect(await resolver.isGitLabHost("git.acme.example", repoPath: "/tmp/x"))
         #expect(await attempts.count == 2)
     }

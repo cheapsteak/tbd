@@ -20,11 +20,37 @@ typealias GLRunner = @Sendable (_ args: [String], _ repoPath: String) async -> G
 /// succeeding, never by this output.
 actor GitLabHostResolver {
     private let glRunner: GLRunner?
+
+    /// Date seam for the one timestamp this actor keeps: when `glab` last ran
+    /// and named no host. It is compared, not slept on, so it is data and takes
+    /// `now:` rather than a `Clock` (`Duration` is behavior, `Date` is data).
+    /// This actor schedules nothing, so it has no clock at all.
+    private let now: @Sendable () -> Date
+
     private var cachedHosts: Set<String>?
+
+    /// When `glab` last ran to completion and named no host, or nil if that has
+    /// not happened (or the answer has since aged out).
+    private var lastEmptyStatusAt: Date?
+
     private static let log = Logger(subsystem: "com.tbd.daemon", category: "pr.gitlab")
 
-    init(glRunner: GLRunner? = nil) {
+    /// How long "glab ran and named no host" is believed before it is asked
+    /// again.
+    ///
+    /// This is the only knob trading two costs against each other. Below it
+    /// sits the poll cadence — `GitPollCadence.prInterval` is 30 s in the
+    /// foreground, and every distinct worktree path on the tick asks this
+    /// actor — so a window of one full interval already collapses a fleet's
+    /// worth of `glab auth status` spawns per tick into one. Above it sits how
+    /// long a user who has just run `glab auth login --hostname …` waits for
+    /// TBD to notice. Five minutes is ten foreground ticks of silence for a
+    /// wait no longer than the background poll interval itself.
+    static let emptyStatusLifetime: TimeInterval = 300
+
+    init(glRunner: GLRunner? = nil, now: @escaping @Sendable () -> Date = { Date() }) {
         self.glRunner = glRunner
+        self.now = now
     }
 
     func isGitLabHost(_ host: String, repoPath: String) async -> Bool {
@@ -35,38 +61,67 @@ actor GitLabHostResolver {
         return await hosts(repoPath: repoPath).contains(normalized)
     }
 
-    /// Only a non-empty derivation is cached. An empty set is never an
-    /// observation that the fleet has no GitLab hosts — `fetchHosts` returns it
-    /// just as readily when `glab` is absent, fails to launch, or prints
-    /// something unparseable — so remembering it would mean a user who runs
-    /// `glab auth login --hostname …` after the daemon started, or one
-    /// transient failure on the first poll after boot, gets no GitLab until the
-    /// next restart, with no message anywhere. The spec's "cached for the
-    /// daemon run, so nothing needs invalidating" reasons about caching a
-    /// derived truth; it does not license caching a failure to derive.
+    /// Three outcomes, remembered for three different spans, because they are
+    /// three different facts.
     ///
-    /// Retrying costs nothing on the fleet this cache exists for: `github.com`
-    /// short-circuits in `isGitLabHost` before reaching here, so a GitHub-only
-    /// fleet still spawns no `glab` at all. Only a host that is neither
-    /// `github.com` nor a declared GitLab host re-probes, and it does so
-    /// precisely because the answer for it is still unknown.
+    /// **A non-empty derivation is cached for the resolver's life.** It is a
+    /// derived truth about a declaration the user made; nothing invalidates it.
+    ///
+    /// **`glab` failing to launch is never remembered.** It is not an
+    /// observation that the fleet has no GitLab hosts, just a failure to ask —
+    /// the binary is absent, or one exec failed transiently. Remembering it
+    /// would mean a user who installs `glab` mid-run, or one bad first poll
+    /// after boot, gets no GitLab until the next restart with no message
+    /// anywhere. Retrying costs nothing in the case that dominates: `glab`
+    /// absent resolves to a static nil path, so no subprocess is spawned at
+    /// all.
+    ///
+    /// **`glab` running and naming no host ages out after
+    /// `emptyStatusLifetime`.** That one *is* an observation, and it is the
+    /// steady state of every fleet with `glab` installed and no GitLab host
+    /// configured — so re-deriving it per call means one subprocess per
+    /// worktree per poll tick, forever, for an answer that has not changed.
+    /// It cannot be cached for the run either: the same user is one
+    /// `glab auth login --hostname …` away from making it wrong. A bounded
+    /// window is what both facts allow, and it is bounded on the side that
+    /// matters — the answer is at worst `emptyStatusLifetime` stale, never
+    /// stale until restart.
+    ///
+    /// Note also that `github.com` short-circuits in `isGitLabHost` before
+    /// reaching here, so none of this is on a pure GitHub.com fleet's path. It
+    /// is on a GitHub Enterprise, Bitbucket, gitea or codeberg fleet's path,
+    /// which is why the empty answer has to be cheap.
     private func hosts(repoPath: String) async -> Set<String> {
         if let cachedHosts { return cachedHosts }
-        let resolved = await fetchHosts(repoPath: repoPath)
-        guard !resolved.isEmpty else { return resolved }
-        cachedHosts = resolved
-        return resolved
-    }
+        if let lastEmptyStatusAt, !isStale(lastEmptyStatusAt) { return [] }
 
-    private func fetchHosts(repoPath: String) async -> Set<String> {
-        guard let glRunner else { return [] }
-        // The exit status is ignored deliberately: glab exits 1 when ANY
-        // configured host fails to authenticate, so a perfectly good setup
-        // reports failure whenever an unused gitlab.com entry shares the config.
-        guard let result = await glRunner(["auth", "status"], repoPath) else {
+        guard let derived = await fetchHosts(repoPath: repoPath) else {
             Self.log.debug("glab did not launch; no GitLab hosts derived")
             return []
         }
+        guard !derived.isEmpty else {
+            lastEmptyStatusAt = now()
+            return []
+        }
+        cachedHosts = derived
+        return derived
+    }
+
+    /// `abs`, because the wall clock this reads can step backwards. A magnitude
+    /// test makes a backwards jump re-derive early — the safe direction —
+    /// rather than pinning the empty answer in place until the clock catches up.
+    private func isStale(_ stamp: Date) -> Bool {
+        abs(now().timeIntervalSince(stamp)) >= Self.emptyStatusLifetime
+    }
+
+    /// The host list `glab` named, or nil if `glab` did not launch — a
+    /// distinction the caller pays attention to, so it must not collapse here.
+    private func fetchHosts(repoPath: String) async -> Set<String>? {
+        guard let glRunner else { return nil }
+        // The exit status is ignored deliberately: glab exits 1 when ANY
+        // configured host fails to authenticate, so a perfectly good setup
+        // reports failure whenever an unused gitlab.com entry shares the config.
+        guard let result = await glRunner(["auth", "status"], repoPath) else { return nil }
         let parsed = Set(Self.parseAuthStatusHosts(result.stdout + "\n" + result.stderr)
             .map { $0.lowercased() })
         Self.log.debug("derived GitLab hosts: \(parsed.sorted().joined(separator: ","), privacy: .public)")
