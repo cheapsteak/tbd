@@ -12,11 +12,15 @@ Research backing every measured claim here:
 
 `PRBindingExtractor`'s URL pattern is host-locked to `https://github.com/`
 (`Sources/TBDShared/PRBindingExtractor.swift:32-33`), and every discovered
-binding is stamped `host: "github.com"` (`:239`). All three discovery
-paths — the `PostToolUse:Bash` hook, branch matching, and manual attach — funnel
-through that pattern, so on a non-GitHub worktree no binding can ever form. The
-status-bar chip a user sees there is synthetic, and the URL that chip carries is
-rejected by the daemon if they try to act on it.
+binding is stamped `host: "github.com"` (`:239`). The three discovery
+paths that start from a URL — the `PostToolUse:Bash` hook, branch matching, and
+`tbd pr attach <url>` — funnel through that pattern, so on a non-GitHub worktree
+no binding forms from a URL at all. The status-bar chip a user sees there is
+synthetic, and the URL that chip carries is rejected by the daemon if they try to
+act on it. The fourth path, `tbd pr attach <number>`, does form a binding
+anywhere, because it composes its own URL — but it composes a github.com one for
+every host, so on a non-GitHub worktree it yields a binding that points at a
+repository which is not the user's.
 
 The groundwork for fixing this was laid deliberately. The `host` column on
 `worktree_pull_request` already exists, and the extractor's own comment
@@ -55,6 +59,17 @@ Repo-shaped discovery — branch matching, which starts from a worktree and its
 remote rather than from a URL — does need to know the forge. It derives it from
 `glab auth status`, whose output enumerates the hosts `glab` is configured for
 and whether each authenticates.
+
+**Neither mechanism reads the hostname's shape, and nothing else may either.**
+"Not github.com" describes GitHub Enterprise, Bitbucket, Gitea and Codeberg as
+readily as it describes a self-managed GitLab, and all of them serve `/pull/<n>`,
+so a host-keyed classifier is wrong for every non-GitLab fleet off github.com —
+it would label their pull requests "MR" and compose merge-request URLs that
+404. `Forge` therefore offers exactly one classifier, `Forge.forURL`, keyed on
+the `/-/merge_requests/` marker the extractor already anchors on, and every
+per-binding label reads the binding's own `url` through it. Where no URL exists
+yet the forge is established rather than classified — see "Attaching by bare
+number".
 
 **Why derive from `glab` rather than declare or probe.** A host appears in that
 list only because someone ran `glab auth login --hostname <host>`, and that same
@@ -284,13 +299,22 @@ composes a `/pull/` URL from the worktree's owner and name
 would fabricate a GitHub URL for a merge request that does not exist there,
 which is worse than refusing, because the resulting binding looks valid.
 
-Composing the URL requires the forge, and this is the one user-facing path that
-depends on the repo-shaped derivation rather than on a URL that identifies
-itself. So the repo resolver returns the host alongside the owner and name, and
-the URL shape is chosen from the forge: `/pull/<n>` for GitHub,
-`/-/merge_requests/<n>` for GitLab. When the forge cannot be determined the call
-returns nil, which the existing contract already handles — the caller defers
-rather than guessing, exactly as it does today when the repo cannot be named.
+Composing the URL requires the forge, and this is the one user-facing path with
+no URL to read it from. So the repo resolver returns the host alongside the
+owner and name, and the daemon asks the host-list derivation directly —
+`PRStatusManager.isGitLabHost`, answered by `GitLabHostResolver` in the
+worktree's own directory, where `glab` reads its configuration. Only a host
+named there gets `/-/merge_requests/<n>`; every other host gets `/pull/<n>`,
+which is the shape github.com has always been given and the shape a GitHub
+Enterprise, Bitbucket, Gitea or Codeberg checkout serves. github.com
+short-circuits inside the resolver, so a GitHub-only fleet spawns nothing.
+
+The answer is one declaration, so a fleet on which nobody has run
+`glab auth login --hostname …` composes GitHub's shape — the same URL it
+composed before GitLab existed here, on the worktree's own host rather than a
+hardcoded github.com. When the repo itself cannot be named the call returns nil
+and the caller defers rather than guessing, exactly as it does when a worktree
+has no resolvable identity.
 
 The related synthetic binding in
 `Sources/TBDApp/PRBindingPresentation.swift:71-81` constructs a placeholder with
@@ -416,7 +440,8 @@ CI signal to be computed independently.
 
 The command name, the database tables, the daemon's internal vocabulary and any
 label summarising several bindings keep saying "PR". Only user-facing text
-describing one specific binding whose forge is known renders "MR".
+describing one specific binding renders "MR", and only when that binding's own
+URL says it is a merge request.
 
 `tbd pr` is documented to agents in the `tbd` skill
 (`Sources/TBDShared/TBDSkillContent.swift:187-189`), so agents have been
@@ -484,8 +509,13 @@ tested.
   `GLRunner` that fails the test if invoked.
 - GitLab node parsing, including an absent `headPipeline`.
 - Attach by bare number composes a `/-/merge_requests/<n>` URL with the GitLab
-  host on a GitLab worktree, still composes `/pull/<n>` on a GitHub one, and
-  returns nil rather than guessing when the forge is undetermined.
+  host on a GitLab worktree, and `/pull/<n>` on every host the resolver does not
+  name — github.com and the self-hosted non-GitLab fleets alike, pinned by
+  driving one host both ways so the branch is asserted rather than the string.
+  It returns nil rather than guessing when the repo cannot be named.
+- A binding's own label follows its URL: a `/pull/` binding reads "PR" whatever
+  host it sits on, and a `/-/merge_requests/` one reads "MR" on gitlab.com and
+  on a self-managed instance alike.
 
 ## Rules this design answers
 

@@ -11,20 +11,29 @@ public enum Forge: String, Codable, Sendable, CaseIterable {
 }
 
 public extension Forge {
-    /// Classify a host. `github.com` is GitHub; every other host is treated as
-    /// GitLab here.
+    /// Classify a request from its own URL.
     ///
-    /// This is a *composition* fallback, not host discovery — the only thing
-    /// that can really know which self-managed hosts are GitLab is
-    /// `GitLabHostResolver`, reading what the user already told `glab`. The
-    /// callers of this function have already been handed a host that came from
-    /// a repo identity or from a URL a GitLab pattern matched, and they need a
-    /// shape to write, not a fact to establish. The known limitation is a
-    /// GitHub Enterprise host, which classifies as `.gitlab`; the paths that
-    /// call this previously hardcoded `github.com` outright, so Enterprise was
-    /// already unserved and is not newly broken.
-    static func forHost(_ host: String) -> Forge {
-        host.lowercased() == "github.com" ? .github : .gitlab
+    /// `/-/merge_requests/` is the coordinate, because it is a fact about the
+    /// request rather than a guess about where it lives: GitLab always inserts
+    /// `/-/` between a project path and a resource, and no other forge uses
+    /// that segment — which is why `PRBindingExtractor` anchors its GitLab
+    /// pattern on the same literal. Every URL that reaches here was either
+    /// matched by one of those patterns or composed alongside one, so the
+    /// marker is present exactly when the request is a merge request. Matched
+    /// case-insensitively, and `.github` when the marker is absent.
+    ///
+    /// The HOST cannot answer this question. "Not github.com" describes GitHub
+    /// Enterprise, Bitbucket, Gitea and Codeberg as readily as it describes a
+    /// self-managed GitLab, and all of them serve `/pull/<n>`, so a
+    /// host-shaped classifier mislabels every non-GitLab fleet that is not on
+    /// github.com — including the label under a binding a user attached by
+    /// number. A host is only ever evidence of GitLab when someone declared it
+    /// so: where no URL exists yet, because the daemon is composing one for a
+    /// bare `tbd pr attach <number>`, the shape comes from
+    /// `GitLabHostResolver` reading what the user already told `glab`, never
+    /// from the hostname's shape.
+    static func forURL(_ url: String) -> Forge {
+        url.lowercased().contains("/-/merge_requests/") ? .gitlab : .github
     }
 
     /// How this forge names ONE request in its own vocabulary — `PR #412` on

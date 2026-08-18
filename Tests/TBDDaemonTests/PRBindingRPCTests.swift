@@ -14,6 +14,12 @@ import TestSupport
 /// `prBindingRepoResolver` seam — production resolves it with `gh repo view`
 /// (or the `origin` remote) behind `PRStatusManager`'s TTL cache, which a unit
 /// test must not spawn.
+///
+/// `gitLabHosts` is the other injected fact: composing a URL for a bare number
+/// asks `PRStatusManager` which hosts speak GitLab, and the injecting init
+/// answers from a set rather than from `glab auth status`. A harness that names
+/// no host therefore stands for every non-GitLab fleet at once — github.com,
+/// GitHub Enterprise, Bitbucket, Gitea, Codeberg.
 private struct PRBindingRPCHarness {
     enum HarnessError: Error, CustomStringConvertible {
         case rpcFailed(String)
@@ -30,7 +36,8 @@ private struct PRBindingRPCHarness {
     let worktreeID: UUID
     let repoID: UUID
 
-    init(repo: (owner: String, name: String, host: String)?) async throws {
+    init(repo: (owner: String, name: String, host: String)?,
+         gitLabHosts: Set<String> = []) async throws {
         let db = try TBDDatabase(inMemory: true)
         self.db = db
         let suffix = UUID().uuidString
@@ -49,6 +56,15 @@ private struct PRBindingRPCHarness {
                 hooks: HookResolver()),
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
+            // `ghRunner` is required by the injecting init and must never be
+            // reached from these paths; failing loudly is the assertion that it
+            // is not.
+            prManager: PRStatusManager(
+                ghRunner: { _, _ in
+                    Issue.record("pr.attach must not spawn gh")
+                    return nil
+                },
+                gitLabHosts: gitLabHosts),
             prBindingRepoResolver: { _ in repo },
             actuationLog: makeTestActuationLog())
     }
@@ -136,7 +152,8 @@ struct PRBindingRPCTests {
     @Test("pr.attach by number composes a merge-request URL on a GitLab host")
     func attachByNumberGitLab() async throws {
         let harness = try await PRBindingRPCHarness(
-            repo: ("acme/platform", "api-gateway", "git.acme.example"))
+            repo: ("acme/platform", "api-gateway", "git.acme.example"),
+            gitLabHosts: ["git.acme.example"])
         let attach = try await harness.attach(number: 412)
         #expect(attach.outcome == "bound")
         #expect(attach.binding?.url
@@ -151,23 +168,62 @@ struct PRBindingRPCTests {
     @Test("pr.attach by number keeps a deeply nested GitLab namespace intact")
     func attachByNumberNestedNamespace() async throws {
         let harness = try await PRBindingRPCHarness(
-            repo: ("acme/platform/backend", "api-gateway", "git.acme.example"))
+            repo: ("acme/platform/backend", "api-gateway", "git.acme.example"),
+            gitLabHosts: ["git.acme.example"])
         let attach = try await harness.attach(number: 7)
         #expect(attach.binding?.url
                 == "https://git.acme.example/acme/platform/backend/api-gateway/-/merge_requests/7")
         #expect(attach.binding?.owner == "acme/platform/backend")
     }
 
-    /// A GitHub Enterprise-shaped host is not github.com, so the composed URL
-    /// must at least stay on the worktree's own host rather than silently
-    /// naming github.com — which is what the hardcoded composition did.
-    @Test("pr.attach by number never composes a github.com URL for another host")
-    func attachByNumberKeepsItsOwnHost() async throws {
-        let harness = try await PRBindingRPCHarness(
+    /// A self-hosted host is not github.com, so the composed URL must stay on
+    /// the worktree's own host rather than silently naming github.com — which
+    /// is what the hardcoded composition did.
+    ///
+    /// It must equally not become a merge request. "Not github.com" is not
+    /// evidence of GitLab: GitHub Enterprise, Bitbucket, Gitea and Codeberg all
+    /// live on their own hosts and all serve `/pull/<n>`. Only a host the
+    /// resolver actually names gets GitLab's shape, and this harness names
+    /// none, so `/pull/` is the whole answer — and the URL is asserted entire,
+    /// because a prefix check passes for a merge-request URL too.
+    @Test("pr.attach by number composes /pull/ for a self-hosted non-GitLab host")
+    func attachByNumberSelfHostedPullRequest() async throws {
+        for host in ["github.acme.example", "bitbucket.acme.example", "codeberg.org"] {
+            let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod", host))
+            let attach = try await harness.attach(number: 412)
+            #expect(attach.outcome == "bound")
+            #expect(attach.binding?.url == "https://\(host)/acme/acme-prod/pull/412")
+            #expect(attach.binding?.host == host)
+        }
+    }
+
+    /// The same host, classified both ways, so the branch is pinned rather than
+    /// the string: `git.acme.example` is a merge request only when the resolver
+    /// names it GitLab.
+    @Test("pr.attach by number follows the resolver, not the hostname")
+    func attachByNumberFollowsTheResolver() async throws {
+        let unknown = try await PRBindingRPCHarness(
             repo: ("acme", "acme-prod", "git.acme.example"))
-        let attach = try await harness.attach(number: 412)
-        #expect(attach.binding?.url.hasPrefix("https://git.acme.example/") == true)
-        #expect(attach.binding?.url.contains("github.com") == false)
+        #expect(try await unknown.attach(number: 412).binding?.url
+                == "https://git.acme.example/acme/acme-prod/pull/412")
+
+        let known = try await PRBindingRPCHarness(
+            repo: ("acme", "acme-prod", "git.acme.example"),
+            gitLabHosts: ["git.acme.example"])
+        #expect(try await known.attach(number: 412).binding?.url
+                == "https://git.acme.example/acme/acme-prod/-/merge_requests/412")
+    }
+
+    /// github.com short-circuits inside the resolver before any subprocess, so
+    /// the unchanged GitHub shape is not merely the fallback here — it is the
+    /// answer a GitHub fleet reaches without asking anything.
+    @Test("pr.attach by number on github.com composes /pull/ even with GitLab hosts known")
+    func attachByNumberGitHubUnchanged() async throws {
+        let harness = try await PRBindingRPCHarness(
+            repo: ("acme", "acme-prod", "github.com"),
+            gitLabHosts: ["git.acme.example"])
+        #expect(try await harness.attach(number: 412).binding?.url
+                == "https://github.com/acme/acme-prod/pull/412")
     }
 
     @Test("pr.attach reports a wrong-repo rejection instead of binding")

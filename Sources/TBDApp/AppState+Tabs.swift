@@ -529,9 +529,11 @@ extension AppState {
                 id: UUID(),
                 content: .webview(id: UUID(), url: url),
                 // One tab names one request, so it speaks that request's own
-                // forge. The URL is the only forge coordinate this signature
-                // carries, and it is the very URL the tab will show.
-                label: Forge.forHost(url.host ?? "github.com").refLabel(number: number)
+                // forge, read from the very URL the tab will show: GitLab's
+                // `/-/merge_requests/` marks a merge request and every other
+                // shape is a pull request. The host would be the wrong
+                // coordinate — see `Forge.forURL`.
+                label: Forge.forURL(url.absoluteString).refLabel(number: number)
             )
             tabs[worktreeID, default: []].append(tab)
             activeTabIndices[worktreeID] = (tabs[worktreeID]?.count ?? 1) - 1

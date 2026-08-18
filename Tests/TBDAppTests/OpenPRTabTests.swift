@@ -54,7 +54,8 @@ struct OpenPRTabTests {
     }
 
     /// One tab names one request, so it takes that request's forge vocabulary.
-    /// The host in the URL is the only forge coordinate `openPR` receives.
+    /// The URL's own shape is the forge coordinate — `/-/merge_requests/` is
+    /// GitLab's and nobody else's.
     @Test("a GitLab merge request names its tab in GitLab's syntax")
     func gitLabTabLabel() {
         withAppState { state in
@@ -63,6 +64,22 @@ struct OpenPRTabTests {
                 "https://git.acme.example/acme/platform/api-gateway/-/merge_requests/412")!
             state.openPR(url: url, number: 412, worktreeID: worktreeID, inBrowser: false)
             #expect(state.tabs[worktreeID]?.first?.label == "MR !412")
+        }
+    }
+
+    /// The other half of that rule, and the one a host-shaped classifier gets
+    /// wrong: a self-hosted host is not evidence of GitLab. GitHub Enterprise,
+    /// Bitbucket, Gitea and Codeberg all serve pull requests from hosts that
+    /// are not `github.com`, and a `/pull/` URL says so.
+    @Test("a pull request on a self-hosted host still names its tab PR")
+    func selfHostedPullRequestTabLabel() {
+        withAppState { state in
+            for host in ["github.acme.example", "bitbucket.acme.example", "codeberg.org"] {
+                let worktreeID = UUID()
+                let url = URL(string: "https://\(host)/acme/acme-prod/pull/412")!
+                state.openPR(url: url, number: 412, worktreeID: worktreeID, inBrowser: false)
+                #expect(state.tabs[worktreeID]?.first?.label == "PR #412")
+            }
         }
     }
 

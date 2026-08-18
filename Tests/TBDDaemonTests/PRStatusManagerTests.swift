@@ -959,8 +959,8 @@ struct PRStatusManagerTests {
     @Test("parseRemoteIdentity rejects a remote that names no network host")
     func parseRemoteIdentityRejectsHostlessRemotes() {
         // Split into segments these fabricate the hosts "Users", "srv" and
-        // ".." — each cached like a real one, each classified as a GitLab
-        // instance by `Forge.forHost`, and each enough to make
+        // ".." — each cached like a real one, each composed into an attach URL
+        // that points at nothing, and each enough to make
         // `poisonedCacheEntries` clear a legitimately cached PR status.
         #expect(PRStatusManager.parseRemoteIdentity("file:///Users/me/acme-prod.git") == nil)
         #expect(PRStatusManager.parseRemoteIdentity("/srv/git/acme/acme-prod.git") == nil)

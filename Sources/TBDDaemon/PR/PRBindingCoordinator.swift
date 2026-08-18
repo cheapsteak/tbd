@@ -210,12 +210,10 @@ public actor PRBindingCoordinator {
     /// belt-and-braces rather than a live case; `owner`/`name` still have to
     /// match either way.
     ///
-    /// Deliberately not `Forge.forHost`: it classifies every non-`github.com`
-    /// host as GitLab, so a GitHub Enterprise checkout would read as a different
-    /// forge from a `github.com` URL and this guard would reject exactly the
-    /// binding the exemption above exists to keep. Its own doc calls that out —
-    /// it is a composition fallback, not host discovery, and a validation gate
-    /// must not borrow a guess.
+    /// Hosts are compared as strings, and no forge classification enters this
+    /// guard at all. A forge is derived from a URL's shape (`Forge.forURL`) or
+    /// established by asking which hosts speak GitLab; neither is a licence to
+    /// call two hosts the same host, and a validation gate needs the hosts.
     private static func hostsAgree(own: String, parsed: String) -> Bool {
         let own = own.lowercased()
         let parsed = parsed.lowercased()

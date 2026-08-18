@@ -365,7 +365,12 @@ public actor PRStatusManager {
     /// reaches the resolver; production injects nothing and the resolver reads
     /// `glab auth status` (cached, and short-circuited for github.com before
     /// any subprocess).
-    private nonisolated func isGitLabHost(_ host: String, repoPath: String) async -> Bool {
+    ///
+    /// Reachable from outside this actor because `RPCRouter` composes a URL for
+    /// `tbd pr attach <number>`, the one path with no URL to read the forge
+    /// from, and a hostname's shape is not an acceptable substitute for this
+    /// answer.
+    nonisolated func isGitLabHost(_ host: String, repoPath: String) async -> Bool {
         if gitLabHosts.contains(host.lowercased()) { return true }
         guard let gitLabHostResolver else { return false }
         return await gitLabHostResolver.isGitLabHost(host, repoPath: repoPath)
@@ -2813,12 +2818,11 @@ public actor PRStatusManager {
     /// first path segment read as one. `file:///Users/me/repo.git` would
     /// otherwise resolve to the host "Users" and `/srv/git/acme/repo.git` to
     /// "srv" — identities that are not merely useless but harmful. They are
-    /// cached like any other; `Forge.forHost` classifies anything that is not
-    /// `github.com` as GitLab, so `tbd pr attach` composes merge-request URLs
-    /// against them; and `poisonedCacheEntries` rests on "both sides resolved"
-    /// meaning both sides are KNOWN, so a fabricated identity turns a
-    /// legitimately cached PR status into a cross-repo poisoning and clears it,
-    /// persistently.
+    /// cached like any other, so `tbd pr attach <number>` composes a binding URL
+    /// against a host that answers nothing; and `poisonedCacheEntries` rests on
+    /// "both sides resolved" meaning both sides are KNOWN, so a fabricated
+    /// identity turns a legitimately cached PR status into a cross-repo
+    /// poisoning and clears it, persistently.
     ///
     /// `RemoteRepoMatching` in TBDShared parses the same three shapes and is
     /// deliberately not reused: it drops the host by design, and it keeps only

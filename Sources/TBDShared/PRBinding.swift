@@ -95,10 +95,16 @@ public struct PRBinding: Codable, Sendable, Equatable, Identifiable {
     /// How this one binding is named in the UI: `PR #412` on GitHub, `MR !412`
     /// on GitLab, whose own reference syntax is `!iid`.
     ///
+    /// Read from the binding's own `url`, which carries GitLab's
+    /// `/-/merge_requests/` marker, and not from its `host` — a host is not
+    /// evidence of a forge, so a `host`-shaped derivation renames every
+    /// GitHub Enterprise, Bitbucket, Gitea and Codeberg pull request a merge
+    /// request. `Forge.forURL` documents the coordinate.
+    ///
     /// Per-binding text only. Anything summarising several bindings keeps the
     /// neutral wording, because a worktree can span forges.
     public var refLabel: String {
-        Forge.forHost(host).refLabel(number: number)
+        Forge.forURL(url).refLabel(number: number)
     }
 
     /// Identity for deduplication — matches the table's UNIQUE constraint.

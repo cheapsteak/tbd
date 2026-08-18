@@ -36,8 +36,8 @@ struct PRBindingTests {
         #expect(gl.refLabel == "MR !412")
     }
 
-    /// The host decides, not the URL: a binding's `host` column is the durable
-    /// fact and `refLabel` must not quietly re-derive the forge from the URL.
+    /// The marker travels with the URL, not with the host, so GitLab's own
+    /// SaaS host reads the same way a self-managed one does.
     @Test("gitlab.com bindings read as merge requests too")
     func refLabelGitLabDotCom() {
         let gl = PRBinding(id: UUID(), worktreeID: UUID(), host: "gitlab.com",
@@ -45,6 +45,31 @@ struct PRBindingTests {
                            url: "https://gitlab.com/acme/api-gateway/-/merge_requests/7",
                            source: .manual, boundAt: Date(timeIntervalSince1970: 0))
         #expect(gl.refLabel == "MR !7")
+    }
+
+    /// The URL decides, not the host — because "not github.com" is not evidence
+    /// of GitLab. GitHub Enterprise, Bitbucket, Gitea and Codeberg all serve
+    /// pull requests from their own hosts, and a binding on one of them must
+    /// not be relabelled a merge request.
+    @Test("a pull request on a self-hosted host is still a PR")
+    func refLabelSelfHostedPullRequest() {
+        for host in ["github.acme.example", "bitbucket.acme.example",
+                     "git.acme.example", "codeberg.org"] {
+            let binding = PRBinding(id: UUID(), worktreeID: UUID(), host: host,
+                                    owner: "acme", repo: "acme-prod", number: 412,
+                                    url: "https://\(host)/acme/acme-prod/pull/412",
+                                    source: .manual, boundAt: Date(timeIntervalSince1970: 0))
+            #expect(binding.refLabel == "PR #412")
+        }
+    }
+
+    /// The marker is matched case-insensitively so an odd-cased URL cannot flip
+    /// a merge request into a pull request in the UI.
+    @Test("forge derivation ignores URL case")
+    func forgeDerivationIgnoresCase() {
+        #expect(Forge.forURL(
+            "https://GIT.ACME.EXAMPLE/acme/api/-/MERGE_REQUESTS/7") == .gitlab)
+        #expect(Forge.forURL("https://GITHUB.COM/acme/acme-prod/PULL/7") == .github)
     }
 
     @Test("terminal states are merged and closed only")

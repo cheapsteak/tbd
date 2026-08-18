@@ -1254,20 +1254,40 @@ public final class RPCRouter: Sendable {
     /// wrong-repo. Returns nil when the worktree's repo cannot be named — the
     /// caller defers rather than guessing an owner or a host.
     ///
-    /// The URL's shape is the host's to decide: GitLab writes
-    /// `/<namespace…>/<project>/-/merge_requests/<iid>`, GitHub writes
-    /// `/owner/name/pull/<n>`. Composing the GitHub shape for every host, as
-    /// this did, produced a URL that pointed at nothing on a GitLab instance.
+    /// This is the one path that must establish the forge rather than read it,
+    /// because there is no URL yet to read it from: GitLab writes
+    /// `/<namespace…>/<project>/-/merge_requests/<iid>` where GitHub writes
+    /// `/owner/name/pull/<n>`, and composing one shape for every host yields a
+    /// URL that points at nothing on the hosts that speak the other.
+    ///
+    /// So it asks the only component that can know. `PRStatusManager` answers
+    /// from `GitLabHostResolver`, which reads the hosts the user configured
+    /// `glab` for — a declaration, not an inference. The GitLab shape is
+    /// composed only for a host named there; every other host keeps `/pull/`,
+    /// which is what a GitHub Enterprise, Bitbucket, Gitea or Codeberg
+    /// checkout serves and what github.com has always been given. Reading the
+    /// hostname's own shape instead would hand all four of those fleets a
+    /// merge-request URL that 404s.
     private func prRef(worktreeID: UUID, number: Int) async -> ParsedPRURL? {
         guard let own = await prBindingRepoResolver(worktreeID) else { return nil }
-        let url: String
-        switch Forge.forHost(own.host) {
-        case .gitlab:
-            url = "https://\(own.host)/\(own.owner)/\(own.name)/-/merge_requests/\(number)"
-        case .github:
-            url = "https://\(own.host)/\(own.owner)/\(own.name)/pull/\(number)"
-        }
+        let path = "https://\(own.host)/\(own.owner)/\(own.name)"
+        let url = await isGitLabWorktree(worktreeID: worktreeID, host: own.host)
+            ? "\(path)/-/merge_requests/\(number)"
+            : "\(path)/pull/\(number)"
         return ParsedPRURL(
             host: own.host, owner: own.owner, repo: own.name, number: number, url: url)
+    }
+
+    /// Whether this worktree's host speaks GitLab, asked in the worktree's own
+    /// directory because that is where `glab` reads its configuration from.
+    ///
+    /// A worktree with no local row — a remote one, or one deleted between the
+    /// resolve and this call — cannot supply that directory, so the question
+    /// goes unasked and the answer is the unchanged GitHub shape. That is the
+    /// same "defer rather than guess" the callers of `prRef` already take.
+    /// `github.com` never reaches a subprocess: the resolver short-circuits it.
+    private func isGitLabWorktree(worktreeID: UUID, host: String) async -> Bool {
+        guard let worktree = try? await db.worktrees.getLocal(id: worktreeID) else { return false }
+        return await prManager.isGitLabHost(host, repoPath: worktree.path)
     }
 }
