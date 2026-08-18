@@ -226,10 +226,26 @@ private actor GHCallLog {
 private actor HangingRecheck {
     private var entered = false
     private var released = false
+    /// How many rechecks were issued, so a test can assert a second one never
+    /// was — the whole point of the single-flight gate.
+    private(set) var issued = 0
 
     func hang() async {
         entered = true
+        issued += 1
         while !released { try? await Task.sleep(for: .milliseconds(5)) }
+    }
+
+    /// Whether the issued count is still `count` after `grace`. A recheck is
+    /// issued from a detached task nobody schedules, so "a second one never
+    /// appeared" can only be asserted by giving it a window to appear in.
+    func issuedStayedAt(_ count: Int, for grace: Duration = .milliseconds(500)) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: grace)
+        while ContinuousClock.now < deadline {
+            if issued != count { return false }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return issued == count
     }
 
     func release() { released = true }
@@ -804,6 +820,42 @@ struct PRStatusManagerBindingTests {
         // green merely because nothing was ever asked.
         #expect(await recheck.wasEntered())
         await recheck.release()
+    }
+
+    @Test("a project whose recheck is still outstanding is not issued another")
+    func recheckIsSingleFlightPerProject() async throws {
+        // The detached recheck inherits no cancellation and `runCLI` imposes no
+        // timeout, so without a gate a hung endpoint accumulates one `glab`,
+        // one `Process` and its descriptors per tick, forever — and no
+        // reconciler covers a forge CLI subprocess.
+        let gl = GitLabFake()
+        let recheck = HangingRecheck()
+        let manager = PRStatusManager(
+            ghRunner: { _, _ in nil },
+            glRunner: { args, path in
+                if args.contains(where: { $0.contains("with_merge_status_recheck=true") }) {
+                    await recheck.hang()
+                    return GHCommandResult(stdout: "[]")
+                }
+                return await gl.run(args: args, repoPath: path)
+            },
+            gitLabHosts: [Self.gitLabHost])
+        let binding = Self.gitLabBinding()
+
+        _ = await manager.refreshBindings([binding])
+        #expect(await recheck.wasEntered(), "the first poll issued no recheck to be blocked by")
+
+        // A second poll of the same project, while the first recheck hangs.
+        _ = await manager.refreshBindings([binding])
+        #expect(await recheck.issuedStayedAt(1))
+
+        // …and the gate re-arms when the outstanding one ends, so this is a
+        // bound rather than a one-shot.
+        await recheck.release()
+        try await waitFor("the gate to re-arm once the outstanding recheck ended") {
+            _ = await manager.refreshBindings([binding])
+            return await recheck.issued >= 2
+        }
     }
 
     @Test("the recheck asks only about merge requests that can still change")

@@ -168,6 +168,40 @@ public actor PRStatusManager {
     /// behind its back would spawn `glab auth status` from a unit test.
     private let gitLabHostResolver: GitLabHostResolver?
 
+    /// Single-flight admission for the detached GitLab mergeability recheck,
+    /// keyed by the project it is issued against.
+    ///
+    /// The recheck is deliberately fire-and-forget — nothing in the pass reads
+    /// its answer, so nothing in the pass may wait for it — but detaching it
+    /// removed the only thing that used to bound it. `runCLI` imposes no
+    /// timeout and a detached task inherits no cancellation, so before this
+    /// gate a hung endpoint accumulated one `glab`, one `Process` and its file
+    /// descriptors per project per tick, without limit: ~288 of them overnight
+    /// at a five-minute cadence. A forge CLI subprocess is covered by no
+    /// reconciler — `AgentReaper` reaps agent processes, not these — so the
+    /// bound has to be here, at the only place that creates one.
+    ///
+    /// Single-flight rather than a timeout: it needs no clock seam, and it is
+    /// the stronger statement. A second recheck for a project whose first is
+    /// still outstanding asks the server to redo work it has not finished, so
+    /// skipping it loses nothing even when the endpoint is healthy; a timeout
+    /// would still allow one outstanding process per tick until it fired.
+    /// Outstanding-forever is the intended reading of a hung recheck: the
+    /// project simply stops asking until that process ends.
+    private actor GitLabRecheckGate {
+        private var outstanding: Set<String> = []
+
+        /// True for the caller that may issue the recheck for `key`; false when
+        /// one is still outstanding for that project.
+        func admit(_ key: String) -> Bool { outstanding.insert(key).inserted }
+
+        func finish(_ key: String) { outstanding.remove(key) }
+    }
+
+    /// `let` of a `Sendable` type, so the `nonisolated` GitLab paths reach it
+    /// without hopping onto this actor.
+    private let gitLabRecheckGate = GitLabRecheckGate()
+
     /// The last authentication refusal observed per forge host, lowercased.
     ///
     /// Keyed by host rather than by worktree or binding because that is the
@@ -1165,16 +1199,22 @@ public actor PRStatusManager {
         // in this pass reads the result, so nothing in this pass may wait for
         // it.
         //
+        // Detaching removes the stall and would, unbounded, replace it with a
+        // subprocess leak — so the issue is single-flighted per project by
+        // `gitLabRecheckGate`, which is where that reasoning is written down.
+        //
         // Only non-terminal merge requests are asked. A merged or closed one has
         // a mergeability nobody will recompute and nobody will read, so
         // including it spends a server-side job to learn nothing.
         let recheckIIDs = nodes.filter { !Self.isTerminalGitLabState($0.state) }.map(\.number)
-        if !recheckIIDs.isEmpty {
+        let gateKey = "\(group.host)\u{1}\(projectPath)"
+        if !recheckIIDs.isEmpty, await gitLabRecheckGate.admit(gateKey) {
             let host = group.host
             let recheckPath = GitLabQueries.recheckPath(projectPath: projectPath, iids: recheckIIDs)
             Task.detached { [self] in
                 _ = await runGLResult(args: ["api", "--hostname", host, recheckPath],
                                       repoPath: repoPath)
+                await gitLabRecheckGate.finish(gateKey)
             }
         }
 
