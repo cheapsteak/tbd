@@ -166,12 +166,18 @@ local re-run.
 ## A narrowed caller reads the verdict differently
 
 The remote run is always the whole suite, so a caller that narrowed its own run
-with `--filter` or `--skip` did not ask the question the remote answered. One
+with any of the arguments that select a subset did not ask the question the
+remote answered. One
 half of that mismatch is free and the other is not, and the asymmetry is what
 lets narrowed runs use the valve at all:
 
 - **A green whole-suite verdict is sound for a narrowed caller.** If every test
-  passes, every subset of them passes. The count reported is the whole suite's,
+  passes, every subset of them passes. A green conclusion is taken at its word
+  here rather than re-derived from the result files: every test step exited zero,
+  so a recorded failure in the artifact is a known-issue record rather than a real
+  one, and this repo records those routinely. That premise is asserted rather than
+  enforced — nothing reads a known-issue marker — so a toolchain that ever exited
+  zero while recording a genuine failure would be believed. The count reported is the whole suite's,
   which clears a narrowed caller's floor because that floor is a minimum and the
   whole suite is a superset of what the caller asked for.
 - **A red whole-suite verdict says nothing about the caller's subset.** The
@@ -203,6 +209,17 @@ would clear a floor of 35 with several thousand tests it never selected.
 The backstop is that CI never enables the valve, so its filtered passes run
 directly with their floors intact and a rename is still caught before a merge.
 What is lost is the local, pre-push instance of that check.
+
+**What counts as narrowing is deliberately over-broad**, because the two
+directions cost differently. A false positive costs one lane an optimisation. A
+false negative adopts a whole-suite failure as a narrowed run's result, naming
+tests the caller excluded — so anything that might select a subset is treated as
+if it does: `--filter` and `--skip`, the deprecated `--specifier` and its `-s`
+spelling, `--disable-xctest` and `--disable-swift-testing`, `--test-product`, and
+`--list-tests` and the bare `list` subcommand, which run no tests at all. Both the
+`--flag value` and `--flag=value` spellings are recognised. Options that widen or
+merely configure a run — `--enable-xctest`, `--num-workers`, `--xunit-output` —
+are deliberately absent.
 
 Passing the caller's narrowing arguments through to the dispatch would remove the
 mismatch and make a red verdict directly usable. That input must be allowlisted
@@ -315,10 +332,12 @@ shipped default:
 - `TBD_REMOTE_VERIFY_ALLOW_ORPHAN=1` — disables the requester-liveness check, for
   a run deliberately detached.
 
-Those bounds compose rather than cap each other, so the ticket-hold ceiling is
-the run ceiling plus correlation plus whatever a final bounded call spends —
-roughly 48 minutes at the shipped defaults, not 45. At most 50 failures are
-rendered.
+Those bounds compose rather than cap each other, and the ticket is held across
+all of them: a baseline query, a push, a dispatch, correlation, the run itself,
+and the download. At the shipped defaults that is a worst case near 78 minutes,
+not the run ceiling alone. The number matters because hold time against a
+two-ticket pool is the capacity model — understating it would size the pool
+against a wait that cannot happen. At most 50 failures are rendered.
 
 **Graduation** flips that default only once a soak shows three things, because
 each is a way the valve can be quietly worse than waiting: that a green remote
