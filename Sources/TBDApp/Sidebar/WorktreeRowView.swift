@@ -97,13 +97,15 @@ struct WorktreeRowView: View {
 
     /// Whether one terminal has trustworthy foreground work to animate in the
     /// sidebar. Codex's hook state can remain latched after a turn ends, so its
-    /// transcript-derived presentation state is authoritative here. Missing
-    /// transcript evidence deliberately renders idle instead of preserving a
-    /// false thinking indicator. Other terminal kinds retain their existing
+    /// transcript-derived presentation state is authoritative here unless the
+    /// hook reports that Codex is waiting for the user. Missing transcript
+    /// evidence deliberately renders idle instead of preserving a false
+    /// thinking indicator. Other terminal kinds retain their existing
     /// hook-backed behavior.
     nonisolated static func isForegroundWorking(_ terminal: Terminal) -> Bool {
         if terminal.isCodexTerminal {
-            return terminal.presentationActivityState == .working
+            return terminal.activityState != .waitingForUser
+                && terminal.presentationActivityState == .working
         }
         return terminal.activityState == .working
     }

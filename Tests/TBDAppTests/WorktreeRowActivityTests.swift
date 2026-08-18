@@ -44,6 +44,16 @@ struct WorktreeRowActivityTests {
         #expect(WorktreeRowView.isForegroundWorking(codex))
     }
 
+    @Test func codexPermissionWaitOverridesTranscriptWorkingActivity() {
+        let codex = terminal(
+            kind: .codex,
+            activityState: .waitingForUser,
+            presentationActivityState: .working
+        )
+
+        #expect(!WorktreeRowView.isForegroundWorking(codex))
+    }
+
     @Test func codexTranscriptIdleOverridesStaleRawWorkingActivity() {
         let codex = terminal(
             kind: .codex,
