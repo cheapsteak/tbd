@@ -2201,6 +2201,11 @@ final class AppState: ObservableObject {
            let observedAt = delta.activityStateObservedAt {
             terminals[delta.worktreeID]?[idx].activityStateSource = source
             terminals[delta.worktreeID]?[idx].activityStateObservedAt = observedAt
+            if terminals[delta.worktreeID]?[idx].isCodexTerminal == true,
+               delta.activityState == .idle,
+               source == .hookEvent("SessionStart") {
+                terminals[delta.worktreeID]?[idx].presentationActivityState = .idle
+            }
         }
     }
 

@@ -31,6 +31,72 @@ import TBDShared
 }
 
 @MainActor
+@Test func appState_sessionStartDeltaClearsCodexPresentationActivityImmediately() {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    state.terminals = [
+        worktreeID: [
+            Terminal(
+                id: terminalID,
+                worktreeID: worktreeID,
+                tmuxWindowID: "@1",
+                tmuxPaneID: "%1",
+                label: "Codex",
+                kind: .codex,
+                activityState: .working,
+                presentationActivityState: .working
+            )
+        ]
+    ]
+
+    state.handleDelta(.terminalActivityUpdated(TerminalActivityDelta(
+        terminalID: terminalID,
+        worktreeID: worktreeID,
+        activityState: .idle,
+        activityStateSource: .hookEvent("SessionStart"),
+        activityStateObservedAt: Date(timeIntervalSinceReferenceDate: 1)
+    )))
+
+    let terminal = state.terminals[worktreeID]![0]
+    #expect(terminal.presentationActivityState == .idle)
+    #expect(!WorktreeRowView.isForegroundWorking(terminal))
+}
+
+@MainActor
+@Test func appState_genericIdleHookPreservesCodexTranscriptWorkingActivity() {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    state.terminals = [
+        worktreeID: [
+            Terminal(
+                id: terminalID,
+                worktreeID: worktreeID,
+                tmuxWindowID: "@1",
+                tmuxPaneID: "%1",
+                label: "Codex",
+                kind: .codex,
+                activityState: .working,
+                presentationActivityState: .working
+            )
+        ]
+    ]
+
+    state.handleDelta(.terminalActivityUpdated(TerminalActivityDelta(
+        terminalID: terminalID,
+        worktreeID: worktreeID,
+        activityState: .idle,
+        activityStateSource: .hookEvent(RPCMethod.terminalActivityEvent),
+        activityStateObservedAt: Date(timeIntervalSinceReferenceDate: 1)
+    )))
+
+    let terminal = state.terminals[worktreeID]![0]
+    #expect(terminal.presentationActivityState == .working)
+    #expect(WorktreeRowView.isForegroundWorking(terminal))
+}
+
+@MainActor
 @Test func appState_interruptClearsCodexActivityImmediately() {
     let state = AppState()
     let worktreeID = UUID()
