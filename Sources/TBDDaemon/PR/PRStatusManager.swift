@@ -166,21 +166,22 @@ public actor PRStatusManager {
     ///
     /// The recheck is deliberately fire-and-forget — nothing in the pass reads
     /// its answer, so nothing in the pass may wait for it — but detaching it
-    /// removed the only thing that used to bound it. `runCLI` imposes no
-    /// timeout and a detached task inherits no cancellation, so before this
-    /// gate a hung endpoint accumulated one `glab`, one `Process` and its file
-    /// descriptors per project per tick, without limit: ~288 of them overnight
-    /// at a five-minute cadence. A forge CLI subprocess is covered by no
-    /// reconciler — `AgentReaper` reaps agent processes, not these — so the
-    /// bound has to be here, at the only place that creates one.
+    /// removed the only thing that used to bound it. A detached task inherits
+    /// no cancellation, so without a bound a hung endpoint accumulated one
+    /// `glab`, one `Process` and its file descriptors per project per tick,
+    /// without limit: ~288 of them overnight at a five-minute cadence. A forge
+    /// CLI subprocess is covered by no reconciler — `AgentReaper` reaps agent
+    /// processes, not these — so the bound has to be here, at the only place
+    /// that creates one.
     ///
-    /// Single-flight rather than a timeout: it needs no clock seam, and it is
-    /// the stronger statement. A second recheck for a project whose first is
-    /// still outstanding asks the server to redo work it has not finished, so
-    /// skipping it loses nothing even when the endpoint is healthy; a timeout
-    /// would still allow one outstanding process per tick until it fired.
-    /// Outstanding-forever is the intended reading of a hung recheck: the
-    /// project simply stops asking until that process ends.
+    /// This gate is half of that bound and answers "how many": a project with
+    /// a recheck outstanding issues no second one, so a tick cannot multiply a
+    /// stuck endpoint. `recheckTimeout` is the other half and answers "for how
+    /// long": the detached call is raced against that deadline and the child is
+    /// terminated when it fires, so no recheck is outstanding forever. Both are
+    /// needed — the gate alone leaves one process per project pinned for the
+    /// life of the daemon, and the deadline alone still admits a new process
+    /// per tick until it fires.
     private actor GitLabRecheckGate {
         private var outstanding: Set<String> = []
 
@@ -194,6 +195,23 @@ public actor PRStatusManager {
     /// `let` of a `Sendable` type, so the `nonisolated` GitLab paths reach it
     /// without hopping onto this actor.
     private let gitLabRecheckGate = GitLabRecheckGate()
+
+    /// How long a detached mergeability recheck may run before its `glab` is
+    /// terminated.
+    ///
+    /// Generous on purpose: the call exists to queue work on someone else's
+    /// server, so a slow instance must be allowed to finish rather than be
+    /// killed and retried on the next tick. What the deadline rules out is the
+    /// unbounded case — a process nothing ever ends, which no sweep would
+    /// reclaim either.
+    static let recheckTimeout: Duration = .seconds(60)
+
+    /// Clock seam for that deadline — existential, defaulted, and last, so no
+    /// call site changes and this actor's `Sendable` conformances are not
+    /// infected by a generic parameter. `Duration` is behavior, `Date` is data:
+    /// the deadline sleeps, so it takes a clock, while `now` above stamps facts
+    /// that get persisted and compared, so it stays a date seam.
+    private let clock: any Clock<Duration>
 
     /// The last authentication refusal observed per forge host, lowercased.
     ///
@@ -219,7 +237,9 @@ public actor PRStatusManager {
     /// data). This actor schedules nothing, so it has no clock at all.
     private let now: @Sendable () -> Date
 
-    public init(now: @escaping @Sendable () -> Date = { Date() }) {
+    public init(now: @escaping @Sendable () -> Date = { Date() },
+                clock: any Clock<Duration> = ContinuousClock()) {
+        self.clock = clock
         self.ghRunner = nil
         self.remoteURLReader = nil
         self.glRunner = nil
@@ -239,7 +259,9 @@ public actor PRStatusManager {
          glRunner: GLRunner? = nil,
          gitLabHosts: Set<String> = [],
          remoteURLReader: @escaping RemoteURLReader = { _ in nil },
-         now: @escaping @Sendable () -> Date = { Date() }) {
+         now: @escaping @Sendable () -> Date = { Date() },
+         clock: any Clock<Duration> = ContinuousClock()) {
+        self.clock = clock
         self.ghRunner = ghRunner
         self.glRunner = glRunner
         self.gitLabHosts = Set(gitLabHosts.map { $0.lowercased() })
@@ -1188,18 +1210,20 @@ public actor PRStatusManager {
         // cannot disturb the poll — the value it produces is read by the NEXT
         // tick's GraphQL call, not by this one.
         //
-        // Detached, and that is load-bearing rather than tidy. `runCLI` imposes
-        // no timeout, `refreshBindings` walks its groups one at a time, and
-        // `fetchAll` skips the next poll while one is still in flight — so a
-        // `glab` that hangs here stalls PR polling for the entire fleet, with no
-        // deadline to end it. Hanging is the plausible failure for this call in
-        // particular: it exists to queue work on someone else's server. Nothing
-        // in this pass reads the result, so nothing in this pass may wait for
-        // it.
+        // Detached, and that is load-bearing rather than tidy.
+        // `refreshBindings` walks its groups one at a time and `fetchAll` skips
+        // the next poll while one is still in flight — so a `glab` that hangs
+        // here would stall PR polling for the entire fleet. Hanging is the
+        // plausible failure for this call in particular: it exists to queue work
+        // on someone else's server. Nothing in this pass reads the result, so
+        // nothing in this pass may wait for it.
         //
         // Detaching removes the stall and would, unbounded, replace it with a
-        // subprocess leak — so the issue is single-flighted per project by
-        // `gitLabRecheckGate`, which is where that reasoning is written down.
+        // subprocess leak, so the detached call is bounded twice at this one
+        // creation site: `gitLabRecheckGate` caps how many are live (one per
+        // project) and `recheckTimeout` caps how long any one of them lives,
+        // terminating the child when it fires. Both bounds are reasoned about
+        // where the gate is declared.
         //
         // Only non-terminal merge requests are asked. A merged or closed one has
         // a mergeability nobody will recompute and nobody will read, so
@@ -1210,8 +1234,8 @@ public actor PRStatusManager {
             let host = group.host
             let recheckPath = GitLabQueries.recheckPath(projectPath: projectPath, iids: recheckIIDs)
             Task.detached { [self] in
-                _ = await runGLResult(args: ["api", "--hostname", host, recheckPath],
-                                      repoPath: repoPath)
+                _ = await runGLBounded(args: ["api", "--hostname", host, recheckPath],
+                                       repoPath: repoPath, timeout: Self.recheckTimeout)
                 await gitLabRecheckGate.finish(gateKey)
             }
         }
@@ -3164,6 +3188,45 @@ public actor PRStatusManager {
         return await Self.runGlab(args: args, repoPath: repoPath)
     }
 
+    /// One `glab` invocation that cannot outlive `timeout`, for the detached
+    /// call nobody is waiting on.
+    ///
+    /// The deadline is a race, not a poll: whichever of the call and the sleep
+    /// finishes first wins, and cancelling the group ends the other. On a
+    /// timeout that cancellation reaches `runCLI`, which terminates the child —
+    /// the bound is on the subprocess itself rather than merely on the task
+    /// awaiting it, because a task that stops waiting leaves a `glab` nothing
+    /// reclaims. Returns nil when the deadline fired; every caller of this is
+    /// discarding the answer anyway.
+    private nonisolated func runGLBounded(args: [String], repoPath: String,
+                                          timeout: Duration) async -> GHCommandResult? {
+        enum Outcome: Sendable {
+            case finished(GHCommandResult?)
+            case timedOut
+        }
+        return await withTaskGroup(of: Outcome.self, returning: GHCommandResult?.self) { group in
+            group.addTask {
+                .finished(await self.runGLResult(args: args, repoPath: repoPath))
+            }
+            group.addTask {
+                // A cancelled sleep also reports `.timedOut`, and that is
+                // harmless: it can only happen after the other task already
+                // produced the value this returns.
+                try? await self.clock.sleep(for: timeout)
+                return .timedOut
+            }
+            defer { group.cancelAll() }
+            guard let first = await group.next() else { return nil }
+            switch first {
+            case .finished(let result):
+                return result
+            case .timedOut:
+                logger.debug("glab call exceeded \(timeout, privacy: .public); terminating it")
+                return nil
+            }
+        }
+    }
+
     /// The real `glab` subprocess. Static because `GitLabHostResolver` is handed
     /// this same runner while the manager is still being initialized, so there
     /// is no instance yet for it to capture.
@@ -3175,34 +3238,57 @@ public actor PRStatusManager {
         return await runCLI(executable: glabPath, args: args, repoPath: repoPath)
     }
 
+    /// Runs a forge CLI and answers what it printed.
+    ///
+    /// **Cancelling the calling task terminates the child.** Without that, a
+    /// caller that stops waiting — the deadline in `runGLBounded` is the one
+    /// that does — abandons a live subprocess that no reconciler reclaims, so
+    /// the deadline would bound the wait and not the leak. `ChildProcessHandle`
+    /// carries the process across to the cancellation handler and closes the
+    /// two orderings that could otherwise let one slip: a cancel that lands
+    /// before `run()` prevents the launch outright, and one that lands during
+    /// `run()` is re-checked immediately afterwards.
     private static func runCLI(executable: String, args: [String], repoPath: String) async -> GHCommandResult? {
-        await withCheckedContinuation { continuation in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: executable)
-            process.arguments = args
-            process.currentDirectoryURL = URL(fileURLWithPath: repoPath)
+        let handle = ChildProcessHandle()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: executable)
+                process.arguments = args
+                process.currentDirectoryURL = URL(fileURLWithPath: repoPath)
 
-            let stdout = Pipe()
-            let stderr = Pipe()
-            process.standardOutput = stdout
-            process.standardError = stderr
+                let stdout = Pipe()
+                let stderr = Pipe()
+                process.standardOutput = stdout
+                process.standardError = stderr
 
-            process.terminationHandler = { p in
-                let stdoutData = stdout.fileHandleForReading.readDataToEndOfFile()
-                let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
-                continuation.resume(returning: GHCommandResult(
-                    stdout: String(data: stdoutData, encoding: .utf8) ?? "",
-                    stderr: String(data: stderrData, encoding: .utf8) ?? "",
-                    exitStatus: p.terminationStatus
-                ))
+                process.terminationHandler = { p in
+                    let stdoutData = stdout.fileHandleForReading.readDataToEndOfFile()
+                    let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
+                    continuation.resume(returning: GHCommandResult(
+                        stdout: String(data: stdoutData, encoding: .utf8) ?? "",
+                        stderr: String(data: stderrData, encoding: .utf8) ?? "",
+                        exitStatus: p.terminationStatus
+                    ))
+                }
+
+                guard handle.adopt(process) else {
+                    // Cancelled before the launch: the cheapest possible
+                    // termination is never starting.
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                do {
+                    try process.run()
+                    handle.terminateIfCancelled()
+                } catch {
+                    logger.debug("Failed to launch \(executable, privacy: .public): \(error)")
+                    continuation.resume(returning: nil)
+                }
             }
-
-            do {
-                try process.run()
-            } catch {
-                logger.debug("Failed to launch \(executable, privacy: .public): \(error)")
-                continuation.resume(returning: nil)
-            }
+        } onCancel: {
+            handle.cancel()
         }
     }
 
@@ -3242,6 +3328,52 @@ struct GHCommandResult: Sendable {
 }
 
 // MARK: - Supporting types
+
+/// The child a `runCLI` call launched, shared with that call's cancellation
+/// handler so a caller that stops waiting can end the process rather than
+/// abandon it.
+///
+/// `withCheckedContinuation`'s body and `withTaskCancellationHandler`'s
+/// `onCancel` run on different threads and either may go first, so the handoff
+/// is lock-guarded and remembers a cancellation that arrived before there was
+/// anything yet to cancel.
+private final class ChildProcessHandle: @unchecked Sendable {
+    private let lock = NSLock()
+    private var process: Process?
+    private var cancelled = false
+
+    /// Takes the process, or answers false because cancellation already
+    /// arrived — in which case the caller must not launch it at all.
+    func adopt(_ process: Process) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !cancelled else { return false }
+        self.process = process
+        return true
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        let launched = process
+        lock.unlock()
+        Self.terminate(launched)
+    }
+
+    /// Re-checked right after `run()` returns, for the cancellation that landed
+    /// mid-launch and so found nothing running to signal.
+    func terminateIfCancelled() {
+        lock.lock()
+        let launched = cancelled ? process : nil
+        lock.unlock()
+        Self.terminate(launched)
+    }
+
+    private static func terminate(_ process: Process?) {
+        guard let process, process.isRunning else { return }
+        process.terminate()
+    }
+}
 
 /// Result of the single-PR refresh query, populated by `parsePRByBranch`.
 /// (No longer `Codable`: the refresh path moved from `gh pr view --json` to

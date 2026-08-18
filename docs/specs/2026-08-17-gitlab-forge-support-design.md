@@ -235,22 +235,31 @@ open merge request in the project.
 This is not a fallback transport and does not reopen the transport decision. The
 poll remains GraphQL; the REST call carries no data TBD reads.
 
-**The recheck is detached, and single-flighted per project by
-`GitLabRecheckGate`.** Nothing in the pass reads the recheck's answer, so
-nothing in the pass may wait for it — and it is the call most likely to hang,
-since its whole purpose is to queue work on someone else's server. Left
-attached, one hung `glab` stalls PR polling for the entire fleet, because
-`refreshBindings` walks its groups one at a time and `fetchAll` skips the next
-poll while one is in flight. Detaching removes that stall and, unbounded, would
-replace it with a subprocess leak: `runCLI` imposes no timeout and a detached
-task inherits no cancellation, so a hung endpoint accumulates one `glab`, one
+**The recheck is detached, and bounded twice where it is created.** Nothing in
+the pass reads the recheck's answer, so nothing in the pass may wait for it —
+and it is the call most likely to hang, since its whole purpose is to queue work
+on someone else's server. Left attached, one hung `glab` stalls PR polling for
+the entire fleet, because `refreshBindings` walks its groups one at a time and
+`fetchAll` skips the next poll while one is in flight. Detaching removes that
+stall and, unbounded, would replace it with a subprocess leak: a detached task
+inherits no cancellation, so a hung endpoint accumulates one `glab`, one
 `Process` and its file descriptors per project per tick — around 288 of them
 overnight at a five-minute cadence, and no reconciler covers a forge CLI
-subprocess. `GitLabRecheckGate` is an actor holding the set of projects with a
-recheck outstanding; a project with one in flight issues no second call, and
-outstanding-forever is the intended reading of a hang — that project stops
-asking until the process ends. Only non-terminal merge requests are named: a
-merged or closed one has a mergeability nobody recomputes and nobody reads.
+subprocess.
+
+The two bounds answer different questions, and both are needed.
+
+- **How many.** `GitLabRecheckGate` is an actor holding the set of projects with
+  a recheck outstanding; a project with one in flight issues no second call, so
+  a stuck endpoint cannot multiply per tick.
+- **For how long.** The detached call is raced against a 60-second deadline on
+  an injected clock, and the child is terminated when it fires, so no recheck is
+  outstanding forever. The deadline is deliberately generous: a slow instance
+  should be allowed to finish rather than be killed and retried next tick. What
+  it rules out is the unbounded case.
+
+Only non-terminal merge requests are named: a merged or closed one has a
+mergeability nobody recomputes and nobody reads.
 
 **Branch matching queries the server, not the viewer.** GitHub forces TBD to
 fetch the authenticated user's own pull requests and match branches locally,
@@ -537,6 +546,8 @@ tested.
   `CHECKING` and `PREPARING` cases.
 - The recheck request names only bound merge requests, and a failure or an
   unparseable response from it does not disturb the poll's own result.
+- A hung recheck is terminated once its deadline elapses, driven by the injected
+  clock so the test proves the bound without waiting for it.
 - Forge derivation is not attempted for a GitHub remote, asserted by an injected
   `GLRunner` that fails the test if invoked.
 - GitLab node parsing, including an absent `headPipeline`.
@@ -562,12 +573,24 @@ GitHub arm is unchanged, and is covered by the existing suite.
 **No new reconciler.** No durable external resource is created. `glab`
 subprocesses are transient in exactly the way `gh`'s already are, no git ref,
 worktree, tmux entity, or file outlives the request that created it, and no new
-row is written that an existing sweep does not already cover. The single
-exception is the detached mergeability recheck, whose subprocess outlives the
-pass that spawned it; it is bounded at its creation site by `GitLabRecheckGate`
-— at most one live recheck per project — because a forge CLI subprocess is
-covered by no sweep and the count, not the lifetime, is what has to stay
-finite.
+row is written that an existing sweep does not already cover.
+
+The single exception is the detached mergeability recheck, whose subprocess
+outlives the pass that spawned it. It is bounded at its creation site instead of
+by a sweep, by the pair described under "GitLab I/O": the single-flight gate
+keeps at most one live recheck per project, and the deadline terminates the
+child when it fires, so neither the count nor the lifetime is open-ended. A
+forge CLI subprocess is covered by no existing sweep, and this design adds none.
+
+**A daemon that dies mid-recheck orphans that child, and nothing reclaims it.**
+The deadline lives in the daemon's own process, so it dies with it, and the
+gate's set is in memory and starts empty at the next launch. Stated plainly
+rather than left implied: at the instant of a crash the exposure is at most one
+`glab` per GitLab project, each one a request whose only effect is to queue a
+mergeability recomputation on the server, and each holding its own file
+descriptors until that request ends. A sweep for those would have to reap by
+command line — the only handle a restarted daemon has on a process it never
+spawned — which is a worse trade than the bounded exposure it would reclaim.
 
 **No migration.** No column is added or changed, so the migration-plus-record-
 plus-model rule has nothing to apply to.
@@ -626,15 +649,16 @@ substantial part of a GitLab fleet would permanently display a status that
 communicates nothing — and the state is reachable out of TBD's own poll, which
 makes leaving it a choice rather than a limitation.
 
-**Bounding the recheck with a timeout instead of single-flight.** A deadline on
-the detached call would also stop the subprocess pile-up, and it would end a hung
-`glab` rather than waiting on it. Rejected because single-flight is both cheaper
-and the stronger statement: it needs no timer and therefore no injected clock
-seam, and a second recheck for a project whose first is still outstanding is
-asking the server to redo work it has not finished — so skipping it loses
-nothing even when the endpoint is perfectly healthy. A timeout would still
-permit one live process per project per tick until it fired. `GitLabRecheckGate`
-is what ships.
+**Bounding the recheck with either mechanism alone.** Each half looks
+sufficient on its own and neither is. A deadline with no admission gate still
+admits a fresh process per project per tick until it fires, so a stuck endpoint
+multiplies inside the deadline. Single-flight with no deadline is cheaper — it
+needs no timer and therefore no clock seam — and it does cap the count, but it
+never ends a hung `glab`: the project stops asking and the process stays for the
+life of the daemon, which is precisely the unreclaimed resource that has to be
+answered for. Skipping a second recheck loses nothing even on a healthy endpoint,
+since it asks the server to redo work it has not finished, so the gate is worth
+keeping — alongside the deadline, not instead of it.
 
 **Growing `PRMergeableState`.** Dedicated cases for GitLab's distinct states
 would be more faithful to what GitLab reports. Rejected because every new tier

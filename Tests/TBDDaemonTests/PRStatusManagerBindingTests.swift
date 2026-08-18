@@ -1,7 +1,9 @@
+import Clocks
 import Testing
 import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TestSupport
 
 // MARK: - Injected `gh`
 
@@ -258,6 +260,43 @@ private actor HangingRecheck {
             try? await Task.sleep(for: .milliseconds(5))
         }
         return entered
+    }
+}
+
+/// A mergeability recheck that never answers until something cancels it.
+///
+/// Cancellation is the observable stand-in for the kill: production's `runCLI`
+/// turns exactly this cancellation into a `terminate()` on the `glab` child, so
+/// a recheck that observes it is one whose subprocess ends.
+private actor CancellableRecheck {
+    private var entered = false
+    private var cancelled = false
+
+    func hangUntilCancelled() async {
+        entered = true
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        cancelled = true
+    }
+
+    /// Polled, because the recheck is issued from a detached task whose
+    /// scheduling no test owns. The bound under test is virtual time; these
+    /// waits only cover that scheduling.
+    func wasEntered(within timeout: Duration = .seconds(10)) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while !entered && ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return entered
+    }
+
+    func wasCancelled(within timeout: Duration = .seconds(10)) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while !cancelled && ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return cancelled
     }
 }
 
@@ -856,6 +895,40 @@ struct PRStatusManagerBindingTests {
             _ = await manager.refreshBindings([binding])
             return await recheck.issued >= 2
         }
+    }
+
+    @Test("a hung mergeability recheck is terminated once its deadline elapses",
+          .clockDriven)
+    func recheckIsBoundedByADeadline() async {
+        // Single-flight caps how MANY rechecks are live and can never end one:
+        // a `glab` that hangs stays for the life of the daemon, and no
+        // reconciler covers a forge CLI subprocess. The deadline is the half
+        // that caps the LIFETIME, and it has to reach the call itself —
+        // cancellation, which `runCLI` turns into a terminate on the child —
+        // rather than merely stop this side waiting for it.
+        let clock = TestClock()
+        let gl = GitLabFake()
+        let recheck = CancellableRecheck()
+        let manager = PRStatusManager(
+            ghRunner: { _, _ in nil },
+            glRunner: { args, path in
+                if args.contains(where: { $0.contains("with_merge_status_recheck=true") }) {
+                    await recheck.hangUntilCancelled()
+                    return nil
+                }
+                return await gl.run(args: args, repoPath: path)
+            },
+            gitLabHosts: [Self.gitLabHost],
+            clock: clock)
+
+        _ = await manager.refreshBindings([Self.gitLabBinding()])
+        #expect(await recheck.wasEntered(), "no recheck was issued for a deadline to bound")
+
+        // Virtual time: the bound is proven without spending it.
+        await clock.advanceWhenSuspended(by: PRStatusManager.recheckTimeout)
+
+        #expect(await recheck.wasCancelled(),
+                "the recheck was still running after its deadline elapsed")
     }
 
     @Test("the recheck asks only about merge requests that can still change")
