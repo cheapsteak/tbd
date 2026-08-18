@@ -105,6 +105,27 @@ struct CodexTranscriptActivityTrackerTests {
         #expect(state == .idle)
     }
 
+    @Test func laterObservationsDoNotRescanAlreadyConsumedBytes() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        let initial = event(type: "task_started", turnID: "a")
+        let replacement = event(type: "task_started", turnID: "b")
+        #expect(initial.count == replacement.count)
+        try fixture.write(initial)
+        let tracker = CodexTranscriptActivityTracker()
+        let worktreeID = UUID()
+        let firstState = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+
+        try fixture.overwriteBeginning(with: replacement)
+        try fixture.append(event(type: "task_complete", turnID: "a"))
+        let appendedState = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+
+        #expect(firstState == .working)
+        #expect(appendedState == .idle)
+    }
+
     @Test func unterminatedRecordWaitsForNewline() async throws {
         let fixture = try TranscriptFixture()
         defer { fixture.remove() }
@@ -121,6 +142,22 @@ struct CodexTranscriptActivityTrackerTests {
 
         #expect(beforeNewline == nil)
         #expect(afterNewline == .working)
+    }
+
+    @Test func lifecycleRecordCrossingReadChunkBoundaryIsReassembled() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        let record = event(
+            type: "task_started", turnID: "a",
+            padding: String(repeating: "x", count: 64 * 1024))
+        #expect(record.count > 64 * 1024)
+        try fixture.write(record)
+        let tracker = CodexTranscriptActivityTracker()
+
+        let state = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: UUID())
+
+        #expect(state == .working)
     }
 
     @Test func truncationResetsAndRebuildsFromByteZero() async throws {
@@ -169,7 +206,8 @@ struct CodexTranscriptActivityTrackerTests {
     @Test func unreadablePathReturnsNilInsteadOfCachedWorking() async throws {
         let fixture = try TranscriptFixture()
         defer { fixture.remove() }
-        try fixture.write(event(type: "task_started", turnID: "a"))
+        try fixture.write(
+            event(type: "task_started", turnID: "a", padding: String(repeating: "x", count: 256)))
         let tracker = CodexTranscriptActivityTracker()
         let worktreeID = UUID()
         let initial = await tracker.observe(
@@ -178,9 +216,13 @@ struct CodexTranscriptActivityTrackerTests {
 
         let unreadable = await tracker.observe(
             transcriptPath: fixture.path, worktreeID: worktreeID)
+        try fixture.replaceDirectoryWithFile(event(type: "task_complete", turnID: "replacement"))
+        let recovered = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
 
         #expect(initial == .working)
         #expect(unreadable == nil)
+        #expect(recovered == .idle)
     }
 
     @Test func fleetWideRetainPrunesEveryMissingTranscript() async throws {
@@ -228,9 +270,17 @@ struct CodexTranscriptActivityTrackerTests {
         #expect(await tracker.hasBaseline(transcriptPath: keptThere.path))
     }
 
-    private func event(type: String, turnID: String, terminated: Bool = true) -> Data {
+    private func event(
+        type: String,
+        turnID: String,
+        terminated: Bool = true,
+        padding: String? = nil
+    ) -> Data {
         let newline = terminated ? "\n" : ""
-        return Data((#"{"type":"event_msg","payload":{"type":"\#(type)","turn_id":"\#(turnID)"}}"# + newline).utf8)
+        let paddingField = padding.map { #", "padding":"\#($0)""# } ?? ""
+        return Data((
+            #"{"type":"event_msg","payload":{"type":"\#(type)","turn_id":"\#(turnID)"\#(paddingField)}}"#
+                + newline).utf8)
     }
 }
 
@@ -258,9 +308,21 @@ private final class TranscriptFixture: @unchecked Sendable {
         try handle.write(contentsOf: data)
     }
 
+    func overwriteBeginning(with data: Data) throws {
+        let handle = try FileHandle(forWritingTo: file)
+        defer { try? handle.close() }
+        try handle.seek(toOffset: 0)
+        try handle.write(contentsOf: data)
+    }
+
     func replaceFileWithDirectory() throws {
         try FileManager.default.removeItem(at: file)
         try FileManager.default.createDirectory(at: file, withIntermediateDirectories: false)
+    }
+
+    func replaceDirectoryWithFile(_ data: Data) throws {
+        try FileManager.default.removeItem(at: file)
+        try data.write(to: file)
     }
 
     func remove() {
