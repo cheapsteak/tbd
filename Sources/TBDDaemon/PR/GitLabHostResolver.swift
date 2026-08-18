@@ -46,6 +46,16 @@ actor GitLabHostResolver {
     /// long a user who has just run `glab auth login --hostname …` waits for
     /// TBD to notice. Five minutes is ten foreground ticks of silence for a
     /// wait no longer than the background poll interval itself.
+    ///
+    /// That wait is not merely cosmetic, which is what keeps the window short.
+    /// For its duration the newly configured checkout is still classified
+    /// non-GitLab, so `fetchNumberedMatches` will offer its stored `prNumber`
+    /// to gh's by-number query — and on a flat GitLab namespace those
+    /// coordinates can be answered by a same-named GitHub repository, the
+    /// hazard `PRStatusManager` warns about at that call site. Here it is
+    /// bounded to at most `emptyStatusLifetime` and self-heals on the first
+    /// re-derivation; unbounded caching of the empty answer would leave it
+    /// standing until restart.
     static let emptyStatusLifetime: TimeInterval = 300
 
     init(glRunner: GLRunner? = nil, now: @escaping @Sendable () -> Date = { Date() }) {

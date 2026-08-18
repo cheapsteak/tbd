@@ -88,8 +88,47 @@ Four constraints on the derivation:
   on ambient repo context would send a self-managed instance's queries to the
   public one.
 
-The derived host set is cached in memory for the daemon run. Nothing is
-persisted, so nothing needs invalidating, and no clock seam is required.
+**The derivation remembers three outcomes for three different spans, because
+they are three different facts.** Nothing is persisted; all of it lives in
+memory for the daemon run.
+
+- **A non-empty derivation** — `glab` ran and named hosts — is kept for the
+  resolver's life. It is a derived truth about a declaration the user made, and
+  nothing invalidates a declaration.
+- **`glab` failing to launch** is never remembered. It is not an observation
+  that the fleet has no GitLab hosts, only a failure to ask: the binary is
+  absent, or one exec failed transiently. Remembering it would mean a user who
+  runs `glab auth login` after TBD started gets no GitLab support until the
+  next restart, with no message anywhere. Retrying costs nothing in the case
+  that dominates, because an absent `glab` resolves to a static nil path that
+  spawns no subprocess at all.
+- **`glab` running and naming no host** is remembered for a bounded window,
+  `emptyStatusLifetime`, of 300 seconds. That one *is* an observation, and it is
+  the steady state of every fleet with `glab` installed and no GitLab host
+  configured — so re-deriving it per call means one `glab auth status`
+  subprocess per worktree per poll tick, forever, for an answer that has not
+  changed. It cannot be kept for the run either, since the same user is one
+  `glab auth login --hostname …` away from making it wrong.
+
+The window is bounded on the side that matters: the empty answer is at worst
+300 seconds stale, never stale until restart. Its floor is the poll cadence —
+`GitPollCadence.prInterval` is 30 s in the foreground and every distinct
+worktree path on the tick asks — so even one interval collapses a fleet's worth
+of spawns into one; its ceiling is how long a user who has just authenticated
+waits. The wait is not merely cosmetic: for its duration the checkout is still
+classified non-GitLab, so a stored merge-request number can be offered to gh's
+by-number query, where a same-named GitHub repository may answer. Bounding it
+to 300 seconds makes that self-healing rather than durable.
+
+The window takes an injected **date** seam, `now: @Sendable () -> Date`, not a
+clock. The timestamp is compared and never slept on, and the resolver schedules
+nothing — `Duration` is behavior, `Date` is data. The comparison uses the
+magnitude of the interval, so a wall clock that steps backwards re-derives
+early rather than pinning the empty answer in place until the clock catches up.
+
+None of this sits on a pure `github.com` fleet's path, which short-circuits
+before any subprocess. It sits on a GitHub Enterprise, Bitbucket, Gitea or
+Codeberg fleet's path, which is why the empty answer has to be cheap.
 
 **Credential expiry is a reporting requirement, not a recovery one.** Tokens are
 personal access tokens with an expiry and no refresh, so a host that worked
@@ -180,6 +219,23 @@ open merge request in the project.
 
 This is not a fallback transport and does not reopen the transport decision. The
 poll remains GraphQL; the REST call carries no data TBD reads.
+
+**The recheck is detached, and single-flighted per project by
+`GitLabRecheckGate`.** Nothing in the pass reads the recheck's answer, so
+nothing in the pass may wait for it — and it is the call most likely to hang,
+since its whole purpose is to queue work on someone else's server. Left
+attached, one hung `glab` stalls PR polling for the entire fleet, because
+`refreshBindings` walks its groups one at a time and `fetchAll` skips the next
+poll while one is in flight. Detaching removes that stall and, unbounded, would
+replace it with a subprocess leak: `runCLI` imposes no timeout and a detached
+task inherits no cancellation, so a hung endpoint accumulates one `glab`, one
+`Process` and its file descriptors per project per tick — around 288 of them
+overnight at a five-minute cadence, and no reconciler covers a forge CLI
+subprocess. `GitLabRecheckGate` is an actor holding the set of projects with a
+recheck outstanding; a project with one in flight issues no second call, and
+outstanding-forever is the intended reading of a hang — that project stops
+asking until the process ends. Only non-terminal merge requests are named: a
+merged or closed one has a mergeability nobody recomputes and nobody reads.
 
 **Branch matching queries the server, not the viewer.** GitHub forces TBD to
 fetch the authenticated user's own pull requests and match branches locally,
@@ -444,7 +500,12 @@ GitHub arm is unchanged, and is covered by the existing suite.
 **No new reconciler.** No durable external resource is created. `glab`
 subprocesses are transient in exactly the way `gh`'s already are, no git ref,
 worktree, tmux entity, or file outlives the request that created it, and no new
-row is written that an existing sweep does not already cover.
+row is written that an existing sweep does not already cover. The single
+exception is the detached mergeability recheck, whose subprocess outlives the
+pass that spawned it; it is bounded at its creation site by `GitLabRecheckGate`
+— at most one live recheck per project — because a forge CLI subprocess is
+covered by no sweep and the count, not the lifetime, is what has to stay
+finite.
 
 **No migration.** No column is added or changed, so the migration-plus-record-
 plus-model rule has nothing to apply to.
@@ -503,11 +564,15 @@ substantial part of a GitLab fleet would permanently display a status that
 communicates nothing — and the state is reachable out of TBD's own poll, which
 makes leaving it a choice rather than a limitation.
 
-**Rate-limiting the recheck behind a staleness timer.** Politest to the server,
-and rejected for now only because it buys little over scoping the request to bound
-merge requests, while introducing a timer and therefore an injected clock seam. If
-field use shows the per-tick request is too much load, this is the change to
-make.
+**Bounding the recheck with a timeout instead of single-flight.** A deadline on
+the detached call would also stop the subprocess pile-up, and it would end a hung
+`glab` rather than waiting on it. Rejected because single-flight is both cheaper
+and the stronger statement: it needs no timer and therefore no injected clock
+seam, and a second recheck for a project whose first is still outstanding is
+asking the server to redo work it has not finished — so skipping it loses
+nothing even when the endpoint is perfectly healthy. A timeout would still
+permit one live process per project per tick until it fired. `GitLabRecheckGate`
+is what ships.
 
 **Growing `PRMergeableState`.** Dedicated cases for GitLab's distinct states
 would be more faithful to what GitLab reports. Rejected because every new tier

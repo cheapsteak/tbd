@@ -2674,12 +2674,29 @@ public actor PRStatusManager {
     /// only one of them licenses it for a host gh itself would have answered
     /// for.
     private enum GHUnservable {
-        /// There is no gh binary, or gh ran with credentials in hand and said
-        /// none of this checkout's remotes name a GitHub host it knows. Either
-        /// way the answer is about the CHECKOUT: gh will never speak for it, on
-        /// this host or any other, so `origin` may. This is the route every
+        /// gh ran with credentials in hand and said none of this checkout's
+        /// remotes name a GitHub host it knows — or there is no gh binary at
+        /// all.
+        ///
+        /// The first route is about the CHECKOUT: gh will never speak for it,
+        /// on this host or any other, so `origin` may. This is the route every
         /// GitLab checkout with a working gh takes, and it must keep behaving
         /// exactly as it does.
+        ///
+        /// The second route is not. "No gh binary" is a fact about the MACHINE,
+        /// by exactly the argument `.noCredentials` makes for itself, and it is
+        /// grouped here pragmatically rather than because it belongs. The
+        /// residual that grouping accepts: a daemon whose PATH lacks `gh`, on a
+        /// `github.com` fork checkout with an `upstream` remote, resolves to the
+        /// fork via `origin` — so a hydrated parent-repo PR can be cleared, and
+        /// the clear persists.
+        ///
+        /// It is not fixed by routing the no-binary case to `.noCredentials`,
+        /// because that withholds the `origin` parse on every `github.com`
+        /// checkout of a gh-less machine, and the parse is also what composes
+        /// attach-by-number URLs there. Trading a working feature on every
+        /// gh-less GitHub checkout against a fork-with-upstream corner is the
+        /// worse deal.
         case cannotServeThisCheckout
         /// gh holds no credentials for anywhere, so it never got as far as the
         /// checkout. The answer is about the MACHINE, and it is silence about
