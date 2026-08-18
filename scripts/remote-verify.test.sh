@@ -280,11 +280,32 @@ test_an_untracked_file_refuses_too() {
 }
 
 test_a_missing_gh_refuses_rather_than_falling_back_silently() {
+  # A CONSTRUCTED PATH, NOT A SYSTEM ONE. "gh lives somewhere else" is a fact
+  # about one machine, not about any machine: on a developer's mac `gh` is
+  # under `/opt/homebrew/bin`, so naming `/usr/bin:/bin` made it absent by
+  # accident, while a GitHub runner ships `/usr/bin/gh` and the same PATH finds
+  # it — the case then exercised the auth branch and could never pass on CI.
+  #
+  # The fixture bin below holds exactly the tools the script reaches for BEFORE
+  # it looks for `gh` — `dirname` to locate itself, `git` for the repository and
+  # dirty-tree checks that deliberately come first — and nothing else. An empty
+  # bin would refuse for a missing `git` instead, and the case would be testing
+  # nothing it names. `/bin/bash` is absolute because PATH is where bash would
+  # otherwise be found.
   local root; root="$(setup)"
-  OUT="$(cd "$root/work" && env PATH="/usr/bin:/bin" TBD_HOME="$root/home" bash "$SCRIPT" 2>&1)"
+  local nogh="$root/nogh-bin" tool
+  mkdir -p "$nogh"
+  for tool in git dirname; do ln -s "$(command -v "$tool")" "$nogh/$tool"; done
+  # Asserted, not assumed: a future runner image that put `gh` somewhere this
+  # bin reaches must redden here rather than quietly move the case to another
+  # branch of `check_preconditions`.
+  assert_eq "the fixture PATH really has no gh" "" "$(PATH="$nogh" command -v gh)"
+  OUT="$(cd "$root/work" && env PATH="$nogh" TBD_HOME="$root/home" /bin/bash "$SCRIPT" 2>&1)"
   RC=$?
   assert_eq "no gh exits 78" "78" "$RC"
   assert_contains "and says so" "$OUT" "gh is not installed"
+  # And it refused for the missing `gh` rather than for a hole in the fixture.
+  assert_missing "with nothing else missing from the bin" "$OUT" "command not found"
   rm -rf "$root"
 }
 

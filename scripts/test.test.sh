@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # Tests for scripts/test.sh — run: bash scripts/test.test.sh
 #
+# MACOS ONLY, AND LOUDLY SO. `mode_of` reads the file mode with BSD `stat -f`,
+# which GNU `stat` spells differently, so on Linux the mode comes back empty and
+# the decoy cases fail rather than passing vacuously. That is why this file runs
+# in the macOS `lint` job while the other script harnesses run on `ubuntu-latest`
+# (.github/workflows/test.yml).
+#
 # ZERO BUILDS, ZERO CPU LOAD, AND IT NEVER TOUCHES THE REAL ~/tbd, ~/.claude,
 # ~/.codex OR THE REAL TMUX SOCKET DIRECTORY. Every case here drives the wrapper
 # against a synthetic home under a throwaway fixture directory, with a stub

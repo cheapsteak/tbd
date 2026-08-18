@@ -175,6 +175,17 @@ STUB
 # expression rather than faking its output. Echoes "yes" or "no".
 have_jq() { if command -v jq >/dev/null 2>&1; then echo yes; else echo no; fi; }
 
+# A SKIP IS PRINTED AS AN `ok` LINE, so ten dropped cases and ten passing ones
+# look alike to anything counting output. On a developer's machine that is the
+# right trade — the harness still runs everything it can. On CI it is not: `jq`
+# is part of the runner image, so its absence means the image changed under us,
+# and a run that quietly stopped exercising the `--jq` expression would report
+# the same green as one that did.
+if [ -n "${CI:-}" ] && [ "$(have_jq)" != yes ]; then
+  echo "FAIL - jq is missing on CI, where the runner image provides it; the run-leg cases would be skipped silently"
+  FAIL=1
+fi
+
 # refs_on_origin ROOT -> the fixture remote's branch names, sorted, space-joined.
 refs_on_origin() {
   git -C "$1/work" ls-remote --heads origin | awk '{sub(/^refs\/heads\//, "", $2); print $2}' | sort | tr '\n' ' '
