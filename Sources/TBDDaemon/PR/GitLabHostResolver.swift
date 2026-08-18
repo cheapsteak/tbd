@@ -35,9 +35,25 @@ actor GitLabHostResolver {
         return await hosts(repoPath: repoPath).contains(normalized)
     }
 
+    /// Only a non-empty derivation is cached. An empty set is never an
+    /// observation that the fleet has no GitLab hosts — `fetchHosts` returns it
+    /// just as readily when `glab` is absent, fails to launch, or prints
+    /// something unparseable — so remembering it would mean a user who runs
+    /// `glab auth login --hostname …` after the daemon started, or one
+    /// transient failure on the first poll after boot, gets no GitLab until the
+    /// next restart, with no message anywhere. The spec's "cached for the
+    /// daemon run, so nothing needs invalidating" reasons about caching a
+    /// derived truth; it does not license caching a failure to derive.
+    ///
+    /// Retrying costs nothing on the fleet this cache exists for: `github.com`
+    /// short-circuits in `isGitLabHost` before reaching here, so a GitHub-only
+    /// fleet still spawns no `glab` at all. Only a host that is neither
+    /// `github.com` nor a declared GitLab host re-probes, and it does so
+    /// precisely because the answer for it is still unknown.
     private func hosts(repoPath: String) async -> Set<String> {
         if let cachedHosts { return cachedHosts }
         let resolved = await fetchHosts(repoPath: repoPath)
+        guard !resolved.isEmpty else { return resolved }
         cachedHosts = resolved
         return resolved
     }

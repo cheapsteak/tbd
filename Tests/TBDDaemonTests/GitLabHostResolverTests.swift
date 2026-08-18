@@ -65,6 +65,25 @@ struct GitLabHostResolverTests {
         #expect(await resolver.isGitLabHost("git.acme.example", repoPath: "/tmp/x") == false)
     }
 
+    /// A derivation that produced nothing is not an answer, it is a failed
+    /// question. `glab` may be installed, or authenticated against a new host,
+    /// at any point during a daemon run that lasts days — and one transient
+    /// launch failure on the first poll after boot must not disable GitLab
+    /// until the next restart.
+    @Test("an empty derivation is retried, not remembered")
+    func emptyDerivationIsRetried() async {
+        let attempts = Probe()
+        let resolver = GitLabHostResolver(glRunner: { _, _ in
+            let seen = await attempts.mark()
+            // First call: glab is not on PATH. Afterwards the user has run
+            // `glab auth login --hostname git.acme.example`.
+            return seen == 1 ? nil : GHCommandResult(stdout: Self.realOutput)
+        })
+        #expect(await resolver.isGitLabHost("git.acme.example", repoPath: "/tmp/x") == false)
+        #expect(await resolver.isGitLabHost("git.acme.example", repoPath: "/tmp/x"))
+        #expect(await attempts.count == 2)
+    }
+
     @Test("the host list is fetched once and cached for the resolver's life")
     func cachesAcrossCalls() async {
         let probed = Probe()
@@ -114,5 +133,9 @@ struct GitLabHostResolverTests {
 
 private actor Probe {
     private(set) var count = 0
-    func mark() { count += 1 }
+    @discardableResult
+    func mark() -> Int {
+        count += 1
+        return count
+    }
 }
