@@ -184,6 +184,12 @@ public final class RPCRouter: Sendable {
     /// TTL cache; tests inject a stub through the init parameter of the same
     /// name.
     let prBindingRepoResolver: @Sendable (UUID) async -> (owner: String, name: String, host: String)?
+    /// Whether a worktree's host is one the user configured `glab` for — nil
+    /// when there is no local directory to put the question in. The coordinator
+    /// is built on this same closure, so the guard that refuses a `github.com`
+    /// URL on a GitLab checkout and the composer that picks `/-/merge_requests/`
+    /// over `/pull/` agree about the forge.
+    let prBindingForgeResolver: @Sendable (UUID, String) async -> Bool?
     /// Queues concurrent `terminal.send` RPCs per terminal so two payloads
     /// never interleave in one composer. Different terminals still send in
     /// parallel — see `TerminalSendSerializer`.
@@ -265,8 +271,17 @@ public final class RPCRouter: Sendable {
             return await prManager.repoIdentity(repoPath: worktree.path)
         }
         self.prBindingRepoResolver = repoResolver
+        // The forge half of the same seam, captured the same way. `getLocal`
+        // again, and its nil is the same "nothing here to ask in": `glab` reads
+        // its configuration from the checkout's own directory, which a remote
+        // row does not have on this machine.
+        let forgeResolver: @Sendable (UUID, String) async -> Bool? = { [db, prManager] worktreeID, host in
+            guard let worktree = try? await db.worktrees.getLocal(id: worktreeID) else { return nil }
+            return await prManager.isGitLabHost(host, repoPath: worktree.path)
+        }
+        self.prBindingForgeResolver = forgeResolver
         self.prBindingCoordinator = PRBindingCoordinator(
-            store: db.prBindings, resolveRepo: repoResolver)
+            store: db.prBindings, resolveRepo: repoResolver, isGitLabHost: forgeResolver)
         self.pendingQuestions = pendingQuestions
         self.repoSerializer = repoSerializer
         self.configDirManager = configDirManager
@@ -1302,7 +1317,6 @@ public final class RPCRouter: Sendable {
     /// Codeberg checkout serves. `github.com` never reaches a subprocess: the
     /// resolver short-circuits it.
     private func isGitLabWorktree(worktreeID: UUID, host: String) async -> Bool? {
-        guard let worktree = try? await db.worktrees.getLocal(id: worktreeID) else { return nil }
-        return await prManager.isGitLabHost(host, repoPath: worktree.path)
+        await prBindingForgeResolver(worktreeID, host)
     }
 }

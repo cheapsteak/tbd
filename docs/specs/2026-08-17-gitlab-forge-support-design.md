@@ -299,6 +299,30 @@ a GitLab branch that splits the path on the `/-/` separator: everything left of
 it is the project path, so no segment counting is needed and nesting depth is
 irrelevant.
 
+**Two forges can name one `owner/name`, so binding validation compares hosts as
+well.** `identityKey` and the unique index already key on the host; the
+wrong-repo guard is the one place that does not, and comparing namespace and
+project alone lets a merge request for `acme/proj` bind to a
+`github.com/acme/proj` worktree. A false bind is the expensive direction — the
+foreign request merging can auto-archive a worktree that never had anything to
+do with it, while a missed bind costs one `tbd pr attach` — so a request whose
+captured host is not the worktree's is refused.
+
+One exemption, bounded by the forge rather than by the hostname. The extractor's
+GitHub pattern is host-locked, so a parsed `github.com` is a constant that
+pattern supplies rather than a host it read; refusing on it would break a
+`github.com` URL attached to a GitHub Enterprise or mirror checkout of the same
+project — the collision `RemoteRepoMatching` documents as tolerated — so such a
+checkout keeps its binding. A worktree whose own host is one `glab` names does
+not. Its requests live on that host, so a github.com pull request sharing its
+namespace and project is a different project, and binding it would poll a
+stranger's PR through `gh` and let that stranger's merge archive the worktree.
+The forge is asked here — the same declaration the URL composer and the mapping
+arm read — never inferred from the hostname, and a forge nothing could establish
+defers rather than binding, exactly as an unresolvable repo does. A worktree
+already on the URL's own host settles on the host comparison alone, so a
+github.com fleet never puts the question at all.
+
 ## Attaching by bare number
 
 `tbd pr attach <number>` does not carry a URL, so the daemon builds one. That

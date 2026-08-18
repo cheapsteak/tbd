@@ -16,15 +16,23 @@ struct PRBindingCoordinatorTests {
         let coordinator: PRBindingCoordinator
         let repoID: UUID
 
+        /// - Parameter gitLabHosts: the hosts the user configured `glab` for.
+        ///   Empty — the default — stands for every non-GitLab fleet at once:
+        ///   github.com, GitHub Enterprise, Bitbucket, Gitea, Codeberg. `nil` is
+        ///   the third answer, the state in which nothing could establish the
+        ///   worktree's forge at all.
         init(repo: (owner: String, name: String, host: String)? =
-            ("acme", "acme-prod", "github.com")) async throws {
+            ("acme", "acme-prod", "github.com"),
+             gitLabHosts: Set<String>? = []) async throws {
             db = try TBDDatabase(inMemory: true)
             let created = try await db.repos.create(
                 path: "/tmp/prbinding-coord-repo-\(UUID().uuidString)",
                 displayName: "acme-prod", defaultBranch: "main")
             repoID = created.id
             store = db.prBindings
-            coordinator = PRBindingCoordinator(store: store, resolveRepo: { _ in repo })
+            coordinator = PRBindingCoordinator(
+                store: store, resolveRepo: { _ in repo },
+                isGitLabHost: { _, host in gitLabHosts.map { $0.contains(host.lowercased()) } })
         }
 
         func newWorktree() async throws -> UUID {
@@ -127,12 +135,13 @@ struct PRBindingCoordinatorTests {
     /// which is what `RemoteRepoMatching` documents as a deliberately tolerated
     /// collision.
     ///
-    /// This passes against the pre-fix guard too — that is the point: it pins
-    /// the binding the fix must not take away. Comparing hosts for plain
-    /// equality instead turns it into `.rejectedWrongRepo`.
+    /// Neither host below is configured for `glab`, which is what makes them
+    /// *not* GitLab — the exemption survives on that answer, not on the shape of
+    /// their names. These two stand for every non-GitLab fleet off github.com:
+    /// GitHub Enterprise, Bitbucket, Gitea, Codeberg, and a mirror.
     @Test("still binds a github.com URL to an enterprise or mirror checkout")
     func bindsGitHubURLAgainstAnotherHostCheckout() async throws {
-        for host in ["ghe.acme.example", "gitlab.acme.example"] {
+        for host in ["ghe.acme.example", "git.acme.example"] {
             let fixture = try await Fixture(repo: ("acme", "acme-prod", host))
             let wt = try await fixture.newWorktree()
             let outcome = await fixture.coordinator.bind(worktreeID: wt, parsed: parsed,
@@ -143,6 +152,61 @@ struct PRBindingCoordinatorTests {
             // The URL's host is what gets recorded — the binding is re-queried
             // by `(host, owner, repo, number)` and must reach the real request.
             #expect(binding.host == "github.com")
+        }
+    }
+
+    /// Where that exemption stops, and the collision it would otherwise leave
+    /// open. This worktree's host speaks GitLab, so its requests live there and
+    /// a `github.com` pull request sharing an `owner/name` is a different
+    /// project by construction. Binding it would poll a stranger's PR through
+    /// `gh` and let that stranger's merge auto-archive this worktree.
+    ///
+    /// Against the exemption as it stood — unconditional on any `github.com`
+    /// URL — this returned `.bound` and wrote a row.
+    @Test("rejects a github.com URL on a checkout whose own host speaks GitLab")
+    func rejectsGitHubURLAgainstGitLabCheckout() async throws {
+        let fixture = try await Fixture(repo: ("acme", "acme-prod", "gitlab.acme.example"),
+                                        gitLabHosts: ["gitlab.acme.example"])
+        let wt = try await fixture.newWorktree()
+        let outcome = await fixture.coordinator.bind(worktreeID: wt, parsed: parsed,
+                                                     source: .hook)
+        guard case .rejectedWrongRepo(let named) = outcome else {
+            Issue.record("expected .rejectedWrongRepo, got \(outcome)"); return
+        }
+        // Owner and name agree, so the rejection has to name the host.
+        #expect(named == "github.com/acme/acme-prod")
+        #expect(try await fixture.store.list(worktreeID: wt, includeDetached: true).isEmpty)
+    }
+
+    /// The third answer. A worktree whose forge nothing could establish gets no
+    /// binding invented for it: the two ways to be wrong are not symmetric, and
+    /// a deferral writes nothing and is retried on the next poll or attach,
+    /// while a bind can auto-archive this worktree on a stranger's merge.
+    @Test("defers a github.com URL when the checkout's forge cannot be determined")
+    func defersWhenForgeUndetermined() async throws {
+        let fixture = try await Fixture(repo: ("acme", "acme-prod", "git.acme.example"),
+                                        gitLabHosts: nil)
+        let wt = try await fixture.newWorktree()
+        let outcome = await fixture.coordinator.bind(worktreeID: wt, parsed: parsed,
+                                                     source: .hook)
+        guard case .deferredUnknownRepo = outcome else {
+            Issue.record("expected .deferredUnknownRepo, got \(outcome)"); return
+        }
+        #expect(try await fixture.store.list(worktreeID: wt, includeDetached: true).isEmpty)
+    }
+
+    /// A worktree already on the URL's own host never reaches the forge
+    /// question at all — the hosts are equal, so nothing is asked and no `glab`
+    /// subprocess could be spawned. Pinned because an undetermined forge now
+    /// defers, and a guard that asked first would turn every github.com bind
+    /// into a deferral wherever the answer is unavailable.
+    @Test("a matching host binds without consulting the forge")
+    func matchingHostSkipsForgeQuestion() async throws {
+        let fixture = try await Fixture(gitLabHosts: nil)
+        let wt = try await fixture.newWorktree()
+        let outcome = await fixture.coordinator.bind(worktreeID: wt, parsed: parsed, source: .hook)
+        guard case .bound = outcome else {
+            Issue.record("expected .bound, got \(outcome)"); return
         }
     }
 

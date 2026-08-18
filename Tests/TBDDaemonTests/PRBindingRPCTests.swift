@@ -271,6 +271,38 @@ struct PRBindingRPCTests {
         #expect(try await harness.bindings().bindings.isEmpty)
     }
 
+    /// The router half of the cross-forge guard: the coordinator only knows a
+    /// worktree's forge because the router hands it a closure over the same
+    /// `glab`-derived answer `pr.attach <number>` composes URLs from. A closure
+    /// wired to the wrong thing — or to nothing — passes every coordinator-level
+    /// test and still binds here.
+    @Test("pr.attach of a github.com URL is rejected on a GitLab checkout")
+    func attachGitHubURLOnGitLabCheckout() async throws {
+        let harness = try await PRBindingRPCHarness(
+            repo: ("acme", "acme-prod", "git.acme.example"),
+            gitLabHosts: ["git.acme.example"])
+        let attach = try await harness.attach(url: "https://github.com/acme/acme-prod/pull/412")
+        #expect(attach.outcome == "rejectedWrongRepo")
+        // Owner and name match, so the host is the whole disagreement.
+        #expect(attach.detail == "github.com/acme/acme-prod")
+        #expect(attach.binding == nil)
+        #expect(try await harness.bindings().bindings.isEmpty)
+    }
+
+    /// The same URL on a self-hosted host that speaks no GitLab still binds —
+    /// the exemption a host-locked GitHub pattern earns, and the reason the
+    /// rejection above is keyed on the declared forge rather than on the
+    /// hostname not being github.com.
+    @Test("pr.attach of a github.com URL still binds on a non-GitLab self-hosted checkout")
+    func attachGitHubURLOnEnterpriseCheckout() async throws {
+        let harness = try await PRBindingRPCHarness(
+            repo: ("acme", "acme-prod", "ghe.acme.example"),
+            gitLabHosts: ["git.acme.example"])
+        let attach = try await harness.attach(url: "https://github.com/acme/acme-prod/pull/412")
+        #expect(attach.outcome == "bound")
+        #expect(attach.binding?.host == "github.com")
+    }
+
     @Test("pr.detach tombstones and pr.bindings stops returning it")
     func detach() async throws {
         let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod", "github.com"))

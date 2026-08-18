@@ -34,16 +34,24 @@ public actor PRBindingCoordinator {
 
     private let store: PRBindingStore
     private let resolveRepo: @Sendable (UUID) async -> (owner: String, name: String, host: String)?
+    private let isGitLabHost: @Sendable (UUID, String) async -> Bool?
 
     /// - Parameter resolveRepo: the worktree's own `owner`/`name` and host, or
     ///   nil when they cannot be determined (no remote, git failure, unknown
     ///   worktree). Validation always compares `owner`/`name`, and compares the
-    ///   host under the rule `hostsAgree` states — the host also rides along for
-    ///   the callers that must *compose* a reference.
+    ///   host under the rule `hostAgreement` states — the host also rides along
+    ///   for the callers that must *compose* a reference.
+    /// - Parameter isGitLabHost: whether the worktree's own host is one the
+    ///   user has configured `glab` for, or nil when the question could not be
+    ///   put at all (no directory on this machine to ask in). Only the
+    ///   `github.com` exemption in `hostAgreement` consults it, so a worktree
+    ///   whose host already matches the URL's never pays for the answer.
     public init(store: PRBindingStore,
-                resolveRepo: @escaping @Sendable (UUID) async -> (owner: String, name: String, host: String)?) {
+                resolveRepo: @escaping @Sendable (UUID) async -> (owner: String, name: String, host: String)?,
+                isGitLabHost: @escaping @Sendable (UUID, String) async -> Bool?) {
         self.store = store
         self.resolveRepo = resolveRepo
+        self.isGitLabHost = isGitLabHost
     }
 
     public func bind(worktreeID: UUID, parsed: ParsedPRURL,
@@ -86,12 +94,18 @@ public actor PRBindingCoordinator {
             logger.debug("rejecting PR #\(parsed.number, privacy: .public) for worktree \(worktreeID.uuidString, privacy: .public): PR is in \(other, privacy: .public), worktree is in \(own.owner, privacy: .public)/\(own.name, privacy: .public)")
             return .rejectedWrongRepo(other)
         }
-        guard Self.hostsAgree(own: own.host, parsed: parsed.host) else {
+        switch await hostAgreement(worktreeID: worktreeID, own: own.host, parsed: parsed.host) {
+        case .agree:
+            break
+        case .disagree:
             // The owner and name are identical here, so naming them alone would
             // read as nonsense — the host is the whole disagreement.
             let elsewhere = "\(parsed.host)/\(other)"
             logger.debug("rejecting PR #\(parsed.number, privacy: .public) for worktree \(worktreeID.uuidString, privacy: .public): PR is on \(elsewhere, privacy: .public), worktree is on \(own.host, privacy: .public)")
             return .rejectedWrongRepo(elsewhere)
+        case .undetermined:
+            logger.debug("deferring PR #\(parsed.number, privacy: .public) for worktree \(worktreeID.uuidString, privacy: .public): the forge of \(own.host, privacy: .public) could not be determined")
+            return .deferredUnknownRepo
         }
 
         let candidate = PRBinding(
@@ -172,10 +186,20 @@ public actor PRBindingCoordinator {
     /// The host `PRBindingExtractor`'s GitHub pattern hard-codes. Because that
     /// pattern is host-locked, a parsed `github.com` is the pattern's own
     /// constant rather than something read off the URL's forge — which is what
-    /// `hostsAgree` leans on. When enterprise support lands and that pattern
+    /// `hostAgreement` leans on. When enterprise support lands and that pattern
     /// starts *capturing* a host, this constant and the exemption it drives go
     /// with it.
     private static let patternAssumedGitHubHost = "github.com"
+
+    /// Whether a request's host may name the same repo the worktree checks out,
+    /// or whether nothing could answer.
+    private enum HostAgreement {
+        case agree
+        case disagree
+        /// The worktree's forge could not be established, and the answer would
+        /// have decided the `github.com` exemption.
+        case undetermined
+    }
 
     /// Whether a request's host may name the same repo the worktree checks out.
     ///
@@ -189,36 +213,61 @@ public actor PRBindingCoordinator {
     /// with it, while a missed bind costs one `tbd pr attach`.
     ///
     /// So hosts agree when they are the same host (case-insensitively;
-    /// hostnames are), when either side has no host at all, or when the URL's
-    /// host is the `github.com` every GitHub URL carries by construction.
+    /// hostnames are), and when either side has no host at all.
     ///
-    /// That last clause is the trade-off, and it is deliberate. A *captured*
-    /// host is evidence about where a request lives; a hard-coded one is an
-    /// assumption the pattern made, and rejecting on it would refuse bindings
-    /// that work today — a `github.com` URL attached to a GitHub Enterprise or
-    /// self-hosted-mirror checkout with the same `owner/name`, the same
+    /// **The `github.com` exemption, and where it stops.** A parsed
+    /// `github.com` is a constant `PRBindingExtractor`'s host-locked GitHub
+    /// pattern supplies rather than a host it read off the URL, so on its own it
+    /// is not evidence about where the request lives. Rejecting on it would
+    /// refuse bindings that work today — a `github.com` URL attached to a GitHub
+    /// Enterprise or self-hosted-mirror checkout with the same `owner/name`, the
     /// same-org/same-name-across-hosts collision `RemoteRepoMatching` documents
-    /// as deliberately tolerated. The cost is that this rule does not close
-    /// that older, narrower hole; it closes the one this coordinator can
-    /// actually see, which is a URL that *did* observe its host disagreeing
-    /// with the host the worktree resolved.
+    /// as deliberately tolerated. Such a worktree therefore still binds.
+    ///
+    /// A worktree whose own host speaks **GitLab** does not. Its merge requests
+    /// live on that host, so a `github.com` pull request sharing an `owner/name`
+    /// with it is a different project by construction — and binding it would
+    /// poll a stranger's PR through `gh` and let that stranger's merge
+    /// auto-archive this worktree. That is the cross-forge collision this guard
+    /// exists to close, and it is the whole of what the exemption gives up.
+    ///
+    /// **The forge is asked, never read off the hostname.** "Not github.com"
+    /// describes GitHub Enterprise, Bitbucket, Gitea and Codeberg as readily as
+    /// a self-managed GitLab, so a host-keyed classifier would refuse all four
+    /// of those fleets a binding they should get. The answer comes from the same
+    /// seam the rest of the daemon uses — the hosts the user configured `glab`
+    /// for, a declaration rather than an inference.
+    ///
+    /// **An undetermined forge defers rather than binds.** Nothing has answered
+    /// there, and the two ways to be wrong are not symmetric: binding invents a
+    /// row that can auto-archive a worktree on someone else's merge, while
+    /// deferring writes nothing and the next poll or attach asks again. The
+    /// caller turns it into `.deferredUnknownRepo`, the same outcome an
+    /// unresolvable repo already gets. Like an absent host it is belt-and-braces
+    /// rather than a live case: the forge is unaskable only for a worktree with
+    /// no directory on this machine, and such a worktree cannot resolve its own
+    /// repo either, so `bind` has already deferred before reaching here.
     ///
     /// An absent host on either side is treated as unknown, not as a mismatch —
     /// the same reason an unresolvable repo defers instead of rejecting. Absent
     /// is unreachable from the shipping call paths (the extractor always names a
-    /// host, and a bare-number attach composes the worktree's own), so it is
-    /// belt-and-braces rather than a live case; `owner`/`name` still have to
-    /// match either way.
+    /// host, and a bare-number attach composes the worktree's own), so it too is
+    /// belt-and-braces; `owner`/`name` still have to match either way.
     ///
-    /// Hosts are compared as strings, and no forge classification enters this
-    /// guard at all. A forge is derived from a URL's shape (`Forge.forURL`) or
-    /// established by asking which hosts speak GitLab; neither is a licence to
-    /// call two hosts the same host, and a validation gate needs the hosts.
-    private static func hostsAgree(own: String, parsed: String) -> Bool {
+    /// Hosts themselves are compared as strings, and no forge classification
+    /// derived from a URL's shape (`Forge.forURL`) enters this guard: that
+    /// answers what a request is, not whether two hosts are one host, and a
+    /// validation gate needs the hosts.
+    private func hostAgreement(worktreeID: UUID, own: String, parsed: String) async -> HostAgreement {
         let own = own.lowercased()
         let parsed = parsed.lowercased()
-        guard !own.isEmpty, !parsed.isEmpty else { return true }
-        return parsed == own || parsed == patternAssumedGitHubHost
+        guard !own.isEmpty, !parsed.isEmpty else { return .agree }
+        if parsed == own { return .agree }
+        // Every other disagreement is a disagreement; only the pattern's own
+        // constant earns a second question, and only that question spawns work.
+        guard parsed == Self.patternAssumedGitHubHost else { return .disagree }
+        guard let ownIsGitLab = await isGitLabHost(worktreeID, own) else { return .undetermined }
+        return ownIsGitLab ? .disagree : .agree
     }
 
     private func identityKey(worktreeID: UUID, parsed: ParsedPRURL) -> String {

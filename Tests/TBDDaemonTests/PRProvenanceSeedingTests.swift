@@ -34,7 +34,11 @@ struct PRProvenanceSeedingTests {
                 displayName: "acme-prod", defaultBranch: "main")
             repoID = created.id
             store = db.prBindings
-            coordinator = PRBindingCoordinator(store: store, resolveRepo: { _ in repo })
+            // No host is configured for `glab`, which is every non-GitLab fleet
+            // at once; seeding never turns on the forge anyway, since the
+            // worktree's own host is what these fixtures parse.
+            coordinator = PRBindingCoordinator(store: store, resolveRepo: { _ in repo },
+                                               isGitLabHost: { _, _ in false })
         }
 
         func newWorktree(prNumber: Int? = nil) async throws -> UUID {
