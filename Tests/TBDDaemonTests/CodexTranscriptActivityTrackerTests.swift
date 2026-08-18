@@ -5,6 +5,8 @@ import Testing
 
 @Suite("Codex transcript activity tracker")
 struct CodexTranscriptActivityTrackerTests {
+    private static let initialTailByteLimit = Int(CodexTranscriptActivityTracker.initialTailByteLimit)
+
     @Test func taskStartedProducesWorking() {
         var reducer = CodexTurnLifecycleReducer()
 
@@ -100,6 +102,93 @@ struct CodexTranscriptActivityTrackerTests {
         #expect(state == .working)
     }
 
+    @Test func firstObservationDoesNotDecodeLifecycleOlderThanTailLimit() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        let oldStart = event(type: "task_started", turnID: "old")
+        let tail = event(
+            type: "agent_message", turnID: "padding",
+            exactByteCount: Self.initialTailByteLimit)
+        try fixture.write(oldStart + tail)
+        let tracker = CodexTranscriptActivityTracker()
+
+        let state = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: UUID())
+
+        #expect(state == nil)
+    }
+
+    @Test func firstObservationReconstructsLifecycleInsideOversizedTranscriptTail() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        let prefix = event(
+            type: "agent_message", turnID: "padding",
+            exactByteCount: Self.initialTailByteLimit + 128)
+        try fixture.write(prefix + event(type: "task_started", turnID: "latest"))
+        let tracker = CodexTranscriptActivityTracker()
+
+        let state = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: UUID())
+
+        #expect(state == .working)
+    }
+
+    @Test func tailStartingOnRecordBoundaryRetainsFirstRecord() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        let prefix = event(type: "agent_message", turnID: "prefix")
+        let start = event(type: "task_started", turnID: "boundary")
+        let tailPadding = event(
+            type: "agent_message", turnID: "padding",
+            exactByteCount: Self.initialTailByteLimit - start.count)
+        try fixture.write(prefix + start + tailPadding)
+        let tracker = CodexTranscriptActivityTracker()
+
+        let state = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: UUID())
+
+        #expect(state == .working)
+    }
+
+    @Test func tailStartingMidRecordDiscardsOnlyLeadingPartialRecord() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        let partialStart = event(
+            type: "task_started", turnID: "old",
+            exactByteCount: Self.initialTailByteLimit + 128)
+        try fixture.write(partialStart + event(type: "task_complete", turnID: "other"))
+        let tracker = CodexTranscriptActivityTracker()
+
+        let state = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: UUID())
+
+        #expect(state == .idle)
+    }
+
+    @Test func appendedCompletionAfterTailBootstrapDoesNotRescanHistory() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        let prefix = event(
+            type: "agent_message", turnID: "padding",
+            exactByteCount: Self.initialTailByteLimit + 128)
+        let initialStart = event(type: "task_started", turnID: "a")
+        let replacementStart = event(type: "task_started", turnID: "b")
+        #expect(initialStart.count == replacementStart.count)
+        try fixture.write(prefix + initialStart)
+        let tracker = CodexTranscriptActivityTracker()
+        let worktreeID = UUID()
+        let initial = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+
+        try fixture.overwrite(at: UInt64(prefix.count), with: replacementStart)
+        try fixture.append(event(type: "task_complete", turnID: "a"))
+        let completed = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+
+        #expect(initial == .working)
+        #expect(completed == .idle)
+    }
+
     @Test func secondObservationReadsAppendedCompletion() async throws {
         let fixture = try TranscriptFixture()
         defer { fixture.remove() }
@@ -187,6 +276,33 @@ struct CodexTranscriptActivityTrackerTests {
 
         #expect(initial == .working)
         #expect(rebuilt == .idle)
+    }
+
+    @Test func truncationRebuildUsesBoundedTailPolicy() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        let initialPrefix = event(
+            type: "agent_message", turnID: "initial-padding",
+            exactByteCount: Self.initialTailByteLimit + 512)
+        try fixture.write(
+            initialPrefix
+                + event(type: "task_started", turnID: "initial")
+                + event(
+                    type: "agent_message", turnID: "more-padding",
+                    exactByteCount: Self.initialTailByteLimit + 512))
+        let tracker = CodexTranscriptActivityTracker()
+        let worktreeID = UUID()
+        _ = await tracker.observe(transcriptPath: fixture.path, worktreeID: worktreeID)
+
+        let oldStart = event(type: "task_started", turnID: "old")
+        let replacementTail = event(
+            type: "agent_message", turnID: "replacement-padding",
+            exactByteCount: Self.initialTailByteLimit)
+        try fixture.write(oldStart + replacementTail)
+        let rebuilt = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+
+        #expect(rebuilt == nil)
     }
 
     @Test func transcriptPathsHaveIndependentBaselines() async throws {
@@ -284,13 +400,24 @@ struct CodexTranscriptActivityTrackerTests {
         type: String,
         turnID: String,
         terminated: Bool = true,
-        padding: String? = nil
+        padding: String? = nil,
+        exactByteCount: Int? = nil
     ) -> Data {
         let newline = terminated ? "\n" : ""
-        let paddingField = padding.map { #", "padding":"\#($0)""# } ?? ""
-        return Data((
-            #"{"type":"event_msg","payload":{"type":"\#(type)","turn_id":"\#(turnID)"\#(paddingField)}}"#
-                + newline).utf8)
+        func encoded(padding: String?) -> Data {
+            let paddingField = padding.map { #", "padding":"\#($0)""# } ?? ""
+            return Data((
+                #"{"type":"event_msg","payload":{"type":"\#(type)","turn_id":"\#(turnID)"\#(paddingField)}}"#
+                    + newline).utf8)
+        }
+
+        let base = encoded(padding: padding)
+        guard let exactByteCount else { return base }
+
+        let emptyPadded = encoded(padding: "")
+        precondition(exactByteCount >= emptyPadded.count)
+        let exactPadding = String(repeating: "x", count: exactByteCount - emptyPadded.count)
+        return encoded(padding: exactPadding)
     }
 }
 
@@ -319,9 +446,13 @@ private final class TranscriptFixture: @unchecked Sendable {
     }
 
     func overwriteBeginning(with data: Data) throws {
+        try overwrite(at: 0, with: data)
+    }
+
+    func overwrite(at offset: UInt64, with data: Data) throws {
         let handle = try FileHandle(forWritingTo: file)
         defer { try? handle.close() }
-        try handle.seek(toOffset: 0)
+        try handle.seek(toOffset: offset)
         try handle.write(contentsOf: data)
     }
 

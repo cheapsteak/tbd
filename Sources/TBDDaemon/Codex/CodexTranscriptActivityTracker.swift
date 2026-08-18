@@ -46,17 +46,19 @@ struct CodexTurnLifecycleReducer: Sendable {
 }
 
 /// Reconstructs a Codex session's turn activity from its append-only JSONL
-/// transcript. Each path is scanned from byte zero once, then only from the
-/// last successfully-read offset on later observations.
+/// transcript. Each path is bootstrapped from a bounded tail once, then only
+/// from the last successfully-read offset on later observations.
 actor CodexTranscriptActivityTracker {
     private struct Baseline {
         var worktreeID: UUID
         var offset: UInt64
         var pendingFragment: Data
+        var discardingLeadingPartialLine: Bool
         var reducer: CodexTurnLifecycleReducer
     }
 
     private static let readChunkSize = 64 * 1024
+    static let initialTailByteLimit: UInt64 = 1024 * 1024
     private var baselines: [String: Baseline] = [:]
 
     var baselineCount: Int { baselines.count }
@@ -66,29 +68,28 @@ actor CodexTranscriptActivityTracker {
     /// an inaccessible transcript is still active.
     func observe(transcriptPath: String, worktreeID: UUID) -> TerminalActivityState? {
         let previous = baselines[transcriptPath]
-        var baseline = previous ?? Baseline(
-            worktreeID: worktreeID,
-            offset: 0,
-            pendingFragment: Data(),
-            reducer: CodexTurnLifecycleReducer())
 
         do {
             let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: transcriptPath))
             defer { try? handle.close() }
 
             let fileSize = try handle.seekToEnd()
-            if fileSize < baseline.offset {
-                baseline = Baseline(
-                    worktreeID: worktreeID,
-                    offset: 0,
-                    pendingFragment: Data(),
-                    reducer: CodexTurnLifecycleReducer())
-            } else {
+            var baseline: Baseline
+            if let previous, fileSize >= previous.offset {
+                baseline = previous
                 baseline.worktreeID = worktreeID
+            } else {
+                baseline = try makeTailBaseline(
+                    handle: handle,
+                    fileSize: fileSize,
+                    worktreeID: worktreeID)
             }
 
             try handle.seek(toOffset: baseline.offset)
-            while let chunk = try handle.read(upToCount: Self.readChunkSize), !chunk.isEmpty {
+            while baseline.offset < fileSize {
+                let remaining = fileSize - baseline.offset
+                let count = Int(min(UInt64(Self.readChunkSize), remaining))
+                guard let chunk = try handle.read(upToCount: count), !chunk.isEmpty else { return nil }
                 baseline.offset += UInt64(chunk.count)
                 consumeCompleteLines(from: chunk, into: &baseline)
             }
@@ -116,7 +117,40 @@ actor CodexTranscriptActivityTracker {
         baselines[transcriptPath] != nil
     }
 
+    private func makeTailBaseline(
+        handle: FileHandle,
+        fileSize: UInt64,
+        worktreeID: UUID
+    ) throws -> Baseline {
+        let startOffset = fileSize > Self.initialTailByteLimit
+            ? fileSize - Self.initialTailByteLimit
+            : 0
+        var discardingLeadingPartialLine = false
+
+        if startOffset > 0 {
+            try handle.seek(toOffset: startOffset - 1)
+            let precedingByte = try handle.read(upToCount: 1)?.first
+            discardingLeadingPartialLine = precedingByte != 0x0A
+        }
+
+        return Baseline(
+            worktreeID: worktreeID,
+            offset: startOffset,
+            pendingFragment: Data(),
+            discardingLeadingPartialLine: discardingLeadingPartialLine,
+            reducer: CodexTurnLifecycleReducer())
+    }
+
     private func consumeCompleteLines(from chunk: Data, into baseline: inout Baseline) {
+        if baseline.discardingLeadingPartialLine {
+            guard let newline = chunk.firstIndex(of: 0x0A) else { return }
+            baseline.discardingLeadingPartialLine = false
+            let afterNewline = chunk.index(after: newline)
+            guard afterNewline != chunk.endIndex else { return }
+            consumeCompleteLines(from: Data(chunk[afterNewline...]), into: &baseline)
+            return
+        }
+
         baseline.pendingFragment.append(chunk)
         var lineStart = baseline.pendingFragment.startIndex
 
