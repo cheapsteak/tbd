@@ -432,6 +432,75 @@ and none of that separation survives a PTY. So the mode is opt-in per invocation
 rather than a property of the provider, and `create`, whose whole answer is three
 lines of prose on stdout, is the only verb that sets it.
 
+### The process `create` spawns has no reconciler, on purpose
+
+`create` is a new kind of durable resource for TBD: a process spawned outside
+tmux, on a pty the daemon opened for exactly this call. Per `CLAUDE.md`'s
+reconciler doctrine
+([`2026-08-15-named-reconciler-doctrine-design.md`](2026-08-15-named-reconciler-doctrine-design.md)),
+that requires one of three answers — name the reconciler that covers it, argue
+that an orphan cannot arise, or point to a spec that deliberately chose
+otherwise. This is the third: no sweep reclaims this process, and this
+subsection is that decision, recorded where the spawn lives rather than at the
+end of the document.
+
+**The failure mode is real, and it was reproduced rather than argued.** The
+deadline on a `create` invocation lives entirely inside the daemon that spawned
+it — `runBoundedProcess` hands it to `SubprocessWatchdog`, a thread in the
+daemon's own process, not anything independent of it. If the daemon dies while
+a `create` is in flight, the watchdog dies with it and the child is reparented
+to pid 1 with nothing left supervising it. This was measured, not inferred: a
+child holding a pty replica, with its parent process killed with `SIGKILL`,
+survived and was observed reparented to pid 1 — its `ppid` changed from the
+parent to `1` — and kept running. Nothing signals it when this happens: the
+runner never calls `setsid` or claims the pty as the child's controlling
+terminal with `TIOCSCTTY` — neither call appears in `BoundedProcessRunner.swift`
+— so the pty the child inherits is never *controlling*, and closing the primary
+side sends it no `SIGHUP`. The ordinary way a lost parent's children learn to
+die never fires here.
+
+Nor does `AgentReaper` reach it. `findStructuralOrphans`
+(`Sources/TBDDaemon/Process/AgentReaper.swift`:36) only considers children of a
+known `tbd-*` tmux server; a `create` invocation has no tmux server anywhere in
+its ancestry — the whole reason it needed its own pty in the first place
+(above) is that it runs outside tmux entirely.
+
+**Why the answer is "no sweep" rather than "extend one."** The process is a
+single short-lived CLI invocation, not an accumulating resource: it holds no
+lock, no lease, no git ref, no tmux server or socket, no database row of its
+own, and no file that outlives it — the row `create` writes to the
+`claude_cloud_session` ledger is written *before* the invocation and belongs to
+the ledger regardless of whether the process behind it is still running (above).
+It is bounded by its own work: `claude --cloud` makes its call, prints its
+three lines, and exits (§11); on the way out, its first write to a pty replica
+whose primary side has already closed returns `EIO`, so the ordinary exit path
+is self-terminating even with nothing watching it. And the window for the
+failure is narrow — the daemon has to die during the seconds one `create` is in
+flight, not at any other time.
+
+That is a different shape from the leaks the doctrine responds to. 2,804
+leaked git branches and roughly 7,100 dead tmux socket files were unbounded
+accumulations — resources that never went away on their own and kept growing
+for as long as nothing reclaimed them. A `create` process outliving its daemon
+is bounded by comparison: at most one per crash, and gone on its own once the
+call it is making returns.
+
+**What this does not claim.** The pathological case is real, and this section
+does not pretend otherwise: a child that hangs *before* it ever writes — a
+stalled network call mid-request, say — has no `EIO` to trip over and no
+controlling terminal to signal it, and can linger indefinitely once the daemon
+that was timing it is gone. This slice does not build machinery for that case.
+It is a known gap, not a hidden one.
+
+**What would reverse this decision.** Orphaned `claude` processes actually
+observed during the soak. If that happens, the remedy is to record the spawned
+pid and its process start time on the ledger's `pending` row at spawn time, so
+a future sweep can confirm the pid is still alive, compare its recorded start
+time against the running process's to rule out pid reuse, and check the running
+binary is `claude` before signalling it. That is enough for a reconciler to act
+safely without a live daemon ever having supervised the child directly — it is
+just not needed until the pathological case shows up outside a lab.
+
 ### Reading the session id and the title out of `create`'s output
 
 `create` is fire-and-forget: it exits 0 immediately without attaching, having
