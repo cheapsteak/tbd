@@ -31,6 +31,20 @@ enum PRUndeterminedCause {
     /// truncated or malformed blob. Not the absence of a record: an attempt was
     /// made, and only what it concluded is lost.
     static let unreadableRecord = "the recorded outcome could not be read"
+    /// The CLI ran and reached the host, which refused the credentials. Named
+    /// separately from `cliUnavailable` because the remedy differs: a token
+    /// expired, and only re-authenticating that specific host fixes it. A
+    /// personal access token has no refresh, so a host that answered yesterday
+    /// starts refusing today — and letting that read as "there is no merge
+    /// request here" is the silent degradation this whole vocabulary exists to
+    /// prevent.
+    ///
+    /// The host is the one piece of forge detail this vocabulary does carry,
+    /// and deliberately: the remedy is `glab auth login --hostname <host>`, so
+    /// a report that withheld the host would name a fix nobody could apply.
+    static func forgeAuthFailed(host: String) -> String {
+        "the forge rejected the credentials for \(host)"
+    }
 }
 
 /// In-memory cache of GitHub PR status per worktree.
@@ -130,6 +144,31 @@ public actor PRStatusManager {
 
     private let ghRunner: GHRunner?
 
+    /// Behavior seam for the `glab` subprocess, mirroring `ghRunner`. Nil means
+    /// "shell out to the real `glab`"; a test injects one so the whole GitLab
+    /// path runs with no binary, no credentials and no network.
+    private let glRunner: GLRunner?
+
+    /// Hosts known to speak GitLab, stated outright. Tests pass the set
+    /// directly so the resolver — and the `glab auth status` subprocess behind
+    /// it — stays out of the loop; production leaves it empty and lets
+    /// `gitLabHostResolver` answer.
+    private let gitLabHosts: Set<String>
+
+    /// Production's answer to "is this host GitLab?", read from what the user
+    /// already told `glab`. Nil in the injecting init: a test that hands over
+    /// `gitLabHosts` has stated the whole answer, and consulting a resolver
+    /// behind its back would spawn `glab auth status` from a unit test.
+    private let gitLabHostResolver: GitLabHostResolver?
+
+    /// The last authentication refusal observed per forge host, lowercased.
+    ///
+    /// Keyed by host rather than by worktree or binding because that is the
+    /// scope of both the fault and its remedy: one expired token silences every
+    /// project on that instance at once, and one `glab auth login` restores
+    /// them all. Cleared the moment a call to that host succeeds.
+    private var forgeAuthFailures: [String: String] = [:]
+
     /// Behavior seam for reading a checkout's `origin` remote URL — the second
     /// identity source, used only when `gh` cannot name the repo, which is
     /// every checkout on a host `gh` does not speak to. Production leaves it
@@ -149,13 +188,28 @@ public actor PRStatusManager {
     public init(now: @escaping @Sendable () -> Date = { Date() }) {
         self.ghRunner = nil
         self.remoteURLReader = nil
+        self.glRunner = nil
+        self.gitLabHosts = []
+        // The resolver needs a runner of its own: it is constructed here, before
+        // any instance exists to capture, so it gets the static `glab` spawner
+        // rather than `runGLResult`.
+        self.gitLabHostResolver = GitLabHostResolver(glRunner: { args, repoPath in
+            await PRStatusManager.runGlab(args: args, repoPath: repoPath)
+        })
         self.now = now
     }
 
+    /// `glRunner` and `gitLabHosts` are defaulted so every existing call site
+    /// stays a GitHub-only manager that can never spawn `glab`.
     init(ghRunner: @escaping GHRunner,
+         glRunner: GLRunner? = nil,
+         gitLabHosts: Set<String> = [],
          remoteURLReader: @escaping RemoteURLReader = { _ in nil },
          now: @escaping @Sendable () -> Date = { Date() }) {
         self.ghRunner = ghRunner
+        self.glRunner = glRunner
+        self.gitLabHosts = Set(gitLabHosts.map { $0.lowercased() })
+        self.gitLabHostResolver = nil
         self.remoteURLReader = remoteURLReader
         self.now = now
     }
@@ -263,6 +317,44 @@ public actor PRStatusManager {
     /// runner counts as available: it is what stands in for the binary.
     private var forgeCLIAvailable: Bool {
         ghRunner != nil || Self.resolvedGHPath != nil
+    }
+
+    /// The same question for `glab`. `nonisolated` because the GitLab fetch
+    /// paths are, and it reads only immutable state.
+    private nonisolated var gitLabCLIAvailable: Bool {
+        glRunner != nil || Self.resolvedGlabPath != nil
+    }
+
+    /// Whether this host speaks GitLab.
+    ///
+    /// An injected set is the whole answer when there is one, so a test never
+    /// reaches the resolver; production injects nothing and the resolver reads
+    /// `glab auth status` (cached, and short-circuited for github.com before
+    /// any subprocess).
+    private nonisolated func isGitLabHost(_ host: String, repoPath: String) async -> Bool {
+        if gitLabHosts.contains(host.lowercased()) { return true }
+        guard let gitLabHostResolver else { return false }
+        return await gitLabHostResolver.isGitLabHost(host, repoPath: repoPath)
+    }
+
+    /// The credential refusal last observed for a host, or nil if its most
+    /// recent call succeeded. The report is per host because the fault is:
+    /// every project on that instance goes dark together.
+    public func lastUndeterminedCause(forHost host: String) -> String? {
+        forgeAuthFailures[host.lowercased()]
+    }
+
+    /// Record — or, on `failed: false`, retract — a host's credential refusal.
+    /// A single successful call is proof the token works again, which is the
+    /// only evidence this actor ever accepts for authentication (never status
+    /// text; see `GitLabHostResolver`).
+    private func setForgeAuthFailure(_ failed: Bool, host: String) {
+        let key = host.lowercased()
+        if failed {
+            forgeAuthFailures[key] = PRUndeterminedCause.forgeAuthFailed(host: host)
+        } else {
+            forgeAuthFailures.removeValue(forKey: key)
+        }
     }
 
     /// Record one attempt's outcome and persist it — unless a newer attempt is
@@ -483,14 +575,26 @@ public actor PRStatusManager {
         /// rather than collapsed to a Bool so an unnumbered worktree's
         /// `.undetermined` names what actually went wrong.
         var batchFailureCause = PRUndeterminedCause.queryFailed
+        /// Which unnumbered worktrees are on a GitLab host, which of those a
+        /// project query actually answered for, and — for the ones it matched —
+        /// whether their project gates merges on the pipeline. The GitLab side
+        /// is judged per project rather than by one fleet-wide batch, so
+        /// `batchSucceeded` cannot speak for it.
+        var gitLabUnnumberedIDs: Set<UUID> = []
+        var gitLabAnsweredIDs: Set<UUID> = []
+        var gitLabPipelineGated: [UUID: Bool] = [:]
+        var gitLabFailureCause = PRUndeterminedCause.queryFailed
         if !unnumbered.isEmpty {
             // Resolve each unnumbered worktree's own repo once, mirroring the
             // numbered path's `resolved` dictionary. TTL-cached, so the poll
             // doesn't spawn a `gh repo view` subprocess per worktree per tick.
+            // The host rides along because it is what decides which forge to ask.
             var unnumberedRepos: [String: (owner: String, name: String)] = [:]
+            var unnumberedHosts: [String: String] = [:]
             for path in Set(unnumbered.map(\.worktreePath)) {
                 if let ownerRepo = await cachedNameWithOwner(repoPath: path) {
                     unnumberedRepos[path] = (owner: ownerRepo.owner, name: ownerRepo.name)
+                    unnumberedHosts[path] = ownerRepo.host
                 } else {
                     logger.debug("fetchAll: could not resolve owner/name for unnumbered worktree at \(path, privacy: .public)")
                 }
@@ -525,21 +629,50 @@ public actor PRStatusManager {
                 poisoned.map { (worktreeID: $0.worktreeID, url: $0.cachedURL) },
                 context: "cross-repo heal")
 
-            if let jsonData = await runGHGraphQL(repoPath: repoPath) {
-                if let nodes = try? Self.parsePRNodes(from: jsonData) {
-                    batchSucceeded = true   // empty nodes is still a valid answer (viewer has no PRs)
-                    let branchMatches = Self.matchUnnumbered(unnumbered, nodes: nodes,
-                                                             resolveRepo: { unnumberedRepos[$0] })
-                    branchMatchedIDs.formUnion(branchMatches.map(\.worktreeID))
-                    matches += branchMatches
+            // Split the by-branch path by forge. A worktree whose repo would
+            // not name itself has no host either, so it stays on the GitHub
+            // side — the pre-GitLab behavior, where it simply matches nothing.
+            var gitLabPaths: Set<String> = []
+            for (path, host) in unnumberedHosts where await isGitLabHost(host, repoPath: path) {
+                gitLabPaths.insert(path)
+            }
+            let gitLabUnnumbered = unnumbered.filter { gitLabPaths.contains($0.worktreePath) }
+            let gitHubUnnumbered = unnumbered.filter { !gitLabPaths.contains($0.worktreePath) }
+            gitLabUnnumberedIDs = Set(gitLabUnnumbered.map(\.id))
+
+            // The viewer batch is GitHub's only branch-matching route, and it is
+            // skipped outright when no worktree is on GitHub — a GitLab-only
+            // fleet never spawns `gh`.
+            if !gitHubUnnumbered.isEmpty {
+                if let jsonData = await runGHGraphQL(repoPath: repoPath) {
+                    if let nodes = try? Self.parsePRNodes(from: jsonData) {
+                        batchSucceeded = true   // empty nodes is still a valid answer (viewer has no PRs)
+                        let branchMatches = Self.matchUnnumbered(gitHubUnnumbered, nodes: nodes,
+                                                                 resolveRepo: { unnumberedRepos[$0] })
+                        branchMatchedIDs.formUnion(branchMatches.map(\.worktreeID))
+                        matches += branchMatches
+                    } else {
+                        logger.warning("Failed to parse GraphQL response")
+                        batchFailureCause = PRUndeterminedCause.unparseableResponse
+                    }
                 } else {
-                    logger.warning("Failed to parse GraphQL response")
-                    batchFailureCause = PRUndeterminedCause.unparseableResponse
+                    batchFailureCause = forgeCLIAvailable
+                        ? PRUndeterminedCause.queryFailed
+                        : PRUndeterminedCause.cliUnavailable
                 }
-            } else {
-                batchFailureCause = forgeCLIAvailable
-                    ? PRUndeterminedCause.queryFailed
-                    : PRUndeterminedCause.cliUnavailable
+            }
+
+            // GitLab asks the server for the branches instead, one query per
+            // project — author-blind, so a merge request opened through the web
+            // UI or by a teammate is found, which the viewer batch can never do.
+            if !gitLabUnnumbered.isEmpty {
+                let gitLab = await fetchGitLabBranchMatches(
+                    gitLabUnnumbered, repos: unnumberedRepos, hosts: unnumberedHosts)
+                branchMatchedIDs.formUnion(gitLab.matches.map(\.worktreeID))
+                matches += gitLab.matches
+                gitLabAnsweredIDs = gitLab.answeredIDs
+                gitLabPipelineGated = gitLab.pipelineGated
+                gitLabFailureCause = gitLab.failureCause
             }
         }
 
@@ -547,8 +680,15 @@ public actor PRStatusManager {
         // whose cached status still carries a PR number — resolve those by
         // number (one extra aliased round trip, only when such worktrees
         // exist). See `cachedNumberFallback` for the gating rationale.
+        //
+        // GitHub worktrees only: both this fallback and the head-ref
+        // verification below resolve their numbers through the `gh` by-number
+        // query, which would offer a GitLab project path to GitHub. A GitLab
+        // worktree therefore keeps its cached status when the branch query
+        // leaves it unmatched, which is the conservative direction.
+        let gitHubUnnumberedEntries = unnumbered.filter { !gitLabUnnumberedIDs.contains($0.id) }
         let fallback = Self.cachedNumberFallback(
-            unnumbered: unnumbered,
+            unnumbered: gitHubUnnumberedEntries,
             matchedIDs: Set(matches.map(\.worktreeID)),
             batchSucceeded: batchSucceeded,
             cachedStatus: { cache[$0] })
@@ -590,7 +730,7 @@ public actor PRStatusManager {
         // numbers a second time in the same tick would buy nothing. They are
         // retried on the next poll like any other unresolved entry.
         let verificationTargets = Self.headRefVerificationTargets(
-            unnumbered: unnumbered,
+            unnumbered: gitHubUnnumberedEntries,
             matchedIDs: Set(matches.map(\.worktreeID)).union(fallback.map(\.id)),
             batchSucceeded: batchSucceeded,
             verifiedIDs: headRefVerifiedIDs,
@@ -617,7 +757,10 @@ public actor PRStatusManager {
             for match in matches {
                 let node = match.node
                 let id = match.worktreeID
-                if node.state != "OPEN" || !Self.aggregateRollupIsNonSuccess(node.statusCheckRollupState) {
+                // A GitLab node carried its pipeline status in the same batch,
+                // so it never pays for GitHub's per-request check query.
+                if node.forge != .github || node.state != "OPEN"
+                    || !Self.aggregateRollupIsNonSuccess(node.statusCheckRollupState) {
                     group.addTask { (id, (failing: false, pending: false)) }
                 } else {
                     group.addTask {
@@ -648,12 +791,15 @@ public actor PRStatusManager {
                 signals = Self.aggregateFallbackSignals(match.node.statusCheckRollupState)
             }
             let (state, reason) = Self.mapStateAndReason(
+                forge: match.node.forge,
                 ghState: match.node.state,
                 mergeVerdictRaw: match.node.mergeVerdictRaw,
                 reviewVerdictRaw: match.node.reviewVerdictRaw,
                 isDraft: match.node.isDraft,
                 requiredChecksFailing: signals.failing,
-                requiredChecksPending: signals.pending
+                requiredChecksPending: signals.pending,
+                pipelineGated: gitLabPipelineGated[match.worktreeID] ?? false,
+                pipelineStatus: match.node.statusCheckRollupState
             )
             let status = PRStatus(number: match.node.number, url: match.node.url, state: state, reason: reason,
                                   mergeQueuePosition: match.node.mergeQueuePosition,
@@ -681,8 +827,17 @@ public actor PRStatusManager {
             outcomes[wt.id] = .undetermined(cause: PRUndeterminedCause.queryFailed)
         }
         for wt in unnumbered where outcomes[wt.id] == nil && !directRefreshLanded(wt.id, after: batchStartedAt) {
-            outcomes[wt.id] = batchSucceeded ? PRObservation.Outcome.none
-                                             : .undetermined(cause: batchFailureCause)
+            if gitLabUnnumberedIDs.contains(wt.id) {
+                // Judged by the project query that covered THIS worktree, never
+                // by the viewer batch — which was not asked about it, and on a
+                // GitLab-only fleet was not run at all.
+                outcomes[wt.id] = gitLabAnsweredIDs.contains(wt.id)
+                    ? PRObservation.Outcome.none
+                    : .undetermined(cause: gitLabFailureCause)
+            } else {
+                outcomes[wt.id] = batchSucceeded ? PRObservation.Outcome.none
+                                                 : .undetermined(cause: batchFailureCause)
+            }
         }
         for (id, observedOutcome) in outcomes {
             await record(observedOutcome, for: id, at: batchStartedAt)
@@ -827,14 +982,17 @@ public actor PRStatusManager {
     /// `worktreeID`; here it carries a BINDING id. That is the whole point of
     /// this path — several bindings of one worktree must stay distinguishable.
     ///
-    /// `group.host` is not passed to `gh`: binding creation is host-locked to
-    /// github.com today (`PRBindingExtractor`), so every group resolves against
-    /// gh's default host. It still keys the grouping, so the day an enterprise
-    /// host can be bound, two hosts' repos cannot land in one query.
+    /// `group.host` chooses the forge. `groupBindingsByRepo` already keys on it,
+    /// so a group is one repo on one host and the whole group takes one path:
+    /// a GitLab host goes to `refreshGitLabBindingGroup`, everything else stays
+    /// on `gh`, whose auth is host-scoped and therefore needs no host argument.
     private nonisolated func refreshBindingGroup(
         _ group: (host: String, owner: String, name: String, bindings: [PRBinding]),
         repoPath: String
     ) async -> [UUID: PRBindingObservation] {
+        if await isGitLabHost(group.host, repoPath: repoPath) {
+            return await refreshGitLabBindingGroup(group, repoPath: repoPath)
+        }
         let aliased = group.bindings.enumerated().map {
             (alias: "pr\($0.offset)", bindingID: $0.element.id, number: $0.element.number)
         }
@@ -924,6 +1082,135 @@ public actor PRStatusManager {
                 baseRef: Self.refOrNil(node.baseRefName))
         }
         return observations
+    }
+
+    /// One GitLab project group: one batched `mergeRequests(iids:)` read, then a
+    /// fire-and-forget mergeability recheck.
+    ///
+    /// Structurally the twin of the `gh` arm above, with one shape difference
+    /// that is the point of the GitLab transport: the pipeline status rides in
+    /// the same response, so there is no per-request check query and no second
+    /// round trip to fail separately.
+    private nonisolated func refreshGitLabBindingGroup(
+        _ group: (host: String, owner: String, name: String, bindings: [PRBinding]),
+        repoPath: String
+    ) async -> [UUID: PRBindingObservation] {
+        let projectPath = "\(group.owner)/\(group.name)"
+        let iids = group.bindings.map(\.number)
+        let fetched = await fetchGitLabNodes(
+            query: GitLabQueries.mergeRequestsByIIDQuery(iids: iids),
+            host: group.host, projectPath: projectPath, repoPath: repoPath)
+        guard case .success(let nodes, let pipelineGated) = fetched else {
+            if case .failure(let cause) = fetched {
+                logger.debug("refreshBindings: GitLab query for \(projectPath, privacy: .public) settled nothing (\(cause, privacy: .public)); keeping previous statuses")
+            }
+            // Including the authentication path: an expired token proves
+            // nothing about the merge requests, so every binding keeps the
+            // value it had rather than being cleared.
+            return Self.previousStatuses(group.bindings)
+        }
+
+        // GitLab computes mergeability asynchronously and never recomputes on
+        // read, so a merge request can report UNCHECKED indefinitely. This asks
+        // it to recompute; the answer is deliberately dropped, and its failure
+        // cannot disturb the poll — the value it produces is read by the NEXT
+        // tick's GraphQL call, not by this one.
+        _ = await runGLResult(
+            args: ["api", "--hostname", group.host,
+                   GitLabQueries.recheckPath(projectPath: projectPath, iids: iids)],
+            repoPath: repoPath)
+
+        let byIID = Dictionary(nodes.map { ($0.number, $0) }, uniquingKeysWith: { first, _ in first })
+        var observations: [UUID: PRBindingObservation] = [:]
+        for binding in group.bindings {
+            guard let node = byIID[binding.number] else {
+                logger.debug("refreshBindings: merge request !\(binding.number, privacy: .public) did not resolve by iid; keeping previous status")
+                observations[binding.id] = binding.status.map { PRBindingObservation(status: $0) }
+                continue
+            }
+            let (state, reason) = Self.mapStateAndReason(
+                forge: .gitlab,
+                ghState: node.state,
+                mergeVerdictRaw: node.mergeVerdictRaw,
+                isDraft: node.isDraft,
+                pipelineGated: pipelineGated,
+                pipelineStatus: node.statusCheckRollupState)
+            observations[binding.id] = PRBindingObservation(
+                status: PRStatus(number: node.number, url: node.url, state: state,
+                                 reason: reason, mergeQueuePosition: node.mergeQueuePosition,
+                                 observedAt: now()),
+                headBranch: Self.refOrNil(node.headRefName),
+                baseRef: Self.refOrNil(node.baseRefName))
+        }
+        return observations
+    }
+
+    /// What one GitLab GraphQL read settled.
+    private enum GitLabFetchOutcome {
+        case success(nodes: [PRNode], pipelineGated: Bool)
+        /// A failure class from `PRUndeterminedCause`.
+        case failure(cause: String)
+    }
+
+    /// Run one GitLab GraphQL query and classify what came back.
+    ///
+    /// `--hostname` is on every invocation and must stay there: outside a GitLab
+    /// checkout `glab api` silently defaults to gitlab.com, so a missing flag
+    /// does not fail — it confidently answers about the wrong instance.
+    /// `fullPath` is bound as a variable because it is user data; iids and
+    /// branches are quoted into the query by `GitLabQueries`.
+    private nonisolated func fetchGitLabNodes(
+        query: String, host: String, projectPath: String, repoPath: String
+    ) async -> GitLabFetchOutcome {
+        let args = ["api", "graphql", "--hostname", host,
+                    "-f", "query=\(query)", "-f", "fullPath=\(projectPath)"]
+        guard let result = await runGLResult(args: args, repoPath: repoPath) else {
+            return .failure(cause: gitLabCLIAvailable
+                ? PRUndeterminedCause.queryFailed
+                : PRUndeterminedCause.cliUnavailable)
+        }
+        if Self.isForgeAuthFailure(result) {
+            await setForgeAuthFailure(true, host: host)
+            logger.debug("GitLab host \(host, privacy: .public) refused the credentials")
+            return .failure(cause: PRUndeterminedCause.forgeAuthFailed(host: host))
+        }
+        guard let data = Self.graphQLOutputData(stdout: result.stdout) else {
+            let errSuffix = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            logger.debug("GitLab query for \(projectPath, privacy: .public) produced no output (exit \(result.exitStatus, privacy: .public)): \(errSuffix, privacy: .public)")
+            return .failure(cause: PRUndeterminedCause.queryFailed)
+        }
+        // The call reached the host and the host answered, which is the only
+        // evidence this actor accepts that the credentials work.
+        await setForgeAuthFailure(false, host: host)
+        let parsed = GitLabQueries.parseMergeRequests(from: data)
+        return .success(nodes: parsed.nodes, pipelineGated: parsed.pipelineGated)
+    }
+
+    /// Whether a forge invocation was refused for want of valid credentials.
+    ///
+    /// Two shapes, because `glab` reports the same fault two ways: a transport
+    /// refusal exits non-zero with the status line on stderr, while a request
+    /// that reached GraphQL comes back exit-zero with an error object. Both are
+    /// an expired token, and neither may read as "this project has no merge
+    /// requests".
+    static func isForgeAuthFailure(_ result: GHCommandResult) -> Bool {
+        let stderr = result.stderr.lowercased()
+        if result.exitStatus != 0 && (stderr.contains("401") || stderr.contains("unauthorized")) {
+            return true
+        }
+        return graphQLReportsUnauthenticated(result.stdout)
+    }
+
+    private static func graphQLReportsUnauthenticated(_ stdout: String) -> Bool {
+        guard let data = graphQLOutputData(stdout: stdout),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let errors = root["errors"] as? [[String: Any]] else { return false }
+        return errors.contains { error in
+            let code = ((error["extensions"] as? [String: Any])?["code"] as? String)?.lowercased() ?? ""
+            let message = (error["message"] as? String)?.lowercased() ?? ""
+            return code.contains("unauthenticated") || code.contains("authentication")
+                || message.contains("unauthenticated")
+        }
     }
 
     /// A branch name the response actually carried, or nil. An empty string is
@@ -2325,6 +2612,84 @@ public actor PRStatusManager {
         return matches
     }
 
+    /// Branch matching on GitLab: one `sourceBranches` query per project.
+    ///
+    /// The counterpart of `runGHGraphQL` + `matchUnnumbered`, and deliberately
+    /// shaped differently. GitHub can only be asked for the *viewer's* pull
+    /// requests, so branch matching there is a local join over whatever the
+    /// authenticated account happens to have authored. GitLab takes the branch
+    /// list as a query argument with no author filter, so the instance does the
+    /// matching and a merge request opened by a teammate or through the web UI
+    /// is found — the coverage gap that makes this the discovery route worth
+    /// having.
+    ///
+    /// Degrades per project: a project whose query fails contributes no matches
+    /// and no answered ids, so its worktrees keep whatever they had and record
+    /// `.undetermined` rather than "no merge request".
+    private nonisolated func fetchGitLabBranchMatches(
+        _ unnumbered: [PollWorktree],
+        repos: [String: (owner: String, name: String)],
+        hosts: [String: String]
+    ) async -> (matches: [(worktreeID: UUID, node: PRNode)],
+                answeredIDs: Set<UUID>,
+                pipelineGated: [UUID: Bool],
+                failureCause: String) {
+        var matches: [(worktreeID: UUID, node: PRNode)] = []
+        var answered: Set<UUID> = []
+        var gated: [UUID: Bool] = [:]
+        var failureCause = PRUndeterminedCause.queryFailed
+
+        // One query per project, so several worktrees on one project cost one
+        // round trip — the same economy the aliased by-number query buys on the
+        // GitHub side.
+        var order: [String] = []
+        var groups: [String: (host: String, owner: String, name: String, entries: [PollWorktree])] = [:]
+        for wt in unnumbered {
+            guard let repo = repos[wt.worktreePath], let host = hosts[wt.worktreePath] else { continue }
+            let key = "\(host.lowercased())\u{1}\(repo.owner.lowercased())\u{1}\(repo.name.lowercased())"
+            if groups[key] == nil {
+                groups[key] = (host, repo.owner, repo.name, [])
+                order.append(key)
+            }
+            groups[key]?.entries.append(wt)
+        }
+
+        for key in order {
+            guard let group = groups[key] else { continue }
+            let branches = Self.orderedUniqueBranches(group.entries.flatMap(Self.candidatesFor))
+            guard !branches.isEmpty else { continue }
+            let fetched = await fetchGitLabNodes(
+                query: GitLabQueries.mergeRequestsByBranchQuery(branches: branches),
+                host: group.host,
+                projectPath: "\(group.owner)/\(group.name)",
+                repoPath: group.entries[0].worktreePath)
+            switch fetched {
+            case .failure(let cause):
+                failureCause = cause
+            case .success(let nodes, let pipelineGated):
+                answered.formUnion(group.entries.map(\.id))
+                let groupMatches = Self.matchUnnumbered(group.entries, nodes: nodes,
+                                                        resolveRepo: { repos[$0] })
+                for match in groupMatches { gated[match.worktreeID] = pipelineGated }
+                matches += groupMatches
+            }
+        }
+        return (matches, answered, gated, failureCause)
+    }
+
+    /// The branch list one project query asks about: every candidate of every
+    /// worktree in it, first-seen order kept and duplicates dropped — several
+    /// worktrees legitimately share a candidate.
+    static func orderedUniqueBranches(_ branches: [String]) -> [String] {
+        var seen: Set<String> = []
+        var out: [String] = []
+        for branch in branches {
+            guard !branch.isEmpty, seen.insert(branch).inserted else { continue }
+            out.append(branch)
+        }
+        return out
+    }
+
     private nonisolated func runGHGraphQL(repoPath: String) async -> Data? {
         let query = """
         {
@@ -2407,10 +2772,32 @@ public actor PRStatusManager {
             logger.debug("gh CLI not found in PATH")
             return nil
         }
+        return await Self.runCLI(executable: ghPath, args: args, repoPath: repoPath)
+    }
 
-        return await withCheckedContinuation { continuation in
+    /// One `glab` invocation, through the injected seam when a test supplied one.
+    private nonisolated func runGLResult(args: [String], repoPath: String) async -> GHCommandResult? {
+        if let glRunner {
+            return await glRunner(args, repoPath)
+        }
+        return await Self.runGlab(args: args, repoPath: repoPath)
+    }
+
+    /// The real `glab` subprocess. Static because `GitLabHostResolver` is handed
+    /// this same runner while the manager is still being initialized, so there
+    /// is no instance yet for it to capture.
+    private static func runGlab(args: [String], repoPath: String) async -> GHCommandResult? {
+        guard let glabPath = resolvedGlabPath else {
+            logger.debug("glab CLI not found in PATH")
+            return nil
+        }
+        return await runCLI(executable: glabPath, args: args, repoPath: repoPath)
+    }
+
+    private static func runCLI(executable: String, args: [String], repoPath: String) async -> GHCommandResult? {
+        await withCheckedContinuation { continuation in
             let process = Process()
-            process.executableURL = URL(fileURLWithPath: ghPath)
+            process.executableURL = URL(fileURLWithPath: executable)
             process.arguments = args
             process.currentDirectoryURL = URL(fileURLWithPath: repoPath)
 
@@ -2432,27 +2819,31 @@ public actor PRStatusManager {
             do {
                 try process.run()
             } catch {
-                logger.debug("Failed to launch gh: \(error)")
+                logger.debug("Failed to launch \(executable, privacy: .public): \(error)")
                 continuation.resume(returning: nil)
             }
         }
     }
 
-    /// Resolved once per process — gh's location doesn't change mid-process.
-    private static let resolvedGHPath: String? = {
-        let candidates = ["/usr/local/bin/gh", "/opt/homebrew/bin/gh", "/usr/bin/gh"]
+    /// Resolved once per process — a CLI's location doesn't change mid-process.
+    private static let resolvedGHPath: String? = resolveCLIPath("gh")
+
+    private static let resolvedGlabPath: String? = resolveCLIPath("glab")
+
+    private static func resolveCLIPath(_ tool: String) -> String? {
+        let candidates = ["/usr/local/bin/\(tool)", "/opt/homebrew/bin/\(tool)", "/usr/bin/\(tool)"]
         for path in candidates {
             if FileManager.default.isExecutableFile(atPath: path) { return path }
         }
         // Fall back to PATH search
         if let pathEnv = ProcessInfo.processInfo.environment["PATH"] {
             for dir in pathEnv.split(separator: ":") {
-                let full = "\(dir)/gh"
+                let full = "\(dir)/\(tool)"
                 if FileManager.default.isExecutableFile(atPath: full) { return full }
             }
         }
         return nil
-    }()
+    }
 }
 
 /// One `gh` invocation's outcome. Internal (not private) so the injected-runner

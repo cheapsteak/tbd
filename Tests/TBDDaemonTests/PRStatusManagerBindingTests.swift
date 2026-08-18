@@ -97,6 +97,109 @@ private actor BindingGH {
     }
 }
 
+// MARK: - Injected `glab`
+
+/// A stand-in for the `glab` CLI answering the three shapes the GitLab path
+/// issues: the batched `mergeRequests(iids:)` read, the author-blind
+/// `sourceBranches` read, and the REST mergeability recheck.
+///
+/// It records which shapes it saw and whether `--hostname` was on every one of
+/// them — the flag whose absence would not fail but would silently answer about
+/// gitlab.com instead of the configured instance.
+private actor GitLabFake {
+    private let host: String
+    private let projectPath: String
+    private let iid: Int
+    private let sourceBranch: String
+    private let detailedMergeStatus: String
+    /// When set, every call answers with this instead — the expired-token shape.
+    private let refusal: GHCommandResult?
+
+    private(set) var callCount = 0
+    private(set) var sawGraphQL = false
+    private(set) var sawSourceBranches = false
+    private(set) var sawRecheck = false
+    private(set) var recheckArgs: [String] = []
+    private(set) var hostnameFlagAlwaysPresent = true
+    private(set) var hostnamesSeen: [String] = []
+
+    init(host: String = "git.acme.example",
+         projectPath: String = "acme/platform/api-gateway",
+         iid: Int = 412,
+         sourceBranch: String = "tbd/my-branch",
+         detailedMergeStatus: String = "NOT_APPROVED",
+         refusal: GHCommandResult? = nil) {
+        self.host = host
+        self.projectPath = projectPath
+        self.iid = iid
+        self.sourceBranch = sourceBranch
+        self.detailedMergeStatus = detailedMergeStatus
+        self.refusal = refusal
+    }
+
+    func run(args: [String], repoPath: String) -> GHCommandResult? {
+        callCount += 1
+        if let index = args.firstIndex(of: "--hostname"), index + 1 < args.count {
+            hostnamesSeen.append(args[index + 1])
+        } else {
+            hostnameFlagAlwaysPresent = false
+        }
+        if let refusal { return refusal }
+
+        if let query = args.first(where: { $0.hasPrefix("query=") }) {
+            sawGraphQL = true
+            if query.contains("sourceBranches:") {
+                sawSourceBranches = true
+                guard query.contains("\"\(sourceBranch)\"") else { return Self.emptyProject }
+            }
+            return GHCommandResult(stdout: nodeResponse)
+        }
+        if args.contains(where: { $0.contains("with_merge_status_recheck=true") }) {
+            sawRecheck = true
+            recheckArgs = args
+            return GHCommandResult(stdout: "[]")
+        }
+        return nil
+    }
+
+    private static let emptyProject = GHCommandResult(
+        stdout: #"{"data":{"project":{"onlyAllowMergeIfPipelineSucceeds":true,"mergeRequests":{"nodes":[]}}}}"#)
+
+    /// Written with a plain `"""` literal and interpolation — no backslash
+    /// escapes — so a mis-escaped fixture cannot silently exercise the
+    /// parse-failure path instead of the one under test.
+    private var nodeResponse: String {
+        """
+        {"data":{"project":{"onlyAllowMergeIfPipelineSucceeds":true,
+        "mergeRequests":{"nodes":[{"iid":"\(iid)","state":"opened","draft":false,
+        "detailedMergeStatus":"\(detailedMergeStatus)","conflicts":false,
+        "sourceBranch":"\(sourceBranch)","targetBranch":"main",
+        "createdAt":"2026-08-01T10:00:00Z",
+        "webUrl":"https://\(host)/\(projectPath)/-/merge_requests/\(iid)",
+        "headPipeline":{"status":"SUCCESS"}}]}}}}
+        """
+    }
+}
+
+/// A `gh` that can answer nothing, only count what it was asked.
+private actor GHCallLog {
+    private(set) var viewerQueries = 0
+
+    func record(_ args: [String]) -> GHCommandResult? {
+        if args.contains(where: { $0.hasPrefix("query=") && $0.contains("viewer {") }) {
+            viewerQueries += 1
+        }
+        return nil
+    }
+}
+
+/// A token that expires and is later re-issued, so one test can watch a host
+/// go dark and come back.
+private actor AuthGate {
+    private(set) var refuses = true
+    func reissueToken() { refuses = false }
+}
+
 @Suite("PRStatusManager binding refresh")
 struct PRStatusManagerBindingTests {
 
@@ -460,6 +563,287 @@ struct PRStatusManagerBindingTests {
 
         #expect(emitted.isEmpty)
         #expect(await manager.allStatuses()[wt]?.number == 77)
+    }
+
+    // MARK: - GitLab routing
+
+    private static let gitLabHost = "git.acme.example"
+    private static let gitLabNamespace = "acme/platform"
+    private static let gitLabProject = "api-gateway"
+    private static let gitLabMRURL =
+        "https://git.acme.example/acme/platform/api-gateway/-/merge_requests/412"
+
+    private static func gitLabBinding(
+        worktreeID: UUID = UUID(), number: Int = 412, status: PRStatus? = nil
+    ) -> PRBinding {
+        PRBinding(
+            worktreeID: worktreeID, host: gitLabHost, owner: gitLabNamespace,
+            repo: gitLabProject, number: number, url: gitLabMRURL,
+            status: status, source: .manual)
+    }
+
+    @Test("a GitLab binding group queries glab and maps through the GitLab arm")
+    func gitLabGroupRefresh() async {
+        let gl = GitLabFake()
+        let manager = PRStatusManager(
+            ghRunner: { _, _ in nil },
+            glRunner: { args, path in await gl.run(args: args, repoPath: path) },
+            gitLabHosts: [Self.gitLabHost])
+        let binding = Self.gitLabBinding()
+
+        let observed = await manager.refreshBindings([binding])
+
+        // NOT_APPROVED with a green gating pipeline is GitLab's "only an
+        // approval is missing" — the GitHub arm would read the same string as
+        // an unknown merge state and never produce this.
+        #expect(observed[binding.id]?.status.state == .mergeable)
+        #expect(observed[binding.id]?.status.number == 412)
+        #expect(observed[binding.id]?.status.url == Self.gitLabMRURL)
+        #expect(observed[binding.id]?.headBranch == "tbd/my-branch")
+        #expect(observed[binding.id]?.baseRef == "main")
+        #expect(await gl.sawGraphQL)
+        #expect(await gl.sawRecheck)
+        // Outside a GitLab checkout `glab api` defaults to gitlab.com, so a
+        // missing --hostname would answer confidently about the wrong instance.
+        #expect(await gl.hostnameFlagAlwaysPresent)
+        #expect(Set(await gl.hostnamesSeen) == [Self.gitLabHost])
+    }
+
+    @Test("the mergeability recheck carries its parameters in the path, not as fields")
+    func recheckStaysAGet() async {
+        let gl = GitLabFake()
+        let manager = PRStatusManager(
+            ghRunner: { _, _ in nil },
+            glRunner: { args, path in await gl.run(args: args, repoPath: path) },
+            gitLabHosts: [Self.gitLabHost])
+
+        _ = await manager.refreshBindings([Self.gitLabBinding()])
+
+        let args = await gl.recheckArgs
+        // A `-f` would flip `glab api` from GET to POST, which this endpoint
+        // does not answer.
+        #expect(!args.contains("-f"))
+        #expect(args.contains { $0.contains("iids%5B%5D=412") })
+        #expect(args.contains { $0.hasPrefix("projects/") })
+    }
+
+    @Test("a failing recheck cannot disturb the statuses the poll already read")
+    func recheckFailureIsDiscarded() async {
+        // The recheck queues work on someone else's server and returns nothing
+        // TBD reads, so its failure is not this poll's business.
+        let gl = GitLabFake()
+        let manager = PRStatusManager(
+            ghRunner: { _, _ in nil },
+            glRunner: { args, path in
+                if args.contains(where: { $0.contains("with_merge_status_recheck=true") }) {
+                    return GHCommandResult(stdout: "", stderr: "500 Internal Server Error",
+                                           exitStatus: 1)
+                }
+                return await gl.run(args: args, repoPath: path)
+            },
+            gitLabHosts: [Self.gitLabHost])
+        let binding = Self.gitLabBinding()
+
+        let observed = await manager.refreshBindings([binding])
+
+        #expect(observed[binding.id]?.status.state == .mergeable)
+    }
+
+    @Test("a GitHub binding group never invokes glab")
+    func gitHubGroupSkipsGlab() async {
+        let gl = GitLabFake()
+        let gh = BindingGH(nodes: [
+            BindingGH.key(owner: "acme", repo: "acme-prod", number: 412):
+                Self.nodeJSON(number: 412)
+        ])
+        let manager = PRStatusManager(
+            ghRunner: { args, path in await gh.run(args: args, repoPath: path) },
+            glRunner: { args, path in await gl.run(args: args, repoPath: path) },
+            gitLabHosts: [Self.gitLabHost])
+        let binding = Self.binding(412, worktreeID: UUID())
+
+        let observed = await manager.refreshBindings([binding])
+
+        #expect(observed[binding.id]?.status.state == .mergeable)
+        #expect(await gl.callCount == 0)
+        #expect(await gh.aliasedQueries.count == 1)
+    }
+
+    @Test("branch matching finds a GitLab merge request opened by someone else")
+    func gitLabBranchMatch() async {
+        // `sourceBranches` has no author filter, so this is the route that finds
+        // a merge request opened through the web UI or by another account —
+        // GitHub's viewer batch structurally cannot.
+        let gl = GitLabFake()
+        let wt = UUID()
+        let manager = PRStatusManager(
+            ghRunner: { _, _ in nil },
+            glRunner: { args, path in await gl.run(args: args, repoPath: path) },
+            gitLabHosts: [Self.gitLabHost],
+            remoteURLReader: { _ in
+                "https://git.acme.example/acme/platform/api-gateway.git"
+            })
+
+        let outcome = await manager.fetchAll(worktrees: [Self.pollWorktree(wt)])
+
+        #expect(await gl.sawSourceBranches)
+        #expect(await manager.allStatuses()[wt]?.number == 412)
+        #expect(await manager.allStatuses()[wt]?.state == .mergeable)
+        #expect(outcome.discovered.count == 1)
+        #expect(outcome.discovered.first?.worktreeID == wt)
+        #expect(outcome.discovered.first?.parsed.number == 412)
+        #expect(outcome.discovered.first?.parsed.host == Self.gitLabHost)
+        #expect(outcome.discovered.first?.parsed.owner == Self.gitLabNamespace)
+        #expect(outcome.discovered.first?.parsed.repo == Self.gitLabProject)
+        #expect(await manager.observation(for: wt)?.outcome == .observed)
+    }
+
+    @Test("a GitLab-only fleet never asks gh for the viewer batch")
+    func gitLabOnlyFleetSkipsViewerBatch() async {
+        // `gh` cannot name this checkout — it is not a host it speaks to — so
+        // identity comes from the remote, and nothing on this fleet is GitHub.
+        // The viewer batch is then not merely fruitless but never issued.
+        let gl = GitLabFake()
+        let gh = GHCallLog()
+        let manager = PRStatusManager(
+            ghRunner: { args, _ in await gh.record(args) },
+            glRunner: { args, path in await gl.run(args: args, repoPath: path) },
+            gitLabHosts: [Self.gitLabHost],
+            remoteURLReader: { _ in
+                "https://git.acme.example/acme/platform/api-gateway.git"
+            })
+
+        let wt = UUID()
+        _ = await manager.fetchAll(worktrees: [Self.pollWorktree(wt)])
+
+        #expect(await gh.viewerQueries == 0)
+        // And the GitLab side still answered, so this is not a vacuous pass.
+        #expect(await manager.allStatuses()[wt]?.number == 412)
+    }
+
+    @Test("an unmatched GitLab branch query reports none, not a failure")
+    func gitLabBranchQueryAnsweredNothing() async {
+        // The project answered; it simply has no merge request on this branch.
+        let gl = GitLabFake(sourceBranch: "someone-elses-branch")
+        let wt = UUID()
+        let manager = PRStatusManager(
+            ghRunner: { _, _ in nil },
+            glRunner: { args, path in await gl.run(args: args, repoPath: path) },
+            gitLabHosts: [Self.gitLabHost],
+            remoteURLReader: { _ in
+                "https://git.acme.example/acme/platform/api-gateway.git"
+            })
+
+        _ = await manager.fetchAll(worktrees: [Self.pollWorktree(wt)])
+
+        #expect(await manager.observation(for: wt)?.outcome == PRObservation.Outcome.none)
+    }
+
+    // MARK: - Authentication failure
+
+    @Test("an auth failure names the host instead of degrading to no-forge")
+    func authFailureNamesHost() async {
+        let manager = PRStatusManager(
+            ghRunner: { _, _ in nil },
+            glRunner: { _, _ in
+                GHCommandResult(stdout: "", stderr: "401 Unauthorized", exitStatus: 1)
+            },
+            gitLabHosts: [Self.gitLabHost])
+        let binding = Self.gitLabBinding()
+
+        let observed = await manager.refreshBindings([binding])
+
+        #expect(observed[binding.id] == nil)
+        #expect(await manager.lastUndeterminedCause(forHost: Self.gitLabHost)
+                == PRUndeterminedCause.forgeAuthFailed(host: Self.gitLabHost))
+        // The remedy is host-shaped, so the report must name the host.
+        #expect(await manager.lastUndeterminedCause(forHost: Self.gitLabHost)?
+                .contains(Self.gitLabHost) == true)
+    }
+
+    @Test("a GraphQL authentication error is an auth failure too, not an empty project")
+    func graphQLAuthErrorNamesHost() async {
+        let manager = PRStatusManager(
+            ghRunner: { _, _ in nil },
+            glRunner: { _, _ in
+                GHCommandResult(stdout: """
+                {"errors":[{"message":"invalid token",
+                "extensions":{"code":"UNAUTHENTICATED"}}]}
+                """)
+            },
+            gitLabHosts: [Self.gitLabHost])
+
+        _ = await manager.refreshBindings([Self.gitLabBinding()])
+
+        #expect(await manager.lastUndeterminedCause(forHost: Self.gitLabHost)
+                == PRUndeterminedCause.forgeAuthFailed(host: Self.gitLabHost))
+    }
+
+    @Test("an auth failure keeps every existing binding rather than clearing it")
+    func authFailureKeepsBindings() async {
+        let previous = PRStatus(number: 412, url: Self.gitLabMRURL, state: .pending,
+                                reason: "Checks pending")
+        let manager = PRStatusManager(
+            ghRunner: { _, _ in nil },
+            glRunner: { _, _ in
+                GHCommandResult(stdout: "", stderr: "401 Unauthorized", exitStatus: 1)
+            },
+            gitLabHosts: [Self.gitLabHost])
+        let binding = Self.gitLabBinding(status: previous)
+
+        let observed = await manager.refreshBindings([binding])
+
+        #expect(observed[binding.id]?.status == previous)
+    }
+
+    @Test("a host that answers again retracts its recorded refusal")
+    func successClearsAuthFailure() async {
+        // A token is re-issued and the host works; only a call succeeding is
+        // ever accepted as proof, and it must clear the stale report.
+        let gl = GitLabFake()
+        let gate = AuthGate()
+        let manager = PRStatusManager(
+            ghRunner: { _, _ in nil },
+            glRunner: { args, path in
+                if await gate.refuses {
+                    return GHCommandResult(stdout: "", stderr: "401 Unauthorized", exitStatus: 1)
+                }
+                return await gl.run(args: args, repoPath: path)
+            },
+            gitLabHosts: [Self.gitLabHost])
+        let binding = Self.gitLabBinding()
+
+        _ = await manager.refreshBindings([binding])
+        #expect(await manager.lastUndeterminedCause(forHost: Self.gitLabHost) != nil)
+
+        await gate.reissueToken()
+        let observed = await manager.refreshBindings([binding])
+
+        #expect(observed[binding.id]?.status.state == .mergeable)
+        #expect(await manager.lastUndeterminedCause(forHost: Self.gitLabHost) == nil)
+    }
+
+    @Test("a GitHub host never gets a GitLab auth report")
+    func gitHubHostHasNoForgeAuthReport() async {
+        let gh = BindingGH()
+        let manager = PRStatusManager(
+            ghRunner: { args, path in await gh.run(args: args, repoPath: path) },
+            glRunner: { _, _ in
+                GHCommandResult(stdout: "", stderr: "401 Unauthorized", exitStatus: 1)
+            },
+            gitLabHosts: [Self.gitLabHost])
+
+        _ = await manager.refreshBindings([Self.binding(412, worktreeID: UUID())])
+
+        #expect(await manager.lastUndeterminedCause(forHost: "github.com") == nil)
+    }
+
+    // MARK: - Branch list composition (pure)
+
+    @Test("one project query asks about each branch once, in first-seen order")
+    func branchListDeduplicates() {
+        #expect(PRStatusManager.orderedUniqueBranches(
+            ["tbd/a", "release/1", "tbd/a", "", "tbd/b"]) == ["tbd/a", "release/1", "tbd/b"])
     }
 
     private static func pollWorktree(
