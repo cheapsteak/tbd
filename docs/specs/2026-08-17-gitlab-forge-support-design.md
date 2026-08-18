@@ -85,7 +85,7 @@ that is the only fact being extracted. Whether credentials currently work is
 proven by an API call succeeding, never by status text — which is measurably
 unreliable: on a self-managed instance the block for a working host printed
 `✓ Logged in to <host>` and `! Invalid token provided in configuration file`
-together, while every REST and GraphQL call with that token succeeded (#673).
+together, while every REST and GraphQL call with that token succeeded.
 
 Four constraints on the derivation:
 
@@ -219,9 +219,9 @@ path.
 **A REST call accompanies the GraphQL read, for one narrow purpose.** GitLab
 computes mergeability asynchronously and does not recompute it on read, so a
 merge request can report `UNCHECKED` indefinitely — 21 of 71 open merge requests
-on a self-managed instance, including some open for months (#673). GraphQL offers
-no way to ask for a recomputation; both plausible argument spellings are rejected
-as `argumentNotAccepted`. REST's list endpoint does, via
+measured on a self-managed instance, including some open for months. GraphQL
+offers no way to ask for a recomputation; both plausible argument spellings are
+rejected as `argumentNotAccepted`. REST's list endpoint does, via
 `with_merge_status_recheck=true`, and accepts it alongside `iids[]`.
 
 So each poll pass issues one additional REST call per project, naming only the
@@ -266,9 +266,9 @@ A GitLab namespace nests up to twenty levels, so a project path is
 `acme/platform/backend/api-gateway` rather than `owner/name`. Nesting is the
 common case rather than an edge case: of 100 projects sampled on a self-managed
 instance, 72 had one intermediate subgroup and 7 had two, leaving 21 flat as the
-minority (#673). A design that treated `owner/name` as normal and nesting as an
-exception would be calibrated backwards. The two existing
-columns hold it unchanged, reframed as namespace and project: the namespace path
+minority. A design that treated `owner/name` as normal and nesting as an
+exception would be calibrated backwards. The two existing columns hold it
+unchanged, reframed as namespace and project: the namespace path
 goes in `owner`, the project name in `repo`. GitHub's `owner` is simply a
 one-segment namespace, so the concept is already shared; only the column's name
 is narrower than what it holds, and that is documented at the declaration site.
@@ -344,7 +344,7 @@ something demanding the author's attention.
 owns, and continuous-integration failure sits low in that order. Field
 measurement makes this unmissable: across 71 open merge requests on a project
 configured with `only_allow_merge_if_pipeline_succeeds`, 33 had a failing head
-pipeline and **not one** reported `CI_MUST_PASS` (#673). Approval, draft and
+pipeline and **not one** reported `CI_MUST_PASS`. Approval, draft and
 unchecked states masked every one of them.
 
 Two consequences follow, and together they rule out reading CI state off
@@ -392,8 +392,8 @@ progress does not turn the fleet red.
 - `UNCHECKED` maps to `.pending` with the distinct reason **"Mergeability not
   checked"**, because it is *not* transient: GitLab computes mergeability
   asynchronously and leaves a stale merge request unchecked until something
-  re-triggers it, so 21 of 71 sampled merge requests sat in it, some for months
-  (#673). The reason string must not imply the state is about to resolve. The
+  re-triggers it, so 21 of 71 sampled merge requests sat in it, some for
+  months. The reason string must not imply the state is about to resolve. The
   recheck request described under "GitLab I/O" is what actually moves it.
 - `CONFLICT` maps to `.blocked`, "Merge conflicts"; `NEED_REBASE` to `.blocked`,
   "Behind base branch"; `BLOCKED_STATUS` to `.blocked`, "Blocked by another
@@ -434,10 +434,10 @@ next action, not a maximum over everything wrong.
 
 ### Observed distribution
 
-Every mapping choice above is calibrated against one measurement rather than
+Every mapping choice above is calibrated against field measurement rather than
 against the enum's shape: 71 open merge requests on one active project of a
-self-managed 19.0.3-ee instance that requires both passing pipelines and resolved
-discussions (#673).
+self-managed GitLab instance that requires both passing pipelines and resolved
+discussions.
 
 | `detailedMergeStatus` | count |
 |---|---|
@@ -487,8 +487,8 @@ The arm earns its place on evidence rather than symmetry: merge requests in the
 field are created almost entirely through `glab mr create`, much of it
 agent-driven, which is exactly the case the hook exists to catch — an agent
 opening a merge request that the fleet would otherwise not notice until the next
-poll. The web UI accounts for the rest, and `git push -o merge_request.create`
-is not used at all (#673).
+poll. The web UI accounts for the rest, and the merge requests measured on a
+self-managed instance include none created by `git push -o merge_request.create`.
 
 Because GitLab branch matching is author-blind, every route is discovered
 eventually even without the hook, so the arm buys latency rather than coverage —
