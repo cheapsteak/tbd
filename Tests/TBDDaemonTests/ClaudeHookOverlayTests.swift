@@ -134,7 +134,20 @@ extension TBDHomeSerialized {
             "gh pr 'create'",
             "gh 'pr' 'create'",
             "gh pr\tcreate",
-            "gh pr    create"
+            "gh pr    create",
+            // The GitLab half. `glab`'s verb is `mr`, and every property above
+            // has to hold for it too — the prefilter is one pattern serving
+            // both forges.
+            "glab mr create --fill",
+            "glab -R acme/acme-prod mr create",
+            "glab --repo acme/acme-prod mr create --fill",
+            "cd /tmp && glab mr create -t x",
+            "/usr/local/bin/glab mr create",
+            #"glab "mr" create"#,
+            #"glab mr "create""#,
+            "glab 'mr' 'create'",
+            "glab mr\tcreate",
+            "glab  mr   create -t x"
         ]
         for command in bindable {
             #expect(PRBindingExtractor.isPRCreateCommand(command),
@@ -160,6 +173,8 @@ extension TBDHomeSerialized {
         #expect(try prefilterAdmits("ls -la /tmp") == false)
         #expect(try prefilterAdmits("git status --short") == false)
         #expect(try prefilterAdmits("gh pr view 12 --json state") == false)
+        #expect(try prefilterAdmits("glab mr view 12") == false)
+        #expect(try prefilterAdmits("glab mr list") == false)
     }
 
     @Test func registersStopFailureNotifyHook() throws {
