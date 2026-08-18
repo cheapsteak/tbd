@@ -17,12 +17,12 @@ struct CodexTurnLifecycleReducer: Sendable {
         }
     }
 
-    private var openTurnIDs: Set<String> = []
+    private var currentTurnID: String?
     private var hasLifecycleEvidence = false
 
     var activityState: TerminalActivityState? {
         guard hasLifecycleEvidence else { return nil }
-        return openTurnIDs.isEmpty ? .idle : .working
+        return currentTurnID == nil ? .idle : .working
     }
 
     mutating func consume(line: Data) {
@@ -33,10 +33,12 @@ struct CodexTurnLifecycleReducer: Sendable {
         switch envelope.payload.type {
         case "task_started":
             hasLifecycleEvidence = true
-            openTurnIDs.insert(turnID)
+            currentTurnID = turnID
         case "task_complete", "turn_aborted":
             hasLifecycleEvidence = true
-            openTurnIDs.remove(turnID)
+            if currentTurnID == turnID {
+                currentTurnID = nil
+            }
         default:
             break
         }

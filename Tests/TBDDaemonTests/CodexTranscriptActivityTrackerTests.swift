@@ -50,7 +50,17 @@ struct CodexTranscriptActivityTrackerTests {
         #expect(reducer.activityState == .idle)
     }
 
-    @Test func multipleTurnsRemainWorkingUntilAllClose() {
+    @Test func laterTurnSupersedesUnmatchedHistoricalTurn() {
+        var reducer = CodexTurnLifecycleReducer()
+        reducer.consume(line: event(type: "task_started", turnID: "a"))
+        reducer.consume(line: event(type: "task_started", turnID: "b"))
+
+        reducer.consume(line: event(type: "task_complete", turnID: "b"))
+
+        #expect(reducer.activityState == .idle)
+    }
+
+    @Test func lateCloseForSupersededTurnDoesNotCloseCurrentTurn() {
         var reducer = CodexTurnLifecycleReducer()
         reducer.consume(line: event(type: "task_started", turnID: "a"))
         reducer.consume(line: event(type: "task_started", turnID: "b"))
@@ -58,7 +68,7 @@ struct CodexTranscriptActivityTrackerTests {
         reducer.consume(line: event(type: "task_complete", turnID: "a"))
         #expect(reducer.activityState == .working)
 
-        reducer.consume(line: event(type: "turn_aborted", turnID: "b"))
+        reducer.consume(line: event(type: "task_complete", turnID: "b"))
         #expect(reducer.activityState == .idle)
     }
 
