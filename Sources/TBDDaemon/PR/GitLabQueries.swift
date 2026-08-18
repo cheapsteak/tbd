@@ -85,8 +85,11 @@ enum GitLabQueries {
     /// `read_api` on one project, into "no merge request here" for every
     /// worktree on it — silently and permanently.
     enum ParseOutcome {
-        /// The response carried a project. `nodes` may legitimately be empty.
-        case answered(nodes: [PRNode], pipelineGated: Bool)
+        /// The response carried a project. `nodes` may legitimately be empty,
+        /// and `pipelineGated` is nil when the project did not say — see the
+        /// `gated` binding in `parseMergeRequests` for why that stays a third
+        /// state instead of collapsing to false.
+        case answered(nodes: [PRNode], pipelineGated: Bool?)
         /// The response could not be understood: unparseable JSON, `data: null`,
         /// a null project, or a `mergeRequests` block with no node list. The
         /// caller must record this as undetermined, never as no merge request.
@@ -117,7 +120,16 @@ enum GitLabQueries {
             // the `gh` by-number arm uses partial stdout.
             log.debug("GitLab GraphQL errors alongside usable data: \(errorCodes.joined(separator: ","), privacy: .public)")
         }
-        let gated = project["onlyAllowMergeIfPipelineSucceeds"] as? Bool ?? false
+        // Three shapes reach nil here and all three mean the same thing: the
+        // field was null, absent, or something this build cannot read as a
+        // Bool. None of them is evidence that the project does not gate merges
+        // on its pipelines, and `?? false` would make them indistinguishable
+        // from a project that answered "no" — which switches the whole CI
+        // branch of the mapper off and, because NOT_APPROVED maps to
+        // .mergeable, renders a failing gated pipeline as "Ready to merge".
+        // It stays a scalar rather than making the response unreadable: one
+        // null field must not discard the merge requests that came with it.
+        let gated = project["onlyAllowMergeIfPipelineSucceeds"] as? Bool
         // Element-wise, because a `[[String: Any]]` cast fails whole: one null
         // element — how GraphQL reports a per-node error — would discard every
         // sibling node. Same shape as the `gh` parser after PR #208.

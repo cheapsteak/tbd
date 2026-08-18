@@ -666,6 +666,7 @@ public actor PRStatusManager {
         /// `batchSucceeded` cannot speak for it.
         var gitLabUnnumberedIDs: Set<UUID> = []
         var gitLabAnsweredIDs: Set<UUID> = []
+        // Keyed only where the project said; see `fetchGitLabBranchMatches`.
         var gitLabPipelineGated: [UUID: Bool] = [:]
         var gitLabFailureCause = PRUndeterminedCause.queryFailed
         if !unnumbered.isEmpty {
@@ -882,7 +883,10 @@ public actor PRStatusManager {
                 isDraft: match.node.isDraft,
                 requiredChecksFailing: signals.failing,
                 requiredChecksPending: signals.pending,
-                pipelineGated: gitLabPipelineGated[match.worktreeID] ?? false,
+                // Absent means the project never said, which the mapper reads
+                // as gated. A GitHub match is absent too and its arm ignores
+                // the value entirely.
+                pipelineGated: gitLabPipelineGated[match.worktreeID],
                 pipelineStatus: match.node.statusCheckRollupState
             )
             let status = PRStatus(number: match.node.number, url: match.node.url, state: state, reason: reason,
@@ -1187,7 +1191,7 @@ public actor PRStatusManager {
             query: GitLabQueries.mergeRequestsByIIDQuery(iids: iids),
             host: group.host, projectPath: projectPath, repoPath: repoPath)
         let nodes: [PRNode]
-        let pipelineGated: Bool
+        let pipelineGated: Bool?
         switch fetched {
         case .success(let fetchedNodes, let gated):
             nodes = fetchedNodes
@@ -1277,7 +1281,9 @@ public actor PRStatusManager {
 
     /// What one GitLab GraphQL read settled.
     private enum GitLabFetchOutcome {
-        case success(nodes: [PRNode], pipelineGated: Bool)
+        /// `pipelineGated` is nil when the project did not say whether merges
+        /// are gated on pipelines; the mapper reads that as gated.
+        case success(nodes: [PRNode], pipelineGated: Bool?)
         /// A failure class from `PRUndeterminedCause`.
         case failure(cause: String)
         /// The host refused the credentials. A case of its own because it is the
@@ -1614,7 +1620,7 @@ public actor PRStatusManager {
         isDraft: Bool = false,
         requiredChecksFailing: Bool = false,
         requiredChecksPending: Bool = false,
-        pipelineGated: Bool = false,
+        pipelineGated: Bool? = nil,
         pipelineStatus: String? = nil
     ) -> (state: PRMergeableState, reason: String) {
         switch forge {
@@ -1706,7 +1712,7 @@ public actor PRStatusManager {
         state: String,
         detailed: String,
         isDraft: Bool,
-        pipelineGated: Bool,
+        pipelineGated: Bool?,
         pipelineStatus: String?
     ) -> (state: PRMergeableState, reason: String) {
         switch state.lowercased() {
@@ -1726,7 +1732,16 @@ public actor PRStatusManager {
         // `onlyAllowMergeIfPipelineSucceeds` is the faithful analogue of
         // GitHub's "required check". A failing pipeline on a project that does
         // not gate merges is GitHub's UNSTABLE, which TBD does not colour.
-        if pipelineGated, let pipelineStatus {
+        //
+        // A nil gating answer is read as gated, so only an explicit `false`
+        // switches this branch off. The asymmetry is the whole reason the value
+        // is optional: over-colouring a project that turns out not to gate
+        // costs the reader a glance at a merge request that was fine, while
+        // under-colouring costs them the failure itself — with NOT_APPROVED
+        // mapping to .mergeable below, an unread gating answer would render a
+        // merge request with a failing pipeline as "Ready to merge". The same
+        // reading covers the pending statuses for one rule rather than two.
+        if pipelineGated != false, let pipelineStatus {
             switch pipelineStatus {
             case "FAILED": return (.checksFailed, "Pipeline failed")
             case "RUNNING", "PENDING", "CREATED", "WAITING_FOR_RESOURCE", "PREPARING":
@@ -3040,6 +3055,10 @@ public actor PRStatusManager {
     /// Degrades per project: a project whose query fails contributes no matches
     /// and no answered ids, so its worktrees keep whatever they had and record
     /// `.undetermined` rather than "no merge request".
+    ///
+    /// `pipelineGated` is keyed only for worktrees whose project stated whether
+    /// merges are gated on pipelines. An absent key is "nobody could read it",
+    /// which the mapper reads as gated.
     private nonisolated func fetchGitLabBranchMatches(
         _ unnumbered: [PollWorktree],
         repos: [String: (owner: String, name: String)],
@@ -3089,7 +3108,12 @@ public actor PRStatusManager {
                 answered.formUnion(group.entries.map(\.id))
                 let groupMatches = Self.matchUnnumbered(group.entries, nodes: nodes,
                                                         resolveRepo: { repos[$0] })
-                for match in groupMatches { gated[match.worktreeID] = pipelineGated }
+                // Keyed only when the project stated it: a worktree missing
+                // from this table is one whose gating nobody could read, and
+                // the mapper reads that absence as gated.
+                if let pipelineGated {
+                    for match in groupMatches { gated[match.worktreeID] = pipelineGated }
+                }
                 matches += groupMatches
             }
         }

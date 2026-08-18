@@ -8,7 +8,7 @@ struct GitLabMappingTests {
 
     private func map(
         _ verdict: String, state: String = "opened", draft: Bool = false,
-        pipeline: String? = nil, gated: Bool = true
+        pipeline: String? = nil, gated: Bool? = true
     ) -> (state: PRMergeableState, reason: String) {
         PRStatusManager.mapStateAndReason(
             forge: .gitlab, ghState: state, mergeVerdictRaw: verdict,
@@ -121,6 +121,36 @@ struct GitLabMappingTests {
     func failingNotGated() {
         // The same situation as GitHub's UNSTABLE, which TBD does not colour.
         #expect(map("NOT_APPROVED", pipeline: "FAILED", gated: false).state != .checksFailed)
+    }
+
+    @Test("a failing pipeline stays red when nobody could read whether merges are gated")
+    func failingWithUnknownGating() {
+        // nil is "the project did not tell us", which only `false` may
+        // silence. The witness for why: the line below is what the same merge
+        // request maps to when unknown is collapsed to false — .mergeable,
+        // "Ready to merge", printed against a failed pipeline. Over-colouring
+        // an ungated project costs a glance; this costs a bad merge.
+        let unknown = map("NOT_APPROVED", pipeline: "FAILED", gated: nil)
+        #expect(unknown.state == .checksFailed)
+        #expect(unknown.reason == "Pipeline failed")
+        #expect(map("NOT_APPROVED", pipeline: "FAILED", gated: false) == (.mergeable, "Ready to merge"))
+    }
+
+    @Test("unknown gating reads as gated for the pending statuses too, not only for failures")
+    func pendingWithUnknownGating() {
+        // One rule rather than two: the whole CI branch is entered on anything
+        // but an explicit false.
+        #expect(map("NOT_APPROVED", pipeline: "RUNNING", gated: nil)
+                == (.pending, "Pipeline running"))
+        #expect(map("NOT_APPROVED", pipeline: "RUNNING", gated: false).state == .mergeable)
+    }
+
+    @Test("unknown gating does not colour a merge request with no pipeline at all")
+    func noPipelineWithUnknownGating() {
+        // The CI branch needs a status to read; an unknown gating answer is not
+        // itself evidence of anything to show.
+        #expect(map("MERGEABLE", pipeline: nil, gated: nil).state == .mergeable)
+        #expect(map("CONFLICT", pipeline: nil, gated: nil) == (.blocked, "Merge conflicts"))
     }
 
     @Test("a draft with a failing pipeline stays draft")

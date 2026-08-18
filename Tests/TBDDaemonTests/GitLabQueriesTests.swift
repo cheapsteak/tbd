@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import TBDDaemonLib
+@testable import TBDShared
 
 @Suite("GitLab queries and parsing")
 struct GitLabQueriesTests {
@@ -17,15 +18,41 @@ struct GitLabQueriesTests {
     }
 
     static func response(_ nodes: String, gated: Bool = true) -> Data {
+        responseWithGating("\"onlyAllowMergeIfPipelineSucceeds\":\(gated),", nodes: nodes)
+    }
+
+    /// A response whose gating field is written verbatim, for the three shapes
+    /// a `Bool` literal cannot express: present-and-null, absent entirely, and
+    /// present with the wrong type. Pass "" to omit the field.
+    static func responseWithGating(_ field: String, nodes: String) -> Data {
         Data("""
-        {"data":{"project":{"onlyAllowMergeIfPipelineSucceeds":\(gated),
+        {"data":{"project":{\(field)
         "mergeRequests":{"nodes":[\(nodes)]}}}}
         """.utf8)
     }
 
+    /// The node with a failing pipeline, for the pairing that matters: gating
+    /// nobody could read plus CI that is definitely red.
+    static var failingNode: String {
+        oneNode.replacingOccurrences(of: #""status":"SUCCESS""#, with: #""status":"FAILED""#)
+    }
+
+    /// What the mapper makes of the first node of a parsed response.
+    ///
+    /// The composition is the property under test, not the parse alone: the
+    /// gating flag exists only to reach this call, and a parser that answers
+    /// nil is only useful if the mapper still refuses to say "Ready to merge".
+    static func mappedFirstNode(_ data: Data) -> (state: PRMergeableState, reason: String)? {
+        guard let (nodes, gated) = answered(data), let node = nodes.first else { return nil }
+        return PRStatusManager.mapStateAndReason(
+            forge: .gitlab, ghState: node.state, mergeVerdictRaw: node.mergeVerdictRaw,
+            isDraft: node.isDraft, pipelineGated: gated,
+            pipelineStatus: node.statusCheckRollupState)
+    }
+
     /// The parsed nodes, or nil when the response was refused as unreadable —
     /// so a test that expects an answer can `#require` it.
-    static func answered(_ data: Data) -> (nodes: [GitLabQueries.PRNode], gated: Bool)? {
+    static func answered(_ data: Data) -> (nodes: [GitLabQueries.PRNode], gated: Bool?)? {
         guard case .answered(let nodes, let gated) = GitLabQueries.parseMergeRequests(from: data)
         else { return nil }
         return (nodes, gated)
@@ -74,7 +101,7 @@ struct GitLabQueriesTests {
     @Test("parses a node into a PRNode tagged gitlab")
     func parsesNode() throws {
         let (nodes, gated) = try #require(Self.answered(Self.response(Self.oneNode)))
-        #expect(gated)
+        #expect(gated == true)
         #expect(nodes.count == 1)
         let n = nodes[0]
         #expect(n.forge == .gitlab)
@@ -112,7 +139,60 @@ struct GitLabQueriesTests {
     @Test("a non-gating project reports pipelineGated false")
     func nonGatingProject() throws {
         let (_, gated) = try #require(Self.answered(Self.response(Self.oneNode, gated: false)))
-        #expect(!gated)
+        #expect(gated == false)
+        // An explicit false is a fact the project stated, and it still switches
+        // the CI branch off — the tri-state must not have turned into "always
+        // gated".
+        #expect(Self.mappedFirstNode(Self.response(Self.failingNode, gated: false))?.state
+                == .mergeable)
+    }
+
+    @Test("a null gating field is unknown, and a failing pipeline stays red under it")
+    func gatingFieldNull() throws {
+        // `?? false` read this as "this project does not gate merges", which
+        // switches the whole CI branch of the mapper off. With NOT_APPROVED
+        // mapping to .mergeable, the merge request below then rendered "Ready
+        // to merge" with a failed pipeline — the fail-open this work exists to
+        // remove, in its worst form, because the user is told to go merge.
+        let data = Self.responseWithGating(
+            #""onlyAllowMergeIfPipelineSucceeds":null,"#, nodes: Self.failingNode)
+        let (_, gated) = try #require(Self.answered(data))
+        #expect(gated == nil)
+        #expect(Self.mappedFirstNode(data)?.state == .checksFailed)
+    }
+
+    @Test("an absent gating field is unknown, and a failing pipeline stays red under it")
+    func gatingFieldAbsent() throws {
+        // The shape a GitLab edition that does not expose the field takes, and
+        // the one a narrowed token can produce.
+        let data = Self.responseWithGating("", nodes: Self.failingNode)
+        let (_, gated) = try #require(Self.answered(data))
+        #expect(gated == nil)
+        #expect(Self.mappedFirstNode(data)?.state == .checksFailed)
+    }
+
+    @Test("a wrong-typed gating field is unknown, and a failing pipeline stays red under it")
+    func gatingFieldWrongTyped() throws {
+        let data = Self.responseWithGating(
+            #""onlyAllowMergeIfPipelineSucceeds":"yes","#, nodes: Self.failingNode)
+        let (_, gated) = try #require(Self.answered(data))
+        #expect(gated == nil)
+        #expect(Self.mappedFirstNode(data)?.state == .checksFailed)
+    }
+
+    @Test("an unreadable gating field costs the gating answer only, not the merge requests")
+    func unknownGatingKeepsTheNodes() throws {
+        // The previous fix in this area exists to stop one null field zeroing a
+        // whole batch, so the tri-state must not have re-introduced that: the
+        // merge requests still arrive, and only the gating answer is missing.
+        let other = Self.failingNode.replacingOccurrences(
+            of: #""iid":"412""#, with: #""iid":"7""#)
+        let data = Self.responseWithGating(
+            #""onlyAllowMergeIfPipelineSucceeds":null,"#,
+            nodes: "\(Self.failingNode), \(other)")
+        let (nodes, gated) = try #require(Self.answered(data))
+        #expect(nodes.map(\.number) == [412, 7])
+        #expect(gated == nil)
     }
 
     @Test("an errors-only response is unreadable, never an answered empty project")
@@ -139,7 +219,7 @@ struct GitLabQueriesTests {
     func emptyNodeList() throws {
         let (nodes, gated) = try #require(Self.answered(Self.response("")))
         #expect(nodes.isEmpty)
-        #expect(gated)
+        #expect(gated == true)
     }
 
     @Test("garbage that is not JSON is unreadable")
