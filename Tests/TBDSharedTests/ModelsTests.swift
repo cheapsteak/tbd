@@ -59,7 +59,8 @@ import Testing
         tmuxPaneID: "%3",
         label: "editor",
         createdAt: Date(),
-        activityState: .working
+        activityState: .working,
+        presentationActivityState: .idle
     )
     let data = try JSONEncoder().encode(terminal)
     let decoded = try JSONDecoder().decode(Terminal.self, from: data)
@@ -67,6 +68,7 @@ import Testing
     #expect(decoded.tmuxWindowID == "@1")
     #expect(decoded.label == "editor")
     #expect(decoded.activityState == .working)
+    #expect(decoded.presentationActivityState == .idle)
 }
 
 @Test func testNotificationRoundTrip() throws {
@@ -247,6 +249,7 @@ import Testing
 
     let decoded = try JSONDecoder().decode(Terminal.self, from: json)
     #expect(decoded.activityState == .unknown)
+    #expect(decoded.presentationActivityState == nil)
 }
 
 // MARK: - Hibernation fields + gating helpers

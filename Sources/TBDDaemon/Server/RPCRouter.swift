@@ -187,6 +187,9 @@ public final class RPCRouter: Sendable {
     /// never interleave in one composer. Different terminals still send in
     /// parallel — see `TerminalSendSerializer`.
     let terminalSendSerializer = TerminalSendSerializer()
+    /// Daemon-lifetime incremental transcript baselines used only to enrich
+    /// terminal-list responses for Codex presentation state.
+    let codexActivityTracker = CodexTranscriptActivityTracker()
     /// Opt-in tmux control-mode wiring. `nil` when the daemon did not provide
     /// one (tests, older callers); when present, terminal handlers open a gated
     /// logging-only `tmux -CC` connection after each `ensureServer()`.

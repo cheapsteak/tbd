@@ -547,6 +547,9 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     public var transcriptPath: String?
     public var kind: TerminalKind?
     public var activityState: TerminalActivityState
+    /// Activity reconstructed for display from the current agent transcript.
+    /// This is response-derived and is never persisted as hook activity.
+    public var presentationActivityState: TerminalActivityState?
     /// When set, the terminal is HIBERNATED: its `claude` process was
     /// gracefully terminated to reclaim memory, but the tmux window (and its
     /// shell) is kept alive. `claudeSessionID` still points at the session to
@@ -630,6 +633,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
                 transcriptPath: String? = nil,
                 kind: TerminalKind? = nil,
                 activityState: TerminalActivityState = .unknown,
+                presentationActivityState: TerminalActivityState? = nil,
                 hibernatedAt: Date? = nil,
                 hibernateReason: HibernateReason? = nil,
                 keepWarm: Bool = false,
@@ -653,6 +657,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         self.transcriptPath = transcriptPath
         self.kind = kind
         self.activityState = activityState
+        self.presentationActivityState = presentationActivityState
         self.hibernatedAt = hibernatedAt
         self.hibernateReason = hibernateReason
         self.keepWarm = keepWarm
@@ -667,7 +672,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     enum CodingKeys: String, CodingKey {
         case id, worktreeID, tmuxWindowID, tmuxPaneID, label, createdAt
         case pinnedAt, claudeSessionID, suspendedAt, suspendedSnapshot, profileID, transcriptPath, kind
-        case activityState
+        case activityState, presentationActivityState
         case hibernatedAt, hibernateReason, keepWarm, pendingResumeAt, watchDeskRole
         case activityStateSource, activityStateObservedAt
         case awaitingInputReason, awaitingInputObservedAt
@@ -689,6 +694,8 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         transcriptPath = try c.decodeIfPresent(String.self, forKey: .transcriptPath)
         kind = try c.decodeIfPresent(TerminalKind.self, forKey: .kind)
         activityState = try c.decodeIfPresent(TerminalActivityState.self, forKey: .activityState) ?? .unknown
+        presentationActivityState = try c.decodeIfPresent(
+            TerminalActivityState.self, forKey: .presentationActivityState)
         hibernatedAt = try c.decodeIfPresent(Date.self, forKey: .hibernatedAt)
         hibernateReason = try c.decodeIfPresent(HibernateReason.self, forKey: .hibernateReason)
         keepWarm = try c.decodeIfPresent(Bool.self, forKey: .keepWarm) ?? false

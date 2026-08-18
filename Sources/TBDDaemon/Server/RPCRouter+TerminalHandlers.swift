@@ -506,7 +506,20 @@ extension RPCRouter {
 
     func handleTerminalList(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalListParams.self, from: paramsData)
-        let terminals = try await db.terminals.list(worktreeID: params.worktreeID)
+        var terminals = try await db.terminals.list(worktreeID: params.worktreeID)
+        var codexTranscriptPaths: Set<String> = []
+
+        for index in terminals.indices where terminals[index].isCodexTerminal {
+            guard let transcriptPath = terminals[index].transcriptPath,
+                  !transcriptPath.isEmpty else { continue }
+            codexTranscriptPaths.insert(transcriptPath)
+            terminals[index].presentationActivityState = await codexActivityTracker.observe(
+                transcriptPath: transcriptPath,
+                worktreeID: terminals[index].worktreeID)
+        }
+
+        await codexActivityTracker.retain(
+            transcriptPaths: codexTranscriptPaths, scope: params.worktreeID)
         return try RPCResponse(result: terminals)
     }
 
