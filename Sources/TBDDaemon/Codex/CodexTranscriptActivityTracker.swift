@@ -53,12 +53,13 @@ actor CodexTranscriptActivityTracker {
         var worktreeID: UUID
         var offset: UInt64
         var pendingFragment: Data
-        var discardingLeadingPartialLine: Bool
+        var discardingCurrentLine: Bool
         var reducer: CodexTurnLifecycleReducer
     }
 
     private static let readChunkSize = 64 * 1024
     static let initialTailByteLimit: UInt64 = 1024 * 1024
+    static let maxBufferedRecordByteCount = Int(initialTailByteLimit)
     private var baselines: [String: Baseline] = [:]
 
     var baselineCount: Int { baselines.count }
@@ -117,6 +118,11 @@ actor CodexTranscriptActivityTracker {
         baselines[transcriptPath] != nil
     }
 
+    func bufferedRecordState(transcriptPath: String) -> (byteCount: Int, isDiscarding: Bool)? {
+        guard let baseline = baselines[transcriptPath] else { return nil }
+        return (baseline.pendingFragment.count, baseline.discardingCurrentLine)
+    }
+
     private func makeTailBaseline(
         handle: FileHandle,
         fileSize: UInt64,
@@ -125,42 +131,51 @@ actor CodexTranscriptActivityTracker {
         let startOffset = fileSize > Self.initialTailByteLimit
             ? fileSize - Self.initialTailByteLimit
             : 0
-        var discardingLeadingPartialLine = false
+        var discardingCurrentLine = false
 
         if startOffset > 0 {
             try handle.seek(toOffset: startOffset - 1)
             let precedingByte = try handle.read(upToCount: 1)?.first
-            discardingLeadingPartialLine = precedingByte != 0x0A
+            discardingCurrentLine = precedingByte != 0x0A
         }
 
         return Baseline(
             worktreeID: worktreeID,
             offset: startOffset,
             pendingFragment: Data(),
-            discardingLeadingPartialLine: discardingLeadingPartialLine,
+            discardingCurrentLine: discardingCurrentLine,
             reducer: CodexTurnLifecycleReducer())
     }
 
     private func consumeCompleteLines(from chunk: Data, into baseline: inout Baseline) {
-        if baseline.discardingLeadingPartialLine {
+        var scanStart = chunk.startIndex
+
+        if baseline.discardingCurrentLine {
             guard let newline = chunk.firstIndex(of: 0x0A) else { return }
-            baseline.discardingLeadingPartialLine = false
-            let afterNewline = chunk.index(after: newline)
-            guard afterNewline != chunk.endIndex else { return }
-            consumeCompleteLines(from: Data(chunk[afterNewline...]), into: &baseline)
+            baseline.discardingCurrentLine = false
+            scanStart = chunk.index(after: newline)
+        }
+
+        while scanStart != chunk.endIndex {
+            if let newline = chunk[scanStart...].firstIndex(of: 0x0A) {
+                let segmentCount = chunk.distance(from: scanStart, to: newline)
+                if segmentCount <= Self.maxBufferedRecordByteCount - baseline.pendingFragment.count {
+                    baseline.pendingFragment.append(contentsOf: chunk[scanStart..<newline])
+                    baseline.reducer.consume(line: baseline.pendingFragment)
+                }
+                baseline.pendingFragment.removeAll(keepingCapacity: false)
+                scanStart = chunk.index(after: newline)
+                continue
+            }
+
+            let segmentCount = chunk.distance(from: scanStart, to: chunk.endIndex)
+            if segmentCount <= Self.maxBufferedRecordByteCount - baseline.pendingFragment.count {
+                baseline.pendingFragment.append(contentsOf: chunk[scanStart...])
+            } else {
+                baseline.pendingFragment.removeAll(keepingCapacity: false)
+                baseline.discardingCurrentLine = true
+            }
             return
-        }
-
-        baseline.pendingFragment.append(chunk)
-        var lineStart = baseline.pendingFragment.startIndex
-
-        while let newline = baseline.pendingFragment[lineStart...].firstIndex(of: 0x0A) {
-            baseline.reducer.consume(line: Data(baseline.pendingFragment[lineStart..<newline]))
-            lineStart = baseline.pendingFragment.index(after: newline)
-        }
-
-        if lineStart != baseline.pendingFragment.startIndex {
-            baseline.pendingFragment = Data(baseline.pendingFragment[lineStart...])
         }
     }
 }

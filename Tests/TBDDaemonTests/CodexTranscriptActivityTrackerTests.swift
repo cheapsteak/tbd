@@ -6,6 +6,8 @@ import Testing
 @Suite("Codex transcript activity tracker")
 struct CodexTranscriptActivityTrackerTests {
     private static let initialTailByteLimit = Int(CodexTranscriptActivityTracker.initialTailByteLimit)
+    private static let maxBufferedRecordByteCount =
+        CodexTranscriptActivityTracker.maxBufferedRecordByteCount
 
     @Test func taskStartedProducesWorking() {
         var reducer = CodexTurnLifecycleReducer()
@@ -241,6 +243,54 @@ struct CodexTranscriptActivityTrackerTests {
 
         #expect(beforeNewline == nil)
         #expect(afterNewline == .working)
+    }
+
+    @Test func oversizedUnterminatedRecordIsDiscardedWithoutGrowingTheBuffer() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        try fixture.write(event(type: "task_started", turnID: "a"))
+        let tracker = CodexTranscriptActivityTracker()
+        let worktreeID = UUID()
+        _ = await tracker.observe(transcriptPath: fixture.path, worktreeID: worktreeID)
+
+        try fixture.append(event(
+            type: "agent_message", turnID: "oversized",
+            terminated: false,
+            exactByteCount: Self.maxBufferedRecordByteCount + 128))
+        _ = await tracker.observe(transcriptPath: fixture.path, worktreeID: worktreeID)
+        let discarding = await tracker.bufferedRecordState(transcriptPath: fixture.path)
+
+        #expect(discarding?.byteCount == 0)
+        #expect(discarding?.isDiscarding == true)
+
+        try fixture.append(
+            Data([0x0A]) + event(type: "task_complete", turnID: "a"))
+        let recovered = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+        let recoveredBuffer = await tracker.bufferedRecordState(transcriptPath: fixture.path)
+
+        #expect(recovered == .idle)
+        #expect(recoveredBuffer?.byteCount == 0)
+        #expect(recoveredBuffer?.isDiscarding == false)
+    }
+
+    @Test func oversizedCompleteRecordIsNotDecodedBeforeLaterLifecycleEvent() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        try fixture.write(event(type: "task_started", turnID: "a"))
+        let tracker = CodexTranscriptActivityTracker()
+        let worktreeID = UUID()
+        _ = await tracker.observe(transcriptPath: fixture.path, worktreeID: worktreeID)
+
+        try fixture.append(
+            event(
+                type: "task_started", turnID: "oversized",
+                exactByteCount: Self.maxBufferedRecordByteCount + 128)
+                + event(type: "task_complete", turnID: "a"))
+        let state = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+
+        #expect(state == .idle)
     }
 
     @Test func lifecycleRecordCrossingReadChunkBoundaryIsReassembled() async throws {
