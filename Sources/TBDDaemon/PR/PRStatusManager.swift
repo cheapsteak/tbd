@@ -364,6 +364,29 @@ public actor PRStatusManager {
         }
     }
 
+    /// Report a host's credential refusal as a per-worktree `PRObservation` —
+    /// the fact `pr.list` already carries to the sidebar and its tooltip, and
+    /// the same rail the branch-match path reports an auth failure on.
+    ///
+    /// Without this the binding path — the main path once a GitLab worktree has
+    /// a binding — keeps every chip at its last value with nothing anywhere
+    /// saying why. Keeping the values is right; an expired token proves nothing
+    /// about the merge requests. Saying nothing about them is the gap.
+    ///
+    /// Deliberately narrow: only the credential refusal is reported, not every
+    /// failure class. A query that failed once is reconfirmed by the next tick,
+    /// whereas a personal access token has no refresh — once it expires, every
+    /// later tick refuses too and nothing else will ever surface it. Reporting
+    /// the transient classes here would also relabel a worktree whose other
+    /// bindings, on another host, were read perfectly well this pass.
+    private func reportAuthFailure(host: String, bindings: [PRBinding]) async {
+        let cause = PRUndeterminedCause.forgeAuthFailed(host: host)
+        let observedAt = now()
+        for worktreeID in Set(bindings.map(\.worktreeID)) {
+            await record(.undetermined(cause: cause), for: worktreeID, at: observedAt)
+        }
+    }
+
     /// Record one attempt's outcome and persist it — unless a newer attempt is
     /// already on record.
     ///
@@ -934,7 +957,9 @@ public actor PRStatusManager {
     /// `nonisolated` on purpose: this path must not touch `cache`,
     /// `lastDirectUpdate`, `headRefVerifiedIDs`, `onStatusPersist` or
     /// `onMergedTransition`. Persisting a binding's status — and deciding what a
-    /// merge means across several of them — belongs to the caller.
+    /// merge means across several of them — belongs to the caller. The one piece
+    /// of actor state it does write is `reportAuthFailure`'s observation, which
+    /// is an *attempt* fact about a worktree rather than any binding's value.
     ///
     /// A transient failure at any stage (gh did not launch, no data, the number
     /// did not resolve, the check query failed) yields the binding's PREVIOUS
@@ -1107,13 +1132,21 @@ public actor PRStatusManager {
         let fetched = await fetchGitLabNodes(
             query: GitLabQueries.mergeRequestsByIIDQuery(iids: iids),
             host: group.host, projectPath: projectPath, repoPath: repoPath)
-        guard case .success(let nodes, let pipelineGated) = fetched else {
-            if case .failure(let cause) = fetched {
-                logger.debug("refreshBindings: GitLab query for \(projectPath, privacy: .public) settled nothing (\(cause, privacy: .public)); keeping previous statuses")
-            }
-            // Including the authentication path: an expired token proves
-            // nothing about the merge requests, so every binding keeps the
-            // value it had rather than being cleared.
+        let nodes: [PRNode]
+        let pipelineGated: Bool
+        switch fetched {
+        case .success(let fetchedNodes, let gated):
+            nodes = fetchedNodes
+            pipelineGated = gated
+        case .failure(let cause):
+            logger.debug("refreshBindings: GitLab query for \(projectPath, privacy: .public) settled nothing (\(cause, privacy: .public)); keeping previous statuses")
+            return Self.previousStatuses(group.bindings)
+        case .authenticationFailed(let host):
+            logger.debug("refreshBindings: \(host, privacy: .public) refused the credentials for \(projectPath, privacy: .public); keeping previous statuses and reporting the refusal")
+            // An expired token proves nothing about the merge requests, so every
+            // binding keeps the value it had rather than being cleared — but the
+            // worktree is told why its values stopped moving.
+            await reportAuthFailure(host: host, bindings: group.bindings)
             return Self.previousStatuses(group.bindings)
         }
 
@@ -1185,6 +1218,12 @@ public actor PRStatusManager {
         case success(nodes: [PRNode], pipelineGated: Bool)
         /// A failure class from `PRUndeterminedCause`.
         case failure(cause: String)
+        /// The host refused the credentials. A case of its own because it is the
+        /// failure that does not resolve itself: a personal access token has no
+        /// refresh, so a host that answered yesterday refuses today and every
+        /// day after, and every caller that merely keeps its previous values
+        /// would go quiet forever.
+        case authenticationFailed(host: String)
     }
 
     /// Run one GitLab GraphQL query and classify what came back.
@@ -1207,7 +1246,7 @@ public actor PRStatusManager {
         if Self.isForgeAuthFailure(result) {
             await setForgeAuthFailure(true, host: host)
             logger.debug("GitLab host \(host, privacy: .public) refused the credentials")
-            return .failure(cause: PRUndeterminedCause.forgeAuthFailed(host: host))
+            return .authenticationFailed(host: host)
         }
         guard let data = Self.graphQLOutputData(stdout: result.stdout) else {
             let errSuffix = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2850,6 +2889,11 @@ public actor PRStatusManager {
             switch fetched {
             case .failure(let cause):
                 failureCause = cause
+            case .authenticationFailed(let host):
+                // Reported here as the cause every worktree of this project
+                // records; the binding path has to report it separately,
+                // because nothing there records an outcome per worktree.
+                failureCause = PRUndeterminedCause.forgeAuthFailed(host: host)
             case .success(let nodes, let pipelineGated):
                 answered.formUnion(group.entries.map(\.id))
                 let groupMatches = Self.matchUnnumbered(group.entries, nodes: nodes,

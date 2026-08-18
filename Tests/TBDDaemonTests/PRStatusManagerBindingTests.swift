@@ -1112,6 +1112,40 @@ struct PRStatusManagerBindingTests {
         #expect(observed[binding.id]?.status == previous)
     }
 
+    @Test("a credential refusal on the binding path reaches the worktree, not just a log")
+    func authFailureIsReportedOnTheBindingPath() async {
+        // Once a GitLab worktree has a binding, this is the path that polls it.
+        // A personal access token has no refresh, so an expired one refuses
+        // every tick from here on: keeping the last value is right, and saying
+        // nothing about it is what leaves every chip frozen and unexplained.
+        let wt = UUID()
+        let previous = PRStatus(number: 412, url: Self.gitLabMRURL, state: .mergeable)
+        let manager = PRStatusManager(
+            ghRunner: { _, _ in nil },
+            glRunner: { _, _ in
+                GHCommandResult(stdout: "", stderr: "401 Unauthorized", exitStatus: 1)
+            },
+            gitLabHosts: [Self.gitLabHost])
+        let binding = Self.gitLabBinding(worktreeID: wt, status: previous)
+
+        let observed = await manager.refreshBindings([binding])
+
+        #expect(observed[binding.id]?.status == previous)
+        #expect(await manager.observation(for: wt)?.outcome
+                == .undetermined(cause: PRUndeterminedCause.forgeAuthFailed(host: Self.gitLabHost)))
+
+        // And deliberately only the refusal: a query that merely failed is
+        // reconfirmed by the next tick, and recording it here would relabel a
+        // worktree whose other bindings were read perfectly well this pass.
+        let other = UUID()
+        let quiet = PRStatusManager(
+            ghRunner: { _, _ in nil },
+            glRunner: { _, _ in nil },
+            gitLabHosts: [Self.gitLabHost])
+        _ = await quiet.refreshBindings([Self.gitLabBinding(worktreeID: other)])
+        #expect(await quiet.observation(for: other) == nil)
+    }
+
     @Test("a host that answers again retracts its recorded refusal")
     func successClearsAuthFailure() async {
         // A token is re-issued and the host works; only a call succeeding is
