@@ -99,7 +99,7 @@ enum GitLabQueries {
         guard let dataObj = root["data"] as? [String: Any],
               let project = dataObj["project"] as? [String: Any],
               let mrs = project["mergeRequests"] as? [String: Any],
-              let raw = mrs["nodes"] as? [[String: Any]] else {
+              let raw = mrs["nodes"] as? [Any] else {
             // Warning, not debug: this is the shape a project rename or a
             // per-project permission loss takes, and it degrades a whole
             // project's worth of worktrees at once.
@@ -112,7 +112,11 @@ enum GitLabQueries {
             log.debug("GitLab GraphQL errors alongside usable data: \(errorCodes.joined(separator: ","), privacy: .public)")
         }
         let gated = project["onlyAllowMergeIfPipelineSucceeds"] as? Bool ?? false
-        return .answered(nodes: raw.compactMap(node(from:)), pipelineGated: gated)
+        // Element-wise, because a `[[String: Any]]` cast fails whole: one null
+        // element — how GraphQL reports a per-node error — would discard every
+        // sibling node. Same shape as the `gh` parser after PR #208.
+        let nodes = raw.compactMap { $0 as? [String: Any] }.compactMap(node(from:))
+        return .answered(nodes: nodes, pipelineGated: gated)
     }
 
     static func node(from obj: [String: Any]) -> PRNode? {

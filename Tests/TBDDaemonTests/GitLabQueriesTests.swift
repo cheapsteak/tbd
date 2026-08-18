@@ -81,6 +81,19 @@ struct GitLabQueriesTests {
         #expect(nodes[0].statusCheckRollupState == nil)
     }
 
+    @Test("a null node element costs that node only, not the whole batch")
+    func nullNodeElement() throws {
+        // Nulling one element is how GraphQL surfaces a per-node error, and a
+        // whole-array cast fails on it and discards every sibling — the defect
+        // PR #208 fixed on the GitHub side. Siblings on both sides of the null
+        // must survive.
+        let other = Self.oneNode.replacingOccurrences(
+            of: #""iid":"412""#, with: #""iid":"7""#)
+        let (nodes, _) = try #require(
+            Self.answered(Self.response("\(Self.oneNode), null, \(other)")))
+        #expect(nodes.map(\.number) == [412, 7])
+    }
+
     @Test("a non-gating project reports pipelineGated false")
     func nonGatingProject() throws {
         let (_, gated) = try #require(Self.answered(Self.response(Self.oneNode, gated: false)))
