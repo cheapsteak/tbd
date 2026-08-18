@@ -126,15 +126,17 @@ Local SwiftPM `build`, `test`, and `run` compilation goes through
 `scripts/swift-safe`. It holds a
 kernel-managed, machine-global lock at `~/tbd/runtime/swift-build.lock`, so a
 fleet of TBD worktrees cannot compile simultaneously. Compile commands default
-to two jobs and rejects an explicit job count above that configured limit unless
-a developer opts out. Non-compiling `swift package` metadata and resolution
-commands do not enter the governor.
+to two jobs and reject an explicit job count above that configured limit.
+Non-compiling `swift package` metadata and resolution commands do not enter the
+governor.
 
-- `TBD_SWIFT_JOBS` sets the default and maximum job count (default `2`).
+- `TBD_SWIFT_JOBS` sets the job count (default `2`), honored at face value with
+  no ceiling. Because the lock already allows only one build at a time, this is
+  a bound on the whole machine's compiler parallelism, and exporting it is the
+  machine owner's consent — e.g. `8` on a 12-core laptop. A `-j`/`--jobs` on
+  the command line may lower it but not raise it; raise this instead.
 - `TBD_SWIFT_LOCK_TIMEOUT_SECONDS` sets the wait timeout (default `1800`).
 - `TBD_SWIFT_LOCK_PATH` overrides the shared lock path for isolated testing.
-- `TBD_SWIFT_ALLOW_HIGH_JOBS=1` permits an explicit higher job count on an
-  otherwise idle machine.
 - `TBD_SWIFT_ALLOW_ORPHAN=1` keeps a queued build waiting even after the
   process that requested it exits. A queued wrapper otherwise records its
   ancestor chain at startup and gives up as soon as any of those processes

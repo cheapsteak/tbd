@@ -39,7 +39,9 @@ The main chat session agent should not write code directly. Delegate all impleme
 - Run `scripts/test.sh` if you changed daemon or shared code. It fences the run
   against the developer's real `~/tbd` and `~/.claude` (see "Tests must not
   touch ~/tbd") and invokes SwiftPM through `scripts/swift-safe`, which
-  serializes builds across TBD worktrees and defaults to two compiler jobs;
+  serializes builds across TBD worktrees and defaults to two compiler jobs —
+  the machine's owner can raise that by exporting `TBD_SWIFT_JOBS` (builds are
+  serialized, so it is a machine-wide ceiling: e.g. 8 on a 12-core machine);
   raw `swift build/test/run` is blocked by the repo guardrail because
   concurrent default `-j12` builds can exhaust this development machine. The
   two wrappers are orthogonal — admission control and filesystem isolation —

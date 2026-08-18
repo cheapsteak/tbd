@@ -108,8 +108,19 @@ class SwiftSafeTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def run_runner(self, *arguments, **extra_env):
-        env = os.environ.copy()
+    def runner_env(self, **extra_env) -> dict[str, str]:
+        """The wrapper's environment with every knob it reads cleared first.
+
+        A developer who exported `TBD_SWIFT_JOBS` for their own machine — the
+        wrapper invites exactly that — must not decide what these cases
+        observe, or the default cases assert their job count instead of the
+        shipped one.  Each case states the settings it depends on itself.
+        """
+        env = {
+            name: value
+            for name, value in os.environ.items()
+            if not name.startswith("TBD_SWIFT_")
+        }
         env.update(
             {
                 "TBD_HOME": str(self.tbd_home),
@@ -117,11 +128,14 @@ class SwiftSafeTests(unittest.TestCase):
                 **extra_env,
             }
         )
+        return env
+
+    def run_runner(self, *arguments, **extra_env):
         return subprocess.run(
             [str(RUNNER), *arguments],
             text=True,
             capture_output=True,
-            env=env,
+            env=self.runner_env(**extra_env),
             check=False,
         )
 
@@ -145,10 +159,44 @@ class SwiftSafeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "build -j 1")
 
+    def test_a_job_count_at_the_configured_limit_is_preserved(self):
+        result = self.run_runner("build", "-j", "8", TBD_SWIFT_JOBS="8")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "build -j 8")
+
+    def test_an_exported_job_count_is_honored_at_face_value(self):
+        """The lock already caps the machine at one build, so no ceiling."""
+        result = self.run_runner("build", TBD_SWIFT_JOBS="8")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "build --jobs 8")
+
+    def test_a_large_exported_job_count_is_honored_too(self):
+        """A big machine's owner sets the bound; the wrapper does not argue."""
+        result = self.run_runner("test", "--filter", "Foo", TBD_SWIFT_JOBS="34")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "test --filter Foo --jobs 34")
+
+    def test_zero_and_negative_exported_job_counts_are_rejected(self):
+        for value in ("0", "-1"):
+            with self.subTest(value=value):
+                result = self.run_runner("build", TBD_SWIFT_JOBS=value)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("must be positive", result.stderr)
+                self.assertEqual(result.stdout, "")
+
     def test_excessive_job_count_is_rejected(self):
+        """A command line may lower the machine owner's bound, never raise it."""
         result = self.run_runner("test", "-j12")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("exceeds TBD_SWIFT_JOBS=2", result.stderr)
+        self.assertIn("raise TBD_SWIFT_JOBS", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_a_raised_limit_admits_the_command_line_count_it_rejected(self):
+        """Same command, TBD_SWIFT_JOBS raised: the bound is the only gate."""
+        result = self.run_runner("test", "-j12", TBD_SWIFT_JOBS="12")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "test -j12")
 
     def test_fractional_default_job_count_is_rejected(self):
         result = self.run_runner("build", TBD_SWIFT_JOBS="2.5")
@@ -165,9 +213,7 @@ class SwiftSafeTests(unittest.TestCase):
             "#!/bin/sh\nprintf 'ready\\n'\nsleep 30\n",
             encoding="utf-8",
         )
-        env = os.environ.copy()
-        env.update({"TBD_HOME": str(self.tbd_home), "TBD_SWIFT_BIN": str(self.fake_swift)})
-        with _lock_holder(env):
+        with _lock_holder(self.runner_env()):
             result = self.run_runner(
                 "test", TBD_SWIFT_LOCK_TIMEOUT_SECONDS="0.05"
             )
@@ -224,14 +270,7 @@ class SwiftSafeTests(unittest.TestCase):
             "#!/bin/sh\nprintf 'ready\\n'\nsleep 30\n",
             encoding="utf-8",
         )
-        env = os.environ.copy()
-        env.update(
-            {
-                "TBD_HOME": str(self.tbd_home),
-                "TBD_SWIFT_BIN": str(self.fake_swift),
-            }
-        )
-        with _lock_holder(env, cwd=str(holder_directory)) as holder:
+        with _lock_holder(self.runner_env(), cwd=str(holder_directory)) as holder:
             result = self.run_runner(
                 "test",
                 TBD_SWIFT_LOCK_TIMEOUT_SECONDS="0.4",

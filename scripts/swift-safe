@@ -6,6 +6,14 @@ prevents otherwise-independent Claude sessions from each starting a full
 Swift compiler swarm on the same laptop.  The file may remain on disk: flock
 ownership is kernel-managed and is released when this process exits.
 
+Compile commands are given ``--jobs`` from ``TBD_SWIFT_JOBS`` (default 2).
+That value is honored at face value, with no ceiling: the lock already
+guarantees at most one build on the machine, so the variable is a total-machine
+compiler bound and whoever owns the machine sets it.  A ``-j``/``--jobs`` on
+the command line may lower it but not raise it — an agent that wants more
+parallelism is asking to overrule the machine owner, and should raise
+``TBD_SWIFT_JOBS`` instead.
+
 Waiting is reported on stderr, never stdout, so a caller parsing SwiftPM's
 output sees nothing from this wrapper.  The holder writes ``pid``/``cwd``/
 ``command`` into the lock file after acquiring, and a waiter reads it back to
@@ -44,7 +52,6 @@ import time
 
 
 DEFAULT_JOBS = 2
-MAX_JOBS = 4
 DEFAULT_TIMEOUT_SECONDS = 1_800.0
 # Agent harnesses kill a session that emits nothing for 600s, and a queued
 # build used to be silent for the full 30-minute timeout.  One line a minute
@@ -127,13 +134,10 @@ def _positive_integer(name: str, default: int) -> int:
 
 
 def _job_limit() -> int:
-    value = _positive_integer("TBD_SWIFT_JOBS", DEFAULT_JOBS)
-    if value > MAX_JOBS and os.environ.get("TBD_SWIFT_ALLOW_HIGH_JOBS") != "1":
-        raise SystemExit(
-            f"TBD_SWIFT_JOBS={value} exceeds the safe local ceiling {MAX_JOBS}; "
-            "set TBD_SWIFT_ALLOW_HIGH_JOBS=1 only for an isolated machine"
-        )
-    return value
+    # No ceiling on purpose: the machine-global lock means this is the whole
+    # machine's compiler bound, and exporting the variable is its owner's
+    # consent. A cap on top of serialization was doubly conservative.
+    return _positive_integer("TBD_SWIFT_JOBS", DEFAULT_JOBS)
 
 
 def _requested_jobs(arguments: list[str]) -> int | None:
@@ -196,10 +200,10 @@ def _bounded_arguments(subcommand: str, arguments: list[str]) -> list[str]:
         return [*result, "--jobs", str(limit)]
     if requested <= 0:
         raise SystemExit("SwiftPM --jobs must be positive")
-    if requested > limit and os.environ.get("TBD_SWIFT_ALLOW_HIGH_JOBS") != "1":
+    if requested > limit:
         raise SystemExit(
             f"requested SwiftPM --jobs {requested} exceeds TBD_SWIFT_JOBS={limit}; "
-            "lower the command or explicitly set TBD_SWIFT_ALLOW_HIGH_JOBS=1"
+            "lower the command, or raise TBD_SWIFT_JOBS if you own this machine"
         )
     return result
 
