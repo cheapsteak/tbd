@@ -59,6 +59,20 @@ struct GitLabMappingTests {
         #expect(r.reason == "Pipeline failed")
     }
 
+    @Test("a merge conflict does not outrank a failing gated pipeline")
+    func conflictDoesNotBeatFailingPipeline() {
+        // The ordering is deliberate, not an oversight: the CI signal is
+        // computed ahead of the merge-status switch, so CONFLICT reports the
+        // pipeline rather than the conflict. Both are true and both block, and
+        // the pipeline is the signal GitLab's own detailedMergeStatus is least
+        // able to report — it ranks CI below almost everything, which is why
+        // the CI signal is computed separately at all. Pinned so a future
+        // reader does not "fix" the precedence into the switch.
+        let r = map("CONFLICT", pipeline: "FAILED")
+        #expect(r.state == .checksFailed)
+        #expect(r.reason == "Pipeline failed")
+    }
+
     @Test("a draft outranks both an explicit change request and a failing pipeline")
     func draftBeatsRequestedChanges() {
         // Draft sits above the change-request slot, so hoisting
