@@ -262,6 +262,60 @@ private actor OneShot<Value: Sendable> {
     }
 }
 
+/// A `gh` that disowns the checkout — as it does on every GitLab remote — and
+/// would still answer any GraphQL query put to it, because a FLAT GitLab
+/// namespace is a valid GitHub coordinate and a same-named repository on
+/// github.com really does answer for it.
+///
+/// Every answer here is MERGED: on the wrong forge that is the destructive one,
+/// since it drives the merged-transition machinery (auto-archive included).
+private actor MirrorGH {
+    private(set) var graphQLQueries: [String] = []
+
+    private static let disownment = GHCommandResult(
+        stdout: "",
+        stderr: "none of the git remotes configured for this repository point to a known GitHub host",
+        exitStatus: 1)
+
+    func run(args: [String]) -> GHCommandResult? {
+        if args.first == "repo" { return Self.disownment }
+        guard let query = args.first(where: { $0.hasPrefix("query=") }) else { return nil }
+        graphQLQueries.append(query)
+        if query.contains("title") {
+            // `openPRsQuery` — the branch picker's list.
+            return GHCommandResult(stdout: """
+            {"data":{"repository":{"pullRequests":{"nodes":[
+            {"number":77,"title":"Mirror pull request","headRefName":"tbd/my-branch",
+             "isDraft":false,"isCrossRepository":false,
+             "headRepositoryOwner":{"login":"acme"}}]}}}}
+            """)
+        }
+        if query.contains("pullRequest(number:") {
+            return GHCommandResult(stdout: """
+            {"data":{"repository":{"pr0":\(Self.mergedNode)}}}
+            """)
+        }
+        return GHCommandResult(stdout: """
+        {"data":{"repository":{"pullRequests":{"nodes":[\(Self.mergedNode)]}}}}
+        """)
+    }
+
+    private static let mergedNode = """
+    {"number":77,"url":"https://github.com/acme/api-gateway/pull/77","state":"MERGED",
+     "mergeStateStatus":"CLEAN","reviewDecision":"APPROVED","headRefName":"tbd/my-branch",
+     "baseRefName":"main","createdAt":"2026-08-01T00:00:00Z","isDraft":false,
+     "statusCheckRollup":{"state":"SUCCESS"}}
+    """
+}
+
+/// Records every merged transition the manager fires — the edge that reaches
+/// auto-archive and auto-hibernate.
+private actor MergedTransitions {
+    private(set) var fired: [(worktreeID: UUID, number: Int)] = []
+    func record(_ worktreeID: UUID, _ number: Int) { fired.append((worktreeID, number)) }
+    var count: Int { fired.count }
+}
+
 /// A token that expires and is later re-issued, so one test can watch a host
 /// go dark and come back.
 private actor AuthGate {
@@ -907,6 +961,98 @@ struct PRStatusManagerBindingTests {
 
         let outcome = await manager.observation(for: wt)?.outcome
         #expect(outcome == .undetermined(cause: PRUndeterminedCause.unparseableResponse))
+    }
+
+    // MARK: - Cross-forge containment
+
+    /// A GitLab project whose namespace is FLAT, so its owner/name are also
+    /// valid GitHub coordinates — 21% of sampled projects, and the shape where
+    /// a wrong-forge query does not fail but answers.
+    private static func flatGitLabWorktree(
+        _ id: UUID, prNumber: Int? = nil
+    ) -> PRStatusManager.PollWorktree {
+        (id: id, branch: "tbd/my-branch", upstreamBranch: "main", defaultBranch: "main",
+         pushBranch: .noPushDestination, worktreePath: "/wt/api-gateway", prNumber: prNumber)
+    }
+
+    private static func mirrorManager(
+        _ gh: MirrorGH
+    ) -> PRStatusManager {
+        PRStatusManager(
+            ghRunner: { args, _ in await gh.run(args: args) },
+            glRunner: { _, _ in nil },
+            gitLabHosts: [Self.gitLabHost],
+            remoteURLReader: { _ in "https://git.acme.example/acme/api-gateway.git" })
+    }
+
+    @Test("an on-select refresh never writes a GitHub pull request onto a GitLab worktree")
+    func refreshDoesNotCrossForges() async {
+        let gh = MirrorGH()
+        let manager = Self.mirrorManager(gh)
+        let merges = MergedTransitions()
+        await manager.setOnMergedTransition { id, number in await merges.record(id, number) }
+        let wt = UUID()
+
+        let status = await manager.refresh(
+            worktreeID: wt, branch: "tbd/my-branch", upstreamBranch: "main",
+            defaultBranch: "main", pushBranch: .noPushDestination,
+            repoPath: "/wt/api-gateway")
+
+        #expect(status == nil)
+        #expect(await manager.allStatuses()[wt] == nil)
+        #expect(await merges.count == 0)
+        #expect(await gh.graphQLQueries.isEmpty)
+        #expect(await manager.observation(for: wt)?.outcome
+                == .undetermined(cause: PRUndeterminedCause.forgeNotQueryableDirectly))
+    }
+
+    @Test("a stored number on a GitLab worktree is never offered to gh")
+    func refreshByNumberDoesNotCrossForges() async {
+        // The by-number route is the one that reaches a pull request the branch
+        // query cannot, so it is also the one that reaches the wrong forge's.
+        let gh = MirrorGH()
+        let manager = Self.mirrorManager(gh)
+        let merges = MergedTransitions()
+        await manager.setOnMergedTransition { id, number in await merges.record(id, number) }
+        let wt = UUID()
+
+        let status = await manager.refresh(
+            worktreeID: wt, branch: "tbd/my-branch", upstreamBranch: "main",
+            defaultBranch: "main", pushBranch: .noPushDestination,
+            repoPath: "/wt/api-gateway", prNumber: 77)
+
+        #expect(status == nil)
+        #expect(await merges.count == 0)
+        #expect(await gh.graphQLQueries.isEmpty)
+    }
+
+    @Test("the poll's by-number path cannot auto-archive a GitLab worktree on a GitHub PR")
+    func pollByNumberDoesNotCrossForges() async {
+        let gh = MirrorGH()
+        let manager = Self.mirrorManager(gh)
+        let merges = MergedTransitions()
+        await manager.setOnMergedTransition { id, number in await merges.record(id, number) }
+        let wt = UUID()
+
+        _ = await manager.fetchAll(worktrees: [Self.flatGitLabWorktree(wt, prNumber: 77)])
+
+        #expect(await manager.allStatuses()[wt] == nil)
+        #expect(await merges.count == 0)
+        #expect(await gh.graphQLQueries.isEmpty)
+    }
+
+    @Test("the open-PR picker does not offer a GitLab repo another forge's pull requests")
+    func openPRPickerDoesNotCrossForges() async {
+        // Listing GitLab merge requests is not built, so an empty list is the
+        // honest answer — a list of somebody else's pull requests is not, and
+        // creating a worktree from one would check out a foreign branch.
+        let gh = MirrorGH()
+        let manager = Self.mirrorManager(gh)
+
+        let prs = await manager.fetchOpenPRs(repoPath: "/wt/api-gateway")
+
+        #expect(prs.isEmpty)
+        #expect(await gh.graphQLQueries.isEmpty)
     }
 
     // MARK: - Authentication failure

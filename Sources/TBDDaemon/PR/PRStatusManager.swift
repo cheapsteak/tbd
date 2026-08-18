@@ -31,6 +31,13 @@ enum PRUndeterminedCause {
     /// truncated or malformed blob. Not the absence of a record: an attempt was
     /// made, and only what it concluded is lost.
     static let unreadableRecord = "the recorded outcome could not be read"
+    /// The worktree lives on a forge this path cannot ask. The direct refresh
+    /// speaks GitHub's API alone, and a GitLab worktree is refreshed through
+    /// its bindings instead — so one with no binding yet has no direct-refresh
+    /// route at all. Named rather than folded into `queryFailed` because
+    /// nothing failed and retrying changes nothing; the alternative to saying
+    /// so is letting a same-named GitHub repository answer in its place.
+    static let forgeNotQueryableDirectly = "this worktree's forge cannot be queried directly"
     /// The CLI ran and reached the host, which refused the credentials. Named
     /// separately from `cliUnavailable` because the remedy differs: a token
     /// expired, and only re-authenticating that specific host fixes it. A
@@ -1286,6 +1293,25 @@ public actor PRStatusManager {
     public func refresh(worktreeID: UUID, branch: String, upstreamBranch: String?, defaultBranch: String?,
                         pushBranch: GitManager.PushBranchResolution,
                         repoPath: String, prNumber: Int? = nil) async -> PRStatus? {
+        // A GitLab worktree must never be answered by `gh`. Both routes below
+        // speak GitHub's API alone, and on a FLAT GitLab namespace the
+        // worktree's owner/name are valid GitHub coordinates too: with a
+        // same-named repository on github.com, `applyRefreshedNode` would write
+        // a GitHub pull request's status onto a GitLab worktree and, on a merged
+        // one, run the merged-transition machinery — auto-archive included —
+        // against a pull request from another forge. `poisonedCacheEntries`
+        // compares owner and name only, so it cannot catch that either.
+        //
+        // The cache is left exactly as it was; only the outcome is recorded, and
+        // it says the forge cannot be asked rather than that the query failed.
+        if let identity = await cachedNameWithOwner(repoPath: repoPath),
+           await isGitLabHost(identity.host, repoPath: repoPath) {
+            logger.debug("refresh: worktree \(worktreeID, privacy: .public) is on GitLab host \(identity.host, privacy: .public); its merge request is refreshed through its bindings, not by gh")
+            await record(.undetermined(cause: PRUndeterminedCause.forgeNotQueryableDirectly),
+                         for: worktreeID, at: now())
+            return cache[worktreeID]
+        }
+
         // A stored PR number (fork PRs, or a PR whose head we renamed locally)
         // can't be found by head branch — resolve it directly, mirroring
         // fetchAll's number-first path. Only fall back to the branch path when no
@@ -2393,6 +2419,21 @@ public actor PRStatusManager {
             logger.debug("listOpenPRs: could not resolve owner/name for \(repoPath, privacy: .public)")
             return []
         }
+        if await isGitLabHost(ownerRepo.host, repoPath: repoPath) {
+            // Not merely fruitless — actively wrong. What follows is a GitHub
+            // GraphQL query, and on a flat GitLab namespace the same owner/name
+            // is a valid GitHub coordinate: a same-named repository on
+            // github.com would fill the picker with pull requests this repo has
+            // nothing to do with, and creating a worktree from one would check
+            // out a branch from another forge.
+            //
+            // Listing GitLab merge requests is not built, so the picker is empty
+            // for a GitLab repo — but not silently: `.warning` is recorded by
+            // default where `.debug` is not, so "the picker shows nothing" has
+            // an answer in the log without turning debug logging on first.
+            logger.warning("listOpenPRs: \(repoPath, privacy: .public) lives on GitLab host \(ownerRepo.host, privacy: .public); listing merge requests is not implemented, so the picker stays empty")
+            return []
+        }
         let args = [
             "api", "graphql",
             "-f", "query=\(Self.openPRsQuery())",
@@ -2709,11 +2750,21 @@ public actor PRStatusManager {
     ) async -> [(worktreeID: UUID, node: PRNode)] {
         var resolved: [String: (owner: String, name: String)] = [:]
         for path in Set(numbered.map(\.worktreePath)) {
-            if let ownerRepo = await cachedNameWithOwner(repoPath: path) {
-                resolved[path] = (owner: ownerRepo.owner, name: ownerRepo.name)
-            } else {
+            guard let ownerRepo = await cachedNameWithOwner(repoPath: path) else {
                 logger.debug("fetchAll: could not resolve owner/name for numbered PRs at \(path, privacy: .public)")
+                continue
             }
+            // The by-number query is GitHub's. Offering a GitLab checkout's
+            // coordinates to it is not merely fruitless on a flat namespace —
+            // a same-named GitHub repository answers, and a MERGED answer fires
+            // auto-archive on a worktree whose merge request is somewhere else
+            // entirely. Dropping the entry degrades exactly as an unresolvable
+            // repo does: the worktree keeps its cached status.
+            guard !(await isGitLabHost(ownerRepo.host, repoPath: path)) else {
+                logger.debug("fetchAll: not offering the stored number at \(path, privacy: .public) to gh — \(ownerRepo.host, privacy: .public) is a GitLab host")
+                continue
+            }
+            resolved[path] = (owner: ownerRepo.owner, name: ownerRepo.name)
         }
         var matches: [(worktreeID: UUID, node: PRNode)] = []
         for group in Self.groupNumberedByRepo(numbered, resolve: { resolved[$0] }) {
