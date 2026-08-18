@@ -37,7 +37,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # The remote itself is named once, in the driver: this front-end never pushes.
 REMOTE="origin"
 INERT_NAMESPACE="preflight/"
-# Used only when the remote's own HEAD cannot be read; see `default_branch`.
+# Used only when the remote's own HEAD cannot be read, and it names one trunk
+# rather than recognising any; see `default_branch` for what that does not cover.
 FALLBACK_DEFAULT_BRANCH="main"
 EXIT_REFUSED=78
 
@@ -142,10 +143,18 @@ ref_is_unowned() {
 
 # default_branch -> the branch this repository treats as its trunk.
 #
-# Read from the remote's own HEAD, which is what `git remote set-head` records,
-# and falling back to a name rather than to "no protected branch": a repository
-# whose `origin/HEAD` was never fetched is the common case on a fresh clone, and
-# the fallback must fail towards refusing rather than towards verifying trunk.
+# Read from the remote's own HEAD, which is what `git remote set-head` records.
+# A repository whose `origin/HEAD` was never fetched — the common case on a
+# fresh clone — falls back to the literal name `main`, and that fallback covers
+# exactly one trunk: a repository whose trunk is called anything else gets a
+# comparison that never matches, so a lane standing on trunk is not stopped
+# here. The honest fix would be `git ls-remote --symref origin HEAD`, and it is
+# not worth a network round trip on every invocation for a stop that is already
+# redundant: `dispatch_ref_for` answers `preflight/<branch>` for every branch
+# and `push_ref` refuses any ref outside that namespace, so trunk is protected
+# by construction whatever this function returns. What this guard buys is a
+# second, independent stop if that construction ever regresses — on this
+# repository, whose trunk is `main`. It does not buy a general one.
 default_branch() {
   local head=""
   head="$(git symbolic-ref --quiet --short "refs/remotes/$REMOTE/HEAD" 2>/dev/null)" || head=""

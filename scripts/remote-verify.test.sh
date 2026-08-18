@@ -152,6 +152,9 @@ case "$1 ${2:-}" in
       shift
     done
     mkdir -p "$dir"
+    # THE DOWNLOAD SUCCEEDING AND HOLDING NOTHING is a third shape, not the one
+    # above: `gh` exits 0 and the artifact has no xUnit file in it.
+    if [ -n "${STUB_GH_EMPTY_ARTIFACT:-}" ]; then printf 'no results\n' > "$dir/README.txt"; exit 0; fi
     cp "$STUB_GH_XML_DIR"/*.xml "$dir"/
     exit 0 ;;
 esac
@@ -225,6 +228,29 @@ test_the_default_branch_is_read_from_the_remote_head() {
   git -C "$root/work" symbolic-ref "refs/remotes/origin/HEAD" "refs/remotes/origin/$BRANCH"
   trunk="$(cd "$root/work" && default_branch)"
   assert_eq "and a recorded one is believed" "$BRANCH" "$trunk"
+  rm -rf "$root"
+}
+
+test_a_differently_named_trunk_is_confined_rather_than_refused() {
+  # THE LIMIT OF THE DEFAULT-BRANCH STOP, PINNED SO THE COMMENT CANNOT DRIFT.
+  # The fallback is the literal name `main`, so on a repository whose trunk is
+  # `master` and whose `origin/HEAD` was never fetched, a lane standing on trunk
+  # is NOT stopped by that comparison. Nothing is lost, because it was never the
+  # containment: `dispatch_ref_for` answers `preflight/<branch>` for every branch
+  # and `push_ref` refuses every ref outside that namespace, so trunk stays
+  # untouched anyway. This case asserts both halves — the stop does not fire, and
+  # trunk does not move.
+  local root; root="$(setup)"
+  git -C "$root/work" branch -m main master
+  git -C "$root/work" checkout -q master
+  local trunk; trunk="$(cd "$root/work" && default_branch)"
+  assert_eq "the fallback still answers main, not this repo's trunk" "main" "$trunk"
+  local head; head="$(git -C "$root/work" rev-parse HEAD)"
+  run_verify "$root"
+  assert_eq "so standing on master is verified rather than refused" "0" "$RC"
+  assert_missing "and the refusal never fired" "$OUT" "default branch"
+  assert_eq "yet the trunk itself was never pushed" "" "$(remote_sha "$root" master)"
+  assert_eq "the commit went to the inert ref instead" "$head" "$(remote_sha "$root" "preflight/master")"
   rm -rf "$root"
 }
 
@@ -490,6 +516,29 @@ test_a_failing_run_with_no_results_artifact_falls_back_to_a_local_run() {
   assert_contains "and that nothing says the tests ran" "$OUT" "published no results"
   assert_contains "and points at the run" "$OUT" "https://example.invalid/runs/4242"
   assert_missing "and never claims a failure it cannot describe" "$OUT" "run FAILED"
+  rm -rf "$root"
+}
+
+test_a_failing_run_whose_artifact_holds_no_results_falls_back_too() {
+  # THE ARTIFACT ARRIVED AND SAID NOTHING, which is the same claim as no
+  # artifact at all: no failing test to report and no population to weigh
+  # against the run's own conclusion. The green run below refuses the identical
+  # artifact, and one artifact may not mean two things.
+  local root; root="$(setup)"
+  run_verify "$root" STUB_GH_CONCLUSION=failure STUB_GH_EMPTY_ARTIFACT=1
+  assert_eq "an empty artifact on a red run exits 78, not 1" "78" "$RC"
+  assert_contains "and names what was missing" "$OUT" "held no result files"
+  assert_missing "and never claims a failure it cannot describe" "$OUT" "run FAILED"
+  assert_missing "and states no population" "$OUT" "Test run with"
+  rm -rf "$root"
+}
+
+test_a_passing_run_whose_artifact_holds_no_results_refuses() {
+  local root; root="$(setup)"
+  run_verify "$root" STUB_GH_EMPTY_ARTIFACT=1
+  assert_eq "the same artifact on a green run exits 78" "78" "$RC"
+  assert_contains "and names what was missing" "$OUT" "held no result files"
+  assert_missing "and invents no count" "$OUT" "Test run with"
   rm -rf "$root"
 }
 

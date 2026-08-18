@@ -758,16 +758,24 @@ def failures_in(path: Path) -> list[Failure]:
 class Report:
     """What the result files said, and how to print it.
 
+    `files` is how many result files this report describes, readable ones and
+    unreadable ones alike. Zero is a report about nothing — an artifact that
+    arrived holding no xUnit file at all — and is a different claim from a
+    report over files that recorded no failures. It is carried rather than
+    inferred because every other field of an empty report is indistinguishable
+    from a clean one: no total, no unreadable names, no population.
+
     `tests` is the population the run actually executed, summed across the
-    files, and is None when no file said — an artifact that never arrived, or
-    one whose every file was unreadable.  None is not zero: a caller that needs
-    to state how many tests ran must refuse rather than publish a number no
-    file supports.
+    files, and is None when no file said — an artifact that never arrived, one
+    that held no result file, or one whose every file was unreadable.  None is
+    not zero: a caller that needs to state how many tests ran must refuse
+    rather than publish a number no file supports.
     """
 
     total: int
     unreadable: tuple[str, ...]
     lines: tuple[str, ...]
+    files: int
     tests: int | None = None
 
 
@@ -797,7 +805,15 @@ def render_results(paths: Sequence[Path], *, limit: int = MAX_RENDERED_FAILURES)
             sections.append((path, failures))
 
     lines: list[str] = []
-    if total:
+    if not paths:
+        # SAID SEPARATELY FROM "no failing tests", because it is not a statement
+        # about the tests at all: no file arrived to make one. The line below
+        # would otherwise read as "the passes ran and came back clean".
+        lines.append(
+            "remote-verify: no result files were published, so nothing here says "
+            "whether a single test ran"
+        )
+    elif total:
         plural = "" if total == 1 else "s"
         lines.append(
             f"remote-verify: {total} failing test{plural} "
@@ -830,6 +846,7 @@ def render_results(paths: Sequence[Path], *, limit: int = MAX_RENDERED_FAILURES)
         total=total,
         unreadable=tuple(path.name for path, _ in unreadable),
         lines=tuple(lines),
+        files=len(paths),
         tests=tests,
     )
 
@@ -863,10 +880,23 @@ def verdict_from_results(results: Report | None) -> int:
     - **Readable results that state no population** — `EXIT_FAILED`. Files
       arrived, they record nothing failing, and they will not say how many tests
       ran; that is too little to set against the run's own conclusion, so the
-      conclusion stands.
+      conclusion stands. The distinction from the case below is the file: a pass
+      wrote something here, and a writer that emitted a result element without a
+      `tests=` attribute is a shape neither of SwiftPM's writers produces, so
+      what arrived is not the artifact of a run that never started.
     - **No results at all** — `EXIT_REFUSED`, and this is the case that must not
-      be a failure. `test.yml`'s test job runs eight fallible setup steps before
-      it reaches the first `scripts/test.sh` — checkout, mtime restore, `brew
+      be a failure. It covers both an artifact that never arrived and one that
+      arrived holding no result file (`files == 0`): a report describing no file
+      is a report about nothing, and it must not fall through to the branch above
+      on the strength of a population no file was ever asked for. That the two
+      are one case here is the point — the green path's `_write_pass_report`
+      already refuses both on `tests is None`, and the same downloaded artifact
+      must not be "no verdict" for a run that passed and "your suite is red" for
+      one that failed. Only `actions/upload-artifact`'s `if-no-files-found: warn`
+      keeps the second shape off the wire today, by publishing no artifact when
+      nothing matches; that is a third party's behavior, not a guard of ours.
+      `test.yml`'s test job runs eight fallible setup steps before it reaches
+      the first `scripts/test.sh` — checkout, mtime restore, `brew
       install tmux`, `xcode-select`, toolchain capture, cache restore, workspace
       repair, force rebuild — and any one of them failing means zero tests ran,
       no xUnit file was written and no artifact was uploaded. `brew install`
@@ -892,7 +922,7 @@ def verdict_from_results(results: Report | None) -> int:
     themselves instead. Failing job names are still reported to the operator —
     they just do not get to decide what the tests did.
     """
-    if results is None:
+    if results is None or not results.files:
         return EXIT_REFUSED
     if results.total or results.unreadable:
         return EXIT_FAILED
@@ -1054,10 +1084,17 @@ def drive(
             if verdict_from_results(results) == EXIT_REFUSED:
                 jobs = failed_job_names(completed)
                 attribution = f" (failing jobs: {', '.join(jobs)})" if jobs else ""
-                if results is None:
+                # An artifact holding no result file says exactly what a missing
+                # artifact says, so it is refused in the same words. Reaching the
+                # message below with it would print "every one of the None tests
+                # it ran passed".
+                if results is None or not results.files:
+                    cause = problem or (
+                        f"the {RESULTS_ARTIFACT} artifact held no result files"
+                    )
                     raise Refused(
                         f"run {run_id} finished failure and published no results "
-                        f"({problem}){attribution}, so nothing says its tests ran "
+                        f"({cause}){attribution}, so nothing says its tests ran "
                         "at all, let alone failed; re-running locally is the only "
                         f"honest answer {url}".rstrip()
                     )
@@ -1144,9 +1181,16 @@ def _write_pass_report(
     low.
     """
     if results is None or results.tests is None:
-        detail = problem or (
-            f"the {RESULTS_ARTIFACT} artifact named no test population"
-        )
+        # `problem` names a download that failed; the two branches under it are
+        # an artifact that arrived and still said nothing — grouped exactly as
+        # `verdict_from_results` groups them, so a caller reading a green refusal
+        # and a red one about the same artifact reads the same cause.
+        if problem:
+            detail = problem
+        elif results is None or not results.files:
+            detail = f"the {RESULTS_ARTIFACT} artifact held no result files"
+        else:
+            detail = f"the {RESULTS_ARTIFACT} artifact named no test population"
         raise Refused(
             f"run {run_id} passed but its results could not be counted "
             f"({detail}), so the test population cannot be stated {url}".rstrip()
@@ -1236,8 +1280,9 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] | None = 
         description=(
             "Exits 1 when the results record failures or cannot be believed, and "
             f"{EXIT_REFUSED} when they record a complete, empty set of failures "
-            "over a stated population — no test verdict. Same mapping the driver "
-            "uses; see verdict_from_results."
+            "over a stated population, or when there is no result file to read "
+            "at all — no test verdict either way. Same mapping the driver uses; "
+            "see verdict_from_results."
         ),
     )
     renderer.add_argument("paths", nargs="+")

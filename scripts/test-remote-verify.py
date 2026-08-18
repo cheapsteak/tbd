@@ -524,7 +524,14 @@ class RenderingTests(unittest.TestCase):
     def test_no_results_at_all_still_produces_a_line(self):
         report = remote_verify.render_results([])
         self.assertEqual(report.total, 0)
+        self.assertEqual(report.files, 0)
         self.assertTrue(report.lines)
+        rendered = "\n".join(report.lines)
+        # NOT the "outside the test passes" line the case above gets. That one
+        # says the passes ran and came back clean, which is a claim about the
+        # tests; nothing ran here that could make one.
+        self.assertIn("no result files were published", rendered)
+        self.assertNotIn("outside the test passes", rendered)
 
     def test_skipped_and_passing_cases_are_not_failures(self):
         failures = remote_verify.failures_in(
@@ -691,9 +698,15 @@ class ResultsVerdictTests(unittest.TestCase):
     `scripts/test.sh` runs locally.
     """
 
-    def report(self, *, total=0, unreadable=(), tests=None):
+    def report(self, *, total=0, unreadable=(), tests=None, files=1):
+        # `files` defaults to a report that describes something, because that is
+        # what every case below but one is about. The one that is not passes 0.
         return remote_verify.Report(
-            total=total, unreadable=tuple(unreadable), lines=(), tests=tests
+            total=total,
+            unreadable=tuple(unreadable),
+            lines=(),
+            files=files,
+            tests=tests,
         )
 
     def test_recorded_failures_are_a_test_failure(self):
@@ -737,6 +750,27 @@ class ResultsVerdictTests(unittest.TestCase):
         # setup died, the compile died, or the upload broke on a genuinely red run
         # whose failures the local re-run finds properly.
         self.assertEqual(remote_verify.verdict_from_results(None), 78)
+
+    def test_an_artifact_holding_no_result_file_is_no_verdict_either(self):
+        # THE SAME CASE AS THE ONE ABOVE, arriving by a different route: the
+        # download succeeded and there was no xUnit file inside it. Every other
+        # field of that report is indistinguishable from a clean one — no total,
+        # no unreadable names, no population — so without `files` it falls
+        # through to "readable results that state no population" and reports a
+        # red suite for a run that said nothing about any test. The green path
+        # already refuses this shape, and the two paths must not read one
+        # artifact two ways.
+        self.assertEqual(
+            remote_verify.verdict_from_results(self.report(files=0, tests=None)), 78
+        )
+
+    def test_a_rendered_report_over_no_files_at_all_is_no_verdict(self):
+        # The same claim through the production path rather than a hand-built
+        # report, because `files` is only worth anything if `render_results` sets
+        # it: an artifact with nothing in it to read renders to exactly this.
+        self.assertEqual(
+            remote_verify.verdict_from_results(remote_verify.render_results([])), 78
+        )
 
 
 class CorrelationTests(unittest.TestCase):
@@ -893,18 +927,29 @@ class DriverTests(unittest.TestCase):
     def diagnostics(self) -> str:
         return "\n".join(self.reported)
 
-    def results_runner(self, conclusion, **files):
+    def results_runner(self, conclusion, *, empty=False, **files):
         """A `gh` whose run reaches `conclusion` and publishes `files`.
 
         Both verdicts download the artifact: a red run needs the failures, and
         a green one needs the population, because a caller reading `Test run
         with N tests` cannot be handed a number no result file supports.
+
+        `empty` publishes an artifact holding no xUnit file at all — the third
+        shape, between an artifact that arrived with results and one that never
+        arrived.
         """
 
         def download(argv):
+            destination = Path(argv[argv.index("--dir") + 1])
+            if empty:
+                # THE DOWNLOAD SUCCEEDS AND THERE IS NOTHING TO READ. Distinct
+                # from the missing artifact below, which fails the download and
+                # reaches the driver as `results is None`.
+                destination.mkdir(parents=True, exist_ok=True)
+                (destination / "README.txt").write_text("no results\n", encoding="utf-8")
+                return completed()
             if not files:
                 return completed(1, stderr="no artifact matches xunit-results")
-            destination = Path(argv[argv.index("--dir") + 1])
             write_results(destination, **files)
             return completed()
 
@@ -940,6 +985,10 @@ class DriverTests(unittest.TestCase):
     def passing_runner_without_results(self):
         """A green run whose artifact never arrived — nothing to count."""
         return self.results_runner("success")
+
+    def empty_artifact_runner(self, conclusion):
+        """A run whose artifact downloads and holds no result file."""
+        return self.results_runner(conclusion, empty=True)
 
     def failing_runner(self, **files):
         return self.results_runner("failure", **files)
@@ -1058,6 +1107,29 @@ class DriverTests(unittest.TestCase):
         )
         self.assertEqual(self.drive(runner), 1)
         self.assertIn("unreadable", self.output())
+
+    def test_a_red_run_whose_artifact_holds_no_result_file_is_no_verdict(self):
+        # AN ARTIFACT THAT ARRIVED AND HELD NOTHING SAYS WHAT A MISSING ONE
+        # SAYS. Nothing here describes any test population, so there is no
+        # evidence to set against the conclusion and no failing test to report —
+        # 78 sends the lane back to the local queue, where it gets a real answer.
+        # What keeps this shape off the wire today is `actions/upload-artifact`'s
+        # `if-no-files-found: warn`, which publishes nothing when the glob misses
+        # — a third party's behavior, not a guard of ours.
+        self.assertEqual(self.drive(self.empty_artifact_runner("failure")), 78)
+        self.assertNotIn("FAILED", self.output())
+        self.assertNotIn("Test run with", self.output())
+        self.assertIn("published no results", self.diagnostics())
+        self.assertIn("held no result files", self.diagnostics())
+
+    def test_the_same_empty_artifact_refuses_on_a_green_run_too(self):
+        # THE SYMMETRY IS THE POINT: one artifact, one meaning. The green path
+        # has always refused an uncountable pass; the red path used to call the
+        # identical report a failing suite.
+        self.assertEqual(self.drive(self.empty_artifact_runner("success")), 78)
+        self.assertNotIn("Test run with", self.output())
+        self.assertIn("could not be counted", self.diagnostics())
+        self.assertIn("held no result files", self.diagnostics())
 
     def test_a_red_run_whose_results_state_no_population_stays_red(self):
         # Readable, no failures, and silent about how many tests ran: no evidence
@@ -1409,6 +1481,16 @@ class RenderCommandTests(unittest.TestCase):
         rendered, _ = self.render(str(self.dir))
         report = remote_verify.render_results(remote_verify.result_files(self.dir))
         self.assertEqual(rendered, remote_verify.verdict_from_results(report))
+
+    def test_a_directory_with_nothing_to_read_is_no_verdict(self):
+        # The same artifact the driver refuses, handed to the other subcommand:
+        # a directory that holds no xUnit file at all. Exiting 1 here would call
+        # an empty download a red suite, and the two subcommands would disagree
+        # about one artifact.
+        (self.dir / "README.txt").write_text("no results\n", encoding="utf-8")
+        status, output = self.render(str(self.dir))
+        self.assertEqual(status, 78)
+        self.assertIn("no result files were published", output)
 
     def test_a_named_file_can_be_rendered_on_its_own(self):
         write_results(self.dir, **{"xunit-app": SWIFT_TESTING_STYLE})
