@@ -16,8 +16,14 @@ enum GitLabQueries {
 
     /// The tier-1 selection. `headPipeline { status }` rides along in the same
     /// batch — the fact GitHub needs a separate per-PR check query for.
+    ///
+    /// Every field here is read by `node(from:)`. Nothing else may be asked
+    /// for: an unread field buys no information and still carries the whole
+    /// query's schema risk. `conflicts` was requested and never read —
+    /// `detailedMergeStatus` already reports CONFLICT, and that is the only
+    /// conflict signal the mapper consults.
     static let nodeSelection = """
-    iid state draft detailedMergeStatus conflicts
+    iid state draft detailedMergeStatus
     sourceBranch targetBranch createdAt webUrl
     headPipeline { status }
     """

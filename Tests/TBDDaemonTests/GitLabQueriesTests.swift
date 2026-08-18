@@ -5,6 +5,17 @@ import Testing
 @Suite("GitLab queries and parsing")
 struct GitLabQueriesTests {
 
+    /// The exact GraphQL field set every merge-request query may ask for.
+    static let expectedNodeFields =
+        "iid state draft detailedMergeStatus sourceBranch targetBranch createdAt webUrl "
+        + "headPipeline { status }"
+
+    /// Runs of whitespace collapsed to one space, so a query pin survives
+    /// reformatting without loosening which fields it names.
+    static func normalized(_ query: String) -> String {
+        query.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    }
+
     static func response(_ nodes: String, gated: Bool = true) -> Data {
         Data("""
         {"data":{"project":{"onlyAllowMergeIfPipelineSucceeds":\(gated),
@@ -27,25 +38,26 @@ struct GitLabQueriesTests {
 
     static let oneNode = """
     {"iid":"412","state":"opened","draft":false,
-     "detailedMergeStatus":"NOT_APPROVED","conflicts":false,
+     "detailedMergeStatus":"NOT_APPROVED",
      "sourceBranch":"feat/x","targetBranch":"main",
      "createdAt":"2026-08-01T10:00:00Z",
      "webUrl":"https://git.acme.example/acme/platform/api/-/merge_requests/412",
      "headPipeline":{"status":"SUCCESS"}}
     """
 
-    @Test("the iid query embeds validated integers and takes fullPath as a variable")
+    @Test("the iid query emits exactly the tier-1 field set, with fullPath as a variable")
     func iidQueryShape() {
-        let q = GitLabQueries.mergeRequestsByIIDQuery(iids: [412, 7])
-        #expect(q.contains(#"iids: ["412", "7"]"#))
-        #expect(q.contains("$fullPath: ID!"))
-        #expect(q.contains("onlyAllowMergeIfPipelineSucceeds"))
-        #expect(q.contains("headPipeline { status }"))
-        // No paid-tier field may appear: one unknown field returns data: null
-        // for the whole batch.
-        #expect(!q.contains("mergeTrainCar"))
-        #expect(!q.contains("approvalsRequired"))
-        #expect(!q.contains("externalStatusChecks"))
+        // A whitelist, because the hazard is a field appearing, not a
+        // particular field appearing: one unknown field returns data: null for
+        // the whole batch, and a test naming today's forbidden fields would
+        // pass on tomorrow's. Whitespace is normalized so the pin survives
+        // reformatting while the field set itself stays exact.
+        let q = Self.normalized(GitLabQueries.mergeRequestsByIIDQuery(iids: [412, 7]))
+        #expect(q == """
+        query($fullPath: ID!) { project(fullPath: $fullPath) { \
+        onlyAllowMergeIfPipelineSucceeds mergeRequests(iids: ["412", "7"]) { \
+        nodes { \(Self.expectedNodeFields) } } } }
+        """)
     }
 
     @Test("the branch query JSON-escapes branch names")
@@ -54,6 +66,9 @@ struct GitLabQueriesTests {
         #expect(q.contains(#""feat/a""#))
         #expect(q.contains(#"weird\"name"#))
         #expect(q.contains("state: opened"))
+        // The same pinned field set the iid query emits — both interpolate one
+        // selection, and that is worth keeping true.
+        #expect(Self.normalized(q).contains("nodes { \(Self.expectedNodeFields) }"))
     }
 
     @Test("parses a node into a PRNode tagged gitlab")

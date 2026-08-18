@@ -172,7 +172,7 @@ private actor GitLabFake {
         """
         {"data":{"project":{"onlyAllowMergeIfPipelineSucceeds":true,
         "mergeRequests":{"nodes":[{"iid":"\(iid)","state":"opened","draft":false,
-        "detailedMergeStatus":"\(detailedMergeStatus)","conflicts":false,
+        "detailedMergeStatus":"\(detailedMergeStatus)",
         "sourceBranch":"\(sourceBranch)","targetBranch":"main",
         "createdAt":"2026-08-01T10:00:00Z",
         "webUrl":"https://\(host)/\(projectPath)/-/merge_requests/\(iid)",
