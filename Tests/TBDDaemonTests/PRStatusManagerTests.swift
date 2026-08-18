@@ -899,6 +899,28 @@ struct PRStatusManagerTests {
         #expect(PRStatusManager.parseOwnerRepo(fromURL: "https://example.com/not-a-pr") == nil)
     }
 
+    @Test("parseOwnerRepo splits a nested GitLab URL at the /-/ separator")
+    func parseOwnerRepoGitLab() {
+        let parsed = PRStatusManager.parseOwnerRepo(
+            fromURL: "https://git.acme.example/acme/platform/backend/api-gateway/-/merge_requests/412")
+        #expect(parsed?.owner == "acme/platform/backend")
+        #expect(parsed?.name == "api-gateway")
+    }
+
+    @Test("parseOwnerRepo still handles GitHub URLs")
+    func parseOwnerRepoGitHub() {
+        let parsed = PRStatusManager.parseOwnerRepo(
+            fromURL: "https://github.com/acme/acme-prod/pull/412")
+        #expect(parsed?.owner == "acme")
+        #expect(parsed?.name == "acme-prod")
+    }
+
+    @Test("parseOwnerRepo rejects a GitLab URL with no project segment")
+    func parseOwnerRepoGitLabTooShort() {
+        #expect(PRStatusManager.parseOwnerRepo(
+            fromURL: "https://git.acme.example/acme/-/merge_requests/1") == nil)
+    }
+
     // MARK: - GraphQL query builder
 
     /// A malformed (unbalanced) GraphQL query is rejected by the server at parse time,

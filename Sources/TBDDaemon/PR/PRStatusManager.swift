@@ -1338,11 +1338,24 @@ public actor PRStatusManager {
         return PRCheckDetail(contexts: result, rollupState: rollupState, truncated: truncated)
     }
 
-    /// Parse `owner` and `name` from a PR URL like
-    /// `https://github.com/<owner>/<name>/pull/<n>`.
+    /// Parse `owner` and `name` from a pull- or merge-request URL.
+    ///
+    /// GitHub: `/owner/name/pull/<n>`, matched positionally.
+    /// GitLab:  `/<namespace…>/<project>/-/merge_requests/<n>`, split at the
+    /// `/-/` separator so nesting depth is irrelevant — the namespace may run
+    /// to twenty levels, and nesting is the common case rather than the edge.
     static func parseOwnerRepo(fromURL url: String) -> (owner: String, name: String)? {
         guard let components = URLComponents(string: url) else { return nil }
-        let parts = components.path.split(separator: "/", omittingEmptySubsequences: true)
+        let path = components.path
+        if let range = path.range(of: "/-/merge_requests/") {
+            let project = path[path.startIndex..<range.lowerBound]
+                .split(separator: "/", omittingEmptySubsequences: true)
+                .map(String.init)
+            guard project.count >= 2 else { return nil }
+            return (owner: project.dropLast().joined(separator: "/"),
+                    name: project[project.count - 1])
+        }
+        let parts = path.split(separator: "/", omittingEmptySubsequences: true)
         // Expect: [owner, name, "pull", <n>]
         guard parts.count >= 4, parts[2] == "pull" else { return nil }
         return (owner: String(parts[0]), name: String(parts[1]))
