@@ -105,14 +105,20 @@ the moment of a user gesture, which deserves its own examination.
 
 ## Identification
 
-One `ps` snapshot per sweep supplies pid, ppid, pgid and start time for every
-process. For each candidate with `ppid == 1` owned by our uid, the collector
-reads the cwd through `proc_pidinfo(PROC_PIDVNODEPATHINFO)`. This needs no
-elevated privileges for same-uid processes and no per-pid `lsof` subprocess;
-root-owned processes return `EPERM` and are skipped, which is correct, since TBD
-never spawns any.
+Cwd comes from the `lsof -d cwd -Fn` pass `OrphanGC` already runs once per
+sweep. That pass prints a `p<pid>` header followed by an `n<path>` line per
+process, and `parseLiveCWDs` currently keeps only the paths. Retaining the pid
+alongside the path yields a pid-to-cwd map for every process on the machine at
+no additional cost — no new subprocess, no per-pid syscall, and the established
+"lsof unavailable means skip the entire sweep" direction already guards it.
+That failure direction matters more here than anywhere else in the sweep: a
+missing cwd map must never be read as "this process is not in a worktree".
 
-The call returns a fully resolved path (`/private/var/...` rather than
+A second `ps -axo pid=,ppid=,pgid=` snapshot supplies the process graph, which
+lsof does not carry. It is the same `/bin/ps` invocation shape
+`ProcessSignaller` already uses.
+
+`lsof` reports fully resolved paths (`/private/var/...` rather than
 `/var/...`), so both sides of every comparison resolve symlinks first — the same
 care `WorktreeLifecycle+Archive.swift` already takes when matching a worktree
 path against `git worktree list` output.
