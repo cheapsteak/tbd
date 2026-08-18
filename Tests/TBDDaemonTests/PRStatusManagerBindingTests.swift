@@ -123,18 +123,38 @@ private actor GitLabFake {
     private(set) var hostnameFlagAlwaysPresent = true
     private(set) var hostnamesSeen: [String] = []
 
+    /// The state of the merge request this project answers with, and — when
+    /// set — a second, already-merged one beside it.
+    private let state: String
+    private let mergedIID: Int?
+
     init(host: String = "git.acme.example",
          projectPath: String = "acme/platform/api-gateway",
          iid: Int = 412,
          sourceBranch: String = "tbd/my-branch",
          detailedMergeStatus: String = "NOT_APPROVED",
+         state: String = "opened",
+         mergedIID: Int? = nil,
          refusal: GHCommandResult? = nil) {
         self.host = host
         self.projectPath = projectPath
         self.iid = iid
         self.sourceBranch = sourceBranch
         self.detailedMergeStatus = detailedMergeStatus
+        self.state = state
+        self.mergedIID = mergedIID
         self.refusal = refusal
+    }
+
+    /// Wait for the mergeability recheck to arrive, up to `timeout`. It is
+    /// issued from a detached task, so a test that asserts on it must wait for
+    /// it rather than assume the refresh already ran it.
+    func waitForRecheck(within timeout: Duration = .seconds(10)) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while !sawRecheck && ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return sawRecheck
     }
 
     func run(args: [String], repoPath: String) -> GHCommandResult? {
@@ -169,14 +189,22 @@ private actor GitLabFake {
     /// escapes — so a mis-escaped fixture cannot silently exercise the
     /// parse-failure path instead of the one under test.
     private var nodeResponse: String {
-        """
+        let nodes = [node(iid: iid, state: state)]
+            + (mergedIID.map { [node(iid: $0, state: "merged")] } ?? [])
+        return """
         {"data":{"project":{"onlyAllowMergeIfPipelineSucceeds":true,
-        "mergeRequests":{"nodes":[{"iid":"\(iid)","state":"opened","draft":false,
+        "mergeRequests":{"nodes":[\(nodes.joined(separator: ","))]}}}}
+        """
+    }
+
+    private func node(iid: Int, state: String) -> String {
+        """
+        {"iid":"\(iid)","state":"\(state)","draft":false,
         "detailedMergeStatus":"\(detailedMergeStatus)",
         "sourceBranch":"\(sourceBranch)","targetBranch":"main",
         "createdAt":"2026-08-01T10:00:00Z",
         "webUrl":"https://\(host)/\(projectPath)/-/merge_requests/\(iid)",
-        "headPipeline":{"status":"SUCCESS"}}]}}}}
+        "headPipeline":{"status":"SUCCESS"}}
         """
     }
 }
@@ -190,6 +218,47 @@ private actor GHCallLog {
             viewerQueries += 1
         }
         return nil
+    }
+}
+
+/// A mergeability recheck that never returns until the test lets it, so a test
+/// can assert what the poll does *while* one is outstanding.
+private actor HangingRecheck {
+    private var entered = false
+    private var released = false
+
+    func hang() async {
+        entered = true
+        while !released { try? await Task.sleep(for: .milliseconds(5)) }
+    }
+
+    func release() { released = true }
+
+    /// Whether the recheck was reached within `timeout`. Polled, because it is
+    /// issued from a detached task whose scheduling no test owns.
+    func wasEntered(within timeout: Duration = .seconds(10)) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while !entered && ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return entered
+    }
+}
+
+/// A value some other task produces, awaited with a deadline — so a test that
+/// asserts "this call does not wait for that one" fails on a timer instead of
+/// hanging the whole suite when it does.
+private actor OneShot<Value: Sendable> {
+    private var stored: Value?
+
+    func fulfil(_ value: Value) { stored = value }
+
+    func value(within timeout: Duration = .seconds(10)) async -> Value? {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while stored == nil && ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return stored
     }
 }
 
@@ -602,7 +671,7 @@ struct PRStatusManagerBindingTests {
         #expect(observed[binding.id]?.headBranch == "tbd/my-branch")
         #expect(observed[binding.id]?.baseRef == "main")
         #expect(await gl.sawGraphQL)
-        #expect(await gl.sawRecheck)
+        #expect(await gl.waitForRecheck())
         // Outside a GitLab checkout `glab api` defaults to gitlab.com, so a
         // missing --hostname would answer confidently about the wrong instance.
         #expect(await gl.hostnameFlagAlwaysPresent)
@@ -619,6 +688,7 @@ struct PRStatusManagerBindingTests {
 
         _ = await manager.refreshBindings([Self.gitLabBinding()])
 
+        #expect(await gl.waitForRecheck())
         let args = await gl.recheckArgs
         // A `-f` would flip `glab api` from GET to POST, which this endpoint
         // does not answer.
@@ -647,6 +717,79 @@ struct PRStatusManagerBindingTests {
         let observed = await manager.refreshBindings([binding])
 
         #expect(observed[binding.id]?.status.state == .mergeable)
+    }
+
+    @Test("a hanging mergeability recheck cannot stall the poll that issued it")
+    func recheckDoesNotBlockThePoll() async {
+        // `runCLI` imposes no timeout, `refreshBindings` walks its groups one at
+        // a time and `fetchAll` skips its next poll while one is running — so a
+        // recheck that hangs would stop PR polling for the whole fleet with no
+        // deadline to end it. Nothing in the pass reads its answer, so nothing
+        // in the pass may wait for it.
+        let gl = GitLabFake()
+        let recheck = HangingRecheck()
+        let manager = PRStatusManager(
+            ghRunner: { _, _ in nil },
+            glRunner: { args, path in
+                if args.contains(where: { $0.contains("with_merge_status_recheck=true") }) {
+                    await recheck.hang()
+                    return GHCommandResult(stdout: "[]")
+                }
+                return await gl.run(args: args, repoPath: path)
+            },
+            gitLabHosts: [Self.gitLabHost])
+        let binding = Self.gitLabBinding()
+        let refreshed = OneShot<[UUID: PRStatusManager.PRBindingObservation]>()
+
+        Task { await refreshed.fulfil(await manager.refreshBindings([binding])) }
+        let observed = await refreshed.value()
+
+        #expect(observed?[binding.id]?.status.state == .mergeable,
+                "refreshBindings did not return while the recheck was still outstanding")
+        // …and the recheck really was outstanding, so the pass above is not
+        // green merely because nothing was ever asked.
+        #expect(await recheck.wasEntered())
+        await recheck.release()
+    }
+
+    @Test("the recheck asks only about merge requests that can still change")
+    func recheckSkipsTerminalMergeRequests() async {
+        // A merged merge request has a mergeability nobody will recompute and
+        // nobody will read, so asking for it spends a job on someone else's
+        // server to learn nothing.
+        let gl = GitLabFake(mergedIID: 500)
+        let manager = PRStatusManager(
+            ghRunner: { _, _ in nil },
+            glRunner: { args, path in await gl.run(args: args, repoPath: path) },
+            gitLabHosts: [Self.gitLabHost])
+        let wt = UUID()
+
+        _ = await manager.refreshBindings([
+            Self.gitLabBinding(worktreeID: wt, number: 412),
+            Self.gitLabBinding(worktreeID: wt, number: 500)
+        ])
+
+        #expect(await gl.waitForRecheck())
+        let args = await gl.recheckArgs
+        #expect(args.contains { $0.contains("iids%5B%5D=412") })
+        #expect(!args.contains { $0.contains("iids%5B%5D=500") })
+    }
+
+    @Test("a group with nothing left to settle issues no recheck at all")
+    func terminalOnlyGroupSkipsTheRecheck() async {
+        let gl = GitLabFake(state: "merged")
+        let manager = PRStatusManager(
+            ghRunner: { _, _ in nil },
+            glRunner: { args, path in await gl.run(args: args, repoPath: path) },
+            gitLabHosts: [Self.gitLabHost])
+        let binding = Self.gitLabBinding()
+
+        let observed = await manager.refreshBindings([binding])
+
+        #expect(observed[binding.id]?.status.state == .merged)
+        // No task is created, so there is nothing to race: the recheck the old
+        // code awaited inline would already have been seen by now.
+        #expect(await gl.sawRecheck == false)
     }
 
     @Test("a GitHub binding group never invokes glab")

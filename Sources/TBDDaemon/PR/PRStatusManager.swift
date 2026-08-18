@@ -1115,10 +1115,28 @@ public actor PRStatusManager {
         // it to recompute; the answer is deliberately dropped, and its failure
         // cannot disturb the poll — the value it produces is read by the NEXT
         // tick's GraphQL call, not by this one.
-        _ = await runGLResult(
-            args: ["api", "--hostname", group.host,
-                   GitLabQueries.recheckPath(projectPath: projectPath, iids: iids)],
-            repoPath: repoPath)
+        //
+        // Detached, and that is load-bearing rather than tidy. `runCLI` imposes
+        // no timeout, `refreshBindings` walks its groups one at a time, and
+        // `fetchAll` skips the next poll while one is still in flight — so a
+        // `glab` that hangs here stalls PR polling for the entire fleet, with no
+        // deadline to end it. Hanging is the plausible failure for this call in
+        // particular: it exists to queue work on someone else's server. Nothing
+        // in this pass reads the result, so nothing in this pass may wait for
+        // it.
+        //
+        // Only non-terminal merge requests are asked. A merged or closed one has
+        // a mergeability nobody will recompute and nobody will read, so
+        // including it spends a server-side job to learn nothing.
+        let recheckIIDs = nodes.filter { !Self.isTerminalGitLabState($0.state) }.map(\.number)
+        if !recheckIIDs.isEmpty {
+            let host = group.host
+            let recheckPath = GitLabQueries.recheckPath(projectPath: projectPath, iids: recheckIIDs)
+            Task.detached { [self] in
+                _ = await runGLResult(args: ["api", "--hostname", host, recheckPath],
+                                      repoPath: repoPath)
+            }
+        }
 
         let byIID = Dictionary(nodes.map { ($0.number, $0) }, uniquingKeysWith: { first, _ in first })
         var observations: [UUID: PRBindingObservation] = [:]
@@ -1143,6 +1161,16 @@ public actor PRStatusManager {
                 baseRef: Self.refOrNil(node.baseRefName))
         }
         return observations
+    }
+
+    /// Whether a merge request's state is settled for good.
+    ///
+    /// Compared case-insensitively because the two GitLab transports disagree:
+    /// GraphQL answers `merged`/`closed` in lower case and REST in upper, and
+    /// `PRNode.state` carries whichever the response used.
+    static func isTerminalGitLabState(_ state: String) -> Bool {
+        let normalized = state.lowercased()
+        return normalized == "merged" || normalized == "closed"
     }
 
     /// What one GitLab GraphQL read settled.
