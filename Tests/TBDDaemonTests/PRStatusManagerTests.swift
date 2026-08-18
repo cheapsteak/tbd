@@ -956,6 +956,24 @@ struct PRStatusManagerTests {
         #expect(parsed?.name == "api")
     }
 
+    @Test("parseRemoteIdentity rejects a remote that names no network host")
+    func parseRemoteIdentityRejectsHostlessRemotes() {
+        // Split into segments these fabricate the hosts "Users", "srv" and
+        // ".." — each cached like a real one, each classified as a GitLab
+        // instance by `Forge.forHost`, and each enough to make
+        // `poisonedCacheEntries` clear a legitimately cached PR status.
+        #expect(PRStatusManager.parseRemoteIdentity("file:///Users/me/acme-prod.git") == nil)
+        #expect(PRStatusManager.parseRemoteIdentity("/srv/git/acme/acme-prod.git") == nil)
+        #expect(PRStatusManager.parseRemoteIdentity("../sibling/acme-prod.git") == nil)
+        // …while the three shapes that do name one still parse.
+        #expect(PRStatusManager.parseRemoteIdentity(
+            "https://github.com/acme/acme-prod.git")?.host == "github.com")
+        #expect(PRStatusManager.parseRemoteIdentity(
+            "git@git.acme.example:acme/api.git")?.host == "git.acme.example")
+        #expect(PRStatusManager.parseRemoteIdentity(
+            "ssh://git@git.acme.example:2222/acme/api.git")?.host == "git.acme.example")
+    }
+
     @Test("parseRemoteIdentity returns nil rather than guessing a host")
     func parseRemoteIdentityRejectsIncomplete() {
         // Nothing here names a host, and a caller that cannot name the host
@@ -2710,5 +2728,38 @@ struct PRStatusManagerRepoIdentityTests {
             ghRunner: { _, _ in nil },
             remoteURLReader: { _ in gitLabRemote })
         #expect(await absent.repoIdentity(repoPath: "/wt/api-gateway")?.host == "git.acme.example")
+    }
+
+    @Test("a hostless remote cannot fabricate an identity that clears a cached PR")
+    func hostlessRemoteDoesNotPoisonTheCache() async {
+        // `poisonedCacheEntries` clears a cached PR whose repo differs from the
+        // worktree's own, on the premise that both sides are KNOWN. An identity
+        // invented out of a local path's first segments makes every cached PR
+        // look cross-repo — and the clear is persisted, so a restart cannot
+        // bring it back.
+        let wt = UUID()
+        let manager = PRStatusManager(
+            ghRunner: { _, _ in nil },
+            remoteURLReader: { _ in "file:///Users/me/acme-prod.git" })
+        await manager.seedForTesting(
+            worktreeID: wt,
+            status: PRStatus(number: 412, url: "https://github.com/acme/acme-prod/pull/412",
+                             state: .mergeable))
+        let recorder = PersistedClearRecorder()
+        await manager.setOnStatusPersist { id, status in
+            await recorder.record(id, isClear: status == nil)
+        }
+
+        let outcome = await manager.fetchAll(worktrees: [Self.pollWorktree(wt)])
+
+        #expect(await manager.allStatuses()[wt]?.number == 412)
+        #expect(await recorder.clears.isEmpty)
+        // Nor may the heal report a binding it never disproved.
+        #expect(outcome.disproved.isEmpty)
+    }
+
+    private static func pollWorktree(_ id: UUID) -> PRStatusManager.PollWorktree {
+        (id: id, branch: "tbd/my-branch", upstreamBranch: "main", defaultBranch: "main",
+         pushBranch: .noPushDestination, worktreePath: "/wt/acme-prod", prNumber: nil)
     }
 }

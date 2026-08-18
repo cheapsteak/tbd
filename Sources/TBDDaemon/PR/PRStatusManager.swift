@@ -2554,10 +2554,22 @@ public actor PRStatusManager {
 
     /// The host, namespace and project of a git remote URL.
     ///
-    /// Accepts the three shapes a remote can take — `https://host/a/b`,
-    /// `ssh://git@host:22/a/b`, and the scp-like `git@host:a/b` — and keeps the
-    /// FULL namespace, because a GitLab project can nest (`acme/platform/api`)
-    /// and the owner is everything before the last segment.
+    /// Accepts the three shapes a remote that names a NETWORK HOST can take —
+    /// `https://host/a/b`, `ssh://git@host:22/a/b`, and the scp-like
+    /// `git@host:a/b` — and keeps the FULL namespace, because a GitLab project
+    /// can nest (`acme/platform/api`) and the owner is everything before the
+    /// last segment.
+    ///
+    /// A remote that names no host is rejected outright rather than having its
+    /// first path segment read as one. `file:///Users/me/repo.git` would
+    /// otherwise resolve to the host "Users" and `/srv/git/acme/repo.git` to
+    /// "srv" — identities that are not merely useless but harmful. They are
+    /// cached like any other; `Forge.forHost` classifies anything that is not
+    /// `github.com` as GitLab, so `tbd pr attach` composes merge-request URLs
+    /// against them; and `poisonedCacheEntries` rests on "both sides resolved"
+    /// meaning both sides are KNOWN, so a fabricated identity turns a
+    /// legitimately cached PR status into a cross-repo poisoning and clears it,
+    /// persistently.
     ///
     /// `RemoteRepoMatching` in TBDShared parses the same three shapes and is
     /// deliberately not reused: it drops the host by design, and it keeps only
@@ -2569,10 +2581,22 @@ public actor PRStatusManager {
         var rest = remote.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !rest.isEmpty else { return nil }
         if let scheme = rest.range(of: "://") {
+            // Only the schemes that carry a network host. `file://` names a
+            // path on this machine, and a path's first segment is not a host.
+            guard Self.networkRemoteSchemes.contains(String(rest[..<scheme.lowerBound]).lowercased()) else {
+                return nil
+            }
             rest = String(rest[scheme.upperBound...])
-        } else if let colon = rest.firstIndex(of: ":") {
-            // scp-like syntax puts ':' where a URL puts the first '/'.
+        } else if let colon = rest.firstIndex(of: ":"), !rest[..<colon].contains("/"),
+                  colon != rest.startIndex {
+            // scp-like syntax puts ':' where a URL puts the first '/'. The
+            // colon must come before any '/', or this is a local path with a
+            // colon somewhere in it rather than `host:namespace/project`.
             rest.replaceSubrange(colon...colon, with: "/")
+        } else {
+            // A bare local path — `/srv/git/acme/repo.git`, `../sibling` — names
+            // no host at all, and its first segment must never be read as one.
+            return nil
         }
         var segments = rest.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
         guard segments.count >= 3 else { return nil }
@@ -2586,6 +2610,11 @@ public actor PRStatusManager {
         guard !host.isEmpty, !owner.isEmpty, !name.isEmpty else { return nil }
         return (owner: owner, name: name, host: host.lowercased())
     }
+
+    /// The URL schemes that put a network host where this parser reads one.
+    /// `file` is deliberately absent, and so is every scheme nobody has seen on
+    /// a forge remote: an unknown scheme is not evidence of a host.
+    private static let networkRemoteSchemes: Set<String> = ["ssh", "git", "git+ssh", "http", "https"]
 
     /// `resolveNameWithOwner` behind a ~15-min TTL cache so the periodic poll
     /// (by-number query) and picker (open-PR query) stop spawning a `gh repo
