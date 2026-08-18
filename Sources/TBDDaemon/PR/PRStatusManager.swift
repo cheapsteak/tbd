@@ -2446,16 +2446,36 @@ public actor PRStatusManager {
     ///    it names the parent, which is where a fork's pull requests actually
     ///    live — so replacing it with a remote parse would silently break every
     ///    fork checkout.
-    /// 2. The `origin` remote, parsed directly, when gh cannot answer. gh
-    ///    refuses outright on a host it does not recognise, so this is the only
-    ///    route by which a GitLab checkout can ever name itself.
+    /// 2. The `origin` remote, parsed directly, and **only when gh cannot serve
+    ///    this checkout at all** — it is not installed, or it ran and disowned
+    ///    the checkout because no remote names a GitHub host it knows. That is
+    ///    the case every GitLab checkout is in, and it is the only route by
+    ///    which one can ever name itself.
+    ///
+    /// A gh failure that says nothing about the checkout — an expired token, a
+    /// 401, a rate limit, a network blip — is NOT licence to parse the remote.
+    /// The two sources disagree on exactly the checkout where it matters: on a
+    /// fork with an `upstream` remote gh names the parent, where the fork's pull
+    /// requests live, while `origin` names the fork. And this answer is cached
+    /// for fifteen minutes (`cachedNameWithOwner`), while a nil is not cached at
+    /// all — so a wrong answer is durable and a deferral self-heals on the next
+    /// tick. Deferring is therefore the only safe reading of a transient
+    /// failure.
     ///
     /// Returns nil when neither source yields a host — a caller that cannot
     /// name the repo defers, and must never fall back to guessing `github.com`.
     private nonisolated func resolveNameWithOwner(
         repoPath: String
     ) async -> (owner: String, name: String, host: String)? {
-        if let identity = await resolveViaGH(repoPath: repoPath) { return identity }
+        switch await resolveViaGH(repoPath: repoPath) {
+        case .resolved(let owner, let name, let host):
+            return (owner: owner, name: name, host: host)
+        case .transientFailure:
+            logger.debug("gh could not name the repo at \(repoPath, privacy: .public) this time; deferring rather than reading its origin remote")
+            return nil
+        case .unservable:
+            break
+        }
         guard let remote = await readRemoteURL(repoPath: repoPath),
               let identity = Self.parseRemoteIdentity(remote) else {
             logger.debug("could not name the repo at \(repoPath, privacy: .public) from gh or from its origin remote")
@@ -2464,19 +2484,67 @@ public actor PRStatusManager {
         return identity
     }
 
-    private nonisolated func resolveViaGH(
-        repoPath: String
-    ) async -> (owner: String, name: String, host: String)? {
+    /// What one `gh repo view` settled about a checkout.
+    private enum GHRepoResolution {
+        case resolved(owner: String, name: String, host: String)
+        /// gh cannot serve this checkout at all: no binary, or it ran and said
+        /// none of the checkout's remotes name a GitHub host it knows. The only
+        /// state in which the `origin` remote may speak for the repo instead.
+        case unservable
+        /// gh ran and failed at something it does serve. Says nothing about the
+        /// checkout, so it settles nothing about the checkout.
+        case transientFailure
+    }
+
+    private nonisolated func resolveViaGH(repoPath: String) async -> GHRepoResolution {
         let args = ["repo", "view", "--json", "nameWithOwner,url"]
-        guard let output = await runGH(args: args, repoPath: repoPath),
-              let data = output.data(using: .utf8),
+        guard let result = await runGHResult(args: args, repoPath: repoPath) else {
+            // gh never launched — it is absent, or the spawn itself failed.
+            // There is nobody to ask, on this checkout or any other.
+            return .unservable
+        }
+        let errSuffix = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard result.exitStatus == 0 else {
+            if Self.ghDisownsCheckout(errSuffix) {
+                logger.debug("gh does not speak for the repo at \(repoPath, privacy: .public): \(errSuffix, privacy: .public)")
+                return .unservable
+            }
+            logger.debug("gh repo view exited \(result.exitStatus, privacy: .public) for \(repoPath, privacy: .public): \(errSuffix, privacy: .public)")
+            return .transientFailure
+        }
+        guard let data = result.stdout.data(using: .utf8),
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let nameWithOwner = root["nameWithOwner"] as? String,
               let url = root["url"] as? String,
-              let host = URLComponents(string: url)?.host, !host.isEmpty else { return nil }
+              let host = URLComponents(string: url)?.host, !host.isEmpty else {
+            logger.debug("gh repo view answered for \(repoPath, privacy: .public) in a shape this build could not read")
+            return .transientFailure
+        }
         let parts = nameWithOwner.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "/")
-        guard parts.count == 2 else { return nil }
-        return (owner: String(parts[0]), name: String(parts[1]), host: host)
+        guard parts.count == 2 else { return .transientFailure }
+        return .resolved(owner: String(parts[0]), name: String(parts[1]), host: host)
+    }
+
+    /// Whether gh's own refusal says it does not serve this checkout, as opposed
+    /// to failing at something it does serve.
+    ///
+    /// A whitelist of gh's disownment messages, deliberately not a blacklist of
+    /// failures: an unrecognised message must read as "ask again later", because
+    /// the alternative reading is cached for fifteen minutes and points every
+    /// query at the wrong repository (see `resolveNameWithOwner`). A message gh
+    /// rewords therefore costs a GitLab checkout one poll's deferral until this
+    /// list is updated; the opposite default would cost a fork checkout a wrong,
+    /// cached identity on every transient 401.
+    static func ghDisownsCheckout(_ stderr: String) -> Bool {
+        let text = stderr.lowercased()
+        // "none of the git remotes configured for this repository point to a
+        // known GitHub host" — every GitLab checkout, and the steady state this
+        // fallback exists for.
+        return text.contains("known github host")
+            // Nothing to point anywhere, and nothing for gh to be authoritative
+            // about; the remote parse will fail too, harmlessly.
+            || text.contains("no git remotes found")
+            || text.contains("not a git repository")
     }
 
     private nonisolated func readRemoteURL(repoPath: String) async -> String? {
@@ -2750,20 +2818,6 @@ public actor PRStatusManager {
             return Self.aggregateFallbackSignals(detail.rollupState)
         }
         return Self.checkSignals(contexts: detail.contexts, aggregateRollupState: detail.rollupState)
-    }
-
-    private nonisolated func runGH(args: [String], repoPath: String) async -> String? {
-        guard let result = await runGHResult(args: args, repoPath: repoPath) else {
-            return nil
-        }
-
-        guard result.exitStatus == 0 else {
-            let errStr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            logger.debug("gh exited \(result.exitStatus, privacy: .public): \(errStr, privacy: .public)")
-            return nil
-        }
-
-        return result.stdout
     }
 
     static func graphQLOutputData(stdout: String) -> Data? {

@@ -2628,3 +2628,87 @@ struct PRStatusManagerInvalidateReentrancyTests {
         #expect(await manager.observation(for: wt) == nil)
     }
 }
+
+/// A `gh repo view` whose answer a test can change between calls, so one test
+/// can watch a checkout go dark and come back.
+private actor RepoViewGH {
+    private var result: GHCommandResult?
+    private(set) var calls = 0
+
+    init(_ result: GHCommandResult?) { self.result = result }
+
+    func answer(_ next: GHCommandResult?) { result = next }
+
+    func run(_ args: [String]) -> GHCommandResult? {
+        calls += 1
+        return result
+    }
+}
+
+@Suite("PRStatusManager repo identity")
+struct PRStatusManagerRepoIdentityTests {
+
+    private static let forkRemote = "https://github.com/contributor/acme-prod.git"
+
+    /// gh's own wording when no remote names a host it speaks to — every GitLab
+    /// checkout, and the state the `origin` fallback exists for.
+    private static let disownment = """
+    none of the git remotes configured for this repository point to a known \
+    GitHub host. To tell gh about a new GitHub host, please use `gh auth login`
+    """
+
+    @Test("a transient gh failure defers rather than letting origin name the fork")
+    func transientGHFailureDefers() async {
+        // On a fork checkout gh resolves the PARENT repo — where the fork's
+        // pull requests live — while `origin` names the fork. A 401 is no
+        // evidence about which of those is right, and the answer would be
+        // cached for fifteen minutes, so the only safe reading is "ask again".
+        let gh = RepoViewGH(GHCommandResult(
+            stdout: "", stderr: "HTTP 401: Bad credentials (https://api.github.com/graphql)",
+            exitStatus: 1))
+        let manager = PRStatusManager(
+            ghRunner: { args, _ in await gh.run(args) },
+            remoteURLReader: { _ in Self.forkRemote })
+
+        #expect(await manager.repoIdentity(repoPath: "/wt/acme-prod") == nil)
+
+        // A deferral is never cached, so the next attempt gets gh's answer —
+        // the parent, not the fork.
+        await gh.answer(GHCommandResult(
+            stdout: #"{"nameWithOwner":"acme/acme-prod","url":"https://github.com/acme/acme-prod"}"#))
+        let healed = await manager.repoIdentity(repoPath: "/wt/acme-prod")
+        #expect(healed?.owner == "acme")
+        #expect(healed?.name == "acme-prod")
+        #expect(healed?.host == "github.com")
+    }
+
+    @Test("only gh disowning the checkout lets the origin remote name it")
+    func onlyDisownmentLicensesTheRemoteParse() async {
+        let gitLabRemote = "git@git.acme.example:acme/platform/api-gateway.git"
+        let disowned = PRStatusManager(
+            ghRunner: { _, _ in GHCommandResult(stdout: "", stderr: Self.disownment, exitStatus: 1) },
+            remoteURLReader: { _ in gitLabRemote })
+
+        let identity = await disowned.repoIdentity(repoPath: "/wt/api-gateway")
+        #expect(identity?.host == "git.acme.example")
+        #expect(identity?.owner == "acme/platform")
+        #expect(identity?.name == "api-gateway")
+
+        // The same checkout and the same remote, behind a failure that says
+        // nothing about either: no identity at all rather than a guessed one.
+        let refused = PRStatusManager(
+            ghRunner: { _, _ in
+                GHCommandResult(stdout: "", stderr: "error connecting to api.github.com",
+                                exitStatus: 1)
+            },
+            remoteURLReader: { _ in gitLabRemote })
+        #expect(await refused.repoIdentity(repoPath: "/wt/api-gateway") == nil)
+
+        // And the GitLab-only fleet with no `gh` installed at all: nobody to
+        // ask, on this checkout or any other, so the remote speaks.
+        let absent = PRStatusManager(
+            ghRunner: { _, _ in nil },
+            remoteURLReader: { _ in gitLabRemote })
+        #expect(await absent.repoIdentity(repoPath: "/wt/api-gateway")?.host == "git.acme.example")
+    }
+}
