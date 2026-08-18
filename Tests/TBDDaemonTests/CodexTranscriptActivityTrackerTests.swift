@@ -78,7 +78,192 @@ struct CodexTranscriptActivityTrackerTests {
         #expect(reducer.activityState == nil)
     }
 
-    private func event(type: String, turnID: String) -> Data {
-        Data((#"{"type":"event_msg","payload":{"type":"\#(type)","turn_id":"\#(turnID)"}}"# + "\n").utf8)
+    @Test func firstObservationRebuildsPreExistingOpenTurn() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        try fixture.write(event(type: "task_started", turnID: "a"))
+        let tracker = CodexTranscriptActivityTracker()
+
+        let state = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: UUID())
+
+        #expect(state == .working)
+    }
+
+    @Test func secondObservationReadsAppendedCompletion() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        try fixture.write(event(type: "task_started", turnID: "a"))
+        let tracker = CodexTranscriptActivityTracker()
+        let worktreeID = UUID()
+        _ = await tracker.observe(transcriptPath: fixture.path, worktreeID: worktreeID)
+
+        try fixture.append(event(type: "task_complete", turnID: "a"))
+        let state = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+
+        #expect(state == .idle)
+    }
+
+    @Test func unterminatedRecordWaitsForNewline() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        let record = event(type: "task_started", turnID: "a", terminated: false)
+        try fixture.write(record)
+        let tracker = CodexTranscriptActivityTracker()
+        let worktreeID = UUID()
+
+        let beforeNewline = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+        try fixture.append(Data([0x0A]))
+        let afterNewline = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+
+        #expect(beforeNewline == nil)
+        #expect(afterNewline == .working)
+    }
+
+    @Test func truncationResetsAndRebuildsFromByteZero() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        try fixture.write(
+            event(type: "task_started", turnID: "a")
+                + event(type: "agent_message", turnID: "padding"))
+        let tracker = CodexTranscriptActivityTracker()
+        let worktreeID = UUID()
+        let initial = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+
+        try fixture.write(event(type: "task_complete", turnID: "replacement"))
+        let rebuilt = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+
+        #expect(initial == .working)
+        #expect(rebuilt == .idle)
+    }
+
+    @Test func transcriptPathsHaveIndependentBaselines() async throws {
+        let first = try TranscriptFixture()
+        let second = try TranscriptFixture()
+        defer {
+            first.remove()
+            second.remove()
+        }
+        try first.write(event(type: "task_started", turnID: "a"))
+        try second.write(event(type: "task_complete", turnID: "b"))
+        let tracker = CodexTranscriptActivityTracker()
+        let worktreeID = UUID()
+
+        let firstState = await tracker.observe(
+            transcriptPath: first.path, worktreeID: worktreeID)
+        let secondState = await tracker.observe(
+            transcriptPath: second.path, worktreeID: worktreeID)
+        let firstAgain = await tracker.observe(
+            transcriptPath: first.path, worktreeID: worktreeID)
+
+        #expect(firstState == .working)
+        #expect(secondState == .idle)
+        #expect(firstAgain == .working)
+    }
+
+    @Test func unreadablePathReturnsNilInsteadOfCachedWorking() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        try fixture.write(event(type: "task_started", turnID: "a"))
+        let tracker = CodexTranscriptActivityTracker()
+        let worktreeID = UUID()
+        let initial = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+        try fixture.replaceFileWithDirectory()
+
+        let unreadable = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+
+        #expect(initial == .working)
+        #expect(unreadable == nil)
+    }
+
+    @Test func fleetWideRetainPrunesEveryMissingTranscript() async throws {
+        let first = try TranscriptFixture()
+        let second = try TranscriptFixture()
+        defer {
+            first.remove()
+            second.remove()
+        }
+        try first.write(event(type: "task_started", turnID: "a"))
+        try second.write(event(type: "task_started", turnID: "b"))
+        let tracker = CodexTranscriptActivityTracker()
+        _ = await tracker.observe(transcriptPath: first.path, worktreeID: UUID())
+        _ = await tracker.observe(transcriptPath: second.path, worktreeID: UUID())
+
+        await tracker.retain(transcriptPaths: [first.path], scope: nil)
+
+        #expect(await tracker.baselineCount == 1)
+    }
+
+    @Test func worktreeScopedRetainDoesNotPruneAnotherWorktree() async throws {
+        let keptHere = try TranscriptFixture()
+        let prunedHere = try TranscriptFixture()
+        let keptThere = try TranscriptFixture()
+        defer {
+            keptHere.remove()
+            prunedHere.remove()
+            keptThere.remove()
+        }
+        for fixture in [keptHere, prunedHere, keptThere] {
+            try fixture.write(event(type: "task_started", turnID: fixture.path))
+        }
+        let tracker = CodexTranscriptActivityTracker()
+        let here = UUID()
+        let there = UUID()
+        _ = await tracker.observe(transcriptPath: keptHere.path, worktreeID: here)
+        _ = await tracker.observe(transcriptPath: prunedHere.path, worktreeID: here)
+        _ = await tracker.observe(transcriptPath: keptThere.path, worktreeID: there)
+
+        await tracker.retain(transcriptPaths: [keptHere.path], scope: here)
+
+        #expect(await tracker.baselineCount == 2)
+        #expect(await tracker.hasBaseline(transcriptPath: keptHere.path))
+        #expect(!(await tracker.hasBaseline(transcriptPath: prunedHere.path)))
+        #expect(await tracker.hasBaseline(transcriptPath: keptThere.path))
+    }
+
+    private func event(type: String, turnID: String, terminated: Bool = true) -> Data {
+        let newline = terminated ? "\n" : ""
+        return Data((#"{"type":"event_msg","payload":{"type":"\#(type)","turn_id":"\#(turnID)"}}"# + newline).utf8)
+    }
+}
+
+private final class TranscriptFixture: @unchecked Sendable {
+    private let directory: URL
+    private let file: URL
+
+    init() throws {
+        directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-transcript-activity-\(UUID().uuidString)")
+        file = directory.appendingPathComponent("rollout.jsonl")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    }
+
+    var path: String { file.path }
+
+    func write(_ data: Data) throws {
+        try data.write(to: file)
+    }
+
+    func append(_ data: Data) throws {
+        let handle = try FileHandle(forWritingTo: file)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: data)
+    }
+
+    func replaceFileWithDirectory() throws {
+        try FileManager.default.removeItem(at: file)
+        try FileManager.default.createDirectory(at: file, withIntermediateDirectories: false)
+    }
+
+    func remove() {
+        try? FileManager.default.removeItem(at: directory)
     }
 }
