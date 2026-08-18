@@ -91,6 +91,11 @@ struct StatusBarView: View {
         /// the PR names its tab `PR #N` and must not have to re-parse "#412".
         let number: Int
         let label: String
+        /// The binding named in its own forge's vocabulary (`PR #412` /
+        /// `MR !412`), for the tooltip. Carried on the chip rather than
+        /// recomposed in the view because the binding — the only thing that
+        /// knows the host — does not reach the view.
+        let refLabel: String
         let url: URL?
         let state: PRMergeableState?
     }
@@ -131,6 +136,7 @@ struct StatusBarView: View {
                 id: binding.id,
                 number: binding.number,
                 label: "#\(binding.number)",
+                refLabel: binding.refLabel,
                 url: URL(string: binding.url),
                 state: binding.status?.state
             )
@@ -286,10 +292,11 @@ private struct PRChipView: View {
 
     @State private var isHovering = false
 
-    /// Tooltip and accessibility hint, e.g. `Open PR #412 — Checks failing`.
+    /// Tooltip and accessibility hint, e.g. `Open PR #412 — Checks failing`,
+    /// or `Open MR !412 — Checks failing` for a GitLab binding.
     private var tooltip: String {
-        guard let state = chip.state else { return "Open PR \(chip.label)" }
-        return "Open PR \(chip.label) — \(state.displayReason)"
+        guard let state = chip.state else { return "Open \(chip.refLabel)" }
+        return "Open \(chip.refLabel) — \(state.displayReason)"
     }
 
     /// The dot color, taken from the shared PR palette so a chip cannot drift

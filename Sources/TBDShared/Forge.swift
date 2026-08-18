@@ -26,4 +26,18 @@ public extension Forge {
     static func forHost(_ host: String) -> Forge {
         host.lowercased() == "github.com" ? .github : .gitlab
     }
+
+    /// How this forge names ONE request in its own vocabulary — `PR #412` on
+    /// GitHub, `MR !412` on GitLab, which is the reference syntax GitLab itself
+    /// uses everywhere from commit messages to its own UI.
+    ///
+    /// Only per-binding text may use this. Anything summarising SEVERAL
+    /// bindings keeps neutral wording, because one worktree can hold bindings
+    /// on both forges at once and no single vocabulary would be true of them.
+    func refLabel(number: Int) -> String {
+        switch self {
+        case .github: return "PR #\(number)"
+        case .gitlab: return "MR !\(number)"
+        }
+    }
 }

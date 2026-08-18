@@ -53,6 +53,19 @@ struct OpenPRTabTests {
         }
     }
 
+    /// One tab names one request, so it takes that request's forge vocabulary.
+    /// The host in the URL is the only forge coordinate `openPR` receives.
+    @Test("a GitLab merge request names its tab in GitLab's syntax")
+    func gitLabTabLabel() {
+        withAppState { state in
+            let worktreeID = UUID()
+            let url = URL(string:
+                "https://git.acme.example/acme/platform/api-gateway/-/merge_requests/412")!
+            state.openPR(url: url, number: 412, worktreeID: worktreeID, inBrowser: false)
+            #expect(state.tabs[worktreeID]?.first?.label == "MR !412")
+        }
+    }
+
     @Test("a tab already on that URL is focused, and nothing new is created")
     func reusesExistingTab() {
         withAppState { state in

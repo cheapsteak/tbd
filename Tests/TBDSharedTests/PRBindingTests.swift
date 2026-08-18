@@ -19,6 +19,34 @@ struct PRBindingTests {
         )
     }
 
+    /// Per-binding text speaks the binding's own forge. Aggregate wording ("2
+    /// pull requests") deliberately does not, because a worktree can span
+    /// forges — that is asserted where the aggregates live, in TBDApp.
+    @Test("per-binding label uses each forge's own reference syntax")
+    func refLabelPerForge() {
+        let gh = PRBinding(id: UUID(), worktreeID: UUID(), host: "github.com",
+                           owner: "acme", repo: "acme-prod", number: 412,
+                           url: "https://github.com/acme/acme-prod/pull/412",
+                           source: .manual, boundAt: Date(timeIntervalSince1970: 0))
+        let gl = PRBinding(id: UUID(), worktreeID: UUID(), host: "git.acme.example",
+                           owner: "acme/platform", repo: "api-gateway", number: 412,
+                           url: "https://git.acme.example/acme/platform/api-gateway/-/merge_requests/412",
+                           source: .manual, boundAt: Date(timeIntervalSince1970: 0))
+        #expect(gh.refLabel == "PR #412")
+        #expect(gl.refLabel == "MR !412")
+    }
+
+    /// The host decides, not the URL: a binding's `host` column is the durable
+    /// fact and `refLabel` must not quietly re-derive the forge from the URL.
+    @Test("gitlab.com bindings read as merge requests too")
+    func refLabelGitLabDotCom() {
+        let gl = PRBinding(id: UUID(), worktreeID: UUID(), host: "gitlab.com",
+                           owner: "acme", repo: "api-gateway", number: 7,
+                           url: "https://gitlab.com/acme/api-gateway/-/merge_requests/7",
+                           source: .manual, boundAt: Date(timeIntervalSince1970: 0))
+        #expect(gl.refLabel == "MR !7")
+    }
+
     @Test("terminal states are merged and closed only")
     func terminalStates() {
         #expect(PRMergeableState.merged.isTerminal)

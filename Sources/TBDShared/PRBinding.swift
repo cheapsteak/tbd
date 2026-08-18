@@ -92,6 +92,15 @@ public struct PRBinding: Codable, Sendable, Equatable, Identifiable {
                         headBranch: headBranch, baseRef: baseRef)
     }
 
+    /// How this one binding is named in the UI: `PR #412` on GitHub, `MR !412`
+    /// on GitLab, whose own reference syntax is `!iid`.
+    ///
+    /// Per-binding text only. Anything summarising several bindings keeps the
+    /// neutral wording, because a worktree can span forges.
+    public var refLabel: String {
+        Forge.forHost(host).refLabel(number: number)
+    }
+
     /// Identity for deduplication — matches the table's UNIQUE constraint.
     /// Owner and repo compare case-insensitively because GitHub treats them so.
     public var identityKey: String {

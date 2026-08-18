@@ -528,7 +528,10 @@ extension AppState {
             let tab = TBDShared.Tab(
                 id: UUID(),
                 content: .webview(id: UUID(), url: url),
-                label: "PR #\(number)"
+                // One tab names one request, so it speaks that request's own
+                // forge. The URL is the only forge coordinate this signature
+                // carries, and it is the very URL the tab will show.
+                label: Forge.forHost(url.host ?? "github.com").refLabel(number: number)
             )
             tabs[worktreeID, default: []].append(tab)
             activeTabIndices[worktreeID] = (tabs[worktreeID]?.count ?? 1) - 1
