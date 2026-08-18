@@ -385,13 +385,16 @@ extension AppState {
         // Remaining terminals: Codex (Ctrl+C), Claude, or legacy nil-kind sessions.
         if let idx = terminals[terminal.worktreeID]?.firstIndex(where: { $0.id == terminalID }) {
             terminals[terminal.worktreeID]?[idx].activityState = .idle
+            terminals[terminal.worktreeID]?[idx].activityStateSource = .terminalInterrupt
+            terminals[terminal.worktreeID]?[idx].activityStateObservedAt = Date()
         }
 
         Task {
             do {
                 try await daemonClient.setTerminalActivity(
                     terminalID: terminalID,
-                    activityState: .idle
+                    activityState: .idle,
+                    origin: .userInterrupt
                 )
             } catch {
                 logger.debug("Failed to publish terminal interrupt state: \(error.localizedDescription, privacy: .public)")

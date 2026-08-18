@@ -2839,6 +2839,7 @@ extension RPCRouter {
         // Deliberately NOT `setActivityState`: this event says a session
         // exists, not what it is doing, and `activityState` gates hibernation.
         try await db.terminals.clearAwaitingInputReason(id: terminal.id)
+        let codexActivityObservedAt: Date?
         if terminal.kind == .codex || terminal.label == TerminalLabel.codex {
             // This handler is driven by the session-start hook, which is what
             // told us the session exists and is between turns.
@@ -2847,9 +2848,13 @@ extension RPCRouter {
             // every other stamp this file writes: `SessionStateResolver`'s
             // rung 4 *compares* it, and the store's default `Date()` is a
             // timestamp nothing outside the store can name.
+            let observedAt = now()
+            codexActivityObservedAt = observedAt
             try await db.terminals.setActivityState(
                 id: terminal.id, activityState: .idle, source: .hookEvent("SessionStart"),
-                observedAt: now())
+                observedAt: observedAt)
+        } else {
+            codexActivityObservedAt = nil
         }
 
         // Invalidate cached transcript parse for the OLD session file (if any)
@@ -2872,11 +2877,13 @@ extension RPCRouter {
             sessionID: params.sessionID,
             transcriptPath: cleanedPath
         )))
-        if terminal.kind == .codex || terminal.label == TerminalLabel.codex {
+        if let codexActivityObservedAt {
             subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
                 terminalID: terminal.id,
                 worktreeID: terminal.worktreeID,
-                activityState: .idle
+                activityState: .idle,
+                activityStateSource: .hookEvent("SessionStart"),
+                activityStateObservedAt: codexActivityObservedAt
             )))
         }
         return .ok()
@@ -2964,7 +2971,11 @@ extension RPCRouter {
         // and over is exactly the shape the counter exists to make visible, and
         // a count taken after that guard would report zero for it. One actor
         // hop and an integer add, which is the whole per-event budget.
-        await sessionCounters.recordHookEvent(terminalID: terminal.id, at: now())
+        // An app-originated interrupt shares this RPC but is a user action, not
+        // an agent hook, so it must not inflate the hook-event counter.
+        if params.origin == nil {
+            await sessionCounters.recordHookEvent(terminalID: terminal.id, at: now())
+        }
 
         // UserPromptSubmit reaches the daemon as activity=working. If a
         // session-limit auto-resume is pending, the user just continued
@@ -3006,30 +3017,38 @@ extension RPCRouter {
             }
         }
 
-        guard terminal.activityState != params.activityState else {
+        // A user interrupt must replace provenance even when the raw value was
+        // already idle. Conversely, a repeated idle hook must not erase that
+        // explicit override; only a later value transition (notably a genuine
+        // working hook) supersedes it.
+        guard terminal.activityState != params.activityState || params.origin == .userInterrupt else {
             return .ok()
         }
 
-        // Every caller of this RPC is an agent hook bridged through
-        // `tbd terminal-activity`. The params do not yet carry WHICH hook event
-        // fired, so the RPC surface stands in as the source name until a later
-        // slice threads the event through — a coarser answer than we want, but
-        // a true one, and one no reader can mistake for an observation TBD made
-        // itself.
+        // Hook callers are bridged through `tbd terminal-activity`; the params
+        // do not yet carry WHICH hook event fired, so the RPC surface stands in
+        // as their source name. The app's explicit interrupt declares its
+        // origin separately and is persisted as a user action instead.
         // `observedAt` from the router's date seam, never the store's default
         // `Date()`. The resolver's rung-4 decision is an ordering comparison
         // between exactly this stamp and the one `recordAwaitingInputReason`
         // writes above, so a test that cannot pin both ends cannot pin the
         // decision at all.
+        let source: FactSource = params.origin == .userInterrupt
+            ? .terminalInterrupt
+            : .hookEvent(RPCMethod.terminalActivityEvent)
+        let observedAt = now()
         try await db.terminals.setActivityState(
             id: terminal.id,
             activityState: params.activityState,
-            source: .hookEvent(RPCMethod.terminalActivityEvent),
-            observedAt: now())
+            source: source,
+            observedAt: observedAt)
         subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
             terminalID: terminal.id,
             worktreeID: terminal.worktreeID,
-            activityState: params.activityState
+            activityState: params.activityState,
+            activityStateSource: source,
+            activityStateObservedAt: observedAt
         )))
         return .ok()
     }

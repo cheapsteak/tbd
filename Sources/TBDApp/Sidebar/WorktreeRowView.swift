@@ -104,7 +104,8 @@ struct WorktreeRowView: View {
     /// hook-backed behavior.
     nonisolated static func isForegroundWorking(_ terminal: Terminal) -> Bool {
         if terminal.isCodexTerminal {
-            return terminal.activityState != .waitingForUser
+            return terminal.activityStateSource != .terminalInterrupt
+                && terminal.activityState != .waitingForUser
                 && terminal.presentationActivityState == .working
         }
         return terminal.activityState == .working

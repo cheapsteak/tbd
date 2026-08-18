@@ -169,10 +169,22 @@ public struct TerminalActivityDelta: Codable, Sendable {
     public let terminalID: UUID
     public let worktreeID: UUID
     public let activityState: TerminalActivityState
-    public init(terminalID: UUID, worktreeID: UUID, activityState: TerminalActivityState) {
+    /// Optional for wire compatibility with daemons that predate activity
+    /// provenance on this push event. New daemons send both halves together.
+    public let activityStateSource: FactSource?
+    public let activityStateObservedAt: Date?
+    public init(
+        terminalID: UUID,
+        worktreeID: UUID,
+        activityState: TerminalActivityState,
+        activityStateSource: FactSource? = nil,
+        activityStateObservedAt: Date? = nil
+    ) {
         self.terminalID = terminalID
         self.worktreeID = worktreeID
         self.activityState = activityState
+        self.activityStateSource = activityStateSource
+        self.activityStateObservedAt = activityStateObservedAt
     }
 }
 

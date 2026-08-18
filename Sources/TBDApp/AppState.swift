@@ -2197,6 +2197,11 @@ final class AppState: ObservableObject {
             return
         }
         terminals[delta.worktreeID]?[idx].activityState = delta.activityState
+        if let source = delta.activityStateSource,
+           let observedAt = delta.activityStateObservedAt {
+            terminals[delta.worktreeID]?[idx].activityStateSource = source
+            terminals[delta.worktreeID]?[idx].activityStateObservedAt = observedAt
+        }
     }
 
     /// Seamless in-place "Switch account": the terminal row is unchanged except

@@ -44,7 +44,8 @@ import TBDShared
                 tmuxPaneID: "%1",
                 label: "Codex",
                 kind: .codex,
-                activityState: .working
+                activityState: .working,
+                presentationActivityState: .working
             )
         ]
     ]
@@ -52,6 +53,75 @@ import TBDShared
     state.handleTerminalInterrupt(terminalID: terminalID)
 
     #expect(state.terminals[worktreeID]?[0].activityState == .idle)
+    #expect(state.terminals[worktreeID]?[0].activityStateSource?.kind == "user-action")
+    #expect(state.terminals[worktreeID]?[0].activityStateSource?.detail == "terminal-interrupt")
+    #expect(!WorktreeRowView.isForegroundWorking(state.terminals[worktreeID]![0]))
+}
+
+@MainActor
+@Test func appState_interruptRecordsProvenanceWhenCodexIsAlreadyRawIdle() {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    state.terminals = [
+        worktreeID: [
+            Terminal(
+                id: terminalID,
+                worktreeID: worktreeID,
+                tmuxWindowID: "@1",
+                tmuxPaneID: "%1",
+                label: "Codex",
+                kind: .codex,
+                activityState: .idle,
+                presentationActivityState: .working
+            )
+        ]
+    ]
+
+    state.handleTerminalInterrupt(terminalID: terminalID)
+
+    #expect(state.terminals[worktreeID]?[0].activityStateSource?.kind == "user-action")
+    #expect(state.terminals[worktreeID]?[0].activityStateSource?.detail == "terminal-interrupt")
+    #expect(!WorktreeRowView.isForegroundWorking(state.terminals[worktreeID]![0]))
+}
+
+@MainActor
+@Test func appState_workingHookDeltaSupersedesCodexInterrupt() throws {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    let interruptSource = try JSONDecoder().decode(
+        FactSource.self,
+        from: Data(#"{"kind":"user-action","detail":"terminal-interrupt"}"#.utf8)
+    )
+    let delta = try JSONDecoder().decode(
+        TerminalActivityDelta.self,
+        from: Data(
+            #"{"terminalID":"\#(terminalID.uuidString)","worktreeID":"\#(worktreeID.uuidString)","activityState":"working","activityStateSource":{"kind":"hook","detail":"terminal.activityEvent"},"activityStateObservedAt":0}"#.utf8
+        )
+    )
+    state.terminals = [
+        worktreeID: [
+            Terminal(
+                id: terminalID,
+                worktreeID: worktreeID,
+                tmuxWindowID: "@1",
+                tmuxPaneID: "%1",
+                label: "Codex",
+                kind: .codex,
+                activityState: .idle,
+                presentationActivityState: .working,
+                activityStateSource: interruptSource
+            )
+        ]
+    ]
+
+    state.handleDelta(.terminalActivityUpdated(delta))
+
+    #expect(state.terminals[worktreeID]?[0].activityState == .working)
+    #expect(state.terminals[worktreeID]?[0].activityStateSource == .hookEvent(RPCMethod.terminalActivityEvent))
+    #expect(state.terminals[worktreeID]?[0].activityStateObservedAt == Date(timeIntervalSinceReferenceDate: 0))
+    #expect(WorktreeRowView.isForegroundWorking(state.terminals[worktreeID]![0]))
 }
 
 @MainActor

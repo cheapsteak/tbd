@@ -80,4 +80,122 @@ struct TerminalActivityEventHandlerTests {
         #expect(response.success)
         #expect(response.error == nil)
     }
+
+    @Test("user interrupt persists distinct provenance from working state")
+    func userInterruptPersistsProvenanceFromWorking() async throws {
+        let terminal = try await makeTerminal()
+        try await db.terminals.setActivityState(
+            id: terminal.id,
+            activityState: .working,
+            source: .hookEvent(RPCMethod.terminalActivityEvent)
+        )
+        let request = RPCRequest(
+            method: RPCMethod.terminalActivityEvent,
+            params: #"{"terminalID":"\#(terminal.id.uuidString)","activityState":"idle","origin":"user_interrupt"}"#
+        )
+
+        let response = await router.handle(request)
+
+        #expect(response.success)
+        let updated = try #require(await db.terminals.get(id: terminal.id))
+        #expect(updated.activityState == .idle)
+        #expect(updated.activityStateSource?.kind == "user-action")
+        #expect(updated.activityStateSource?.detail == "terminal-interrupt")
+    }
+
+    @Test("user interrupt replaces provenance when raw state is already idle")
+    func userInterruptPersistsProvenanceFromIdle() async throws {
+        let terminal = try await makeTerminal()
+        try await db.terminals.setActivityState(
+            id: terminal.id,
+            activityState: .idle,
+            source: .hookEvent(RPCMethod.terminalActivityEvent)
+        )
+        let request = RPCRequest(
+            method: RPCMethod.terminalActivityEvent,
+            params: #"{"terminalID":"\#(terminal.id.uuidString)","activityState":"idle","origin":"user_interrupt"}"#
+        )
+
+        let response = await router.handle(request)
+
+        #expect(response.success)
+        let updated = try #require(await db.terminals.get(id: terminal.id))
+        #expect(updated.activityState == .idle)
+        #expect(updated.activityStateSource?.kind == "user-action")
+        #expect(updated.activityStateSource?.detail == "terminal-interrupt")
+    }
+
+    @Test("same-state hook does not erase an explicit interrupt")
+    func sameStateHookPreservesInterrupt() async throws {
+        let terminal = try await makeTerminal()
+        let interruptSource = try JSONDecoder().decode(
+            FactSource.self,
+            from: Data(#"{"kind":"user-action","detail":"terminal-interrupt"}"#.utf8)
+        )
+        try await db.terminals.setActivityState(
+            id: terminal.id,
+            activityState: .idle,
+            source: interruptSource
+        )
+        let request = try RPCRequest(
+            method: RPCMethod.terminalActivityEvent,
+            params: TerminalActivityEventParams(
+                terminalID: terminal.id,
+                activityState: .idle
+            )
+        )
+
+        let response = await router.handle(request)
+
+        #expect(response.success)
+        let updated = try #require(await db.terminals.get(id: terminal.id))
+        #expect(updated.activityStateSource?.kind == "user-action")
+        #expect(updated.activityStateSource?.detail == "terminal-interrupt")
+    }
+
+    @Test("later working hook supersedes an explicit interrupt")
+    func laterWorkingHookSupersedesInterrupt() async throws {
+        let terminal = try await makeTerminal()
+        let interrupt = RPCRequest(
+            method: RPCMethod.terminalActivityEvent,
+            params: #"{"terminalID":"\#(terminal.id.uuidString)","activityState":"idle","origin":"user_interrupt"}"#
+        )
+        #expect((await router.handle(interrupt)).success)
+
+        let working = try RPCRequest(
+            method: RPCMethod.terminalActivityEvent,
+            params: TerminalActivityEventParams(
+                terminalID: terminal.id,
+                activityState: .working
+            )
+        )
+        #expect((await router.handle(working)).success)
+
+        let updated = try #require(await db.terminals.get(id: terminal.id))
+        #expect(updated.activityState == .working)
+        #expect(updated.activityStateSource == .hookEvent(RPCMethod.terminalActivityEvent))
+    }
+
+    @Test("user interrupt is not counted as an agent hook event")
+    func userInterruptDoesNotIncrementHookCounter() async throws {
+        let terminal = try await makeTerminal()
+        let transcript = FileManager.default.temporaryDirectory
+            .appendingPathComponent("terminal-activity-\(UUID().uuidString).jsonl")
+        try Data().write(to: transcript)
+        defer { try? FileManager.default.removeItem(at: transcript) }
+        let request = RPCRequest(
+            method: RPCMethod.terminalActivityEvent,
+            params: #"{"terminalID":"\#(terminal.id.uuidString)","activityState":"idle","origin":"user_interrupt"}"#
+        )
+
+        #expect((await router.handle(request)).success)
+
+        let counters = try #require(await router.sessionCounters.sample(
+            terminalID: terminal.id,
+            worktreeID: terminal.worktreeID,
+            transcriptPath: transcript.path,
+            commitsUnchangedSince: nil
+        ))
+        #expect(counters.hookEventsInWindow == 0)
+    }
 }

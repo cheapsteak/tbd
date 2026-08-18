@@ -54,6 +54,20 @@ struct WorktreeRowActivityTests {
         #expect(!WorktreeRowView.isForegroundWorking(codex))
     }
 
+    @Test func codexExplicitInterruptOverridesTranscriptWorkingActivity() throws {
+        var codex = terminal(
+            kind: .codex,
+            activityState: .idle,
+            presentationActivityState: .working
+        )
+        codex.activityStateSource = try JSONDecoder().decode(
+            FactSource.self,
+            from: Data(#"{"kind":"user-action","detail":"terminal-interrupt"}"#.utf8)
+        )
+
+        #expect(!WorktreeRowView.isForegroundWorking(codex))
+    }
+
     @Test func codexTranscriptIdleOverridesStaleRawWorkingActivity() {
         let codex = terminal(
             kind: .codex,

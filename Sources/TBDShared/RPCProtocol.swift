@@ -3066,12 +3066,25 @@ public struct TerminalSessionEventParams: Codable, Sendable {
     }
 }
 
+public enum TerminalActivityEventOrigin: String, Codable, Sendable {
+    /// The app observed the user explicitly interrupting the foreground agent.
+    case userInterrupt = "user_interrupt"
+}
+
 public struct TerminalActivityEventParams: Codable, Sendable {
     public let terminalID: UUID
     public let activityState: TerminalActivityState
-    public init(terminalID: UUID, activityState: TerminalActivityState) {
+    /// Absent for the existing agent-hook bridge. Optional so older clients'
+    /// payloads continue to decode unchanged.
+    public let origin: TerminalActivityEventOrigin?
+    public init(
+        terminalID: UUID,
+        activityState: TerminalActivityState,
+        origin: TerminalActivityEventOrigin? = nil
+    ) {
         self.terminalID = terminalID
         self.activityState = activityState
+        self.origin = origin
     }
 }
 

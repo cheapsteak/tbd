@@ -237,6 +237,16 @@ import Testing
         #expect(decoded.summary == "hook:Notification")
     }
 
+    @Test func userActionSourceCarriesItsActionName() throws {
+        let json = #"{"kind":"user-action","detail":"terminal-interrupt"}"#
+        let decoded = try JSONDecoder().decode(FactSource.self, from: Data(json.utf8))
+
+        #expect(decoded.kind == "user-action")
+        #expect(decoded.detail == "terminal-interrupt")
+        #expect(decoded.summary == "user-action:terminal-interrupt")
+        #expect(try roundTrip(decoded) == decoded)
+    }
+
     // MARK: - ObservedFact.summary
 
     /// Assert on the COMPOSED line, not on the presence of the three fields:
