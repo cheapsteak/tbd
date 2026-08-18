@@ -10,7 +10,8 @@ public enum OrphanGCError: LocalizedError, CustomStringConvertible, Equatable {
     /// No `ReapRecord` exists with the given id.
     case recordNotFound(UUID)
     /// `restore(recordID:)` only supports `.agentWorktree` records — scratchpads
-    /// have no restore path (there's nothing to recreate a bare tmp dir from).
+    /// have no restore path (there's nothing to recreate a bare tmp dir from),
+    /// and an `.orphanProcess` record describes a kill, which nothing can undo.
     case unsupportedKind(ReapKind)
     /// The record was already restored once; restoring twice would attempt to
     /// recreate a worktree that (probably) already exists on disk.
@@ -713,7 +714,19 @@ public actor OrphanGC {
         guard let record = try await db.reapRecords.get(id: recordID) else {
             throw OrphanGCError.recordNotFound(recordID)
         }
-        guard record.kind == .agentWorktree else {
+        // Exhaustive and default-less on purpose: a new `ReapKind` must not
+        // silently inherit either answer — it has to be classified here.
+        switch record.kind {
+        case .agentWorktree:
+            break
+        case .scratchpad, .archivedWorktree, .profileDir:
+            // Directory-shaped kinds with no way back: a bare tmp dir has
+            // nothing to recreate it from, an archived worktree's directory was
+            // drained, and a quarantined profile dir's row is already gone.
+            throw OrphanGCError.unsupportedKind(record.kind)
+        case .orphanProcess:
+            // A killed process cannot be restored at all. The record is an
+            // audit trail, not an undo.
             throw OrphanGCError.unsupportedKind(record.kind)
         }
         guard record.restoredAt == nil else {

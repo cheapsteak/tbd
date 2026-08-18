@@ -1595,6 +1595,25 @@ public enum ReapKind: String, Codable, Sendable {
     /// is already gone, so renaming it back would just recreate an orphan for
     /// the next sweep.
     case profileDir
+    /// A process that outlived the worktree it was rooted in — reclaimed by
+    /// `OrphanProcessCollector`
+    /// (`docs/specs/2026-08-18-orphan-process-gc-design.md`).
+    ///
+    /// The record describes a **kill**, not a directory, so it reads the
+    /// `ReapRecord` fields differently from every other kind:
+    /// - `worktreePath` is the dead worktree the process was rooted in — the
+    ///   TBD-managed root its resolved cwd fell under, not a path this reap
+    ///   removed. Nothing on disk was touched.
+    /// - `processDescription` carries the pid and a truncated argv, so the
+    ///   record says *what* was killed and not merely where it lived.
+    /// - `branch`, `headSHA`, `snapshotRef` and `quarantinePath` are unused
+    ///   and always `nil`: they are path- and git-shaped, and a process has
+    ///   neither a git identity nor a quarantine.
+    ///
+    /// It is **not restorable** — `OrphanGC.restore` rejects it explicitly. A
+    /// killed process cannot be brought back, so the record is an audit trail
+    /// rather than an undo.
+    case orphanProcess
 }
 
 /// Record of a directory the daemon-owned orphan GC swept and (optionally)
@@ -1620,12 +1639,17 @@ public struct ReapRecord: Codable, Sendable, Identifiable, Equatable {
     /// `OrphanGC.restore` rejects `.profileDir` — but the path a user needs to
     /// retrieve anything by hand before the retention window expires.
     public var quarantinePath: String?
+    /// What was killed (`orphanProcess` only): the pid and a truncated argv.
+    /// `nil` for every directory-shaped kind, and for rows written before the
+    /// column existed.
+    public var processDescription: String?
     public var reapedAt: Date
     public var restoredAt: Date?
 
     public init(id: UUID = UUID(), kind: ReapKind, repoPath: String, worktreePath: String,
                 branch: String? = nil, headSHA: String? = nil, snapshotRef: String? = nil,
                 apparentBytes: Int64? = nil, quarantinePath: String? = nil,
+                processDescription: String? = nil,
                 reapedAt: Date = Date(), restoredAt: Date? = nil) {
         self.id = id
         self.kind = kind
@@ -1636,6 +1660,7 @@ public struct ReapRecord: Codable, Sendable, Identifiable, Equatable {
         self.snapshotRef = snapshotRef
         self.apparentBytes = apparentBytes
         self.quarantinePath = quarantinePath
+        self.processDescription = processDescription
         self.reapedAt = reapedAt
         self.restoredAt = restoredAt
     }

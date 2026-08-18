@@ -1528,6 +1528,16 @@ public final class TBDDatabase: Sendable {
                 table: "config", column: "gc_orphan_processes_enabled", type: .boolean)
         }
 
+        // What an `orphanProcess` reap killed: the pid and a truncated argv.
+        // Nullable and left NULL by every other kind, all of which describe a
+        // directory rather than a process. camelCase for the same reason
+        // v79 chose it — to match the columns this table already has
+        // (`repoPath`, `worktreePath`, `snapshotRef`, `quarantinePath`).
+        migrator.registerMigration("v84_reap_records_process_description") { db in
+            try db.addColumnIfMissing(
+                table: "reap_records", column: "processDescription", type: .text)
+        }
+
         return migrator
     }
 }
