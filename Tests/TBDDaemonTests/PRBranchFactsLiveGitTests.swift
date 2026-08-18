@@ -87,7 +87,7 @@ struct PRBranchFactsLiveGitTests {
     private static func node(number: Int, head: String, state: String = "OPEN") -> PRStatusManager.PRNode {
         PRStatusManager.PRNode(
             number: number, url: "https://github.com/acme/acme-prod/pull/\(number)", state: state,
-            mergeStateStatus: "CLEAN", reviewDecision: "", headRefName: head,
+            mergeVerdictRaw: "CLEAN", reviewVerdictRaw: "", headRefName: head,
             createdAt: "2026-07-01T00:00:00Z", isDraft: false,
             statusCheckRollupState: nil, mergeQueuePosition: nil)
     }

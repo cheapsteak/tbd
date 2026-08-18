@@ -636,8 +636,8 @@ public actor PRStatusManager {
             }
             let (state, reason) = Self.mapStateAndReason(
                 ghState: match.node.state,
-                mergeStateStatus: match.node.mergeStateStatus,
-                reviewDecision: match.node.reviewDecision,
+                mergeVerdictRaw: match.node.mergeVerdictRaw,
+                reviewVerdictRaw: match.node.reviewVerdictRaw,
                 isDraft: match.node.isDraft,
                 requiredChecksFailing: signals.failing,
                 requiredChecksPending: signals.pending
@@ -891,8 +891,8 @@ public actor PRStatusManager {
             }
             let (state, reason) = Self.mapStateAndReason(
                 ghState: node.state,
-                mergeStateStatus: node.mergeStateStatus,
-                reviewDecision: node.reviewDecision,
+                mergeVerdictRaw: node.mergeVerdictRaw,
+                reviewVerdictRaw: node.reviewVerdictRaw,
                 isDraft: node.isDraft,
                 requiredChecksFailing: signals.failing,
                 requiredChecksPending: signals.pending
@@ -1068,7 +1068,7 @@ public actor PRStatusManager {
         }
         return await applyRefreshedNode(
             worktreeID: worktreeID, number: node.number, url: node.url, state: node.state,
-            mergeStateStatus: node.mergeStateStatus, reviewDecision: node.reviewDecision,
+            mergeStateStatus: node.mergeVerdictRaw, reviewDecision: node.reviewVerdictRaw,
             isDraft: node.isDraft, mergeQueuePosition: node.mergeQueuePosition, repoPath: repoPath)
     }
 
@@ -1100,8 +1100,8 @@ public actor PRStatusManager {
         }
         let (mappedState, reason) = Self.mapStateAndReason(
             ghState: state,
-            mergeStateStatus: mergeStateStatus,
-            reviewDecision: reviewDecision,
+            mergeVerdictRaw: mergeStateStatus,
+            reviewVerdictRaw: reviewDecision,
             isDraft: isDraft,
             requiredChecksFailing: signals.failing,
             requiredChecksPending: signals.pending
@@ -1139,9 +1139,10 @@ public actor PRStatusManager {
     /// Required-check awareness: a failing *required* check is red and a pending *required*
     /// check is yellow regardless of merge state; non-required checks never color the icon.
     public static func mapStateAndReason(
+        forge: Forge = .github,
         ghState: String,
-        mergeStateStatus: String,
-        reviewDecision: String = "",
+        mergeVerdictRaw: String,
+        reviewVerdictRaw: String = "",
         isDraft: Bool = false,
         requiredChecksFailing: Bool = false,
         requiredChecksPending: Bool = false
@@ -1150,21 +1151,21 @@ public actor PRStatusManager {
         case "MERGED": return (.merged, "Merged")
         case "CLOSED": return (.closed, "Closed")
         default:
-            if isDraft || mergeStateStatus == "DRAFT" { return (.draft, "Draft") }
-            if reviewDecision == "CHANGES_REQUESTED" { return (.changesRequested, "Changes requested") }
+            if isDraft || mergeVerdictRaw == "DRAFT" { return (.draft, "Draft") }
+            if reviewVerdictRaw == "CHANGES_REQUESTED" { return (.changesRequested, "Changes requested") }
             // Uniform precedence: failing required check → red, pending required check → yellow,
             // regardless of merge state. With no required checks both are false and the
-            // mergeStateStatus switch below decides (see checkSignals).
+            // merge-verdict switch below decides (see checkSignals).
             if requiredChecksFailing { return (.checksFailed, "Checks failing") }
             if requiredChecksPending { return (.pending, "Checks pending") }
 
-            switch mergeStateStatus {
+            switch mergeVerdictRaw {
             case "CLEAN", "HAS_HOOKS", "UNSTABLE":
                 // UNSTABLE = mergeable with only non-required checks failing → not red.
                 return (.mergeable, "Ready to merge")
             case "BLOCKED":
                 // Checks are settled and passing; the only blocker is a not-yet-given review.
-                return reviewDecision == "REVIEW_REQUIRED" ? (.mergeable, "Ready to merge") : (.blocked, "Blocked")
+                return reviewVerdictRaw == "REVIEW_REQUIRED" ? (.mergeable, "Ready to merge") : (.blocked, "Blocked")
             case "DIRTY":
                 return (.blocked, "Merge conflicts")
             case "BEHIND":
@@ -1178,17 +1179,19 @@ public actor PRStatusManager {
     }
 
     public static func mapState(
+        forge: Forge = .github,
         ghState: String,
-        mergeStateStatus: String,
-        reviewDecision: String = "",
+        mergeVerdictRaw: String,
+        reviewVerdictRaw: String = "",
         isDraft: Bool = false,
         requiredChecksFailing: Bool = false,
         requiredChecksPending: Bool = false
     ) -> PRMergeableState {
         Self.mapStateAndReason(
+            forge: forge,
             ghState: ghState,
-            mergeStateStatus: mergeStateStatus,
-            reviewDecision: reviewDecision,
+            mergeVerdictRaw: mergeVerdictRaw,
+            reviewVerdictRaw: reviewVerdictRaw,
             isDraft: isDraft,
             requiredChecksFailing: requiredChecksFailing,
             requiredChecksPending: requiredChecksPending
@@ -1408,17 +1411,19 @@ public actor PRStatusManager {
     /// Compute human-readable reason string for the PR merge state.
     /// Delegates to mapStateAndReason() for the single source of truth.
     public static func computeReason(
+        forge: Forge = .github,
         ghState: String,
-        mergeStateStatus: String,
-        reviewDecision: String = "",
+        mergeVerdictRaw: String,
+        reviewVerdictRaw: String = "",
         isDraft: Bool = false,
         requiredChecksFailing: Bool = false,
         requiredChecksPending: Bool = false
     ) -> String {
         Self.mapStateAndReason(
+            forge: forge,
             ghState: ghState,
-            mergeStateStatus: mergeStateStatus,
-            reviewDecision: reviewDecision,
+            mergeVerdictRaw: mergeVerdictRaw,
+            reviewVerdictRaw: reviewVerdictRaw,
             isDraft: isDraft,
             requiredChecksFailing: requiredChecksFailing,
             requiredChecksPending: requiredChecksPending
@@ -1524,8 +1529,10 @@ public actor PRStatusManager {
         public let number: Int
         public let url: String
         public let state: String
-        public let mergeStateStatus: String
-        public let reviewDecision: String   // "APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED", or ""
+        public let mergeVerdictRaw: String
+        /// The forge's own verdict on review state, in whatever vocabulary that
+        /// forge speaks — never normalized here.
+        public let reviewVerdictRaw: String
         public let headRefName: String
         public let createdAt: String        // ISO 8601, e.g. "2026-03-24T15:58:27Z"
         public let isDraft: Bool
@@ -1536,25 +1543,30 @@ public actor PRStatusManager {
         /// The PR's base branch. Descriptive only — nothing matches on it — so
         /// it defaults to empty rather than being a required parse field, and a
         /// response that omits it degrades to "unknown" instead of dropping the
-        /// whole node. Declared last so the memberwise init stays
+        /// whole node. Declared late so the memberwise init stays
         /// source-compatible.
         public let baseRefName: String
+        /// The forge that produced this node. Declared last with a default so
+        /// the memberwise init stays source-compatible, the same reason
+        /// `baseRefName` is declared where it is.
+        public let forge: Forge
 
-        init(number: Int, url: String, state: String, mergeStateStatus: String,
-             reviewDecision: String, headRefName: String, createdAt: String, isDraft: Bool,
+        init(number: Int, url: String, state: String, mergeVerdictRaw: String,
+             reviewVerdictRaw: String, headRefName: String, createdAt: String, isDraft: Bool,
              statusCheckRollupState: String?, mergeQueuePosition: Int?,
-             baseRefName: String = "") {
+             baseRefName: String = "", forge: Forge = .github) {
             self.number = number
             self.url = url
             self.state = state
-            self.mergeStateStatus = mergeStateStatus
-            self.reviewDecision = reviewDecision
+            self.mergeVerdictRaw = mergeVerdictRaw
+            self.reviewVerdictRaw = reviewVerdictRaw
             self.headRefName = headRefName
             self.createdAt = createdAt
             self.isDraft = isDraft
             self.statusCheckRollupState = statusCheckRollupState
             self.mergeQueuePosition = mergeQueuePosition
             self.baseRefName = baseRefName
+            self.forge = forge
         }
     }
 
@@ -1875,8 +1887,8 @@ public actor PRStatusManager {
         let mergeQueueEntry = node["mergeQueueEntry"] as? [String: Any]
         let mergeQueuePosition = mergeQueueEntry?["position"] as? Int
         return PRNode(number: number, url: url, state: state,
-                      mergeStateStatus: mergeStateStatus,
-                      reviewDecision: reviewDecision,
+                      mergeVerdictRaw: mergeStateStatus,
+                      reviewVerdictRaw: reviewDecision,
                       headRefName: headRefName,
                       createdAt: createdAt,
                       isDraft: isDraft,

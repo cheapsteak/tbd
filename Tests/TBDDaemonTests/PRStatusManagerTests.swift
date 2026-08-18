@@ -10,31 +10,31 @@ struct PRStatusManagerTests {
 
     @Test("maps OPEN + CLEAN to .mergeable")
     func mapsMergeableState() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "CLEAN")
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "CLEAN")
         #expect(status == .mergeable)
     }
 
     @Test("maps OPEN + BLOCKED to .blocked")
     func mapsBlocked() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "BLOCKED")
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "BLOCKED")
         #expect(status == .blocked)
     }
 
     @Test("maps OPEN + DIRTY to .blocked")
     func mapsDirty() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "DIRTY")
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "DIRTY")
         #expect(status == .blocked)
     }
 
     @Test("maps OPEN + BEHIND to .blocked")
     func mapsBehind() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "BEHIND")
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "BEHIND")
         #expect(status == .blocked)
     }
 
     @Test("maps OPEN + UNKNOWN to .pending")
     func mapsPendingUnknown() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "UNKNOWN")
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "UNKNOWN")
         #expect(status == .pending)
     }
 
@@ -42,7 +42,7 @@ struct PRStatusManagerTests {
     func mapsPendingChecks() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "UNKNOWN",
+            mergeVerdictRaw: "UNKNOWN",
             requiredChecksPending: true
         )
         #expect(status == .pending)
@@ -52,7 +52,7 @@ struct PRStatusManagerTests {
     func mapsPendingChecksOverClean() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "CLEAN",
+            mergeVerdictRaw: "CLEAN",
             requiredChecksPending: true
         )
         #expect(status == .pending)
@@ -62,7 +62,7 @@ struct PRStatusManagerTests {
     func mapsPendingChecksOverBlocked() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "BLOCKED",
+            mergeVerdictRaw: "BLOCKED",
             requiredChecksPending: true
         )
         #expect(status == .pending)
@@ -72,8 +72,8 @@ struct PRStatusManagerTests {
     func mapsReviewRequiredWithPassingChecksToMergeable() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "BLOCKED",
-            reviewDecision: "REVIEW_REQUIRED",
+            mergeVerdictRaw: "BLOCKED",
+            reviewVerdictRaw: "REVIEW_REQUIRED",
             requiredChecksFailing: false,
             requiredChecksPending: false
         )
@@ -84,8 +84,8 @@ struct PRStatusManagerTests {
     func mapsReviewRequiredWithPendingChecksToPending() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "BLOCKED",
-            reviewDecision: "REVIEW_REQUIRED",
+            mergeVerdictRaw: "BLOCKED",
+            reviewVerdictRaw: "REVIEW_REQUIRED",
             requiredChecksPending: true
         )
         #expect(status == .pending)
@@ -95,21 +95,21 @@ struct PRStatusManagerTests {
     func mapsBlockedWithEmptyReviewDecisionToBlocked() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "BLOCKED",
-            reviewDecision: ""
+            mergeVerdictRaw: "BLOCKED",
+            reviewVerdictRaw: ""
         )
         #expect(status == .blocked)
     }
 
     @Test("maps HAS_HOOKS to .mergeable")
     func mapsHasHooks() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "HAS_HOOKS")
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "HAS_HOOKS")
         #expect(status == .mergeable)
     }
 
     @Test("maps UNSTABLE (non-required checks failing) to .mergeable")
     func mapsUnstable() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "UNSTABLE")
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "UNSTABLE")
         #expect(status == .mergeable)
     }
 
@@ -117,7 +117,7 @@ struct PRStatusManagerTests {
     func mapsUnstablePendingChecks() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "UNSTABLE",
+            mergeVerdictRaw: "UNSTABLE",
             requiredChecksPending: true
         )
         #expect(status == .pending)
@@ -125,7 +125,7 @@ struct PRStatusManagerTests {
 
     @Test("maps unknown future merge state to .blocked")
     func mapsUnknownFutureMergeState() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "SOME_FUTURE_STATE")
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "SOME_FUTURE_STATE")
         #expect(status == .blocked)
     }
 
@@ -133,7 +133,7 @@ struct PRStatusManagerTests {
     func mapsPendingUnknownFutureMergeState() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "SOME_FUTURE_STATE",
+            mergeVerdictRaw: "SOME_FUTURE_STATE",
             requiredChecksPending: true
         )
         #expect(status == .pending)
@@ -141,31 +141,31 @@ struct PRStatusManagerTests {
 
     @Test("maps MERGED to .merged")
     func mapsMerged() {
-        let status = PRStatusManager.mapState(ghState: "MERGED", mergeStateStatus: "UNKNOWN")
+        let status = PRStatusManager.mapState(ghState: "MERGED", mergeVerdictRaw: "UNKNOWN")
         #expect(status == .merged)
     }
 
     @Test("maps CLOSED to .closed")
     func mapsClosed() {
-        let status = PRStatusManager.mapState(ghState: "CLOSED", mergeStateStatus: "BLOCKED")
+        let status = PRStatusManager.mapState(ghState: "CLOSED", mergeVerdictRaw: "BLOCKED")
         #expect(status == .closed)
     }
 
     @Test("maps OPEN + CHANGES_REQUESTED to .changesRequested")
     func mapsChangesRequested() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "BLOCKED", reviewDecision: "CHANGES_REQUESTED")
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "BLOCKED", reviewVerdictRaw: "CHANGES_REQUESTED")
         #expect(status == .changesRequested)
     }
 
     @Test("maps OPEN + CLEAN + CHANGES_REQUESTED to .changesRequested (review wins)")
     func mapsChangesRequestedOverClean() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "CLEAN", reviewDecision: "CHANGES_REQUESTED")
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "CLEAN", reviewVerdictRaw: "CHANGES_REQUESTED")
         #expect(status == .changesRequested)
     }
 
     @Test("maps draft PRs to .draft")
     func mapsDraft() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "CLEAN", isDraft: true)
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "CLEAN", isDraft: true)
         #expect(status == .draft)
     }
 
@@ -173,7 +173,7 @@ struct PRStatusManagerTests {
     func mapsNonRequiredFailingCheckStaysMergeable() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "CLEAN",
+            mergeVerdictRaw: "CLEAN",
             requiredChecksFailing: false
         )
         #expect(status == .mergeable)
@@ -183,7 +183,7 @@ struct PRStatusManagerTests {
     func mapsRequiredFailingCheckToChecksFailed() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "BLOCKED",
+            mergeVerdictRaw: "BLOCKED",
             requiredChecksFailing: true
         )
         #expect(status == .checksFailed)
@@ -193,7 +193,7 @@ struct PRStatusManagerTests {
     func mapsDraftOverFailingChecks() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "CLEAN",
+            mergeVerdictRaw: "CLEAN",
             isDraft: true,
             requiredChecksFailing: true
         )
@@ -204,7 +204,7 @@ struct PRStatusManagerTests {
     func mapsFailingOverPendingBlocked() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "BLOCKED",
+            mergeVerdictRaw: "BLOCKED",
             requiredChecksFailing: true,
             requiredChecksPending: true
         )
@@ -215,7 +215,7 @@ struct PRStatusManagerTests {
     func mapsFailingOverPendingClean() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "CLEAN",
+            mergeVerdictRaw: "CLEAN",
             requiredChecksFailing: true,
             requiredChecksPending: true
         )
@@ -226,7 +226,7 @@ struct PRStatusManagerTests {
     func mapsUnstableRequiredFailingToChecksFailed() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "UNSTABLE",
+            mergeVerdictRaw: "UNSTABLE",
             requiredChecksFailing: true
         )
         #expect(status == .checksFailed)
@@ -236,7 +236,7 @@ struct PRStatusManagerTests {
     func mapsDirtyRequiredFailingToChecksFailed() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "DIRTY",
+            mergeVerdictRaw: "DIRTY",
             requiredChecksFailing: true
         )
         #expect(status == .checksFailed)
@@ -246,7 +246,7 @@ struct PRStatusManagerTests {
     func mapsBehindRequiredFailingToChecksFailed() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "BEHIND",
+            mergeVerdictRaw: "BEHIND",
             requiredChecksFailing: true
         )
         #expect(status == .checksFailed)
@@ -256,7 +256,7 @@ struct PRStatusManagerTests {
     func mapsUnknownFutureMergeStateRequiredFailingToChecksFailed() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "SOME_FUTURE_STATE",
+            mergeVerdictRaw: "SOME_FUTURE_STATE",
             requiredChecksFailing: true
         )
         #expect(status == .checksFailed)
@@ -312,7 +312,7 @@ struct PRStatusManagerTests {
         #expect(nodes.count == 3)
         #expect(nodes[0].headRefName == "tbd/cool-feature")
         #expect(nodes[0].state == "OPEN")
-        #expect(nodes[0].mergeStateStatus == "CLEAN")
+        #expect(nodes[0].mergeVerdictRaw == "CLEAN")
         #expect(nodes[0].isDraft == true)
         #expect(nodes[0].statusCheckRollupState == "FAILURE")
         #expect(nodes[1].headRefName == "tbd/old-feature")
@@ -981,8 +981,8 @@ struct PRStatusManagerTests {
     func reasonForMerged() {
         let reason = PRStatusManager.computeReason(
             ghState: "MERGED",
-            mergeStateStatus: "UNKNOWN",
-            reviewDecision: "",
+            mergeVerdictRaw: "UNKNOWN",
+            reviewVerdictRaw: "",
             isDraft: false
         )
         #expect(reason == "Merged")
@@ -992,8 +992,8 @@ struct PRStatusManagerTests {
     func reasonForClosed() {
         let reason = PRStatusManager.computeReason(
             ghState: "CLOSED",
-            mergeStateStatus: "UNKNOWN",
-            reviewDecision: "",
+            mergeVerdictRaw: "UNKNOWN",
+            reviewVerdictRaw: "",
             isDraft: false
         )
         #expect(reason == "Closed")
@@ -1003,8 +1003,8 @@ struct PRStatusManagerTests {
     func reasonForDraft() {
         let reason = PRStatusManager.computeReason(
             ghState: "OPEN",
-            mergeStateStatus: "CLEAN",
-            reviewDecision: "",
+            mergeVerdictRaw: "CLEAN",
+            reviewVerdictRaw: "",
             isDraft: true
         )
         #expect(reason == "Draft")
@@ -1014,8 +1014,8 @@ struct PRStatusManagerTests {
     func reasonForMergeable() {
         let reason = PRStatusManager.computeReason(
             ghState: "OPEN",
-            mergeStateStatus: "CLEAN",
-            reviewDecision: "",
+            mergeVerdictRaw: "CLEAN",
+            reviewVerdictRaw: "",
             isDraft: false
         )
         #expect(reason == "Ready to merge")
@@ -1025,8 +1025,8 @@ struct PRStatusManagerTests {
     func reasonForConflicts() {
         let reason = PRStatusManager.computeReason(
             ghState: "OPEN",
-            mergeStateStatus: "DIRTY",
-            reviewDecision: "",
+            mergeVerdictRaw: "DIRTY",
+            reviewVerdictRaw: "",
             isDraft: false
         )
         #expect(reason == "Merge conflicts")
@@ -1036,8 +1036,8 @@ struct PRStatusManagerTests {
     func reasonForBehind() {
         let reason = PRStatusManager.computeReason(
             ghState: "OPEN",
-            mergeStateStatus: "BEHIND",
-            reviewDecision: "",
+            mergeVerdictRaw: "BEHIND",
+            reviewVerdictRaw: "",
             isDraft: false
         )
         #expect(reason == "Behind base branch")
@@ -1047,8 +1047,8 @@ struct PRStatusManagerTests {
     func reasonForFailingChecks() {
         let reason = PRStatusManager.computeReason(
             ghState: "OPEN",
-            mergeStateStatus: "CLEAN",
-            reviewDecision: "",
+            mergeVerdictRaw: "CLEAN",
+            reviewVerdictRaw: "",
             isDraft: false,
             requiredChecksFailing: true
         )
@@ -1059,8 +1059,8 @@ struct PRStatusManagerTests {
     func reasonForPendingChecks() {
         let reason = PRStatusManager.computeReason(
             ghState: "OPEN",
-            mergeStateStatus: "CLEAN",
-            reviewDecision: "",
+            mergeVerdictRaw: "CLEAN",
+            reviewVerdictRaw: "",
             isDraft: false,
             requiredChecksPending: true
         )
@@ -1071,7 +1071,7 @@ struct PRStatusManagerTests {
     func reasonForRequiredFailingUnderUnstable() {
         let reason = PRStatusManager.computeReason(
             ghState: "OPEN",
-            mergeStateStatus: "UNSTABLE",
+            mergeVerdictRaw: "UNSTABLE",
             requiredChecksFailing: true
         )
         #expect(reason == "Checks failing")
@@ -1081,8 +1081,8 @@ struct PRStatusManagerTests {
     func reasonForRequiredPendingUnderBlocked() {
         let reason = PRStatusManager.computeReason(
             ghState: "OPEN",
-            mergeStateStatus: "BLOCKED",
-            reviewDecision: "REVIEW_REQUIRED",
+            mergeVerdictRaw: "BLOCKED",
+            reviewVerdictRaw: "REVIEW_REQUIRED",
             requiredChecksPending: true
         )
         #expect(reason == "Checks pending")
@@ -1092,8 +1092,8 @@ struct PRStatusManagerTests {
     func reasonForChangesRequested() {
         let reason = PRStatusManager.computeReason(
             ghState: "OPEN",
-            mergeStateStatus: "BLOCKED",
-            reviewDecision: "CHANGES_REQUESTED",
+            mergeVerdictRaw: "BLOCKED",
+            reviewVerdictRaw: "CHANGES_REQUESTED",
             isDraft: false
         )
         #expect(reason == "Changes requested")
@@ -1103,8 +1103,8 @@ struct PRStatusManagerTests {
     func reasonForReviewRequired() {
         let reason = PRStatusManager.computeReason(
             ghState: "OPEN",
-            mergeStateStatus: "BLOCKED",
-            reviewDecision: "REVIEW_REQUIRED",
+            mergeVerdictRaw: "BLOCKED",
+            reviewVerdictRaw: "REVIEW_REQUIRED",
             isDraft: false
         )
         // REVIEW_REQUIRED with passing checks is actually mergeable (green), never shows a red/yellow warning
@@ -1117,8 +1117,8 @@ struct PRStatusManagerTests {
     func stateAndReasonBlockedReviewRequiredMergeable() {
         let (state, reason) = PRStatusManager.mapStateAndReason(
             ghState: "OPEN",
-            mergeStateStatus: "BLOCKED",
-            reviewDecision: "REVIEW_REQUIRED"
+            mergeVerdictRaw: "BLOCKED",
+            reviewVerdictRaw: "REVIEW_REQUIRED"
         )
         #expect(state == .mergeable)
         #expect(reason == "Ready to merge")
@@ -1128,7 +1128,7 @@ struct PRStatusManagerTests {
     func stateAndReasonUnstableNilChecksMergeable() {
         let (state, reason) = PRStatusManager.mapStateAndReason(
             ghState: "OPEN",
-            mergeStateStatus: "UNSTABLE"
+            mergeVerdictRaw: "UNSTABLE"
         )
         #expect(state == .mergeable)
         #expect(reason == "Ready to merge")
@@ -1138,7 +1138,7 @@ struct PRStatusManagerTests {
     func stateAndReasonCleanMergeable() {
         let (state, reason) = PRStatusManager.mapStateAndReason(
             ghState: "OPEN",
-            mergeStateStatus: "CLEAN"
+            mergeVerdictRaw: "CLEAN"
         )
         #expect(state == .mergeable)
         #expect(reason == "Ready to merge")
@@ -1148,7 +1148,7 @@ struct PRStatusManagerTests {
     func stateAndReasonDirtyConflicts() {
         let (state, reason) = PRStatusManager.mapStateAndReason(
             ghState: "OPEN",
-            mergeStateStatus: "DIRTY"
+            mergeVerdictRaw: "DIRTY"
         )
         #expect(state == .blocked)
         #expect(reason == "Merge conflicts")
@@ -1158,7 +1158,7 @@ struct PRStatusManagerTests {
     func stateAndReasonBehind() {
         let (state, reason) = PRStatusManager.mapStateAndReason(
             ghState: "OPEN",
-            mergeStateStatus: "BEHIND"
+            mergeVerdictRaw: "BEHIND"
         )
         #expect(state == .blocked)
         #expect(reason == "Behind base branch")
@@ -1473,8 +1473,8 @@ struct PRStatusManagerTests {
     /// Convenience PRNode factory for the matching tests.
     private func prNode(number: Int, url: String, branch: String, state: String = "OPEN",
                         createdAt: String = "2026-07-01T00:00:00Z") -> PRStatusManager.PRNode {
-        PRStatusManager.PRNode(number: number, url: url, state: state, mergeStateStatus: "CLEAN",
-                               reviewDecision: "", headRefName: branch, createdAt: createdAt,
+        PRStatusManager.PRNode(number: number, url: url, state: state, mergeVerdictRaw: "CLEAN",
+                               reviewVerdictRaw: "", headRefName: branch, createdAt: createdAt,
                                isDraft: false, statusCheckRollupState: nil, mergeQueuePosition: nil)
     }
 
