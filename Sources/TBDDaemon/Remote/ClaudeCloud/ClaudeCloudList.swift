@@ -6,6 +6,14 @@ extension ClaudeCloudInvoker {
     /// invocation is a create that failed. There is no discovery to confirm
     /// it AGAINST here, so the window alone decides — and the row is retained
     /// either way, so the judgement costs nothing but a state label.
+    ///
+    /// 600s is a soak-tuned starting value, not a measured one — no field data
+    /// exists yet for how long a `create` actually takes. It was chosen to sit
+    /// comfortably longer than a `create` should ever take, while staying short
+    /// enough that an idempotency key stuck behind one that hung frees up
+    /// within a single working session rather than the next day. What would
+    /// revise it: real creates observed resolving later than this window
+    /// during the soak.
     static let pendingFailureWindow: TimeInterval = 600
 
     /// `list` returns the `claude_cloud_session` ledger — what this machine

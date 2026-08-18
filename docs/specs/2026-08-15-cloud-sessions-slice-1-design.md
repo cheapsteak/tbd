@@ -1,12 +1,18 @@
 # Claude cloud sessions, slice 1 — create, send, land, archive
 
 **Date:** 2026-08-15
-**Status:** Design, not yet implemented.
+**Status:** `describe`, `create`, `list` and `send` are shipped, with `attach`
+declared and implemented through a separate TTY-exec path. `land`, `archive` and
+`unarchive` are designed here (§6, §7) but ship in a later slice: `describe`
+deliberately does not declare either yet, because a capability list is the
+contract the app reads to decide which actions to offer, and declaring a verb
+that answers `not_implemented` would mean offering an action that always fails.
 **Scope:** The first end-to-end path through the cloud-sessions design: create a
-cloud session from a repo's `+` menu, see it as a row in that repo's tree, steer
-it by sending it messages (with an attach terminal beside the send field where
-the account is entitled to one), land it into a local worktree, and archive the
-lane when it is done.
+cloud session from a repo's `+` menu, see it as a row in that repo's tree, and
+steer it by sending it messages (with an attach terminal beside the send field
+where the account is entitled to one). Landing it into a local worktree and
+archiving the lane when it is done are designed in the same document, and ship
+once a later slice declares those two capabilities on the provider.
 **Parent design:** [`2026-08-07-claude-cloud-sessions-design.md`](2026-08-07-claude-cloud-sessions-design.md).
 Everything here is downstream of that document and contradicts none of it.
 **Also depends on:**
@@ -27,7 +33,7 @@ provider named `claude-cloud` that is compiled into the daemon rather than
 registered as an executable, and a session that resolves to a registered
 repository becomes a worktree row in that repository's tree like any other lane.
 
-This slice builds the shortest path that is genuinely useful, end to end:
+This document designs the shortest end-to-end path that is genuinely useful:
 
 - **Create.** A cloud session is created from the repository's `+` menu, behind
   a flag that ships off.
@@ -37,22 +43,30 @@ This slice builds the shortest path that is genuinely useful, end to end:
   send field posts a message to the session — the same field every other remote
   provider gets, over the provider's `send` verb. Where the account is entitled
   to it, an attach terminal sits beside it.
-- **Land.** A row action converts the lane in place from remote to local:
-  the branch is checked out on this machine, the row keeps its identity, and
-  the conversation resumes in the first pane.
-- **Archive.** A row action retires the lane from the working set, composing over
-  what the provider declares, and says honestly what it did and did not do to the
-  session behind it (§7).
+- **Land** (§6, a later slice). A row action would convert the lane in place
+  from remote to local: the branch checked out on this machine, the row
+  keeping its identity, and the conversation resuming in the first pane.
+- **Archive** (§7, a later slice). A row action would retire the lane from the
+  working set, composing over what the provider declares, and say honestly
+  what it did and did not do to the session behind it.
 
-**Done is create → send → land → archive.** Attach is implemented and declared,
-but whether a given account may attach to a running cloud session is an
-entitlement the vendor grants server-side, and it is off by default (§11). On an
-account without it the Attach pane shows a call to action naming the condition,
-rather than a terminal that dies on connect; on an account with it, attach works.
-The slice is complete either way — each of those four gestures works without
-attach — with one honest consequence: on an unentitled account TBD shows no reply
-to a send, because the reply is on Anthropic's servers and nothing supported
-reads it back (below).
+**This slice ships create → send, with attach declared and implemented through
+a separate TTY-exec path.** Whether a given account may attach to a running
+cloud session is an entitlement the vendor grants server-side, and it is off by
+default (§11). On an account without it the Attach pane shows a call to action
+naming the condition, rather than a terminal that dies on connect; on an account
+with it, attach works. The slice is complete either way — create and send both
+work without attach — with one honest consequence: on an unentitled account TBD
+shows no reply to a send, because the reply is on Anthropic's servers and
+nothing supported reads it back (below).
+
+**Land and archive are designed in this document (§6, §7) but ship in a later
+slice.** `describe` does not declare either capability yet: a capability list
+is the contract the app reads to decide which actions to offer, and declaring a
+verb that answers `not_implemented` would mean offering an action that always
+fails. The missing declaration makes those two paths fail closed correctly
+rather than reaching a stub. §6 and §7 exist so that later slice is a
+capability declaration and an implementation, not a redesign.
 
 ### What the platform exposes, and what TBD builds against
 
@@ -82,8 +96,9 @@ are the reason the watch surface is not in it.
   (§11).
 
 What is left is exactly the documented CLI — create, send, resume by teleport,
-and attach where the account is entitled — and that is enough for create → send
-→ land → archive.
+and attach where the account is entitled — and that is enough for this slice's
+create → send, and enough to design land and archive (§6, §7) against, even
+though declaring and shipping those two verbs is a later slice's work.
 
 Five things the parent design specifies are deliberately **out of scope here**:
 
@@ -221,22 +236,30 @@ test). Mechanisms compile.
 
 **What `describe` declares.** `contract_versions: [2]` only — nothing exposed
 terminates a running cloud session, so the provider cannot implement `stop`, and
-major 1 requires it. Capabilities are `send`, `attach`, `land`, `archive` and
-`unarchive`. Three capability names are deliberately **not** declared, and each
-absence is a fact about the surface rather than an unimplemented verb:
+major 1 requires it. Capabilities are `send` and `attach`. Five capability names
+are deliberately **not** declared, for two different reasons:
 
-- **`stop`** — nothing exposed terminates a running cloud session.
-- **`log`** — a cloud session has no terminal to scroll.
-- **`transcript`** — no supported interface reads a cloud session's conversation
-  (§1).
+- **`stop`, `log` and `transcript` are absent because of a fact about the vendor
+  surface, not because of anything left to build.** Nothing exposed terminates
+  a running cloud session (`stop`); a cloud session has no terminal to scroll
+  (`log`); no supported interface reads a cloud session's conversation
+  (`transcript`, §1). No future slice of this feature changes any of that.
+- **`land`, `archive` and `unarchive` are absent because this is a real gap in
+  the current build, not a fact about the vendor.** `ClaudeCloudInvoker.run`
+  answers all three with `not_implemented`. They are a later slice of this
+  feature (§6, §7), which will declare each capability string together with
+  its implementation in the same change. Declaring them ahead of that would
+  offer the app an action — Land, Archive, Unarchive on a cloud lane — that
+  always fails.
 
-**`archive` and `unarchive` are implemented against the provider's own ledger.**
-`archive` sets the archived flag on the `claude_cloud_session` row named by the
-id and returns the updated session; `unarchive` clears it. Both are idempotent,
-neither removes the row, and `list` goes on enumerating the session — reporting
-it with `archived: true` — which is what the contract requires of every provider.
-§7 carries the reasoning, including what this does not do to the session on
-Anthropic's side.
+**`archive` and `unarchive` are designed to run against the provider's own
+ledger, in the later slice that declares them.** `archive` will set the
+archived flag on the `claude_cloud_session` row named by the id and return the
+updated session; `unarchive` will clear it. Both are designed idempotent,
+neither removing the row, with `list` going on enumerating the session —
+reporting it with `archived: true` — which is what the contract requires of
+every provider. §7 carries the reasoning, including what this will not do to
+the session on Anthropic's side.
 
 `create_params` are `repo`, `branch`, `prompt` and `environment`, the last typed
 `string` because `describe` answers offline and the set of configured cloud
@@ -248,19 +271,26 @@ with the signed-in account — including for `attach`, which is declared because
 provider implements it. Whether a given account is permitted to use it is a
 separate, runtime question, and §5 is where that is answered.
 
-**Verbs.** `create` runs `claude --cloud "<prompt>"` from the repository
-checkout, on a pseudo-terminal, and reads the session id and its title out of
-what it prints (below). `list` returns the `claude_cloud_session` ledger — what this machine
-started — and nothing else; it is always `complete: false`, which the next
-subsection specifies. `send` posts one message through
-`claude -p "<msg>" --cloud <id> --output-format json`; the response is
-`{"ok": true, "session_id": "…", "url": "…"}`, and `ok` plus a `session_id`
-matching the id sent is the success condition. `attach` runs
-`claude --cloud <id>` on the pane's PTY. `land` reports the session's repository
-and branch with a `resume_command` of `claude --teleport <id>` and `forks: true`.
-`archive` and `unarchive` write the archived flag on the ledger row and return
-the updated session; neither invokes the vendor CLI at all, because the ledger is
-the inventory they file within (§7).
+**Verbs, shipped.** `create` runs `claude --cloud "<prompt>"` from the
+repository checkout, on a pseudo-terminal, and reads the session id and its
+title out of what it prints (below). `list` returns the `claude_cloud_session`
+ledger — what this machine started — and nothing else; it is always
+`complete: false`, which the next subsection specifies. `send` posts one
+message through `claude -p "<msg>" --cloud <id> --output-format json`; the
+response is `{"ok": true, "session_id": "…", "url": "…"}`, and `ok` plus a
+`session_id` matching the id sent is the success condition. `attach` runs
+`claude --cloud <id>` on the pane's PTY.
+
+**Verbs, designed for the later slice that declares them.** `land` will report
+the session's repository and branch with a `resume_command` of
+`claude --teleport <id>` and `forks: true`. `archive` and `unarchive` will
+write the archived flag on the ledger row and return the updated session;
+neither will invoke the vendor CLI, because the ledger is the inventory they
+file within (§7). Until that slice declares them, a caller that reaches any of
+the three anyway — a stale capability cache, a call that skips the capability
+check — gets a `not_implemented` contract-bug exit rather than a silent
+success: `ClaudeCloudInvoker.run` answers `land`, `archive` and `unarchive`
+that way today.
 
 **`send` implements the contract's byte interface on top of that call.** The
 contract's `send` takes stdin bytes destined for a terminal and requires the
@@ -1087,6 +1117,13 @@ vendor exposes no other way.
 
 ## 6. Land
 
+**This section designs Land; it ships in the later slice that declares `land`
+on the provider (§3), not in this one.** `claude-cloud`'s `describe` does not
+yet declare `land`, and `ClaudeCloudInvoker.run` answers it with
+`not_implemented`, so nothing below is reachable through today's build. It is
+specified here so the later slice is a capability declaration and an RPC, not
+a redesign.
+
 Land is an action on the adopted worktree row, enabled when the row's provider
 declares the `land` capability. It converts the row **in place**: `.remote`
 becomes `.local`, the git worktree is materialized, and the row keeps its id, its
@@ -1191,11 +1228,12 @@ Landing is always a user gesture and is never triggered by session state.
 reports `forks: true`, so the landed checkout and the session diverge from this
 moment: the work is on this machine now, and a session nobody will return to
 should not sit in the working inventory. A session is retired through the
-`archive` verb where its provider declares one, and cloud declares it (§3), so
-landing calls that verb — one invocation, on the same in-process ledger path §7
-specifies, marking the ledger row archived. TBD never *stops* a session on
-landing whatever a provider declares: landing is a "bring this home" gesture,
-not a teardown, and the remote box may still hold work that was never pushed.
+`archive` verb where its provider declares one, and once cloud declares it
+(§3), landing calls that verb — one invocation, on the same in-process ledger
+path §7 specifies, marking the ledger row archived. TBD never *stops* a
+session on landing whatever a provider declares: landing is a "bring this
+home" gesture, not a teardown, and the remote box may still hold work that was
+never pushed.
 
 **That retirement is within TBD's inventory, not Anthropic's, and the lane says
 so.** The cloud session keeps running on Anthropic's infrastructure and keeps
@@ -1220,6 +1258,13 @@ list.
 
 ## 7. Archiving a remote lane
 
+**This section designs Archive for a remote lane; it ships in the later slice
+that declares `archive` and `unarchive` on the provider (§3), not in this
+one.** `claude-cloud`'s `describe` does not yet declare either capability, and
+`ClaudeCloudInvoker.run` answers both with `not_implemented`. It is specified
+here for the same reason §6 is: so the later slice is a capability declaration
+and an implementation, not a redesign.
+
 Archive retires a lane from the working set, and a cloud lane needs the gesture
 more than a local one does: nothing else takes it out of the tree. Retirement
 driven by drift needs a complete snapshot and there is never one (§3), so a cloud
@@ -1232,10 +1277,11 @@ section of every non-scratch, non-main row's menu, gated only on
 `hasActiveChildren`, so an adopted remote row shows it; `run(.archive)`
 (`Sources/TBDApp/Sidebar/RowActionMenuActions.swift`:184-186) calls
 `AppState.archiveWorktree`, which calls `worktree.archive`, which refuses. The
-menu item is not the defect: what changes is that the daemon stops refusing. How
-the item presents for a provider that cannot archive is the 08-16 design's; a
-cloud lane's provider declares the capability, so for a cloud lane the item is
-live exactly as it looks today.
+menu item is not the defect: what changes, once the later slice declares
+`archive`, is that the daemon stops refusing. How the item presents for a
+provider that cannot archive is the 08-16 design's; once a cloud lane's
+provider declares the capability, the item will be live for a cloud lane
+exactly as it looks today.
 
 ### The fences, and why lifting them is not enough
 
@@ -1302,19 +1348,21 @@ revive cases — is specified by
 and this document does not restate any of it. What follows is only what is
 particular to this provider.
 
-**`claude-cloud` takes the verb path.** It declares `archive` and `unarchive`
-(§3), so archiving a cloud lane invokes `archive` and then marks the row, and
-reviving one invokes `unarchive` and then flips the row back. It reaches neither
-of the other branches: the `gone` exemption is for a session the provider has
-stopped enumerating, which a cloud session never becomes (§3), and the refusal is
-for a provider that declares no `archive`, which this one always does — the
-declaration is a compiled constant rather than a runtime answer.
+**`claude-cloud` will take the verb path, once it declares `archive` and
+`unarchive`.** Archiving a cloud lane will invoke `archive` and then mark the
+row, and reviving one will invoke `unarchive` and then flip the row back (§3).
+It reaches neither of the other branches: the `gone` exemption is for a
+session the provider has stopped enumerating, which a cloud session never
+becomes (§3), and the refusal is for a provider that declares no `archive` —
+once cloud declares it, the declaration is a compiled constant rather than a
+runtime answer, so the refusal branch stays permanently unreached for this
+provider.
 
-**Both verbs run against the provider's own ledger and send nothing to
-Anthropic.** `archive` sets the archived flag on the `claude_cloud_session` row;
-`unarchive` clears it. Every later `list` returns that session carrying the flag
-it now holds — `archived: true` after an archive, `archived: false` after an
-unarchive (§3).
+**Both verbs will run against the provider's own ledger and send nothing to
+Anthropic.** `archive` will set the archived flag on the `claude_cloud_session`
+row; `unarchive` will clear it. Every later `list` will return that session
+carrying the flag it now holds — `archived: true` after an archive,
+`archived: false` after an unarchive (§3).
 
 Three properties make that a real retirement rather than a costume:
 
@@ -1462,8 +1510,8 @@ manual gesture takes, and the rail participates under the per-worktree opt-in it
 already has. A cloud lane is reachable by it — PR polling is keyed on the branch
 and runs `git` and `gh` in the repository's own checkout, so a remote row carries
 a PR badge like any other (`RPCRouter.pollableWorktrees`,
-`Sources/TBDDaemon/Server/RPCRouter.swift`:946) — and its provider declares
-`archive`, so nothing declines on cloud's behalf.
+`Sources/TBDDaemon/Server/RPCRouter.swift`:946) — and once its provider
+declares `archive`, nothing will decline on cloud's behalf.
 
 **The arming gesture is therefore the whole of what stands between a merged PR
 and a filed cloud lane.** Neither termination guard fires for a cloud lane
@@ -1660,6 +1708,17 @@ elapsed backoff window, admits a transient one under the same conditions, and
 Reattach clears either. A provider with no block behaves exactly as it does now,
 reconnect included.
 
+**What this slice actually tests for cloud's three deferred verbs.**
+`describe`'s JSON lists exactly `send` and `attach`, never `land`, `archive` or
+`unarchive`. `ClaudeCloudInvoker.run` answers all three deferred verbs with a
+`not_implemented` contract-bug exit rather than a silent success, asserted
+against every verb `describe` does not declare — the assertion that would fail
+if a capability were ever declared without `run` answering it.
+
+**Land's and archive's own tests belong to the later slice that declares those
+capabilities, and are specified below for the same reason §6 and §7 are: so
+that slice is a capability declaration and an implementation, not a redesign.**
+
 **A cloud lane archives through the verb.** Archiving one invokes `archive` and
 then marks the row, asserted against a fake invoker that records every verb it
 was asked for — so a `stop`, which this provider does not declare, fails the
@@ -1746,11 +1805,14 @@ entry in the file still loads, with and without the cloud flag on.
 
 ## 10. Work order
 
-**Nothing opens a pull request until the whole path works end to end.** The order
-below minimizes rework; it is not a sequence of independently shippable
-increments, and several steps are unobservable on their own. Building it as
-increments would mean shipping the routing change with nothing to route and the
-provider with no flag to gate it.
+**This slice's pull request does not open until steps 1 through 9 work end to
+end.** The order below minimizes rework; it is not a sequence of independently
+shippable increments, and several steps are unobservable on their own.
+Building it as increments would mean shipping the routing change with nothing
+to route and the provider with no flag to gate it. Steps 10 and 11 — archive
+and land — are the later slice's work order (§6, §7), sequenced here for
+continuity with the steps this slice ships; that slice opens its own pull
+request once its own path works end to end.
 
 1. **The shared model change (§2).** Origin field, record mapping, round-trip
    tests. Everything downstream reads provenance, and every later step written
@@ -1798,6 +1860,10 @@ provider with no flag to gate it.
    attach block reaching the app through the one `RemoteProviderStatus` lookup,
    alongside the attach exit-class correction the block depends on. They land
    together because they share that lookup.
+
+Steps 10 and 11 belong to the later slice that declares `archive`, `unarchive`
+and `land` on the provider:
+
 10. **Archive (§7).** The built-in provider's `archive` and `unarchive` verbs
     over the ledger column from step 6, the remote arm of `worktree.archive` and of
     revive on the 08-16 design's composition, the row copy, the Archived list's
