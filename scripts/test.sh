@@ -163,6 +163,13 @@
 # ~28 trips an hour against a remote that sustains ~12 runs an hour, while T=300
 # fires four or five times, on the tail this valve exists for.
 #
+# OFF, THE BOUND IS CLEARED RATHER THAN LEFT ALONE, and that is what makes
+# "off" mean the pre-valve behavior exactly. `TBD_SWIFT_QUEUE_YIELD_SECONDS` is
+# a knob `swift-safe` documents and honours on any `test` run, whether or not
+# this valve is enabled — so a caller who exported it would otherwise yield 76
+# with the valve off, down a path that does not route, and this wrapper would
+# exit 76 having tested nothing.
+#
 # THREE EXIT CODES DECIDE WHAT HAPPENS NEXT, AND CONFLATING ANY TWO IS A SILENT
 # WRONG ANSWER:
 #
@@ -431,16 +438,28 @@ done
 # taken — there is nothing to unwind, and the caller finds out immediately
 # rather than half an hour into a wait.
 #
-# `TBD_REMOTE_VERIFY` unset leaves `remote_verify_enabled` at 0 and
-# `fenced_env` empty, so every path below is what it was before the valve
-# existed: no bound is forwarded, and 76 is just an exit status.
+# `TBD_REMOTE_VERIFY` unset leaves `remote_verify_enabled` at 0 and the bound
+# CLEARED, so every path below is what it was before the valve existed: the
+# run queues without limit, and 76 can only be the suite's own exit status.
 DEFAULT_REMOTE_VERIFY_YIELD_SECONDS=300
 YIELDED_THE_QUEUE=76
 REMOTE_VERIFY_REFUSED=78
 
 remote_verify_enabled=0
 caller_narrowed=0
-fenced_env=()
+# THE BOUND IS CLEARED, NOT LEFT ALONE — the same distinction the fallback
+# below turns on, and the valve-off path needs it just as badly. An empty
+# array only stops this script from ADDING the assignment; an inherited
+# `TBD_SWIFT_QUEUE_YIELD_SECONDS` passes straight through `env`, and
+# `swift-safe` gates the yield on the subcommand alone and knows nothing about
+# `TBD_REMOTE_VERIFY` — so the run would yield 76 with the valve off, the
+# routing below would not fire, and the wrapper would exit 76 having tested
+# nothing. `scripts/git-hooks/pre-push` runs this script with no scrubbing and
+# BLOCKS THE PUSH on that status, and `swift-safe`'s own docstring presents the
+# knob as supported, so the developer who exported it is doing nothing odd.
+# An explicit empty value wins in `env` and is falsy in `swift-safe` ("never
+# yield"), which is the pre-valve behavior "unset" is supposed to mean.
+fenced_env=(TBD_SWIFT_QUEUE_YIELD_SECONDS=)
 if [ "${TBD_REMOTE_VERIFY:-}" = "1" ]; then
   remote_verify_enabled=1
   # `:-`, SO AN EMPTY VALUE MEANS "NOT SET" RATHER THAN FAILING THE RUN. The

@@ -190,7 +190,15 @@ STUB
 # repository rather than asking the wrapper for an override it would never need
 # in production. Empty means "wherever the harness was invoked" — the real repo
 # — which is what every case outside section 7 wants.
+#
+# `RUN_TEE` names a file the run's output is STREAMED to while it happens.
+# `RUN_OUT` is a command substitution, so it exists only once the run is over —
+# which is no use to a case that must observe a run mid-flight and act on what
+# it sees (the lock-contention cases in section 7). `pipefail` is on for this
+# file, and `tee` never fails, so `RUN_RC` is still the wrapper's own status.
+# Empty means `/dev/null`, which is every other case.
 RUN_CWD=""
+RUN_TEE=""
 run_script() {
   local script="$1" fix="$2"; shift 2
   RUN_OUT="$(cd "${RUN_CWD:-.}" && env -u CI -u TBD_HOME -u TBD_SOCKET_PATH -u TBD_CLAUDE_HOST_HOME \
@@ -209,7 +217,7 @@ run_script() {
                  TMUX_TMPDIR="$(caller_tmux_tmpdir "$fix")" \
                  TBD_SWIFT_BIN="$fix/bin/fake-swift" \
                  FAKE_SWIFT_DUMP="$fix/swift-invocation" \
-                 bash "$script" "$@" 2>&1)"
+                 bash "$script" "$@" 2>&1 | tee "${RUN_TEE:-/dev/null}")"
   RUN_RC=$?
 }
 
@@ -1032,6 +1040,173 @@ test_the_valve_flag_is_load_bearing() {
   rmfix "$fix"
 }
 
+# THE BOUND THE CONTENTION CASES EXPORT, AND THE MARGIN THEY WAIT PAST IT.
+# `swift-safe` measures the bound from the moment it starts waiting — which is
+# the moment it prints the line the cases below poll for — so the margin is
+# relative to the bound and to nothing else. No case here waits on a wall-clock
+# guess about how long the wrapper's preamble takes, because on a loaded box
+# that guess is wrong and the case that made it passes vacuously.
+INHERITED_YIELD_SECONDS=0.4
+PAST_THE_BOUND_SECONDS=1.5
+# How long a case will wait for something it is certain must happen — the
+# holder taking the lock, the queued run announcing itself, the run giving up.
+# Generous, because it only bounds a WEDGE: reaching it is a failure with a
+# named cause, never a verdict. Expressed in 0.05s polls, which is also what
+# the holder is handed.
+WEDGE_DEADLINE_SECONDS=60
+WEDGE_DEADLINE_POLLS=1200
+
+# Poll until a file exists, or the deadline passes. Answers "waited" / "wedged"
+# so a failing assertion says which.
+await_file() {
+  local path="$1" waited=0
+  while [ ! -e "$path" ] && [ "$waited" -lt "$WEDGE_DEADLINE_POLLS" ]; do
+    sleep 0.05; waited=$((waited + 1))
+  done
+  if [ -e "$path" ]; then echo "waited"; else echo "wedged"; fi
+}
+
+# The same, for a string appearing in a file a live run is still writing to.
+await_text() {
+  local path="$1" needle="$2" waited=0
+  while ! grep -q -- "$needle" "$path" 2>/dev/null && [ "$waited" -lt "$WEDGE_DEADLINE_POLLS" ]; do
+    sleep 0.05; waited=$((waited + 1))
+  done
+  if grep -q -- "$needle" "$path" 2>/dev/null; then echo "waited"; else echo "wedged"; fi
+}
+
+# A REAL SECOND HOLDER ON THE REAL LOCK — the contention a yield needs, and
+# nothing else in this file simulates it. `swift-safe` takes an exclusive
+# `flock`, so the only way to make a run queue is to hold that lock from another
+# process; a stub could only assert that the bound was forwarded, which is the
+# half of the defect that was already visible.
+#
+# IT HOLDS UNTIL RELEASED, NOT FOR A FIXED TIME. A timed hold has to outlast the
+# wrapper's preamble — a scratch home, three decoys, a fingerprint, a python
+# interpreter — and on a loaded box that took longer than any hold worth
+# writing, at which point the run acquires an uncontended lock and the case
+# proves nothing. The holder's own deadline is a wedge guard, not a schedule.
+LOCK_HOLDER_PID=""
+hold_the_shared_lock() {
+  local lock="$1" ready="$2" release="$3"
+  mkdir -p "$(dirname "$lock")"
+  rm -f "$ready" "$release"
+  python3 - "$lock" "$ready" "$release" "$WEDGE_DEADLINE_SECONDS" <<'HOLDER' &
+import fcntl, os, sys, time
+lock_path, ready_path, release_path, deadline_seconds = sys.argv[1:5]
+with open(lock_path, "a+", encoding="utf-8") as handle:
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    open(ready_path, "w", encoding="utf-8").close()
+    deadline = time.monotonic() + float(deadline_seconds)
+    while not os.path.exists(release_path) and time.monotonic() < deadline:
+        time.sleep(0.05)
+HOLDER
+  LOCK_HOLDER_PID=$!
+  assert_eq "the holder took the shared lock" "waited" "$(await_file "$ready")"
+}
+
+release_the_shared_lock() {
+  local release="$1"
+  : > "$release"
+  wait "$LOCK_HOLDER_PID" 2>/dev/null
+  LOCK_HOLDER_PID=""
+}
+
+# The wrapper, running while the case watches it. `run_script` captures its
+# output with a command substitution, so it hands back nothing until the run is
+# over — and a run queued behind a held lock is not over. The subshell writes
+# the status to a file, whose EXISTENCE is what "has it exited yet?" is asked
+# through: no `kill -0`, no process-table matching, nothing that could touch a
+# process this harness does not own.
+BACKGROUND_RUN_PID=""
+start_run_in_background() {
+  local script="$1" fix="$2"
+  RUN_TEE="$fix/run-output"
+  : > "$RUN_TEE"
+  rm -f "$fix/run-status"
+  ( run_script "$script" "$fix"; printf '%s' "$RUN_RC" > "$fix/run-status" ) &
+  BACKGROUND_RUN_PID=$!
+}
+
+# Sets RUN_OUT and RUN_RC from the files, so the assertions below read exactly
+# as they do in every synchronous case.
+finish_background_run() {
+  local fix="$1"
+  wait "$BACKGROUND_RUN_PID" 2>/dev/null
+  BACKGROUND_RUN_PID=""
+  RUN_OUT="$(cat "$fix/run-output" 2>/dev/null)"
+  RUN_RC="$(cat "$fix/run-status" 2>/dev/null)"
+  RUN_TEE=""
+}
+
+# `swift-safe` announcing that it is queued. Waiting for THIS rather than for a
+# duration is what makes the two cases below independent of how slow the box is:
+# the bound is measured from here.
+QUEUED_ANNOUNCEMENT="waiting for the shared build slot"
+
+# THE DEFAULT-OFF GUARANTEE, TESTED THROUGH THE ONLY THING THAT CAN BREAK IT.
+# Every other off-path case here runs against an environment `run_script` has
+# already scrubbed, so none of them can see the one input that makes the off
+# path behave differently: an INHERITED `TBD_SWIFT_QUEUE_YIELD_SECONDS`. It is a
+# knob `scripts/swift-safe` documents, it is honoured on any `test` regardless
+# of `TBD_REMOTE_VERIFY`, and `env` ADDS assignments rather than clearing
+# inherited ones — so omitting the assignment is not the same as clearing it.
+# Left uncleared, a developer who exported that bound gets 76 out of a wrapper
+# that ran no tests at all, and `scripts/git-hooks/pre-push` runs this script
+# with no scrubbing and turns that into a blocked push.
+#
+# The run must REACH THE COMPILER, not merely exit non-76: the whole complaint
+# is a run that tested nothing.
+test_an_inherited_yield_bound_does_not_bound_a_valve_off_run() {
+  local fix; fix="$(mkfix)"
+  hold_the_shared_lock "$fix/home/tbd/runtime/swift-build.lock" \
+    "$fix/lock-held" "$fix/lock-release"
+  RUN_ENV=(TBD_SWIFT_QUEUE_YIELD_SECONDS="$INHERITED_YIELD_SECONDS")
+  start_run_in_background "$SCRIPT" "$fix"
+  RUN_ENV=()
+  assert_eq "the run really was queued behind the holder" "waited" \
+    "$(await_text "$fix/run-output" "$QUEUED_ANNOUNCEMENT")"
+  sleep "$PAST_THE_BOUND_SECONDS"
+  assert_eq "and it is still queued well past the inherited bound" "false" \
+    "$([ -e "$fix/run-status" ] && echo true || echo false)"
+  release_the_shared_lock "$fix/lock-release"
+  finish_background_run "$fix"
+  assert_ok "a valve-off run under contention is green" "$RUN_RC"
+  assert_eq "and it reached the compiler" "1" "$(swift_invocations "$fix")"
+  assert_missing "having never yielded its place" "$RUN_OUT" \
+    "yielding the local build slot"
+  assert_contains "with the inherited bound cleared" "$(dump_of "$fix")" \
+    "TBD_SWIFT_QUEUE_YIELD_SECONDS=<unset>"
+  rmfix "$fix"
+}
+
+# MUTATION. Put the bare `fenced_env=()` back — anchored at column 0, so this
+# weakens the valve-off initialisation and not the identically spelled clearing
+# inside `fall_back_to_the_local_queue` — and the caller's bound rides into a
+# run that never asked to be verified anywhere: 76, no tests, blocked push.
+# Nothing here is timed: the lock is held until the run gives up on its own.
+test_the_valve_off_bound_clearing_is_load_bearing() {
+  local fix mutant; fix="$(mkfix)"
+  mutant="$(mutant_of "$SCRIPT" \
+    's/^fenced_env=\(TBD_SWIFT_QUEUE_YIELD_SECONDS=\)$/fenced_env=()/')"
+  hold_the_shared_lock "$fix/home/tbd/runtime/swift-build.lock" \
+    "$fix/lock-held" "$fix/lock-release"
+  RUN_ENV=(TBD_SWIFT_QUEUE_YIELD_SECONDS="$INHERITED_YIELD_SECONDS")
+  start_run_in_background "$mutant" "$fix"
+  RUN_ENV=()
+  assert_eq "the mutant queued behind the holder too" "waited" \
+    "$(await_text "$fix/run-output" "$QUEUED_ANNOUNCEMENT")"
+  assert_eq "and gave up on its own, without the lock ever being released" \
+    "waited" "$(await_file "$fix/run-status")"
+  release_the_shared_lock "$fix/lock-release"
+  finish_background_run "$fix"
+  assert_eq "without the clearing a valve-off run exits 76" "76" "$RUN_RC"
+  assert_eq "having compiled and tested nothing" "0" "$(swift_invocations "$fix")"
+  assert_contains "on a yield nobody asked for" "$RUN_OUT" \
+    "yielding the local build slot"
+  rmfix "$fix"
+}
+
 test_the_valve_forwards_its_default_bound_when_enabled() {
   local fix; fix="$(mkfix)"
   RUN_ENV=(TBD_REMOTE_VERIFY=1)
@@ -1322,11 +1497,14 @@ test_an_inherited_yield_bound_does_not_survive_the_fallback() {
 }
 
 # MUTATION. Put the bare `fenced_env=()` back and the caller's 10 rides straight
-# into the re-run.
+# into the re-run. Anchored to the indented occurrence, so it weakens the
+# clearing inside `fall_back_to_the_local_queue` and leaves the identically
+# spelled valve-off initialisation at column 0 intact — the two are separate
+# guards and a mutation that tripped both would prove neither.
 test_the_fallback_bound_clearing_is_load_bearing() {
   local fix mutant; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
   mutant="$(mutant_of "$SCRIPT" \
-    's/fenced_env=\(TBD_SWIFT_QUEUE_YIELD_SECONDS=\)/fenced_env=()/')"
+    's/^  fenced_env=\(TBD_SWIFT_QUEUE_YIELD_SECONDS=\)$/  fenced_env=()/')"
   RUN_ENV=(TBD_REMOTE_VERIFY=1 TBD_SWIFT_QUEUE_YIELD_SECONDS=10
            FAKE_SWIFT_RC="76 0" FAKE_REMOTE_VERIFY_RC=78
            FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
@@ -1777,8 +1955,15 @@ test_a_timed_out_wait_is_not_routed_remotely() {
   rmfix "$fix"
 }
 
-# With the flag off the routing must not fire even on a 76 the suite produced
-# for its own reasons — the off path is the pre-valve path, byte for byte.
+# WITH THE FLAG OFF, A 76 CAN ONLY COME FROM THE SUITE ITSELF, and it is still
+# just an exit status. The yield can no longer produce one: the off path clears
+# `TBD_SWIFT_QUEUE_YIELD_SECONDS` rather than merely declining to set it, so
+# `swift-safe` never yields there however the caller's environment was primed
+# (see `test_an_inherited_yield_bound_does_not_bound_a_valve_off_run`). What is
+# left is a test process that exits 76 for reasons of its own — which the stub
+# is, standing in for `swift` — and the routing must not fire on it. Hence the
+# invocation count: the 76 asserted here is a suite's verdict, from a run that
+# reached the compiler, not a queue given up before one.
 test_a_76_with_the_valve_off_is_propagated_untouched() {
   local fix; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
   RUN_ENV=(FAKE_SWIFT_RC=76 FAKE_REMOTE_VERIFY_RC=0
@@ -1786,6 +1971,7 @@ test_a_76_with_the_valve_off_is_propagated_untouched() {
   run_with_valve "$fix"
   RUN_ENV=()
   assert_eq "76 is just an exit status when the valve is off" "76" "$RUN_RC"
+  assert_eq "and it came from a run that reached the compiler" "1" "$(swift_invocations "$fix")"
   assert_eq "and nothing is dispatched" "0" "$(remote_verify_dispatches "$fix")"
   rmfix "$fix"
 }
