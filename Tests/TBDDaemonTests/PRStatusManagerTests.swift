@@ -921,6 +921,51 @@ struct PRStatusManagerTests {
             fromURL: "https://git.acme.example/acme/-/merge_requests/1") == nil)
     }
 
+    // MARK: - Remote identity
+
+    @Test("parseRemoteIdentity reads host, owner and name from an https remote")
+    func parseRemoteIdentityHTTPS() {
+        let parsed = PRStatusManager.parseRemoteIdentity("https://github.com/acme/acme-prod.git")
+        #expect(parsed?.host == "github.com")
+        #expect(parsed?.owner == "acme")
+        #expect(parsed?.name == "acme-prod")
+    }
+
+    @Test("parseRemoteIdentity reads an scp-style remote")
+    func parseRemoteIdentitySCP() {
+        let parsed = PRStatusManager.parseRemoteIdentity("git@git.acme.example:acme/platform/api-gateway.git")
+        #expect(parsed?.host == "git.acme.example")
+        // Everything before the last segment is the namespace, however deep.
+        #expect(parsed?.owner == "acme/platform")
+        #expect(parsed?.name == "api-gateway")
+    }
+
+    @Test("parseRemoteIdentity keeps a deeply nested GitLab namespace whole")
+    func parseRemoteIdentityNested() {
+        let parsed = PRStatusManager.parseRemoteIdentity(
+            "https://git.acme.example/acme/platform/backend/api-gateway.git")
+        #expect(parsed?.owner == "acme/platform/backend")
+        #expect(parsed?.name == "api-gateway")
+    }
+
+    @Test("parseRemoteIdentity drops an ssh port from the host")
+    func parseRemoteIdentitySSHPort() {
+        let parsed = PRStatusManager.parseRemoteIdentity("ssh://git@git.acme.example:2222/acme/api.git")
+        #expect(parsed?.host == "git.acme.example")
+        #expect(parsed?.owner == "acme")
+        #expect(parsed?.name == "api")
+    }
+
+    @Test("parseRemoteIdentity returns nil rather than guessing a host")
+    func parseRemoteIdentityRejectsIncomplete() {
+        // Nothing here names a host, and a caller that cannot name the host
+        // must defer — never default to github.com.
+        #expect(PRStatusManager.parseRemoteIdentity("acme/acme-prod") == nil)
+        #expect(PRStatusManager.parseRemoteIdentity("") == nil)
+        #expect(PRStatusManager.parseRemoteIdentity("   ") == nil)
+        #expect(PRStatusManager.parseRemoteIdentity("https://github.com/acme") == nil)
+    }
+
     // MARK: - GraphQL query builder
 
     /// A malformed (unbalanced) GraphQL query is rejected by the server at parse time,
@@ -2220,7 +2265,7 @@ private actor FakeGH {
     }
 
     func run(args: [String], repoPath: String) -> GHCommandResult? {
-        if args.first == "repo" { return GHCommandResult(stdout: "acme/acme-prod\n") }
+        if args.first == "repo" { return GHCommandResult(stdout: #"{"nameWithOwner":"acme/acme-prod","url":"https://github.com/acme/acme-prod"}"#) }
         guard let query = args.first(where: { $0.hasPrefix("query=") }) else { return nil }
         if query.contains("viewer {") {
             viewerQueries += 1

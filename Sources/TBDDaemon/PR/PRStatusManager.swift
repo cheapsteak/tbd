@@ -89,7 +89,7 @@ public actor PRStatusManager {
     /// one repo) sharing an entry is the cache working, not a collision. Entries
     /// are only ever added and expire on time; nothing prunes by row, so no
     /// worktree can evict another's.
-    private var ownerRepoCache: [String: (value: (owner: String, name: String), expiry: Date)] = [:]
+    private var ownerRepoCache: [String: (value: (owner: String, name: String, host: String), expiry: Date)] = [:]
 
     /// Reentrancy guard: a previous poll still running means a new `fetchAll` is skipped
     /// so two generations of batch data can't interleave their cache writes.
@@ -130,6 +130,15 @@ public actor PRStatusManager {
 
     private let ghRunner: GHRunner?
 
+    /// Behavior seam for reading a checkout's `origin` remote URL — the second
+    /// identity source, used only when `gh` cannot name the repo, which is
+    /// every checkout on a host `gh` does not speak to. Production leaves it
+    /// nil and runs `GitManager`; the injecting init defaults it to "no
+    /// remote", so a test that stubs `gh` never spawns a `git` subprocess.
+    typealias RemoteURLReader = @Sendable (_ repoPath: String) async -> String?
+
+    private let remoteURLReader: RemoteURLReader?
+
     /// Date seam for the observed-at this actor *stamps* on the facts it
     /// records — `PRStatus.observedAt` and `PRObservation.observedAt`. Both are
     /// persisted and later compared to age a cache, so they are data, and take
@@ -139,11 +148,15 @@ public actor PRStatusManager {
 
     public init(now: @escaping @Sendable () -> Date = { Date() }) {
         self.ghRunner = nil
+        self.remoteURLReader = nil
         self.now = now
     }
 
-    init(ghRunner: @escaping GHRunner, now: @escaping @Sendable () -> Date = { Date() }) {
+    init(ghRunner: @escaping GHRunner,
+         remoteURLReader: @escaping RemoteURLReader = { _ in nil },
+         now: @escaping @Sendable () -> Date = { Date() }) {
         self.ghRunner = ghRunner
+        self.remoteURLReader = remoteURLReader
         self.now = now
     }
 
@@ -477,7 +490,7 @@ public actor PRStatusManager {
             var unnumberedRepos: [String: (owner: String, name: String)] = [:]
             for path in Set(unnumbered.map(\.worktreePath)) {
                 if let ownerRepo = await cachedNameWithOwner(repoPath: path) {
-                    unnumberedRepos[path] = ownerRepo
+                    unnumberedRepos[path] = (owner: ownerRepo.owner, name: ownerRepo.name)
                 } else {
                     logger.debug("fetchAll: could not resolve owner/name for unnumbered worktree at \(path, privacy: .public)")
                 }
@@ -2035,22 +2048,95 @@ public actor PRStatusManager {
 
     // MARK: - Shell helpers
 
-    /// Resolve the checkout's `owner/name` for repo-scoped GraphQL queries.
-    /// Uses `gh repo view` (git-remote resolution) so `refresh` need not already
-    /// hold a PR URL to parse.
-    private nonisolated func resolveNameWithOwner(repoPath: String) async -> (owner: String, name: String)? {
-        let args = ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]
-        guard let output = await runGH(args: args, repoPath: repoPath) else { return nil }
-        let parts = output.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "/")
+    /// Resolve the checkout's `owner/name` and the host it lives on, for
+    /// repo-scoped queries and for composing a reference from a bare number.
+    ///
+    /// Two sources, in this order, and the order is the whole design:
+    ///
+    /// 1. `gh repo view`, which is asked for `url` alongside `nameWithOwner` so
+    ///    the host is gh's own answer rather than an assumption. gh resolves a
+    ///    *base* repo, not merely `origin` — with an `upstream` remote present
+    ///    it names the parent, which is where a fork's pull requests actually
+    ///    live — so replacing it with a remote parse would silently break every
+    ///    fork checkout.
+    /// 2. The `origin` remote, parsed directly, when gh cannot answer. gh
+    ///    refuses outright on a host it does not recognise, so this is the only
+    ///    route by which a GitLab checkout can ever name itself.
+    ///
+    /// Returns nil when neither source yields a host — a caller that cannot
+    /// name the repo defers, and must never fall back to guessing `github.com`.
+    private nonisolated func resolveNameWithOwner(
+        repoPath: String
+    ) async -> (owner: String, name: String, host: String)? {
+        if let identity = await resolveViaGH(repoPath: repoPath) { return identity }
+        guard let remote = await readRemoteURL(repoPath: repoPath),
+              let identity = Self.parseRemoteIdentity(remote) else {
+            logger.debug("could not name the repo at \(repoPath, privacy: .public) from gh or from its origin remote")
+            return nil
+        }
+        return identity
+    }
+
+    private nonisolated func resolveViaGH(
+        repoPath: String
+    ) async -> (owner: String, name: String, host: String)? {
+        let args = ["repo", "view", "--json", "nameWithOwner,url"]
+        guard let output = await runGH(args: args, repoPath: repoPath),
+              let data = output.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let nameWithOwner = root["nameWithOwner"] as? String,
+              let url = root["url"] as? String,
+              let host = URLComponents(string: url)?.host, !host.isEmpty else { return nil }
+        let parts = nameWithOwner.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "/")
         guard parts.count == 2 else { return nil }
-        return (owner: String(parts[0]), name: String(parts[1]))
+        return (owner: String(parts[0]), name: String(parts[1]), host: host)
+    }
+
+    private nonisolated func readRemoteURL(repoPath: String) async -> String? {
+        if let remoteURLReader { return await remoteURLReader(repoPath) }
+        return await GitManager().getRemoteURL(repoPath: repoPath)
+    }
+
+    /// The host, namespace and project of a git remote URL.
+    ///
+    /// Accepts the three shapes a remote can take — `https://host/a/b`,
+    /// `ssh://git@host:22/a/b`, and the scp-like `git@host:a/b` — and keeps the
+    /// FULL namespace, because a GitLab project can nest (`acme/platform/api`)
+    /// and the owner is everything before the last segment.
+    ///
+    /// `RemoteRepoMatching` in TBDShared parses the same three shapes and is
+    /// deliberately not reused: it drops the host by design, and it keeps only
+    /// the last two segments, so it reads `acme/platform/backend/api` as
+    /// `backend/api`. Both choices are correct for what it does — matching a
+    /// provider's `meta["repo"]` against registered repos — and wrong for
+    /// naming a repo to its own forge.
+    static func parseRemoteIdentity(_ remote: String) -> (owner: String, name: String, host: String)? {
+        var rest = remote.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rest.isEmpty else { return nil }
+        if let scheme = rest.range(of: "://") {
+            rest = String(rest[scheme.upperBound...])
+        } else if let colon = rest.firstIndex(of: ":") {
+            // scp-like syntax puts ':' where a URL puts the first '/'.
+            rest.replaceSubrange(colon...colon, with: "/")
+        }
+        var segments = rest.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        guard segments.count >= 3 else { return nil }
+        var host = segments.removeFirst()
+        if let at = host.lastIndex(of: "@") { host = String(host[host.index(after: at)...]) }
+        // An `ssh://git@host:22/…` port is not part of the host name.
+        if let portColon = host.firstIndex(of: ":") { host = String(host[host.startIndex..<portColon]) }
+        var name = segments.removeLast()
+        if name.lowercased().hasSuffix(".git") { name = String(name.dropLast(4)) }
+        let owner = segments.joined(separator: "/")
+        guard !host.isEmpty, !owner.isEmpty, !name.isEmpty else { return nil }
+        return (owner: owner, name: name, host: host.lowercased())
     }
 
     /// `resolveNameWithOwner` behind a ~15-min TTL cache so the periodic poll
     /// (by-number query) and picker (open-PR query) stop spawning a `gh repo
     /// view` subprocess on every call. A checkout's owner/name is effectively
     /// immutable, so a stale entry is harmless within the TTL.
-    private func cachedNameWithOwner(repoPath: String) async -> (owner: String, name: String)? {
+    private func cachedNameWithOwner(repoPath: String) async -> (owner: String, name: String, host: String)? {
         if let entry = ownerRepoCache[repoPath], entry.expiry > Date() {
             return entry.value
         }
@@ -2059,12 +2145,15 @@ public actor PRStatusManager {
         return resolved
     }
 
-    /// The checkout's own GitHub `owner`/`name`, through the same TTL cache the
-    /// poll and picker use. Exposed for PR *binding* validation, which has to
-    /// ask the same question on every hook fire and manual attach — resolving
-    /// it independently would both double the `gh repo view` subprocesses and
-    /// let the two answers disagree inside a TTL window.
-    public func repoIdentity(repoPath: String) async -> (owner: String, name: String)? {
+    /// The checkout's own `owner`/`name` and the host they live on, through the
+    /// same TTL cache the poll and picker use. Exposed for PR *binding*
+    /// validation, which has to ask the same question on every hook fire and
+    /// manual attach — resolving it independently would both double the `gh
+    /// repo view` subprocesses and let the two answers disagree inside a TTL
+    /// window. The host rides along because a bare number has to be composed
+    /// into a reference, and the shape of that reference is the host's to
+    /// decide.
+    public func repoIdentity(repoPath: String) async -> (owner: String, name: String, host: String)? {
         await cachedNameWithOwner(repoPath: repoPath)
     }
 
@@ -2109,7 +2198,7 @@ public actor PRStatusManager {
         var resolved: [String: (owner: String, name: String)] = [:]
         for path in Set(numbered.map(\.worktreePath)) {
             if let ownerRepo = await cachedNameWithOwner(repoPath: path) {
-                resolved[path] = ownerRepo
+                resolved[path] = (owner: ownerRepo.owner, name: ownerRepo.name)
             } else {
                 logger.debug("fetchAll: could not resolve owner/name for numbered PRs at \(path, privacy: .public)")
             }

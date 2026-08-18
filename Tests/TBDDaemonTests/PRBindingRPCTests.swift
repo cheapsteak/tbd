@@ -10,9 +10,10 @@ import TestSupport
 ///
 /// `worktree_pull_request.worktreeID` is an enforced foreign key, so the harness
 /// seeds a real repo and worktree instead of inventing a bare UUID. The
-/// worktree's own `owner/name` comes from the router's injected
+/// worktree's own `owner/name/host` comes from the router's injected
 /// `prBindingRepoResolver` seam — production resolves it with `gh repo view`
-/// behind `PRStatusManager`'s TTL cache, which a unit test must not spawn.
+/// (or the `origin` remote) behind `PRStatusManager`'s TTL cache, which a unit
+/// test must not spawn.
 private struct PRBindingRPCHarness {
     enum HarnessError: Error, CustomStringConvertible {
         case rpcFailed(String)
@@ -29,7 +30,7 @@ private struct PRBindingRPCHarness {
     let worktreeID: UUID
     let repoID: UUID
 
-    init(repo: (owner: String, name: String)?) async throws {
+    init(repo: (owner: String, name: String, host: String)?) async throws {
         let db = try TBDDatabase(inMemory: true)
         self.db = db
         let suffix = UUID().uuidString
@@ -113,7 +114,7 @@ struct PRBindingRPCTests {
 
     @Test("pr.attach with a URL binds and pr.bindings returns it")
     func attachThenList() async throws {
-        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod"))
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod", "github.com"))
         let attach = try await harness.attach(url: "https://github.com/acme/acme-prod/pull/412")
         #expect(attach.outcome == "bound")
         #expect(attach.binding?.number == 412)
@@ -124,14 +125,54 @@ struct PRBindingRPCTests {
 
     @Test("pr.attach accepts a bare number and resolves the worktree's repo")
     func attachByNumber() async throws {
-        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod"))
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod", "github.com"))
         let attach = try await harness.attach(number: 77)
         #expect(attach.binding?.url == "https://github.com/acme/acme-prod/pull/77")
     }
 
+    /// The bug this closes: a bare number on a GitLab checkout used to compose
+    /// `https://github.com/<namespace>/<project>/pull/<n>` — a github.com URL
+    /// for a repo that does not exist there, bound and then polled forever.
+    @Test("pr.attach by number composes a merge-request URL on a GitLab host")
+    func attachByNumberGitLab() async throws {
+        let harness = try await PRBindingRPCHarness(
+            repo: ("acme/platform", "api-gateway", "git.acme.example"))
+        let attach = try await harness.attach(number: 412)
+        #expect(attach.outcome == "bound")
+        #expect(attach.binding?.url
+                == "https://git.acme.example/acme/platform/api-gateway/-/merge_requests/412")
+        #expect(attach.binding?.host == "git.acme.example")
+        #expect(attach.binding?.owner == "acme/platform")
+        #expect(attach.binding?.repo == "api-gateway")
+    }
+
+    /// A namespace nests arbitrarily on GitLab, and every level of it belongs
+    /// to the owner — the project is only ever the last segment.
+    @Test("pr.attach by number keeps a deeply nested GitLab namespace intact")
+    func attachByNumberNestedNamespace() async throws {
+        let harness = try await PRBindingRPCHarness(
+            repo: ("acme/platform/backend", "api-gateway", "git.acme.example"))
+        let attach = try await harness.attach(number: 7)
+        #expect(attach.binding?.url
+                == "https://git.acme.example/acme/platform/backend/api-gateway/-/merge_requests/7")
+        #expect(attach.binding?.owner == "acme/platform/backend")
+    }
+
+    /// A GitHub Enterprise-shaped host is not github.com, so the composed URL
+    /// must at least stay on the worktree's own host rather than silently
+    /// naming github.com — which is what the hardcoded composition did.
+    @Test("pr.attach by number never composes a github.com URL for another host")
+    func attachByNumberKeepsItsOwnHost() async throws {
+        let harness = try await PRBindingRPCHarness(
+            repo: ("acme", "acme-prod", "git.acme.example"))
+        let attach = try await harness.attach(number: 412)
+        #expect(attach.binding?.url.hasPrefix("https://git.acme.example/") == true)
+        #expect(attach.binding?.url.contains("github.com") == false)
+    }
+
     @Test("pr.attach reports a wrong-repo rejection instead of binding")
     func attachWrongRepo() async throws {
-        let harness = try await PRBindingRPCHarness(repo: ("acme", "other-repo"))
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "other-repo", "github.com"))
         let attach = try await harness.attach(url: "https://github.com/acme/acme-prod/pull/412")
         #expect(attach.outcome == "rejectedWrongRepo")
         #expect(attach.detail == "acme/acme-prod")
@@ -141,7 +182,7 @@ struct PRBindingRPCTests {
 
     @Test("pr.detach tombstones and pr.bindings stops returning it")
     func detach() async throws {
-        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod"))
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod", "github.com"))
         _ = try await harness.attach(number: 412)
         #expect(try await harness.detach(number: 412))
         #expect(try await harness.bindings().bindings.isEmpty)
@@ -159,7 +200,7 @@ struct PRBindingRPCTests {
     /// the second must drop it.
     @Test("pr.bindings reports how many bindings are tombstoned")
     func bindingsReportDetachedCount() async throws {
-        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod"))
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod", "github.com"))
         #expect(try await harness.bindings().detachedCount == 0)
 
         _ = try await harness.attach(number: 412)
@@ -195,7 +236,7 @@ struct PRBindingRPCTests {
     /// fan-out never reaches it. One call reports the whole table.
     @Test("pr.bindingsAll returns several worktrees' bindings in one call")
     func bindingsAllAcrossWorktrees() async throws {
-        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod"))
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod", "github.com"))
         let second = try await harness.addWorktree()
         try await harness.attach(number: 412)
         try await harness.attach(number: 413)
@@ -217,7 +258,7 @@ struct PRBindingRPCTests {
     /// legacy-status fallback, so a detach is not silently undone.
     @Test("pr.bindingsAll excludes tombstoned rows and still reports a tombstone-only worktree")
     func bindingsAllReportsTombstones() async throws {
-        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod"))
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod", "github.com"))
         let tombstonedOnly = try await harness.addWorktree()
         try await harness.attach(number: 412)
         try await harness.attach(number: 413)
@@ -239,7 +280,7 @@ struct PRBindingRPCTests {
     /// the response does not grow one entry per worktree in the fleet.
     @Test("pr.bindingsAll omits a worktree that has no bindings at all")
     func bindingsAllOmitsUnboundWorktrees() async throws {
-        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod"))
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod", "github.com"))
         _ = try await harness.addWorktree()
         #expect(try await harness.bindingsAll().worktrees.isEmpty)
 
@@ -250,13 +291,13 @@ struct PRBindingRPCTests {
 
     @Test("pr.detach of an unbound PR reports false rather than erroring")
     func detachUnknown() async throws {
-        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod"))
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod", "github.com"))
         #expect(try await harness.detach(number: 999) == false)
     }
 
     @Test("pr.attach with neither url nor number is an RPC error")
     func attachMissingArgs() async throws {
-        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod"))
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod", "github.com"))
         await #expect(throws: (any Error).self) {
             _ = try await harness.attachRaw(url: nil, number: nil)
         }
@@ -276,7 +317,7 @@ struct PRBindingRPCTests {
 
     @Test("a malformed url is still reported as unusable input")
     func attachRejectsMalformedURL() async throws {
-        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod"))
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod", "github.com"))
         await #expect(throws: (any Error).self) {
             _ = try await harness.attachRaw(url: "https://example.com/not/a/pr", number: nil)
         }
@@ -294,7 +335,7 @@ struct PRBindingRPCTests {
     func detachTwiceReportsFalse() async throws {
         // `updateAll` counts matched rows, so the second detach used to print
         // "Detached." for a no-op.
-        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod"))
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod", "github.com"))
         _ = try await harness.attach(number: 412)
         #expect(try await harness.detach(number: 412))
         #expect(try await harness.detach(number: 412) == false)

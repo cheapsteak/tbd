@@ -177,12 +177,13 @@ public final class RPCRouter: Sendable {
     /// Binding policy for the multi-PR-per-worktree bindings — repo validation,
     /// dedupe, tombstones, cap.
     let prBindingCoordinator: PRBindingCoordinator
-    /// The worktree's own GitHub `owner`/`name`. The coordinator is built on
-    /// this same closure, so a caller that must name a repo before it can form a
-    /// PR reference (`pr.attach 412`) agrees with the policy that validates it.
-    /// Production resolves it via `PRStatusManager`'s `gh repo view` TTL cache;
-    /// tests inject a stub through the init parameter of the same name.
-    let prBindingRepoResolver: @Sendable (UUID) async -> (owner: String, name: String)?
+    /// The worktree's own `owner`/`name` and the host they live on. The
+    /// coordinator is built on this same closure, so a caller that must name a
+    /// repo before it can form a PR reference (`pr.attach 412`) agrees with the
+    /// policy that validates it. Production resolves it via `PRStatusManager`'s
+    /// TTL cache; tests inject a stub through the init parameter of the same
+    /// name.
+    let prBindingRepoResolver: @Sendable (UUID) async -> (owner: String, name: String, host: String)?
     /// Queues concurrent `terminal.send` RPCs per terminal so two payloads
     /// never interleave in one composer. Different terminals still send in
     /// parallel — see `TerminalSendSerializer`.
@@ -223,7 +224,7 @@ public final class RPCRouter: Sendable {
         remoteManager: RemoteProviderManager? = nil,
         codexExecutableResolver: (@Sendable () throws -> String)? = nil,
         codexHomeEnsurer: (@Sendable () throws -> URL)? = nil,
-        prBindingRepoResolver: (@Sendable (UUID) async -> (owner: String, name: String)?)? = nil,
+        prBindingRepoResolver: (@Sendable (UUID) async -> (owner: String, name: String, host: String)?)? = nil,
         now: @escaping @Sendable () -> Date = { Date() },
         actuationLog: ActuationLog
     ) {
@@ -1246,16 +1247,27 @@ public final class RPCRouter: Sendable {
         return .resolved(parsed)
     }
 
-    /// A bare PR number as a `ParsedPRURL` in the worktree's own repo.
+    /// A bare PR or MR number as a `ParsedPRURL` in the worktree's own repo.
     ///
     /// Resolved through the same seam the coordinator validates with, so a
     /// number can never synthesise a URL the policy would then reject as
     /// wrong-repo. Returns nil when the worktree's repo cannot be named — the
-    /// caller defers rather than guessing an owner.
+    /// caller defers rather than guessing an owner or a host.
+    ///
+    /// The URL's shape is the host's to decide: GitLab writes
+    /// `/<namespace…>/<project>/-/merge_requests/<iid>`, GitHub writes
+    /// `/owner/name/pull/<n>`. Composing the GitHub shape for every host, as
+    /// this did, produced a URL that pointed at nothing on a GitLab instance.
     private func prRef(worktreeID: UUID, number: Int) async -> ParsedPRURL? {
         guard let own = await prBindingRepoResolver(worktreeID) else { return nil }
+        let url: String
+        switch Forge.forHost(own.host) {
+        case .gitlab:
+            url = "https://\(own.host)/\(own.owner)/\(own.name)/-/merge_requests/\(number)"
+        case .github:
+            url = "https://\(own.host)/\(own.owner)/\(own.name)/pull/\(number)"
+        }
         return ParsedPRURL(
-            host: "github.com", owner: own.owner, repo: own.name, number: number,
-            url: "https://github.com/\(own.owner)/\(own.name)/pull/\(number)")
+            host: own.host, owner: own.owner, repo: own.name, number: number, url: url)
     }
 }

@@ -35,7 +35,12 @@ struct PRPollReconcileTests {
         func set(nodesByNumber: [Int: String]) { self.nodesByNumber = nodesByNumber }
 
         func run(args: [String], repoPath: String) -> GHCommandResult? {
-            if args.first == "repo" { return GHCommandResult(stdout: nameWithOwner + "\n") }
+            if args.first == "repo" {
+                // `gh repo view --json nameWithOwner,url` — the url is what
+                // names the host the checkout lives on.
+                return GHCommandResult(stdout: #"{"nameWithOwner":"\#(nameWithOwner)","#
+                    + #""url":"https://github.com/\#(nameWithOwner)"}"#)
+            }
             guard let query = args.first(where: { $0.hasPrefix("query=") }) else { return nil }
             if query.contains("commits(last: 1)") { return nil }
             if query.contains("viewer {") {
@@ -135,7 +140,7 @@ struct PRPollReconcileTests {
                 tmux: TmuxManager(dryRun: true),
                 startTime: Date(),
                 prManager: manager,
-                prBindingRepoResolver: { _ in ("acme", "acme-prod") },
+                prBindingRepoResolver: { _ in ("acme", "acme-prod", "github.com") },
                 actuationLog: makeTestActuationLog())
             // Production wires this in `Daemon.swift` too. Without it the poll
             // judges no merge rule at all, and the two ordering findings below

@@ -16,7 +16,8 @@ struct PRBindingCoordinatorTests {
         let coordinator: PRBindingCoordinator
         let repoID: UUID
 
-        init(repo: (owner: String, name: String)? = ("acme", "acme-prod")) async throws {
+        init(repo: (owner: String, name: String, host: String)? =
+            ("acme", "acme-prod", "github.com")) async throws {
             db = try TBDDatabase(inMemory: true)
             let created = try await db.repos.create(
                 path: "/tmp/prbinding-coord-repo-\(UUID().uuidString)",
@@ -53,7 +54,7 @@ struct PRBindingCoordinatorTests {
 
     @Test("rejects a PR belonging to a different repo")
     func rejectsWrongRepo() async throws {
-        let fixture = try await Fixture(repo: ("acme", "other-repo"))
+        let fixture = try await Fixture(repo: ("acme", "other-repo", "github.com"))
         let wt = try await fixture.newWorktree()
         let outcome = await fixture.coordinator.bind(worktreeID: wt, parsed: parsed, source: .hook)
         guard case .rejectedWrongRepo(let named) = outcome else {
@@ -65,7 +66,7 @@ struct PRBindingCoordinatorTests {
 
     @Test("repo comparison is case-insensitive")
     func repoCaseInsensitive() async throws {
-        let fixture = try await Fixture(repo: ("ACME", "ACME-PROD"))
+        let fixture = try await Fixture(repo: ("ACME", "ACME-PROD", "github.com"))
         let wt = try await fixture.newWorktree()
         let outcome = await fixture.coordinator.bind(worktreeID: wt, parsed: parsed, source: .hook)
         guard case .bound = outcome else {

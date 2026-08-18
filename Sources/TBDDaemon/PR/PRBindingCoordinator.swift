@@ -33,12 +33,16 @@ public actor PRBindingCoordinator {
     }
 
     private let store: PRBindingStore
-    private let resolveRepo: @Sendable (UUID) async -> (owner: String, name: String)?
+    private let resolveRepo: @Sendable (UUID) async -> (owner: String, name: String, host: String)?
 
-    /// - Parameter resolveRepo: the worktree's own GitHub `owner`/`name`, or nil
-    ///   when it cannot be determined (no remote, git failure, unknown worktree).
+    /// - Parameter resolveRepo: the worktree's own `owner`/`name` and host, or
+    ///   nil when they cannot be determined (no remote, git failure, unknown
+    ///   worktree). Validation compares `owner`/`name` only: the host is
+    ///   carried for the callers that must *compose* a reference, and folding
+    ///   it into the wrong-repo check would start rejecting bindings that are
+    ///   accepted today, which is a policy change and not this one.
     public init(store: PRBindingStore,
-                resolveRepo: @escaping @Sendable (UUID) async -> (owner: String, name: String)?) {
+                resolveRepo: @escaping @Sendable (UUID) async -> (owner: String, name: String, host: String)?) {
         self.store = store
         self.resolveRepo = resolveRepo
     }
