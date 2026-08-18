@@ -1277,6 +1277,20 @@ public struct Config: Codable, Sendable, Equatable {
     /// so this property is
     /// `claude_cloud_enabled ?? Config.claudeCloudEnabledDefault`.
     public var claudeCloudEnabled: Bool
+    /// Gate for the orphan-GC phase that reclaims processes which outlived the
+    /// worktree they were rooted in
+    /// (`docs/specs/2026-08-18-orphan-process-gc-design.md`). Read on top of
+    /// `gcEnabled`: both must be on for the phase to run. It ships OFF because
+    /// this is the one GC phase that signals processes rather than moving
+    /// bytes, and a process it misjudges cannot be restored.
+    ///
+    /// **Resolved, not stored**, like `gcProfileDirsEnabled`: the backing
+    /// column carries no SQL default and stays NULL until somebody touches the
+    /// toggle, so this property is
+    /// `gc_orphan_processes_enabled ?? Config.gcOrphanProcessesEnabledDefault`.
+    /// NULL means "never chose" and follows the shipped default wherever it
+    /// goes; `0`/`1` is an explicit gesture and is honored forever.
+    public var gcOrphanProcessesEnabled: Bool
 
     /// Default idle-timeout for auto-hibernation, in minutes.
     public static let defaultHibernateIdleMinutes = 30
@@ -1311,6 +1325,11 @@ public struct Config: Codable, Sendable, Equatable {
     /// lives. Cloud ships off; graduating it is a change to this constant — no
     /// forcing `UPDATE` migration, and an explicit opt-out is left alone.
     public static let claudeCloudEnabledDefault = false
+    /// The shipped default for `gcOrphanProcessesEnabled`, and the single place
+    /// it lives. The orphaned-process collector ships off; graduating it is a
+    /// change to this constant — no forcing `UPDATE` migration, and an explicit
+    /// opt-out is left alone.
+    public static let gcOrphanProcessesEnabledDefault = false
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -1340,7 +1359,8 @@ public struct Config: Codable, Sendable, Equatable {
                 queuedPromptEnabled: Bool = Config.queuedPromptDefault,
                 supervisionEnabled: Bool = Config.supervisionEnabledDefault,
                 gcProfileDirsEnabled: Bool = Config.gcProfileDirsEnabledDefault,
-                claudeCloudEnabled: Bool = Config.claudeCloudEnabledDefault) {
+                claudeCloudEnabled: Bool = Config.claudeCloudEnabledDefault,
+                gcOrphanProcessesEnabled: Bool = Config.gcOrphanProcessesEnabledDefault) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
         self.envSettingOverrides = envSettingOverrides
@@ -1370,6 +1390,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.supervisionEnabled = supervisionEnabled
         self.gcProfileDirsEnabled = gcProfileDirsEnabled
         self.claudeCloudEnabled = claudeCloudEnabled
+        self.gcOrphanProcessesEnabled = gcOrphanProcessesEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -1440,6 +1461,11 @@ public struct Config: Codable, Sendable, Equatable {
             Bool.self, forKey: .gcProfileDirsEnabled) ?? Config.gcProfileDirsEnabledDefault
         claudeCloudEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .claudeCloudEnabled) ?? Config.claudeCloudEnabledDefault
+        // Same tri-state again: absent means the sender knew nothing about the
+        // flag, which is the NULL column's situation — follow the shipped
+        // default rather than hardcoding `false`.
+        gcOrphanProcessesEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .gcOrphanProcessesEnabled) ?? Config.gcOrphanProcessesEnabledDefault
     }
 }
 
