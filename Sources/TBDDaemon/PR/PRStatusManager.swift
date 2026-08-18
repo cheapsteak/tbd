@@ -1158,7 +1158,36 @@ public actor PRStatusManager {
         reviewVerdictRaw: String = "",
         isDraft: Bool = false,
         requiredChecksFailing: Bool = false,
-        requiredChecksPending: Bool = false
+        requiredChecksPending: Bool = false,
+        pipelineGated: Bool = false,
+        pipelineStatus: String? = nil
+    ) -> (state: PRMergeableState, reason: String) {
+        switch forge {
+        case .github:
+            return mapGitHubStateAndReason(
+                ghState: ghState,
+                mergeVerdictRaw: mergeVerdictRaw,
+                reviewVerdictRaw: reviewVerdictRaw,
+                isDraft: isDraft,
+                requiredChecksFailing: requiredChecksFailing,
+                requiredChecksPending: requiredChecksPending)
+        case .gitlab:
+            return mapGitLabStateAndReason(
+                state: ghState,
+                detailed: mergeVerdictRaw,
+                isDraft: isDraft,
+                pipelineGated: pipelineGated,
+                pipelineStatus: pipelineStatus)
+        }
+    }
+
+    private static func mapGitHubStateAndReason(
+        ghState: String,
+        mergeVerdictRaw: String,
+        reviewVerdictRaw: String,
+        isDraft: Bool,
+        requiredChecksFailing: Bool,
+        requiredChecksPending: Bool
     ) -> (state: PRMergeableState, reason: String) {
         switch ghState {
         case "MERGED": return (.merged, "Merged")
@@ -1188,6 +1217,69 @@ public actor PRStatusManager {
             default:
                 return (.blocked, "Blocked")
             }
+        }
+    }
+
+    /// GitLab's merge vocabulary.
+    ///
+    /// The CI signal is computed independently of `detailedMergeStatus`, which
+    /// reports only ONE blocker by a precedence GitLab owns and in which CI
+    /// ranks below approval, draft and unchecked. Field measurement: 33 failing
+    /// pipelines across 71 merge requests on a pipeline-gated project produced
+    /// zero CI_MUST_PASS. Reading CI off the merge status would therefore show
+    /// red essentially never, and — since NOT_APPROVED maps to .mergeable —
+    /// would render a merge request with a failing pipeline as "Ready to merge".
+    ///
+    /// Precedence mirrors the GitHub arm exactly: terminal, then draft, then
+    /// the CI signal, then the merge-status switch.
+    private static func mapGitLabStateAndReason(
+        state: String,
+        detailed: String,
+        isDraft: Bool,
+        pipelineGated: Bool,
+        pipelineStatus: String?
+    ) -> (state: PRMergeableState, reason: String) {
+        switch state.lowercased() {
+        case "merged": return (.merged, "Merged")
+        case "closed": return (.closed, "Closed")
+        default: break
+        }
+
+        if isDraft || detailed == "DRAFT_STATUS" { return (.draft, "Draft") }
+
+        // `onlyAllowMergeIfPipelineSucceeds` is the faithful analogue of
+        // GitHub's "required check". A failing pipeline on a project that does
+        // not gate merges is GitHub's UNSTABLE, which TBD does not colour.
+        if pipelineGated, let pipelineStatus {
+            switch pipelineStatus {
+            case "FAILED": return (.checksFailed, "Pipeline failed")
+            case "RUNNING", "PENDING", "CREATED", "WAITING_FOR_RESOURCE", "PREPARING":
+                return (.pending, "Pipeline running")
+            case "MANUAL": return (.pending, "Pipeline awaiting manual action")
+            default: break
+            }
+        }
+
+        switch detailed {
+        case "MERGEABLE": return (.mergeable, "Ready to merge")
+        // Checks are settled and the only blocker is an approval nobody has
+        // given — the same reading the GitHub arm gives BLOCKED + REVIEW_REQUIRED.
+        case "NOT_APPROVED": return (.mergeable, "Ready to merge")
+        case "DISCUSSIONS_NOT_RESOLVED": return (.changesRequested, "Unresolved discussions")
+        case "REQUESTED_CHANGES": return (.changesRequested, "Changes requested")
+        case "CONFLICT": return (.blocked, "Merge conflicts")
+        case "NEED_REBASE": return (.blocked, "Behind base branch")
+        case "BLOCKED_STATUS": return (.blocked, "Blocked by another merge request")
+        case "CHECKING", "PREPARING": return (.pending, "Checks pending")
+        // Not transient: GitLab leaves a stale merge request unchecked until
+        // something re-triggers the computation, so the wording must not imply
+        // it is about to resolve.
+        case "UNCHECKED": return (.pending, "Mergeability not checked")
+        default:
+            // The enum grows between releases. Unknown means unknown — treating
+            // it as blocked would let a future GitLab version paint merge
+            // requests red for saying something new.
+            return (.pending, "Mergeability not checked")
         }
     }
 
