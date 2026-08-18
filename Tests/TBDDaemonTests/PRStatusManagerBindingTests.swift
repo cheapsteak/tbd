@@ -739,6 +739,33 @@ struct PRStatusManagerBindingTests {
         #expect(await manager.observation(for: wt)?.outcome == PRObservation.Outcome.none)
     }
 
+    @Test("a GitLab project the query could not read records undetermined, not none")
+    func gitLabProjectErrorIsUndetermined() async {
+        // A renamed project, or a token that lost read_api on this one, comes
+        // back as a GraphQL errors array with `data: null`. The forge did not
+        // answer the question, so recording "this worktree has no merge
+        // request" would flip every worktree on the project dark and silent.
+        let wt = UUID()
+        let manager = PRStatusManager(
+            ghRunner: { _, _ in nil },
+            glRunner: { args, _ in
+                guard args.contains(where: { $0.hasPrefix("query=") }) else { return nil }
+                return GHCommandResult(stdout: """
+                {"errors":[{"message":"unknown project","extensions":{"code":"undefinedField"}}],
+                "data":null}
+                """)
+            },
+            gitLabHosts: [Self.gitLabHost],
+            remoteURLReader: { _ in
+                "https://git.acme.example/acme/platform/api-gateway.git"
+            })
+
+        _ = await manager.fetchAll(worktrees: [Self.pollWorktree(wt)])
+
+        let outcome = await manager.observation(for: wt)?.outcome
+        #expect(outcome == .undetermined(cause: PRUndeterminedCause.unparseableResponse))
+    }
+
     // MARK: - Authentication failure
 
     @Test("an auth failure names the host instead of degrading to no-forge")

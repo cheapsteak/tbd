@@ -12,6 +12,19 @@ struct GitLabQueriesTests {
         """.utf8)
     }
 
+    /// The parsed nodes, or nil when the response was refused as unreadable —
+    /// so a test that expects an answer can `#require` it.
+    static func answered(_ data: Data) -> (nodes: [GitLabQueries.PRNode], gated: Bool)? {
+        guard case .answered(let nodes, let gated) = GitLabQueries.parseMergeRequests(from: data)
+        else { return nil }
+        return (nodes, gated)
+    }
+
+    static func isUnreadable(_ data: Data) -> Bool {
+        if case .unreadable = GitLabQueries.parseMergeRequests(from: data) { return true }
+        return false
+    }
+
     static let oneNode = """
     {"iid":"412","state":"opened","draft":false,
      "detailedMergeStatus":"NOT_APPROVED","conflicts":false,
@@ -44,8 +57,8 @@ struct GitLabQueriesTests {
     }
 
     @Test("parses a node into a PRNode tagged gitlab")
-    func parsesNode() {
-        let (nodes, gated) = GitLabQueries.parseMergeRequests(from: Self.response(Self.oneNode))
+    func parsesNode() throws {
+        let (nodes, gated) = try #require(Self.answered(Self.response(Self.oneNode)))
         #expect(gated)
         #expect(nodes.count == 1)
         let n = nodes[0]
@@ -60,27 +73,50 @@ struct GitLabQueriesTests {
     }
 
     @Test("a null headPipeline yields a nil rollup state rather than dropping the node")
-    func nullPipeline() {
+    func nullPipeline() throws {
         let node = Self.oneNode.replacingOccurrences(
             of: #""headPipeline":{"status":"SUCCESS"}"#, with: #""headPipeline":null"#)
-        let (nodes, _) = GitLabQueries.parseMergeRequests(from: Self.response(node))
+        let (nodes, _) = try #require(Self.answered(Self.response(node)))
         #expect(nodes.count == 1)
         #expect(nodes[0].statusCheckRollupState == nil)
     }
 
     @Test("a non-gating project reports pipelineGated false")
-    func nonGatingProject() {
-        let (_, gated) = GitLabQueries.parseMergeRequests(
-            from: Self.response(Self.oneNode, gated: false))
+    func nonGatingProject() throws {
+        let (_, gated) = try #require(Self.answered(Self.response(Self.oneNode, gated: false)))
         #expect(!gated)
     }
 
-    @Test("an errors-only response yields no nodes and does not throw")
+    @Test("an errors-only response is unreadable, never an answered empty project")
     func errorsResponse() {
+        // `data: null` is what a rejected query looks like. Reading it as "this
+        // project has no merge requests" is what turns one bad token or one
+        // renamed project into every worktree on it reporting no merge request.
         let data = Data(#"{"errors":[{"message":"x","extensions":{"code":"undefinedField"}}],"data":null}"#.utf8)
-        let (nodes, gated) = GitLabQueries.parseMergeRequests(from: data)
+        #expect(Self.isUnreadable(data))
+    }
+
+    @Test("a null project is unreadable — the project rename and lost-permission shape")
+    func nullProject() {
+        #expect(Self.isUnreadable(Data(#"{"data":{"project":null}}"#.utf8)))
+    }
+
+    @Test("a mergeRequests block with no node list is unreadable")
+    func missingNodeList() {
+        let data = Data(#"{"data":{"project":{"onlyAllowMergeIfPipelineSucceeds":true,"mergeRequests":{}}}}"#.utf8)
+        #expect(Self.isUnreadable(data))
+    }
+
+    @Test("an empty node list is an answer: this project genuinely has no merge requests")
+    func emptyNodeList() throws {
+        let (nodes, gated) = try #require(Self.answered(Self.response("")))
         #expect(nodes.isEmpty)
-        #expect(!gated)
+        #expect(gated)
+    }
+
+    @Test("garbage that is not JSON is unreadable")
+    func notJSON() {
+        #expect(Self.isUnreadable(Data("not json at all".utf8)))
     }
 
     @Test("the recheck path percent-encodes the project path and stays a GET")

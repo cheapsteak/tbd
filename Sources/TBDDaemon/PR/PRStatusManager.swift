@@ -1182,8 +1182,16 @@ public actor PRStatusManager {
         // The call reached the host and the host answered, which is the only
         // evidence this actor accepts that the credentials work.
         await setForgeAuthFailure(false, host: host)
-        let parsed = GitLabQueries.parseMergeRequests(from: data)
-        return .success(nodes: parsed.nodes, pipelineGated: parsed.pipelineGated)
+        switch GitLabQueries.parseMergeRequests(from: data) {
+        case .answered(let nodes, let pipelineGated):
+            return .success(nodes: nodes, pipelineGated: pipelineGated)
+        case .unreadable:
+            // The same outcome the `gh` arm reaches when `parsePRNodes` throws.
+            // A response nobody could read settles nothing, so the worktrees it
+            // covers record undetermined rather than "no merge request".
+            logger.warning("GitLab query for \(projectPath, privacy: .public) returned a response this build could not read")
+            return .failure(cause: PRUndeterminedCause.unparseableResponse)
+        }
     }
 
     /// Whether a forge invocation was refused for want of valid credentials.
