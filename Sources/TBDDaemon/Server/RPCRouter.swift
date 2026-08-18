@@ -959,7 +959,24 @@ public final class RPCRouter: Sendable {
     /// in comes from `pollWorkingDirectory` — the repo's own checkout for a
     /// remote row — so no caller ever sees the synthetic `remote://` path.
     static func pollableWorktrees(_ worktrees: [Worktree]) -> [Worktree] {
-        worktrees.filter { !$0.isScratch }
+        worktrees.filter(isPollable)
+    }
+
+    /// Whether one row is asked about at all. The single predicate behind BOTH
+    /// the sweep's enumeration and `pr.refresh`, because the two disagreeing is
+    /// itself the bug: a scratch row the sweep skips forever used to be queried
+    /// the moment it was selected, the query failed in a directory that is not a
+    /// checkout, and the failure was recorded as `.undetermined`, which every PR
+    /// surface renders as "PR status unknown" for a row that cannot have a pull
+    /// request. Then the next sweep's `prManager.retain(active:)` evicted the
+    /// observation again, so the indicator blinked on select and off ~30s later.
+    ///
+    /// A scratch row is repo-less and branch-less by construction, so "no pull
+    /// request applies here" is settled knowledge and the right answer is to make
+    /// no attempt at all: not `.none` (which claims the forge answered), and not
+    /// `.undetermined` (which claims someone tried and could not tell).
+    static func isPollable(_ worktree: Worktree) -> Bool {
+        !worktree.isScratch
     }
 
     /// The directory this row's poll runs `git` and `gh` in, or nil when there
@@ -1070,6 +1087,13 @@ public final class RPCRouter: Sendable {
         guard let wt = try await db.worktrees.get(id: params.worktreeID) else {
             // No observation: no attempt was made, which is a third thing again
             // from `.none` and `.undetermined` and must not be dressed as either.
+            return try RPCResponse(result: PRRefreshResult(status: nil, observation: nil))
+        }
+        // The same predicate the sweep enumerates through. A scratch row is not
+        // polled, so it must not be refreshed either: no attempt is made, and
+        // "no attempt" is reported rather than a failure invented by asking a
+        // question that has no answer here.
+        guard Self.isPollable(wt) else {
             return try RPCResponse(result: PRRefreshResult(status: nil, observation: nil))
         }
         var repo: Repo?
