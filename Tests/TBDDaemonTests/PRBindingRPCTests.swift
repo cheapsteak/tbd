@@ -78,6 +78,17 @@ private struct PRBindingRPCHarness {
             path: "/tmp/prbinding-rpc-wt-\(suffix)", tmuxServer: "tbd-prbinding-rpc").id
     }
 
+    /// A remote lane's row in the same repo. It exists — so a binding's foreign
+    /// key holds and the injected repo resolver still answers for it — but it
+    /// has no directory on this machine, which is the state in which the forge
+    /// cannot be determined.
+    func addRemoteWorktree() async throws -> UUID {
+        let suffix = UUID().uuidString
+        return try await db.worktrees.createRemote(
+            repoID: repoID, name: "remote-\(suffix)", branch: "branch-\(suffix)",
+            provider: "acme-cloud", sessionID: "session-\(suffix)").id
+    }
+
     func bindings() async throws -> PRBindingsResult {
         let request = try RPCRequest(method: RPCMethod.prBindings,
                                      params: PRBindingsParams(worktreeID: worktreeID))
@@ -212,6 +223,30 @@ struct PRBindingRPCTests {
             gitLabHosts: ["git.acme.example"])
         #expect(try await known.attach(number: 412).binding?.url
                 == "https://git.acme.example/acme/acme-prod/-/merge_requests/412")
+    }
+
+    /// The forge shape comes from a second lookup, independent of the repo
+    /// resolver: the worktree's own directory is where `glab` reads its
+    /// configuration from, and a worktree with no local row — a remote lane, or
+    /// one deleted between the two awaits — has no directory here to ask in.
+    /// Nothing has then answered "GitLab" or "not GitLab", and either shape is
+    /// a guess.
+    ///
+    /// `/pull/<n>` is the damaging guess, which is why the resolver here names
+    /// the host as GitLab while the worktree is remote: composing GitHub's
+    /// shape then persists a binding whose URL 404s and whose label reads "PR".
+    /// So the call defers, exactly as it does when the repo cannot be named —
+    /// and the repo *is* nameable here, so the deferral can only come from the
+    /// forge lookup.
+    @Test("pr.attach by number defers when the worktree's forge cannot be determined")
+    func attachByNumberUndeterminedForge() async throws {
+        let harness = try await PRBindingRPCHarness(
+            repo: ("acme", "acme-prod", "git.acme.example"),
+            gitLabHosts: ["git.acme.example"])
+        let remote = try await harness.addRemoteWorktree()
+        let attach = try await harness.attach(number: 412, worktreeID: remote)
+        #expect(attach.outcome == "deferredUnknownRepo")
+        #expect(attach.binding == nil)
     }
 
     /// github.com short-circuits inside the resolver before any subprocess, so

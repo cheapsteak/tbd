@@ -1270,8 +1270,14 @@ public final class RPCRouter: Sendable {
     /// merge-request URL that 404s.
     private func prRef(worktreeID: UUID, number: Int) async -> ParsedPRURL? {
         guard let own = await prBindingRepoResolver(worktreeID) else { return nil }
+        // Two independent lookups have to succeed, and this is the second: the
+        // repo names the coordinate, the forge names the shape. Either one
+        // failing leaves a URL that could only be guessed.
+        guard let isGitLab = await isGitLabWorktree(worktreeID: worktreeID, host: own.host) else {
+            return nil
+        }
         let path = "https://\(own.host)/\(own.owner)/\(own.name)"
-        let url = await isGitLabWorktree(worktreeID: worktreeID, host: own.host)
+        let url = isGitLab
             ? "\(path)/-/merge_requests/\(number)"
             : "\(path)/pull/\(number)"
         return ParsedPRURL(
@@ -1279,15 +1285,24 @@ public final class RPCRouter: Sendable {
     }
 
     /// Whether this worktree's host speaks GitLab, asked in the worktree's own
-    /// directory because that is where `glab` reads its configuration from.
+    /// directory because that is where `glab` reads its configuration from —
+    /// or nil when the question could not be put at all.
     ///
-    /// A worktree with no local row — a remote one, or one deleted between the
-    /// resolve and this call — cannot supply that directory, so the question
-    /// goes unasked and the answer is the unchanged GitHub shape. That is the
-    /// same "defer rather than guess" the callers of `prRef` already take.
-    /// `github.com` never reaches a subprocess: the resolver short-circuits it.
-    private func isGitLabWorktree(worktreeID: UUID, host: String) async -> Bool {
-        guard let worktree = try? await db.worktrees.getLocal(id: worktreeID) else { return false }
+    /// Nil is a third answer and not a soft "no". A worktree with no local row
+    /// — a remote one, or one deleted between the resolve and this call —
+    /// cannot supply that directory, so nothing has answered, and answering
+    /// "not GitLab" there is a guess that composes `/pull/<n>` on a host that
+    /// may well serve `/-/merge_requests/<n>`: a binding whose URL 404s and
+    /// whose label reads "PR", persisted. `prRef` defers on nil instead, the
+    /// same way it defers when the repo cannot be named.
+    ///
+    /// A resolver that positively answers "this host is not GitLab" returns
+    /// `false` and still gets `/pull/<n>` — the shape github.com has always
+    /// been given and the one a GitHub Enterprise, Bitbucket, Gitea or
+    /// Codeberg checkout serves. `github.com` never reaches a subprocess: the
+    /// resolver short-circuits it.
+    private func isGitLabWorktree(worktreeID: UUID, host: String) async -> Bool? {
+        guard let worktree = try? await db.worktrees.getLocal(id: worktreeID) else { return nil }
         return await prManager.isGitLabHost(host, repoPath: worktree.path)
     }
 }
