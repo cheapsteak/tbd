@@ -316,7 +316,9 @@ worktree's own directory, where `glab` reads its configuration. Only a host
 named there gets `/-/merge_requests/<n>`; every other host gets `/pull/<n>`,
 which is the shape github.com has always been given and the shape a GitHub
 Enterprise, Bitbucket, Gitea or Codeberg checkout serves. github.com
-short-circuits inside the resolver, so a GitHub-only fleet spawns nothing.
+short-circuits inside the resolver and spawns nothing; every other host reaches
+the same cached read-only derivation described above, and is answered
+`/pull/<n>` whenever `glab` does not name it.
 
 The answer is one declaration, so a fleet on which nobody has run
 `glab auth login --hostname …` composes GitHub's shape — the same URL it
@@ -371,6 +373,15 @@ signal" below.
   which is the faithful analogue of GitHub's "required check". A failing pipeline
   on a project that does not gate merges on pipelines is the same situation as
   GitHub's `UNSTABLE`, which TBD deliberately does not colour red.
+- That gating answer is a **third state**, not a Bool: null, absent, or
+  unreadable means the project did not say, and only an explicit `false`
+  switches the signal off. Reading an unknown answer as "does not gate" is the
+  fail-open the paragraph above describes — with `NOT_APPROVED` mapping to
+  `.mergeable`, a failing pipeline would render "Ready to merge" — while
+  reading it as gated at worst colours a merge request that was fine. The
+  unknown answer is carried as a missing scalar rather than as an unreadable
+  response: one field nobody could read must not discard the merge requests
+  that arrived with it.
 - `FAILED` on a gating project yields `.checksFailed`; `RUNNING` and `PENDING`
   yield `.pending`.
 - `MANUAL` yields `.pending`, "Pipeline awaiting manual action" — neither failing
@@ -532,6 +543,11 @@ tested.
   `GLRunner` that inspects the arguments.
 - A GitLab host whose calls fail on authentication reports that host, and does
   not degrade to "not a GitLab repo".
+- The gating answer's three states: an explicit `false` still silences the CI
+  signal, while a field that is null, absent entirely, or of the wrong type is
+  each paired with a `FAILED` pipeline and must not come out `.mergeable` — and
+  the merge requests that arrived alongside the unreadable field are still
+  parsed, so the tri-state cannot have re-introduced one null zeroing a batch.
 - The CI signal: `FAILED` on a pipeline-gating project gives `.checksFailed`;
   `FAILED` on a non-gating project does not; a draft with `FAILED` stays
   `.draft`; `MANUAL` gives `.pending` with its own reason; a null
@@ -570,11 +586,38 @@ tested.
 
 **No feature flag.** The relevant criteria are behaviour that acts without a user
 gesture, destroys or mutates persisted state, or wholesale-replaces a
-load-bearing path. This is additive and unreachable for any host that is not
-GitLab: a GitHub-only fleet spawns no new subprocess, takes the unchanged
-`.github` arm, and sees no new state. The one edit that touches shared code — the
-`PRNode` field rename and the `mapStateAndReason` signature — is a refactor whose
-GitHub arm is unchanged, and is covered by the existing suite.
+load-bearing path. What a fleet actually gets depends on its host, and the
+three classes get three different things:
+
+- **`github.com`** – nothing new. `isGitLabHost` short-circuits on the literal
+  host before any subprocess, so such a fleet takes the unchanged `.github` arm
+  over unchanged data and never reaches a line of this work.
+- **A host the user has authenticated `glab` against** – all of it: the
+  derivation, the queries, the `.gitlab` mapping arm, the recheck. Reaching it
+  takes `glab auth login --hostname …`, an explicit act, and the same one that
+  makes the queries work at all.
+- **Every other host** – GitHub Enterprise, Bitbucket, Gitea, Codeberg, any
+  self-hosted forge that is not GitLab – runs the host derivation and stops
+  there. `glab auth status` does not name the host, so the worktree is
+  classified non-GitLab and takes the unchanged `.github` arm; every query,
+  mapping and recheck above is unreachable for it.
+
+That third class is what the decision rests on, because it is the one paying
+for a feature it will never use, and the claim it needs is not "nothing runs"
+but "what runs is small, read-only, and bounded". `glab auth status` reads: it
+starts nothing, writes nothing, and touches no state of TBD's. Where `glab` is
+not installed — the common case on those hosts — the lookup resolves to a
+static nil path and no subprocess is spawned at all. Where it is installed, the
+empty answer is remembered for `emptyStatusLifetime`, so the steady state is
+one short-lived read-only subprocess per 300 seconds for the whole fleet, on a
+poll path that already spawns `gh` on every tick. A flag over that would trade a
+bounded read-only probe for a default in which a GitLab user's merge requests
+stay invisible with no message anywhere, which is the failure this work exists
+to remove.
+
+The one edit that touches shared code — the `PRNode` field rename and the
+`mapStateAndReason` signature — is a refactor whose GitHub arm is unchanged,
+and is covered by the existing suite.
 
 **No new reconciler.** No durable external resource is created. `glab`
 subprocesses are transient in exactly the way `gh`'s already are, no git ref,
