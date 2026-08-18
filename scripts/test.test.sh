@@ -137,7 +137,12 @@ STUB
 #
 # The `-u` list matters: this harness may itself be running under a fenced
 # session, and an inherited TBD_HOME or TBD_SWIFT_LOCK_PATH would silently
-# change which branch of the lock resolution is under test.
+# change which branch of the lock resolution is under test. Every OTHER knob
+# `scripts/swift-safe` reads is cleared for the same reason — the cases below
+# run the REAL wrapper, so a developer's exported TBD_SWIFT_JOBS decides
+# whether a forwarded `-j 2` is admitted at all, and an exported timeout,
+# heartbeat or orphan hatch decides how the admission-lock cases wait.
+# TBD_SWIFT_BIN is the deliberate exception: this harness sets it itself, below.
 #
 # `TMUX_TMPDIR` is pinned rather than unset, and it stands in for the
 # DEVELOPER'S REAL socket directory: the wrapper overwrites it for the run, so
@@ -151,6 +156,8 @@ run_script() {
   local script="$1" fix="$2"; shift 2
   RUN_OUT="$(env -u CI -u TBD_HOME -u TBD_SOCKET_PATH -u TBD_CLAUDE_HOST_HOME \
                  -u TBD_TEST_CODEX_HOME -u TBD_SWIFT_LOCK_PATH -u CFFIXED_USER_HOME \
+                 -u TBD_SWIFT_JOBS -u TBD_SWIFT_LOCK_TIMEOUT_SECONDS \
+                 -u TBD_SWIFT_HEARTBEAT_SECONDS -u TBD_SWIFT_ALLOW_ORPHAN \
                  -u FAKE_SWIFT_DISARM -u FAKE_SWIFT_LEAK -u FAKE_SWIFT_RC \
                  -u FAKE_SWIFT_TMUX_SOCKETS \
                  ${RUN_ENV[@]+"${RUN_ENV[@]}"} \

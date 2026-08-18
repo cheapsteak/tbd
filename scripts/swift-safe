@@ -9,10 +9,12 @@ ownership is kernel-managed and is released when this process exits.
 Compile commands are given ``--jobs`` from ``TBD_SWIFT_JOBS`` (default 2).
 That value is honored at face value, with no ceiling: the lock already
 guarantees at most one build on the machine, so the variable is a total-machine
-compiler bound and whoever owns the machine sets it.  A ``-j``/``--jobs`` on
-the command line may lower it but not raise it — an agent that wants more
-parallelism is asking to overrule the machine owner, and should raise
-``TBD_SWIFT_JOBS`` instead.
+compiler bound and whoever owns the machine sets it.  A value above the
+machine's core count is honored too, with one stderr line saying so: jobs past
+the cores buy memory pressure rather than speed, and a typo would otherwise be
+invisible.  A ``-j``/``--jobs`` on the command line may lower it but not raise
+it — an agent that wants more parallelism is asking to overrule the machine
+owner, and should raise ``TBD_SWIFT_JOBS`` instead.
 
 Waiting is reported on stderr, never stdout, so a caller parsing SwiftPM's
 output sees nothing from this wrapper.  The holder writes ``pid``/``cwd``/
@@ -137,7 +139,18 @@ def _job_limit() -> int:
     # No ceiling on purpose: the machine-global lock means this is the whole
     # machine's compiler bound, and exporting the variable is its owner's
     # consent. A cap on top of serialization was doubly conservative.
-    return _positive_integer("TBD_SWIFT_JOBS", DEFAULT_JOBS)
+    limit = _positive_integer("TBD_SWIFT_JOBS", DEFAULT_JOBS)
+    # Say it, do not refuse it: past the core count the extra jobs only add
+    # memory pressure, so a stray digit costs a swapping machine and nothing
+    # else would report it. `os.cpu_count()` can answer None, and a machine
+    # that cannot count its own cores has no ground to warn from.
+    cores = os.cpu_count()
+    if cores is not None and limit > cores:
+        _report(
+            f"swift-safe: TBD_SWIFT_JOBS={limit} exceeds this machine's {cores} "
+            "CPU cores; jobs beyond core count add memory pressure without speedup"
+        )
+    return limit
 
 
 def _requested_jobs(arguments: list[str]) -> int | None:

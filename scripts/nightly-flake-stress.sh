@@ -54,11 +54,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # when a pass collapses to near-nothing, not to break every time somebody adds or
 # deletes a test. A floor pinned to the exact count would make ordinary test
 # churn look like a filter defect.
+#
+# No filter carries `-j`: the compile job count belongs to `scripts/swift-safe`,
+# which supplies it (2 by default) and refuses a command line asking for more
+# than TBD_SWIFT_JOBS allows. A hardcoded `-j 2` here would abort every
+# iteration on a box whose owner lowered that bound.
 TARGETS=(
-  "ControlModeInputHealth|--parallel -j 2 --filter ControlModeInputHealthTests|5|494|control-mode input health: two contention races"
+  "ControlModeInputHealth|--parallel --filter ControlModeInputHealthTests|5|494|control-mode input health: two contention races"
   "GitManagerTimeout|--no-parallel --filter ^TBDDaemonLiveTests\\.GitManagerTimeoutTests|3|503|60s hang at ~1/22 under heavy load, mechanism unknown"
-  "AppearanceDebounce|--parallel -j 2 --filter AppearanceDebounceTests|4|496|clock-driven wedge: megaYield at background QoS"
-  "FastPassWhole|--parallel -j 2 --skip ^TBDDaemonLiveTests\\.|3000|503|#503's actual reproduction shape: whole fast pass under load"
+  "AppearanceDebounce|--parallel --filter AppearanceDebounceTests|4|496|clock-driven wedge: megaYield at background QoS"
+  "FastPassWhole|--parallel --skip ^TBDDaemonLiveTests\\.|3000|503|#503's actual reproduction shape: whole fast pass under load"
 )
 
 DEFAULT_ITERATIONS=10
@@ -339,9 +344,13 @@ main() {
   # Build ONCE up front so the first iteration's timing is not dominated by the
   # compile. `swift build` alone does NOT build test targets — `--build-tests` does.
   echo
-  echo "building test targets (swift-safe build --build-tests -j 2)…"
+  echo "building test targets (swift-safe build --build-tests)…"
+  # No `-j`: `swift-safe` supplies the machine's job count itself (2 unless
+  # TBD_SWIFT_JOBS says otherwise) and REFUSES a command line above it, so a
+  # box whose owner lowered TBD_SWIFT_JOBS would fail this build for a reason
+  # that reads as a harness defect.
   if ! run_governed_swift "$BUILD_DEADLINE_S" "$work_dir/build.log" \
-    build --build-tests -j 2; then
+    build --build-tests; then
     echo "nightly-flake-stress: BUILD FAILED — see $work_dir/build.log" >&2
     tail -30 "$work_dir/build.log" >&2
     exit 2

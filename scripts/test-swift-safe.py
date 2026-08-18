@@ -176,6 +176,27 @@ class SwiftSafeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "test --filter Foo --jobs 34")
 
+    def test_a_job_count_past_the_core_count_is_honored_but_reported(self):
+        """A typo'd digit is honored — and said out loud, on stderr only.
+
+        9999 is past any machine's cores, so what this asserts does not depend
+        on the machine running it; the core number itself is left unasserted
+        for the same reason.
+        """
+        result = self.run_runner("build", TBD_SWIFT_JOBS="9999")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "build --jobs 9999")
+        self.assertIn("TBD_SWIFT_JOBS=9999 exceeds this machine's", result.stderr)
+        self.assertIn("CPU cores", result.stderr)
+        self.assertIn("without speedup", result.stderr)
+
+    def test_a_job_count_within_the_core_count_is_not_reported(self):
+        """Mutation guard: 1 is at or below every machine's core count."""
+        result = self.run_runner("build", TBD_SWIFT_JOBS="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "build --jobs 1")
+        self.assertNotIn("exceeds this machine's", result.stderr)
+
     def test_zero_and_negative_exported_job_counts_are_rejected(self):
         for value in ("0", "-1"):
             with self.subTest(value=value):
@@ -746,11 +767,21 @@ class OrphanedWrapperTests(unittest.TestCase):
         return condition()
 
     def wrapper_env(self, **extra_env) -> dict[str, str]:
-        env = os.environ.copy()
-        # A developer who exported the escape hatch — docs/reclaim-build.md
-        # invites it — must not silently disarm the check under test. The
-        # hatch case below sets it back explicitly.
-        env.pop("TBD_SWIFT_ALLOW_ORPHAN", None)
+        """The wrapper's environment with every knob it reads cleared first.
+
+        Same reason as `SwiftSafeTests.runner_env`, plus one specific to these
+        cases: an exported `TBD_SWIFT_JOBS` that is empty or not an integer
+        makes the wrapper exit during argument parsing, before it ever reaches
+        the wait loop — so the orphan check under test would never run and the
+        failure would read as a broken check rather than a stray variable. The
+        escape hatch goes with the rest; the hatch case below sets it back
+        explicitly, as does every setting this suite depends on.
+        """
+        env = {
+            name: value
+            for name, value in os.environ.items()
+            if not name.startswith("TBD_SWIFT_")
+        }
         env.update(
             {
                 "TBD_HOME": str(Path(self.temp.name) / "tbd"),

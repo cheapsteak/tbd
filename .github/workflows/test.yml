@@ -206,12 +206,20 @@ jobs:
             ls -la .build/*/debug/Modules/"$module".swiftmodule 2>/dev/null || echo "(absent)"
           done
 
-      # `-j 2` caps parallel swift-frontend processes on the ~7 GB runner.
+      # Two parallel swift-frontend processes is the cap on the ~7 GB runner.
       # Historically (Swift 6.2, all-per-file builds) default parallelism
       # OOMed late in the build with a bare `error: fatalError`. Under
       # Swift 6.3 the two big modules build WMO in debug (~1.35 GB peak
       # frontend RSS each, measured), so the cap is likely over-conservative
       # now — kept as safety margin; candidate for re-validation.
+      #
+      # The test steps below do NOT pass `-j` themselves: `scripts/swift-safe`,
+      # which `scripts/test.sh` runs SwiftPM through, supplies `--jobs 2` and
+      # refuses a command line above TBD_SWIFT_JOBS. Nothing sets that variable
+      # in this workflow, so the effective count here is the wrapper's 2 —
+      # unchanged — while a box whose owner lowered it is no longer failed by a
+      # hardcoded number. The bare `swift build` at the end of the job bypasses
+      # the wrapper, so it still names `-j 2` itself.
       #
       # Three sequential steps, one job (docs/specs/2026-07-24-test-hardening-design.md
       # §4): the tier-3 live suites live in their own target so they can run
@@ -347,7 +355,7 @@ jobs:
         timeout-minutes: 30
         run: |
           set -o pipefail
-          scripts/test.sh --fingerprint --parallel -j 2 --filter '^TBDDaemonTests\.' 2>&1 | tee /tmp/fast-pass-daemon.log
+          scripts/test.sh --fingerprint --parallel --filter '^TBDDaemonTests\.' 2>&1 | tee /tmp/fast-pass-daemon.log
           # `|| true`: with `set -o pipefail` (and GitHub's `bash -e`), a log
           # with no summary line makes the first `grep` exit 1 and a failing
           # command substitution in an assignment kills the shell — so the
@@ -381,7 +389,7 @@ jobs:
         timeout-minutes: 30
         run: |
           set -o pipefail
-          scripts/test.sh --fingerprint --parallel -j 2 --skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.' 2>&1 | tee /tmp/fast-pass-app.log
+          scripts/test.sh --fingerprint --parallel --skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.' 2>&1 | tee /tmp/fast-pass-app.log
           # `|| true`: with `set -o pipefail` (and GitHub's `bash -e`), a log
           # with no summary line makes the first `grep` exit 1 and a failing
           # command substitution in an assignment kills the shell — so the
