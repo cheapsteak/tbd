@@ -229,7 +229,7 @@ public actor PRStatusManager {
         // rather than `runGLResult`.
         self.gitLabHostResolver = GitLabHostResolver(glRunner: { args, repoPath in
             await PRStatusManager.runGlab(args: args, repoPath: repoPath)
-        })
+        }, now: now)
         self.now = now
     }
 
