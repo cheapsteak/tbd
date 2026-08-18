@@ -547,7 +547,13 @@ tested.
 - The recheck request names only bound merge requests, and a failure or an
   unparseable response from it does not disturb the poll's own result.
 - A hung recheck is terminated once its deadline elapses, driven by the injected
-  clock so the test proves the bound without waiting for it.
+  clock so the test proves the bound without waiting for it. Two of those tests
+  run a real child through the production subprocess path rather than a stubbed
+  runner, because the property is about a process and not about a Swift task: a
+  child that sets SIGTERM to `SIG_IGN` and then `exec`s survives the signal and
+  is nonetheless gone by the end of the grace, verified by `kill(pid, 0)` on the
+  pid it reported; a child that takes the signal exits on the deadline alone,
+  with the grace never spent.
 - Forge derivation is not attempted for a GitHub remote, asserted by an injected
   `GLRunner` that fails the test if invoked.
 - GitLab node parsing, including an absent `headPipeline`.
@@ -579,8 +585,13 @@ The single exception is the detached mergeability recheck, whose subprocess
 outlives the pass that spawned it. It is bounded at its creation site instead of
 by a sweep, by the pair described under "GitLab I/O": the single-flight gate
 keeps at most one live recheck per project, and the deadline terminates the
-child when it fires, so neither the count nor the lifetime is open-ended. A
-forge CLI subprocess is covered by no existing sweep, and this design adds none.
+child when it fires, so neither the count nor the lifetime is open-ended. The
+termination escalates: SIGTERM, then SIGKILL after `childKillGrace` if the
+child is still there. Without that second step the bound is on the signal and
+not on the process — SIGTERM is a request, the task group awaits the child
+before returning, and a child that ignores it holds both the recheck task and
+that project's single-flight gate open indefinitely. A forge CLI subprocess is
+covered by no existing sweep, and this design adds none.
 
 **A daemon that dies mid-recheck orphans that child, and nothing reclaims it.**
 The deadline lives in the daemon's own process, so it dies with it, and the

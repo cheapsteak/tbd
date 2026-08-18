@@ -206,6 +206,23 @@ public actor PRStatusManager {
     /// reclaim either.
     static let recheckTimeout: Duration = .seconds(60)
 
+    /// How long a forge CLI child is given to exit on its own after SIGTERM
+    /// before it is killed outright.
+    ///
+    /// `terminate()` is a request, not an outcome: a child that installs a
+    /// handler, ignores the signal, or sits in an uninterruptible state simply
+    /// stays — and `runGLBounded`'s task group awaits it before returning, so
+    /// the recheck task and that project's single-flight gate would both stay
+    /// wedged past `recheckTimeout` on a bound that only looks like one.
+    /// SIGKILL is what makes the deadline a deadline.
+    ///
+    /// Short, because everything the grace protects is already being
+    /// discarded: the deadline has fired and nobody will read this child's
+    /// output. Its only job is to let a well-behaved `glab` close its
+    /// connection and exit on its own rather than be killed for being a moment
+    /// slow about it.
+    static let childKillGrace: Duration = .seconds(5)
+
     /// Clock seam for that deadline — existential, defaulted, and last, so no
     /// call site changes and this actor's `Sendable` conformances are not
     /// infected by a generic parameter. `Duration` is behavior, `Date` is data:
@@ -248,7 +265,7 @@ public actor PRStatusManager {
         // any instance exists to capture, so it gets the static `glab` spawner
         // rather than `runGLResult`.
         self.gitLabHostResolver = GitLabHostResolver(glRunner: { args, repoPath in
-            await PRStatusManager.runGlab(args: args, repoPath: repoPath)
+            await PRStatusManager.runGlab(args: args, repoPath: repoPath, clock: clock)
         }, now: now)
         self.now = now
     }
@@ -3201,7 +3218,7 @@ public actor PRStatusManager {
             logger.debug("gh CLI not found in PATH")
             return nil
         }
-        return await Self.runCLI(executable: ghPath, args: args, repoPath: repoPath)
+        return await Self.runCLI(executable: ghPath, args: args, repoPath: repoPath, clock: clock)
     }
 
     /// One `glab` invocation, through the injected seam when a test supplied one.
@@ -3209,7 +3226,7 @@ public actor PRStatusManager {
         if let glRunner {
             return await glRunner(args, repoPath)
         }
-        return await Self.runGlab(args: args, repoPath: repoPath)
+        return await Self.runGlab(args: args, repoPath: repoPath, clock: clock)
     }
 
     /// One `glab` invocation that cannot outlive `timeout`, for the detached
@@ -3217,10 +3234,11 @@ public actor PRStatusManager {
     ///
     /// The deadline is a race, not a poll: whichever of the call and the sleep
     /// finishes first wins, and cancelling the group ends the other. On a
-    /// timeout that cancellation reaches `runCLI`, which terminates the child —
-    /// the bound is on the subprocess itself rather than merely on the task
-    /// awaiting it, because a task that stops waiting leaves a `glab` nothing
-    /// reclaims. Returns nil when the deadline fired; every caller of this is
+    /// timeout that cancellation reaches `runCLI`, which terminates the child
+    /// and, if it is still there `childKillGrace` later, kills it — the bound
+    /// is on the subprocess itself rather than merely on the task awaiting it,
+    /// because a task that stops waiting leaves a `glab` nothing reclaims, and
+    /// a child that ignores SIGTERM would leave this group waiting on it. Returns nil when the deadline fired; every caller of this is
     /// discarding the answer anyway.
     private nonisolated func runGLBounded(args: [String], repoPath: String,
                                           timeout: Duration) async -> GHCommandResult? {
@@ -3254,12 +3272,13 @@ public actor PRStatusManager {
     /// The real `glab` subprocess. Static because `GitLabHostResolver` is handed
     /// this same runner while the manager is still being initialized, so there
     /// is no instance yet for it to capture.
-    private static func runGlab(args: [String], repoPath: String) async -> GHCommandResult? {
+    private static func runGlab(args: [String], repoPath: String,
+                                clock: any Clock<Duration> = ContinuousClock()) async -> GHCommandResult? {
         guard let glabPath = resolvedGlabPath else {
             logger.debug("glab CLI not found in PATH")
             return nil
         }
-        return await runCLI(executable: glabPath, args: args, repoPath: repoPath)
+        return await runCLI(executable: glabPath, args: args, repoPath: repoPath, clock: clock)
     }
 
     /// Runs a forge CLI and answers what it printed.
@@ -3272,8 +3291,9 @@ public actor PRStatusManager {
     /// two orderings that could otherwise let one slip: a cancel that lands
     /// before `run()` prevents the launch outright, and one that lands during
     /// `run()` is re-checked immediately afterwards.
-    private static func runCLI(executable: String, args: [String], repoPath: String) async -> GHCommandResult? {
-        let handle = ChildProcessHandle()
+    static func runCLI(executable: String, args: [String], repoPath: String,
+                       clock: any Clock<Duration> = ContinuousClock()) async -> GHCommandResult? {
+        let handle = ChildProcessHandle(clock: clock, killGrace: childKillGrace)
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 let process = Process()
@@ -3366,6 +3386,16 @@ private final class ChildProcessHandle: @unchecked Sendable {
     private var process: Process?
     private var cancelled = false
 
+    /// Clock seam for the SIGTERM-to-SIGKILL grace — the only delay this type
+    /// has, and a delay is behavior, so it takes a clock rather than a date.
+    private let clock: any Clock<Duration>
+    private let killGrace: Duration
+
+    init(clock: any Clock<Duration>, killGrace: Duration) {
+        self.clock = clock
+        self.killGrace = killGrace
+    }
+
     /// Takes the process, or answers false because cancellation already
     /// arrived — in which case the caller must not launch it at all.
     func adopt(_ process: Process) -> Bool {
@@ -3381,7 +3411,7 @@ private final class ChildProcessHandle: @unchecked Sendable {
         cancelled = true
         let launched = process
         lock.unlock()
-        Self.terminate(launched)
+        terminate(launched)
     }
 
     /// Re-checked right after `run()` returns, for the cancellation that landed
@@ -3390,12 +3420,35 @@ private final class ChildProcessHandle: @unchecked Sendable {
         lock.lock()
         let launched = cancelled ? process : nil
         lock.unlock()
-        Self.terminate(launched)
+        terminate(launched)
     }
 
-    private static func terminate(_ process: Process?) {
+    /// Asks, then insists. SIGTERM first, and if the child is still there after
+    /// the grace, SIGKILL — the one signal it cannot catch, handle or ignore,
+    /// and so the only thing that turns the caller's deadline into a bound on
+    /// the process rather than on the wait.
+    private func terminate(_ process: Process?) {
         guard let process, process.isRunning else { return }
         process.terminate()
+        // Detached deliberately: this runs from a cancellation handler, and a
+        // sleep on a cancelled task returns at once — the escalation has to
+        // outlive the cancellation that armed it or it would fire immediately
+        // and give the child no grace at all.
+        Task.detached { [self] in
+            try? await clock.sleep(for: killGrace)
+            killIfStillRunning()
+        }
+    }
+
+    private func killIfStillRunning() {
+        lock.lock()
+        let launched = process
+        lock.unlock()
+        // Foundation reaps the child itself and clears `isRunning` when it
+        // does, so the pid read here is still this child's rather than one the
+        // system has since handed to somebody else.
+        guard let launched, launched.isRunning else { return }
+        kill(launched.processIdentifier, SIGKILL)
     }
 }
 

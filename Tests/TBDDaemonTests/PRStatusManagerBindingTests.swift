@@ -931,6 +931,126 @@ struct PRStatusManagerBindingTests {
                 "the recheck was still running after its deadline elapsed")
     }
 
+    @Test("a recheck child that ignores SIGTERM is killed by its deadline",
+          .clockDriven)
+    func recheckChildIsKilledWhenItIgnoresSIGTERM() async throws {
+        // The deadline above proves the Swift task stops waiting. This proves
+        // the thing that actually matters: a real OS process is gone by the
+        // bound. The injected runner drives `runCLI` — the production
+        // subprocess path, cancellation handler and all — with a child that
+        // installs SIG_IGN for SIGTERM and then `exec`s, so the ignore survives
+        // into a single long-lived process whose pid never changes. SIGTERM
+        // alone leaves it running, `withTaskGroup` awaits it before returning,
+        // and the recheck task plus that project's single-flight gate stay
+        // wedged for as long as it lives — well past the 60 s the design leans
+        // on to argue no reconciler is needed.
+        let clock = TestClock()
+        let gl = GitLabFake()
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-glab-kill-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // The child reports its own pid: `$$` is the shell's, and `exec` keeps
+        // it, so this is the pid of the `sleep` the deadline has to reach.
+        let pidFile = dir.appendingPathComponent("child.pid")
+        // Nothing reclaims a forge CLI subprocess, this suite included: if the
+        // assertion below fails the child is still out there, so end it here.
+        defer {
+            if let text = try? String(contentsOf: pidFile, encoding: .utf8),
+               let leaked = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                kill(leaked, SIGKILL)
+            }
+        }
+
+        let manager = PRStatusManager(
+            ghRunner: { _, _ in nil },
+            glRunner: { args, path in
+                guard args.contains(where: { $0.contains("with_merge_status_recheck=true") })
+                else { return await gl.run(args: args, repoPath: path) }
+                return await PRStatusManager.runCLI(
+                    executable: "/bin/sh",
+                    args: ["-c", "trap '' TERM; echo $$ > '\(pidFile.path)'; exec sleep 120"],
+                    repoPath: dir.path,
+                    clock: clock)
+            },
+            gitLabHosts: [Self.gitLabHost],
+            clock: clock)
+
+        _ = await manager.refreshBindings([Self.gitLabBinding()])
+
+        try await waitFor("the recheck child to report its pid") {
+            (try? String(contentsOf: pidFile, encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        }
+        let childPID = try #require(pid_t(
+            String(contentsOf: pidFile, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines)))
+        #expect(kill(childPID, 0) == 0, "the child was not running for the deadline to end")
+
+        // Virtual time: the deadline fires, then the grace after SIGTERM.
+        await clock.advanceWhenSuspended(by: PRStatusManager.recheckTimeout)
+        let died = await clock.advanceUntil(
+            "the SIGTERM-immune recheck child to be killed", by: PRStatusManager.childKillGrace
+        ) { kill(childPID, 0) != 0 && errno == ESRCH }
+
+        #expect(died, "the child outlived its deadline: SIGTERM alone cannot end it")
+    }
+
+    @Test("a recheck child that honours SIGTERM ends without waiting out the grace",
+          .clockDriven)
+    func recheckChildThatHonoursSIGTERMIsNotWaitedOn() async throws {
+        // The other branch of the escalation, and the reason it is a grace
+        // rather than an immediate SIGKILL: the ordinary child — a `glab` that
+        // takes the signal and exits — is gone the moment the deadline fires,
+        // with no advance past it. The wait below spends real time and no
+        // virtual time at all, so a build that had started killing children
+        // outright would still pass here while the previous test is what pins
+        // the grace being spent only on a child that needs it.
+        let clock = TestClock()
+        let gl = GitLabFake()
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-glab-term-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let pidFile = dir.appendingPathComponent("child.pid")
+        defer {
+            if let text = try? String(contentsOf: pidFile, encoding: .utf8),
+               let leaked = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                kill(leaked, SIGKILL)
+            }
+        }
+
+        let manager = PRStatusManager(
+            ghRunner: { _, _ in nil },
+            glRunner: { args, path in
+                guard args.contains(where: { $0.contains("with_merge_status_recheck=true") })
+                else { return await gl.run(args: args, repoPath: path) }
+                return await PRStatusManager.runCLI(
+                    executable: "/bin/sh",
+                    args: ["-c", "echo $$ > '\(pidFile.path)'; exec sleep 120"],
+                    repoPath: dir.path,
+                    clock: clock)
+            },
+            gitLabHosts: [Self.gitLabHost],
+            clock: clock)
+
+        _ = await manager.refreshBindings([Self.gitLabBinding()])
+
+        try await waitFor("the recheck child to report its pid") {
+            (try? String(contentsOf: pidFile, encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        }
+        let childPID = try #require(pid_t(
+            String(contentsOf: pidFile, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines)))
+
+        await clock.advanceWhenSuspended(by: PRStatusManager.recheckTimeout)
+
+        try await waitFor("the recheck child to exit on SIGTERM alone") {
+            kill(childPID, 0) != 0 && errno == ESRCH
+        }
+    }
+
     @Test("the recheck asks only about merge requests that can still change")
     func recheckSkipsTerminalMergeRequests() async {
         // A merged merge request has a mergeability nobody will recompute and
