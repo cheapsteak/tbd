@@ -2555,9 +2555,10 @@ public actor PRStatusManager {
     ///    live — so replacing it with a remote parse would silently break every
     ///    fork checkout.
     /// 2. The `origin` remote, parsed directly, and **only when gh cannot serve
-    ///    this checkout at all** — it is not installed, or it ran and disowned
-    ///    the checkout because no remote names a GitHub host it knows. That is
-    ///    the case every GitLab checkout is in, and it is the only route by
+    ///    this checkout at all** — it is not installed, it holds no credentials
+    ///    for anywhere (`ghExitNoCredentials`), or it ran and disowned the
+    ///    checkout because no remote names a GitHub host it knows. Those are
+    ///    the cases every GitLab checkout is in, and this is the only route by
     ///    which one can ever name itself.
     ///
     /// A gh failure that says nothing about the checkout — an expired token, a
@@ -2613,8 +2614,8 @@ public actor PRStatusManager {
         }
         let errSuffix = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
         guard result.exitStatus == 0 else {
-            if Self.ghDisownsCheckout(errSuffix) {
-                logger.debug("gh does not speak for the repo at \(repoPath, privacy: .public): \(errSuffix, privacy: .public)")
+            if result.exitStatus == Self.ghExitNoCredentials || Self.ghDisownsCheckout(errSuffix) {
+                logger.debug("gh does not speak for the repo at \(repoPath, privacy: .public) (exit \(result.exitStatus, privacy: .public)): \(errSuffix, privacy: .public)")
                 return .unservable
             }
             logger.debug("gh repo view exited \(result.exitStatus, privacy: .public) for \(repoPath, privacy: .public): \(errSuffix, privacy: .public)")
@@ -2632,6 +2633,45 @@ public actor PRStatusManager {
         guard parts.count == 2 else { return .transientFailure }
         return .resolved(owner: String(parts[0]), name: String(parts[1]), host: host)
     }
+
+    /// gh's exit code for "there are no credentials on this machine at all"
+    /// (`exitAuth` in gh's own `main.go`). It is a cleaner discriminator than
+    /// any stderr string, and the only route to this state gh has: it runs its
+    /// auth check BEFORE it resolves a base repo, so an unauthenticated gh
+    /// **never** emits the disownment message below — not for a GitLab remote,
+    /// not for any remote. Reading exit 4 as transient therefore left every
+    /// checkout on a machine with an unused `gh` unnameable forever (a nil is
+    /// not cached, so it re-failed on every tick), which takes down GitLab
+    /// branch matching, provenance seeding, the open-PR picker and every hook
+    /// or `tbd pr attach` bind — for exactly the population this path exists
+    /// to serve.
+    ///
+    /// An expired or rejected token is a different state and is NOT this one:
+    /// credentials exist, gh runs the command, and the HTTP 401 comes back as
+    /// exit 1. That stays transient, which is what keeps a fork checkout from
+    /// being renamed by a flaky token.
+    ///
+    /// **The trade-off, accepted deliberately, and its one sharp edge:** on a
+    /// GITHUB fork checkout with no credentials, resolution falls through to
+    /// the `origin` parse and names the fork rather than the parent gh would
+    /// have named. Every gh query on that checkout fails anyway, so no PR
+    /// feature works there under either reading and the identity buys nothing —
+    /// while for a GitLab checkout the remote parse is the ONLY route that ever
+    /// works. The cost is a wrong answer nobody can act on; the benefit is the
+    /// whole feature for the people it was built for.
+    ///
+    /// The edge is that the answer is not quite inert: `poisonedCacheEntries`
+    /// rests on "both sides resolved" meaning both are KNOWN, so on such a
+    /// checkout a cached pull request living in the PARENT now reads as
+    /// cross-repo against the fork and is cleared, persistently, and reported
+    /// as a disproved binding. It is bounded — only while gh holds no
+    /// credentials at all, only for a worktree with no stored PR number, and a
+    /// re-login re-finds any pull request still inside the 100-PR viewer batch
+    /// — and the same edge already existed for a checkout with no `gh`
+    /// installed. Narrowing it (declining the parse when the parsed host is one
+    /// gh would have served) is a separate change to `poisonedCacheEntries`'s
+    /// premise, not to this discriminator.
+    private static let ghExitNoCredentials: Int32 = 4
 
     /// Whether gh's own refusal says it does not serve this checkout, as opposed
     /// to failing at something it does serve.

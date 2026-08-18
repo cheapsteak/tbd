@@ -2730,6 +2730,39 @@ struct PRStatusManagerRepoIdentityTests {
         #expect(await absent.repoIdentity(repoPath: "/wt/api-gateway")?.host == "git.acme.example")
     }
 
+    @Test("a gh holding no credentials at all cannot speak for any checkout")
+    func unauthenticatedGHLicensesTheRemoteParse() async {
+        // gh runs its auth check BEFORE it resolves a base repo, so a gh that
+        // is installed but never logged in NEVER emits the disownment message
+        // — not on a GitLab remote, not on any remote. It exits 4 with the
+        // login prompt instead. Reading that as transient left a GitLab-only
+        // developer with an unused gh unable to name their repo on any tick,
+        // which is the whole GitLab path.
+        let gitLabRemote = "git@git.acme.example:acme/platform/api-gateway.git"
+        let loginPrompt = """
+        To get started with GitHub CLI, please run:  gh auth login
+        Alternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token.
+        """
+        let unauthenticated = PRStatusManager(
+            ghRunner: { _, _ in GHCommandResult(stdout: "", stderr: loginPrompt, exitStatus: 4) },
+            remoteURLReader: { _ in gitLabRemote })
+
+        let identity = await unauthenticated.repoIdentity(repoPath: "/wt/api-gateway")
+        #expect(identity?.host == "git.acme.example")
+        #expect(identity?.owner == "acme/platform")
+        #expect(identity?.name == "api-gateway")
+
+        // The exit code is what settles it, not the wording: gh's own
+        // `exitAuth` means "no credentials anywhere", while a REJECTED
+        // credential is exit 1 and stays transient. A stderr whitelist would
+        // have to guess which is which, so an unrecognised failure carrying
+        // the same words still defers rather than renaming a fork.
+        let rejected = PRStatusManager(
+            ghRunner: { _, _ in GHCommandResult(stdout: "", stderr: loginPrompt, exitStatus: 1) },
+            remoteURLReader: { _ in gitLabRemote })
+        #expect(await rejected.repoIdentity(repoPath: "/wt/api-gateway") == nil)
+    }
+
     @Test("a hostless remote cannot fabricate an identity that clears a cached PR")
     func hostlessRemoteDoesNotPoisonTheCache() async {
         // `poisonedCacheEntries` clears a cached PR whose repo differs from the
