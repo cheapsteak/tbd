@@ -1440,6 +1440,27 @@ public final class TBDDatabase: Sendable {
                 table: "reap_records", column: "quarantinePath", type: .text)
         }
 
+        // Clear the PR attempt outcome recorded against scratch rows. A scratch
+        // row (`repoID IS NULL`) has no repo, no branch, and a path that is not a
+        // checkout, so the poll skips it. `pr.refresh` queried it anyway on
+        // select, failed in that directory, and wrote `.undetermined` to the row.
+        // Every PR surface renders that as "PR status unknown", so a scratch lane
+        // grew a `?` badge it can never resolve.
+        //
+        // `RPCRouter.isPollable` now gates both paths, so no row can acquire one
+        // again, but the recorded ones outlive the guard, and by two separate
+        // readers: the daemon re-hydrates them into `PRStatusManager` at every
+        // start, and the app seeds `prObservations` straight off the worktree row.
+        // Both read the column, so the column is where the fix has to land.
+        //
+        // Scoped to `prObservation`. A scratch row's `prStatus` is left alone
+        // because no path ever wrote one: the failing query kept the (absent)
+        // cached value rather than replacing it.
+        migrator.registerMigration("v80_clear_scratch_pr_observation") { db in
+            try db.execute(
+                sql: "UPDATE worktree SET prObservation = NULL WHERE repoID IS NULL")
+        }
+
         return migrator
     }
 }

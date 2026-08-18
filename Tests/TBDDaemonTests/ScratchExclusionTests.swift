@@ -63,6 +63,63 @@ struct ScratchExclusionTests {
         #expect(result.statuses[scratch.id] == nil)
     }
 
+    /// The other half of the same guard, and the one that was missing: the poll
+    /// skipped a scratch row while `pr.refresh` (which the app fires the moment
+    /// a row is selected) queried it anyway. The query ran in a directory that
+    /// is not a checkout, failed, and the failure was recorded as `.undetermined`,
+    /// which every PR surface renders as an unresolvable "?" badge. Asserting the
+    /// DB row too, because the recorded outcome is what outlived the attempt: it
+    /// is re-hydrated at every daemon start and read straight off the row by the
+    /// app.
+    @Test("pr.refresh makes no attempt for a scratch worktree")
+    func prRefreshMakesNoAttemptForScratch() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
+        let scratch = try await db.worktrees.createScratch(
+            name: "s", displayName: "s", path: "/tmp/scr-\(UUID().uuidString)", tmuxServer: "tbd-scratch")
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.prRefresh, params: PRRefreshParams(worktreeID: scratch.id)))
+        let result = try response.decodeResult(PRRefreshResult.self)
+
+        #expect(result.status == nil)
+        #expect(result.observation == nil,
+                "no attempt was made: neither `.none` nor `.undetermined`")
+        #expect(try await db.worktrees.get(id: scratch.id)?.prObservation == nil,
+                "a scratch row must not acquire a recorded outcome that outlives the attempt")
+    }
+
+    /// A repo-scoped row still gets asked. Without this the fix above could be
+    /// widened into "never refresh anything" and nothing would notice: the test
+    /// environment has no usable `gh`, so the attempt cannot resolve, but it
+    /// must still be *made* and reported as unresolved.
+    @Test("pr.refresh still attempts a repo-scoped worktree")
+    func prRefreshStillAttemptsRegularRows() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
+        let repo = try await db.repos.create(
+            path: "/tmp/repo-\(UUID().uuidString)", displayName: "acme", defaultBranch: "main")
+        let regular = try await db.worktrees.create(
+            repoID: repo.id, name: "w", displayName: "w", branch: "tbd/w",
+            path: "/tmp/wt-\(UUID().uuidString)", tmuxServer: "tbd-w")
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.prRefresh, params: PRRefreshParams(worktreeID: regular.id)))
+        let result = try response.decodeResult(PRRefreshResult.self)
+
+        let outcome = try #require(result.observation?.outcome,
+                                   "a repo-scoped row is still asked about")
+        if case .undetermined = outcome {} else {
+            Issue.record("expected the unresolved attempt to be .undetermined, observed \(outcome)")
+        }
+    }
+
     @Test("reconcile only ever lists worktrees scoped to a repoID")
     func reconcileIsRepoScoped() async throws {
         let (tempDir, repoDir) = try await createTestRepo()
