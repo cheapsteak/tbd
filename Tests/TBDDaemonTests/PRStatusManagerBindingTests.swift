@@ -1054,8 +1054,33 @@ struct PRStatusManagerBindingTests {
         #expect(await manager.allStatuses()[wt] == nil)
         #expect(await merges.count == 0)
         #expect(await gh.graphQLQueries.isEmpty)
-        #expect(await manager.observation(for: wt)?.outcome
-                == .undetermined(cause: PRUndeterminedCause.forgeNotQueryableDirectly))
+        // Declining to ask gh is not an attempt that failed. A worktree with no
+        // outcome on record still has none — asserting one would light the "PR
+        // status unknown" indicator on a worktree nothing was ever asked about.
+        #expect(await manager.observation(for: wt) == nil)
+    }
+
+    @Test("a manual refresh on a GitLab worktree leaves its last observation standing")
+    func refreshKeepsTheGitLabObservation() async {
+        // `pr.refresh` is a user gesture. A GitLab worktree whose bindings poll
+        // perfectly must not answer it with "last check did not resolve" — the
+        // binding poll settles this worktree, and its word stands until it has
+        // a new one.
+        let gh = MirrorGH()
+        let manager = Self.mirrorManager(gh)
+        let wt = UUID()
+        let polled = Date(timeIntervalSince1970: 1_770_000_000)
+        await manager.hydrateObservations([wt: PRObservation(outcome: .observed, observedAt: polled)])
+
+        _ = await manager.refresh(
+            worktreeID: wt, branch: "tbd/my-branch", upstreamBranch: "main",
+            defaultBranch: "main", pushBranch: .noPushDestination,
+            repoPath: "/wt/api-gateway")
+
+        let observation = await manager.observation(for: wt)
+        #expect(observation?.outcome == .observed)
+        #expect(observation?.observedAt == polled)
+        #expect(await gh.graphQLQueries.isEmpty)
     }
 
     @Test("a stored number on a GitLab worktree is never offered to gh")

@@ -31,13 +31,6 @@ enum PRUndeterminedCause {
     /// truncated or malformed blob. Not the absence of a record: an attempt was
     /// made, and only what it concluded is lost.
     static let unreadableRecord = "the recorded outcome could not be read"
-    /// The worktree lives on a forge this path cannot ask. The direct refresh
-    /// speaks GitHub's API alone, and a GitLab worktree is refreshed through
-    /// its bindings instead — so one with no binding yet has no direct-refresh
-    /// route at all. Named rather than folded into `queryFailed` because
-    /// nothing failed and retrying changes nothing; the alternative to saying
-    /// so is letting a same-named GitHub repository answer in its place.
-    static let forgeNotQueryableDirectly = "this worktree's forge cannot be queried directly"
     /// The CLI ran and reached the host, which refused the credentials. Named
     /// separately from `cliUnavailable` because the remedy differs: a token
     /// expired, and only re-authenticating that specific host fixes it. A
@@ -1381,13 +1374,18 @@ public actor PRStatusManager {
         // against a pull request from another forge. `poisonedCacheEntries`
         // compares owner and name only, so it cannot catch that either.
         //
-        // The cache is left exactly as it was; only the outcome is recorded, and
-        // it says the forge cannot be asked rather than that the query failed.
+        // Nothing is written at all: not the cache, and not the outcome either.
+        // Declining to ask is not an attempt that failed, and this path is
+        // reached by a USER GESTURE — `pr.refresh` and the on-select refresh.
+        // Recording `.undetermined` here would answer a GitLab worktree whose
+        // bindings poll perfectly with "last check did not resolve" — stomping
+        // a good `.observed`, and on a worktree with no status yet lighting the
+        // "PR status unknown" indicator at the exact moment the user asked for
+        // reassurance. The binding poll is what settles this worktree, and
+        // its last word stands until it has a new one.
         if let identity = await cachedNameWithOwner(repoPath: repoPath),
            await isGitLabHost(identity.host, repoPath: repoPath) {
             logger.debug("refresh: worktree \(worktreeID, privacy: .public) is on GitLab host \(identity.host, privacy: .public); its merge request is refreshed through its bindings, not by gh")
-            await record(.undetermined(cause: PRUndeterminedCause.forgeNotQueryableDirectly),
-                         for: worktreeID, at: now())
             return cache[worktreeID]
         }
 
