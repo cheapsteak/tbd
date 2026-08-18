@@ -353,9 +353,10 @@ essentially never on such an instance. Worse, combined with `NOT_APPROVED`
 mapping to `.mergeable`, a merge request with a failing pipeline would render as
 "Ready to merge".
 
-So the GitLab arm mirrors the structure GitHub's arm already has: a CI signal
-computed independently of the merge status, and evaluated in the same precedence
-position — after draft, before the merge-status switch.
+So the GitLab arm takes the structure GitHub's arm already has: a CI signal
+computed independently of the merge status, evaluated after draft and before the
+merge-status switch, with one signal ranked above it — see "What outranks the CI
+signal" below.
 
 - The signal is **gated on the project's `onlyAllowMergeIfPipelineSucceeds`**,
   which is the faithful analogue of GitHub's "required check". A failing pipeline
@@ -382,9 +383,9 @@ progress does not turn the fleet red.
 - `DISCUSSIONS_NOT_RESOLVED` maps to `.changesRequested`, "Unresolved
   discussions". A human is waiting on the author, which is what that state
   already means. Two of the same six merge requests reported it.
-- `REQUESTED_CHANGES` maps to `.changesRequested`. GitLab carries this as a
-  dedicated `detailedMergeStatus` value, so no per-reviewer scan and no
-  paid-tier field is needed to express it.
+- `REQUESTED_CHANGES` maps to `.changesRequested`, and is the one value ranked
+  above the CI signal. GitLab carries it as a dedicated `detailedMergeStatus`
+  value, so no per-reviewer scan and no paid-tier field is needed to express it.
 - `DRAFT_STATUS`, and the `draft` boolean, map to `.draft`.
 - `CHECKING` and `PREPARING` map to `.pending`, "Checks pending". These are
   genuinely transient.
@@ -405,6 +406,31 @@ progress does not turn the fleet red.
   attention. Unknown means unknown. This is the one place the GitLab arm
   deliberately differs from the GitHub arm's `default: return (.blocked,
   "Blocked")` (`:1175`).
+
+### What outranks the CI signal
+
+Exactly one merge-status value is evaluated ahead of the CI signal:
+`REQUESTED_CHANGES`. So the full order is terminal, draft, explicit change
+request, CI signal, merge-status switch — the GitHub arm's own order, where
+`CHANGES_REQUESTED` likewise sits ahead of the required-check signals. A merge
+request that a reviewer has explicitly rejected while its pipeline is also red
+reports the rejection; read off the merge status instead, it would report only
+the pipeline and the reviewer's decision would surface nowhere in the UI.
+
+`DISCUSSIONS_NOT_RESOLVED` does **not** share that slot, and the two are
+deliberately not lumped together. The rule is that an explicit change request
+outranks CI and an unresolved thread does not. GitHub's arm privileges only the
+explicit review decision, and an open discussion thread is not a rejection —
+the author may have answered every comment and simply not clicked resolve — so
+when a pipeline is failing too, the pipeline is the more actionable thing to
+show.
+
+Ranking a change request above a failing pipeline is a deliberate step *down* in
+attention severity: `.changesRequested` is 4 and `.checksFailed` is 6, so a
+merge request with both renders as the less severe of the two. That is already
+the GitHub arm's behaviour, and the stance behind it is that an explicit human
+rejection is the thing to tell the author about — the icon is a pointer to the
+next action, not a maximum over everything wrong.
 
 ### Observed distribution
 
@@ -501,6 +527,12 @@ tested.
   `FAILED` on a non-gating project does not; a draft with `FAILED` stays
   `.draft`; `MANUAL` gives `.pending` with its own reason; a null
   `headPipeline` leaves the merge status to decide.
+- The precedence around that signal, in both directions:
+  `REQUESTED_CHANGES` with a failing gated pipeline gives `.changesRequested`,
+  "Changes requested", while `DISCUSSIONS_NOT_RESOLVED` with the same pipeline
+  gives `.checksFailed`, "Pipeline failed" — so a later edit cannot promote the
+  unresolved-thread case to the change-request slot without going red. A draft
+  carrying both stays `.draft`.
 - `UNCHECKED` yields `.pending` with a reason distinct from the transient
   `CHECKING` and `PREPARING` cases.
 - The recheck request names only bound merge requests, and a failure or an

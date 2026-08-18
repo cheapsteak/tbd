@@ -1661,8 +1661,23 @@ public actor PRStatusManager {
     /// red essentially never, and — since NOT_APPROVED maps to .mergeable —
     /// would render a merge request with a failing pipeline as "Ready to merge".
     ///
-    /// Precedence mirrors the GitHub arm exactly: terminal, then draft, then
-    /// the CI signal, then the merge-status switch.
+    /// Precedence: terminal, then draft, then an explicit change request, then
+    /// the CI signal, then the merge-status switch. The first three slots are
+    /// the GitHub arm's own order, with `REQUESTED_CHANGES` standing where
+    /// `CHANGES_REQUESTED` stands there.
+    ///
+    /// `DISCUSSIONS_NOT_RESOLVED` deliberately sits *after* the CI signal,
+    /// inside the merge-status switch, and the two must not be lumped together:
+    /// an explicit change request outranks CI, an unresolved thread does not.
+    /// The GitHub arm privileges only the explicit review decision, and an open
+    /// discussion thread is not a rejection — so when a pipeline is also
+    /// failing, the pipeline is the more actionable thing to show the author.
+    ///
+    /// Ranking a change request above a failing pipeline deliberately yields
+    /// the *lower*-severity `.changesRequested` (attention severity 4) rather
+    /// than `.checksFailed` (6) when both hold. That is what the GitHub arm
+    /// already does, and the product stance behind it is that an explicit human
+    /// rejection is the thing to tell the author about.
     private static func mapGitLabStateAndReason(
         state: String,
         detailed: String,
@@ -1677,6 +1692,12 @@ public actor PRStatusManager {
         }
 
         if isDraft || detailed == "DRAFT_STATUS" { return (.draft, "Draft") }
+
+        // Ahead of the CI signal, where the GitHub arm puts CHANGES_REQUESTED:
+        // an explicit rejection must not be masked by a red pipeline. Handled
+        // here rather than in the switch below, which is why that switch has no
+        // REQUESTED_CHANGES case.
+        if detailed == "REQUESTED_CHANGES" { return (.changesRequested, "Changes requested") }
 
         // `onlyAllowMergeIfPipelineSucceeds` is the faithful analogue of
         // GitHub's "required check". A failing pipeline on a project that does
@@ -1696,8 +1717,9 @@ public actor PRStatusManager {
         // Checks are settled and the only blocker is an approval nobody has
         // given — the same reading the GitHub arm gives BLOCKED + REVIEW_REQUIRED.
         case "NOT_APPROVED": return (.mergeable, "Ready to merge")
+        // Ranks below the CI signal above, unlike REQUESTED_CHANGES: a thread
+        // nobody has resolved is not an explicit rejection.
         case "DISCUSSIONS_NOT_RESOLVED": return (.changesRequested, "Unresolved discussions")
-        case "REQUESTED_CHANGES": return (.changesRequested, "Changes requested")
         case "CONFLICT": return (.blocked, "Merge conflicts")
         case "NEED_REBASE": return (.blocked, "Behind base branch")
         case "BLOCKED_STATUS": return (.blocked, "Blocked by another merge request")

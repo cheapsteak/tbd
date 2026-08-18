@@ -34,6 +34,38 @@ struct GitLabMappingTests {
         #expect(map("REQUESTED_CHANGES", pipeline: "SUCCESS").state == .changesRequested)
     }
 
+    @Test("an explicit change request outranks a failing gated pipeline")
+    func requestedChangesBeatsFailingPipeline() {
+        // The GitHub arm puts CHANGES_REQUESTED ahead of its required-check
+        // signals, so a reviewer's explicit rejection is what the author is
+        // told about even when CI is also red. This arm must agree, otherwise
+        // the rejection is masked and never surfaces anywhere in the UI.
+        // Note the deliberate severity inversion: .changesRequested (4) ranks
+        // below .checksFailed (6), and is still the state we want here.
+        let r = map("REQUESTED_CHANGES", pipeline: "FAILED")
+        #expect(r.state == .changesRequested)
+        #expect(r.reason == "Changes requested")
+    }
+
+    @Test("an unresolved discussion does not outrank a failing gated pipeline")
+    func discussionsDoNotBeatFailingPipeline() {
+        // The deliberate other half of the rule above, pinned so that a future
+        // edit made in the name of consistency cannot quietly promote
+        // DISCUSSIONS_NOT_RESOLVED alongside REQUESTED_CHANGES. An open thread
+        // is not an explicit rejection, and a failing pipeline is the more
+        // actionable thing to show the author.
+        let r = map("DISCUSSIONS_NOT_RESOLVED", pipeline: "FAILED")
+        #expect(r.state == .checksFailed)
+        #expect(r.reason == "Pipeline failed")
+    }
+
+    @Test("a draft outranks both an explicit change request and a failing pipeline")
+    func draftBeatsRequestedChanges() {
+        // Draft sits above the change-request slot, so hoisting
+        // REQUESTED_CHANGES over the CI signal must not disturb it.
+        #expect(map("REQUESTED_CHANGES", draft: true, pipeline: "FAILED").state == .draft)
+    }
+
     @Test("MERGEABLE reads as ready")
     func mergeable() {
         #expect(map("MERGEABLE", pipeline: "SUCCESS").state == .mergeable)
