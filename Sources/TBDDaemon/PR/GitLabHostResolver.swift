@@ -61,9 +61,16 @@ actor GitLabHostResolver {
     /// is indented beneath it.
     static func parseAuthStatusHosts(_ output: String) -> [String] {
         var out: [String] = []
-        for line in output.split(separator: "\n", omittingEmptySubsequences: true) {
+        // Split on any newline, and trim newlines as well as spaces. CRLF is
+        // the reason for both. Swift reads "\r\n" as ONE Character, so
+        // `split(separator: "\n")` finds no separator in CRLF output at all and
+        // hands the whole transcript back as a single "line" — which the
+        // no-spaces guard then rejects, leaving no hosts and GitLab silently
+        // off with no error anywhere. `\r` alone would survive
+        // `.whitespaces` too, which is spaces and tabs only.
+        for line in output.split(whereSeparator: \.isNewline) {
             guard let first = line.first, !first.isWhitespace else { continue }
-            let candidate = line.trimmingCharacters(in: .whitespaces)
+            let candidate = line.trimmingCharacters(in: .whitespacesAndNewlines)
             // A hostname line has no spaces and at least one dot.
             guard !candidate.isEmpty, !candidate.contains(" "), candidate.contains(".") else { continue }
             if !out.contains(candidate) { out.append(candidate) }

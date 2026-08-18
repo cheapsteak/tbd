@@ -95,6 +95,21 @@ struct GitLabHostResolverTests {
         """)
         #expect(hosts == ["git.acme.example"])
     }
+
+    /// CRLF is not exotic here: `glab auth status` is read through a pipe whose
+    /// contents come from whatever the host and the user's terminal settings
+    /// produced. A trailing `\r` clears both guards below the split — it is not
+    /// a space and it is not a dot — so the parse "succeeds" with a host name
+    /// nobody will ever ask about, and GitLab is silently off with no error
+    /// anywhere.
+    @Test("a CRLF-terminated host line still resolves")
+    func crlfTerminatedHostResolves() async {
+        let crlf = "git.acme.example\r\n  ✓ Logged in to git.acme.example as someone\r\n"
+        #expect(GitLabHostResolver.parseAuthStatusHosts(crlf) == ["git.acme.example"])
+
+        let resolver = GitLabHostResolver(glRunner: { _, _ in GHCommandResult(stdout: crlf) })
+        #expect(await resolver.isGitLabHost("git.acme.example", repoPath: "/tmp/x"))
+    }
 }
 
 private actor Probe {
