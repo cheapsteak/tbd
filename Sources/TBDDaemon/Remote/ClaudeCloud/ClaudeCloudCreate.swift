@@ -2,6 +2,37 @@ import Foundation
 import TBDShared
 
 extension ClaudeCloudInvoker {
+    /// The answer to a replay whose key already has a session on file.
+    ///
+    /// Built from the ORIGINAL call's repo, branch and environment rather
+    /// than whatever this replay's body says: the session being described is
+    /// the recorded one. Nil when the row names no session, which `resolve`
+    /// never leaves behind.
+    static func recordedSessionResult(_ existing: ClaudeCloudSessionRow) -> ProviderResult? {
+        guard let sessionID = existing.sessionID else { return nil }
+        var meta = ["repo": existing.repoKey]
+        if let branch = existing.branch, !branch.isEmpty { meta["branch"] = branch }
+        if let environment = existing.environment, !environment.isEmpty {
+            meta["environment"] = environment
+        }
+        let payload = ClaudeCloudSessionProjection.payload(
+            sessionID: sessionID, title: existing.title, createdAt: existing.createdAt,
+            archived: existing.archived, meta: meta)
+        return ProviderResult(
+            exitCode: 0,
+            stdout: (try? JSONSerialization.data(withJSONObject: payload)) ?? Data(),
+            stderr: "")
+    }
+
+    /// The refusal for a key some other attempt holds. Transient on purpose:
+    /// the pending window is what turns it back into a key that can spawn.
+    static func inFlightResult(_ idempotencyKey: String) -> ProviderResult {
+        Self.errorResult(
+            exitCode: 3, code: "in_progress",
+            message: "create with idempotency key '\(idempotencyKey)' is already "
+                + "in flight; retry once it resolves or the pending window elapses")
+    }
+
     /// `create` runs `claude --cloud "<prompt>"` from the repository
     /// checkout, on a pseudo-terminal, and reads the session id and its title
     /// out of what it prints.
@@ -25,37 +56,21 @@ extension ClaudeCloudInvoker {
 
         // A same-key replay must never spawn `claude --cloud` a second time —
         // there is no discovery to reconcile a second live session with the
-        // first, so a duplicate spawn orphans one of them permanently. This
-        // has to run BEFORE `upsertPending` below: that call is itself
-        // idempotent on the key and returns the existing row unchanged, so
-        // reading its result could never distinguish "this row already
-        // existed" from "this row was just inserted, and of course it reads
-        // pending" — the two look identical the instant after either happens.
+        // first, so a duplicate spawn orphans one of them permanently.
+        //
+        // This classification is a FAST PATH, not the guard. It answers a key
+        // that is already settled before the parameter validation below can
+        // reject a replay whose body differs from the original's — a resolved
+        // key is answered from the ledger, and a key another attempt holds is
+        // refused, without either needing this call's `prompt` or repository
+        // to be valid. `claimForSpawn` is what actually licenses a spawn, and
+        // it decides atomically; see its doc comment for why nothing weaker
+        // can be correct here.
         if let existing = try await db.claudeCloudSessions.rows()
             .first(where: { $0.idempotencyKey == idempotencyKey }) {
             switch existing.state {
             case ClaudeCloudLedgerState.resolved.rawValue:
-                if let sessionID = existing.sessionID {
-                    // Return the recorded session rather than spawning again.
-                    // Re-spawning here would race `Store.resolve` and could
-                    // overwrite the first session's id on this very row,
-                    // erasing the only record of it (finding 4's "latent"
-                    // case) — so the replay is answered from what is already
-                    // on file, using the ORIGINAL call's repo/branch/environment
-                    // rather than whatever this replay's body happens to say.
-                    var meta = ["repo": existing.repoKey]
-                    if let branch = existing.branch, !branch.isEmpty { meta["branch"] = branch }
-                    if let environment = existing.environment, !environment.isEmpty {
-                        meta["environment"] = environment
-                    }
-                    let payload = ClaudeCloudSessionProjection.payload(
-                        sessionID: sessionID, title: existing.title, createdAt: existing.createdAt,
-                        archived: existing.archived, meta: meta)
-                    return ProviderResult(
-                        exitCode: 0,
-                        stdout: (try? JSONSerialization.data(withJSONObject: payload)) ?? Data(),
-                        stderr: "")
-                }
+                if let answer = Self.recordedSessionResult(existing) { return answer }
             case ClaudeCloudLedgerState.pending.rawValue:
                 // The FIRST attempt under this key may still be running, or
                 // may have crashed before recording anything — there is no
@@ -67,10 +82,7 @@ extension ClaudeCloudInvoker {
                 // this from being a dead end: once the window judges the
                 // first attempt failed, the SAME key falls through below and
                 // spawns fresh.
-                return Self.errorResult(
-                    exitCode: 3, code: "in_progress",
-                    message: "create with idempotency key '\(idempotencyKey)' is already "
-                        + "in flight; retry once it resolves or the pending window elapses")
+                return Self.inFlightResult(idempotencyKey)
             default:
                 // `.failed`: the pending window already gave up on this key
                 // with no session ever recorded, so a replay is the closest
@@ -110,9 +122,26 @@ extension ClaudeCloudInvoker {
         let paramsJSON = String(
             data: (try? JSONSerialization.data(withJSONObject: params)) ?? Data("{}".utf8),
             encoding: .utf8) ?? "{}"
-        let row = try await db.claudeCloudSessions.upsertPending(
+        // The authoritative decision, and the only one that may license a
+        // spawn. The classification above is a fast path that answers a
+        // settled key before this call's parameter validation can reject a
+        // replay it would have answered from the ledger; it cannot be the
+        // guard, because between reading a `failed` row and spawning, a
+        // concurrent replay reads the same row and spawns too.
+        let row: ClaudeCloudSessionRow
+        switch try await db.claudeCloudSessions.claimForSpawn(
             idempotencyKey: idempotencyKey, repoKey: repoKey, repoPath: repo.path,
-            branch: branch, environment: environment, paramsJSON: paramsJSON, now: now())
+            branch: branch, environment: environment, paramsJSON: paramsJSON, now: now()) {
+        case .claimed(let claimed):
+            row = claimed
+        case .inFlight:
+            return Self.inFlightResult(idempotencyKey)
+        case .resolved(let existing):
+            guard let answer = Self.recordedSessionResult(existing) else {
+                return Self.inFlightResult(idempotencyKey)
+            }
+            return answer
+        }
 
         // The measured CLI surface (design §11) takes the description and
         // nothing else — no branch flag, no environment flag. Both are

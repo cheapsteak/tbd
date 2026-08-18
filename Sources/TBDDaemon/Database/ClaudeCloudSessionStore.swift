@@ -90,6 +90,82 @@ public struct ClaudeCloudSessionStore: Sendable {
         }
     }
 
+    /// Whether a caller may spawn `claude --cloud` under an idempotency key.
+    public enum SpawnClaim: Sendable {
+        /// This caller owns the spawn; the row is `pending`.
+        case claimed(ClaudeCloudSessionRow)
+        /// Another attempt under this key holds the claim.
+        case inFlight
+        /// A session is already on file — answer from it rather than spawning.
+        case resolved(ClaudeCloudSessionRow)
+    }
+
+    /// Claims an idempotency key for a spawn, deciding and recording in ONE
+    /// write.
+    ///
+    /// A read followed by `upsertPending` could not be made safe however
+    /// carefully it was written, because `upsertPending` returns an existing
+    /// row UNCHANGED: a `failed` row stayed `failed` across the spawn, so two
+    /// replays arriving after the pending window gave up both read `failed`,
+    /// both fell through, and both spawned. With no discovery to reconcile
+    /// two live cloud sessions against one ledger row, that orphans one of
+    /// them permanently — and whichever `resolve` lands second overwrites the
+    /// first session id, erasing the only record of it.
+    ///
+    /// GRDB admits a single writer, so a concurrent caller waits and then
+    /// observes whatever state this one left. Reclaiming a row additionally
+    /// moves it back to `pending` with a compare-and-set and claims only when
+    /// that UPDATE actually changed a row. The transition is both the claim
+    /// and the truth: an attempt is in flight again, so the pending window
+    /// governs it again.
+    public func claimForSpawn(
+        idempotencyKey: String, repoKey: String, repoPath: String,
+        branch: String?, environment: String?, paramsJSON: String, now: Date
+    ) async throws -> SpawnClaim {
+        try await writer.write { db in
+            if let existing = try ClaudeCloudSessionRow
+                .filter(Column("idempotencyKey") == idempotencyKey).fetchOne(db) {
+                // The state this row must still be in for the claim to be
+                // this caller's. Nil means no claim is available at all.
+                let reclaimable: String?
+                switch ClaudeCloudLedgerState(rawValue: existing.state) {
+                case .resolved:
+                    // A resolved row with no session id names nothing, so it
+                    // is reclaimable rather than an answer. `resolve` always
+                    // writes one, so this is a can't-happen guarded anyway.
+                    guard existing.sessionID == nil else { return .resolved(existing) }
+                    reclaimable = ClaudeCloudLedgerState.resolved.rawValue
+                case .failed:
+                    reclaimable = ClaudeCloudLedgerState.failed.rawValue
+                case .pending:
+                    reclaimable = nil
+                case nil:
+                    // An unrecognized state is not a licence to start a second
+                    // cloud session; refuse rather than guess.
+                    reclaimable = nil
+                }
+                guard let expected = reclaimable else { return .inFlight }
+                try db.execute(
+                    sql: "UPDATE claude_cloud_session SET state = ? WHERE id = ? AND state = ?",
+                    arguments: [
+                        ClaudeCloudLedgerState.pending.rawValue, existing.id, expected,
+                    ])
+                guard db.changesCount == 1 else { return .inFlight }
+                var claimed = existing
+                claimed.state = ClaudeCloudLedgerState.pending.rawValue
+                return .claimed(claimed)
+            }
+            let row = ClaudeCloudSessionRow(
+                id: UUID().uuidString, idempotencyKey: idempotencyKey,
+                state: ClaudeCloudLedgerState.pending.rawValue, sessionID: nil, title: nil,
+                createdAt: now, resolvedAt: nil, repoKey: repoKey, repoPath: repoPath,
+                branch: branch, environment: environment, paramsJSON: paramsJSON,
+                archived: false)
+            try row.insert(db)
+            return .claimed(row)
+        }
+    }
+
     /// A create whose output named a session. The provenance link is written
     /// here and nowhere else. `title` is the vendor's parsed summary, or nil
     /// when the title parse found nothing — a cosmetic loss that must never

@@ -1054,4 +1054,123 @@ struct ClaudeCloudInvokerTests {
         #expect(ClaudeCloudSendPayload.message(fromStdin: Data(interiorAndTrailing.utf8))
             == "one" + "\r\n" + "two")
     }
+
+    /// Two replays of a key the pending window already gave up on must
+    /// produce exactly ONE spawn.
+    ///
+    /// The gate is what makes this discriminating rather than lucky: it holds
+    /// the first spawn open, so the second `create` provably does its own
+    /// claim while the first is still in flight. Two bare concurrent calls
+    /// need not interleave at all, and would pass against the very race this
+    /// exists to catch.
+    ///
+    /// Asserted on the SPAWN count, not the row count: the unique index on
+    /// `idempotencyKey` keeps the ledger at one row either way, so a row-count
+    /// assertion is exactly the one that cannot see this bug. A second spawn
+    /// starts a second real cloud session, and with no discovery to reconcile
+    /// the two, whichever `resolve` lands second overwrites the first id.
+    @Test func twoConcurrentReplaysOfAFailedKeySpawnOnlyOnce() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await seedRepo(db)
+        let row = try await db.claudeCloudSessions.upsertPending(
+            idempotencyKey: "tbd-1", repoKey: "acme/api", repoPath: "/tmp/api",
+            branch: "fix-ci", environment: nil, paramsJSON: "{}",
+            now: Date(timeIntervalSince1970: 1_000_000))
+        try await db.claudeCloudSessions.markFailed(ids: [row.id])
+
+        let gate = SpawnGate()
+        let spawner = GatedClaudeSpawner(
+            gate: gate, outcome: .completed(status: 0, output: successOutput, stderr: ""))
+        let inv = gatedInvoker(db: db, spawner: spawner)
+
+        async let firstResult = inv.run(
+            config(), verb: ["create"], stdin: createBody(), timeout: 60, contractVersion: 2)
+        // Resumes only once the first spawn is genuinely under way.
+        await gate.waitUntilEntered()
+        let second = try await inv.run(
+            config(), verb: ["create"], stdin: createBody(), timeout: 60, contractVersion: 2)
+        await gate.release()
+        let first = try await firstResult
+
+        #expect(spawner.requestsSnapshot().count == 1)
+        #expect(first.exitCode == 0)
+        #expect(second.exitCode == 3)
+        #expect(second.failureClass == .transient)
+        #expect(try await db.claudeCloudSessions.rows().count == 1)
+    }
+
+    private func gatedInvoker(
+        db: TBDDatabase, spawner: GatedClaudeSpawner,
+        now: @escaping @Sendable () -> Date = { Date(timeIntervalSince1970: 1_000_000) }
+    ) -> ClaudeCloudInvoker {
+        ClaudeCloudInvoker(db: db, spawner: spawner, now: now)
+    }
+}
+
+/// Lets a test hold one spawn open and observe that it started.
+actor SpawnGate {
+    private var entered = false
+    private var enteredWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releasedFlag = false
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func markEntered() {
+        entered = true
+        for waiter in enteredWaiters { waiter.resume() }
+        enteredWaiters = []
+    }
+
+    func waitUntilEntered() async {
+        if entered { return }
+        await withCheckedContinuation { enteredWaiters.append($0) }
+    }
+
+    func release() {
+        releasedFlag = true
+        for waiter in releaseWaiters { waiter.resume() }
+        releaseWaiters = []
+    }
+
+    func waitUntilReleased() async {
+        if releasedFlag { return }
+        await withCheckedContinuation { releaseWaiters.append($0) }
+    }
+}
+
+/// Records every spawn and parks the FIRST one until the test releases it, so
+/// a concurrency test can put a second caller through its claim while the
+/// first is provably still spawning.
+final class GatedClaudeSpawner: ClaudeCloudSpawning, @unchecked Sendable {
+    private let lock = NSLock()
+    private var requests: [ClaudeCloudSpawnRequest] = []
+    private let gate: SpawnGate
+    private let outcome: ClaudeCloudSpawnOutcome
+
+    init(gate: SpawnGate, outcome: ClaudeCloudSpawnOutcome) {
+        self.gate = gate
+        self.outcome = outcome
+    }
+
+    func spawn(_ request: ClaudeCloudSpawnRequest) async throws -> ClaudeCloudSpawnOutcome {
+        if record(request) {
+            await gate.markEntered()
+            await gate.waitUntilReleased()
+        }
+        return outcome
+    }
+
+    /// Synchronous so the NSLock critical section is not taken from an async
+    /// context. Returns whether this was the first spawn.
+    private func record(_ request: ClaudeCloudSpawnRequest) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        requests.append(request)
+        return requests.count == 1
+    }
+
+    func requestsSnapshot() -> [ClaudeCloudSpawnRequest] {
+        lock.lock()
+        defer { lock.unlock() }
+        return requests
+    }
 }
