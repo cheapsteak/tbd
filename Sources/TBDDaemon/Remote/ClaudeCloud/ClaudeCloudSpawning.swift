@@ -42,7 +42,16 @@ protocol ClaudeCloudSpawning: Sendable {
 struct BoundedProcessClaudeSpawner: ClaudeCloudSpawning {
     let executable: String
 
-    init(executable: String) { self.executable = executable }
+    /// Behavior seam for the subprocess deadline (`Tests/CLAUDE.md`, "Clock and
+    /// date seams"), matching `GitManager`/`TmuxManager.runExternalCommand`.
+    /// Tests pass a `TestClock` to drive `runBoundedProcess`'s deadline in
+    /// virtual time instead of racing a real one on a loaded runner.
+    let clock: any Clock<Duration>
+
+    init(executable: String, clock: any Clock<Duration> = ContinuousClock()) {
+        self.executable = executable
+        self.clock = clock
+    }
 
     /// The environment one invocation runs under. Pure and static so the
     /// pinned geometry is assertable without a spawn.
@@ -77,7 +86,8 @@ struct BoundedProcessClaudeSpawner: ClaudeCloudSpawning {
             // outright, and neither verb here has anything to write.
             stdin: nil,
             timeout: .seconds(request.timeout),
-            stdio: request.usesPseudoTerminal ? .pseudoTerminal : .pipes)
+            stdio: request.usesPseudoTerminal ? .pseudoTerminal : .pipes,
+            clock: clock)
         switch outcome {
         case .timedOut:
             return .timedOut
