@@ -45,6 +45,16 @@ if [ ${#files[@]} -gt 0 ]; then
   swiftlint --strict "${files[@]}"
 fi
 
+# The SQL migrations under Sources/TBDDaemon/Database/Migrations/. Costs a
+# fraction of a second — a directory listing, a `git diff` against the merge
+# base, and one in-memory SQLite replay — and it is NOT skipped by
+# TBD_SKIP_PREPUSH_TESTS below, which exists to dodge the multi-minute test
+# passes. Its history-is-frozen check is the one guard that has to run before
+# the push rather than after: a migration edited in place is already applied
+# under its old name on somebody's machine.
+echo "[pre-push] Linting SQL migrations..."
+python3 scripts/lint-migrations.py
+
 if [ "${TBD_SKIP_PREPUSH_TESTS:-}" = "1" ]; then
   echo "[pre-push] TBD_SKIP_PREPUSH_TESTS=1 — skipping the guarded test pass."
   exit 0

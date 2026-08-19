@@ -286,13 +286,22 @@ custom_rules:
   migration_use_helpers:
     name: "Use idempotent migration helpers"
     # included/excluded HERE take REGEX (not glob), matched against file path.
+    # Both entries name ONE file each. Do not relax either to the enclosing
+    # directory: MigrationHelpers.swift is where `create(table:` and
+    # `.add(column:` legitimately live — it is the implementation of the
+    # helpers this rule points people at.
     included:
+      # The frozen v1-v84 block. Its own migrations sit inside a
+      # `swiftlint:disable migration_use_helpers` region; anything added
+      # outside that region is caught.
       - "Sources/TBDDaemon/Database/Database\\.swift"
+      # The Swift escape hatch, `SQLMigrationLoader.inlineTimestampMigrations`.
+      - "Sources/TBDDaemon/Database/SQLMigrationLoader\\.swift"
     regex: 'create\(table:|\.add\(column:|CREATE\s+(?:TABLE|INDEX)'
     match_kinds:
       - identifier
       - string
-    message: "New migrations must use createTableIfNotExists / addIndexIfMissing / addColumnIfMissing from MigrationHelpers.swift, not raw DDL. See Sources/TBDDaemon/Database/CLAUDE.md."
+    message: "Raw DDL in Swift must use createTableIfNotExists / addIndexIfMissing / addColumnIfMissing from MigrationHelpers.swift. This rule governs the Swift escape hatch (SQLMigrationLoader.inlineTimestampMigrations) and the frozen v1-v84 block; an ordinary new migration is a .sql file under Database/Migrations/ and is checked by scripts/lint-migrations.py instead. See Sources/TBDDaemon/Database/CLAUDE.md."
     severity: error
 
   no_setenv_tbdhome_wrong_target:
