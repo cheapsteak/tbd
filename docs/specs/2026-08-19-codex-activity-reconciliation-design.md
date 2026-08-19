@@ -40,7 +40,18 @@ The Codex presentation state follows this precedence:
 
 Ctrl+C is an explicit user action and must not wait for Codex to append `turn_aborted`. A later valid event from the current session may supersede the interrupt. A permission request must remain visible even while the transcript contains an open task.
 
-This path is enabled by default and has no feature flag. It replaces a known-unreliable Codex indicator, performs no destructive or autonomous action, and fails conservatively to idle. Maintaining two selectable interpretations would create competing answers to the same status question and preserve the failure mode this design removes.
+This path is enabled by default and has no feature flag. Although it wholesale replaces the Codex working/idle presentation signal, it is classified as a bug fix under the repository's rollout policy: it restores the existing indicator's intended meaning instead of adding an optional capability. It performs no destructive or autonomous action and fails conservatively to idle. Maintaining two selectable interpretations would create competing answers to the same status question and preserve the failure mode this design removes.
+
+## Required invariants
+
+- A Codex terminal presents working only from complete lifecycle evidence associated with its current transcript identity and session generation.
+- Unknown transcript evidence never reuses cached working evidence.
+- A session-bound hook from an older Codex session changes no terminal fact and does not cancel current-session scheduled work.
+- Ctrl+C clears working immediately and remains authoritative until a valid later current-session event supersedes it.
+- A current permission wait defeats transcript working.
+- SessionStart applies identity and its eligible prompt/activity effects atomically; an event rejected by one ordering rail cannot partially roll identity backward.
+- Session identity, raw activity, attention state, and transcript presentation are ordered by the timestamps that describe those specific facts.
+- Claude and shell terminals do not enter Codex reconciliation or acquire its ordering behavior.
 
 ## Authoritative signals
 
@@ -67,7 +78,7 @@ An accepted `SessionStart` establishes the current session identity and transcri
 
 For Codex, an accepted start also establishes a lifecycle boundary at the transcript's current end. Events before that boundary do not become current work after a same-path resume or daemon restart. The persisted SessionStart fact lets a new tracker reconstruct the boundary conservatively at the current end when actor memory is unavailable.
 
-Rejected or stale SessionStart events do not change identity, transcript path, attention state, activity, or tracker boundaries. Equal-time competing starts are first-wins so completion order cannot roll identity backward.
+Rejected or stale SessionStart events do not change identity, transcript path, attention state, activity, or tracker boundaries. Equal-time competing starts are first-wins so completion order cannot roll identity backward. A permission fact observed at the same time as, or after, SessionStart survives it; only a strictly older permission fact is retracted.
 
 ### Transcript tracker
 
@@ -87,11 +98,12 @@ A completion or abort closes the current task when:
 
 - its `turn_id` matches the current start;
 - its non-null `started_at` matches the current start; or
-- it cannot be correlated because identity or start time is absent.
+- the close record omits `turn_id`; or
+- the close record omits `started_at` and its `turn_id` does not match.
 
-The last case deliberately clears to idle under the false-thinking safety policy. When a close carries a different, older `started_at`, it does not close a newer task. A start without a `turn_id` is ignored because it cannot establish useful identity.
+The uncorrelated cases deliberately clear to idle under the false-thinking safety policy. This means a mismatched close without `started_at` can clear a different, genuinely open successor. That known false-idle risk is preferable to allowing the observed rewritten-close shape to leave working latched indefinitely. When a close carries a different, older `started_at`, it does not close a newer task. A start without a `turn_id` is ignored because it cannot establish useful identity.
 
-The reducer does not maintain a task stack. Separate subagents have separate rollout files, and copied parent starts are historical prefixes. Restoring an older start after the child turn closes would manufacture active work that Codex does not report.
+The reducer does not maintain a task stack. `session_meta` and `thread_spawn` describe rollout provenance, not nested task lifecycle inside one file, so they do not change reducer state. Separate subagents have separate rollout files, and a child file can contain copied parent lifecycle records as a historical prefix. A newer child `task_started` supersedes that copied prefix. Restoring an older parent start after the child turn closes would manufacture active work that Codex does not report.
 
 ### Terminal-list presentation
 
@@ -181,7 +193,7 @@ Reducer tests cover:
 - matching, older, and missing `started_at`;
 - missing task identity;
 - later-start supersession;
-- copied parent prefix followed by a child start and close;
+- `session_meta`/`thread_spawn` plus a copied parent prefix followed by a child start and close;
 - completion and abort variants;
 - malformed and unrelated JSONL records.
 
