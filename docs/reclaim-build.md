@@ -199,3 +199,4 @@ Notes:
 
 ## Future
 The ~4.6 GiB of compiled artifacts can only be de-duplicated across worktrees via SwiftPM compilation caching (LLVM CAS + prefix mapping) on the new Swift Build engine — currently an opt-in pitch. Track and pilot when it lands.
+For the measured cold-build cost breakdown behind that conclusion — where the 327.9 s of a cold build actually goes, and why splitting the package into core and app halves was judged low return — see [`docs/research/2026-08-19-cold-build-split/findings.md`](research/2026-08-19-cold-build-split/findings.md).
