@@ -34,4 +34,19 @@ import Testing
 
         #expect(command.readHookPayload)
     }
+
+    @Test("hook payload reader stops after detecting one byte over the limit")
+    func hookPayloadReaderStopsAtOverflowBoundary() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("terminal-activity-hook-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Data(repeating: 0x61, count: (1 << 20) + 512).write(to: url)
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+
+        let payload = TerminalActivityEventCommand.readBoundedHookPayload(from: handle)
+
+        #expect(payload == nil)
+        #expect(try handle.offset() == UInt64((1 << 20) + 1))
+    }
 }
