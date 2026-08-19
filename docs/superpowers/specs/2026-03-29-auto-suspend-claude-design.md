@@ -112,7 +112,7 @@ Steps 1–5 are cancellable (the coordinator can cancel the suspend task during 
 
 Steps 1–5 that skip leave the terminal running — conservative by default.
 
-**No suspend message for v1**: TBD-created panes use `zsh -ic <command>` — the pane dies when Claude exits, so there's no shell to echo into. The user sees the terminal resume when they switch back, which is sufficient feedback.
+**No suspend message for v1**: TBD-created panes use `zsh -ilc <command>` — the pane dies when Claude exits, so there's no shell to echo into. The user sees the terminal resume when they switch back, which is sufficient feedback.
 
 **Race condition note**: Claude could start working between `isIdleConfirmed()` and the `/exit` send. This is benign — Claude Code queues `/exit` and processes it after the current turn completes. The session is preserved. Since `/exit` is past the point of no return, the terminal is always marked as suspended once step 6 executes.
 
@@ -123,7 +123,7 @@ Triggered when a worktree is selected. Orchestrated by the `SuspendResumeCoordin
 For each terminal in the **arriving** worktree where `suspendedAt != nil`:
 
 1. **Check if Claude is already running**: `pane_current_command` matches Claude. This could mean the user manually restarted it, OR a timed-out suspend's `/exit` hasn't been processed yet. **Do not clear `suspendedAt` in this case** — wait for Claude to exit (the queued `/exit` will eventually process). If the terminal is still running after another 5s, then assume the user restarted it intentionally: clear `suspendedAt`, re-capture session ID, done.
-2. **Check pane is alive**: verify the tmux pane/window still exists via `TmuxManager.windowExists()`. The pane will almost always be dead (TBD-created panes use `zsh -ic` — the shell exits when Claude exits).
+2. **Check pane is alive**: verify the tmux pane/window still exists via `TmuxManager.windowExists()`. The pane will almost always be dead (TBD-created panes use `zsh -ilc` — the shell exits when Claude exits).
 3. **Build resume command**: `claude --resume <claudeSessionID> --dangerously-skip-permissions` (daemon always launches managed Claude with this flag today)
 4. **Create new tmux window**: call `TmuxManager.createWindow(server:session:cwd:shellCommand:)` with the resume command. Update the terminal record's `tmuxWindowID` and `tmuxPaneID` to the new values.
 5. **Force app UI reconnection**: the state delta broadcast must cause the app to recreate the `TerminalPanelView` for this terminal. Since `TerminalPanelView` binds tmux in `makeNSView` (which only runs once) and `updateNSView` is a no-op, a changed `tmuxWindowID` won't rebind the view. **Fix**: include `tmuxWindowID` in the view's `.id()` modifier (e.g. `.id("\(terminalID)-\(tmuxWindowID)")`), so SwiftUI destroys and recreates the view when the window ID changes.

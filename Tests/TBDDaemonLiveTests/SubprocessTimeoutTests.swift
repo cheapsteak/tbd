@@ -106,8 +106,9 @@ struct SubprocessTimeoutTests {
     }
 
     @Test func runExternalCommandTimesOutPromptlyWhenGrandchildHoldsPipeOpen() async {
-        // Real call sites run `[shell, "-ic", cmd]`, and rc files can fork
-        // background children that inherit the pipe write ends. The deadline
+        // Real call sites run `[shell, "-ilc", cmd]`, and startup files
+        // (profile and rc) can fork background children that inherit the
+        // pipe write ends. The deadline
         // kills only the DIRECT child, so EOF never arrives on the pipes. The
         // old blocking `readDataToEndOfFile` drain leaked two parked
         // global-queue threads + two pipe FDs (+ retained closures) per

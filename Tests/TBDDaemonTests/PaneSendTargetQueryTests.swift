@@ -149,7 +149,7 @@ struct PaneSendTargetQueryTests {
     @Test("the quoted export form TBD actually plants is read back exactly")
     func resolveQuotedExport() {
         // The literal shape `newWindowCommand` produces from the `env` map.
-        let command = "/bin/zsh -ic \"export TBD_TERMINAL_ID='\(Self.plantedID)'; "
+        let command = "/bin/zsh -ilc \"export TBD_TERMINAL_ID='\(Self.plantedID)'; "
             + "export TBD_WORKTREE_ID='11'; claude\""
         #expect(TmuxManager.resolvePaneTerminalID(paneOption: "", startCommand: command)
             == Self.plantedID)

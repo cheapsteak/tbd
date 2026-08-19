@@ -255,8 +255,11 @@ public struct TmuxManager: Sendable {
     }
 
     public static func newWindowCommand(server: String, session: String, cwd: String, shellCommand: String, env: [String: String] = [:], sensitiveEnv: [String: String] = [:], cols: Int? = nil, rows: Int? = nil) -> [String] {
-        // Use shell -ic so commands with arguments work (e.g. "claude --dangerously-skip-permissions")
-        // -i keeps it interactive (loads .zshrc), -c runs the command
+        // Use shell -ilc so commands with arguments work (e.g. "claude --dangerously-skip-permissions")
+        // -i keeps it interactive (loads rc files such as .zshrc), -l makes it
+        // a login shell (loads profile files: /etc/zprofile's path_helper and
+        // ~/.zprofile supply the /usr/local/bin and Homebrew PATH entries; see
+        // docs/specs/2026-08-19-login-shell-panes-design.md), -c runs the command.
         // After the command exits, the pane closes (tmux default behavior)
         let userShell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
         let fullCommand = envExportPrefixed(shellCommand, env: env)
@@ -269,9 +272,10 @@ public struct TmuxManager: Sendable {
         //     tmux invocation's own argv during fork/exec, but tmux re-execs
         //     and its server process does not retain the original argv
         //     visibly.)
-        //   - rc-affecting toggles (e.g. DISABLE_AUTO_UPDATE on hook panes):
-        //     the `env` export-prefix runs after `.zshrc` completes, so only
-        //     -e values are visible while rc files execute.
+        //   - startup-file-affecting toggles (e.g. DISABLE_AUTO_UPDATE on hook
+        //     panes): the `env` export-prefix runs after every startup file
+        //     (profile and rc) completes, so only -e values are visible while
+        //     profile and rc files execute.
         let eFlags = sensitiveEnvFlags(sensitiveEnv)
         // Note: size flags (-x/-y) are intentionally NOT emitted here. tmux's
         // `new-window` does not support those flags (only `new-session`,
@@ -284,17 +288,19 @@ public struct TmuxManager: Sendable {
         _ = rows
         return ["-L", server, "new-window", "-t", session, "-c", cwd]
             + eFlags
-            + ["-PF", "#{window_id} #{pane_id}", userShell, "-ic", fullCommand]
+            + ["-PF", "#{window_id} #{pane_id}", userShell, "-ilc", fullCommand]
     }
 
     /// Respawn (replace the running program of) an existing window's pane
     /// IN PLACE, keeping the same window id and pane id. Shares
     /// `newWindowCommand`'s env handling through `envExportPrefixed` and
     /// `sensitiveEnvFlags` — the `env` map is inlined as an
-    /// `export …; ` prefix on the shell command (runs AFTER rc files), while
-    /// `sensitiveEnv` is passed via tmux `-e KEY=VALUE` so it's in the process
-    /// environment before the shell starts (kept out of `ps aux`, and visible
-    /// during rc execution). `-k` kills the pane's current program first.
+    /// `export …; ` prefix on the shell command (runs AFTER all startup files,
+    /// profile and rc alike), while `sensitiveEnv` is passed via tmux
+    /// `-e KEY=VALUE` so it's in the process environment before the shell
+    /// starts (kept out of `ps aux`, and visible during profile and rc
+    /// execution). Spawns `$SHELL -ilc` like `newWindowCommand`. `-k` kills
+    /// the pane's current program first.
     ///
     /// Used by the seamless in-place account switch: same tab, same terminal
     /// row, new profile's `claude --resume` command. See PR 5222a79 for why the
@@ -313,7 +319,7 @@ public struct TmuxManager: Sendable {
         let eFlags = sensitiveEnvFlags(sensitiveEnv)
         return ["-L", server, "respawn-window", "-k", "-t", windowID, "-c", cwd]
             + eFlags
-            + [userShell, "-ic", fullCommand]
+            + [userShell, "-ilc", fullCommand]
     }
 
     /// Resize an existing tmux window to the given cell dimensions.

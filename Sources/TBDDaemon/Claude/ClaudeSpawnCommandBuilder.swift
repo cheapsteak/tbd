@@ -178,7 +178,7 @@ enum ClaudeSpawnCommandBuilder {
         // (`cmd` / `shellFallback`, early-returned above) keep update checks.
         // Deliberately NOT a routing key: it must be in the process env
         // BEFORE .zshrc runs, which only tmux's `-e` flag achieves — an
-        // inline export executes after rc files and would be useless.
+        // inline export executes after all startup files and would be useless.
         env["DISABLE_AUTO_UPDATE"] = "true"
         // Registry-driven Claude spawn-env settings. This block only runs in
         // the Claude branches — the `cmd` / `shellFallback` branches return
@@ -192,13 +192,14 @@ enum ClaudeSpawnCommandBuilder {
 
         // Re-export the profile ROUTING env inline, ahead of the claude
         // invocation. tmux's `-e KEY=VALUE` seeds the pane's initial process
-        // environment, but the window runs `$SHELL -ic <command>` and an
-        // interactive shell sources rc files (~/.zshenv, ~/.zshrc) BEFORE the
-        // -c command — any `export CLAUDE_CONFIG_DIR=...` in those files
-        // silently clobbers the -e value. That is exactly what broke profile
-        // login sessions for users running a shell-based Claude account
-        // switcher: every "isolated" session inherited the rc file's config
-        // dir instead of the profile's. Inline exports execute AFTER rc files,
+        // environment, but the window runs `$SHELL -ilc <command>` and an
+        // interactive login shell sources profile and rc files (~/.zshenv,
+        // /etc/zprofile, ~/.zprofile, ~/.zshrc) BEFORE the -c command — any
+        // `export CLAUDE_CONFIG_DIR=...` in those files silently clobbers the
+        // -e value. That is exactly what broke profile login sessions for
+        // users running a shell-based Claude account switcher: every
+        // "isolated" session inherited the rc file's config dir instead of
+        // the profile's. Inline exports execute AFTER every startup file,
         // so they deterministically win.
         //
         // Scope: only the profile routing keys (config dir, base URL, model,

@@ -90,10 +90,64 @@ import Testing
     #expect(args.contains("claude --dangerously-skip-permissions"))
 }
 
+@Test func testNewWindowCommandRunsLoginShell() throws {
+    // Spawned panes run the user's shell as an interactive LOGIN shell:
+    // -i sources rc files, -l sources profile files (/etc/zprofile's
+    // path_helper and ~/.zprofile, which supply /usr/local/bin and the
+    // Homebrew PATH entries), -c runs the command. A non-login -ic shell
+    // skips profile files and leaves user tools like `code` unresolvable.
+    // See docs/specs/2026-08-19-login-shell-panes-design.md.
+    let args = TmuxManager.newWindowCommand(
+        server: "tbd-a1b2c3d4",
+        session: "main",
+        cwd: "/tmp/worktree",
+        shellCommand: "claude",
+        env: ["TBD_TERMINAL_ID": "abc-123"],
+        sensitiveEnv: ["ANTHROPIC_API_KEY": "sk-test"]
+    )
+    #expect(!args.contains("-ic"), "non-login interactive shells skip profile files")
+    let flagIndex = try #require(args.firstIndex(of: "-ilc"))
+    // The flag sits between the shell and the command string, which stays
+    // the final positional argument.
+    #expect(flagIndex == args.count - 2)
+    // The env map is still inlined as an export prefix on the command string,
+    // which runs after every startup file (profile and rc), so it stays the
+    // last writer.
+    #expect(args.last == "export TBD_TERMINAL_ID='abc-123'; claude")
+    // sensitiveEnv still lands via tmux -e: in the process environment before
+    // the shell starts, visible during profile files and rc files alike.
+    let eIndex = try #require(args.firstIndex(of: "ANTHROPIC_API_KEY=sk-test"))
+    #expect(eIndex > 0)
+    #expect(args[eIndex - 1] == "-e")
+}
+
+@Test func testRespawnWindowCommandRunsLoginShell() throws {
+    // The in-place respawn path (seamless profile swap) must spawn through
+    // the same interactive login-shell shape as newWindowCommand, with the
+    // same env-prefix and -e handling.
+    let args = TmuxManager.respawnWindowCommand(
+        server: "tbd-a1b2c3d4",
+        windowID: "@5",
+        cwd: "/tmp/worktree",
+        shellCommand: "claude --resume",
+        env: ["CLAUDE_CONFIG_DIR": "/tmp/profile"],
+        sensitiveEnv: ["ANTHROPIC_API_KEY": "sk-test"]
+    )
+    #expect(args.contains("respawn-window"))
+    #expect(args.contains("-k"))
+    #expect(!args.contains("-ic"), "non-login interactive shells skip profile files")
+    let flagIndex = try #require(args.firstIndex(of: "-ilc"))
+    #expect(flagIndex == args.count - 2)
+    #expect(args.last == "export CLAUDE_CONFIG_DIR='/tmp/profile'; claude --resume")
+    let eIndex = try #require(args.firstIndex(of: "ANTHROPIC_API_KEY=sk-test"))
+    #expect(eIndex > 0)
+    #expect(args[eIndex - 1] == "-e")
+}
+
 @Test func testNewWindowCommandSensitiveEnvUsesEFlag() {
     // sensitiveEnv must land in the process environment via tmux's
-    // `-e KEY=VALUE` flag (visible while .zshrc runs), never as an
-    // `export` prefix inside the -c command string (which runs after).
+    // `-e KEY=VALUE` flag (visible while profile and rc files run), never as
+    // an `export` prefix inside the -c command string (which runs after).
     let args = TmuxManager.newWindowCommand(
         server: "tbd-a1b2c3d4",
         session: "main",

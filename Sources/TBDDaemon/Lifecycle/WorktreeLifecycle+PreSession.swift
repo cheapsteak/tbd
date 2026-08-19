@@ -61,8 +61,9 @@ extension WorktreeLifecycle {
     /// `createWindow(sensitiveEnv:)` so tmux injects it with `-e KEY=VALUE` —
     /// i.e. into the PROCESS environment before zsh starts. The regular
     /// `env:` dict is inlined as `export KEY='V'; ` statements inside the
-    /// `-c` command string, which runs AFTER `.zshrc` completes, so it cannot
-    /// affect anything the rc files do. oh-my-zsh's tools/check_for_upgrade.sh
+    /// `-c` command string, which runs AFTER every startup file (profile and
+    /// rc) completes, so it cannot affect anything the startup files do.
+    /// oh-my-zsh's tools/check_for_upgrade.sh
     /// honors the legacy `DISABLE_AUTO_UPDATE` var (mapped to
     /// `zstyle ':omz:update' mode disabled`), so this skips its interactive
     /// "Would you like to update?" prompt that would otherwise block the hook
