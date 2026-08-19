@@ -687,17 +687,16 @@ public actor OrphanGC {
     /// sweep takes.
     ///
     /// Both row reads happen HERE rather than being handed down from `sweep`,
-    /// and both are read back to back. The sweep's own `archived` list is taken
-    /// before the deletion-queue, scratchpad and profile-dir phases have run —
-    /// `du` shells and Keychain calls, so a wide window — and a worktree
-    /// archived inside that window would be missing from the old `archived`
-    /// list and already excluded from the fresh live list. It would then fall
-    /// through to the "absent from the database" arm and be graced from
-    /// process start instead of from `archivedAt`, which is the weaker gate,
-    /// on the exact row whose grace was just supposed to begin. Reading both
-    /// together closes that. A failure on either read skips the phase, where
-    /// `sweep`'s `try? … ?? []` would have read "no archived worktrees" — the
-    /// same silent weakening by another route.
+    /// and back to back, so the live list and the archived list are one view of
+    /// one instant. The sweep's own `archived` list is taken before the
+    /// deletion-queue, scratchpad and profile-dir phases have run — `du` shells
+    /// and Keychain calls, so a wide window — and a worktree archived inside
+    /// that window would be missing from the old `archived` list while already
+    /// excluded from the fresh live list, leaving the phase to judge it on two
+    /// readings that disagree. Reading both together closes that. A failure on
+    /// either read skips the phase and says so, where `sweep`'s `try? … ?? []`
+    /// would have read "no archived worktrees" and reported a clean sweep of a
+    /// phase that never ran.
     private func reclaimOrphanProcesses(
         config: Config, repos: [Repo], live: LiveCWDs,
         dryRun: Bool, planned: inout [String], reaped: inout Int
@@ -803,12 +802,14 @@ public actor OrphanGC {
         // one directory there per project it has ever run in, and TBD manages
         // almost none of them — a single census of one developer machine found
         // 86 entries, of which 9 named no worktree at all (plain checkouts, a
-        // home directory, and loose files). Listing it as a pool would put
-        // every one of those in the "absent from the database" arm and make a
-        // stranger's live session reclaimable. `ScratchpadCollector.reconcile`
-        // already takes the whitelist side here for a merely destructive
-        // operation ("Unrelated directories in the base are untouched"); this
-        // phase kills processes, so it takes the same side.
+        // home directory, and loose files). A pool is where TBD's own
+        // `.deleting/` queues live and the only place an entry carrying no row
+        // is reclaimable at all; TBD queues no deletions here, so listing this
+        // base as a pool would extend that claim over a tree that is mostly
+        // other software's. `ScratchpadCollector.reconcile` already takes the
+        // whitelist side here for a merely destructive operation ("Unrelated
+        // directories in the base are untouched"); this phase kills processes,
+        // so it takes the same side.
         var sharedRoots = [deletionQueueCollector.resolvedPath(scratchpadBase.path)]
 
         // `adoptWorktree` inserts a row at a path the user chose, so an adopted
@@ -819,17 +820,14 @@ public actor OrphanGC {
         // close, for that whole class of worktree.
         //
         // The row's own path goes in as a SHARED root, never as a pool, and
-        // never its parent directory. A pool means "TBD owns every child
-        // outright, so a stray here is TBD's", which is false of a directory
-        // the user picked: its neighbours are a home directory's, a projects
-        // folder's, someone else's checkouts. Admitting the parent as a pool —
-        // or the path as one, which for a nested layout amounts to the same
-        // widening — would put every one of those neighbours in the
-        // "absent from the database" arm and make a stranger's live session
-        // reclaimable, the same mistake the Claude scratchpad base is listed
-        // above to avoid. A shared root classifies only what an explicit
-        // `live`/`dead` entry names, which is precisely the adopted worktree
-        // itself and nothing beside it.
+        // never its parent directory. A pool means "TBD owns this tree
+        // outright" — it is where TBD's own `.deleting/` queues live, and the
+        // only place an entry carrying no row is reclaimable at all — and that
+        // is false of a directory the user picked: its neighbours are a home
+        // directory's, a projects folder's, someone else's checkouts. A shared
+        // root classifies only what an explicit `live`/`dead` entry names,
+        // which is precisely the adopted worktree itself and nothing beside
+        // it, the same line the Claude scratchpad base above is drawn on.
         //
         // `reclaimDeletionQueue` widens its own set from adopted rows for the
         // same reason; it can take the parent because draining a `.deleting/`
@@ -851,9 +849,9 @@ public actor OrphanGC {
         // A worktree's Claude scratchpad answers to the same owner as the
         // worktree itself — `ScratchpadCollector`'s slug is derived from the
         // worktree path, so the owner is always recoverable. Classifying the
-        // scratchpad alongside its worktree is what keeps a live worktree's
-        // scratchpad out of the "absent from the database" arm, where it would
-        // otherwise become reclaimable while the work is still going on.
+        // scratchpad alongside its worktree is what makes an archived
+        // worktree's scratchpad reclaimable and a live one's explicitly not,
+        // rather than leaving a directory the sweep can see go unjudged.
         func scratchpadPath(forWorktreePath path: String) -> String {
             deletionQueueCollector.resolvedPath(
                 scratchpadBase.appendingPathComponent(

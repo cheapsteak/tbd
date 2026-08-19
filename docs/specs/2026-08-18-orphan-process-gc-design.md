@@ -81,7 +81,8 @@ currently has none.
 ## Scope
 
 **In scope:** processes whose cwd resolves inside a TBD-managed worktree,
-`.deleting/` entry, or scratchpad, and whose owning worktree no longer exists.
+`.deleting/` entry, or scratchpad that something positively attests is dead —
+an archived worktree row, or the deletion queue TBD renamed the directory into.
 
 **Out of scope, tracked as issue #678:** leaked tmux servers and their
 `tmux -CC attach` control-mode clients. A tmux server `chdir`s to `/` when it
@@ -131,7 +132,12 @@ A process is a candidate for reclamation when **all** of these hold:
 - Its resolved cwd lies inside a TBD-managed root: a worktree pool directory,
   a `<pool>/.deleting/` entry, an adopted worktree's own directory, or a
   scratchpad directory.
-- The worktree owning that path is archived or absent from the database.
+- Something **positively attests that the owning directory is dead**. There are
+  exactly two such attestations, and nothing else counts:
+  - a worktree row whose status is `archived` — for the worktree's own
+    directory and for its Claude scratchpad alike; or
+  - the directory sitting in a `<pool>/.deleting/<uuid>` queue entry, which is
+    where TBD itself renamed it on the way to deleting it.
 - It is at least as old as the cwd reading it was matched against.
 
 A cwd inside a **live** worktree is never a candidate, whatever the process is.
@@ -142,16 +148,41 @@ archived counts as live whether or not its directory still exists on disk: that
 combination is a broken worktree, and a broken worktree is a reconcile problem,
 not a licence to kill.
 
+### The absence of a row attests to nothing
+
+A directory under a worktree pool that names no row at all is **ambiguous**, and
+ambiguity keeps. TBD cannot tell a worktree a person added by hand — a bare
+`git worktree add`, or a plain `mkdir` — from garbage some earlier failure left
+behind, and only one of those two is safe to kill processes in.
+
+Nor does time resolve the ambiguity. A row is backfilled for a directory TBD did
+not create only by `WorktreeLifecycle.reconcile`, which runs at daemon startup,
+on `repo.add`, and from the cleanup RPC — **no timer calls it**, and it adopts
+only entries `git worktree list` already reports. This sweep, by contrast, runs
+at startup and then hourly forever. So on a daemon up for days, a hand-made
+directory under the pool is not "not recognized yet"; it is not recognized, full
+stop, and treating that as a death certificate would have the sweep kill live
+work nobody ever archived.
+
+The consequence, accepted deliberately: a worktree whose row was hard-deleted by
+`worktree.forget` while its directory remained keeps its processes. `forget`
+means "stop tracking this, leave the directory alone", and the person may well
+still be working in it. Both orphans measured in the field were rooted in
+**archived** worktrees, so no evidenced coverage rests on the forgotten case.
+
+`.deleting/<uuid>` entries are the one stray a pool still claims, and they are
+not an exception to the rule: TBD renamed the directory there itself, so the
+entry *is* the attestation. It carries no archive instant — there is no row left
+to hold one — so its grace runs from process start instead.
+
 ### Owned roots and shared roots
 
-The "absent from the database" arm makes an unrecognized child of a root
-reclaimable, and that is only sound where every child of the root is TBD's by
-construction. Two kinds of root therefore behave differently:
+Two kinds of root behave differently, because only one of them is where TBD's
+own `.deleting/` queues live:
 
 - **Owned** — each repo's worktree pool (canonical and legacy) and the
-  scratch-worktree pool. Everything under one of these was put there by TBD, so
-  a child naming no row is a leftover this sweep owns, and `.deleting/<uuid>`
-  entries land here.
+  scratch-worktree pool. TBD owns these trees outright, `.deleting/<uuid>`
+  entries land in them, and a cwd inside such an entry is reclaimable.
 - **Shared** — the Claude scratchpad base, and every adopted worktree's own
   directory. Claude Code creates one directory in the scratchpad base per
   project it has ever been run in, and TBD manages almost none of them: a
@@ -159,8 +190,9 @@ construction. Two kinds of root therefore behave differently:
   worktree at all — plain checkouts, a home directory, and loose files. A cwd
   under a shared root is classified only by an explicit live or dead entry —
   derived from a worktree row via `ScratchpadCollector`'s slug for a
-  scratchpad, and from the row's own path for an adopted worktree; an
-  unrecognized child is never a candidate.
+  scratchpad, and from the row's own path for an adopted worktree. TBD queues
+  no deletions here, so nothing under a shared root is claimable on any other
+  ground, and a shared root nested inside a pool wins over it.
 
 `ScratchpadCollector.reconcile` already draws exactly this line for a merely
 destructive operation — "Unrelated directories in the base are untouched" — and
@@ -170,13 +202,12 @@ this phase kills processes, so it draws the line no further out.
 worktree lies under no pool at all. Without an entry of its own it would fail
 the root test above and stay `.outside` forever, reproducing this phase's whole
 subject for that class of worktree — so the row's own path is admitted, as a
-shared root. Not as a pool, and not its parent directory: the location is the
-user's, its neighbours are unrelated checkouts and loose files, and admitting
-the neighbourhood as owned would put every one of them in the "absent from the
-database" arm and make a stranger's live session reclaimable. A shared root
-classifies exactly the adopted worktree and nothing beside it. Since no pool
-contains the path, the reap record takes its repo from the row's own `repoID`
-rather than from the pool-to-repo map.
+shared root. Not as a pool, and not its parent directory: a pool asserts that
+TBD owns the whole tree, which is exactly what is untrue of a location the user
+picked, where the neighbours are unrelated checkouts and loose files. A shared
+root classifies exactly the adopted worktree and nothing beside it. Since no
+pool contains the path, the reap record takes its repo from the row's own
+`repoID` rather than from the pool-to-repo map.
 
 `reclaimDeletionQueue` widens its own pool set from adopted rows for a related
 reason, and can take the whole parent directory: an entry sitting in
@@ -246,11 +277,11 @@ on staleness; the per-volley re-read is what bounds staleness.
 
 The worktree rows have their own staleness problem and the phase reads them
 itself for the same reason: the archived list and the live list have to agree
-with each other, and a row archived between them belongs to neither. It would
-then reach the "absent from the database" arm and be graced from process start
-rather than from `archivedAt` — the weaker gate, on the exact row whose grace was
-just supposed to begin. Both reads happen together, inside the phase, and a
-failure on either skips it.
+with each other, and a row archived between them belongs to neither, leaving the
+phase to judge one worktree on two readings that disagree. Both reads happen
+together, inside the phase, and a failure on either skips it — where the sweep's
+own `try? … ?? []` would have read "no archived worktrees" and reported a clean
+sweep of a phase that never ran.
 
 ## Exclusions
 
@@ -321,7 +352,8 @@ calling that helper in a loop.
 ## Grace
 
 Reclamation waits out `gcGraceSeconds` (3600 today), measured from `archivedAt`
-where a worktree row survives, and from process start time where it does not.
+where an archived row is what attests to the death, and from process start time
+for a `.deleting/` queue entry, which has no row left to carry an instant.
 Reusing the existing knob keeps one dial rather than two, and an hour is far
 below the multi-day lifetimes every observed orphan reached.
 
@@ -402,6 +434,14 @@ an undo.
 - **A stray scratchpad is a skip.** A directory under the Claude scratchpad base
   that names no worktree TBD knows is never a candidate, while an archived
   worktree's own scratchpad still is.
+- **An unrecognized pool child is a skip.** A directory created directly under a
+  worktree pool by hand, holding a `ppid == 1` process far older than
+  `gcGraceSeconds`, is never a candidate — while a `<pool>/.deleting/<uuid>`
+  entry in the same sweep still is, and the `.deleting/` queue directory itself
+  is not, since it names no entry.
+- **A forgotten worktree is a skip.** A row hard-deleted by `worktree.forget`
+  with the directory left intact keeps its processes, pinning that coverage
+  limit as deliberate.
 - **A pid younger than the cwd reading is a skip**, and so is one whose age
   could not be parsed, on both grace arms.
 - **Identity is re-checked at signal time.** A descendant whose start time moved

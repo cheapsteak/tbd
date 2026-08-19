@@ -43,9 +43,11 @@ public struct ProcessSnapshotEntry: Sendable, Equatable {
 public struct DeadWorktreeRoot: Sendable, Equatable {
     /// Canonical directory path.
     public var path: String
-    /// When the owning row was archived. `nil` means no row survives at all,
-    /// in which case grace is measured from process start instead — there is
-    /// no archive instant to measure from.
+    /// When the owning row was archived, where an archived row is what
+    /// established the death. `nil` means the evidence was of the other kind —
+    /// a `<pool>/.deleting/<uuid>` queue entry, which TBD renamed there itself
+    /// and which carries no archive instant to measure from, so grace runs
+    /// from process start instead.
     public var archivedAt: Date?
 
     public init(path: String, archivedAt: Date?) {
@@ -58,19 +60,25 @@ public struct DeadWorktreeRoot: Sendable, Equatable {
 public struct TBDProcessRoots: Sendable {
     /// Canonical prefixes of directories TBD owns **outright**: each repo's
     /// worktree pool (canonical and legacy) and the scratch-worktree pool.
-    /// Every child of one of these is a TBD worktree by construction, so a
-    /// child matching no row is a leftover this sweep owns.
+    ///
+    /// A pool is where TBD's own `.deleting/<uuid>` queue entries live, and an
+    /// entry there is positive evidence of death — TBD renamed it there. Being
+    /// under a pool is NOT itself such evidence: a directory a person created
+    /// under one by hand, with `git worktree add` or a bare `mkdir`, gets no
+    /// row until something calls `WorktreeLifecycle.reconcile`, and no timer
+    /// ever does. So an unrecognized child of a pool is ambiguous, and
+    /// ambiguity keeps.
     public var pools: [String]
     /// Canonical prefixes of directories TBD **shares** with other software —
     /// today the Claude scratchpad base, which Claude Code fills with one
     /// directory per project it has ever been run in, most of which TBD has
     /// never managed. A cwd here is classified only by an explicit `live` or
-    /// `dead` entry; an unrecognized child is never a candidate.
+    /// `dead` entry, and a shared root holds no `.deleting/` queue TBD drains,
+    /// so an unrecognized child is never a candidate.
     ///
-    /// The distinction is the whole difference between a whitelist and a
-    /// blacklist, and `ScratchpadCollector.reconcile` already takes the
-    /// whitelist side ("Unrelated directories in the base are untouched") for
-    /// a merely destructive operation. This one kills processes.
+    /// `ScratchpadCollector.reconcile` already takes the same whitelist side
+    /// ("Unrelated directories in the base are untouched") for a merely
+    /// destructive operation. This one kills processes.
     public var sharedRoots: [String]
     /// Canonical paths of worktrees that are still alive, and of their Claude
     /// scratchpads. A cwd under one of these is never a candidate, even at
@@ -78,9 +86,9 @@ public struct TBDProcessRoots: Sendable {
     /// server safe until the developer has archived the worktree it belonged
     /// to.
     public var live: [String]
-    /// Canonical paths of worktrees that are dead, and of their Claude
-    /// scratchpads, with the archive instant where the row survives to carry
-    /// one.
+    /// Canonical paths of worktrees whose rows say they are dead — archived —
+    /// and of their Claude scratchpads, each carrying that row's archive
+    /// instant.
     public var dead: [DeadWorktreeRoot]
 
     public init(
@@ -100,7 +108,8 @@ public enum CWDOwnership: Sendable, Equatable {
     case outside
     /// Under a worktree that is still alive. Never a candidate.
     case live(path: String)
-    /// Under a dead worktree, a `.deleting/` entry, or a scratchpad.
+    /// Under something positively known to be dead: an archived worktree, an
+    /// archived worktree's scratchpad, or a `<pool>/.deleting/<uuid>` entry.
     case dead(DeadWorktreeRoot)
 }
 
@@ -146,8 +155,10 @@ public struct OrphanProcessCandidate: Sendable, Equatable {
 ///
 /// Every failure direction is toward KEEPING: an unreadable cwd, an unparseable
 /// start time, a uid that is not ours, an identity that cannot be re-read at
-/// signal time, and any ambiguity between a live and a dead owner all leave the
-/// process running.
+/// signal time, and any ambiguity about whether the owning directory is dead
+/// all leave the process running. Reclamation runs on positive evidence of
+/// death — an archived row, or a `.deleting/<uuid>` entry TBD renamed there
+/// itself — never on the mere absence of one.
 public struct OrphanProcessCollector: Sendable {
     let signaller: any ProcessSignaller
     /// One fresh `/bin/ps` reading, taken immediately before each volley so a
@@ -198,12 +209,16 @@ public struct OrphanProcessCollector: Sendable {
     ///   `scripts/restart.sh` is run from a worktree, that worktree — so
     ///   archiving it would otherwise have the sweep SIGKILL the live daemon
     ///   running the sweep.
-    /// - its cwd is readable, and resolves under a dead TBD-managed root.
+    /// - its cwd is readable, and resolves under a TBD-managed root positively
+    ///   known to be dead — an archived worktree (or its scratchpad), or a
+    ///   `.deleting/<uuid>` queue entry. A directory nobody can attest is dead,
+    ///   including an unrecognized child of a worktree pool, keeps.
     /// - it is at least as old as the cwd reading it was joined to, so a pid
     ///   the kernel reissued between the two readings cannot inherit a dead
     ///   process's cwd. An unreadable age fails this, i.e. keeps.
-    /// - the grace window has passed: from `archivedAt` where the row survives
-    ///   to carry one, and from process start time where it does not.
+    /// - the grace window has passed: from `archivedAt` where an archived row
+    ///   established the death, and from process start time for a `.deleting/`
+    ///   entry, which carries no such instant.
     public func candidates(
         processes: [ProcessSnapshotEntry],
         cwdByPID: [Int32: String],
@@ -263,20 +278,21 @@ public struct OrphanProcessCollector: Sendable {
     /// and a dead owner resolves to `live` — keep-biased, like every other gate
     /// in this sweep.
     ///
-    /// A cwd under a **pool** that matches no row at all is `dead` with no
-    /// archive instant: that is the "absent from the database" arm, which
-    /// covers `.deleting/` entries and directories whose row was hard-deleted.
-    /// Its root is the pool's own child (two components for a
-    /// `.deleting/<uuid>` entry) so the record names a worktree-shaped path
-    /// rather than the pool.
+    /// Reclamation needs **positive evidence of death**, and there are exactly
+    /// two kinds. An archived row is one, and arrives as a `dead` entry. A
+    /// `<pool>/.deleting/<uuid>` queue entry is the other: TBD renamed the
+    /// directory there itself, so it is garbage by construction, and it is
+    /// reported with no archive instant because there is no row left to carry
+    /// one. Its root is the two-component entry path rather than the pool, so
+    /// the reap record names a worktree-shaped path.
     ///
-    /// That arm deliberately does NOT extend to a `sharedRoot`. The Claude
-    /// scratchpad base holds one directory per project Claude Code has ever
-    /// run in — `-Users-me-projects-something`, and slugs that are not
-    /// projects at all — and TBD manages almost none of them. Treating an
-    /// unrecognized child of a shared root as a dead worktree would put a
-    /// stranger's live session on the kill list, so a shared root classifies
-    /// only what an explicit `live`/`dead` entry names.
+    /// Every other unrecognized cwd is `outside`, under a pool as much as
+    /// under a shared root. The absence of a row is not evidence of death: a
+    /// directory a person made under a pool by hand acquires a row only when
+    /// something calls `WorktreeLifecycle.reconcile`, which has no periodic
+    /// caller at all, so on a daemon up for days a live hand-made worktree and
+    /// a leftover are indistinguishable — and this file resolves every
+    /// ambiguity by keeping.
     public func ownership(ofCWD cwd: String, roots: TBDProcessRoots) -> CWDOwnership {
         let poolMatch = longestPrefix(of: cwd, among: roots.pools)
         let sharedMatch = longestPrefix(of: cwd, among: roots.sharedRoots)
@@ -293,15 +309,19 @@ public struct OrphanProcessCollector: Sendable {
         if let deadMatch {
             return .dead(deadMatch)
         }
-        // Unrecognized. Only a pool owns its strays, and only when no shared
-        // root sits deeper — a nested shared root wins, keeping the process.
-        guard let poolMatch, poolMatch.count > (sharedMatch?.count ?? -1) else { return .outside }
-        return .dead(
-            DeadWorktreeRoot(path: Self.poolChild(of: cwd, pool: poolMatch), archivedAt: nil))
+        // Unrecognized by any row. The one stray that is still positive
+        // evidence of death is a `.deleting/<uuid>` entry TBD renamed there
+        // itself; everything else under a pool is ambiguous and keeps. Claimed
+        // only when no shared root sits deeper — a nested shared root wins.
+        guard let poolMatch, poolMatch.count > (sharedMatch?.count ?? -1),
+              let queued = Self.deletionQueueEntry(of: cwd, pool: poolMatch)
+        else { return .outside }
+        return .dead(DeadWorktreeRoot(path: queued, archivedAt: nil))
     }
 
-    /// `gcGraceSeconds` measured from `archivedAt` where a row survives, and
-    /// from process start time where it does not. An unparseable start time
+    /// `gcGraceSeconds` measured from `archivedAt` where an archived row
+    /// established the death, and from process start time for a `.deleting/`
+    /// queue entry, which carries no such instant. An unparseable start time
     /// keeps the process.
     func graceElapsed(
         root: DeadWorktreeRoot, entry: ProcessSnapshotEntry, graceSeconds: Int
@@ -624,18 +644,16 @@ public struct OrphanProcessCollector: Sendable {
         return path == prefix || path.hasPrefix(prefix.hasSuffix("/") ? prefix : prefix + "/")
     }
 
-    /// The worktree-shaped child of `pool` that `cwd` sits under: one component
-    /// normally, two for a `<pool>/.deleting/<uuid>` queue entry, since the
-    /// queue directory itself owns nothing.
-    static func poolChild(of cwd: String, pool: String) -> String {
+    /// The `<pool>/.deleting/<uuid>` queue entry `cwd` sits inside, or `nil`
+    /// when it sits under no such entry — which includes every ordinary child
+    /// of the pool, and the queue directory itself, since that directory owns
+    /// nothing and its own death is not attested by anything.
+    static func deletionQueueEntry(of cwd: String, pool: String) -> String? {
         let base = pool.hasSuffix("/") ? String(pool.dropLast()) : pool
-        guard cwd.count > base.count else { return base }
+        guard cwd.count > base.count else { return nil }
         let rest = cwd.dropFirst(base.count + 1).split(separator: "/").map(String.init)
-        guard let first = rest.first else { return base }
-        if first == WorktreeDeletionQueue.dirName, rest.count > 1 {
-            return base + "/" + first + "/" + rest[1]
-        }
-        return base + "/" + first
+        guard rest.count > 1, rest[0] == WorktreeDeletionQueue.dirName else { return nil }
+        return base + "/" + rest[0] + "/" + rest[1]
     }
 
     // MARK: - Real `ps` snapshot

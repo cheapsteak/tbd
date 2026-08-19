@@ -344,9 +344,8 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
         let repo = try await makeRepo(db: db)
         let alive = pool.appendingPathComponent("working", isDirectory: true)
         try await makeWorktree(db: db, repo: repo, name: "working", archived: false)
-        // The scratchpad base is itself a TBD-managed pool, so without owner
-        // resolution this path would fall into the "absent from the database"
-        // arm and become reclaimable while the work is still going on.
+        // Resolved through its worktree's owner, so a live worktree's
+        // scratchpad is classified `live` rather than left unjudged.
         let scratchpad = scratchpadBase.appendingPathComponent(
             ScratchpadCollector.slug(forWorktreePath: alive.path), isDirectory: true)
         try fm.createDirectory(at: scratchpad, withIntermediateDirectories: true)
@@ -390,32 +389,111 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
         #expect(later.terminated == [4242], "the same orphan is reclaimed once the window passes")
     }
 
-    @Test("a directory with no row at all measures grace from process start instead")
-    func graceFromProcessStartWhenNoRowSurvives() async throws {
+    /// A `.deleting/<uuid>` entry carries no archived row, so there is no
+    /// archive instant to grace from and process start stands in for it.
+    @Test("a `.deleting/` entry measures grace from process start instead")
+    func graceFromProcessStartForAQueueEntry() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setGCEnabled(true)
         try await db.config.setGCOrphanProcessesEnabled(true)
         _ = try await makeRepo(db: db)
-        // Under the pool, but no worktree row ever existed for it.
-        let stray = pool.appendingPathComponent("forgotten", isDirectory: true)
-        try fm.createDirectory(at: stray, withIntermediateDirectories: true)
+        let queued = try makeQueuedEntry()
+        let canonQueued = canon(URL(fileURLWithPath: queued, isDirectory: true))
 
         let young = FakeProcessSignaller()
         _ = await makeGC(
             db: db, signaller: young,
-            processes: [entry(pid: 550, elapsed: 60)], cwdByPID: [550: canon(stray)],
+            processes: [entry(pid: 550, elapsed: 60)], cwdByPID: [550: canonQueued],
             now: Date()
         ).sweep()
         #expect(young.terminated.isEmpty)
 
+        // Re-create it: the ungated deletion-queue collector drained the
+        // directory on the sweep above, and this half is about the process.
+        let requeued = try makeQueuedEntry()
+        let canonRequeued = canon(URL(fileURLWithPath: requeued, isDirectory: true))
         let old = FakeProcessSignaller()
         old.behaviors[550] = .init(aliveAfterTerminate: false)
         _ = await makeGC(
             db: db, signaller: old,
-            processes: [entry(pid: 550, elapsed: 86_400)], cwdByPID: [550: canon(stray)],
+            processes: [entry(pid: 550, elapsed: 86_400)], cwdByPID: [550: canonRequeued],
             now: Date()
         ).sweep()
         #expect(old.terminated == [550])
+    }
+
+    /// The absence of a row is not evidence of death. Only three call sites
+    /// reach `WorktreeLifecycle.reconcile` — daemon startup, `repo.add` and the
+    /// cleanup RPC — and no timer is one of them, so on a daemon up for days a
+    /// directory a person created under the pool by hand never acquires a row
+    /// at all. Reclaiming its processes would kill live work nobody archived,
+    /// on the strength of TBD not recognizing a name.
+    @Test("a directory created under the pool by hand is never a candidate")
+    func handMadePoolChildIsNeverACandidate() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let dead = try await makeWorktree(db: db, repo: repo, name: "gone", archived: true)
+        // A worktree someone added with a bare `git worktree add`, or a plain
+        // `mkdir`. TBD never saw it, so it names no row.
+        let byHand = pool.appendingPathComponent("hand-made", isDirectory: true)
+        try fm.createDirectory(at: byHand, withIntermediateDirectories: true)
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[5300] = .init(aliveAfterTerminate: false)
+        signaller.behaviors[5301] = .init(aliveAfterTerminate: false)
+
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            processes: [entry(pid: 5300, elapsed: 864_000), entry(pid: 5301)],
+            cwdByPID: [5300: canon(byHand) + "/src", 5301: dead],
+            now: Date().addingTimeInterval(7200)
+        ).sweep()
+
+        #expect(!signaller.terminated.contains(5300))
+        #expect(!signaller.killed.contains(5300))
+        #expect(!result.planned.contains { $0.contains("pid=5300") })
+        #expect(fm.fileExists(atPath: byHand.path))
+        // The archived worktree's orphan in the same sweep proves the hand-made
+        // directory survived a phase that genuinely ran.
+        #expect(signaller.terminated == [5301])
+    }
+
+    /// `worktree.forget` means "stop tracking this, leave the directory alone",
+    /// and the person may well still be working in it. Its processes are
+    /// therefore out of this sweep's reach — a deliberate limit, not an
+    /// oversight: neither orphan measured in the field was of this kind, both
+    /// having been archived rather than forgotten.
+    @Test("a forgotten worktree whose directory remains is never a candidate")
+    func forgottenWorktreeIsNeverACandidate() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let dead = try await makeWorktree(db: db, repo: repo, name: "gone", archived: true)
+        let forgottenDir = pool.appendingPathComponent("forgotten", isDirectory: true)
+        try fm.createDirectory(at: forgottenDir, withIntermediateDirectories: true)
+        let row = try await db.worktrees.create(
+            repoID: repo.id, name: "forgotten", branch: "forgotten",
+            path: forgottenDir.path, tmuxServer: "tbd-test")
+        // Forget: the row goes, the directory stays.
+        try await db.worktrees.delete(id: row.id)
+        #expect(fm.fileExists(atPath: forgottenDir.path))
+
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[5400] = .init(aliveAfterTerminate: false)
+        signaller.behaviors[5401] = .init(aliveAfterTerminate: false)
+
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            processes: [entry(pid: 5400, elapsed: 864_000), entry(pid: 5401)],
+            cwdByPID: [5400: canon(forgottenDir) + "/src", 5401: dead],
+            now: Date().addingTimeInterval(7200)
+        ).sweep()
+
+        #expect(!signaller.terminated.contains(5400))
+        #expect(!result.planned.contains { $0.contains("pid=5400") })
+        #expect(signaller.terminated == [5401])
     }
 
     @Test("the daemon is never signalled, even with its cwd inside the archived worktree")
@@ -589,9 +667,8 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
     /// The other half, and the reason the adopted path goes in as a SHARED
     /// root rather than a pool: the directory the user picked is the user's,
     /// and its neighbours are unrelated checkouts, loose files, sometimes a
-    /// home directory. A pool would put every one of them in the
-    /// "absent from the database" arm and make a stranger's live session
-    /// reclaimable.
+    /// home directory. A pool asserts that TBD owns the whole tree, which is
+    /// exactly what is not true here.
     @Test("an unrelated sibling of an adopted worktree is never a candidate")
     func adoptedWorktreeSiblingIsNeverACandidate() async throws {
         let db = try TBDDatabase(inMemory: true)

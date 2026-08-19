@@ -239,26 +239,48 @@ struct OrphanProcessCollectorTests {
             == .dead(DeadWorktreeRoot(path: shared + "/-dead", archivedAt: nil)))
     }
 
-    /// A shared root nested inside a pool must win: its strays stay unowned.
-    @Test("a shared root nested inside a pool keeps that pool's stray arm out")
+    /// A shared root nested inside a pool must win: the pool's `.deleting/`
+    /// claim stops at its edge.
+    @Test("a shared root nested inside a pool keeps that pool's deleting arm out")
     func nestedSharedRootWins() {
         let nested = TBDProcessRoots(
             pools: [pool], sharedRoots: [pool + "/shared"], live: [], dead: [])
-        #expect(collector().ownership(ofCWD: pool + "/shared/stray", roots: nested) == .outside)
-        #expect(collector().ownership(ofCWD: pool + "/stray", roots: nested)
-            == .dead(DeadWorktreeRoot(path: pool + "/stray", archivedAt: nil)))
+        #expect(
+            collector().ownership(ofCWD: pool + "/shared/.deleting/abc/x", roots: nested)
+                == .outside)
+        #expect(collector().ownership(ofCWD: pool + "/.deleting/abc/x", roots: nested)
+            == .dead(DeadWorktreeRoot(path: pool + "/.deleting/abc", archivedAt: nil)))
     }
 
-    @Test("a pool path with no row at all is dead with no archive instant")
-    func absentFromTheDatabase() {
+    /// The only stray a pool claims. TBD renamed the directory into
+    /// `.deleting/` itself, so it is garbage by construction — the positive
+    /// evidence the arm requires.
+    @Test("a `.deleting/<uuid>` entry is dead with no archive instant")
+    func deletionQueueEntryIsDead() {
         let subject = collector()
         let onlyPool = TBDProcessRoots(pools: [pool], live: [], dead: [])
-        #expect(subject.ownership(ofCWD: "/pool/forgotten/sub", roots: onlyPool)
-            == .dead(DeadWorktreeRoot(path: "/pool/forgotten", archivedAt: nil)))
-        // A `.deleting/<uuid>` entry takes two components: the queue directory
-        // itself owns nothing.
         #expect(subject.ownership(ofCWD: "/pool/.deleting/abc/sub", roots: onlyPool)
             == .dead(DeadWorktreeRoot(path: "/pool/.deleting/abc", archivedAt: nil)))
+        #expect(subject.ownership(ofCWD: "/pool/.deleting/abc", roots: onlyPool)
+            == .dead(DeadWorktreeRoot(path: "/pool/.deleting/abc", archivedAt: nil)))
+        // The queue directory itself names no entry, so nothing attests to it.
+        #expect(subject.ownership(ofCWD: "/pool/.deleting", roots: onlyPool) == .outside)
+    }
+
+    /// The absence of a row is not evidence of death. `WorktreeLifecycle`
+    /// backfills a row for a directory TBD did not create only from startup,
+    /// `repo.add` and the cleanup RPC — no timer calls it — so on a daemon up
+    /// for days a worktree someone made by hand under the pool, or a bare
+    /// `mkdir`, names no row and never will. TBD cannot tell that from
+    /// leftover garbage, and this file resolves ambiguity by keeping.
+    @Test("a pool child with no row at all is outside, not dead")
+    func unrecognizedPoolChildIsKept() {
+        let subject = collector()
+        let onlyPool = TBDProcessRoots(pools: [pool], live: [], dead: [])
+        #expect(subject.ownership(ofCWD: "/pool/hand-made/sub", roots: onlyPool) == .outside)
+        #expect(subject.ownership(ofCWD: "/pool/hand-made", roots: onlyPool) == .outside)
+        // Not even the pool itself.
+        #expect(subject.ownership(ofCWD: pool, roots: onlyPool) == .outside)
     }
 
     // MARK: - Grace
@@ -273,7 +295,7 @@ struct OrphanProcessCollectorTests {
         #expect(subject.graceElapsed(root: old, entry: entry(pid: 5), graceSeconds: 3600))
     }
 
-    @Test("grace runs from process start where no row survives, and an unknown age keeps")
+    @Test("grace runs from process start for a queue entry, and an unknown age keeps")
     func graceFromProcessStart() {
         let subject = collector()
         let noRow = DeadWorktreeRoot(path: dead, archivedAt: nil)
