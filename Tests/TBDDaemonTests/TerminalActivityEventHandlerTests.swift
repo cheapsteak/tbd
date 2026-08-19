@@ -89,6 +89,129 @@ struct TerminalActivityEventHandlerTests {
         #expect(updated?.activityState == .working)
     }
 
+    @Test(
+        "old-session Codex activity cannot overwrite a newer session",
+        arguments: [TerminalActivityState.working, .waitingForUser]
+    )
+    func oldSessionActivityCannotOverwriteNewSession(
+        activityState: TerminalActivityState
+    ) async throws {
+        let terminal = try await makeTerminal()
+        let sessionStart = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "session-current",
+                transcriptPath: nil,
+                source: "startup"))
+        #expect((await router.handle(sessionStart)).success)
+        let currentPrompt = AwaitingInputReason(
+            message: "Current session needs permission",
+            hookEventName: "Notification",
+            notificationType: "permission_prompt")
+        try await db.terminals.recordAwaitingInputReason(
+            id: terminal.id,
+            reason: currentPrompt,
+            observedAt: Date())
+
+        let staleActivity = try RPCRequest(
+            method: RPCMethod.terminalActivityEvent,
+            params: TerminalActivityEventParams(
+                terminalID: terminal.id,
+                activityState: activityState,
+                sessionID: "session-previous"))
+        #expect((await router.handle(staleActivity)).success)
+
+        let updated = try #require(await db.terminals.get(id: terminal.id))
+        #expect(updated.claudeSessionID == "session-current")
+        #expect(updated.activityState == .idle)
+        #expect(updated.activityStateSource == .hookEvent("SessionStart"))
+        #expect(updated.awaitingInputReason == currentPrompt)
+    }
+
+    @Test("old-session working activity cannot cancel the new session's scheduled resume")
+    func oldSessionWorkingCannotCancelScheduledResume() async throws {
+        let terminal = try await makeTerminal()
+        let sessionStart = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "session-current",
+                transcriptPath: nil,
+                source: "startup"))
+        #expect((await router.handle(sessionStart)).success)
+        _ = try await db.scheduledResumes.insertPending(ScheduledResume(
+            terminalID: terminal.id,
+            worktreeID: terminal.worktreeID,
+            resetsAt: Date().addingTimeInterval(3_600),
+            fireAt: Date().addingTimeInterval(3_660),
+            limitType: "session",
+            rawMessage: "rate limit"))
+
+        let staleActivity = try RPCRequest(
+            method: RPCMethod.terminalActivityEvent,
+            params: TerminalActivityEventParams(
+                terminalID: terminal.id,
+                activityState: .working,
+                sessionID: "session-previous"))
+        #expect((await router.handle(staleActivity)).success)
+
+        #expect(try await db.scheduledResumes.pending(terminalID: terminal.id) != nil)
+    }
+
+    @Test(
+        "same-session Codex activity supersedes SessionStart",
+        arguments: [TerminalActivityState.working, .waitingForUser]
+    )
+    func sameSessionActivitySupersedesSessionStart(
+        activityState: TerminalActivityState
+    ) async throws {
+        let terminal = try await makeTerminal()
+        let sessionStart = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "session-current",
+                transcriptPath: nil,
+                source: "startup"))
+        #expect((await router.handle(sessionStart)).success)
+
+        let currentActivity = try RPCRequest(
+            method: RPCMethod.terminalActivityEvent,
+            params: TerminalActivityEventParams(
+                terminalID: terminal.id,
+                activityState: activityState,
+                sessionID: "session-current"))
+        #expect((await router.handle(currentActivity)).success)
+
+        let updated = try #require(await db.terminals.get(id: terminal.id))
+        #expect(updated.activityState == activityState)
+        #expect(updated.activityStateSource == .hookEvent(RPCMethod.terminalActivityEvent))
+    }
+
+    @Test("legacy identity-free Codex permission activity remains accepted")
+    func legacyPermissionActivityRemainsAccepted() async throws {
+        let terminal = try await makeTerminal()
+        let sessionStart = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "session-current",
+                transcriptPath: nil,
+                source: "startup"))
+        #expect((await router.handle(sessionStart)).success)
+
+        let legacyPermission = try RPCRequest(
+            method: RPCMethod.terminalActivityEvent,
+            params: TerminalActivityEventParams(
+                terminalID: terminal.id,
+                activityState: .waitingForUser))
+        #expect((await router.handle(legacyPermission)).success)
+
+        let updated = try #require(await db.terminals.get(id: terminal.id))
+        #expect(updated.activityState == .waitingForUser)
+    }
+
     @Test("Claude activity hooks retain legacy unordered replacement semantics")
     func claudeActivityHookRetainsLegacyUnorderedReplacement() async throws {
         let terminal = try await makeTerminal(kind: .claude, label: "Claude")

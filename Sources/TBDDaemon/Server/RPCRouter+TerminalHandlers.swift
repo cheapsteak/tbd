@@ -3034,19 +3034,6 @@ extension RPCRouter {
             await sessionCounters.recordHookEvent(terminalID: terminal.id, at: observedAt)
         }
 
-        // UserPromptSubmit reaches the daemon as activity=working. If a
-        // session-limit auto-resume is pending, the user just continued
-        // manually — cancel it (spec §Cancellation). Guarded on the mirror
-        // field so the common case costs nothing. Note: the actuator's own
-        // "continue" also lands here; by then verification usually already
-        // moved the row out of pending, and a cancel-vs-sent race only
-        // affects the audit status, never causes a second send.
-        if params.activityState == .working, terminal.pendingResumeAt != nil {
-            if (try? await db.scheduledResumes.cancelPending(terminalID: terminal.id)) == true {
-                await limitResumeScheduler?.wake()
-            }
-        }
-
         // Stop-hook transcript sync (Stop/StopFailure reach the daemon as
         // activity=idle): when a session finishes a turn and its recorded
         // transcript lives OUTSIDE the project dir derived from the worktree's
@@ -3091,6 +3078,16 @@ extension RPCRouter {
             // behavior. Their persisted activity is a hibernation input, not
             // Codex transcript presentation, so this fix must not impose the
             // new ordering and tie-precedence policy on them.
+            // UserPromptSubmit reaches the daemon as activity=working. If a
+            // session-limit auto-resume is pending, the user just continued
+            // manually — cancel it even when the legacy activity value is
+            // unchanged, preserving the established non-Codex behavior.
+            if params.activityState == .working, terminal.pendingResumeAt != nil {
+                if (try? await db.scheduledResumes.cancelPending(
+                    terminalID: terminal.id)) == true {
+                    await limitResumeScheduler?.wake()
+                }
+            }
             guard terminal.activityState != params.activityState else { return .ok() }
             try await db.terminals.setActivityState(
                 id: terminal.id,
@@ -3109,8 +3106,19 @@ extension RPCRouter {
             activityState: params.activityState,
             source: source,
             observedAt: observedAt,
+            sessionID: params.sessionID,
             replaceSameValue: params.origin == .userInterrupt)
         guard let activityApplication else { return .ok() }
+        // The transactional identity check above must accept a Codex working
+        // hook before it can cancel state belonging to the current session.
+        // The actuator's own "continue" also lands here; by then verification
+        // usually already moved the row out of pending, and a cancel-vs-sent
+        // race affects only audit status, never causes a second send.
+        if params.activityState == .working, terminal.pendingResumeAt != nil {
+            if (try? await db.scheduledResumes.cancelPending(terminalID: terminal.id)) == true {
+                await limitResumeScheduler?.wake()
+            }
+        }
         subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
             terminalID: terminal.id,
             worktreeID: terminal.worktreeID,

@@ -34,6 +34,20 @@ struct TerminalActivityEventCommand: AsyncParsableCommand {
     @Argument(help: "Activity state to publish")
     var state: ActivityArgument
 
+    @Flag(help: "Read Codex hook identity from stdin")
+    var readHookPayload = false
+
+    private struct HookPayload: Decodable {
+        let session_id: String?
+    }
+
+    static func sessionID(fromHookPayload data: Data) -> String? {
+        guard !data.isEmpty, data.count <= 1 << 20,
+              let sessionID = try? JSONDecoder().decode(HookPayload.self, from: data).session_id,
+              !sessionID.isEmpty else { return nil }
+        return sessionID
+    }
+
     mutating func run() async throws {
         guard let terminalIDString = ProcessInfo.processInfo.environment["TBD_TERMINAL_ID"],
               let terminalID = UUID(uuidString: terminalIDString) else {
@@ -48,11 +62,15 @@ struct TerminalActivityEventCommand: AsyncParsableCommand {
         }
 
         do {
+            let sessionID = readHookPayload
+                ? Self.sessionID(fromHookPayload: FileHandle.standardInput.readDataToEndOfFile())
+                : nil
             try client.callVoid(
                 method: RPCMethod.terminalActivityEvent,
                 params: TerminalActivityEventParams(
                     terminalID: terminalID,
-                    activityState: state.activityState
+                    activityState: state.activityState,
+                    sessionID: sessionID
                 )
             )
         } catch {
