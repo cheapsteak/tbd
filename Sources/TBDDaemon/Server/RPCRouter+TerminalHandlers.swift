@@ -13,6 +13,12 @@ private struct TranscriptParseCacheEntry {
     let result: [TranscriptItem]
 }
 
+private struct CodexPresentationIdentity: Equatable {
+    let sessionID: String?
+    let transcriptPath: String?
+    let sessionOrderObservedAt: Date?
+}
+
 /// Caches the last `TranscriptParser.parse` result per session file path.
 /// The fingerprint is the parent JSONL's mtime+size. Subagent files are
 /// re-read on cache miss, so the cache is invalidated whenever the parent
@@ -506,7 +512,71 @@ extension RPCRouter {
 
     func handleTerminalList(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalListParams.self, from: paramsData)
-        let terminals = try await db.terminals.list(worktreeID: params.worktreeID)
+        var terminals = try await db.terminals.list(worktreeID: params.worktreeID)
+        var codexTargets: [CodexTranscriptActivityTracker.Target] = []
+        var durableBoundaryTargets: [CodexTranscriptActivityTracker.Target] = []
+        let observedIdentities = Dictionary(uniqueKeysWithValues: terminals
+            .filter(\.isCodexTerminal)
+            .map {
+                ($0.id, CodexPresentationIdentity(
+                    sessionID: $0.claudeSessionID,
+                    transcriptPath: $0.transcriptPath,
+                    sessionOrderObservedAt: $0.sessionOrderObservedAt))
+            })
+
+        for index in terminals.indices where terminals[index].isCodexTerminal {
+            guard let transcriptPath = terminals[index].transcriptPath,
+                  !transcriptPath.isEmpty else { continue }
+            let target = CodexTranscriptActivityTracker.Target(
+                transcriptPath: transcriptPath,
+                worktreeID: terminals[index].worktreeID)
+            codexTargets.append(target)
+            if terminals[index].sessionOrderObservedAt != nil {
+                durableBoundaryTargets.append(target)
+            }
+        }
+
+        // SessionStart's persisted session generation is the restart-safe boundary
+        // cue. On a fresh tracker, start at the path's current EOF rather than
+        // replaying an orphan task_started from before that lifecycle event.
+        // Existing baselines are never moved, so later appended turns remain
+        // visible after ordinary hooks replace the raw activity fact.
+        await codexActivityTracker.establishSessionBoundariesIfAbsent(
+            transcripts: durableBoundaryTargets)
+        let codexObservation = await codexActivityTracker.observeStamped(
+            transcripts: codexTargets,
+            now: now)
+        // SessionStart can retarget a terminal while transcript observation is
+        // suspended on the tracker actor. Re-read as close to response encoding
+        // as possible, and only bind evidence to the exact session/path that
+        // was observed. A mismatch carries authoritative unknown at the
+        // actor-ordered observation stamp: old-path evidence cannot describe
+        // the new transcript, and leaving the stamp absent would let clients
+        // preserve stale working from the old path as a legacy observation.
+        terminals = try await db.terminals.list(worktreeID: params.worktreeID)
+        var codexTranscriptPaths: Set<String> = []
+        for index in terminals.indices where terminals[index].isCodexTerminal {
+            let transcriptPath = terminals[index].transcriptPath
+            if let transcriptPath, !transcriptPath.isEmpty {
+                codexTranscriptPaths.insert(transcriptPath)
+            }
+            let currentIdentity = CodexPresentationIdentity(
+                sessionID: terminals[index].claudeSessionID,
+                transcriptPath: transcriptPath,
+                sessionOrderObservedAt: terminals[index].sessionOrderObservedAt)
+            guard observedIdentities[terminals[index].id] == currentIdentity else {
+                terminals[index].presentationActivityState = nil
+                terminals[index].presentationActivityObservedAt = codexObservation.observedAt
+                continue
+            }
+            terminals[index].presentationActivityState = transcriptPath.flatMap {
+                codexObservation.states[$0]
+            }
+            terminals[index].presentationActivityObservedAt = codexObservation.observedAt
+        }
+
+        await codexActivityTracker.retain(
+            transcriptPaths: codexTranscriptPaths, scope: params.worktreeID)
         return try RPCResponse(result: terminals)
     }
 
@@ -2778,6 +2848,12 @@ extension RPCRouter {
     /// terminal may have been deleted between hook fire and arrival).
     func handleTerminalSessionEvent(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalSessionEventParams.self, from: paramsData)
+        // Establish event order before the first suspension. SessionStart and
+        // terminal.activityEvent share this activity-fact clock, so a fact with
+        // a later timestamp wins even when earlier handler work finishes
+        // afterward. The store gives explicit interrupts the safety tie-break
+        // when the date source returns an identical timestamp.
+        let observedAt = now()
 
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
             // Soft success — caller is a fire-and-forget hook, returning an
@@ -2785,7 +2861,7 @@ extension RPCRouter {
             logger.debug("sessionEvent: unknown terminalID=\(params.terminalID.uuidString, privacy: .public) — ignoring")
             return .ok()
         }
-        await sessionCounters.recordHookEvent(terminalID: terminal.id, at: now())
+        await sessionCounters.recordHookEvent(terminalID: terminal.id, at: observedAt)
 
         // `cwd` is optional for backward compatibility — when absent we cannot
         // validate, so we fall back to the old behavior.
@@ -2806,37 +2882,27 @@ extension RPCRouter {
             return p
         }()
 
-        try await db.terminals.updateSession(
+        // Codex session identity, prompt retraction, and the idle fact are
+        // reconciled atomically on independent ordering rails. Other agent
+        // kinds retain the established last-writer session and prompt update
+        // in the same transaction.
+        guard let sessionApplication = try await db.terminals.applySessionStart(
             id: terminal.id,
             sessionID: params.sessionID,
-            transcriptPath: cleanedPath
-        )
-        // A new session context has started in this pane — a `/clear`, a
-        // resume after an in-place profile swap, or a hand relaunch — so a
-        // wait reason recorded against the PREVIOUS one is not on screen any
-        // more. It has to be retracted here, from the event that establishes
-        // it, for two reasons `SessionStateResolver`'s rung 4 makes concrete.
-        // A `/clear` points `transcriptPath` at a file Claude Code creates
-        // lazily, so the growth fact is nil and "we could not look is not
-        // evidence it went away" keeps the dead prompt standing; and the
-        // overlay's own `tbd terminal-activity idle` — the rail that would
-        // otherwise clear the columns — no-ops when the row already reads idle
-        // and can be lost on its own while this call lands.
-        //
-        // Deliberately NOT `setActivityState`: this event says a session
-        // exists, not what it is doing, and `activityState` gates hibernation.
-        try await db.terminals.clearAwaitingInputReason(id: terminal.id)
-        if terminal.kind == .codex || terminal.label == TerminalLabel.codex {
-            // This handler is driven by the session-start hook, which is what
-            // told us the session exists and is between turns.
-            //
-            // `observedAt` from the router's date seam, for the same reason as
-            // every other stamp this file writes: `SessionStateResolver`'s
-            // rung 4 *compares* it, and the store's default `Date()` is a
-            // timestamp nothing outside the store can name.
-            try await db.terminals.setActivityState(
-                id: terminal.id, activityState: .idle, source: .hookEvent("SessionStart"),
-                observedAt: now())
+            transcriptPath: cleanedPath,
+            observedAt: observedAt
+        ) else { return .ok() }
+
+        // The accepted SessionStart is also a lifecycle boundary in the Codex
+        // transcript reducer. Capture the current EOF even when the path is
+        // unchanged, so an unmatched task_started from the interrupted session
+        // cannot be re-published as working; later appended turns still win.
+        if terminal.isCodexTerminal,
+           let transcriptPath = sessionApplication.transcriptPath,
+           !transcriptPath.isEmpty {
+            await codexActivityTracker.establishSessionBoundary(
+                transcriptPath: transcriptPath,
+                worktreeID: terminal.worktreeID)
         }
 
         // Invalidate cached transcript parse for the OLD session file (if any)
@@ -2845,7 +2911,7 @@ extension RPCRouter {
         // misses cache and re-parses — no explicit invalidation needed.)
 
         let source = params.source ?? "unknown"
-        logger.info("sessionEvent: terminal \(terminal.id.uuidString, privacy: .public) -> session \(params.sessionID, privacy: .public) (source=\(source, privacy: .public))")
+        logger.info("sessionEvent: terminal \(terminal.id.uuidString, privacy: .public) -> session \(sessionApplication.sessionID, privacy: .public) (source=\(source, privacy: .public))")
 
         // The readiness signal for a parked prompt on the paste path. This
         // hook is the machine fact that the agent is up — never the pane's
@@ -2856,14 +2922,18 @@ extension RPCRouter {
         subscriptions.broadcast(delta: .terminalSessionUpdated(TerminalSessionDelta(
             terminalID: terminal.id,
             worktreeID: terminal.worktreeID,
-            sessionID: params.sessionID,
-            transcriptPath: cleanedPath
+            sessionID: sessionApplication.sessionID,
+            transcriptPath: sessionApplication.transcriptPath,
+            sessionOrderObservedAt: sessionApplication.orderObservedAt
         )))
-        if terminal.kind == .codex || terminal.label == TerminalLabel.codex {
+        if let application = sessionApplication.activityObservation {
             subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
                 terminalID: terminal.id,
                 worktreeID: terminal.worktreeID,
-                activityState: .idle
+                activityState: application.activityState,
+                activityStateSource: application.source,
+                activityStateObservedAt: application.observedAt,
+                activityStateOrderObservedAt: application.orderObservedAt
             )))
         }
         return .ok()
@@ -2940,6 +3010,13 @@ extension RPCRouter {
 
     func handleTerminalActivityEvent(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalActivityEventParams.self, from: paramsData)
+        guard params.origin != .userInterrupt || params.activityState == .idle else {
+            return RPCResponse(error: "user_interrupt origin requires idle activity")
+        }
+        // Timestamp receipt before any actor or database suspension. The
+        // conditional store write below uses this to prevent an earlier event
+        // whose handler finishes late from replacing a later observation.
+        let observedAt = now()
 
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
             logger.debug("activityEvent: unknown terminalID=\(params.terminalID.uuidString, privacy: .public) — ignoring")
@@ -2951,19 +3028,10 @@ extension RPCRouter {
         // and over is exactly the shape the counter exists to make visible, and
         // a count taken after that guard would report zero for it. One actor
         // hop and an integer add, which is the whole per-event budget.
-        await sessionCounters.recordHookEvent(terminalID: terminal.id, at: now())
-
-        // UserPromptSubmit reaches the daemon as activity=working. If a
-        // session-limit auto-resume is pending, the user just continued
-        // manually — cancel it (spec §Cancellation). Guarded on the mirror
-        // field so the common case costs nothing. Note: the actuator's own
-        // "continue" also lands here; by then verification usually already
-        // moved the row out of pending, and a cancel-vs-sent race only
-        // affects the audit status, never causes a second send.
-        if params.activityState == .working, terminal.pendingResumeAt != nil {
-            if (try? await db.scheduledResumes.cancelPending(terminalID: terminal.id)) == true {
-                await limitResumeScheduler?.wake()
-            }
+        // An app-originated interrupt shares this RPC but is a user action, not
+        // an agent hook, so it must not inflate the hook-event counter.
+        if params.origin == nil {
+            await sessionCounters.recordHookEvent(terminalID: terminal.id, at: observedAt)
         }
 
         // Stop-hook transcript sync (Stop/StopFailure reach the daemon as
@@ -2975,7 +3043,7 @@ extension RPCRouter {
         // BEFORE the unchanged-state guard so repeated Stops keep converging.
         // Never rewrites terminal.transcriptPath: the live session keeps
         // appending to the original file; we only copy.
-        if params.activityState == .idle,
+        if params.origin == nil, params.activityState == .idle,
            let storedPath = terminal.transcriptPath, !storedPath.isEmpty,
            FileManager.default.fileExists(atPath: storedPath),
            let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) {
@@ -2993,30 +3061,71 @@ extension RPCRouter {
             }
         }
 
-        guard terminal.activityState != params.activityState else {
-            return .ok()
-        }
-
-        // Every caller of this RPC is an agent hook bridged through
-        // `tbd terminal-activity`. The params do not yet carry WHICH hook event
-        // fired, so the RPC surface stands in as the source name until a later
-        // slice threads the event through — a coarser answer than we want, but
-        // a true one, and one no reader can mistake for an observation TBD made
-        // itself.
+        // Hook callers are bridged through `tbd terminal-activity`; the params
+        // do not yet carry WHICH hook event fired, so the RPC surface stands in
+        // as their source name. The app's explicit interrupt declares its
+        // origin separately and is persisted as a user action instead.
         // `observedAt` from the router's date seam, never the store's default
         // `Date()`. The resolver's rung-4 decision is an ordering comparison
         // between exactly this stamp and the one `recordAwaitingInputReason`
         // writes above, so a test that cannot pin both ends cannot pin the
         // decision at all.
-        try await db.terminals.setActivityState(
+        guard terminal.isCodexTerminal else {
+            // Claude and shell hooks retain their established last-writer
+            // behavior. Their persisted activity is a hibernation input, not
+            // Codex transcript presentation, so this fix must not impose the
+            // new ordering and tie-precedence policy on them.
+            // UserPromptSubmit reaches the daemon as activity=working. If a
+            // session-limit auto-resume is pending, the user just continued
+            // manually — cancel it even when the legacy activity value is
+            // unchanged, preserving the established non-Codex behavior.
+            if params.activityState == .working, terminal.pendingResumeAt != nil {
+                if (try? await db.scheduledResumes.cancelPending(
+                    terminalID: terminal.id)) == true {
+                    await limitResumeScheduler?.wake()
+                }
+            }
+            guard terminal.activityState != params.activityState else { return .ok() }
+            try await db.terminals.setActivityState(
+                id: terminal.id,
+                activityState: params.activityState,
+                source: .hookEvent(RPCMethod.terminalActivityEvent),
+                observedAt: observedAt)
+            subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
+                terminalID: terminal.id,
+                worktreeID: terminal.worktreeID,
+                activityState: params.activityState
+            )))
+            return .ok()
+        }
+        let source: FactSource = params.origin == .userInterrupt
+            ? .terminalInterrupt
+            : .hookEvent(RPCMethod.terminalActivityEvent)
+        let activityApplication = try await db.terminals.applyActivityObservation(
             id: terminal.id,
             activityState: params.activityState,
-            source: .hookEvent(RPCMethod.terminalActivityEvent),
-            observedAt: now())
+            source: source,
+            observedAt: observedAt,
+            sessionID: params.sessionID,
+            replaceSameValue: params.origin == .userInterrupt)
+        guard let activityApplication else { return .ok() }
+        // The transactional identity check above must accept a Codex working
+        // hook before it can cancel state belonging to the current session.
+        // The actuator's own "continue" also lands here; by then verification
+        // usually already moved the row out of pending, and a cancel-vs-sent
+        // race affects only audit status, never causes a second send.
+        if params.activityState == .working, terminal.pendingResumeAt != nil {
+            if (try? await db.scheduledResumes.cancelPending(terminalID: terminal.id)) == true {
+                await limitResumeScheduler?.wake()
+            }
+        }
         subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
             terminalID: terminal.id,
             worktreeID: terminal.worktreeID,
-            activityState: params.activityState
+            activityState: activityApplication.activityState,
+            activityStateSource: activityApplication.source,
+            activityStateObservedAt: activityApplication.observedAt,
+            activityStateOrderObservedAt: activityApplication.orderObservedAt
         )))
         return .ok()
     }

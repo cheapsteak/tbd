@@ -157,11 +157,21 @@ public struct TerminalSessionDelta: Codable, Sendable {
     public let worktreeID: UUID
     public let sessionID: String
     public let transcriptPath: String?
-    public init(terminalID: UUID, worktreeID: UUID, sessionID: String, transcriptPath: String?) {
+    /// Ordering generation of the accepted SessionStart. Optional for wire
+    /// compatibility with older daemons and for non-hook session updates.
+    public let sessionOrderObservedAt: Date?
+    public init(
+        terminalID: UUID,
+        worktreeID: UUID,
+        sessionID: String,
+        transcriptPath: String?,
+        sessionOrderObservedAt: Date? = nil
+    ) {
         self.terminalID = terminalID
         self.worktreeID = worktreeID
         self.sessionID = sessionID
         self.transcriptPath = transcriptPath
+        self.sessionOrderObservedAt = sessionOrderObservedAt
     }
 }
 
@@ -169,10 +179,27 @@ public struct TerminalActivityDelta: Codable, Sendable {
     public let terminalID: UUID
     public let worktreeID: UUID
     public let activityState: TerminalActivityState
-    public init(terminalID: UUID, worktreeID: UUID, activityState: TerminalActivityState) {
+    /// Optional for wire compatibility with daemons that predate activity
+    /// provenance on this push event. New daemons send both halves together.
+    public let activityStateSource: FactSource?
+    public let activityStateObservedAt: Date?
+    /// Optional ordering watermark for wire compatibility. Old daemons omit
+    /// it, in which case clients fall back to `activityStateObservedAt`.
+    public let activityStateOrderObservedAt: Date?
+    public init(
+        terminalID: UUID,
+        worktreeID: UUID,
+        activityState: TerminalActivityState,
+        activityStateSource: FactSource? = nil,
+        activityStateObservedAt: Date? = nil,
+        activityStateOrderObservedAt: Date? = nil
+    ) {
         self.terminalID = terminalID
         self.worktreeID = worktreeID
         self.activityState = activityState
+        self.activityStateSource = activityStateSource
+        self.activityStateObservedAt = activityStateObservedAt
+        self.activityStateOrderObservedAt = activityStateOrderObservedAt
     }
 }
 

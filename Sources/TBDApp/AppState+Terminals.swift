@@ -186,6 +186,7 @@ extension AppState {
             terminals[worktreeID, default: []].append(terminal)
             inserted = true
         }
+        replaceTerminalObservationOrder(with: terminal)
         let splitRepresentationTabIDs = Set((tabs[worktreeID] ?? []).compactMap { tab -> UUID? in
             guard let layout = layouts[tab.id],
                   case .split = layout,
@@ -277,6 +278,7 @@ extension AppState {
                   $0.id == terminal.id
               }) else { return }
         terminals[terminal.worktreeID]?[index] = terminal
+        replaceTerminalObservationOrder(with: terminal)
     }
 
     /// Adopt a daemon snapshot without allowing a response that overlaps an
@@ -289,11 +291,97 @@ extension AppState {
         date: Date = Date()
     ) {
         pruneRecentTerminalDeletions(date: date)
-        let visible = snapshots.filter {
-            !terminalDeletionsAwaitingRecreationCompletion.contains($0.id)
-                && recentlyDeletedTerminalIDs[$0.id] == nil
-        }
         let existing = terminals[worktreeID] ?? []
+        let existingByID = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
+        let visible = snapshots.compactMap { snapshot -> Terminal? in
+            guard !terminalDeletionsAwaitingRecreationCompletion.contains(snapshot.id),
+                  recentlyDeletedTerminalIDs[snapshot.id] == nil else { return nil }
+            guard snapshot.isCodexTerminal else {
+                // Claude and shell rows retain terminal.list's established
+                // arrival-order replacement. The hidden ordering rails belong
+                // only to Codex transcript presentation and must not survive a
+                // terminal incarnation changing away from Codex.
+                terminalPresentationOrderObservedAt.removeValue(forKey: snapshot.id)
+                terminalSessionOrderObservedAt.removeValue(forKey: snapshot.id)
+                return snapshot
+            }
+            var merged = snapshot
+            let current = existingByID[snapshot.id]
+            let incomingActivityOrderObservedAt = snapshot.activityStateOrderObservedAt
+                ?? snapshot.activityStateObservedAt
+            let incomingSessionOrderObservedAt = snapshot.sessionOrderObservedAt
+                ?? incomingActivityOrderObservedAt
+            let currentSessionOrderObservedAt = terminalSessionOrderObservedAt[snapshot.id]
+                ?? current?.sessionOrderObservedAt
+                ?? current.flatMap { terminal in
+                    guard terminal.activityStateSource == .hookEvent("SessionStart") else {
+                        return nil
+                    }
+                    return terminal.activityStateOrderObservedAt
+                        ?? terminal.activityStateObservedAt
+                }
+            let identityChanged = current.map {
+                snapshot.claudeSessionID != $0.claudeSessionID
+                    || snapshot.transcriptPath != $0.transcriptPath
+            } ?? false
+            let shouldKeepCurrentIdentity = identityChanged
+                && currentSessionOrderObservedAt.map { currentOrder in
+                    incomingSessionOrderObservedAt.map { $0 <= currentOrder } ?? true
+                } == true
+            let shouldKeepCurrentSessionOrder = current != nil
+                && currentSessionOrderObservedAt.map { currentOrder in
+                    incomingSessionOrderObservedAt.map { $0 < currentOrder } ?? true
+                } == true
+            let snapshotPredatesCurrentSession = current != nil
+                && currentSessionOrderObservedAt.map { currentOrder in
+                    incomingActivityOrderObservedAt.map { $0 < currentOrder } ?? true
+                } == true
+            if shouldKeepCurrentIdentity, let current {
+                merged.claudeSessionID = current.claudeSessionID
+                merged.transcriptPath = current.transcriptPath
+            }
+            if shouldKeepCurrentIdentity || shouldKeepCurrentSessionOrder, let current {
+                merged.sessionOrderObservedAt = current.sessionOrderObservedAt
+                    ?? currentSessionOrderObservedAt
+                if let currentSessionOrderObservedAt {
+                    terminalSessionOrderObservedAt[snapshot.id] = currentSessionOrderObservedAt
+                }
+            } else if current == nil || identityChanged {
+                if let incomingSessionOrderObservedAt,
+                   snapshot.claudeSessionID != nil || snapshot.transcriptPath != nil {
+                    terminalSessionOrderObservedAt[snapshot.id] = incomingSessionOrderObservedAt
+                } else {
+                    terminalSessionOrderObservedAt.removeValue(forKey: snapshot.id)
+                }
+            } else if let incomingSessionOrderObservedAt,
+                      currentSessionOrderObservedAt.map({ incomingSessionOrderObservedAt > $0 })
+                        != false {
+                terminalSessionOrderObservedAt[snapshot.id] = incomingSessionOrderObservedAt
+            }
+            // A list response may have scanned the same transcript path before
+            // an accepted SessionStart boundary. Its later response timestamp
+            // does not make that pre-boundary presentation current.
+            if shouldKeepCurrentIdentity || snapshotPredatesCurrentSession,
+               let current {
+                merged.presentationActivityState = current.presentationActivityState
+                merged.presentationActivityObservedAt = current.presentationActivityObservedAt
+            }
+            let presentationOrderObservedAt = merged.reconcileActivityObservation(
+                against: current,
+                presentationOrderObservedAt: terminalPresentationOrderObservedAt[snapshot.id]
+                    ?? current?.presentationActivityObservedAt)
+            if let presentationOrderObservedAt {
+                terminalPresentationOrderObservedAt[snapshot.id] = presentationOrderObservedAt
+            } else {
+                terminalPresentationOrderObservedAt.removeValue(forKey: snapshot.id)
+            }
+            return merged
+        }
+        let visibleIDs = Set(visible.map(\.id))
+        for terminal in existing where !visibleIDs.contains(terminal.id) {
+            terminalPresentationOrderObservedAt.removeValue(forKey: terminal.id)
+            terminalSessionOrderObservedAt.removeValue(forKey: terminal.id)
+        }
         guard visible != existing else { return }
         terminals[worktreeID] = visible
         reconcileTabs(worktreeID: worktreeID, terminals: visible)
@@ -385,13 +473,20 @@ extension AppState {
         // Remaining terminals: Codex (Ctrl+C), Claude, or legacy nil-kind sessions.
         if let idx = terminals[terminal.worktreeID]?.firstIndex(where: { $0.id == terminalID }) {
             terminals[terminal.worktreeID]?[idx].activityState = .idle
+            if isCodex {
+                let observedAt = Date()
+                terminals[terminal.worktreeID]?[idx].activityStateSource = .terminalInterrupt
+                terminals[terminal.worktreeID]?[idx].activityStateObservedAt = observedAt
+                terminals[terminal.worktreeID]?[idx].activityStateOrderObservedAt = observedAt
+            }
         }
 
         Task {
             do {
                 try await daemonClient.setTerminalActivity(
                     terminalID: terminalID,
-                    activityState: .idle
+                    activityState: .idle,
+                    origin: isCodex ? .userInterrupt : nil
                 )
             } catch {
                 logger.debug("Failed to publish terminal interrupt state: \(error.localizedDescription, privacy: .public)")
@@ -457,12 +552,38 @@ extension AppState {
     /// Preserve an active recreation claim across removal; otherwise discard
     /// recovery history immediately. Shared by terminal and worktree removal.
     func recordTerminalRemoval(terminalID: UUID, date: Date = Date()) {
+        terminalPresentationOrderObservedAt.removeValue(forKey: terminalID)
+        terminalSessionOrderObservedAt.removeValue(forKey: terminalID)
         pruneRecentTerminalDeletions(date: date)
         recentlyDeletedTerminalIDs[terminalID] = date
         if recreatingTerminalIDs.contains(terminalID) {
             terminalDeletionsAwaitingRecreationCompletion.insert(terminalID)
         } else {
             terminalRecoveryBudget.reset(for: terminalID)
+        }
+    }
+
+    /// A replacement Terminal is a new observation generation even when its
+    /// UUID is reused. Seed both hidden ordering rails from that row rather
+    /// than retaining watermarks from the terminal incarnation it replaced.
+    private func replaceTerminalObservationOrder(with terminal: Terminal) {
+        guard terminal.isCodexTerminal else {
+            terminalPresentationOrderObservedAt.removeValue(forKey: terminal.id)
+            terminalSessionOrderObservedAt.removeValue(forKey: terminal.id)
+            return
+        }
+        if let observedAt = terminal.presentationActivityObservedAt {
+            terminalPresentationOrderObservedAt[terminal.id] = observedAt
+        } else {
+            terminalPresentationOrderObservedAt.removeValue(forKey: terminal.id)
+        }
+        if terminal.claudeSessionID != nil || terminal.transcriptPath != nil,
+           let observedAt = terminal.sessionOrderObservedAt
+            ?? terminal.activityStateOrderObservedAt
+            ?? terminal.activityStateObservedAt {
+            terminalSessionOrderObservedAt[terminal.id] = observedAt
+        } else {
+            terminalSessionOrderObservedAt.removeValue(forKey: terminal.id)
         }
     }
 
@@ -689,5 +810,216 @@ extension AppState {
             showAlert("Failed to cancel scheduled resume: \(error.localizedDescription)",
                       isError: true)
         }
+    }
+}
+
+extension Terminal {
+    /// Merge the activity fact carried by a `terminal.list` row without
+    /// letting an older response roll back a newer local or pushed fact.
+    /// Provenance is one atomic pair: a partial incoming pair is either ignored
+    /// as a same-value legacy echo or applied with both halves cleared. When
+    /// timestamps tie, explicit interrupts and permission waits are preserved,
+    /// while ambiguous working/non-working ties resolve toward non-working.
+    @discardableResult
+    mutating func reconcileActivityObservation(
+        against current: Terminal?,
+        presentationOrderObservedAt: Date?
+    ) -> Date? {
+        let incomingIsComplete = activityStateSource != nil && activityStateObservedAt != nil
+        guard let current else {
+            if !incomingIsComplete {
+                activityStateSource = nil
+                activityStateObservedAt = nil
+                activityStateOrderObservedAt = nil
+            }
+            return self.presentationActivityObservedAt
+        }
+
+        let reconciledPresentationOrderObservedAt = reconcilePresentationObservation(
+            against: current,
+            orderObservedAt: presentationOrderObservedAt)
+
+        let currentIsComplete = current.activityStateSource != nil
+            && current.activityStateObservedAt != nil
+        let incomingOrderObservedAt = activityStateOrderObservedAt
+            ?? activityStateObservedAt
+        let currentOrderObservedAt = current.activityStateOrderObservedAt
+            ?? current.activityStateObservedAt
+        let shouldKeepCurrent: Bool
+        let shouldPreserveCurrentSemanticFact: Bool
+        if incomingIsComplete,
+           currentIsComplete,
+           let incomingOrderObservedAt,
+           let currentOrderObservedAt {
+            shouldKeepCurrent = incomingOrderObservedAt < currentOrderObservedAt
+                || (incomingOrderObservedAt == currentOrderObservedAt
+                    && current.preservesActivityAtEqualOrder(
+                        over: activityState,
+                        source: activityStateSource))
+            shouldPreserveCurrentSemanticFact = !shouldKeepCurrent
+                && activityState == current.activityState
+                && !isMeaningfulSameStateReplacement(source: activityStateSource)
+        } else if !incomingIsComplete, currentIsComplete {
+            shouldKeepCurrent = activityState == current.activityState
+            shouldPreserveCurrentSemanticFact = false
+        } else {
+            shouldKeepCurrent = false
+            shouldPreserveCurrentSemanticFact = false
+        }
+
+        if shouldKeepCurrent {
+            activityState = current.activityState
+            activityStateSource = current.activityStateSource
+            activityStateObservedAt = current.activityStateObservedAt
+            activityStateOrderObservedAt = current.activityStateOrderObservedAt
+        } else if shouldPreserveCurrentSemanticFact {
+            activityStateSource = current.activityStateSource
+            activityStateObservedAt = current.activityStateObservedAt
+            activityStateOrderObservedAt = incomingOrderObservedAt
+        } else if !incomingIsComplete {
+            activityStateSource = nil
+            activityStateObservedAt = nil
+            activityStateOrderObservedAt = nil
+        }
+        return reconciledPresentationOrderObservedAt
+    }
+
+    /// Transcript presentation is response-derived and has its own ordering;
+    /// raw hook timestamps do not order it. Legacy responses with no timestamp
+    /// remain arrival-ordered until a timestamped observation has been adopted.
+    /// On an exact tie, a non-working result wins because false working is the
+    /// costlier error. A timestamped nil is authoritative "could not establish
+    /// activity" evidence (unreadable, incomplete, or capped), so it clears a
+    /// prior working presentation instead of serving cached positive state.
+    private mutating func reconcilePresentationObservation(
+        against current: Terminal,
+        orderObservedAt: Date?
+    ) -> Date? {
+        let identityIsUnchanged = claudeSessionID == current.claudeSessionID
+            && transcriptPath == current.transcriptPath
+        // Presentation ordering is scoped to one transcript identity. A new
+        // identity must not inherit either positive state or an ordering
+        // watermark from the transcript it replaced; legacy rows without a
+        // timestamp therefore conservatively clear a prior working result.
+        guard identityIsUnchanged else { return presentationActivityObservedAt }
+
+        let currentOrderObservedAt = orderObservedAt
+            ?? current.presentationActivityObservedAt
+        let incomingObservedAt = presentationActivityObservedAt
+        let shouldKeepCurrent: Bool
+        switch (incomingObservedAt, currentOrderObservedAt) {
+        case let (incomingAt?, currentAt?) where incomingAt < currentAt:
+            shouldKeepCurrent = true
+        case let (incomingAt?, currentAt?) where incomingAt == currentAt:
+            shouldKeepCurrent = presentationActivityState == .working
+                && current.presentationActivityState != .working
+        case (nil, .some):
+            shouldKeepCurrent = true
+        default:
+            shouldKeepCurrent = false
+        }
+
+        let stableValue = presentationActivityState == current.presentationActivityState
+            && identityIsUnchanged
+        if shouldKeepCurrent || stableValue {
+            presentationActivityState = current.presentationActivityState
+            presentationActivityObservedAt = current.presentationActivityObservedAt
+        }
+        guard !shouldKeepCurrent else { return currentOrderObservedAt }
+        if let incomingObservedAt,
+           let currentOrderObservedAt {
+            return max(incomingObservedAt, currentOrderObservedAt)
+        }
+        return incomingObservedAt ?? currentOrderObservedAt
+    }
+
+    private func preservesActivityAtEqualOrder(
+        over incomingState: TerminalActivityState,
+        source incomingSource: FactSource?
+    ) -> Bool {
+        if incomingSource == .terminalInterrupt { return false }
+        if activityStateSource == .terminalInterrupt { return true }
+        if activityState == .waitingForUser, incomingState != .waitingForUser { return true }
+        return activityState != .working && incomingState == .working
+    }
+
+    private func isMeaningfulSameStateReplacement(source: FactSource?) -> Bool {
+        source == .terminalInterrupt || source == .hookEvent("SessionStart")
+    }
+
+    private func canReplacePresentation(
+        observedAt incomingObservedAt: Date?,
+        orderObservedAt: Date?
+    ) -> Bool {
+        guard let currentObservedAt = orderObservedAt
+            ?? presentationActivityObservedAt else { return true }
+        guard let incomingObservedAt else { return false }
+        return incomingObservedAt >= currentObservedAt
+    }
+
+    /// Apply a pushed activity observation under the same ordering and legacy
+    /// rules used for snapshots. SessionStart is the sole idle hook entitled
+    /// to clear transcript presentation, and only after its complete fact wins
+    /// the timestamp comparison.
+    @discardableResult
+    mutating func applyActivityDelta(
+        _ delta: TerminalActivityDelta,
+        presentationOrderObservedAt: Date?
+    ) -> Date? {
+        let currentPresentationOrderObservedAt = presentationOrderObservedAt
+            ?? self.presentationActivityObservedAt
+        let incomingIsComplete = delta.activityStateSource != nil
+            && delta.activityStateObservedAt != nil
+        let currentIsComplete = activityStateSource != nil && activityStateObservedAt != nil
+        let incomingOrderObservedAt = delta.activityStateOrderObservedAt
+            ?? delta.activityStateObservedAt
+        let currentOrderObservedAt = activityStateOrderObservedAt
+            ?? activityStateObservedAt
+
+        if incomingIsComplete,
+           currentIsComplete,
+           let incomingOrderObservedAt,
+           let currentOrderObservedAt,
+           incomingOrderObservedAt < currentOrderObservedAt
+            || (incomingOrderObservedAt == currentOrderObservedAt
+                && preservesActivityAtEqualOrder(
+                    over: delta.activityState,
+                    source: delta.activityStateSource)) {
+            return currentPresentationOrderObservedAt
+        }
+
+        if !incomingIsComplete {
+            if currentIsComplete, delta.activityState == activityState {
+                return currentPresentationOrderObservedAt
+            }
+            activityState = delta.activityState
+            activityStateSource = nil
+            activityStateObservedAt = nil
+            activityStateOrderObservedAt = nil
+            return currentPresentationOrderObservedAt
+        }
+
+        if currentIsComplete,
+           delta.activityState == activityState,
+           !isMeaningfulSameStateReplacement(source: delta.activityStateSource) {
+            activityStateOrderObservedAt = incomingOrderObservedAt
+            return currentPresentationOrderObservedAt
+        }
+
+        activityState = delta.activityState
+        activityStateSource = delta.activityStateSource
+        activityStateObservedAt = delta.activityStateObservedAt
+        activityStateOrderObservedAt = delta.activityStateOrderObservedAt
+        if isCodexTerminal,
+           delta.activityState == .idle,
+           delta.activityStateSource == .hookEvent("SessionStart"),
+           canReplacePresentation(
+               observedAt: incomingOrderObservedAt,
+               orderObservedAt: currentPresentationOrderObservedAt) {
+            presentationActivityState = .idle
+            presentationActivityObservedAt = incomingOrderObservedAt
+            return incomingOrderObservedAt
+        }
+        return currentPresentationOrderObservedAt
     }
 }

@@ -81,6 +81,18 @@ import TestSupport
         try #require(try await db.terminals.get(id: terminalID))
     }
 
+    private func activityRouter(observedAt: Date) -> RPCRouter {
+        RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(),
+                tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            tmux: TmuxManager(dryRun: true),
+            startTime: Date(),
+            now: { observedAt },
+            actuationLog: makeTestActuationLog())
+    }
+
     /// The park decision for the current row, plus the raw activity triple —
     /// the two things this slice must leave alone.
     private func parkDecision(_ terminal: Terminal) -> HibernationGate.Decision {
@@ -233,7 +245,7 @@ import TestSupport
 
     // MARK: - Superseding
 
-    /// The rail that keeps a recorded reason honest: the next activity
+    /// The rail that keeps a recorded reason honest: the next newer activity
     /// observation clears it, so a "needs your permission" cannot outlive the
     /// prompt it described.
     @Test func theNextActivityObservationSupersedesTheRecordedReason() async throws {
@@ -245,7 +257,8 @@ import TestSupport
         let request = try RPCRequest(
             method: RPCMethod.terminalActivityEvent,
             params: TerminalActivityEventParams(terminalID: terminalID, activityState: .working))
-        #expect(await router.handle(request).success)
+        #expect(await activityRouter(
+            observedAt: Self.observedAt.addingTimeInterval(1)).handle(request).success)
 
         let after = try await terminal()
         #expect(after.awaitingInputReason == nil)
@@ -316,7 +329,8 @@ import TestSupport
         let request = try RPCRequest(
             method: RPCMethod.terminalActivityEvent,
             params: TerminalActivityEventParams(terminalID: terminalID, activityState: .working))
-        #expect(await router.handle(request).success)
+        #expect(await activityRouter(
+            observedAt: Self.observedAt.addingTimeInterval(1)).handle(request).success)
 
         #expect(try await terminal().awaitingInputReason == nil)
     }

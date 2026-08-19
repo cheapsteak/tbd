@@ -48,6 +48,10 @@ public enum FactSource: Sendable, Equatable, Hashable, Codable {
     /// name (`SessionStart`, `Stop`, `Notification`, …). The name is carried,
     /// never matched against a rendered screen.
     case hookEvent(String)
+    /// An explicit action taken by the person operating TBD. The associated
+    /// value names the action (`terminal-interrupt`, …), keeping user intent
+    /// distinct from an agent hook that happens to report the same value.
+    case userAction(String)
     /// The session's transcript JSONL, read from the tail.
     case transcriptTail
     /// The statusline wrapper's captured stdin JSON — the one surface on which
@@ -87,6 +91,7 @@ public enum FactSource: Sendable, Equatable, Hashable, Codable {
     public var kind: String {
         switch self {
         case .hookEvent: return "hook"
+        case .userAction: return "user-action"
         case .transcriptTail: return "transcript-tail"
         case .statuslineTee: return "statusline-tee"
         case .database: return "database"
@@ -101,8 +106,10 @@ public enum FactSource: Sendable, Equatable, Hashable, Codable {
 
     /// The kind's qualifier, when it has one.
     public var detail: String? {
-        if case .hookEvent(let event) = self { return event }
-        return nil
+        switch self {
+        case .hookEvent(let event), .userAction(let event): return event
+        default: return nil
+        }
     }
 
     /// One line, for composition into `ObservedFact.summary`.
@@ -124,6 +131,8 @@ public enum FactSource: Sendable, Equatable, Hashable, Codable {
             // what this decoder already does with a kind it cannot make sense
             // of, and which round-trips back to the same bytes.
             if let detail, !detail.isEmpty { self = .hookEvent(detail) } else { self = .unrecognized(kind) }
+        case "user-action":
+            if let detail, !detail.isEmpty { self = .userAction(detail) } else { self = .unrecognized(kind) }
         case "transcript-tail": self = .transcriptTail
         case "statusline-tee": self = .statuslineTee
         case "database": self = .database
@@ -141,6 +150,11 @@ public enum FactSource: Sendable, Equatable, Hashable, Codable {
         try c.encode(kind, forKey: .kind)
         try c.encodeIfPresent(detail, forKey: .detail)
     }
+}
+
+public extension FactSource {
+    /// Provenance written when the user presses an agent's interrupt key.
+    static let terminalInterrupt = FactSource.userAction("terminal-interrupt")
 }
 
 // MARK: - ObservedFact

@@ -92,7 +92,28 @@ struct WorktreeRowView: View {
 
     private var hasWorkingTerminal: Bool {
         let terminals = appState.terminals[worktree.id] ?? []
-        return terminals.contains { $0.activityState == .working }
+        return Self.hasForegroundWork(in: terminals)
+    }
+
+    /// Whether one terminal has trustworthy foreground work to animate in the
+    /// sidebar. Codex's hook state can remain latched after a turn ends, so its
+    /// transcript-derived presentation state is authoritative here unless the
+    /// hook reports that Codex is waiting for the user. Missing transcript
+    /// evidence deliberately renders idle instead of preserving a false
+    /// thinking indicator. Other terminal kinds retain their existing
+    /// hook-backed behavior.
+    nonisolated static func isForegroundWorking(_ terminal: Terminal) -> Bool {
+        if terminal.isCodexTerminal {
+            return terminal.activityStateSource != .terminalInterrupt
+                && terminal.activityState != .waitingForUser
+                && terminal.presentationActivityState == .working
+        }
+        return terminal.activityState == .working
+    }
+
+    /// The collection form used by the row and by pure presentation tests.
+    nonisolated static func hasForegroundWork(in terminals: [Terminal]) -> Bool {
+        terminals.contains(where: isForegroundWorking)
     }
 
     @ViewBuilder

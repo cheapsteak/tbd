@@ -232,10 +232,16 @@ import Testing
         try await db.terminals.setActivityState(
             id: terminal.id, activityState: .working,
             source: .hookEvent("UserPromptSubmit"), observedAt: epoch)
+        _ = try await db.terminals.applySessionStart(
+            id: terminal.id,
+            sessionID: "session-before-recreation",
+            transcriptPath: "/tmp/session-before-recreation.jsonl",
+            observedAt: epoch.addingTimeInterval(10))
 
         try await db.terminals.clearRecreated(id: terminal.id, at: epoch.addingTimeInterval(30))
 
         let recreated = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(recreated.sessionOrderObservedAt == nil)
         #expect(recreated.activityState == .unknown)
         #expect(recreated.activityStateSource == .derived)
         #expect(recreated.activityStateObservedAt == epoch.addingTimeInterval(30))

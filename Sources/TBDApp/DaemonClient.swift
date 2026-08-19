@@ -724,12 +724,17 @@ actor DaemonClient {
     }
 
     /// Publish an explicit terminal activity state transition.
-    func setTerminalActivity(terminalID: UUID, activityState: TerminalActivityState) async throws {
+    func setTerminalActivity(
+        terminalID: UUID,
+        activityState: TerminalActivityState,
+        origin: TerminalActivityEventOrigin? = nil
+    ) async throws {
         try await callVoidAsync(
             method: RPCMethod.terminalActivityEvent,
             params: TerminalActivityEventParams(
                 terminalID: terminalID,
-                activityState: activityState
+                activityState: activityState,
+                origin: origin
             )
         )
     }

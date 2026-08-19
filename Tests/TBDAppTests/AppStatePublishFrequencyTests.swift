@@ -280,8 +280,8 @@ struct DeltaIngestionTests {
         }
     }
 
-    /// A session rollover delta re-sent with the same session id and transcript
-    /// path: two unconditional subscript writes (`AppState.swift:2185`, `:2191`).
+    /// A session rollover delta re-sent with the same session identity is a
+    /// semantic no-op and must not republish the terminal collection.
     @Test("terminalSessionUpdated: the same session and transcript path")
     func identicalSessionDelta() {
         withEmissionState { state in
@@ -302,15 +302,7 @@ struct DeltaIngestionTests {
                 )))
             }
 
-            // KNOWN ISSUE — `AppState.terminals`, via
-            // `applyTerminalSessionDelta` (AppState.swift:2181). Ideal 0,
-            // observed 2 — the session id and the transcript path are two
-            // separate unconditional subscript writes, so one logical delta
-            // costs two full object-wide invalidations. Fix: compare the whole
-            // row once and assign once.
-            withKnownIssue("an unchanged session rollover republishes twice (#667)") {
-                #expect(count == 0)
-            }
+            #expect(count == 0)
         }
     }
 
@@ -335,12 +327,7 @@ struct DeltaIngestionTests {
             }
 
             #expect(state.terminals[worktreeID]?.first?.claudeSessionID == "def")
-            // KNOWN ISSUE — one logical session rollover should cost one
-            // invalidation. Ideal 1, observed 2 (two subscript writes). Fix:
-            // build the updated row locally, assign once.
-            withKnownIssue("one session rollover costs two publishes (#667)") {
-                #expect(count == 1)
-            }
+            #expect(count == 1)
         }
     }
 

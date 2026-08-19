@@ -56,12 +56,12 @@ enum CodexHookOverlay {
     static let relativePath = "hooks/hooks.json"
 
     static let sessionStartCommand =
-        #"tbd session-event 2>/dev/null || true; tbd terminal-activity idle 2>/dev/null || true"#
+        #"PAYLOAD=$(cat); printf '%s' "$PAYLOAD" | tbd session-event 2>/dev/null || true; printf '%s' "$PAYLOAD" | tbd terminal-activity idle --read-hook-payload 2>/dev/null || true"#
 
     // Only an active goal can cross a Stop hook into autonomous continuation.
     // Paused and limited goals have stopped the current run, so they publish idle.
     static let responseCompleteCommand =
-        #"MSG=$(printf '%s' "$PAYLOAD" | jq -r '.last_assistant_message // empty' 2>/dev/null); tbd notify --type response_complete --message "$MSG" 2>/dev/null || true; SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // empty' 2>/dev/null); SESSION_ID_SQL=$(printf '%s' "$SESSION_ID" | sed "s/'/''/g"); GOAL_STATUS=$(sqlite3 -readonly "$CODEX_HOME/goals_1.sqlite" "SELECT status FROM thread_goals WHERE thread_id = '$SESSION_ID_SQL' ORDER BY updated_at_ms DESC, created_at_ms DESC, rowid DESC LIMIT 1;" 2>/dev/null); [ "$GOAL_STATUS" = active ] || tbd terminal-activity idle 2>/dev/null || true"#
+        #"MSG=$(printf '%s' "$PAYLOAD" | jq -r '.last_assistant_message // empty' 2>/dev/null); tbd notify --type response_complete --message "$MSG" 2>/dev/null || true; SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // empty' 2>/dev/null); SESSION_ID_SQL=$(printf '%s' "$SESSION_ID" | sed "s/'/''/g"); GOAL_STATUS=$(sqlite3 -readonly "$CODEX_HOME/goals_1.sqlite" "SELECT status FROM thread_goals WHERE thread_id = '$SESSION_ID_SQL' ORDER BY updated_at_ms DESC, created_at_ms DESC, rowid DESC LIMIT 1;" 2>/dev/null); [ "$GOAL_STATUS" = active ] || printf '%s' "$PAYLOAD" | tbd terminal-activity idle --read-hook-payload 2>/dev/null || true"#
 
     static let stopRenameCheckCommand =
         #"tbd hooks stop-rename-check 2>/dev/null || true"#
@@ -70,10 +70,10 @@ enum CodexHookOverlay {
         #"PAYLOAD=$(cat); RENAME_RESULT=$(printf '%s' "$PAYLOAD" | \#(stopRenameCheckCommand)); if [ -n "$RENAME_RESULT" ]; then printf '%s\n' "$RENAME_RESULT"; else \#(responseCompleteCommand); fi"#
 
     static let workingCommand =
-        #"tbd terminal-activity working 2>/dev/null || true"#
+        #"tbd terminal-activity working --read-hook-payload 2>/dev/null || true"#
 
     static let waitingForUserCommand =
-        #"tbd terminal-activity waiting_for_user 2>/dev/null || true"#
+        #"tbd terminal-activity waiting_for_user --read-hook-payload 2>/dev/null || true"#
     static func hookPath(in pluginRoot: URL) -> URL {
         pluginRoot.appendingPathComponent(relativePath, isDirectory: false)
     }

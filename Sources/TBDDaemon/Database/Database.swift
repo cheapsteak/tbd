@@ -1538,6 +1538,28 @@ public final class TBDDatabase: Sendable {
                 table: "reap_records", column: "processDescription", type: .text)
         }
 
+        // Event ordering is not the same timestamp as the semantic activity
+        // transition: repeated same-state observations must advance the former
+        // without resetting hibernation's at-rest-since clock. Its explicit
+        // NULL default preserves the unknown third state, so old rows fall back
+        // to activityStateObservedAt without inventing a timestamp.
+        migrator.registerMigration("v85_terminal_activity_order") { db in
+            try db.addColumnIfMissing(
+                table: "terminal", column: "activityStateOrderObservedAt", type: .datetime,
+                defaults: DatabaseValue.null)
+        }
+
+        // Session identity has its own event order. Permission and activity
+        // hooks can arrive after a real SessionStart even though they describe
+        // the previous session, so neither timestamp can safely order the
+        // session ID/path pair. NULL preserves the unknown state for rows that
+        // predate this independently observed fact.
+        migrator.registerMigration("v86_terminal_session_order") { db in
+            try db.addColumnIfMissing(
+                table: "terminal", column: "sessionOrderObservedAt", type: .datetime,
+                defaults: DatabaseValue.null)
+        }
+
         return migrator
     }
 }

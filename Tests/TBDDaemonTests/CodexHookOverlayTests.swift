@@ -5,6 +5,10 @@ import TBDShared
 
 @Suite struct CodexHookOverlayTests {
 
+    private func invokedIdleActivity(_ invocations: [String]) -> Bool {
+        invocations.contains { $0.hasPrefix("terminal-activity idle") }
+    }
+
     private func runStopHook(
         goalStatus: String,
         sessionID: String = "a1b2c3d4-e5f6-4789-abcd-0123456789ab",
@@ -23,6 +27,10 @@ import TBDShared
         try """
         #!/bin/sh
         printf '%s\\n' "$*" >> "$TBD_HOOK_TEST_LOG"
+        if [ "$1" = terminal-activity ]; then
+          ACTIVITY_PAYLOAD=$(cat)
+          printf 'activity-payload=%s\\n' "$ACTIVITY_PAYLOAD" >> "$TBD_HOOK_TEST_LOG"
+        fi
         if [ "$1" = notify ]; then
           printf 'notify-message=%s\\n' "$5" >> "$TBD_HOOK_TEST_LOG"
         fi
@@ -152,6 +160,7 @@ import TBDShared
             return inner.compactMap { $0["command"] as? String }
         }
         #expect(promptCommands.contains { $0.contains("tbd terminal-activity working") })
+        #expect(promptCommands.contains { $0.contains("--read-hook-payload") })
 
         let permissionRequest = hooks?["PermissionRequest"] as? [[String: Any]]
         let permissionCommands: [String] = (permissionRequest ?? []).flatMap { entry -> [String] in
@@ -159,6 +168,58 @@ import TBDShared
             return inner.compactMap { $0["command"] as? String }
         }
         #expect(permissionCommands.contains { $0.contains("tbd terminal-activity waiting_for_user") })
+        #expect(permissionCommands.contains { $0.contains("--read-hook-payload") })
+    }
+
+    @Test func sessionStartForwardsTheExactPayloadToBothBridges() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-codex-session-hook-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let tbdPath = directory.appendingPathComponent("tbd")
+        try """
+        #!/bin/sh
+        if [ "$1" = session-event ]; then
+          cat > "$TBD_SESSION_STDIN"
+        elif [ "$1" = terminal-activity ]; then
+          printf '%s\n' "$*" > "$TBD_ACTIVITY_ARGS"
+          cat > "$TBD_ACTIVITY_STDIN"
+        fi
+        """.write(to: tbdPath, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: tbdPath.path)
+        let sessionInput = directory.appendingPathComponent("session-input")
+        let activityInput = directory.appendingPathComponent("activity-input")
+        let activityArgs = directory.appendingPathComponent("activity-args")
+        let payload = #"{"session_id":"session-current","value":"$(touch should-not-run); ' \""}"#
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", CodexHookOverlay.sessionStartCommand]
+        process.currentDirectoryURL = directory
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = "\(directory.path):/usr/bin:/bin"
+        environment["TBD_SESSION_STDIN"] = sessionInput.path
+        environment["TBD_ACTIVITY_STDIN"] = activityInput.path
+        environment["TBD_ACTIVITY_ARGS"] = activityArgs.path
+        process.environment = environment
+        let input = Pipe()
+        process.standardInput = input
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try process.run()
+        input.fileHandleForWriting.write(Data(payload.utf8))
+        try input.fileHandleForWriting.close()
+        process.waitUntilExit()
+
+        #expect(process.terminationStatus == 0)
+        #expect(try String(contentsOf: sessionInput, encoding: .utf8) == payload)
+        #expect(try String(contentsOf: activityInput, encoding: .utf8) == payload)
+        #expect(try String(contentsOf: activityArgs, encoding: .utf8)
+            == "terminal-activity idle --read-hook-payload\n")
+        #expect(!FileManager.default.fileExists(
+            atPath: directory.appendingPathComponent("should-not-run").path))
     }
 
     @Test func stopHookGatesIdleBehindRenameCheck() throws {
@@ -182,7 +243,7 @@ import TBDShared
         let invocations = try runStopHook(goalStatus: "active")
 
         #expect(invocations.contains { $0.hasPrefix("notify --type response_complete") })
-        #expect(!invocations.contains("terminal-activity idle"))
+        #expect(!invokedIdleActivity(invocations))
     }
 
     @Test func stopHookReadsSessionIDFromPayloadJSON() throws {
@@ -191,7 +252,17 @@ import TBDShared
             sessionID: "b2c3d4e5-f607-489a-bcde-1234567890ab"
         )
 
-        #expect(!invocations.contains("terminal-activity idle"))
+        #expect(!invokedIdleActivity(invocations))
+    }
+
+    @Test func stopHookForwardsPayloadToIdleActivityBridge() throws {
+        let sessionID = "c3d4e5f6-0718-49ab-cdef-2345678901bc"
+        let invocations = try runStopHook(goalStatus: "complete", sessionID: sessionID)
+
+        #expect(invocations.contains("terminal-activity idle --read-hook-payload"))
+        #expect(invocations.contains { line in
+            line.hasPrefix("activity-payload=") && line.contains(sessionID)
+        })
     }
 
     @Test func stopHookReadsAssistantMessageFromPayloadJSON() throws {
@@ -209,7 +280,7 @@ import TBDShared
             priorGoalStatus: "complete"
         )
 
-        #expect(!invocations.contains("terminal-activity idle"))
+        #expect(!invokedIdleActivity(invocations))
     }
 
     @Test func stopHookIgnoresStaleActiveGoalIfLatestStateIsComplete() throws {
@@ -218,7 +289,7 @@ import TBDShared
             priorGoalStatus: "active"
         )
 
-        #expect(invocations.contains("terminal-activity idle"))
+        #expect(invokedIdleActivity(invocations))
     }
 
     @Test func stopHookUsesLatestActiveStateWhenGoalTimestampsTie() throws {
@@ -228,7 +299,7 @@ import TBDShared
             goalTimestampsTie: true
         )
 
-        #expect(!invocations.contains("terminal-activity idle"))
+        #expect(!invokedIdleActivity(invocations))
     }
 
     @Test func stopHookUsesLatestCompleteStateWhenGoalTimestampsTie() throws {
@@ -238,7 +309,7 @@ import TBDShared
             goalTimestampsTie: true
         )
 
-        #expect(invocations.contains("terminal-activity idle"))
+        #expect(invokedIdleActivity(invocations))
     }
 
     @Test func stopHookUsesCreatedAtWhenUpdatedTimesTieBeforeInsertionOrder() throws {
@@ -248,27 +319,27 @@ import TBDShared
             createdAtBreaksUpdateTie: true
         )
 
-        #expect(!invocations.contains("terminal-activity idle"))
+        #expect(!invokedIdleActivity(invocations))
     }
 
     @Test func stopHookPublishesIdleWhenCodexGoalIsComplete() throws {
         let invocations = try runStopHook(goalStatus: "complete")
 
         #expect(invocations.contains { $0.hasPrefix("notify --type response_complete") })
-        #expect(invocations.contains("terminal-activity idle"))
+        #expect(invokedIdleActivity(invocations))
     }
 
     @Test func stopHookPublishesIdleWhenCodexGoalIsBlocked() throws {
         let invocations = try runStopHook(goalStatus: "blocked")
 
-        #expect(invocations.contains("terminal-activity idle"))
+        #expect(invokedIdleActivity(invocations))
     }
 
     @Test(arguments: ["paused", "usage_limited", "budget_limited"])
     func stopHookPublishesIdleWhenCodexGoalCannotContinue(status: String) throws {
         let invocations = try runStopHook(goalStatus: status)
 
-        #expect(invocations.contains("terminal-activity idle"))
+        #expect(invokedIdleActivity(invocations))
     }
 
     @Test func roundtripsAsValidJSON() throws {
