@@ -221,7 +221,16 @@ These are the safety core, and the first is not hypothetical.
   argv[0] and leave the app unrecognized. Over-matching is the keep-favoring
   direction and is accepted.
 - **pid <= 1**, already refused inside `ProcessSignaller`.
-- **Processes not owned by our uid.**
+- **Processes not owned by our uid.** The gate sits in the protected set, next
+  to the binary-name check, rather than only on the orphan root — a root-only
+  gate would let every descendant into the volley whatever its own uid was, and
+  leave the promise resting on `kill(2)` returning `EPERM` across uids, which is
+  the kernel's guarantee rather than this sweep's. A foreign uid protects the
+  process entirely: the walk stops there, so a process of ours running below
+  another user's keeps running, because reclaiming it would mean reaching across
+  a privilege boundary on the strength of a parent link. It is not lost to the
+  reconciler — once its foreign parent exits it reparents to launchd, and the
+  next sweep sees it as an orphan root of its own.
 - **Anything whose cwd could not be read.** Absence of evidence is not evidence
   of an orphan; an unreadable cwd means skip, never reclaim.
 

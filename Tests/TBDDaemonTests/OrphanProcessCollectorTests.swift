@@ -84,7 +84,8 @@ struct OrphanProcessCollectorTests {
             entry(pid: 4000, ppid: 1),
             entry(pid: 4001, ppid: 1),
         ]
-        let protected = collector().protectedPIDs(processes: processes, ourPID: ours)
+        let protected = collector().protectedPIDs(
+            processes: processes, ourPID: ours, ourUID: getuid())
         #expect(protected.contains(ours))
         #expect(protected.contains(4000), "our parent")
         #expect(!protected.contains(4001), "an unrelated ppid==1 process is not protected")
@@ -275,10 +276,35 @@ struct OrphanProcessCollectorTests {
             entry(pid: 701, ppid: 700, command: "/w/.build/debug/TBDDaemon"),
             entry(pid: 702, ppid: 701),
         ]
-        let protected = collector().protectedPIDs(processes: processes, ourPID: 99_999)
+        let protected = collector().protectedPIDs(
+            processes: processes, ourPID: 99_999, ourUID: getuid())
         let order = collector().descendantClosure(
             of: 700, processes: processes, protected: protected)
         #expect(order == [700])
+    }
+
+    /// The uid exclusion is a claim about every process this sweep signals, not
+    /// only about the root that entered the closure. A foreign-uid descendant is
+    /// fully protected — not signalled, and not walked through — so a process of
+    /// ours sitting under another user's stays running rather than being reached
+    /// for across a privilege boundary.
+    @Test("a descendant owned by another uid is neither signalled nor descended through")
+    func closureStopsAtForeignUID() {
+        let processes = [
+            entry(pid: 700, ppid: 1),
+            entry(pid: 701, ppid: 700, uid: getuid() &+ 1),
+            entry(pid: 702, ppid: 701),
+            entry(pid: 703, ppid: 700),
+        ]
+        let protected = collector().protectedPIDs(
+            processes: processes, ourPID: 99_999, ourUID: getuid())
+
+        #expect(protected.contains(701), "a foreign-uid process is protected")
+        let order = collector().descendantClosure(
+            of: 700, processes: processes, protected: protected)
+        #expect(
+            order == [703, 700],
+            "the foreign-uid child and the grandchild below it are both left alone")
     }
 
     // MARK: - Reclamation

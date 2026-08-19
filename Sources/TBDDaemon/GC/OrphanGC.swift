@@ -726,7 +726,7 @@ public actor OrphanGC {
         guard !candidates.isEmpty else { return }
 
         let protected = orphanProcessCollector.protectedPIDs(
-            processes: processes, ourPID: getpid())
+            processes: processes, ourPID: getpid(), ourUID: getuid())
         for candidate in candidates {
             let tree = orphanProcessCollector.descendantClosure(
                 of: candidate.pid, processes: processes, protected: protected)

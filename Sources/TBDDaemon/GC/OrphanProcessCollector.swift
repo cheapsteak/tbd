@@ -180,7 +180,9 @@ public struct OrphanProcessCollector: Sendable {
     /// A process qualifies only when ALL of these hold, and each of them fails
     /// toward keeping:
     /// - `ppid == 1` — reparented to launchd, i.e. actually escaped.
-    /// - owned by `ourUID`.
+    /// - owned by `ourUID`. Enforced through the protected set, so the same
+    ///   exclusion holds for every process the reap volley reaches and not only
+    ///   for the root that entered it.
     /// - `pid > 1`, and neither `ourPID` nor one of its ancestors.
     /// - not a `TBDDaemon` or `TBDApp` process. **Not hypothetical:** the
     ///   daemon runs at `ppid == 1` with its cwd inside a TBD tree — when
@@ -202,14 +204,16 @@ public struct OrphanProcessCollector: Sendable {
         ourPID: Int32,
         graceSeconds: Int
     ) -> [OrphanProcessCandidate] {
-        let protected = protectedPIDs(processes: processes, ourPID: ourPID)
+        let protected = protectedPIDs(processes: processes, ourPID: ourPID, ourUID: ourUID)
         // How stale the cwd map is by the time this snapshot was read. Never
         // negative, so a clock that went backwards cannot weaken the gate.
         let cwdAge = max(0, now().timeIntervalSince(cwdsCapturedAt))
         var result: [OrphanProcessCandidate] = []
         for entry in processes.sorted(by: { $0.pid < $1.pid }) {
             guard entry.pid > 1, entry.ppid == 1 else { continue }
-            guard entry.uid == ourUID else { continue }
+            // Covers the uid exclusion too: `protectedPIDs` holds every process
+            // owned by someone else, so there is one enforcement point rather
+            // than a root-only gate here and nothing at all on descendants.
             guard !protected.contains(entry.pid) else { continue }
             // Absence of evidence is not evidence of an orphan. A process whose
             // cwd could not be read is skipped, never reclaimed — the direction
@@ -300,10 +304,27 @@ public struct OrphanProcessCollector: Sendable {
         return elapsed >= Double(graceSeconds)
     }
 
-    /// `ourPID`, its ancestors, and every `TBDDaemon`/`TBDApp` process in the
-    /// snapshot. Never signalled, and never descended into when computing a
-    /// descendant closure.
-    func protectedPIDs(processes: [ProcessSnapshotEntry], ourPID: Int32) -> Set<Int32> {
+    /// `ourPID`, its ancestors, every `TBDDaemon`/`TBDApp` process in the
+    /// snapshot, and every process owned by a uid other than `ourUID`. Never
+    /// signalled, and never descended into when computing a descendant closure.
+    ///
+    /// The uid exclusion lives here rather than only at the orphan root because
+    /// a root-only gate is not the exclusion the sweep claims: once a root
+    /// passed it, every descendant entered the kill volley whatever its own uid
+    /// was, and only `kill(2)` returning `EPERM` across uids kept the promise.
+    /// That is the kernel's guarantee, not this collector's, and it evaporates
+    /// wherever the daemon is not the unprivileged per-user process it is today.
+    ///
+    /// A foreign uid protects the process **entirely** — the walk stops there,
+    /// so an `ourUID` grandchild underneath one keeps running. Reclaiming it
+    /// would mean reaching across a privilege boundary on the strength of a
+    /// parent link, and every degraded-input path in this file is keep-favoring
+    /// instead. The grandchild is not lost to the reconciler either: when its
+    /// foreign parent exits, it reparents to launchd and the next sweep sees it
+    /// as an orphan root of its own.
+    func protectedPIDs(
+        processes: [ProcessSnapshotEntry], ourPID: Int32, ourUID: uid_t
+    ) -> Set<Int32> {
         var byPID: [Int32: ProcessSnapshotEntry] = [:]
         for entry in processes { byPID[entry.pid] = entry }
 
@@ -316,6 +337,9 @@ public struct OrphanProcessCollector: Sendable {
             cursor = entry.ppid
         }
         for entry in processes where Self.isTBDBinary(entry.command) {
+            protected.insert(entry.pid)
+        }
+        for entry in processes where entry.uid != ourUID {
             protected.insert(entry.pid)
         }
         return protected
