@@ -69,7 +69,8 @@ public struct ClaudeStateDetector: Sendable {
             let pidStr = try await tmux.panePID(server: server, paneID: paneID)
             guard let panePID = Int(pidStr) else { return nil }
 
-            // With `zsh -ilc "claude ..."`, zsh may exec into Claude directly,
+            // With `zsh -i -l -c "claude ..."` (see
+            // TmuxManager.shellFlags(forShell:)), zsh may exec into Claude directly,
             // so pane_pid IS the Claude process (not a shell parent).
             // Try the pane PID's session file first.
             if let id = readSessionID(forPID: panePID) { return id }

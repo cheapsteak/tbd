@@ -994,7 +994,8 @@ struct ClaudeSpawnCommandBuilderEnvTests {
     // MARK: - Inline re-export of profile routing env (rc-clobber defense)
 
     /// REGRESSION: tmux `-e CLAUDE_CONFIG_DIR=...` is clobbered by shell
-    /// startup files (`zsh -ilc` sources ~/.zshenv, profile files, and
+    /// startup files (`zsh -i -l -c`, see TmuxManager.shellFlags(forShell:),
+    /// sources ~/.zshenv, profile files, and
     /// ~/.zshrc BEFORE the -c command — a `export CLAUDE_CONFIG_DIR=...`
     /// account switcher there silently redirected every "isolated" profile
     /// session to that config dir). The builder must ALSO re-export the

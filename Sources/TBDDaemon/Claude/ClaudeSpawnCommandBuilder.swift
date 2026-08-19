@@ -192,7 +192,8 @@ enum ClaudeSpawnCommandBuilder {
 
         // Re-export the profile ROUTING env inline, ahead of the claude
         // invocation. tmux's `-e KEY=VALUE` seeds the pane's initial process
-        // environment, but the window runs `$SHELL -ilc <command>` and an
+        // environment, but the window runs `$SHELL -i -l -c <command>`
+        // (see TmuxManager.shellFlags(forShell:)) and an
         // interactive login shell sources profile and rc files (~/.zshenv,
         // /etc/zprofile, ~/.zprofile, ~/.zshrc) BEFORE the -c command — any
         // `export CLAUDE_CONFIG_DIR=...` in those files silently clobbers the

@@ -33,8 +33,10 @@ private final class RecordedCommands: @unchecked Sendable {
 }
 
 /// Returns the shell command body (last argument of `new-window`) for any
-/// recorded `new-window` invocation. tmux argv ends with `<shell> -ilc <body>`
-/// when env vars are inlined, so the body is the last element.
+/// recorded `new-window` invocation. tmux argv ends with
+/// `<shell> -i -l -c <body>` (separate flag elements, see
+/// TmuxManager.shellFlags(forShell:)) when env vars are inlined, so the body
+/// is the last element.
 private func newWindowBodies(_ recorded: [[String]]) -> [String] {
     recorded.compactMap { call in
         guard call.contains("new-window") else { return nil }

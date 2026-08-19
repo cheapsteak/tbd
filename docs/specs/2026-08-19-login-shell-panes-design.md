@@ -92,7 +92,8 @@ invocation at all.
 - **Pane identity**: `resolvePaneTerminalID` parses the
   `export TBD_TERMINAL_ID='…'` shape out of `#{pane_start_command}`. The
   command string is unchanged; only the shell's flag argument changes. Tests
-  that assert the full argv update from `-ic` to `-ilc` in the same commit.
+  that assert the full argv update from `-ic` to the separate `-i -l -c`
+  elements in the same commit.
 - **Daemon environment policy is untouched.** Installation-time `PATH`
   capture, the filesystem-only tmux executable resolver, and the saved tmux
   fallback stay exactly as specified in
@@ -156,6 +157,16 @@ behavior the well-understood default.
   new Terminal.app window. Profiles that print output add noise before the
   command starts; profiles that hang would hang the pane, as they would any
   terminal tab.
+- **Exec-into-agent detection**: for zsh, the shell still execs into the
+  final `-c` command under login flags (re-measured), so `pane_pid` remains
+  the agent for default configs. An EXIT trap in any sourced startup file
+  defeats that exec, and `-l` widens the set of files that can plant one
+  (`/etc/zprofile`, `~/.zprofile`, zlogin/zlogout machinery): the shell then
+  stays `pane_pid`, and PID-based kill, escalation, and reap paths that
+  assume the pane process is the agent do not reach the agent grandchild.
+  Pre-existing exposure through the rc files, widened here; recorded with
+  the affected consumers in
+  [`reaping-orphaned-agents-design.md`](reaping-orphaned-agents-design.md).
 - **Pre-session hook panes** share the pane spawn path, so a profile that
   blocks (a passphrase prompt, a hung network mount) now consumes the hook's
   marker-wait budget; on timeout the existing behavior notifies and spawns
@@ -163,7 +174,7 @@ behavior the well-understood default.
   breaks every terminal on the machine, so it does not survive long in the
   wild, and special-casing hook panes to non-login would silently deny hooks
   the same PATH repair this change exists to provide.
-- **Nested shells**: a plain shell tab runs `$SHELL -ilc $SHELL`. The inner
+- **Nested shells**: a plain shell tab runs `$SHELL -i -l -c $SHELL`. The inner
   shell is interactive non-login, inherits the outer's exported environment,
   and re-runs only rc files. Directories can appear twice in `PATH`; harmless
   and already true of the rc-added directories today.
