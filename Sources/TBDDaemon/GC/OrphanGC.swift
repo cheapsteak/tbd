@@ -88,10 +88,12 @@ public actor OrphanGC {
     /// `liveCWDsProvider`'s path list — no second subprocess, no per-pid
     /// syscall.
     private let processCWDsProvider: (@Sendable () async -> [Int32: String]?)?
-    /// Test seam for the `ps` snapshot. Returning `nil` means "the process
-    /// graph could not be determined", which skips the orphan-process phase —
-    /// never "there are no orphans".
-    private let processSnapshotProvider: (@Sendable () async -> [ProcessSnapshotEntry]?)?
+    /// The `ps` snapshot reader. Returning `nil` means "the process graph
+    /// could not be determined", which skips the orphan-process phase — never
+    /// "there are no orphans". Injected in tests; the real `/bin/ps` reader in
+    /// production. The same closure is handed to `OrphanProcessCollector`,
+    /// which re-reads through it immediately before each signal volley.
+    private let processSnapshotProvider: @Sendable () async -> [ProcessSnapshotEntry]?
     private let orphanProcessCollector: OrphanProcessCollector
 
     /// Production seam: an injected `lsofProvider` returns a non-optional
@@ -168,9 +170,11 @@ public actor OrphanGC {
         self.profileDirCollector = ProfileDirCollector(
             base: resolvedProfileDirBase, now: resolvedNow)
         self.processCWDsProvider = processCWDsProvider
-        self.processSnapshotProvider = processSnapshotProvider
+        let resolvedSnapshotProvider: @Sendable () async -> [ProcessSnapshotEntry]? =
+            processSnapshotProvider ?? { await OrphanProcessCollector.realProcessSnapshot() }
+        self.processSnapshotProvider = resolvedSnapshotProvider
         self.orphanProcessCollector = OrphanProcessCollector(
-            signaller: signaller, now: resolvedNow,
+            signaller: signaller, snapshotProvider: resolvedSnapshotProvider, now: resolvedNow,
             graceAttempts: orphanProcessGraceAttempts,
             pollInterval: orphanProcessPollInterval,
             clock: clock)
@@ -700,6 +704,10 @@ public actor OrphanGC {
     ) async {
         guard config.gcOrphanProcessesEnabled || dryRun else { return }
 
+        // Stamped BEFORE the reading, so the start instants derived from it
+        // sit no later than the truth — the direction that widens apparent
+        // drift at signal time rather than hiding it.
+        let processesCapturedAt = now()
         guard let processes = await processSnapshot() else {
             logger.error("gc: ps unavailable this sweep — skipping the orphan-process phase")
             planned.append("KEEP ps-unavailable orphan-processes")
@@ -727,19 +735,36 @@ public actor OrphanGC {
 
         let protected = orphanProcessCollector.protectedPIDs(
             processes: processes, ourPID: getpid(), ourUID: getuid())
-        for candidate in candidates {
-            let tree = orphanProcessCollector.descendantClosure(
-                of: candidate.pid, processes: processes, protected: protected)
+        // Every tree is planned from the ONE snapshot before anything is
+        // signalled, so the plan is a single consistent reading of the process
+        // graph rather than one that interleaves with its own destruction.
+        // It does not by itself bound how stale a pid can be by the time it is
+        // signalled — each reap below blocks for up to
+        // `graceAttempts × pollInterval` before the next one starts — which is
+        // why `reap` re-reads identities immediately before each volley.
+        let plan = candidates.map { candidate in
+            (candidate, orphanProcessCollector.descendantClosure(
+                of: candidate.pid, processes: processes, protected: protected))
+        }
+        // The start instant recorded for every pid in the plan. `reap` refuses
+        // to signal a pid whose live start instant no longer matches, which is
+        // what keeps a pid the kernel reissued mid-sweep — to a descendant slot
+        // or to a late candidate's root — out of the volley.
+        let plannedStarts = OrphanProcessCollector.startInstants(
+            processes, capturedAt: processesCapturedAt)
+        for (candidate, tree) in plan {
             planned.append(
                 "REAP orphan-process pid=\(candidate.pid) tree=\(tree.count) \(candidate.rootPath)")
-            // This phase's guard is `gcOrphanProcessesEnabled || dryRun`, so
-            // every line below runs only with the flag actually on.
-            guard !dryRun else { continue }
+        }
+        // This phase's guard is `gcOrphanProcessesEnabled || dryRun`, so every
+        // line below runs only with the flag actually on.
+        guard !dryRun else { return }
+        for (candidate, tree) in plan {
             guard let record = await orphanProcessCollector.reap(
-                candidate, tree: tree,
+                candidate, tree: tree, plannedStarts: plannedStarts,
                 repoPath: Self.repoPath(forRoot: candidate.rootPath, in: repoPathByPool)
             ) else {
-                planned.append("KEEP empty-subtree \(candidate.rootPath)")
+                planned.append("KEEP nothing-signalled \(candidate.rootPath)")
                 continue
             }
             await insertReapRecord(record)
@@ -878,13 +903,11 @@ public actor OrphanGC {
         return path == prefix || path.hasPrefix(prefix.hasSuffix("/") ? prefix : prefix + "/")
     }
 
-    /// One `ps` snapshot per sweep, or `nil` when it could not be taken —
-    /// which skips the orphan-process phase, never "there are no orphans".
+    /// The sweep's planning `ps` snapshot, or `nil` when it could not be
+    /// taken — which skips the orphan-process phase, never "there are no
+    /// orphans".
     private func processSnapshot() async -> [ProcessSnapshotEntry]? {
-        if let processSnapshotProvider {
-            return await processSnapshotProvider()
-        }
-        return await OrphanProcessCollector.realProcessSnapshot()
+        await processSnapshotProvider()
     }
 
     /// Entry point for `repo.remove` (review Medium 2): `db.worktrees.deleteForRepo`

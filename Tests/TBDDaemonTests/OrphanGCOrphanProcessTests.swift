@@ -61,7 +61,8 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
         processes: [ProcessSnapshotEntry],
         cwdByPID: [Int32: String],
         now: Date,
-        processSnapshotAvailable: Bool = true
+        processSnapshotAvailable: Bool = true,
+        snapshotProvider: (@Sendable () async -> [ProcessSnapshotEntry]?)? = nil
     ) -> OrphanGC {
         OrphanGC(
             db: db, git: GitManager(),
@@ -74,7 +75,8 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
             credentialsKeychain: NoopKeychain(),
             beforeProfileDirReap: nil,
             processCWDsProvider: { cwdByPID },
-            processSnapshotProvider: { processSnapshotAvailable ? processes : nil },
+            processSnapshotProvider: snapshotProvider
+                ?? { processSnapshotAvailable ? processes : nil },
             signaller: signaller,
             orphanProcessGraceAttempts: 2,
             orphanProcessPollInterval: .milliseconds(1)
@@ -636,6 +638,98 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
         ).sweep()
 
         #expect(signaller.terminated.isEmpty)
+    }
+
+    // MARK: - Identity at signal time, across a multi-candidate sweep
+
+    /// The amplification case the root-only `age >= cwdAge` gate cannot reach.
+    /// `reclaimOrphanProcesses` signals candidates one after another and each
+    /// reap blocks for up to `graceAttempts × pollInterval` before the next
+    /// one is even examined, so with the half-dozen simultaneous orphans a
+    /// field census found, the LAST candidate's tree is signalled many seconds
+    /// after the reading that named its pids. Its identity check therefore has
+    /// to run at ITS volley, not at the sweep's plan.
+    @Test("a later candidate in a multi-orphan sweep is identity-checked at its own volley")
+    func lateCandidateIsIdentityChecked() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let dead = try await makeWorktree(db: db, repo: repo, name: "gone", archived: true)
+        let signaller = FakeProcessSignaller()
+        // Both honor SIGTERM, so neither reap reaches the SIGKILL escalation
+        // and the readings below line up one-to-one with the volleys.
+        signaller.behaviors[4242] = .init(aliveAfterTerminate: false)
+        signaller.behaviors[4343] = .init(aliveAfterTerminate: false)
+
+        let plan = [entry(pid: 4242), entry(pid: 4343)]
+        // While the first candidate was being reaped, 4343 exited and the
+        // kernel handed its pid to an unrelated, live, same-uid process.
+        let afterFirstReap = [entry(pid: 4242), entry(pid: 4343, elapsed: 4)]
+        let readings = ScriptedReadings([plan, plan, afterFirstReap])
+
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            processes: plan,
+            cwdByPID: [4242: dead, 4343: dead],
+            now: Date().addingTimeInterval(7200),
+            snapshotProvider: { readings.next() }
+        ).sweep()
+
+        #expect(signaller.terminated == [4242], "the first candidate still verified and was reclaimed")
+        #expect(
+            !signaller.terminated.contains(4343),
+            "the last candidate's pid was reissued mid-sweep and must not be signalled")
+        #expect(signaller.killed.isEmpty)
+        #expect(result.planned.contains("KEEP nothing-signalled \(dead)"))
+        #expect(result.reaped == 1)
+        let records = try await db.reapRecords.list(repoPath: nil).filter { $0.kind == .orphanProcess }
+        #expect(records.count == 1)
+        #expect(try #require(records.first?.processDescription).hasPrefix("pid=4242 tree=1 "))
+    }
+
+    @Test("a ps reading that fails at signal time signals nothing and records nothing")
+    func unreadableIdentityAtSignalTimeKeeps() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let dead = try await makeWorktree(db: db, repo: repo, name: "gone", archived: true)
+        let signaller = FakeProcessSignaller()
+        let plan = [entry(pid: 4242)]
+        // The planning reading succeeds; the pre-signal re-read does not.
+        let readings = ScriptedReadings([plan, nil])
+
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            processes: plan,
+            cwdByPID: [4242: dead],
+            now: Date().addingTimeInterval(7200),
+            snapshotProvider: { readings.next() }
+        ).sweep()
+
+        #expect(signaller.terminated.isEmpty, "an identity that cannot be re-read is a skip")
+        #expect(signaller.killed.isEmpty)
+        #expect(result.reaped == 0)
+        #expect(result.planned.contains("REAP orphan-process pid=4242 tree=1 \(dead)"))
+        #expect(result.planned.contains("KEEP nothing-signalled \(dead)"))
+    }
+}
+
+/// Hands out one `ps` reading per call and then repeats the last, so a test can
+/// make the process table change between the reading a sweep planned from and
+/// the volley that acts on it. `nil` stands for a reading that could not be
+/// taken at all.
+private final class ScriptedReadings: @unchecked Sendable {
+    private let lock = NSLock()
+    private var readings: [[ProcessSnapshotEntry]?]
+
+    init(_ readings: [[ProcessSnapshotEntry]?]) {
+        self.readings = readings.isEmpty ? [[]] : readings
+    }
+
+    func next() -> [ProcessSnapshotEntry]? {
+        lock.withLock { readings.count > 1 ? readings.removeFirst() : readings[0] }
     }
 }
 

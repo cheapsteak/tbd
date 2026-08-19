@@ -34,11 +34,45 @@ struct OrphanProcessCollectorTests {
 
     private func collector(
         signaller: ProcessSignaller = FakeProcessSignaller(),
-        now: Date = Date(timeIntervalSince1970: 1_000_000)
+        now: Date = Date(timeIntervalSince1970: 1_000_000),
+        snapshots: ScriptedSnapshots = ScriptedSnapshots([])
     ) -> OrphanProcessCollector {
         OrphanProcessCollector(
-            signaller: signaller, now: { now },
+            signaller: signaller,
+            snapshotProvider: { await snapshots.next() },
+            now: { now },
             graceAttempts: 2, pollInterval: .milliseconds(1))
+    }
+
+    /// Hands out one `ps` reading per call and then repeats the last, so a test
+    /// can make the process table change between the reading a tree was planned
+    /// from and the volley that acts on it. `nil` stands for a reading that
+    /// could not be taken at all.
+    final class ScriptedSnapshots: @unchecked Sendable {
+        private let lock = NSLock()
+        private var readings: [[ProcessSnapshotEntry]?]
+        private(set) var calls = 0
+
+        init(_ readings: [[ProcessSnapshotEntry]?]) {
+            self.readings = readings.isEmpty ? [[]] : readings
+        }
+
+        func next() -> [ProcessSnapshotEntry]? {
+            lock.withLock {
+                calls += 1
+                return readings.count > 1 ? readings.removeFirst() : readings[0]
+            }
+        }
+    }
+
+    /// The start instants a plan would have recorded for `processes`, stamped
+    /// at the collector's own `now` so an unchanged process table verifies
+    /// exactly.
+    private func plannedStarts(
+        _ processes: [ProcessSnapshotEntry],
+        at now: Date = Date(timeIntervalSince1970: 1_000_000)
+    ) -> [Int32: Date] {
+        OrphanProcessCollector.startInstants(processes, capturedAt: now)
     }
 
     // MARK: - Exclusions
@@ -314,11 +348,13 @@ struct OrphanProcessCollectorTests {
         let signaller = FakeProcessSignaller()
         signaller.behaviors[701] = .init(aliveAfterTerminate: false)
         signaller.behaviors[700] = .init(aliveAfterTerminate: true, aliveAfterKill: false)
-        let subject = collector(signaller: signaller)
+        let table = [entry(pid: 700), entry(pid: 701, ppid: 700)]
+        let subject = collector(signaller: signaller, snapshots: ScriptedSnapshots([table]))
         let candidate = OrphanProcessCandidate(
             pid: 700, cwd: dead, rootPath: dead, command: "/usr/bin/node server.js --port 3000")
 
-        let record = await subject.reap(candidate, tree: [701, 700], repoPath: "/repo")
+        let record = await subject.reap(
+            candidate, tree: [701, 700], plannedStarts: plannedStarts(table), repoPath: "/repo")
 
         #expect(signaller.terminated == [701, 700])
         #expect(signaller.killed == [700])
@@ -339,8 +375,99 @@ struct OrphanProcessCollectorTests {
     func emptySubtreeRecordsNothing() async {
         let record = await collector().reap(
             OrphanProcessCandidate(pid: 700, cwd: dead, rootPath: dead, command: "x"),
-            tree: [], repoPath: "")
+            tree: [], plannedStarts: [:], repoPath: "")
         #expect(record == nil)
+    }
+
+    // MARK: - Identity at signal time
+
+    /// The root's `age >= cwdAge` gate in `candidates(…)` never sees a
+    /// descendant: descendants enter a tree purely through the snapshot's ppid
+    /// chain. So the pid the kernel reissued into a descendant slot is caught
+    /// here or nowhere.
+    @Test("a descendant whose start time moved between the plan and the volley is not signalled")
+    func descendantSubstitutionIsSkipped() async throws {
+        let signaller = FakeProcessSignaller()
+        for pid: Int32 in [700, 702] { signaller.behaviors[pid] = .init(aliveAfterTerminate: false) }
+        let planned = [entry(pid: 700), entry(pid: 701, ppid: 700), entry(pid: 702, ppid: 700)]
+        // 701 exited and its pid was reissued to a stranger: same pid, same
+        // uid, same parent slot, but a start time of seconds ago rather than a
+        // day ago.
+        let atVolley = [entry(pid: 700), entry(pid: 701, ppid: 700, elapsed: 3), entry(pid: 702, ppid: 700)]
+        // `reap` is called directly here, so its first reading IS the volley's.
+        let subject = collector(signaller: signaller, snapshots: ScriptedSnapshots([atVolley]))
+
+        let record = await subject.reap(
+            OrphanProcessCandidate(pid: 700, cwd: dead, rootPath: dead, command: "process-compose up"),
+            tree: [701, 702, 700], plannedStarts: plannedStarts(planned), repoPath: "/repo")
+
+        #expect(
+            !signaller.terminated.contains(701),
+            "a reissued pid names an unrelated live process and must never be signalled")
+        #expect(signaller.terminated == [702, 700], "the rest of the tree is still reclaimed")
+        #expect(signaller.killed.isEmpty)
+        #expect(try #require(record).processDescription == "pid=700 tree=2 process-compose up")
+    }
+
+    /// The escalation is a second volley, separated from the first by
+    /// `graceAttempts × pollInterval` of wall time, and SIGKILL is the signal
+    /// nothing survives. It gets its own check rather than the SIGTERM
+    /// volley's now-stale conclusion.
+    @Test("the SIGKILL escalation re-checks identity rather than reusing the SIGTERM volley's")
+    func escalationRechecksIdentity() async throws {
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[700] = .init(aliveAfterTerminate: true, aliveAfterKill: false)
+        let planned = [entry(pid: 700)]
+        let reissued = [entry(pid: 700, elapsed: 1)]
+        let subject = collector(
+            signaller: signaller, snapshots: ScriptedSnapshots([planned, reissued]))
+
+        _ = await subject.reap(
+            OrphanProcessCandidate(pid: 700, cwd: dead, rootPath: dead, command: "x"),
+            tree: [700], plannedStarts: plannedStarts(planned), repoPath: "/repo")
+
+        #expect(signaller.terminated == [700], "identity still matched when SIGTERM was sent")
+        #expect(
+            signaller.killed.isEmpty,
+            "the pid was reissued during the grace window, so SIGKILL must not follow")
+    }
+
+    @Test("an identity that cannot be re-read is a skip, never a kill")
+    func unreadableIdentityKeeps() async throws {
+        let signaller = FakeProcessSignaller()
+        let planned = [entry(pid: 700), entry(pid: 701, ppid: 700)]
+        let subject = collector(
+            signaller: signaller, snapshots: ScriptedSnapshots([nil]))
+
+        let record = await subject.reap(
+            OrphanProcessCandidate(pid: 700, cwd: dead, rootPath: dead, command: "x"),
+            tree: [701, 700], plannedStarts: plannedStarts(planned), repoPath: "/repo")
+
+        #expect(signaller.terminated.isEmpty, "a ps that did not answer signals nothing")
+        #expect(signaller.killed.isEmpty)
+        #expect(record == nil, "nothing was signalled, so nothing is recorded")
+    }
+
+    @Test("a pid whose etime did not parse can never be verified, so it is never signalled")
+    func unparseableAgeIsNeverSignalled() async throws {
+        let signaller = FakeProcessSignaller()
+        let planned = [entry(pid: 700), entry(pid: 701, ppid: 700, elapsed: nil)]
+        let subject = collector(signaller: signaller, snapshots: ScriptedSnapshots([planned]))
+
+        _ = await subject.reap(
+            OrphanProcessCandidate(pid: 700, cwd: dead, rootPath: dead, command: "x"),
+            tree: [701, 700], plannedStarts: plannedStarts(planned), repoPath: "/repo")
+
+        #expect(signaller.terminated == [700])
+    }
+
+    @Test("start instants are the snapshot's capture time minus etime, and skip unparseable rows")
+    func startInstantsDeriveFromETime() {
+        let at = Date(timeIntervalSince1970: 1_000_000)
+        let map = OrphanProcessCollector.startInstants(
+            [entry(pid: 5, elapsed: 60), entry(pid: 6, elapsed: nil)], capturedAt: at)
+        #expect(map[5] == at.addingTimeInterval(-60))
+        #expect(map[6] == nil, "an unparseable etime yields no identity, so the pid never verifies")
     }
 
     // MARK: - Parsing

@@ -183,16 +183,66 @@ reason, and can take the whole parent directory: an entry sitting in
 `.deleting/<uuid>` is there because TBD renamed it there, so draining it needs
 no provenance gate. Killing a process does.
 
-### Two readings, joined by pid
+### Pid reuse, from identification through to the signal
 
-The cwd map and the `ps` snapshot are read at different moments in one sweep and
-joined by pid alone, and macOS reissues pids. A pid that named an orphan when
-lsof ran can name an unrelated new process by the time `ps` runs, and that
-process would inherit the dead one's cwd. So a candidate must be at least as old
-as the gap between the two readings; anything younger is a possible reuse and is
-skipped. A process whose age could not be parsed fails this gate too, which is
-what makes "an unparseable start time keeps the process" true on both grace arms
-rather than only the one that has no archive instant.
+macOS reissues pids, and this phase touches pids at three separate moments: when
+the cwd map is joined to the `ps` snapshot, when a tree is planned from that
+snapshot, and when each member of that tree is signalled. Every one of those
+joins is by pid alone, so each needs its own answer.
+
+**Identification.** The cwd map and the `ps` snapshot are read at different
+moments in one sweep. A pid that named an orphan when lsof ran can name an
+unrelated new process by the time `ps` runs, and that process would inherit the
+dead one's cwd. So a candidate must be at least as old as the gap between the
+two readings; anything younger is a possible reuse and is skipped. A process
+whose age could not be parsed fails this gate too, which is what makes "an
+unparseable start time keeps the process" true on both grace arms rather than
+only the one that has no archive instant.
+
+**Signalling.** That age gate is about one pid — the orphan root — at one
+moment. It says nothing about the two things that follow it. Descendants enter a
+tree purely through the snapshot's ppid chain, with no reading of their own to
+be older than. And reclamation is sequential: each reap blocks for up to
+`graceAttempts × pollInterval` (≈3 s by default) before the next candidate's
+tree is examined at all, so with the half-dozen simultaneous orphans the field
+census found, the last candidate's tree is signalled many seconds after the
+snapshot that named its pids. A pid reissued anywhere in those windows, to a
+descendant slot or to a late candidate's root, would be SIGTERM'd and then
+SIGKILL'd — precisely the harm this mechanism exists to prevent.
+
+The identity of a process across time is **pid plus start time**: a reissued pid
+necessarily started after the reading that recorded the pid it replaced, so its
+start instant has moved. The `ps` snapshot already carries `etime`, so stamping
+each snapshot with its capture instant turns every row into a start instant at
+no extra cost.
+
+So the collector re-reads the process table **immediately before each volley** —
+the SIGTERM one and the SIGKILL escalation alike, roots and descendants alike —
+and signals only the pids whose start instant still matches what the plan
+recorded. A pid whose identity moved is dropped from the volley; a re-reading
+that fails at all drops the whole volley, because an identity that cannot be
+re-read is a skip and never a kill. A row whose `etime` did not parse yields no
+identity, so it can never verify and is never signalled.
+
+That costs **one `/bin/ps` per volley** — one per candidate, plus one more for
+each candidate that actually has a SIGTERM survivor — rather than one per pid.
+Re-reading per pid would be marginally tighter and costs a subprocess for every
+member of a tree (the measured `process-compose` orphan held four), spent at the
+moment the daemon is already doing the one thing in this sweep it cannot undo. A
+whole-table reading per volley bounds staleness by the volley's own re-read
+rather than by the sweep's, which is what the amplification needed, and it
+reuses the reader and the `etime` parser the phase already has.
+
+The comparison carries a two-second tolerance, because `etime` is whole seconds
+truncated and a snapshot is stamped at a slightly different instant than the
+kernel fills it in. That does not weaken the test it guards: a reissued pid's
+start instant moves by the whole age of the process it replaced — days, in every
+orphan measured here — never by a second.
+
+Trees are all planned from the one snapshot before anything is signalled, so the
+plan is a single consistent reading of the process graph rather than one
+interleaved with its own destruction. That is an ordering property, not a bound
+on staleness; the per-volley re-read is what bounds staleness.
 
 The worktree rows have their own staleness problem and the phase reads them
 itself for the same reason: the archived list and the live list have to agree
@@ -251,6 +301,11 @@ ancestor is asked to shut down. It is an ordering rather than a barrier — the
 volley does not wait between generations — so a process that forks during its own
 SIGTERM handling can still leave a child behind; that residue is an orphan of its
 own by the next sweep.
+
+Every pid in that subtree is re-verified against the plan's recorded start time
+immediately before it is signalled, so the closure is a list of candidates for a
+signal rather than a licence to send one — see "Pid reuse, from identification
+through to the signal".
 
 Every signal goes to exactly one pid. `ProcessSignaller.terminate` escalates to
 a group kill whenever the pid is its own group leader, and a process group is a
@@ -349,6 +404,12 @@ an undo.
   worktree's own scratchpad still is.
 - **A pid younger than the cwd reading is a skip**, and so is one whose age
   could not be parsed, on both grace arms.
+- **Identity is re-checked at signal time.** A descendant whose start time moved
+  between the plan and the volley is not signalled while the rest of its tree
+  still is; a later candidate in a multi-candidate sweep is checked at its own
+  volley rather than at the sweep's plan; the SIGKILL escalation re-checks
+  rather than reusing the SIGTERM volley's conclusion; and a re-reading that
+  fails signals nothing and records nothing.
 
 Process-level tests inject the signaller and the `ps` snapshot rather than
 spawning real processes, following `AgentReaperTests`, which drives the same

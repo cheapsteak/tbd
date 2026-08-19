@@ -145,10 +145,15 @@ public struct OrphanProcessCandidate: Sendable, Equatable {
 /// every gate below stays a pure function of its arguments.
 ///
 /// Every failure direction is toward KEEPING: an unreadable cwd, an unparseable
-/// start time, a uid that is not ours, and any ambiguity between a live and a
-/// dead owner all leave the process running.
+/// start time, a uid that is not ours, an identity that cannot be re-read at
+/// signal time, and any ambiguity between a live and a dead owner all leave the
+/// process running.
 public struct OrphanProcessCollector: Sendable {
     let signaller: any ProcessSignaller
+    /// One fresh `/bin/ps` reading, taken immediately before each volley so a
+    /// pid the kernel reissued since the sweep planned its tree is recognized
+    /// and left alone. Injected so tests never spawn a subprocess.
+    let snapshotProvider: @Sendable () async -> [ProcessSnapshotEntry]?
     let now: @Sendable () -> Date
     /// Number of liveness polls between SIGTERM and SIGKILL.
     let graceAttempts: Int
@@ -161,12 +166,16 @@ public struct OrphanProcessCollector: Sendable {
 
     public init(
         signaller: any ProcessSignaller = ProductionProcessSignaller(),
+        snapshotProvider: @escaping @Sendable () async -> [ProcessSnapshotEntry]? = {
+            await OrphanProcessCollector.realProcessSnapshot()
+        },
         now: @escaping @Sendable () -> Date = Date.init,
         graceAttempts: Int = 30,
         pollInterval: Duration = .milliseconds(100),
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.signaller = signaller
+        self.snapshotProvider = snapshotProvider
         self.now = now
         self.graceAttempts = graceAttempts
         self.pollInterval = pollInterval
@@ -372,6 +381,99 @@ public struct OrphanProcessCollector: Sendable {
         return false
     }
 
+    // MARK: - Identity across time
+
+    /// How far a re-read start instant may sit from the one the plan recorded
+    /// and still be the same process.
+    ///
+    /// `ps etime` is whole seconds truncated, so two readings of one process
+    /// can disagree by just under a second, and the instant a snapshot is
+    /// stamped is not the instant the kernel filled it in. Two seconds absorbs
+    /// both. It does not weaken the substitution test it guards: a reissued
+    /// pid necessarily started AFTER the reading that recorded the pid it
+    /// replaced, so its start instant moves by the whole age of that reading's
+    /// subject — days, in every orphan measured here — and never by a second.
+    public static let identityDriftTolerance: TimeInterval = 2
+
+    /// Start instant per pid: the snapshot's capture time minus the row's
+    /// `etime`. This is the cheap identity of a process across time — the pid
+    /// alone is not one, because macOS reissues pids, and a reissued pid
+    /// necessarily carries a later start instant than the one a snapshot
+    /// recorded for it.
+    ///
+    /// A row whose `etime` did not parse is deliberately ABSENT from the map,
+    /// so it can never be verified and is therefore never signalled: the same
+    /// keep-favoring direction an unreadable cwd and an unparseable age take
+    /// on the identification side.
+    public static func startInstants(
+        _ processes: [ProcessSnapshotEntry], capturedAt: Date
+    ) -> [Int32: Date] {
+        var result: [Int32: Date] = [:]
+        for entry in processes {
+            guard let elapsed = entry.elapsedSeconds else { continue }
+            result[entry.pid] = capturedAt.addingTimeInterval(-elapsed)
+        }
+        return result
+    }
+
+    /// The members of `tree`, in the plan's leaf-first order, whose identity in
+    /// a FRESH `ps` reading still matches what the plan recorded for them.
+    ///
+    /// Called immediately before every volley — the SIGTERM one and the SIGKILL
+    /// escalation alike — and for descendants exactly as for the root. The
+    /// sweep's own snapshot is not enough on its own: `reclaimOrphanProcesses`
+    /// reaps candidates one after another and each reap blocks for up to
+    /// `graceAttempts × pollInterval`, so with the half-dozen simultaneous
+    /// orphans a field census found, the last candidate's tree would otherwise
+    /// be signalled many seconds after the reading that named its pids. The
+    /// root's `age >= cwdAge` gate in `candidates(…)` covers neither that
+    /// drift nor descendants, which enter a tree purely by the snapshot's ppid
+    /// chain.
+    ///
+    /// `nil` means the re-reading itself failed, and the caller must signal
+    /// nothing at all: an identity that cannot be re-read is a skip, never a
+    /// kill.
+    func verifiedTargets(
+        _ tree: [Int32], plannedStarts: [Int32: Date]
+    ) async -> [Int32]? {
+        // Stamped BEFORE the reading rather than after it, so any delay in
+        // taking the snapshot widens the apparent drift rather than hiding it.
+        let capturedAt = now()
+        guard let fresh = await snapshotProvider() else {
+            logger.warning("""
+            gc: orphan-process identity re-read failed — signalling nothing this volley
+            """)
+            return nil
+        }
+        let current = Self.startInstants(fresh, capturedAt: capturedAt)
+        return tree.filter { pid in
+            guard let planned = plannedStarts[pid] else {
+                logger.debug("""
+                gc: orphan-process skip pid \(pid, privacy: .public) — \
+                the plan recorded no start instant for it
+                """)
+                return false
+            }
+            guard let live = current[pid] else {
+                logger.debug("""
+                gc: orphan-process skip pid \(pid, privacy: .public) — \
+                gone or unreadable at signal time
+                """)
+                return false
+            }
+            let drift = abs(live.timeIntervalSince(planned))
+            guard drift <= Self.identityDriftTolerance else {
+                logger.warning("""
+                gc: orphan-process skip pid \(pid, privacy: .public) — start time moved \
+                \(Int(drift), privacy: .public)s since the sweep planned this tree, \
+                so the pid now names a different process
+                """)
+                return false
+            }
+            return true
+        }
+    }
+
     // MARK: - Reclamation
 
     /// The orphan root plus every descendant of it in the snapshot, ordered
@@ -389,6 +491,12 @@ public struct OrphanProcessCollector: Sendable {
     /// waiting between generations, so a process that forks during its own
     /// SIGTERM handling can still leave a child behind. That residue is
     /// keep-biased — the next hourly sweep sees it as an orphan of its own.
+    ///
+    /// Membership here is decided purely by the snapshot's ppid chain, which
+    /// says nothing about whether a pid still names the same process by the
+    /// time the volley reaches it. That is `verifiedTargets`' job, and it runs
+    /// on this list — root and descendants alike — immediately before each
+    /// signal.
     public func descendantClosure(
         of pid: Int32, processes: [ProcessSnapshotEntry], protected: Set<Int32>
     ) -> [Int32] {
@@ -417,6 +525,13 @@ public struct OrphanProcessCollector: Sendable {
     /// `graceAttempts × pollInterval`, then SIGKILL whatever is still alive —
     /// again leaf-first.
     ///
+    /// Every volley is filtered through `verifiedTargets` first, so a pid whose
+    /// start instant has moved since `plannedStarts` was taken is dropped
+    /// rather than signalled, and a re-reading that fails drops the whole
+    /// volley. This is what makes the pid-reuse protection hold for the LAST
+    /// candidate of a multi-orphan sweep and for descendants, neither of which
+    /// the root-only `age >= cwdAge` gate in `candidates(…)` reaches.
+    ///
     /// Signalling goes through `ProcessSignaller` rather than raw `kill(2)` so
     /// tests never send a real signal, and so the `pid <= 1` refusal lives in
     /// exactly one place. It uses the seam's **process-only** methods: the
@@ -431,27 +546,47 @@ public struct OrphanProcessCollector: Sendable {
     /// Returns `nil` for an empty subtree (nothing was signalled, so there is
     /// nothing to record).
     public func reap(
-        _ candidate: OrphanProcessCandidate, tree: [Int32], repoPath: String
+        _ candidate: OrphanProcessCandidate, tree: [Int32],
+        plannedStarts: [Int32: Date], repoPath: String
     ) async -> ReapRecord? {
         guard !tree.isEmpty else { return nil }
 
-        for pid in tree {
+        guard let targets = await verifiedTargets(tree, plannedStarts: plannedStarts),
+              !targets.isEmpty else {
+            logger.info("""
+            gc: orphan-process pid \(candidate.pid, privacy: .public) — nothing left to \
+            signal once identities were re-read; keeping the whole tree
+            """)
+            return nil
+        }
+
+        for pid in targets {
             signaller.terminateProcessOnly(pid)
         }
         for _ in 0..<graceAttempts {
-            if !tree.contains(where: { signaller.isAlive($0) }) { break }
+            if !targets.contains(where: { signaller.isAlive($0) }) { break }
             try? await clock.sleep(for: pollInterval)
         }
-        for pid in tree where signaller.isAlive(pid) {
-            logger.warning("""
-            gc: orphan-process pid \(pid, privacy: .public) survived SIGTERM — sending SIGKILL
-            """)
-            signaller.forceKillProcessOnly(pid)
+        let survivors = targets.filter { signaller.isAlive($0) }
+        if !survivors.isEmpty {
+            // Re-verified separately, because the grace window is itself wall
+            // time — `graceAttempts × pollInterval`, ≈3s by default — during
+            // which a member that honored SIGTERM can exit and have its pid
+            // reissued to a stranger. SIGKILL is the signal nothing survives,
+            // so it gets the same check the SIGTERM volley got, not the
+            // SIGTERM volley's now-stale conclusion.
+            let killable = await verifiedTargets(survivors, plannedStarts: plannedStarts) ?? []
+            for pid in killable {
+                logger.warning("""
+                gc: orphan-process pid \(pid, privacy: .public) survived SIGTERM — sending SIGKILL
+                """)
+                signaller.forceKillProcessOnly(pid)
+            }
         }
 
         logger.info("""
         gc: reclaimed orphan process pid \(candidate.pid, privacy: .public) \
-        (subtree of \(tree.count, privacy: .public)) rooted in \
+        (subtree of \(targets.count, privacy: .public)) rooted in \
         \(candidate.rootPath, privacy: .public)
         """)
         return ReapRecord(
@@ -461,7 +596,10 @@ public struct OrphanProcessCollector: Sendable {
             // the dead worktree the process was rooted in, which is the only
             // place-shaped fact an orphan-process record has.
             worktreePath: candidate.rootPath,
-            processDescription: Self.describe(candidate: candidate, tree: tree),
+            // The set actually signalled, not the set planned: a member dropped
+            // by the identity check was never touched, and the record is an
+            // audit trail of what this sweep did.
+            processDescription: Self.describe(candidate: candidate, tree: targets),
             reapedAt: now()
         )
     }
@@ -508,7 +646,7 @@ public struct OrphanProcessCollector: Sendable {
     ///
     /// `-ww` disables column-width truncation, without which macOS clips the
     /// command column even when stdout is a pipe.
-    static func realProcessSnapshot() async -> [ProcessSnapshotEntry]? {
+    public static func realProcessSnapshot() async -> [ProcessSnapshotEntry]? {
         let outcome: BoundedProcessOutcome
         do {
             outcome = try await runBoundedProcess(
