@@ -220,6 +220,10 @@ actor CodexTranscriptActivityTracker {
             guard baseline.offset == fileSize else {
                 return StepResult(state: nil, bytesRead: bytesRead, status: .behind)
             }
+            guard baseline.pendingFragment.isEmpty,
+                  !baseline.discardingCurrentLine else {
+                return StepResult(state: nil, bytesRead: bytesRead, status: .caughtUp)
+            }
             return StepResult(
                 state: baseline.reducer.activityState,
                 bytesRead: bytesRead,

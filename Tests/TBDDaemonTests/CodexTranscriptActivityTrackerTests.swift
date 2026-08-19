@@ -371,6 +371,29 @@ struct CodexTranscriptActivityTrackerTests {
         #expect(afterNewline == .working)
     }
 
+    @Test func partialLifecycleRecordAtEOFDoesNotRepublishCachedState() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        try fixture.write(event(type: "task_started", turnID: "a"))
+        let tracker = CodexTranscriptActivityTracker()
+        let worktreeID = UUID()
+        let working = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+
+        try fixture.append(event(
+            type: "task_complete", turnID: "a", terminated: false))
+        let partial = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+
+        try fixture.append(Data([0x0A]))
+        let completed = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+
+        #expect(working == .working)
+        #expect(partial == nil)
+        #expect(completed == .idle)
+    }
+
     @Test func oversizedUnterminatedRecordIsDiscardedWithoutGrowingTheBuffer() async throws {
         let fixture = try TranscriptFixture()
         defer { fixture.remove() }
@@ -391,9 +414,11 @@ struct CodexTranscriptActivityTrackerTests {
         #expect(boundedBuffer?.byteCount == Self.maxBufferedRecordByteCount)
         #expect(boundedBuffer?.isDiscarding == false)
 
-        _ = await tracker.observe(transcriptPath: fixture.path, worktreeID: worktreeID)
+        let discardedAtEOF = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
         let discarding = await tracker.bufferedRecordState(transcriptPath: fixture.path)
 
+        #expect(discardedAtEOF == nil)
         #expect(discarding?.byteCount == 0)
         #expect(discarding?.isDiscarding == true)
 
