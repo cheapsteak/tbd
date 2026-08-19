@@ -141,7 +141,7 @@ public struct AppliedTerminalActivityObservation: Sendable {
 struct AppliedTerminalSessionStart: Sendable {
     let sessionID: String
     let transcriptPath: String?
-    let orderObservedAt: Date
+    let orderObservedAt: Date?
     let activityObservation: AppliedTerminalActivityObservation?
 }
 
@@ -395,17 +395,18 @@ public struct TerminalStore: Sendable {
         }
     }
 
-    /// Apply a SessionStart with independently ordered session, prompt, and
-    /// activity facts in one database transaction.
+    /// Apply a SessionStart in one database transaction. Codex session,
+    /// prompt, and activity facts use independent ordering rails; other agent
+    /// kinds retain their established last-writer session semantics.
     ///
-    /// Session identity is ordered only against other SessionStarts. A delayed
-    /// permission or activity hook can carry a later server-receipt timestamp
-    /// while still describing the previous session, so it must not suppress a
-    /// genuine identity rollover. Prompt and activity each retain their own
-    /// conservative ordering: a same/newer prompt survives, and an older
-    /// SessionStart cannot regress newer activity. SessionStart is first-wins
-    /// at an equal session watermark; an exact retry is an idempotent no-op and
-    /// therefore cannot move a transcript boundary.
+    /// Codex session identity is ordered only against other SessionStarts. A
+    /// delayed permission or activity hook can carry a later server-receipt
+    /// timestamp while still describing the previous session, so it must not
+    /// suppress a genuine identity rollover. Prompt and activity each retain
+    /// their own conservative ordering: a same/newer prompt survives, and an
+    /// older SessionStart cannot regress newer activity. Codex SessionStart is
+    /// first-wins at an equal session watermark; an exact retry is an
+    /// idempotent no-op and therefore cannot move a transcript boundary.
     func applySessionStart(
         id: UUID,
         sessionID: String,
@@ -416,31 +417,40 @@ public struct TerminalStore: Sendable {
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Terminal not found")
             }
+            let isCodex = record.kind == TerminalKind.codex.rawValue
+                || record.label == TerminalLabel.codex
+            guard isCodex else {
+                // Preserve the established Claude/shell hook behavior: the
+                // last SessionStart to finish replaces identity and retracts
+                // the prior prompt without changing activity. The ordering
+                // rail exists only for Codex transcript reconciliation.
+                record.claudeSessionID = sessionID
+                if let transcriptPath {
+                    record.transcriptPath = transcriptPath
+                }
+                record.sessionOrderObservedAt = nil
+                record.awaitingInputReason = nil
+                record.awaitingInputObservedAt = nil
+                try record.update(db)
+                return AppliedTerminalSessionStart(
+                    sessionID: sessionID,
+                    transcriptPath: record.transcriptPath,
+                    orderObservedAt: nil,
+                    activityObservation: nil)
+            }
             if let storedSessionOrder = record.sessionOrderObservedAt,
                storedSessionOrder >= observedAt {
                 return nil
             }
             record.sessionOrderObservedAt = observedAt
 
-            let isCodex = record.kind == TerminalKind.codex.rawValue
-                || record.label == TerminalLabel.codex
-            let activityObservation: AppliedTerminalActivityObservation?
-            if isCodex {
-                activityObservation = applyActivityObservationToRecord(
-                    to: &record,
-                    activityState: .idle,
-                    source: .hookEvent("SessionStart"),
-                    observedAt: observedAt,
-                    replaceSameValue: true
-                )
-            } else {
-                let storedActivityOrder = record.activityStateOrderObservedAt
-                    ?? record.activityStateObservedAt
-                if storedActivityOrder.map({ $0 < observedAt }) != false {
-                    record.activityStateOrderObservedAt = observedAt
-                }
-                activityObservation = nil
-            }
+            let activityObservation = applyActivityObservationToRecord(
+                to: &record,
+                activityState: .idle,
+                source: .hookEvent("SessionStart"),
+                observedAt: observedAt,
+                replaceSameValue: true
+            )
 
             record.claudeSessionID = sessionID
             if let transcriptPath {
@@ -448,8 +458,7 @@ public struct TerminalStore: Sendable {
             }
             // The activity helper performs this when it accepts Codex's idle
             // fact. Keep the independent call so a rejected stale activity
-            // transition and every non-Codex SessionStart still retract only
-            // a prompt known to be strictly older.
+            // transition still retracts only a prompt known to be older.
             clearAwaitingInputIfNotNewer(record: &record, than: observedAt)
             try record.update(db)
             return AppliedTerminalSessionStart(
@@ -554,15 +563,15 @@ public struct TerminalStore: Sendable {
         }
     }
 
-    /// Apply an externally observed activity fact only when it is not older
-    /// than the ordering watermark already stored for the terminal.
+    /// Apply a Codex or explicit-interrupt activity fact only when it is not
+    /// older than the ordering watermark already stored for the terminal.
     ///
     /// The ordering comparison and write share one database-writer
     /// transaction. Callers may therefore do
     /// arbitrary asynchronous work between observing an event and reaching
     /// this method without allowing that older event to roll back a newer one.
     ///
-    /// A repeated generic value advances only the ordering watermark and clears
+    /// A repeated Codex value advances only the ordering watermark and clears
     /// an awaiting-input reason strictly older than itself. Its semantic transition
     /// timestamp and source remain unchanged, which both preserves
     /// hibernation's at-rest clock and prevents an idle echo from erasing an
@@ -571,7 +580,9 @@ public struct TerminalStore: Sendable {
     /// interrupt and SessionStart) opt into replacement. Exact timestamp ties
     /// cannot establish event order, so explicit interrupts and permission
     /// waits are preserved, while ambiguous working/non-working ties resolve
-    /// toward non-working; the next strictly newer hook advances order.
+    /// toward non-working; the next strictly newer hook advances order. Other
+    /// agent hooks retain their established changed-value replacement and
+    /// same-value no-op behavior.
     public func applyActivityObservation(
         id: UUID,
         activityState: TerminalActivityState,
@@ -582,6 +593,28 @@ public struct TerminalStore: Sendable {
         try await writer.write { db in
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Terminal not found")
+            }
+            let usesOrderedCodexActivity = record.kind == TerminalKind.codex.rawValue
+                || record.label == TerminalLabel.codex
+                || source == .terminalInterrupt
+            guard usesOrderedCodexActivity else {
+                // This API is public to the daemon module, so keep the scope
+                // boundary here as well as at the RPC router. An accidental
+                // non-Codex caller must retain the pre-existing changed-value
+                // replacement and same-value no-op behavior.
+                guard record.activityState != activityState.rawValue else { return nil }
+                record.activityState = activityState.rawValue
+                record.activityStateSource = FactColumnJSON.encode(source)
+                record.activityStateObservedAt = observedAt
+                record.activityStateOrderObservedAt = observedAt
+                record.awaitingInputReason = nil
+                record.awaitingInputObservedAt = nil
+                try record.update(db)
+                return AppliedTerminalActivityObservation(
+                    activityState: activityState,
+                    source: source,
+                    observedAt: observedAt,
+                    orderObservedAt: observedAt)
             }
             guard let application = applyActivityObservationToRecord(
                 to: &record,

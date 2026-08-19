@@ -119,7 +119,7 @@ struct TerminalSessionEventHandlerTests {
             Issue.record("expected terminalSessionUpdated")
             return
         }
-        #expect(session.sessionOrderObservedAt == observedAt)
+        #expect(session.sessionOrderObservedAt == nil)
     }
 
     @Test("ignores non-absolute transcriptPath but still updates sessionID")
@@ -250,8 +250,44 @@ struct TerminalSessionEventHandlerTests {
         #expect(after.activityStateObservedAt == idleAt)
     }
 
-    @Test("a delayed old-session prompt cannot suppress a genuine new SessionStart identity")
-    func delayedOldPromptPreservesNewSessionIdentity() async throws {
+    @Test("Claude SessionStart retains legacy unordered identity and prompt semantics")
+    func claudeSessionStartRetainsLegacyUnorderedSemantics() async throws {
+        let (terminal, _) = try await makeTerminal(initialSession: "initial-session")
+        let olderSessionAt = Date(timeIntervalSince1970: 1_700_000_100)
+        let newerSessionAt = olderSessionAt.addingTimeInterval(1)
+        _ = try await db.terminals.applySessionStart(
+            id: terminal.id,
+            sessionID: "newer-session",
+            transcriptPath: "/tmp/newer-session.jsonl",
+            observedAt: newerSessionAt)
+        try await db.terminals.recordAwaitingInputReason(
+            id: terminal.id,
+            reason: AwaitingInputReason(
+                message: "Claude needs permission",
+                hookEventName: "Notification",
+                notificationType: "permission_prompt"),
+            observedAt: newerSessionAt)
+        let router = makeRouter(now: { olderSessionAt })
+        let request = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "last-arriving-session",
+                transcriptPath: "/tmp/last-arriving-session.jsonl",
+                source: "resume"))
+
+        #expect((await router.handle(request)).success)
+
+        let updated = try #require(await db.terminals.get(id: terminal.id))
+        #expect(updated.claudeSessionID == "last-arriving-session")
+        #expect(updated.transcriptPath == "/tmp/last-arriving-session.jsonl")
+        #expect(updated.sessionOrderObservedAt == nil)
+        #expect(updated.awaitingInputReason == nil)
+        #expect(updated.awaitingInputObservedAt == nil)
+    }
+
+    @Test("a later-completing Claude SessionStart retains legacy prompt retraction")
+    func laterCompletingClaudeSessionStartRetractsPrompt() async throws {
         let (terminal, _) = try await makeTerminal(initialSession: "old-session")
         let baseline = Date(timeIntervalSince1970: 1_700_000_000)
         let sessionStartAt = baseline.addingTimeInterval(1)
@@ -292,9 +328,9 @@ struct TerminalSessionEventHandlerTests {
         let updated = try #require(try await db.terminals.get(id: terminal.id))
         #expect(updated.claudeSessionID == "new-session")
         #expect(updated.transcriptPath == "/tmp/new-session.jsonl")
-        #expect(updated.sessionOrderObservedAt == sessionStartAt)
-        #expect(updated.awaitingInputReason?.classification == .promptOnScreen)
-        #expect(updated.awaitingInputObservedAt == delayedPromptAt)
+        #expect(updated.sessionOrderObservedAt == nil)
+        #expect(updated.awaitingInputReason == nil)
+        #expect(updated.awaitingInputObservedAt == nil)
         #expect(updated.activityState == .working)
         #expect(updated.activityStateSource == .hookEvent("UserPromptSubmit"))
         #expect(updated.activityStateObservedAt == baseline)
@@ -388,7 +424,7 @@ struct TerminalSessionEventHandlerTests {
     }
 
     @Test(
-        "the first differently-identified SessionStart wins an equal timestamp",
+        "SessionStart tie ordering is scoped to Codex",
         arguments: [TerminalKind.codex, .claude]
     )
     func equalTimeDifferentSessionStartPreservesFirstIdentity(
@@ -417,10 +453,17 @@ struct TerminalSessionEventHandlerTests {
         #expect((await sameTimeRouter.handle(second)).success)
 
         let updated = try #require(try await db.terminals.get(id: terminal.id))
-        #expect(updated.claudeSessionID == "first-session")
-        #expect(updated.transcriptPath == "/tmp/first-session.jsonl")
-        #expect(updated.sessionOrderObservedAt == observedAt)
-        #expect(updated.activityStateOrderObservedAt == observedAt)
+        if kind == .codex {
+            #expect(updated.claudeSessionID == "first-session")
+            #expect(updated.transcriptPath == "/tmp/first-session.jsonl")
+            #expect(updated.sessionOrderObservedAt == observedAt)
+            #expect(updated.activityStateOrderObservedAt == observedAt)
+        } else {
+            #expect(updated.claudeSessionID == "second-session")
+            #expect(updated.transcriptPath == "/tmp/second-session.jsonl")
+            #expect(updated.sessionOrderObservedAt == nil)
+            #expect(updated.activityStateOrderObservedAt == nil)
+        }
     }
 
     @Test("unknown terminalID is a soft no-op (success, no error)")

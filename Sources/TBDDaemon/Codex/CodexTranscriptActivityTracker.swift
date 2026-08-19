@@ -34,21 +34,22 @@ struct CodexTurnLifecycleReducer: Sendable {
 
     mutating func consume(line: Data) {
         guard let envelope = try? JSONDecoder().decode(EventEnvelope.self, from: line),
-              envelope.type == "event_msg",
-              let turnID = envelope.payload.turnID else { return }
+              envelope.type == "event_msg" else { return }
 
         switch envelope.payload.type {
         case "task_started":
+            guard let turnID = envelope.payload.turnID else { return }
             hasLifecycleEvidence = true
             currentTurn = Turn(id: turnID, startedAt: envelope.payload.startedAt)
         case "task_complete", "turn_aborted":
             hasLifecycleEvidence = true
-            // Some rollout writers rewrite the close ID and omit started_at.
-            // With no correlation key left, prefer false idle to a permanent
-            // false-working indicator. A present timestamp still protects a
-            // newer turn from a late close belonging to an older one.
+            // Some rollout writers omit or rewrite the close ID. With no
+            // trustworthy identity key, prefer false idle to a permanent
+            // false-working indicator. When both records carry identity, a
+            // present timestamp still protects a newer turn from a late close.
             if let currentTurn,
-               currentTurn.id == turnID
+               envelope.payload.turnID == nil
+                || currentTurn.id == envelope.payload.turnID
                 || currentTurn.startedAt != nil
                 && currentTurn.startedAt == envelope.payload.startedAt
                 || envelope.payload.startedAt == nil {

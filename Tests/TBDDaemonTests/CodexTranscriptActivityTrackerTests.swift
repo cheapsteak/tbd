@@ -74,6 +74,28 @@ struct CodexTranscriptActivityTrackerTests {
         #expect(reducer.activityState == .idle)
     }
 
+    @Test(
+        "a close without a turn ID prefers false idle",
+        arguments: ["task_complete", "turn_aborted"]
+    )
+    func closeWithoutTurnIDPrefersFalseIdle(type: String) {
+        var reducer = CodexTurnLifecycleReducer()
+        reducer.consume(line: event(
+            type: "task_started", turnID: "started-id", startedAt: 200))
+
+        reducer.consume(line: event(type: type, turnID: nil, startedAt: 100))
+
+        #expect(reducer.activityState == .idle)
+    }
+
+    @Test func startWithoutTurnIDIsIgnored() {
+        var reducer = CodexTurnLifecycleReducer()
+
+        reducer.consume(line: event(type: "task_started", turnID: nil))
+
+        #expect(reducer.activityState == nil)
+    }
+
     @Test func closeForKnownOlderStartTimeDoesNotCloseOpenTurn() {
         var reducer = CodexTurnLifecycleReducer()
         reducer.consume(line: event(type: "task_started", turnID: "current", startedAt: 200))
@@ -804,7 +826,7 @@ struct CodexTranscriptActivityTrackerTests {
 
     private func event(
         type: String,
-        turnID: String,
+        turnID: String?,
         startedAt: Int? = nil,
         completedAt: Int? = nil,
         terminated: Bool = true,
@@ -813,11 +835,12 @@ struct CodexTranscriptActivityTrackerTests {
     ) -> Data {
         let newline = terminated ? "\n" : ""
         func encoded(padding: String?) -> Data {
+            let turnIDField = turnID.map { #", "turn_id":"\#($0)""# } ?? ""
             let startedAtField = startedAt.map { #", "started_at":\#($0)"# } ?? ""
             let completedAtField = completedAt.map { #", "completed_at":\#($0)"# } ?? ""
             let paddingField = padding.map { #", "padding":"\#($0)""# } ?? ""
             return Data((
-                #"{"type":"event_msg","payload":{"type":"\#(type)","turn_id":"\#(turnID)"\#(startedAtField)\#(completedAtField)\#(paddingField)}}"#
+                #"{"type":"event_msg","payload":{"type":"\#(type)"\#(turnIDField)\#(startedAtField)\#(completedAtField)\#(paddingField)}}"#
                     + newline).utf8)
         }
 

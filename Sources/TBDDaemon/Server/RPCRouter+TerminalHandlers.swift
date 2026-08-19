@@ -2882,11 +2882,10 @@ extension RPCRouter {
             return p
         }()
 
-        // Session identity, prompt retraction, and (for Codex) the idle fact
-        // are reconciled atomically on their independent ordering rails. A
-        // delayed old-session prompt must not suppress a genuine identity
-        // rollover, while a delayed SessionStart must not clear that newer
-        // prompt or regress activity.
+        // Codex session identity, prompt retraction, and the idle fact are
+        // reconciled atomically on independent ordering rails. Other agent
+        // kinds retain the established last-writer session and prompt update
+        // in the same transaction.
         guard let sessionApplication = try await db.terminals.applySessionStart(
             id: terminal.id,
             sessionID: params.sessionID,
@@ -3087,6 +3086,24 @@ extension RPCRouter {
         let source: FactSource = params.origin == .userInterrupt
             ? .terminalInterrupt
             : .hookEvent(RPCMethod.terminalActivityEvent)
+        guard terminal.isCodexTerminal || params.origin == .userInterrupt else {
+            // Claude and shell hooks retain their established last-writer
+            // behavior. Their persisted activity is a hibernation input, not
+            // Codex transcript presentation, so this fix must not impose the
+            // new ordering and tie-precedence policy on them.
+            guard terminal.activityState != params.activityState else { return .ok() }
+            try await db.terminals.setActivityState(
+                id: terminal.id,
+                activityState: params.activityState,
+                source: source,
+                observedAt: observedAt)
+            subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
+                terminalID: terminal.id,
+                worktreeID: terminal.worktreeID,
+                activityState: params.activityState
+            )))
+            return .ok()
+        }
         let activityApplication = try await db.terminals.applyActivityObservation(
             id: terminal.id,
             activityState: params.activityState,

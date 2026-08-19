@@ -89,6 +89,40 @@ struct TerminalActivityEventHandlerTests {
         #expect(updated?.activityState == .working)
     }
 
+    @Test("Claude activity hooks retain legacy unordered replacement semantics")
+    func claudeActivityHookRetainsLegacyUnorderedReplacement() async throws {
+        let terminal = try await makeTerminal(kind: .claude, label: "Claude")
+        let olderHookAt = Date(timeIntervalSince1970: 1_700_000_100)
+        let newerStoredAt = olderHookAt.addingTimeInterval(1)
+        try await db.terminals.setActivityState(
+            id: terminal.id,
+            activityState: .working,
+            source: .hookEvent("UserPromptSubmit"),
+            observedAt: newerStoredAt)
+        try await db.terminals.recordAwaitingInputReason(
+            id: terminal.id,
+            reason: AwaitingInputReason(
+                message: "Claude needs permission",
+                hookEventName: "Notification",
+                notificationType: "permission_prompt"),
+            observedAt: newerStoredAt)
+        let router = makeRouter(now: { olderHookAt })
+        let request = try RPCRequest(
+            method: RPCMethod.terminalActivityEvent,
+            params: TerminalActivityEventParams(
+                terminalID: terminal.id,
+                activityState: .idle))
+
+        #expect((await router.handle(request)).success)
+
+        let updated = try #require(await db.terminals.get(id: terminal.id))
+        #expect(updated.activityState == .idle)
+        #expect(updated.activityStateSource == .hookEvent(RPCMethod.terminalActivityEvent))
+        #expect(updated.activityStateObservedAt == olderHookAt)
+        #expect(updated.awaitingInputReason == nil)
+        #expect(updated.awaitingInputObservedAt == nil)
+    }
+
     @Test("unknown terminalID is a soft no-op")
     func unknownTerminalSoftSuccess() async throws {
         let request = try RPCRequest(
@@ -414,10 +448,10 @@ struct TerminalActivityEventHandlerTests {
     }
 
     @Test(
-        "a delayed activity observation cannot erase a newer permission prompt",
+        "Claude activity retains legacy changed-value prompt retraction",
         arguments: [TerminalActivityState.working, .idle]
     )
-    func delayedActivityPreservesNewerPermissionPrompt(
+    func claudeActivityRetainsLegacyPromptRetraction(
         activityState: TerminalActivityState
     ) async throws {
         let terminal = try await makeTerminal(kind: .claude, label: "Claude")
@@ -462,13 +496,15 @@ struct TerminalActivityEventHandlerTests {
         #expect((await earlier.value).success)
 
         let updated = try #require(await db.terminals.get(id: terminal.id))
-        let reason = try #require(updated.awaitingInputReason)
-        #expect(reason.classification == .promptOnScreen)
-        #expect(updated.awaitingInputObservedAt == laterPromptAt)
-        let resolved = SessionStateResolver(now: { laterPromptAt }).resolve(
-            SessionStateFacts(terminal: updated))
-        #expect(resolved.value == .awaitingInput(reason: reason))
-        #expect(resolved.observedAt == laterPromptAt)
+        if activityState == .working {
+            let reason = try #require(updated.awaitingInputReason)
+            #expect(reason.classification == .promptOnScreen)
+            #expect(updated.awaitingInputObservedAt == laterPromptAt)
+        } else {
+            #expect(updated.activityState == .idle)
+            #expect(updated.awaitingInputReason == nil)
+            #expect(updated.awaitingInputObservedAt == nil)
+        }
     }
 
     @Test(
@@ -478,7 +514,7 @@ struct TerminalActivityEventHandlerTests {
     func equalTimeActivityPreservesPermissionPrompt(
         activityState: TerminalActivityState
     ) async throws {
-        let terminal = try await makeTerminal(kind: .claude, label: "Claude")
+        let terminal = try await makeTerminal(kind: .codex, label: TerminalLabel.codex)
         let baseline = Date(timeIntervalSince1970: 1_700_000_000)
         let instant = baseline.addingTimeInterval(1)
         let reason = AwaitingInputReason(
