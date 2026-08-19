@@ -18,10 +18,13 @@ A cold build compiles for **327.9 s** at `--jobs 8`. The core half accounts for
 
 The split the proposal would deliver is therefore a saving on the *app* side —
 a core-only contributor stops paying roughly 98 s per cold worktree — and it is
-the smaller of the two halves. It is also the only saving available: `TBDApp`
-depends on `TBDShared` and nothing else of the core's, so no dependency edge
-runs from core to app, and a warm tree already rebuilds neither half on account
-of the other.
+the smaller of the two halves. It is also the only saving available. Three
+dependency edges cross the seam, all of them app-ward — `TBDApp → TBDShared`,
+`TBDAppTests → TBDDaemonLib`, and `TBDAppTests → TestSupport` — and no core
+target depends on any app target, so a warm tree is insulated in one direction
+only: app-side edits never rebuild core, while a core edit does rebuild the app
+targets whose edges reach it. A split has to carry those same three edges as
+cross-package dependencies, so it eliminates none of those warm-tree rebuilds.
 
 Two single targets, `TBDDaemonLib` (97.58 s) and `TBDDaemonTests` (81.98 s),
 are **78.1% of the core number and 54.8% of the whole build**. A package split
@@ -101,11 +104,20 @@ sources it vendors, SwiftTerm, TOMLKit, NetworkImage, Highlightr with its
 
 **No core module was recompiled in the app phase.** `TBDShared`,
 `TBDDaemonLib`, `TBDDaemon` and `TBDCLI` each appear in exactly one phase's
-build output. The target graph explains why: `TBDApp` declares `TBDShared`,
-`TBDAppIcon` and its user-interface products, and no daemon target at all. The
-single edge crossing the seam is `TBDAppTests → TBDDaemonLib`, which exists so
-one test can round-trip replay bytes the daemon assembles through the terminal
-emulator only the app links.
+build output, because each was already built by the time the app phase ran.
+
+Three edges cross the seam, and every one of them points from an app target
+into the core:
+
+- `TBDApp → TBDShared`. Beyond it, `TBDApp` declares only `TBDAppIcon` and its
+  user-interface products, and no daemon target at all.
+- `TBDAppTests → TBDDaemonLib`, which exists so one test can round-trip replay
+  bytes the daemon assembles through the terminal emulator only the app links.
+- `TBDAppTests → TestSupport`, which pulls in `TBDDaemonLib` and `TBDShared`
+  behind it.
+
+No core target depends on an app target, which is why every core-phase
+invocation completed without compiling app code.
 
 ## Biases in the 70% figure
 
@@ -208,10 +220,13 @@ The split was judged low return on this evidence.
 - **It saves the core-side loop about 98 s, once per cold worktree.** That is
   the whole of the app half, and only a contributor who never builds the app
   collects it.
-- **It saves nothing on a warm tree.** No dependency edge runs from core to
-  app, so app-side dependencies are already not rebuilt when core sources
-  change. The split would formalize a separation the target graph already
-  enforces.
+- **It saves nothing on a warm tree.** The three edges crossing the seam all
+  run app-ward, so the insulation is one-directional: app-side edits never
+  rebuild core, but a core edit rebuilds the app targets that reach it — a
+  `TBDShared` change rebuilds `TBDApp` and everything above it, and a
+  `TBDDaemonLib` or `TestSupport` change rebuilds `TBDAppTests`, though not
+  `TBDApp`. A split must carry those same edges as cross-package dependencies,
+  so every one of those rebuilds still happens.
 - **It leaves the dominant costs untouched.** Queueing for the shared build
   lock (276.7 s here) and the core's own bulk — `TBDDaemonLib` plus
   `TBDDaemonTests`, 54.8% of the total — are both outside what a package
