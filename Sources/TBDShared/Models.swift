@@ -1277,6 +1277,20 @@ public struct Config: Codable, Sendable, Equatable {
     /// so this property is
     /// `claude_cloud_enabled ?? Config.claudeCloudEnabledDefault`.
     public var claudeCloudEnabled: Bool
+    /// Gate for the orphan-GC phase that reclaims processes which outlived the
+    /// worktree they were rooted in
+    /// (`docs/specs/2026-08-18-orphan-process-gc-design.md`). Read on top of
+    /// `gcEnabled`: both must be on for the phase to run. It ships OFF because
+    /// this is the one GC phase that signals processes rather than moving
+    /// bytes, and a process it misjudges cannot be restored.
+    ///
+    /// **Resolved, not stored**, like `gcProfileDirsEnabled`: the backing
+    /// column carries no SQL default and stays NULL until somebody touches the
+    /// toggle, so this property is
+    /// `gc_orphan_processes_enabled ?? Config.gcOrphanProcessesEnabledDefault`.
+    /// NULL means "never chose" and follows the shipped default wherever it
+    /// goes; `0`/`1` is an explicit gesture and is honored forever.
+    public var gcOrphanProcessesEnabled: Bool
 
     /// Default idle-timeout for auto-hibernation, in minutes.
     public static let defaultHibernateIdleMinutes = 30
@@ -1311,6 +1325,11 @@ public struct Config: Codable, Sendable, Equatable {
     /// lives. Cloud ships off; graduating it is a change to this constant — no
     /// forcing `UPDATE` migration, and an explicit opt-out is left alone.
     public static let claudeCloudEnabledDefault = false
+    /// The shipped default for `gcOrphanProcessesEnabled`, and the single place
+    /// it lives. The orphaned-process collector ships off; graduating it is a
+    /// change to this constant — no forcing `UPDATE` migration, and an explicit
+    /// opt-out is left alone.
+    public static let gcOrphanProcessesEnabledDefault = false
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -1340,7 +1359,8 @@ public struct Config: Codable, Sendable, Equatable {
                 queuedPromptEnabled: Bool = Config.queuedPromptDefault,
                 supervisionEnabled: Bool = Config.supervisionEnabledDefault,
                 gcProfileDirsEnabled: Bool = Config.gcProfileDirsEnabledDefault,
-                claudeCloudEnabled: Bool = Config.claudeCloudEnabledDefault) {
+                claudeCloudEnabled: Bool = Config.claudeCloudEnabledDefault,
+                gcOrphanProcessesEnabled: Bool = Config.gcOrphanProcessesEnabledDefault) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
         self.envSettingOverrides = envSettingOverrides
@@ -1370,6 +1390,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.supervisionEnabled = supervisionEnabled
         self.gcProfileDirsEnabled = gcProfileDirsEnabled
         self.claudeCloudEnabled = claudeCloudEnabled
+        self.gcOrphanProcessesEnabled = gcOrphanProcessesEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -1440,6 +1461,11 @@ public struct Config: Codable, Sendable, Equatable {
             Bool.self, forKey: .gcProfileDirsEnabled) ?? Config.gcProfileDirsEnabledDefault
         claudeCloudEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .claudeCloudEnabled) ?? Config.claudeCloudEnabledDefault
+        // Same tri-state again: absent means the sender knew nothing about the
+        // flag, which is the NULL column's situation — follow the shipped
+        // default rather than hardcoding `false`.
+        gcOrphanProcessesEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .gcOrphanProcessesEnabled) ?? Config.gcOrphanProcessesEnabledDefault
     }
 }
 
@@ -1569,6 +1595,25 @@ public enum ReapKind: String, Codable, Sendable {
     /// is already gone, so renaming it back would just recreate an orphan for
     /// the next sweep.
     case profileDir
+    /// A process that outlived the worktree it was rooted in — reclaimed by
+    /// `OrphanProcessCollector`
+    /// (`docs/specs/2026-08-18-orphan-process-gc-design.md`).
+    ///
+    /// The record describes a **kill**, not a directory, so it reads the
+    /// `ReapRecord` fields differently from every other kind:
+    /// - `worktreePath` is the dead worktree the process was rooted in — the
+    ///   TBD-managed root its resolved cwd fell under, not a path this reap
+    ///   removed. Nothing on disk was touched.
+    /// - `processDescription` carries the pid and a truncated argv, so the
+    ///   record says *what* was killed and not merely where it lived.
+    /// - `branch`, `headSHA`, `snapshotRef` and `quarantinePath` are unused
+    ///   and always `nil`: they are path- and git-shaped, and a process has
+    ///   neither a git identity nor a quarantine.
+    ///
+    /// It is **not restorable** — `OrphanGC.restore` rejects it explicitly. A
+    /// killed process cannot be brought back, so the record is an audit trail
+    /// rather than an undo.
+    case orphanProcess
 }
 
 /// Record of a directory the daemon-owned orphan GC swept and (optionally)
@@ -1594,12 +1639,17 @@ public struct ReapRecord: Codable, Sendable, Identifiable, Equatable {
     /// `OrphanGC.restore` rejects `.profileDir` — but the path a user needs to
     /// retrieve anything by hand before the retention window expires.
     public var quarantinePath: String?
+    /// What was killed (`orphanProcess` only): the pid and a truncated argv.
+    /// `nil` for every directory-shaped kind, and for rows written before the
+    /// column existed.
+    public var processDescription: String?
     public var reapedAt: Date
     public var restoredAt: Date?
 
     public init(id: UUID = UUID(), kind: ReapKind, repoPath: String, worktreePath: String,
                 branch: String? = nil, headSHA: String? = nil, snapshotRef: String? = nil,
                 apparentBytes: Int64? = nil, quarantinePath: String? = nil,
+                processDescription: String? = nil,
                 reapedAt: Date = Date(), restoredAt: Date? = nil) {
         self.id = id
         self.kind = kind
@@ -1610,6 +1660,7 @@ public struct ReapRecord: Codable, Sendable, Identifiable, Equatable {
         self.snapshotRef = snapshotRef
         self.apparentBytes = apparentBytes
         self.quarantinePath = quarantinePath
+        self.processDescription = processDescription
         self.reapedAt = reapedAt
         self.restoredAt = restoredAt
     }

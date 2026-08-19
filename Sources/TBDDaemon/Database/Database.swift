@@ -1514,6 +1514,30 @@ public final class TBDDatabase: Sendable {
                 columns: ["sessionID"], where: "sessionID IS NOT NULL")
         }
 
+        // Gate for `OrphanProcessCollector` — the reconciler for processes that
+        // outlived the worktree they were rooted in
+        // (docs/specs/2026-08-18-orphan-process-gc-design.md). Ships OFF: it is
+        // the first GC phase that signals processes rather than moving bytes,
+        // so it soaks behind its own switch. Tri-state like v73/v77/v78 — no
+        // SQL default, so a pre-migration row reads NULL ("never chose") rather
+        // than 0, and NULL resolves through
+        // `Config.gcOrphanProcessesEnabledDefault` in `ConfigRecord.toModel()`,
+        // the single place graduation changes.
+        migrator.registerMigration("v83_config_gc_orphan_processes") { db in
+            try db.addColumnIfMissing(
+                table: "config", column: "gc_orphan_processes_enabled", type: .boolean)
+        }
+
+        // What an `orphanProcess` reap killed: the pid and a truncated argv.
+        // Nullable and left NULL by every other kind, all of which describe a
+        // directory rather than a process. camelCase for the same reason
+        // v79 chose it — to match the columns this table already has
+        // (`repoPath`, `worktreePath`, `snapshotRef`, `quarantinePath`).
+        migrator.registerMigration("v84_reap_records_process_description") { db in
+            try db.addColumnIfMissing(
+                table: "reap_records", column: "processDescription", type: .text)
+        }
+
         return migrator
     }
 }

@@ -282,6 +282,7 @@ public enum RPCMethod {
     public static let gcSweepNow = "gc.sweepNow"
     public static let configSetGCEnabled = "config.setGCEnabled"
     public static let configSetGCProfileDirsEnabled = "config.setGCProfileDirsEnabled"
+    public static let configSetGCOrphanProcessesEnabled = "config.setGCOrphanProcessesEnabled"
     public static let remoteProviders = "remote.providers"
     public static let remoteSessions = "remote.sessions"
     public static let remoteCreate = "remote.create"
@@ -2562,6 +2563,15 @@ public struct ConfigSetGCEnabledParams: Codable, Sendable {
 /// collector, which reclaims orphaned `~/tbd/profiles/<uuid>/` directories
 /// (default OFF during soak, on top of the GC master switch).
 public struct ConfigSetGCProfileDirsEnabledParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setGCOrphanProcessesEnabled` — the gate for the
+/// orphaned-process collector, which reclaims processes that outlived the
+/// worktree they were rooted in (default OFF during soak, on top of the GC
+/// master switch). Design: `docs/specs/2026-08-18-orphan-process-gc-design.md`.
+public struct ConfigSetGCOrphanProcessesEnabledParams: Codable, Sendable {
     public var enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }

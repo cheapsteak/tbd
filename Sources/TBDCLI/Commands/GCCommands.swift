@@ -6,7 +6,10 @@ struct GCCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "gc",
         abstract: "Orphan GC: list reaps, restore a reaped agent worktree, trigger a sweep",
-        subcommands: [GCList.self, GCRestore.self, GCSweep.self, GCProfileDirs.self]
+        subcommands: [
+            GCList.self, GCRestore.self, GCSweep.self, GCProfileDirs.self,
+            GCOrphanProcesses.self,
+        ]
     )
 }
 
@@ -31,6 +34,29 @@ struct GCProfileDirs: AsyncParsableCommand {
     }
 }
 
+/// The soak switch for the orphaned-process collector. It is the one GC phase
+/// that signals processes rather than moving bytes, and what it misjudges
+/// cannot be restored, so it ships off and is opted into by hand — here rather
+/// than by editing `state.db`, which the project's own rules put out of bounds.
+struct GCOrphanProcesses: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "orphan-processes",
+        abstract: "Enable or disable reclaiming processes that outlived their worktree (default off)")
+    @Argument(help: "on | off") var state: String
+    mutating func run() async throws {
+        let enabled: Bool
+        switch state.lowercased() {
+        case "on", "true", "enable": enabled = true
+        case "off", "false", "disable": enabled = false
+        default: throw ValidationError("Expected 'on' or 'off', got: \(state)")
+        }
+        try SocketClient().callVoid(
+            method: RPCMethod.configSetGCOrphanProcessesEnabled,
+            params: ConfigSetGCOrphanProcessesEnabledParams(enabled: enabled))
+        print("Orphan-process GC \(enabled ? "enabled" : "disabled").")
+    }
+}
+
 struct GCList: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "list", abstract: "List reap records")
     @Option(name: .long, help: "Filter by repo root path") var repo: String?
@@ -49,7 +75,14 @@ struct GCList: AsyncParsableCommand {
             // A quarantined reap has no restore path, so this is the only
             // handle a user has on the data before retention expires — print it.
             let quarantine = r.quarantinePath.map { "  quarantined→ \($0)" } ?? ""
-            print("\(r.id)  \(r.kind.rawValue)  \(r.worktreePath)  \(size)  \(snap)\(restored)\(quarantine)")
+            // An orphan-process reap removed nothing from disk, so its
+            // worktreePath alone says only where the process lived. The whole
+            // point of the field is to say WHAT was killed.
+            let process = r.processDescription.map { "  killed→ \($0)" } ?? ""
+            print("""
+            \(r.id)  \(r.kind.rawValue)  \(r.worktreePath)  \(size)  \
+            \(snap)\(restored)\(quarantine)\(process)
+            """)
         }
     }
 }
