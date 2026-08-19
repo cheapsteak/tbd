@@ -13,9 +13,12 @@ struct OrphanProcessCollectorTests {
     private let dead = "/pool/gone"
     private let alive = "/pool/working"
 
+    private let shared = "/shared"
+
     private func roots(archivedAt: Date? = Date(timeIntervalSince1970: 0)) -> TBDProcessRoots {
         TBDProcessRoots(
             pools: [pool],
+            sharedRoots: [shared],
             live: [alive],
             dead: [DeadWorktreeRoot(path: dead, archivedAt: archivedAt)])
     }
@@ -44,7 +47,8 @@ struct OrphanProcessCollectorTests {
     func onlyPPID1() {
         let found = collector().candidates(
             processes: [entry(pid: 50, ppid: 42)],
-            cwdByPID: [50: dead], roots: roots(),
+            cwdByPID: [50: dead], cwdsCapturedAt: Date(timeIntervalSince1970: 1_000_000),
+            roots: roots(),
             ourUID: getuid(), ourPID: 12_345, graceSeconds: 3600)
         #expect(found.isEmpty)
     }
@@ -53,7 +57,8 @@ struct OrphanProcessCollectorTests {
     func onlyOurUID() {
         let found = collector().candidates(
             processes: [entry(pid: 50, uid: getuid() &+ 1)],
-            cwdByPID: [50: dead], roots: roots(),
+            cwdByPID: [50: dead], cwdsCapturedAt: Date(timeIntervalSince1970: 1_000_000),
+            roots: roots(),
             ourUID: getuid(), ourPID: 12_345, graceSeconds: 3600)
         #expect(found.isEmpty)
     }
@@ -62,7 +67,8 @@ struct OrphanProcessCollectorTests {
     func neverPID1() {
         let found = collector().candidates(
             processes: [entry(pid: 1, ppid: 1)],
-            cwdByPID: [1: dead], roots: roots(),
+            cwdByPID: [1: dead], cwdsCapturedAt: Date(timeIntervalSince1970: 1_000_000),
+            roots: roots(),
             ourUID: getuid(), ourPID: 12_345, graceSeconds: 3600)
         #expect(found.isEmpty)
     }
@@ -86,11 +92,12 @@ struct OrphanProcessCollectorTests {
         let found = collector().candidates(
             processes: processes,
             cwdByPID: [ours: dead, 4000: dead, 4001: dead],
+            cwdsCapturedAt: Date(timeIntervalSince1970: 1_000_000),
             roots: roots(), ourUID: getuid(), ourPID: ours, graceSeconds: 3600)
         #expect(found.map(\.pid) == [4001])
     }
 
-    @Test("TBDDaemon and TBDApp are recognized by argv[0]'s basename, not by substring")
+    @Test("TBDDaemon and TBDApp are recognized by a path component's basename, not by substring")
     func tbdBinaryMatching() {
         #expect(OrphanProcessCollector.isTBDBinary("/w/tbd/.build/debug/TBDDaemon --foo"))
         #expect(OrphanProcessCollector.isTBDBinary("/w/.build/debug/TBD.app/Contents/MacOS/TBDApp"))
@@ -99,10 +106,59 @@ struct OrphanProcessCollectorTests {
         #expect(!OrphanProcessCollector.isTBDBinary("/usr/bin/node"))
     }
 
+    /// `ps -o command=` prints argv space-joined and unquoted, so a home
+    /// directory with a space in it splits argv[0] in two. Reading only the
+    /// first token would leave `TBDApp` — whose only protection this is —
+    /// unrecognized and reapable.
+    @Test("a space in the executable's own path does not defeat the TBD-binary match")
+    func tbdBinaryMatchingSurvivesSpacedPaths() {
+        #expect(OrphanProcessCollector.isTBDBinary(
+            "/Users/Jane Roe/tbd/.build/debug/TBDDaemon"))
+        #expect(OrphanProcessCollector.isTBDBinary(
+            "/Users/Jane Roe/tbd/.build/debug/TBD.app/Contents/MacOS/TBDApp --verbose"))
+        // Still not a substring match, spaces or no spaces.
+        #expect(!OrphanProcessCollector.isTBDBinary(
+            "/Users/Jane Roe/tbd/worktrees/TBDApp/node server.js"))
+    }
+
+    /// The cwd map and the `ps` snapshot are two readings joined by pid alone,
+    /// and macOS recycles pids. A process younger than the gap between them
+    /// cannot be the one lsof saw.
+    @Test("a process younger than the cwd reading is skipped as a possible pid reuse")
+    func youngerThanTheCWDReadingIsSkipped() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let subject = collector(now: now)
+        // lsof ran 10 minutes before this snapshot; the process is 5 old.
+        let reused = subject.candidates(
+            processes: [entry(pid: 50, elapsed: 300)],
+            cwdByPID: [50: dead], cwdsCapturedAt: now.addingTimeInterval(-600),
+            roots: roots(), ourUID: getuid(), ourPID: 12_345, graceSeconds: 0)
+        #expect(reused.isEmpty)
+
+        // The same process, old enough to have existed when lsof ran.
+        let genuine = subject.candidates(
+            processes: [entry(pid: 50, elapsed: 900)],
+            cwdByPID: [50: dead], cwdsCapturedAt: now.addingTimeInterval(-600),
+            roots: roots(), ourUID: getuid(), ourPID: 12_345, graceSeconds: 0)
+        #expect(genuine.map(\.pid) == [50])
+    }
+
+    @Test("an unreadable process age keeps the process even when the row carries archivedAt")
+    func unknownAgeKeepsOnTheArchivedAtArm() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let found = collector(now: now).candidates(
+            processes: [entry(pid: 50, elapsed: nil)],
+            cwdByPID: [50: dead], cwdsCapturedAt: now,
+            roots: roots(archivedAt: now.addingTimeInterval(-86_400)),
+            ourUID: getuid(), ourPID: 12_345, graceSeconds: 3600)
+        #expect(found.isEmpty)
+    }
+
     @Test("an unreadable cwd is a skip, never a reclaim")
     func unreadableCWDSkips() {
         let found = collector().candidates(
-            processes: [entry(pid: 50)], cwdByPID: [:], roots: roots(),
+            processes: [entry(pid: 50)], cwdByPID: [:],
+            cwdsCapturedAt: Date(timeIntervalSince1970: 1_000_000), roots: roots(),
             ourUID: getuid(), ourPID: 12_345, graceSeconds: 3600)
         #expect(found.isEmpty)
     }
@@ -127,6 +183,35 @@ struct OrphanProcessCollectorTests {
             pools: ["/pool"], live: ["/pool/work"], dead: [])
         #expect(subject.ownership(ofCWD: "/pool/work-2", roots: sibling) != .live(path: "/pool/work"))
         #expect(subject.ownership(ofCWD: "/poolside/x", roots: sibling) == .outside)
+    }
+
+    /// The Claude scratchpad base holds one directory per project Claude Code
+    /// has ever run in — most of them nothing to do with TBD. A stray there is
+    /// NOT a dead worktree, and treating it as one would put a stranger's live
+    /// session on the kill list.
+    @Test("an unrecognized child of a shared root is never a candidate")
+    func strayUnderASharedRootIsKept() {
+        let subject = collector()
+        #expect(subject.ownership(ofCWD: shared + "/-Users-me-projects-acme/x", roots: roots())
+            == .outside)
+        // Only what an explicit live/dead entry names is classified there.
+        let known = TBDProcessRoots(
+            pools: [pool], sharedRoots: [shared], live: [shared + "/-live"],
+            dead: [DeadWorktreeRoot(path: shared + "/-dead", archivedAt: nil)])
+        #expect(subject.ownership(ofCWD: shared + "/-live/x", roots: known)
+            == .live(path: shared + "/-live"))
+        #expect(subject.ownership(ofCWD: shared + "/-dead/x", roots: known)
+            == .dead(DeadWorktreeRoot(path: shared + "/-dead", archivedAt: nil)))
+    }
+
+    /// A shared root nested inside a pool must win: its strays stay unowned.
+    @Test("a shared root nested inside a pool keeps that pool's stray arm out")
+    func nestedSharedRootWins() {
+        let nested = TBDProcessRoots(
+            pools: [pool], sharedRoots: [pool + "/shared"], live: [], dead: [])
+        #expect(collector().ownership(ofCWD: pool + "/shared/stray", roots: nested) == .outside)
+        #expect(collector().ownership(ofCWD: pool + "/stray", roots: nested)
+            == .dead(DeadWorktreeRoot(path: pool + "/stray", archivedAt: nil)))
     }
 
     @Test("a pool path with no row at all is dead with no archive instant")

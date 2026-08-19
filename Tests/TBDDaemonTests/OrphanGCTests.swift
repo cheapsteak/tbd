@@ -260,6 +260,29 @@ struct OrphanGCTests {
         #expect(fetched?.quarantinePath == record.quarantinePath)
     }
 
+    /// `.orphanProcess` is the one kind where "un-restorable" is physical
+    /// rather than contractual: the process is dead. The record is an audit
+    /// trail, and a refused restore must leave it intact to stay one.
+    @Test("restore refuses an orphanProcess record and leaves the audit trail intact")
+    func restoreRejectsOrphanProcessRecords() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let record = ReapRecord(
+            kind: .orphanProcess,
+            repoPath: "/tmp/acme",
+            worktreePath: "/tmp/acme/worktrees/gone",
+            processDescription: "pid=4242 tree=3 /usr/bin/node server.js"
+        )
+        try await db.reapRecords.insert(record)
+        let gc = OrphanGC(db: db, git: GitManager(), broadcast: { _ in }, lsofProvider: { [] })
+
+        await #expect(throws: OrphanGCError.unsupportedKind(.orphanProcess)) {
+            try await gc.restore(recordID: record.id)
+        }
+        let fetched = try await db.reapRecords.get(id: record.id)
+        #expect(fetched?.restoredAt == nil)
+        #expect(fetched?.processDescription == record.processDescription)
+    }
+
     /// Every other kind deletes outright, so the column stays NULL for them —
     /// and a record written without one must decode as `nil`, not as "".
     @Test("a non-quarantined reap record round-trips with a nil quarantine path")

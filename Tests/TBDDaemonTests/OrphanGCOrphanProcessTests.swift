@@ -465,6 +465,38 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
         #expect(result.planned.contains("KEEP ps-unavailable orphan-processes"))
     }
 
+    /// The Claude scratchpad base is shared with every Claude Code session on
+    /// the machine, TBD-managed or not. A directory there naming no worktree
+    /// TBD knows is somebody else's, and its processes are not this sweep's to
+    /// kill — the whitelist side `ScratchpadCollector.reconcile` already takes.
+    @Test("a scratchpad naming no TBD worktree is never a candidate")
+    func strayScratchpadIsNeverACandidate() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let dead = try await makeWorktree(db: db, repo: repo, name: "gone", archived: true)
+        // A Claude session run straight from a checkout TBD has never managed.
+        let stray = scratchpadBase.appendingPathComponent(
+            ScratchpadCollector.slug(forWorktreePath: "/Users/someone/projects/acme"),
+            isDirectory: true)
+        try fm.createDirectory(at: stray, withIntermediateDirectories: true)
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[4243] = .init(aliveAfterTerminate: false)
+
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            processes: [entry(pid: 4242), entry(pid: 4243)],
+            cwdByPID: [4242: canon(stray) + "/sub", 4243: dead],
+            now: Date().addingTimeInterval(7200)
+        ).sweep()
+
+        #expect(!signaller.terminated.contains(4242))
+        #expect(!result.planned.contains { $0.contains("pid=4242") })
+        // The genuine orphan in the same sweep proves the phase ran at all.
+        #expect(signaller.terminated == [4243])
+    }
+
     @Test("a process outside every TBD pool is never a candidate")
     func outsideEveryPoolIsNeverACandidate() async throws {
         let db = try TBDDatabase(inMemory: true)

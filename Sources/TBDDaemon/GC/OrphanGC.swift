@@ -254,7 +254,7 @@ public actor OrphanGC {
         )
 
         await reclaimOrphanProcesses(
-            config: config, repos: repos, archived: archived, live: live,
+            config: config, repos: repos, live: live,
             dryRun: dryRun, planned: &planned, reaped: &reaped
         )
 
@@ -677,12 +677,25 @@ public actor OrphanGC {
     /// a default-off flag needs to see what enabling it would reclaim first —
     /// and touches nothing either way.
     ///
-    /// Both inputs skip the phase rather than proceeding on a partial picture:
-    /// a `ps` snapshot that could not be taken, and a database read that
-    /// failed. That is the keep-favoring direction every other gate in this
+    /// Every input skips the phase rather than proceeding on a partial
+    /// picture: a `ps` snapshot that could not be taken, and either of the two
+    /// row reads. That is the keep-favoring direction every other gate in this
     /// sweep takes.
+    ///
+    /// Both row reads happen HERE rather than being handed down from `sweep`,
+    /// and both are read back to back. The sweep's own `archived` list is taken
+    /// before the deletion-queue, scratchpad and profile-dir phases have run —
+    /// `du` shells and Keychain calls, so a wide window — and a worktree
+    /// archived inside that window would be missing from the old `archived`
+    /// list and already excluded from the fresh live list. It would then fall
+    /// through to the "absent from the database" arm and be graced from
+    /// process start instead of from `archivedAt`, which is the weaker gate,
+    /// on the exact row whose grace was just supposed to begin. Reading both
+    /// together closes that. A failure on either read skips the phase, where
+    /// `sweep`'s `try? … ?? []` would have read "no archived worktrees" — the
+    /// same silent weakening by another route.
     private func reclaimOrphanProcesses(
-        config: Config, repos: [Repo], archived: [Worktree], live: LiveCWDs,
+        config: Config, repos: [Repo], live: LiveCWDs,
         dryRun: Bool, planned: inout [String], reaped: inout Int
     ) async {
         guard config.gcOrphanProcessesEnabled || dryRun else { return }
@@ -692,8 +705,10 @@ public actor OrphanGC {
             planned.append("KEEP ps-unavailable orphan-processes")
             return
         }
-        guard let liveRows = try? await db.worktrees.listLocal(excludeArchived: true) else {
+        guard let liveRows = try? await db.worktrees.listLocal(excludeArchived: true),
+              let archived = try? await db.worktrees.list(status: .archived) else {
             logger.warning("gc: orphan-process phase skipped — DB read failed")
+            planned.append("KEEP db-unavailable orphan-processes")
             return
         }
 
@@ -702,6 +717,7 @@ public actor OrphanGC {
         let candidates = orphanProcessCollector.candidates(
             processes: processes,
             cwdByPID: live.cwdByPID,
+            cwdsCapturedAt: live.capturedAt,
             roots: roots,
             ourUID: getuid(),
             ourPID: getpid(),
@@ -752,11 +768,21 @@ public actor OrphanGC {
                 repoPathByPool[resolved] = repo.path
             }
         }
-        // Scratch worktrees and Claude scratchpads are TBD-managed roots too,
-        // and belong to no repo — hence no `repoPathByPool` entry, which stamps
-        // the record with `""` the same way the scratchpad phase does.
+        // The scratch-worktree pool is TBD's outright, and belongs to no repo —
+        // hence no `repoPathByPool` entry, which stamps the record with `""`
+        // the same way the scratchpad phase does.
         pools.append(deletionQueueCollector.resolvedPath(TBDConstants.scratchDir.path))
-        pools.append(deletionQueueCollector.resolvedPath(scratchpadBase.path))
+        // The Claude scratchpad base is SHARED, not owned. Claude Code creates
+        // one directory there per project it has ever run in, and TBD manages
+        // almost none of them — a single census of one developer machine found
+        // 86 entries, of which 9 named no worktree at all (plain checkouts, a
+        // home directory, and loose files). Listing it as a pool would put
+        // every one of those in the "absent from the database" arm and make a
+        // stranger's live session reclaimable. `ScratchpadCollector.reconcile`
+        // already takes the whitelist side here for a merely destructive
+        // operation ("Unrelated directories in the base are untouched"); this
+        // phase kills processes, so it takes the same side.
+        let sharedRoots = [deletionQueueCollector.resolvedPath(scratchpadBase.path)]
 
         // A worktree's Claude scratchpad answers to the same owner as the
         // worktree itself — `ScratchpadCollector`'s slug is derived from the
@@ -785,7 +811,8 @@ public actor OrphanGC {
                 ]
             }
         return (
-            TBDProcessRoots(pools: pools, live: livePaths, dead: deadRoots),
+            TBDProcessRoots(
+                pools: pools, sharedRoots: sharedRoots, live: livePaths, dead: deadRoots),
             repoPathByPool
         )
     }
@@ -992,17 +1019,19 @@ public actor OrphanGC {
             // candidates — the keep-favoring reading. It is never read as "this
             // process is not in a worktree", because candidacy requires a cwd
             // that IS under a dead root; a missing entry can only subtract.
-            guard let processCWDsProvider else { return LiveCWDs(paths: paths, cwdByPID: [:]) }
+            guard let processCWDsProvider else {
+                return LiveCWDs(paths: paths, cwdByPID: [:], capturedAt: now())
+            }
             guard let map = await processCWDsProvider() else { return nil }
-            return LiveCWDs(paths: paths, cwdByPID: map)
+            return LiveCWDs(paths: paths, cwdByPID: map, capturedAt: now())
         }
-        return await Self.realLiveCWDs()
+        return await Self.realLiveCWDs(capturedAt: now())
     }
 
     /// Real `lsof`-backed live-cwd provider: runs `lsof -d cwd -Fn` under a
     /// 60s deadline and hands the outcome to `parseLiveCWDs`. A spawn failure
     /// is the same "unavailable" sentinel as a timeout: `nil`, skip the sweep.
-    private static func realLiveCWDs() async -> LiveCWDs? {
+    private static func realLiveCWDs(capturedAt: Date) async -> LiveCWDs? {
         let outcome: BoundedProcessOutcome
         do {
             outcome = try await runBoundedProcess(
@@ -1015,7 +1044,7 @@ public actor OrphanGC {
             logger.error("gc: lsof spawn failed: \(String(describing: error), privacy: .public)")
             return nil
         }
-        return parseLiveCWDs(outcome)
+        return parseLiveCWDs(outcome, capturedAt: capturedAt)
     }
 
     /// Pure parser for the lsof outcome — extracted so the safety-relevant
@@ -1032,7 +1061,9 @@ public actor OrphanGC {
     /// - non-zero exit: lsof's output on failure is not a complete cwd
     ///   picture, so it gets the same keep-biased treatment as a timeout.
     /// - non-UTF-8 stdout: unparseable output is no picture at all.
-    static func parseLiveCWDs(_ outcome: BoundedProcessOutcome) -> LiveCWDs? {
+    static func parseLiveCWDs(
+        _ outcome: BoundedProcessOutcome, capturedAt: Date = Date()
+    ) -> LiveCWDs? {
         switch outcome {
         case .timedOut:
             logger.error("gc: lsof timed out after 60s")
@@ -1069,7 +1100,7 @@ public actor OrphanGC {
                     result.append(canonical)
                 }
             }
-            return LiveCWDs(paths: result, cwdByPID: cwdByPID)
+            return LiveCWDs(paths: result, cwdByPID: cwdByPID, capturedAt: capturedAt)
         }
     }
 }
@@ -1088,4 +1119,9 @@ struct LiveCWDs: Sendable, Equatable {
     var paths: [String]
     /// Canonicalized cwd per pid.
     var cwdByPID: [Int32: String]
+    /// When the pass was read. The orphan-process phase joins `cwdByPID` to a
+    /// `ps` snapshot taken later in the same sweep, by pid alone, and macOS
+    /// recycles pids — so it needs to know how stale this reading is before it
+    /// trusts a pid to still mean the same process.
+    var capturedAt: Date
 }

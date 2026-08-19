@@ -13,6 +13,16 @@ public protocol ProcessSignaller: Sendable {
     func terminate(_ pid: Int32)
     /// Send SIGKILL with the same group-vs-single semantics as `terminate`.
     func forceKill(_ pid: Int32)
+    /// Send SIGTERM to **exactly this pid**, never to its process group.
+    ///
+    /// For callers that have already enumerated the set they mean to signal
+    /// and must not exceed it. `terminate`'s group escalation is a superset of
+    /// the process *group*, not of that set: a group can hold a process the
+    /// caller deliberately excluded, and on a reused pid `getpgid` resolves to
+    /// a stranger's group entirely.
+    func terminateProcessOnly(_ pid: Int32)
+    /// Send SIGKILL to exactly this pid, never to its process group.
+    func forceKillProcessOnly(_ pid: Int32)
     /// Pids whose parent pid == `serverPID` (one generation; tmux panes are
     /// direct children of the server process).
     func children(ofServerPID serverPID: Int32) -> [Int32]
@@ -21,6 +31,15 @@ public protocol ProcessSignaller: Sendable {
     /// `ps -o stat=` for the pid (e.g. "S+", "Ss"), or nil when the pid is
     /// gone. The trailing `+` marks the tty's foreground process group.
     func stat(_ pid: Int32) -> String?
+}
+
+public extension ProcessSignaller {
+    /// Defaults so existing conformers — the test fakes in particular — keep
+    /// recording through the signalling method they already implement. Only
+    /// `ProductionProcessSignaller` needs the distinction, because only it
+    /// reaches a real `kill(2)`.
+    func terminateProcessOnly(_ pid: Int32) { terminate(pid) }
+    func forceKillProcessOnly(_ pid: Int32) { forceKill(pid) }
 }
 
 public struct ProductionProcessSignaller: ProcessSignaller {
@@ -34,6 +53,14 @@ public struct ProductionProcessSignaller: ProcessSignaller {
 
     public func terminate(_ pid: Int32) { signal(pid, SIGTERM) }
     public func forceKill(_ pid: Int32) { signal(pid, SIGKILL) }
+
+    public func terminateProcessOnly(_ pid: Int32) { signalPIDOnly(pid, SIGTERM) }
+    public func forceKillProcessOnly(_ pid: Int32) { signalPIDOnly(pid, SIGKILL) }
+
+    private func signalPIDOnly(_ pid: Int32, _ sig: Int32) {
+        guard pid > 1 else { return }  // never signal pid<=1
+        _ = Foundation.kill(pid, sig)
+    }
 
     private func signal(_ pid: Int32, _ sig: Int32) {
         guard pid > 1 else { return }  // never signal pid<=1

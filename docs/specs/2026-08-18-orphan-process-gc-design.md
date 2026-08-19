@@ -114,8 +114,9 @@ no additional cost — no new subprocess, no per-pid syscall, and the establishe
 That failure direction matters more here than anywhere else in the sweep: a
 missing cwd map must never be read as "this process is not in a worktree".
 
-A second `ps -axo pid=,ppid=,pgid=` snapshot supplies the process graph, which
-lsof does not carry. It is the same `/bin/ps` invocation shape
+A second `ps -axww -o pid=,ppid=,pgid=,uid=,etime=,command=` snapshot supplies
+the process graph, the ownership and age fields, and the argv the reap record
+names — none of which lsof carries. It is the same `/bin/ps` invocation shape
 `ProcessSignaller` already uses.
 
 `lsof` reports fully resolved paths (`/private/var/...` rather than
@@ -123,17 +124,55 @@ lsof does not carry. It is the same `/bin/ps` invocation shape
 care `WorktreeLifecycle+Archive.swift` already takes when matching a worktree
 path against `git worktree list` output.
 
-A process is a candidate for reclamation when **both** hold:
+A process is a candidate for reclamation when **all** of these hold:
 
+- `ppid == 1`. It has been reparented to launchd, i.e. it really did escape.
+  A process still held by a live parent is that parent's business.
 - Its resolved cwd lies inside a TBD-managed root: a worktree pool directory,
   a `<pool>/.deleting/` entry, or a scratchpad directory.
-- The worktree owning that path is archived, absent from the database, or its
-  directory no longer exists.
+- The worktree owning that path is archived or absent from the database.
+- It is at least as old as the cwd reading it was matched against.
 
 A cwd inside a **live** worktree is never a candidate, whatever the process is.
 That is what keeps the rule narrow: a deliberately detached dev server is
 reclaimed only after the worktree it belonged to has been archived, which is
-already the gesture that says the work is over.
+already the gesture that says the work is over. A row that is present and not
+archived counts as live whether or not its directory still exists on disk: that
+combination is a broken worktree, and a broken worktree is a reconcile problem,
+not a licence to kill.
+
+### Owned roots and shared roots
+
+The "absent from the database" arm makes an unrecognized child of a root
+reclaimable, and that is only sound where every child of the root is TBD's by
+construction. Two kinds of root therefore behave differently:
+
+- **Owned** — each repo's worktree pool (canonical and legacy) and the
+  scratch-worktree pool. Everything under one of these was put there by TBD, so
+  a child naming no row is a leftover this sweep owns, and `.deleting/<uuid>`
+  entries land here.
+- **Shared** — the Claude scratchpad base. Claude Code creates one directory
+  there per project it has ever been run in, and TBD manages almost none of
+  them: a census of one developer machine found 86 entries, of which 9 named
+  no worktree at all — plain checkouts, a home directory, and loose files. A
+  cwd under a shared root is classified only by an explicit live or dead entry,
+  derived from a worktree row via `ScratchpadCollector`'s slug; an unrecognized
+  child is never a candidate.
+
+`ScratchpadCollector.reconcile` already draws exactly this line for a merely
+destructive operation — "Unrelated directories in the base are untouched" — and
+this phase kills processes, so it draws the line no further out.
+
+### Two readings, joined by pid
+
+The cwd map and the `ps` snapshot are read at different moments in one sweep and
+joined by pid alone, and macOS reissues pids. A pid that named an orphan when
+lsof ran can name an unrelated new process by the time `ps` runs, and that
+process would inherit the dead one's cwd. So a candidate must be at least as old
+as the gap between the two readings; anything younger is a possible reuse and is
+skipped. A process whose age could not be parsed fails this gate too, which is
+what makes "an unparseable start time keeps the process" true on both grace arms
+rather than only the one that has no archive instant.
 
 ## Exclusions
 
@@ -145,6 +184,14 @@ These are the safety core, and the first is not hypothetical.
   worktree. Archiving it would otherwise have the sweep SIGKILL the live daemon
   that is running the sweep. `TBDDaemon`, `TBDApp`, `getpid()` and its ancestors
   are never signalled.
+
+  `getpid()` and its ancestors cover the running daemon; the binary-name check
+  is what covers `TBDApp` and any sibling worktree's daemon, neither of which is
+  in this process's ancestry. It matches the basename of any path component in
+  the command line, not just of the first token: `ps` prints argv space-joined
+  and unquoted, so a home directory with a space in it would otherwise split
+  argv[0] and leave the app unrecognized. Over-matching is the keep-favoring
+  direction and is accepted.
 - **pid <= 1**, already refused inside `ProcessSignaller`.
 - **Processes not owned by our uid.**
 - **Anything whose cwd could not be read.** Absence of evidence is not evidence
@@ -162,8 +209,18 @@ running.
 The collector therefore computes the **descendant closure** of each orphan root
 from the `ps` snapshot it already holds, and signals the whole subtree leaf-first:
 SIGTERM, poll for liveness, SIGKILL anything still alive at the end of the grace
-window. Leaf-first so a parent cannot fork a replacement child while its subtree
-is being torn down.
+window. Leaf-first so no descendant is still unsignalled at the moment its
+ancestor is asked to shut down. It is an ordering rather than a barrier — the
+volley does not wait between generations — so a process that forks during its own
+SIGTERM handling can still leave a child behind; that residue is an orphan of its
+own by the next sweep.
+
+Every signal goes to exactly one pid. `ProcessSignaller.terminate` escalates to
+a group kill whenever the pid is its own group leader, and a process group is a
+superset of the *group*, not of the closure: it can contain a pid this sweep
+deliberately protected, and on a reused pid `getpgid` resolves to a stranger's
+group outright. The exclusion list is only a guarantee if nothing widens the
+target after it has been applied.
 
 This is the capability `ProcessSignaller.children(ofServerPID:)` lacks by
 construction, and it is why the collector computes the closure itself rather than
@@ -201,8 +258,11 @@ The flag gates the collector **on top of** `gcEnabled`, the same way
 Migration, GRDB record and Codable model land in one commit, with the model
 field optional so existing rows and JSON still decode.
 
-**Enabling it for a soak:** set `gc_orphan_processes_enabled = 1` on the
-singleton `config` row. **Graduation:** once reap records across a soak show it
+**Enabling it for a soak:** call the `config.setGCOrphanProcessesEnabled` RPC,
+which writes `gc_orphan_processes_enabled` on the singleton `config` row. It has
+an RPC for the same reason its sibling gates do — the one phase whose mistakes
+cannot be undone should not also be the one whose only switch is behind a
+hand-edit of `state.db`. **Graduation:** once reap records across a soak show it
 only ever caught real garbage, flip
 `Config.gcOrphanProcessesEnabledDefault` to `true` — a one-line change that
 reaches everyone who never touched the toggle while preserving every explicit
@@ -246,6 +306,11 @@ an undo.
   worktree, the sweep does not signal it.
 - **Unreadable cwd is a skip.** A candidate whose cwd cannot be read is never
   reclaimed.
+- **A stray scratchpad is a skip.** A directory under the Claude scratchpad base
+  that names no worktree TBD knows is never a candidate, while an archived
+  worktree's own scratchpad still is.
+- **A pid younger than the cwd reading is a skip**, and so is one whose age
+  could not be parsed, on both grace arms.
 
 Process-level tests inject the signaller and the `ps` snapshot rather than
 spawning real processes, following `AgentReaperTests`, which drives the same

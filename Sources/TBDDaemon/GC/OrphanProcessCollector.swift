@@ -56,22 +56,39 @@ public struct DeadWorktreeRoot: Sendable, Equatable {
 
 /// The TBD-managed path universe one sweep classifies cwds against.
 public struct TBDProcessRoots: Sendable {
-    /// Canonical pool prefixes: each repo's worktree pool directory (canonical
-    /// and legacy), the scratch-worktree pool, and the Claude scratchpad base.
-    /// A cwd outside every one of these is never a candidate, whatever its
-    /// parentage.
+    /// Canonical prefixes of directories TBD owns **outright**: each repo's
+    /// worktree pool (canonical and legacy) and the scratch-worktree pool.
+    /// Every child of one of these is a TBD worktree by construction, so a
+    /// child matching no row is a leftover this sweep owns.
     public var pools: [String]
-    /// Canonical paths of worktrees that are still alive. A cwd under one of
-    /// these is never a candidate, even at `ppid == 1` — that narrowness is
-    /// what keeps a deliberately detached dev server safe until the developer
-    /// has archived the worktree it belonged to.
+    /// Canonical prefixes of directories TBD **shares** with other software —
+    /// today the Claude scratchpad base, which Claude Code fills with one
+    /// directory per project it has ever been run in, most of which TBD has
+    /// never managed. A cwd here is classified only by an explicit `live` or
+    /// `dead` entry; an unrecognized child is never a candidate.
+    ///
+    /// The distinction is the whole difference between a whitelist and a
+    /// blacklist, and `ScratchpadCollector.reconcile` already takes the
+    /// whitelist side ("Unrelated directories in the base are untouched") for
+    /// a merely destructive operation. This one kills processes.
+    public var sharedRoots: [String]
+    /// Canonical paths of worktrees that are still alive, and of their Claude
+    /// scratchpads. A cwd under one of these is never a candidate, even at
+    /// `ppid == 1` — that narrowness is what keeps a deliberately detached dev
+    /// server safe until the developer has archived the worktree it belonged
+    /// to.
     public var live: [String]
-    /// Canonical paths of worktrees that are dead, with the archive instant
-    /// where the row survives to carry one.
+    /// Canonical paths of worktrees that are dead, and of their Claude
+    /// scratchpads, with the archive instant where the row survives to carry
+    /// one.
     public var dead: [DeadWorktreeRoot]
 
-    public init(pools: [String], live: [String], dead: [DeadWorktreeRoot]) {
+    public init(
+        pools: [String], sharedRoots: [String] = [], live: [String],
+        dead: [DeadWorktreeRoot]
+    ) {
         self.pools = pools
+        self.sharedRoots = sharedRoots
         self.live = live
         self.dead = dead
     }
@@ -119,10 +136,13 @@ public struct OrphanProcessCandidate: Sendable, Equatable {
 /// already dead, and its `isTBDOwned` gate excludes non-agent binaries by
 /// design.
 ///
-/// This type never reads the database and never spawns anything: the caller
-/// supplies the `ps` snapshot, the pid-to-cwd map, and the root classification,
-/// the same division of labor `ProfileDirCollector` and `DeletionQueueCollector`
-/// keep with `OrphanGC`.
+/// Classification and reclamation never read the database and never spawn
+/// anything: the caller supplies the `ps` snapshot, the pid-to-cwd map and the
+/// root classification, the same division of labor `ProfileDirCollector` and
+/// `DeletionQueueCollector` keep with `OrphanGC`. The one exception is
+/// `realProcessSnapshot()`, the production `/bin/ps` reader — a static factory
+/// for that injected input, deliberately outside the classifying surface so
+/// every gate below stays a pure function of its arguments.
 ///
 /// Every failure direction is toward KEEPING: an unreadable cwd, an unparseable
 /// start time, a uid that is not ours, and any ambiguity between a live and a
@@ -168,17 +188,24 @@ public struct OrphanProcessCollector: Sendable {
     ///   archiving it would otherwise have the sweep SIGKILL the live daemon
     ///   running the sweep.
     /// - its cwd is readable, and resolves under a dead TBD-managed root.
+    /// - it is at least as old as the cwd reading it was joined to, so a pid
+    ///   the kernel reissued between the two readings cannot inherit a dead
+    ///   process's cwd. An unreadable age fails this, i.e. keeps.
     /// - the grace window has passed: from `archivedAt` where the row survives
     ///   to carry one, and from process start time where it does not.
     public func candidates(
         processes: [ProcessSnapshotEntry],
         cwdByPID: [Int32: String],
+        cwdsCapturedAt: Date,
         roots: TBDProcessRoots,
         ourUID: uid_t,
         ourPID: Int32,
         graceSeconds: Int
     ) -> [OrphanProcessCandidate] {
         let protected = protectedPIDs(processes: processes, ourPID: ourPID)
+        // How stale the cwd map is by the time this snapshot was read. Never
+        // negative, so a clock that went backwards cannot weaken the gate.
+        let cwdAge = max(0, now().timeIntervalSince(cwdsCapturedAt))
         var result: [OrphanProcessCandidate] = []
         for entry in processes.sorted(by: { $0.pid < $1.pid }) {
             guard entry.pid > 1, entry.ppid == 1 else { continue }
@@ -190,6 +217,21 @@ public struct OrphanProcessCollector: Sendable {
             guard let cwd = cwdByPID[entry.pid] else {
                 logger.debug("""
                 gc: orphan-process skip pid \(entry.pid, privacy: .public) — cwd unreadable
+                """)
+                continue
+            }
+            // The cwd map and this snapshot are two readings taken at different
+            // moments and joined by **pid alone**, and macOS recycles pids. A
+            // process younger than the gap cannot be the one lsof saw: its pid
+            // was reissued in between, and the cwd it matched is a dead
+            // process's. Skip it — evidence of the wrong process is worse than
+            // no evidence. An unreadable age is skipped for the same reason,
+            // which also makes "an unparseable etime keeps the process" true
+            // for BOTH grace arms rather than only the no-row one.
+            guard let age = entry.elapsedSeconds, age >= cwdAge else {
+                logger.debug("""
+                gc: orphan-process skip pid \(entry.pid, privacy: .public) — \
+                younger than the cwd reading, so the pid may have been reused
                 """)
                 continue
             }
@@ -208,13 +250,24 @@ public struct OrphanProcessCollector: Sendable {
     /// and a dead owner resolves to `live` — keep-biased, like every other gate
     /// in this sweep.
     ///
-    /// A cwd under a pool that matches no row at all is `dead` with no archive
-    /// instant: that is the "absent from the database" arm, which covers
-    /// `.deleting/` entries and directories whose row was hard-deleted. Its
-    /// root is the pool's own child (two components for a `.deleting/<uuid>`
-    /// entry) so the record names a worktree-shaped path rather than the pool.
+    /// A cwd under a **pool** that matches no row at all is `dead` with no
+    /// archive instant: that is the "absent from the database" arm, which
+    /// covers `.deleting/` entries and directories whose row was hard-deleted.
+    /// Its root is the pool's own child (two components for a
+    /// `.deleting/<uuid>` entry) so the record names a worktree-shaped path
+    /// rather than the pool.
+    ///
+    /// That arm deliberately does NOT extend to a `sharedRoot`. The Claude
+    /// scratchpad base holds one directory per project Claude Code has ever
+    /// run in — `-Users-me-projects-something`, and slugs that are not
+    /// projects at all — and TBD manages almost none of them. Treating an
+    /// unrecognized child of a shared root as a dead worktree would put a
+    /// stranger's live session on the kill list, so a shared root classifies
+    /// only what an explicit `live`/`dead` entry names.
     public func ownership(ofCWD cwd: String, roots: TBDProcessRoots) -> CWDOwnership {
-        guard let pool = longestPrefix(of: cwd, among: roots.pools) else { return .outside }
+        let poolMatch = longestPrefix(of: cwd, among: roots.pools)
+        let sharedMatch = longestPrefix(of: cwd, among: roots.sharedRoots)
+        guard poolMatch != nil || sharedMatch != nil else { return .outside }
 
         let liveMatch = longestPrefix(of: cwd, among: roots.live)
         let deadMatch = roots.dead
@@ -227,7 +280,11 @@ public struct OrphanProcessCollector: Sendable {
         if let deadMatch {
             return .dead(deadMatch)
         }
-        return .dead(DeadWorktreeRoot(path: Self.poolChild(of: cwd, pool: pool), archivedAt: nil))
+        // Unrecognized. Only a pool owns its strays, and only when no shared
+        // root sits deeper — a nested shared root wins, keeping the process.
+        guard let poolMatch, poolMatch.count > (sharedMatch?.count ?? -1) else { return .outside }
+        return .dead(
+            DeadWorktreeRoot(path: Self.poolChild(of: cwd, pool: poolMatch), archivedAt: nil))
     }
 
     /// `gcGraceSeconds` measured from `archivedAt` where a row survives, and
@@ -264,15 +321,31 @@ public struct OrphanProcessCollector: Sendable {
         return protected
     }
 
-    /// True when argv[0]'s basename is `TBDDaemon` or `TBDApp`. Matched on the
-    /// basename, so a path that merely *contains* the name (every TBD worktree
-    /// does) is not mistaken for the binary.
+    /// True when the executable this process is running is `TBDDaemon` or
+    /// `TBDApp`.
+    ///
+    /// `ps -o command=` prints argv space-joined and unquoted, so where argv[0]
+    /// ends is genuinely ambiguous: a home directory named `Jane Roe` yields
+    /// `~/tbd/.build/debug/TBDApp` as two tokens, `.../Jane` and
+    /// `Roe/tbd/.build/debug/TBDApp`. Taking only the first would read that
+    /// basename as `Jane` and leave the app unprotected — and `isTBDBinary` is
+    /// the ONLY thing protecting
+    /// `TBDApp` and any sibling worktree's daemon, neither of which is in this
+    /// process's ancestry.
+    ///
+    /// So every whitespace-delimited token is checked, and any one of them
+    /// having basename `TBDDaemon`/`TBDApp` protects the process.
+    /// That over-matches — a stray argument spelled `.../TBDApp` protects its
+    /// process too — and over-matching is the keep-favoring direction, which is
+    /// the one this whole sweep takes. Matching stays on the **basename**, so a
+    /// path that merely contains the name (every TBD worktree does) is still
+    /// not mistaken for the binary.
     static func isTBDBinary(_ command: String) -> Bool {
-        guard let arg0 = command.split(whereSeparator: { $0 == " " || $0 == "\t" }).first else {
-            return false
+        for token in command.split(whereSeparator: { $0 == " " || $0 == "\t" }) {
+            let basename = token.split(separator: "/").last.map(String.init) ?? String(token)
+            if basename == "TBDDaemon" || basename == "TBDApp" { return true }
         }
-        let basename = arg0.split(separator: "/").last.map(String.init) ?? String(arg0)
-        return basename == "TBDDaemon" || basename == "TBDApp"
+        return false
     }
 
     // MARK: - Reclamation
@@ -282,9 +355,16 @@ public struct OrphanProcessCollector: Sendable {
     ///
     /// Computed here rather than by calling
     /// `ProcessSignaller.children(ofServerPID:)` in a loop, because that helper
-    /// walks exactly one generation by construction. Leaf-first so a parent
-    /// cannot fork a replacement child while its own subtree is being torn
-    /// down. A protected pid is skipped and never descended into.
+    /// walks exactly one generation by construction. A protected pid is skipped
+    /// and never descended into.
+    ///
+    /// Leaf-first so that no descendant is still unsignalled at the moment its
+    /// ancestor gets SIGTERM — an ancestor signalled first could spend its own
+    /// shutdown respawning children that are not in this list. It is an
+    /// ordering, not a barrier: `reap` sends the whole ordered volley without
+    /// waiting between generations, so a process that forks during its own
+    /// SIGTERM handling can still leave a child behind. That residue is
+    /// keep-biased — the next hourly sweep sees it as an orphan of its own.
     public func descendantClosure(
         of pid: Int32, processes: [ProcessSnapshotEntry], protected: Set<Int32>
     ) -> [Int32] {
@@ -315,10 +395,14 @@ public struct OrphanProcessCollector: Sendable {
     ///
     /// Signalling goes through `ProcessSignaller` rather than raw `kill(2)` so
     /// tests never send a real signal, and so the `pid <= 1` refusal lives in
-    /// exactly one place. That seam group-kills when the pid happens to be its
-    /// own group leader; here that is a harmless superset, because every member
-    /// of the closure is already being signalled individually. What it is not
-    /// is *sufficient* — which is why the closure exists.
+    /// exactly one place. It uses the seam's **process-only** methods: the
+    /// ordinary `terminate`/`forceKill` escalate to a group kill whenever the
+    /// pid is its own group leader, and a process group is a superset of the
+    /// *group*, not of this closure. That superset can hold a pid this sweep
+    /// deliberately protected, and on a reused pid it resolves to a stranger's
+    /// group outright — so the promise that a protected process is never
+    /// signalled would not survive it. Group semantics are also not
+    /// *sufficient* here, which is why the closure exists at all.
     ///
     /// Returns `nil` for an empty subtree (nothing was signalled, so there is
     /// nothing to record).
@@ -328,7 +412,7 @@ public struct OrphanProcessCollector: Sendable {
         guard !tree.isEmpty else { return nil }
 
         for pid in tree {
-            signaller.terminate(pid)
+            signaller.terminateProcessOnly(pid)
         }
         for _ in 0..<graceAttempts {
             if !tree.contains(where: { signaller.isAlive($0) }) { break }
@@ -338,7 +422,7 @@ public struct OrphanProcessCollector: Sendable {
             logger.warning("""
             gc: orphan-process pid \(pid, privacy: .public) survived SIGTERM — sending SIGKILL
             """)
-            signaller.forceKill(pid)
+            signaller.forceKillProcessOnly(pid)
         }
 
         logger.info("""
