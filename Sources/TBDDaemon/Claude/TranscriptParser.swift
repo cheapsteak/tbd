@@ -224,6 +224,20 @@ enum TranscriptParser {
             let timestamp = (json["timestamp"] as? String).flatMap { iso8601.date(from: $0) }
             let typeStr = json["type"] as? String
 
+            // A prompt typed while the agent was mid-turn is QUEUED, and Claude
+            // Code never writes a `type:"user"` line for it — the delivery is
+            // recorded only as this attachment. Route its text through the same
+            // classification and emit decision as a typed prompt so the two
+            // recording shapes render identically.
+            if typeStr == "attachment", let text = queuedCommandText(from: json) {
+                items.append(promptItem(
+                    id: lineUUID,
+                    kind: UserMessageClassifier.classify(text: text),
+                    text: text,
+                    timestamp: timestamp))
+                continue
+            }
+
             // Hook- and CLAUDE.md-injected context arrives as `type:"attachment"`
             // rows, which carry no `message` and so match none of the branches
             // below. Always `continue` — an attachment never falls through.
@@ -244,29 +258,17 @@ enum TranscriptParser {
             }
 
             if typeStr == "user", let kind = UserMessageClassifier.classify(json) {
-                let text = extractUserText(from: json) ?? ""
-                // NOTE: TranscriptItem.slashCommand is no longer emitted — slash commands
-                // are flattened into .userPrompt so they render as the user's chat bubble
-                // (the slash command IS what the user typed). The case remains in the
-                // enum for Codable compatibility with any persisted state.
-                if kind == .slashEnvelope {
-                    let (name, args) = parseSlashEnvelope(text)
-                    let bubbleText: String
-                    if let args, !args.isEmpty {
-                        bubbleText = "/\(name) \(args)"
-                    } else {
-                        bubbleText = "/\(name)"
-                    }
-                    items.append(.userPrompt(id: lineUUID, text: bubbleText, timestamp: timestamp))
-                } else {
-                    items.append(.systemReminder(id: lineUUID, kind: kind, text: text, timestamp: timestamp))
-                }
+                items.append(promptItem(
+                    id: lineUUID,
+                    kind: kind,
+                    text: extractUserText(from: json) ?? "",
+                    timestamp: timestamp))
                 continue
             }
 
             if typeStr == "user", UserMessageClassifier.isRealUserMessage(json),
                let text = UserMessageClassifier.extractText(json) {
-                items.append(.userPrompt(id: lineUUID, text: text, timestamp: timestamp))
+                items.append(promptItem(id: lineUUID, kind: nil, text: text, timestamp: timestamp))
                 continue
             }
 
@@ -331,6 +333,61 @@ enum TranscriptParser {
         return items
     }
 
+    /// The item one prompt renders as, given its body and its classification.
+    ///
+    /// The single emit decision for user-authored input, shared by the
+    /// `type:"user"` line branch and the `queued_command` attachment branch —
+    /// a prompt must look the same whether it was typed at an idle agent or
+    /// queued mid-turn, and one helper is what keeps the two from drifting.
+    ///
+    /// NOTE: TranscriptItem.slashCommand is no longer emitted — slash commands
+    /// are flattened into .userPrompt so they render as the user's chat bubble
+    /// (the slash command IS what the user typed). The case remains in the
+    /// enum for Codable compatibility with any persisted state.
+    private static func promptItem(
+        id: String, kind: SystemKind?, text: String, timestamp: Date?
+    ) -> TranscriptItem {
+        guard let kind else {
+            return .userPrompt(id: id, text: text, timestamp: timestamp)
+        }
+        guard kind == .slashEnvelope else {
+            return .systemReminder(id: id, kind: kind, text: text, timestamp: timestamp)
+        }
+        let (name, args) = parseSlashEnvelope(text)
+        let bubbleText: String
+        if let args, !args.isEmpty {
+            bubbleText = "/\(name) \(args)"
+        } else {
+            bubbleText = "/\(name)"
+        }
+        return .userPrompt(id: id, text: bubbleText, timestamp: timestamp)
+    }
+
+    /// The prompt body of a `queued_command` attachment, or nil for every other
+    /// row. `attachment.prompt` is usually a String but is an array of content
+    /// blocks for a multimodal paste, in which case every `text` block joins —
+    /// the same rule `UserMessageClassifier.extractText` applies to a
+    /// `type:"user"` line's content array.
+    ///
+    /// The sibling `type:"queue-operation"` rows (`enqueue`/`remove`/`dequeue`)
+    /// are queue bookkeeping, not the delivery record, and deliberately match
+    /// nothing here — a queued prompt would otherwise render once per queue
+    /// event.
+    static func queuedCommandText(from json: [String: Any]) -> String? {
+        guard json["type"] as? String == "attachment",
+              let att = json["attachment"] as? [String: Any],
+              att["type"] as? String == "queued_command" else {
+            return nil
+        }
+        if let s = att["prompt"] as? String {
+            return s.isEmpty ? nil : s
+        }
+        if let blocks = att["prompt"] as? [[String: Any]] {
+            return UserMessageClassifier.joinTextBlocks(blocks)
+        }
+        return nil
+    }
+
     /// Extract a `TokenUsage` from `message.usage` if all three input-token
     /// fields are present. Output tokens, cache breakdowns, and other fields
     /// are ignored — we only care about the prompt-size signal.
@@ -365,9 +422,11 @@ enum TranscriptParser {
     /// Extracts every injected-context payload from one JSONL row, in emission
     /// order. Returns `[]` for non-attachment rows and for flavors that carry
     /// no injected *prose* context: `*_delta`, `command_permissions`,
-    /// `queued_command`, `diagnostics`, and `edited_text_file` have no
-    /// `content` field at all, while `task_reminder`'s `content` is a
-    /// structured array of todo objects, not renderable text.
+    /// `diagnostics`, and `edited_text_file` have no `content` field at all,
+    /// while `task_reminder`'s `content` is a structured array of todo objects,
+    /// not renderable text. `queued_command` has no `content` either — its
+    /// prompt is user-authored input rather than injected context, and is
+    /// handled by `queuedCommandText(from:)`.
     ///
     /// `attachment.content` has a DIFFERENT native JSON type per flavor —
     /// object for `nested_memory`, array for `hook_additional_context`, string
@@ -742,6 +801,12 @@ enum TranscriptParser {
                 // can never recover their (truncated) body. Re-run the same
                 // extraction `buildItems` used and return it whole, alongside
                 // the injection metadata the overlay renders.
+                // A queued prompt is an attachment row too, but it renders as
+                // the user's own bubble rather than an injected-context row.
+                if let queued = queuedCommandText(from: json) {
+                    return ItemDetail(text: queued, attachment: nil)
+                }
+
                 let payloads = attachmentPayloads(from: json)
                 if !payloads.isEmpty {
                     let meta = attachmentMetadata(from: json, toolSummaries: toolSummaries)

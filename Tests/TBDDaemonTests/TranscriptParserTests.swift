@@ -25,6 +25,21 @@ struct TranscriptParserTests {
         #expect(!userPrompts.isEmpty, "expected at least one user prompt in fixture")
     }
 
+    /// The fixture's last two lines document the queued shape: an `enqueue`
+    /// bookkeeping row that must render nothing, followed by the
+    /// `queued_command` attachment that IS the delivery record.
+    @Test func parses_queued_prompt_from_fixture() throws {
+        let items = TranscriptParser.parse(filePath: fixturePath)
+        let queued = items.filter {
+            if case .userPrompt(let id, _, _) = $0 { return id == "queued-1" }
+            return false
+        }
+        #expect(queued.count == 1, "the fixture's queued prompt must render exactly once")
+        if case .userPrompt(_, let text, _)? = queued.first {
+            #expect(text == "Also check the retry path while you are in there.")
+        }
+    }
+
     @Test func parses_assistant_text() throws {
         let items = TranscriptParser.parse(filePath: fixturePath)
         let assistantTexts = items.compactMap { item -> String? in
@@ -772,11 +787,13 @@ struct TranscriptParserTests {
         #expect(row.text == "acme-deploy, acme-review")
     }
 
+    /// Flavors that carry no injected *prose* context. `queued_command` is
+    /// deliberately absent: it carries the user's own prompt and renders as a
+    /// chat bubble — see the queued-prompt tests below.
     @Test func attachment_payloadless_flavors_emit_nothing() throws {
         let lines = [
             try attachmentLine(uuid: "att-tr", ["type": "task_reminder", "content": [], "itemCount": 0]),
             try attachmentLine(uuid: "att-cp", ["type": "command_permissions", "allowedTools": ["Bash"]]),
-            try attachmentLine(uuid: "att-qc", ["type": "queued_command", "prompt": "go"]),
             try attachmentLine(uuid: "att-dd", ["type": "deferred_tools_delta", "addedNames": ["X"]])
         ].joined(separator: "\n")
         let tmp = try writeTempJSONL(lines)
@@ -1080,6 +1097,149 @@ struct TranscriptParserTests {
             name: "Bash", input: ["command": String(repeating: "acme ", count: 40)])
         #expect(summary.count <= "Bash ".count + 41)
         #expect(summary.hasSuffix("…"))
+    }
+
+    // MARK: - queued prompts
+    //
+    // A prompt typed while the agent is mid-turn is QUEUED, and Claude Code
+    // never writes a `type:"user"` line for it — the delivery is recorded only
+    // as a `queued_command` attachment. Measured over 120 recent session files,
+    // 92 of them carried such rows and only 3 of 1331 were mirrored by a user
+    // line, so every one of these prompts used to vanish from the transcript.
+
+    /// Builds one `type:"attachment"` queued-prompt row. `prompt` is `Any` so a
+    /// test can pass the array-of-content-blocks form a multimodal paste uses.
+    private func queuedLine(uuid: String, prompt: Any, commandMode: String = "prompt") throws -> String {
+        try attachmentLine(uuid: uuid, [
+            "type": "queued_command",
+            "prompt": prompt,
+            "commandMode": commandMode,
+            "origin": ["kind": "human"]
+        ])
+    }
+
+    private func userPrompts(_ items: [TranscriptItem]) -> [(id: String, text: String)] {
+        items.compactMap {
+            if case .userPrompt(let id, let text, _) = $0 { return (id, text) }
+            return nil
+        }
+    }
+
+    @Test func queued_typed_prompt_renders_as_a_user_bubble() throws {
+        let tmp = try writeTempJSONL(
+            try queuedLine(uuid: "q1", prompt: "is the sonnet subagent what the codex subagent does?"))
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let items = TranscriptParser.parse(filePath: tmp)
+        #expect(items.count == 1, "a queued prompt must render, not vanish")
+        let prompts = userPrompts(items)
+        #expect(prompts.count == 1)
+        #expect(prompts.first?.id == "q1", "the row uses the line's own uuid")
+        #expect(prompts.first?.text == "is the sonnet subagent what the codex subagent does?")
+    }
+
+    @Test func queued_cross_session_message_renders_as_a_user_bubble() throws {
+        // Agent-to-agent traffic arrives queued and is real conversation, not
+        // harness noise — it renders exactly as a typed prompt does.
+        let text = #"<cross-session-message from-name="acme-worker">[note] standing down</cross-session-message>"#
+        let tmp = try writeTempJSONL(try queuedLine(uuid: "q1", prompt: text))
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        #expect(userPrompts(TranscriptParser.parse(filePath: tmp)).first?.text == text)
+    }
+
+    @Test func queued_task_notification_is_a_system_row_not_a_user_bubble() throws {
+        let text = "<task-notification>\n<task-id>bpzi7e9op</task-id>\n</task-notification>"
+        let tmp = try writeTempJSONL(
+            try queuedLine(uuid: "q1", prompt: text, commandMode: "task-notification"))
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let items = TranscriptParser.parse(filePath: tmp)
+        #expect(items.count == 1)
+        #expect(userPrompts(items).isEmpty, "a task notification is not something the user said")
+        guard case .systemReminder(let id, let kind, let rowText, _, _, _) = items[0] else {
+            Issue.record("expected .systemReminder"); return
+        }
+        #expect(id == "q1")
+        #expect(kind == .taskNotification)
+        #expect(rowText == text)
+    }
+
+    @Test func queued_slash_envelope_flattens_to_the_command_line() throws {
+        let text = "<command-name>commit</command-name><command-args>--amend</command-args>"
+        let tmp = try writeTempJSONL(try queuedLine(uuid: "q1", prompt: text))
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let items = TranscriptParser.parse(filePath: tmp)
+        #expect(items.count == 1)
+        #expect(userPrompts(items).first?.text == "/commit --amend",
+                "a queued slash command flattens exactly like a typed one")
+    }
+
+    @Test func queued_prompt_as_content_blocks_joins_every_text_block() throws {
+        // Multimodal paste: `prompt` is an array of content blocks. Every text
+        // block joins, mirroring the `type:"user"` content-array rule.
+        let blocks: [[String: Any]] = [
+            ["type": "text", "text": "first line"],
+            ["type": "image", "source": ["type": "base64"]],
+            ["type": "text", "text": "second line"]
+        ]
+        let tmp = try writeTempJSONL(try queuedLine(uuid: "q1", prompt: blocks))
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let items = TranscriptParser.parse(filePath: tmp)
+        #expect(items.count == 1)
+        #expect(userPrompts(items).first?.text == "first line\nsecond line")
+    }
+
+    @Test func queued_prompt_full_body_is_recoverable_by_line_uuid() throws {
+        let text = "the queued question in full"
+        let tmp = try writeTempJSONL(try queuedLine(uuid: "q1", prompt: text))
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        #expect(TranscriptParser.lookupFullBody(filePath: tmp, itemID: "q1") == text)
+    }
+
+    @Test func queue_operation_rows_render_nothing() throws {
+        // `enqueue`/`remove`/`dequeue` are queue bookkeeping, not the delivery
+        // record. If they rendered, one queued prompt would appear several times.
+        let lines = [
+            #"{"type":"queue-operation","operation":"enqueue","timestamp":"2026-08-19T21:13:08.194Z","content":"do the thing"}"#,
+            #"{"type":"queue-operation","operation":"dequeue","timestamp":"2026-08-19T21:13:09.194Z","content":"do the thing"}"#,
+            #"{"type":"queue-operation","operation":"remove","timestamp":"2026-08-19T21:13:10.194Z","content":"do the thing"}"#,
+        ].joined(separator: "\n")
+        let tmp = try writeTempJSONL(lines)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        #expect(TranscriptParser.parse(filePath: tmp).isEmpty)
+    }
+
+    @Test func parseTail_window_with_a_queued_row_matches_the_full_parse() throws {
+        // The purity contract: `buildItems` sees only the lines in the tail's
+        // byte window, so a queued row must be derivable from itself alone —
+        // no cross-row dedup against a user line that may sit outside the window.
+        var lines: [String] = []
+        for i in 0..<20 {
+            let ts = "2026-05-05T10:00:\(String(format: "%02d", i))Z"
+            lines.append(
+                "{\"type\":\"assistant\",\"uuid\":\"a\(i)\",\"timestamp\":\"\(ts)\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"reply \(i)\"}]}}")
+        }
+        lines.append(#"{"type":"queue-operation","operation":"enqueue","content":"queued near the end"}"#)
+        lines.append(try queuedLine(uuid: "qtail", prompt: "queued near the end"))
+        lines.append(
+            #"{"type":"assistant","uuid":"alast","timestamp":"2026-05-05T10:00:59Z","message":{"role":"assistant","content":[{"type":"text","text":"on it"}]}}"#)
+
+        let tmp = try writeTempJSONL(lines.joined(separator: "\n"))
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let full = TranscriptParser.parse(filePath: tmp)
+        #expect(full.contains { if case .userPrompt(let id, _, _) = $0 { return id == "qtail" }; return false },
+                "the queued row must be in the full parse for the comparison to mean anything")
+
+        let tail = TranscriptParser.parseTail(filePath: tmp, limit: 5)
+        #expect(tail.count == 5)
+        #expect(full.suffix(5).map(signature) == tail.map(signature),
+                "a tail window containing a queued row must equal the bottom of the full parse")
     }
 
     // MARK: - helpers

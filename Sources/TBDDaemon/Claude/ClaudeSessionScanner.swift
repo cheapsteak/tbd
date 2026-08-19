@@ -189,6 +189,26 @@ enum ClaudeSessionScanner {
 
     // MARK: Private
 
+    /// The user-authored prompt text of one JSONL line, whichever way Claude
+    /// Code recorded it: a `type:"user"` line when the prompt was typed at an
+    /// idle agent, or a `queued_command` attachment when it was queued
+    /// mid-turn (in which case no user line is ever written). Reading only the
+    /// former left the subtitle stale, or empty, for a session whose prompts
+    /// all arrived while it was busy.
+    ///
+    /// Returns nil for a queued row that classifies as a system envelope —
+    /// a background-task notification is not something the user said.
+    private static func userPromptText(_ json: [String: Any]) -> String? {
+        if UserMessageClassifier.isRealUserMessage(json) {
+            return UserMessageClassifier.extractText(json)
+        }
+        if let queued = TranscriptParser.queuedCommandText(from: json),
+           UserMessageClassifier.classify(text: queued) == nil {
+            return queued
+        }
+        return nil
+    }
+
     private static func parseSummary(file: URL) -> SessionSummary? {
         let rv = try? file.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
         let modifiedAt = rv?.contentModificationDate ?? Date.distantPast
@@ -217,8 +237,7 @@ enum ClaudeSessionScanner {
                 cwd        = json["cwd"]        as? String
                 gitBranch  = json["gitBranch"]  as? String
             }
-            if UserMessageClassifier.isRealUserMessage(json),
-               let text = UserMessageClassifier.extractText(json) {
+            if let text = userPromptText(json) {
                 let truncated = String(text.prefix(300))
                 if firstUserMessage == nil { firstUserMessage = truncated }
                 lastUserMessage = truncated

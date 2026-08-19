@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import TBDShared
 @testable import TBDDaemonLib
 
 @Suite("ClaudeSessionScanner")
@@ -18,7 +19,7 @@ struct ClaudeSessionScannerTests {
         let dir = fixtureURL.deletingLastPathComponent()
         let summaries = ClaudeSessionScanner.listSessions(projectDir: dir)
         let summary = try #require(summaries.first(where: { $0.filePath.hasSuffix("sample-session.jsonl") }))
-        #expect(summary.lineCount == 11)
+        #expect(summary.lineCount == 13)
     }
 
     @Test("first user message is the first real user turn")
@@ -29,12 +30,54 @@ struct ClaudeSessionScannerTests {
         #expect(summary.firstUserMessage == "Hello, can you help me refactor this function?")
     }
 
-    @Test("last user message is the last real user turn")
+    /// The fixture's last prompt was QUEUED while the agent was busy, so Claude
+    /// Code recorded it as a `queued_command` attachment and never wrote a
+    /// `type:"user"` line for it. Reading only user lines left the subtitle
+    /// stuck on the previous turn.
+    @Test("last user message is the last real user turn, queued or typed")
     func lastUserMessage() throws {
         let dir = fixtureURL.deletingLastPathComponent()
         let summaries = ClaudeSessionScanner.listSessions(projectDir: dir)
         let summary = try #require(summaries.first(where: { $0.filePath.hasSuffix("sample-session.jsonl") }))
-        #expect(summary.lastUserMessage == "What does this error mean?")
+        #expect(summary.lastUserMessage == "Also check the retry path while you are in there.")
+    }
+
+    @Test("a session whose only prompt was queued still gets a subtitle")
+    func queuedOnlySessionHasSubtitle() throws {
+        let line = #"""
+        {"type":"attachment","uuid":"q1","timestamp":"2026-08-19T21:10:05.458Z","attachment":{"type":"queued_command","prompt":"only ever queued","commandMode":"prompt"}}
+        """#
+        let summary = try scanOneSession(named: "queued-only", lines: [line])
+        #expect(summary.firstUserMessage == "only ever queued")
+        #expect(summary.lastUserMessage == "only ever queued")
+    }
+
+    /// A queued background-task notification is harness-injected, not something
+    /// the user said — it must never become the session's subtitle.
+    @Test("queued task notification is not treated as a user message")
+    func queuedTaskNotificationIsNotASubtitle() throws {
+        let lines = [
+            #"{"type":"user","uuid":"u1","message":{"role":"user","content":"real question"}}"#,
+            #"""
+            {"type":"attachment","uuid":"q1","attachment":{"type":"queued_command","prompt":"<task-notification>\n<task-id>abc</task-id>\n</task-notification>","commandMode":"task-notification"}}
+            """#,
+        ]
+        let summary = try scanOneSession(named: "queued-notification", lines: lines)
+        #expect(summary.firstUserMessage == "real question")
+        #expect(summary.lastUserMessage == "real question")
+    }
+
+    /// Writes `lines` as a lone session file in a fresh temp project dir and
+    /// returns its summary.
+    private func scanOneSession(named: String, lines: [String]) throws -> SessionSummary {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("scanner-\(named)-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        try (lines.joined(separator: "\n") + "\n")
+            .write(to: tmp.appendingPathComponent("\(named).jsonl"), atomically: true, encoding: .utf8)
+        let summaries = ClaudeSessionScanner.listSessions(projectDir: tmp)
+        return try #require(summaries.first)
     }
 
     @Test("scanner truncates first/last user message to 300 chars")
