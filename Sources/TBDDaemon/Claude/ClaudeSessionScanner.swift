@@ -198,6 +198,15 @@ enum ClaudeSessionScanner {
     ///
     /// Returns nil for a queued row that classifies as a system envelope —
     /// a background-task notification is not something the user said.
+    ///
+    /// Peer traffic is NOT filtered, and that is deliberate: an
+    /// `<agent-message>` or `<cross-session-message>` envelope matches no
+    /// system prefix, so it classifies as a real prompt and can become the
+    /// subtitle. It arrives only queued — no `type:"user"` line ever carries
+    /// one — so there is no typed twin to match, and the choice is between
+    /// showing it and showing a subtitle that predates it. It IS a message
+    /// this session received, so it is shown; deciding it deserves its own
+    /// kind would be a design change, not a parser fix.
     private static func userPromptText(_ json: [String: Any]) -> String? {
         if UserMessageClassifier.isRealUserMessage(json) {
             return UserMessageClassifier.extractText(json)

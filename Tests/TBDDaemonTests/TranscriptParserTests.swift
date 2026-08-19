@@ -1200,6 +1200,62 @@ struct TranscriptParserTests {
         #expect(TranscriptParser.lookupFullBody(filePath: tmp, itemID: "q1") == text)
     }
 
+    /// Every degenerate `prompt` shape must leave the row exactly where it was
+    /// before the queued branch existed: matched by no payload extractor, and
+    /// therefore rendering nothing. An empty bubble is worse than no bubble,
+    /// and `as? [[String: Any]]` is element-wise — an array of bare strings
+    /// fails the cast rather than yielding a partial join.
+    @Test func queued_prompt_with_no_usable_text_renders_nothing() throws {
+        let lines = try [
+            attachmentLine(uuid: "q-absent", ["type": "queued_command", "commandMode": "prompt"]),
+            attachmentLine(uuid: "q-empty", ["type": "queued_command", "prompt": ""]),
+            attachmentLine(uuid: "q-emptyArray", ["type": "queued_command", "prompt": [] as [Any]]),
+            attachmentLine(uuid: "q-noTextBlock", ["type": "queued_command",
+                "prompt": [["type": "image", "source": ["type": "base64"]]] as [[String: Any]]]),
+            attachmentLine(uuid: "q-blankBlocks", ["type": "queued_command",
+                "prompt": [["type": "text", "text": ""]] as [[String: Any]]]),
+            attachmentLine(uuid: "q-number", ["type": "queued_command", "prompt": 42]),
+            attachmentLine(uuid: "q-object", ["type": "queued_command", "prompt": ["text": "not a block array"]]),
+            attachmentLine(uuid: "q-stringArray", ["type": "queued_command", "prompt": ["a", "b"] as [Any]])
+        ].joined(separator: "\n")
+        let tmp = try writeTempJSONL(lines)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        #expect(TranscriptParser.parse(filePath: tmp).isEmpty)
+        for uuid in ["q-absent", "q-empty", "q-emptyArray", "q-noTextBlock",
+                     "q-blankBlocks", "q-number", "q-object", "q-stringArray"] {
+            #expect(TranscriptParser.lookupFullBody(filePath: tmp, itemID: uuid) == nil,
+                    "\(uuid) has no recoverable body")
+        }
+    }
+
+    /// The queued branch returns early from `lookupDetail`, before the general
+    /// `attachmentPayloads` extraction. Injected-context rows in the same file
+    /// must still resolve their body AND their injection metadata — the early
+    /// return is keyed on the row, not on the file.
+    @Test func lookupDetail_still_resolves_injected_rows_alongside_a_queued_row() throws {
+        let absolute = "\(NSHomeDirectory())/acme-prod/CLAUDE.md"
+        let lines = try [
+            queuedLine(uuid: "q1", prompt: "queued while busy"),
+            attachmentLine(uuid: "att-mem", [
+                "type": "nested_memory",
+                "displayPath": "CLAUDE.md",
+                "path": absolute,
+                "content": ["path": absolute, "type": "Project", "content": "# acme rules"]
+            ])
+        ].joined(separator: "\n")
+        let tmp = try writeTempJSONL(lines)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let queued = TranscriptParser.lookupDetail(filePath: tmp, itemID: "q1")
+        #expect(queued.text == "queued while busy")
+        #expect(queued.attachment == nil, "a queued prompt is the user's own input, not injected context")
+
+        let injected = TranscriptParser.lookupDetail(filePath: tmp, itemID: "att-mem")
+        #expect(injected.text == "# acme rules")
+        #expect(injected.attachment?.memoryType == "Project")
+    }
+
     @Test func queue_operation_rows_render_nothing() throws {
         // `enqueue`/`remove`/`dequeue` are queue bookkeeping, not the delivery
         // record. If they rendered, one queued prompt would appear several times.

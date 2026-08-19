@@ -67,6 +67,26 @@ struct ClaudeSessionScannerTests {
         #expect(summary.lastUserMessage == "real question")
     }
 
+    /// Peer traffic is the other thing that only ever arrives queued, and it
+    /// matches no system prefix, so it classifies as a real prompt and DOES
+    /// become the subtitle. Pinned deliberately: it is a message this session
+    /// received, and the alternative was showing a subtitle that predates it.
+    /// Giving peer messages their own kind is a design change, and this test
+    /// is what makes that change deliberate rather than accidental.
+    @Test("a queued peer message becomes the subtitle")
+    func queuedPeerMessageIsASubtitle() throws {
+        let peer = #"<cross-session-message from-name="acme-worker">[note] standing down</cross-session-message>"#
+        let lines = [
+            #"{"type":"user","uuid":"u1","message":{"role":"user","content":"real question"}}"#,
+            #"""
+            {"type":"attachment","uuid":"q1","attachment":{"type":"queued_command","prompt":"<cross-session-message from-name=\"acme-worker\">[note] standing down</cross-session-message>","commandMode":"prompt","isMeta":true}}
+            """#,
+        ]
+        let summary = try scanOneSession(named: "queued-peer", lines: lines)
+        #expect(summary.firstUserMessage == "real question")
+        #expect(summary.lastUserMessage == peer)
+    }
+
     /// Writes `lines` as a lone session file in a fresh temp project dir and
     /// returns its summary.
     private func scanOneSession(named: String, lines: [String]) throws -> SessionSummary {

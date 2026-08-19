@@ -93,6 +93,11 @@ enum UserMessageClassifier {
     /// the measured corpus that meta line is the only user message that ever
     /// carries more than one text block, so joining is a strict repair.
     ///
+    /// The same rule serves `queued_command.prompt`'s array form, which the
+    /// original measurement did not cover. Re-measured for that call site: the
+    /// array form appears on 11 queued rows in the local corpus and none carry
+    /// more than one text block, so joining is a strict repair there too.
+    ///
     /// Returns nil when no non-empty text block is present.
     static func joinTextBlocks(_ blocks: [[String: Any]]) -> String? {
         let texts = blocks

@@ -229,6 +229,22 @@ enum TranscriptParser {
             // recorded only as this attachment. Route its text through the same
             // classification and emit decision as a typed prompt so the two
             // recording shapes render identically.
+            //
+            // "Queued" covers more than human typing: peer traffic
+            // (`<agent-message>`, `<cross-session-message>`) arrives this way
+            // and this way only. Those envelopes match no system prefix, so
+            // they classify as real prompts and render as bubbles. That is the
+            // intent — they are messages this session received, and the
+            // alternative is the pre-fix behavior of dropping them silently.
+            //
+            // Deliberately NOT `truncate`d, unlike the injected-context
+            // attachment branch below: this is delivered input rather than
+            // injected context, and a prompt that arrived on a `type:"user"`
+            // line is not truncated either. Truncating here would make the
+            // same prompt render
+            // differently depending on when it landed, which is the whole
+            // defect being fixed. The measured cost is a median of ~6 KB of
+            // extra body per session.
             if typeStr == "attachment", let text = queuedCommandText(from: json) {
                 items.append(promptItem(
                     id: lineUUID,
@@ -367,12 +383,23 @@ enum TranscriptParser {
     /// row. `attachment.prompt` is usually a String but is an array of content
     /// blocks for a multimodal paste, in which case every `text` block joins —
     /// the same rule `UserMessageClassifier.extractText` applies to a
-    /// `type:"user"` line's content array.
+    /// `type:"user"` line's content array. Both shapes are measured, not
+    /// assumed: across 701 local session JSONLs, 5876 of 5887 queued rows
+    /// carry a String and 11 carry the array form — a paste of one `text`
+    /// block alongside a base64 `image` block.
     ///
-    /// The sibling `type:"queue-operation"` rows (`enqueue`/`remove`/`dequeue`)
-    /// are queue bookkeeping, not the delivery record, and deliberately match
-    /// nothing here — a queued prompt would otherwise render once per queue
-    /// event.
+    /// Every other shape — `prompt` absent, empty, an empty array, an array
+    /// whose blocks carry no text, a number, an object, an array of bare
+    /// strings — returns nil, and the row then falls through to the general
+    /// attachment branch, which has no `queued_command` case and emits
+    /// nothing. That is exactly where such a row sat before this function
+    /// existed: an empty bubble would be worse than no bubble.
+    ///
+    /// The sibling `enqueue`/`remove`/`dequeue` rows are queue bookkeeping,
+    /// not the delivery record. They are a distinct TOP-LEVEL
+    /// `type:"queue-operation"` rather than an attachment flavor, so they fail
+    /// the first guard below and reach no rendering path — which is what keeps
+    /// one queued prompt from rendering once per queue event.
     static func queuedCommandText(from json: [String: Any]) -> String? {
         guard json["type"] as? String == "attachment",
               let att = json["attachment"] as? [String: Any],
@@ -424,9 +451,10 @@ enum TranscriptParser {
     /// no injected *prose* context: `*_delta`, `command_permissions`,
     /// `diagnostics`, and `edited_text_file` have no `content` field at all,
     /// while `task_reminder`'s `content` is a structured array of todo objects,
-    /// not renderable text. `queued_command` has no `content` either — its
-    /// prompt is user-authored input rather than injected context, and is
-    /// handled by `queuedCommandText(from:)`.
+    /// not renderable text. `queued_command` has no `content` either — it
+    /// carries a delivered *prompt* rather than injected context, and is
+    /// handled by `queuedCommandText(from:)`. (Measured: 0 of 5887
+    /// `queued_command` rows in the local corpus carry a `content` field.)
     ///
     /// `attachment.content` has a DIFFERENT native JSON type per flavor —
     /// object for `nested_memory`, array for `hook_additional_context`, string
