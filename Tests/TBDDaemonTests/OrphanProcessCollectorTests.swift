@@ -296,6 +296,11 @@ struct OrphanProcessCollectorTests {
 
         #expect(signaller.terminated == [701, 700])
         #expect(signaller.killed == [700])
+        // Through the pid-exact door, never the one that escalates to a group
+        // kill: a process group is a superset of the group, not of this
+        // closure, and could hold a pid the sweep protected.
+        #expect(signaller.terminatedProcessOnly == [701, 700])
+        #expect(signaller.killedProcessOnly == [700])
         let unwrapped = try #require(record)
         #expect(unwrapped.kind == .orphanProcess)
         #expect(unwrapped.worktreePath == dead)
