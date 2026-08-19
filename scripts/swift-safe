@@ -12,9 +12,13 @@ guarantees at most one build on the machine, so the variable is a total-machine
 compiler bound and whoever owns the machine sets it.  A value above the
 machine's core count is honored too, with one stderr line saying so: jobs past
 the cores buy memory pressure rather than speed, and a typo would otherwise be
-invisible.  A ``-j``/``--jobs`` on the command line may lower it but not raise
-it — an agent that wants more parallelism is asking to overrule the machine
-owner, and should raise ``TBD_SWIFT_JOBS`` instead.
+invisible.  That line reports the count this build will actually use — never a
+configured bound a command-line ``-j`` then lowers, which would warn about a
+build that never happens — and only when ``TBD_SWIFT_JOBS`` was exported: the
+shipped default has nothing to say to the owner of a one-core container, who
+set nothing and could not silence it.  A ``-j``/``--jobs`` on the command line
+may lower it but not raise it — an agent that wants more parallelism is asking
+to overrule the machine owner, and should raise ``TBD_SWIFT_JOBS`` instead.
 
 Waiting is reported on stderr, never stdout, so a caller parsing SwiftPM's
 output sees nothing from this wrapper.  The holder writes ``pid``/``cwd``/
@@ -139,18 +143,31 @@ def _job_limit() -> int:
     # No ceiling on purpose: the machine-global lock means this is the whole
     # machine's compiler bound, and exporting the variable is its owner's
     # consent. A cap on top of serialization was doubly conservative.
-    limit = _positive_integer("TBD_SWIFT_JOBS", DEFAULT_JOBS)
-    # Say it, do not refuse it: past the core count the extra jobs only add
-    # memory pressure, so a stray digit costs a swapping machine and nothing
-    # else would report it. `os.cpu_count()` can answer None, and a machine
-    # that cannot count its own cores has no ground to warn from.
+    return _positive_integer("TBD_SWIFT_JOBS", DEFAULT_JOBS)
+
+
+def _report_jobs_past_the_core_count(effective: int) -> None:
+    """Say it, do not refuse it, once the effective job count is known.
+
+    Past the core count the extra jobs only add memory pressure, so a stray
+    digit costs a swapping machine and nothing else would report it.  Two
+    things keep the line honest.  It is given the count this build will really
+    run with, so a bound a command-line `-j` lowers is never warned about —
+    the warned-of build would not have happened.  And it speaks only for a
+    value somebody exported: the shipped default on a one-core machine would
+    otherwise name a variable its owner never set, with no way to silence it.
+    `os.cpu_count()` can answer None, and a machine that cannot count its own
+    cores has no ground to warn from.
+    """
+    if "TBD_SWIFT_JOBS" not in os.environ:
+        return
     cores = os.cpu_count()
-    if cores is not None and limit > cores:
+    if cores is not None and effective > cores:
         _report(
-            f"swift-safe: TBD_SWIFT_JOBS={limit} exceeds this machine's {cores} "
-            "CPU cores; jobs beyond core count add memory pressure without speedup"
+            f"swift-safe: this build will use {effective} jobs, past this "
+            f"machine's {cores} CPU cores; jobs beyond core count add memory "
+            "pressure without speedup"
         )
-    return limit
 
 
 def _requested_jobs(arguments: list[str]) -> int | None:
@@ -208,6 +225,7 @@ def _bounded_arguments(subcommand: str, arguments: list[str]) -> list[str]:
     )
     requested = _requested_jobs(job_arguments)
     if requested is None:
+        _report_jobs_past_the_core_count(limit)
         if subcommand == "run":
             return [subcommand, "--jobs", str(limit), *arguments]
         return [*result, "--jobs", str(limit)]
@@ -218,6 +236,7 @@ def _bounded_arguments(subcommand: str, arguments: list[str]) -> list[str]:
             f"requested SwiftPM --jobs {requested} exceeds TBD_SWIFT_JOBS={limit}; "
             "lower the command, or raise TBD_SWIFT_JOBS if you own this machine"
         )
+    _report_jobs_past_the_core_count(requested)
     return result
 
 

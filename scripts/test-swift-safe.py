@@ -186,7 +186,8 @@ class SwiftSafeTests(unittest.TestCase):
         result = self.run_runner("build", TBD_SWIFT_JOBS="9999")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "build --jobs 9999")
-        self.assertIn("TBD_SWIFT_JOBS=9999 exceeds this machine's", result.stderr)
+        self.assertIn("this build will use 9999 jobs", result.stderr)
+        self.assertIn("past this machine's", result.stderr)
         self.assertIn("CPU cores", result.stderr)
         self.assertIn("without speedup", result.stderr)
 
@@ -195,7 +196,41 @@ class SwiftSafeTests(unittest.TestCase):
         result = self.run_runner("build", TBD_SWIFT_JOBS="1")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "build --jobs 1")
-        self.assertNotIn("exceeds this machine's", result.stderr)
+        self.assertNotIn("past this machine's", result.stderr)
+
+    def test_a_command_line_lowering_the_count_silences_the_report(self):
+        """The line speaks for the build that runs, not for the bound it read.
+
+        `-j 2` is what SwiftPM is handed, so warning about the 9999 the
+        command line just lowered would name a build nobody asked for.
+        """
+        result = self.run_runner("build", "-j", "2", TBD_SWIFT_JOBS="9999")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "build -j 2")
+        self.assertNotIn("past this machine's", result.stderr)
+        self.assertNotIn("9999", result.stderr)
+
+    def test_a_command_line_count_past_the_core_count_is_still_reported(self):
+        """Mutation guard: lowering the bound is not the same as being safe."""
+        result = self.run_runner("build", "-j", "9998", TBD_SWIFT_JOBS="9999")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "build -j 9998")
+        self.assertIn("this build will use 9998 jobs", result.stderr)
+
+    def test_the_shipped_default_never_reports_on_any_machine(self):
+        """Nobody exported anything, so there is nobody to warn — and no knob.
+
+        This must hold on a one-core machine or container too, where the
+        shipped default of 2 is itself past the core count: a line naming
+        TBD_SWIFT_JOBS to someone who never set it is noise they cannot
+        silence.  Asserted with no `TBD_SWIFT_JOBS` in the environment at all,
+        which `runner_env` guarantees.
+        """
+        result = self.run_runner("build")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "build --jobs 2")
+        self.assertNotIn("past this machine's", result.stderr)
+        self.assertNotIn("TBD_SWIFT_JOBS", result.stderr)
 
     def test_zero_and_negative_exported_job_counts_are_rejected(self):
         for value in ("0", "-1"):

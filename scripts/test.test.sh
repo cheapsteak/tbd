@@ -587,7 +587,10 @@ test_detection_is_off_by_default_off_ci() {
 # Position-independent, last one wins, and neither flag reaches `swift test`.
 test_fingerprint_flags_are_consumed_and_last_wins() {
   local fix; fix="$(mkfix)"
-  RUN_ENV=(FAKE_SWIFT_LEAK="$fix/home/tbd/profiles")
+  # TBD_SWIFT_JOBS is pinned because the forwarded `-j 2` must clear
+  # swift-safe's bound: left unset it rides on that wrapper's DEFAULT_JOBS, and
+  # lowering that constant would red this case as if forwarding had broken.
+  RUN_ENV=(FAKE_SWIFT_LEAK="$fix/home/tbd/profiles" TBD_SWIFT_JOBS=2)
   run_wrapper "$fix" --parallel --fingerprint -j 2 --no-fingerprint
   assert_ok "a trailing --no-fingerprint wins" "$RUN_RC"
   assert_missing "flags are not forwarded to swift" "$(dump_of "$fix")" "fingerprint"
