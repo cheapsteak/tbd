@@ -137,12 +137,20 @@ enumerating what is banned.
   migrations, and the frozen `v1`–`v84` names.
 - **Statement allowlist** — every statement must lead with one of
   `CREATE TABLE IF NOT EXISTS`, `CREATE [UNIQUE] INDEX IF NOT EXISTS`,
-  `ALTER TABLE … ADD [COLUMN]`, `ALTER TABLE … RENAME`, `DROP TABLE IF EXISTS`,
-  `DROP INDEX IF EXISTS`, `INSERT OR IGNORE`, `INSERT OR REPLACE`, `UPDATE`,
-  `DELETE FROM`, or `PRAGMA`. Anything outside the list fails, and the author
-  either rewrites or takes the Swift escape hatch. Widening the list is a
-  deliberate edit with a reviewer, which is the point: each addition is a claim
-  that the new form is idempotent and order-independent.
+  `ALTER TABLE … ADD [COLUMN]`, `DROP TABLE IF EXISTS`, `DROP INDEX IF EXISTS`,
+  `INSERT OR IGNORE`, `INSERT OR REPLACE`, `UPDATE`, or `DELETE FROM`. Anything
+  outside the list fails, and the author either rewrites or takes the Swift
+  escape hatch. Widening the list is a deliberate edit with a reviewer, which is
+  the point: each addition is a claim that the new form is idempotent and
+  order-independent.
+
+  Two forms are excluded for failing exactly that claim. `ALTER TABLE … RENAME`
+  has no `IF EXISTS` spelling and no loader-side skip, so it cannot be replayed
+  and cannot be reordered. `PRAGMA foreign_keys` is a documented no-op inside a
+  transaction, and GRDB runs every migration inside one — so it would appear to
+  work in any standalone replay and silently do nothing in production. Both
+  belong to the Swift escape hatch, where GRDB's `foreignKeyChecks:` parameter
+  handles the table-rebuild case properly.
 - **Idempotent DDL** — `CREATE TABLE` and `CREATE INDEX` must carry
   `IF NOT EXISTS`; `DROP` must carry `IF EXISTS`.
 - **History is frozen** — a migration file present on `origin/main` may not be
@@ -210,7 +218,7 @@ harness.
   logged without throwing; column absent is added.
 - Ordering — out-of-order filenames register sorted, and a Swift escape-hatch
   migration interleaves by identifier rather than landing last.
-- `Bundle.module` discovery finds the directory in the test context. This is
+- The locator finds the directory in the test context. This is
   the tripwire for the resource bundle silently vanishing in CI.
 - Splitter parity, Swift half — a shared fixture table of adversarial SQL
   (semicolons inside literals, trigger bodies, comments, trailing empties)
@@ -223,7 +231,7 @@ harness.
 
 ## Risk: the resource bundle must resolve
 
-`Bundle.module` must resolve for `TBDDaemonLib` in two contexts: the daemon run
+The resource directory must resolve for `TBDDaemonLib` in two contexts: the daemon run
 from `.build/debug/TBDDaemon` by `scripts/restart.sh`, and `scripts/test.sh`.
 `TBDCLI` never opens the database, so it is not a third.
 
@@ -271,13 +279,19 @@ install included.
 
 Past that, the database serves as its own manifest: if `grdb_migrations` holds
 timestamp-shaped identifiers but the bundle yielded zero `.sql` files, the
-bundle is present but truncated, and the daemon refuses to start. That catches
-the subtler hazard — a daemon shipped or copied with a hollowed-out bundle,
-which would otherwise run happily against an under-migrated schema.
+loader logs that at error level naming the directory and the applied
+identifiers. It does **not** refuse to start, and the distinction is worth
+being precise about, because the obvious stricter choice is wrong here.
 
-The second gate is dormant until the first `.sql` migration ships, since an
-empty directory and an empty applied-identifier set are the normal state at
-cutover. The first gate is live immediately.
+A bundle that is present but hollowed out is not a failure mode `.copy`
+produces — SwiftPM either ships the directory or does not, and the case where
+it does not is gate one, which throws. Meanwhile "directory present, zero
+files" is the ordinary state of any worktree branched before the first
+migration landed. In a repository where several worktrees are checked out at
+once and `scripts/restart.sh` from any of them replaces the daemon
+machine-wide, refusing to start there would brick the fleet on a routine branch
+switch — a far worse outcome than the shipping accident it was meant to catch.
+So gate two reports and gate one enforces.
 
 It deliberately does not fire on a partial mismatch. Downgrading to an older
 build is a legitimate way to hold applied identifiers with no corresponding
@@ -401,7 +415,7 @@ people remember and becomes a check that fails.
 
 ## What would show this is wrong
 
-- The `Bundle.module` spike fails in the daemon or under `scripts/test.sh`.
+- The resource bundle fails to resolve in the daemon or under `scripts/test.sh`.
 - The statement allowlist proves too narrow in practice and migrations start
   routinely taking the Swift escape hatch, which would mean the conflict rate
   never fell.
