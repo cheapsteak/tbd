@@ -174,6 +174,14 @@ skipped. A process whose age could not be parsed fails this gate too, which is
 what makes "an unparseable start time keeps the process" true on both grace arms
 rather than only the one that has no archive instant.
 
+The worktree rows have their own staleness problem and the phase reads them
+itself for the same reason: the archived list and the live list have to agree
+with each other, and a row archived between them belongs to neither. It would
+then reach the "absent from the database" arm and be graced from process start
+rather than from `archivedAt` — the weaker gate, on the exact row whose grace was
+just supposed to begin. Both reads happen together, inside the phase, and a
+failure on either skips it.
+
 ## Exclusions
 
 These are the safety core, and the first is not hypothetical.
