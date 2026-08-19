@@ -117,7 +117,22 @@ public struct ClaudeCloudSessionStore: Sendable {
     /// moves it back to `pending` with a compare-and-set and claims only when
     /// that UPDATE actually changed a row. The transition is both the claim
     /// and the truth: an attempt is in flight again, so the pending window
-    /// governs it again.
+    /// governs it again — which is why the reclaim UPDATE also rewrites
+    /// `createdAt` to this call's `now`, not just `state`. `createdAt` carries
+    /// two meanings that stay consistent under that rewrite: it is the clock
+    /// `list`'s pending-failure window measures, and it is the session's
+    /// creation time in the `list` payload. A reclaimed row that goes on to
+    /// resolve did have its session created by THIS attempt, so both readings
+    /// stay true. Leaving the old `createdAt` in place — writing only `state`
+    /// — would make a row reclaimed the instant before a `list` poll read as
+    /// already past the window under the ORIGINAL attempt's age, so the very
+    /// next sweep marks it `failed` again while the reclaiming caller's spawn
+    /// is still in flight, and a third replay reclaims and spawns a second
+    /// time: the double-spawn hazard this method exists to close. The cost is
+    /// that a reclaimed row no longer records when the original attempt ran —
+    /// acceptable because nothing reads that: `list()` projects only
+    /// `resolved` rows, and the row is retained under the new timestamp
+    /// either way.
     public func claimForSpawn(
         idempotencyKey: String, repoKey: String, repoPath: String,
         branch: String?, environment: String?, paramsJSON: String, now: Date
@@ -146,13 +161,17 @@ public struct ClaudeCloudSessionStore: Sendable {
                 }
                 guard let expected = reclaimable else { return .inFlight }
                 try db.execute(
-                    sql: "UPDATE claude_cloud_session SET state = ? WHERE id = ? AND state = ?",
+                    sql: """
+                    UPDATE claude_cloud_session SET state = ?, createdAt = ?
+                    WHERE id = ? AND state = ?
+                    """,
                     arguments: [
-                        ClaudeCloudLedgerState.pending.rawValue, existing.id, expected,
+                        ClaudeCloudLedgerState.pending.rawValue, now, existing.id, expected,
                     ])
                 guard db.changesCount == 1 else { return .inFlight }
                 var claimed = existing
                 claimed.state = ClaudeCloudLedgerState.pending.rawValue
+                claimed.createdAt = now
                 return .claimed(claimed)
             }
             let row = ClaudeCloudSessionRow(

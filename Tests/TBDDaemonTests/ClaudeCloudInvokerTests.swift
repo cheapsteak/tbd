@@ -1099,6 +1099,85 @@ struct ClaudeCloudInvokerTests {
         #expect(try await db.claudeCloudSessions.rows().count == 1)
     }
 
+    /// The bug `claimForSpawn`'s own doc comment claims not to have: a
+    /// reclaim UPDATE that rewrote `state` back to `pending` but left
+    /// `createdAt` alone left the pending-failure window still measuring
+    /// from the ORIGINAL attempt's timestamp, so a `list()` poll landing
+    /// after that original window — but well inside a fresh one — re-failed
+    /// a row whose reclaiming spawn was still genuinely in flight. A further
+    /// replay then read `failed` again and reclaimed AND SPAWNED a second
+    /// time: the exact double-spawn hazard `claimForSpawn` exists to close.
+    ///
+    /// The gate is what makes this discriminating rather than lucky: it
+    /// holds the reclaiming spawn open, so the `list()` poll and the third
+    /// replay both provably land while that spawn is still running, not
+    /// after it quietly finished.
+    @Test func aReclaimSurvivesAListPollBeforeItResolves() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await seedRepo(db)
+
+        let originalCreatedAt = Date(timeIntervalSince1970: 1_000_000)
+        _ = try await db.claudeCloudSessions.upsertPending(
+            idempotencyKey: "tbd-1", repoKey: "acme/api", repoPath: "/tmp/api",
+            branch: "fix-ci", environment: nil, paramsJSON: "{}", now: originalCreatedAt)
+
+        // Age the row past the pending window so a `list()` marks it
+        // `failed` — the precondition a reclaim needs to observe.
+        let markFailedAt = originalCreatedAt.addingTimeInterval(601)
+        _ = try await invoker(
+            db: db, spawner: FakeClaudeSpawner(outcomes: []), now: { markFailedAt }
+        ).run(config(), verb: ["list"], stdin: nil, timeout: 30, contractVersion: 2)
+        #expect(try await db.claudeCloudSessions.rows().first?.state
+            == ClaudeCloudLedgerState.failed.rawValue)
+
+        // Reclaim: a same-key `create` replay standing in for a spawn
+        // genuinely in flight. `reclaimAt` is what a correct reclaim stamps
+        // as the row's NEW `createdAt`.
+        let reclaimAt = markFailedAt
+        let gate = SpawnGate()
+        let spawner = GatedClaudeSpawner(
+            gate: gate, outcome: .completed(status: 0, output: successOutput, stderr: ""))
+        let reclaimInvoker = ClaudeCloudInvoker(db: db, spawner: spawner, now: { reclaimAt })
+
+        async let reclaimResult = reclaimInvoker.run(
+            config(), verb: ["create"], stdin: createBody(), timeout: 60, contractVersion: 2)
+        // Resumes only once the reclaim's spawn is genuinely under way, so
+        // the poll below races a real in-flight spawn rather than a
+        // completed one.
+        await gate.waitUntilEntered()
+
+        // The discriminating poll. `pollAt` is chosen so the two readings of
+        // "how old is this row" disagree: 300s elapsed measured from
+        // `reclaimAt` (INSIDE the 600s window — a correct reclaim keeps the
+        // row `pending`), but 901s elapsed measured from the untouched
+        // `originalCreatedAt` (OUTSIDE the window — the bug re-fails the row
+        // here, while the reclaiming spawn is still running).
+        let pollAt = reclaimAt.addingTimeInterval(300)
+        _ = try await invoker(
+            db: db, spawner: FakeClaudeSpawner(outcomes: []), now: { pollAt }
+        ).run(config(), verb: ["list"], stdin: nil, timeout: 30, contractVersion: 2)
+        let polled = try #require(try await db.claudeCloudSessions.rows().first)
+        #expect(polled.state == ClaudeCloudLedgerState.pending.rawValue)
+
+        // The consequence: with the row correctly still `pending`, a THIRD
+        // replay of the same key must be refused rather than spawning a
+        // second real cloud session. Reuses the SAME gated spawner so its
+        // request count is the discriminator — the unique index on
+        // `idempotencyKey` pins the ROW count at one either way, which is
+        // exactly why a row-count assertion cannot see this class of bug.
+        let thirdInvoker = ClaudeCloudInvoker(db: db, spawner: spawner, now: { pollAt })
+        let thirdResult = try await thirdInvoker.run(
+            config(), verb: ["create"], stdin: createBody(), timeout: 60, contractVersion: 2)
+        #expect(thirdResult.exitCode == 3)
+        #expect(thirdResult.decodedError?.code == "in_progress")
+        #expect(spawner.requestsSnapshot().count == 1)
+
+        await gate.release()
+        let reclaimed = try await reclaimResult
+        #expect(reclaimed.exitCode == 0)
+        #expect(try await db.claudeCloudSessions.rows().count == 1)
+    }
+
     private func gatedInvoker(
         db: TBDDatabase, spawner: GatedClaudeSpawner,
         now: @escaping @Sendable () -> Date = { Date(timeIntervalSince1970: 1_000_000) }
