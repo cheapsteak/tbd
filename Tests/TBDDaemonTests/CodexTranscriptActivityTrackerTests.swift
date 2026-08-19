@@ -6,6 +6,8 @@ import Testing
 @Suite("Codex transcript activity tracker")
 struct CodexTranscriptActivityTrackerTests {
     private static let initialTailByteLimit = Int(CodexTranscriptActivityTracker.initialTailByteLimit)
+    private static let incrementalReadByteLimit =
+        Int(CodexTranscriptActivityTracker.incrementalReadByteLimit)
     private static let maxBufferedRecordByteCount =
         CodexTranscriptActivityTracker.maxBufferedRecordByteCount
 
@@ -206,6 +208,63 @@ struct CodexTranscriptActivityTrackerTests {
         #expect(state == .idle)
     }
 
+    @Test func incrementalBacklogDoesNotPublishIntermediateLifecycleState() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        try fixture.write(event(type: "task_complete", turnID: "seed"))
+        let tracker = CodexTranscriptActivityTracker()
+        let worktreeID = UUID()
+        _ = await tracker.observe(transcriptPath: fixture.path, worktreeID: worktreeID)
+
+        try fixture.append(
+            event(type: "task_started", turnID: "a")
+                + event(
+                    type: "agent_message", turnID: "padding",
+                    exactByteCount: Self.incrementalReadByteLimit)
+                + event(type: "task_complete", turnID: "a"))
+
+        let catchingUp = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+        let caughtUp = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+
+        #expect(catchingUp == nil)
+        #expect(caughtUp == .idle)
+    }
+
+    @Test func incrementalBacklogPreservesRecordCrossingPollBoundaries() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        try fixture.write(event(type: "task_complete", turnID: "seed"))
+        let tracker = CodexTranscriptActivityTracker()
+        let worktreeID = UUID()
+        _ = await tracker.observe(transcriptPath: fixture.path, worktreeID: worktreeID)
+
+        let crossingStart = event(type: "task_started", turnID: "a")
+        let firstPadding = event(
+            type: "agent_message", turnID: "first-padding",
+            exactByteCount: Self.incrementalReadByteLimit - crossingStart.count / 2)
+        let secondPadding = event(
+            type: "agent_message", turnID: "second-padding",
+            exactByteCount: Self.incrementalReadByteLimit)
+        try fixture.append(
+            firstPadding
+                + crossingStart
+                + secondPadding
+                + event(type: "task_complete", turnID: "different-turn"))
+
+        let firstCatchUp = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+        let secondCatchUp = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+        let caughtUp = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+
+        #expect(firstCatchUp == nil)
+        #expect(secondCatchUp == nil)
+        #expect(caughtUp == .working)
+    }
+
     @Test func laterObservationsDoNotRescanAlreadyConsumedBytes() async throws {
         let fixture = try TranscriptFixture()
         defer { fixture.remove() }
@@ -257,6 +316,14 @@ struct CodexTranscriptActivityTrackerTests {
             type: "agent_message", turnID: "oversized",
             terminated: false,
             exactByteCount: Self.maxBufferedRecordByteCount + 128))
+        let catchingUp = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+        let boundedBuffer = await tracker.bufferedRecordState(transcriptPath: fixture.path)
+
+        #expect(catchingUp == nil)
+        #expect(boundedBuffer?.byteCount == Self.maxBufferedRecordByteCount)
+        #expect(boundedBuffer?.isDiscarding == false)
+
         _ = await tracker.observe(transcriptPath: fixture.path, worktreeID: worktreeID)
         let discarding = await tracker.bufferedRecordState(transcriptPath: fixture.path)
 
@@ -287,9 +354,12 @@ struct CodexTranscriptActivityTrackerTests {
                 type: "task_started", turnID: "oversized",
                 exactByteCount: Self.maxBufferedRecordByteCount + 128)
                 + event(type: "task_complete", turnID: "a"))
+        let catchingUp = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
         let state = await tracker.observe(
             transcriptPath: fixture.path, worktreeID: worktreeID)
 
+        #expect(catchingUp == nil)
         #expect(state == .idle)
     }
 

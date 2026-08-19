@@ -47,7 +47,9 @@ struct CodexTurnLifecycleReducer: Sendable {
 
 /// Reconstructs a Codex session's turn activity from its append-only JSONL
 /// transcript. Each path is bootstrapped from a bounded tail once, then only
-/// from the last successfully-read offset on later observations.
+/// from the last successfully-read offset on later observations. An observation
+/// advances by a bounded amount and reports no state until it reaches the EOF
+/// captured at its start, so partially-reduced lifecycle history is never shown.
 actor CodexTranscriptActivityTracker {
     private struct Baseline {
         var worktreeID: UUID
@@ -59,6 +61,7 @@ actor CodexTranscriptActivityTracker {
 
     private static let readChunkSize = 64 * 1024
     static let initialTailByteLimit: UInt64 = 1024 * 1024
+    static let incrementalReadByteLimit = initialTailByteLimit
     static let maxBufferedRecordByteCount = Int(initialTailByteLimit)
     private var baselines: [String: Baseline] = [:]
 
@@ -86,9 +89,12 @@ actor CodexTranscriptActivityTracker {
                     worktreeID: worktreeID)
             }
 
+            let unreadByteCount = fileSize - baseline.offset
+            let readByteCount = min(unreadByteCount, Self.incrementalReadByteLimit)
+            let observationEndOffset = baseline.offset + readByteCount
             try handle.seek(toOffset: baseline.offset)
-            while baseline.offset < fileSize {
-                let remaining = fileSize - baseline.offset
+            while baseline.offset < observationEndOffset {
+                let remaining = observationEndOffset - baseline.offset
                 let count = Int(min(UInt64(Self.readChunkSize), remaining))
                 guard let chunk = try handle.read(upToCount: count), !chunk.isEmpty else { return nil }
                 baseline.offset += UInt64(chunk.count)
@@ -96,6 +102,7 @@ actor CodexTranscriptActivityTracker {
             }
 
             baselines[transcriptPath] = baseline
+            guard baseline.offset == fileSize else { return nil }
             return baseline.reducer.activityState
         } catch {
             return nil
