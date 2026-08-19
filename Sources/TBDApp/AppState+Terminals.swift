@@ -300,7 +300,10 @@ extension AppState {
             let current = existingByID[snapshot.id]
             let incomingActivityOrderObservedAt = snapshot.activityStateOrderObservedAt
                 ?? snapshot.activityStateObservedAt
+            let incomingSessionOrderObservedAt = snapshot.sessionOrderObservedAt
+                ?? incomingActivityOrderObservedAt
             let currentSessionOrderObservedAt = terminalSessionOrderObservedAt[snapshot.id]
+                ?? current?.sessionOrderObservedAt
                 ?? current.flatMap { terminal in
                     guard terminal.activityStateSource == .hookEvent("SessionStart") else {
                         return nil
@@ -314,7 +317,11 @@ extension AppState {
             } ?? false
             let shouldKeepCurrentIdentity = identityChanged
                 && currentSessionOrderObservedAt.map { currentOrder in
-                    incomingActivityOrderObservedAt.map { $0 <= currentOrder } ?? true
+                    incomingSessionOrderObservedAt.map { $0 <= currentOrder } ?? true
+                } == true
+            let shouldKeepCurrentSessionOrder = current != nil
+                && currentSessionOrderObservedAt.map { currentOrder in
+                    incomingSessionOrderObservedAt.map { $0 < currentOrder } ?? true
                 } == true
             let snapshotPredatesCurrentSession = current != nil
                 && currentSessionOrderObservedAt.map { currentOrder in
@@ -323,13 +330,24 @@ extension AppState {
             if shouldKeepCurrentIdentity, let current {
                 merged.claudeSessionID = current.claudeSessionID
                 merged.transcriptPath = current.transcriptPath
+            }
+            if shouldKeepCurrentIdentity || shouldKeepCurrentSessionOrder, let current {
+                merged.sessionOrderObservedAt = current.sessionOrderObservedAt
+                    ?? currentSessionOrderObservedAt
+                if let currentSessionOrderObservedAt {
+                    terminalSessionOrderObservedAt[snapshot.id] = currentSessionOrderObservedAt
+                }
             } else if current == nil || identityChanged {
-                if let incomingActivityOrderObservedAt,
+                if let incomingSessionOrderObservedAt,
                    snapshot.claudeSessionID != nil || snapshot.transcriptPath != nil {
-                    terminalSessionOrderObservedAt[snapshot.id] = incomingActivityOrderObservedAt
+                    terminalSessionOrderObservedAt[snapshot.id] = incomingSessionOrderObservedAt
                 } else {
                     terminalSessionOrderObservedAt.removeValue(forKey: snapshot.id)
                 }
+            } else if let incomingSessionOrderObservedAt,
+                      currentSessionOrderObservedAt.map({ incomingSessionOrderObservedAt > $0 })
+                        != false {
+                terminalSessionOrderObservedAt[snapshot.id] = incomingSessionOrderObservedAt
             }
             // A list response may have scanned the same transcript path before
             // an accepted SessionStart boundary. Its later response timestamp
@@ -544,7 +562,8 @@ extension AppState {
             terminalPresentationOrderObservedAt.removeValue(forKey: terminal.id)
         }
         if terminal.claudeSessionID != nil || terminal.transcriptPath != nil,
-           let observedAt = terminal.activityStateOrderObservedAt
+           let observedAt = terminal.sessionOrderObservedAt
+            ?? terminal.activityStateOrderObservedAt
             ?? terminal.activityStateObservedAt {
             terminalSessionOrderObservedAt[terminal.id] = observedAt
         } else {

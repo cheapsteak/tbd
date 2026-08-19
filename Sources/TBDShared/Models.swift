@@ -598,6 +598,10 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     /// `/compact` rollovers (where Claude may pick a different
     /// `~/.claude/projects/` subdirectory than cwd would suggest).
     public var transcriptPath: String?
+    /// Ordering watermark for accepted SessionStart identity rollovers.
+    /// Independent from activity and prompt timestamps because either hook
+    /// can arrive late while describing the previous session.
+    public var sessionOrderObservedAt: Date?
     public var kind: TerminalKind?
     public var activityState: TerminalActivityState
     /// Activity reconstructed for display from the current agent transcript.
@@ -692,6 +696,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
                 suspendedAt: Date? = nil, suspendedSnapshot: String? = nil,
                 profileID: UUID? = nil,
                 transcriptPath: String? = nil,
+                sessionOrderObservedAt: Date? = nil,
                 kind: TerminalKind? = nil,
                 activityState: TerminalActivityState = .unknown,
                 presentationActivityState: TerminalActivityState? = nil,
@@ -718,6 +723,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         self.suspendedSnapshot = suspendedSnapshot
         self.profileID = profileID
         self.transcriptPath = transcriptPath
+        self.sessionOrderObservedAt = sessionOrderObservedAt
         self.kind = kind
         self.activityState = activityState
         self.presentationActivityState = presentationActivityState
@@ -736,7 +742,8 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case id, worktreeID, tmuxWindowID, tmuxPaneID, label, createdAt
-        case pinnedAt, claudeSessionID, suspendedAt, suspendedSnapshot, profileID, transcriptPath, kind
+        case pinnedAt, claudeSessionID, suspendedAt, suspendedSnapshot, profileID, transcriptPath
+        case sessionOrderObservedAt, kind
         case activityState, presentationActivityState, presentationActivityObservedAt
         case hibernatedAt, hibernateReason, keepWarm, pendingResumeAt, watchDeskRole
         case activityStateSource, activityStateObservedAt, activityStateOrderObservedAt
@@ -757,6 +764,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         suspendedSnapshot = try c.decodeIfPresent(String.self, forKey: .suspendedSnapshot)
         profileID = try c.decodeIfPresent(UUID.self, forKey: .profileID)
         transcriptPath = try c.decodeIfPresent(String.self, forKey: .transcriptPath)
+        sessionOrderObservedAt = try c.decodeIfPresent(Date.self, forKey: .sessionOrderObservedAt)
         kind = try c.decodeIfPresent(TerminalKind.self, forKey: .kind)
         activityState = try c.decodeIfPresent(TerminalActivityState.self, forKey: .activityState) ?? .unknown
         presentationActivityState = try c.decodeIfPresent(

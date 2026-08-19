@@ -2885,9 +2885,10 @@ extension RPCRouter {
         }()
 
         // Session identity, prompt retraction, and (for Codex) the idle fact
-        // are one ordered store transaction. A delayed older SessionStart must
-        // not rewrite identity or clear a prompt before its activity fact is
-        // rejected as stale.
+        // are reconciled atomically on their independent ordering rails. A
+        // delayed old-session prompt must not suppress a genuine identity
+        // rollover, while a delayed SessionStart must not clear that newer
+        // prompt or regress activity.
         guard let sessionApplication = try await db.terminals.applySessionStart(
             id: terminal.id,
             sessionID: params.sessionID,
@@ -2899,7 +2900,7 @@ extension RPCRouter {
         // transcript reducer. Capture the current EOF even when the path is
         // unchanged, so an unmatched task_started from the interrupted session
         // cannot be re-published as working; later appended turns still win.
-        if sessionApplication.activityObservation != nil,
+        if terminal.isCodexTerminal,
            let transcriptPath = sessionApplication.transcriptPath,
            !transcriptPath.isEmpty {
             await codexActivityTracker.establishSessionBoundary(

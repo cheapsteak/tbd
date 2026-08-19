@@ -642,6 +642,7 @@ private func decodedCodexSnapshot(
     var terminal = state.terminals[worktreeID]?.first
     #expect(terminal?.claudeSessionID == "new-session")
     #expect(terminal?.transcriptPath == "/tmp/new-session.jsonl")
+    #expect(terminal?.sessionOrderObservedAt == sessionStartAt)
     #expect(terminal?.presentationActivityState == nil)
     #expect(state.terminalSessionOrderObservedAt[terminalID] == sessionStartAt)
 
@@ -655,6 +656,53 @@ private func decodedCodexSnapshot(
     terminal = state.terminals[worktreeID]?.first
     #expect(terminal?.activityStateSource == .hookEvent("SessionStart"))
     #expect(terminal?.presentationActivityState == .idle)
+}
+
+@MainActor
+@Test func appState_persistedSessionOrderFencesStaleSnapshotIdentity() throws {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    let oldActivityAt = Date(timeIntervalSinceReferenceDate: 20)
+    let staleSessionAt = Date(timeIntervalSinceReferenceDate: 25)
+    let currentSessionAt = Date(timeIntervalSinceReferenceDate: 30)
+    let misleadingNewerActivityAt = Date(timeIntervalSinceReferenceDate: 40)
+    let current = Terminal(
+        id: terminalID,
+        worktreeID: worktreeID,
+        tmuxWindowID: "@1",
+        tmuxPaneID: "%1",
+        label: "Codex",
+        claudeSessionID: "current-session",
+        transcriptPath: "/tmp/current-session.jsonl",
+        sessionOrderObservedAt: currentSessionAt,
+        kind: .codex,
+        activityState: .idle,
+        activityStateSource: .hookEvent("Stop"),
+        activityStateObservedAt: oldActivityAt,
+        activityStateOrderObservedAt: oldActivityAt)
+    state.terminals = [worktreeID: [current]]
+
+    var stale = current
+    stale.claudeSessionID = "stale-session"
+    stale.transcriptPath = "/tmp/stale-session.jsonl"
+    stale.sessionOrderObservedAt = staleSessionAt
+    stale.activityStateOrderObservedAt = misleadingNewerActivityAt
+    state.adoptTerminalSnapshot([stale], worktreeID: worktreeID)
+
+    let terminal = state.terminals[worktreeID]?.first
+    #expect(terminal?.claudeSessionID == "current-session")
+    #expect(terminal?.transcriptPath == "/tmp/current-session.jsonl")
+    #expect(terminal?.sessionOrderObservedAt == currentSessionAt)
+    #expect(state.terminalSessionOrderObservedAt[terminalID] == currentSessionAt)
+
+    var sameIdentityStale = try #require(terminal)
+    sameIdentityStale.sessionOrderObservedAt = staleSessionAt
+    sameIdentityStale.activityStateOrderObservedAt = misleadingNewerActivityAt
+    state.adoptTerminalSnapshot([sameIdentityStale], worktreeID: worktreeID)
+
+    #expect(state.terminals[worktreeID]?.first?.sessionOrderObservedAt == currentSessionAt)
+    #expect(state.terminalSessionOrderObservedAt[terminalID] == currentSessionAt)
 }
 
 @MainActor

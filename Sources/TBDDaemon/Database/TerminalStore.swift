@@ -21,6 +21,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var suspendedSnapshot: String?
     var profile_id: String?
     var transcriptPath: String?
+    var sessionOrderObservedAt: Date?
     var kind: String?
     var activityState: String?
     var hibernatedAt: Date?
@@ -52,6 +53,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.suspendedSnapshot = terminal.suspendedSnapshot
         self.profile_id = terminal.profileID?.uuidString
         self.transcriptPath = terminal.transcriptPath
+        self.sessionOrderObservedAt = terminal.sessionOrderObservedAt
         self.kind = terminal.kind?.rawValue
         self.activityState = terminal.activityState.rawValue
         self.hibernatedAt = terminal.hibernatedAt
@@ -91,6 +93,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             suspendedSnapshot: suspendedSnapshot,
             profileID: profile_id.flatMap(UUID.init(uuidString:)),
             transcriptPath: transcriptPath,
+            sessionOrderObservedAt: sessionOrderObservedAt,
             kind: kind.flatMap(TerminalKind.init(rawValue:)),
             activityState: activityState.flatMap(TerminalActivityState.init(rawValue:)) ?? .unknown,
             hibernatedAt: hibernatedAt,
@@ -392,19 +395,17 @@ public struct TerminalStore: Sendable {
         }
     }
 
-    /// Apply a SessionStart as one ordered database fact. Session identity,
-    /// prompt retraction, the shared event-order watermark, and Codex's idle
-    /// transition either all advance together or none do.
+    /// Apply a SessionStart with independently ordered session, prompt, and
+    /// activity facts in one database transaction.
     ///
-    /// A prompt at the same timestamp wins the tie, matching
-    /// `SessionStateResolver`: SessionStart cannot prove whether that more
-    /// specific wait was raised before or after it. SessionStart itself is
-    /// first-wins at an equal activity watermark: a differently-identified
-    /// event cannot roll identity backward, while an exact retry is an
-    /// idempotent no-op and therefore cannot move a transcript boundary.
-    /// Claude does not assert an activity value here, but still advances the
-    /// ordering watermark so an older activity or SessionStart cannot finish
-    /// late and roll the row back.
+    /// Session identity is ordered only against other SessionStarts. A delayed
+    /// permission or activity hook can carry a later server-receipt timestamp
+    /// while still describing the previous session, so it must not suppress a
+    /// genuine identity rollover. Prompt and activity each retain their own
+    /// conservative ordering: a same/newer prompt survives, and an older
+    /// SessionStart cannot regress newer activity. SessionStart is first-wins
+    /// at an equal session watermark; an exact retry is an idempotent no-op and
+    /// therefore cannot move a transcript boundary.
     func applySessionStart(
         id: UUID,
         sessionID: String,
@@ -415,33 +416,29 @@ public struct TerminalStore: Sendable {
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Terminal not found")
             }
-            if record.awaitingInputObservedAt.map({ $0 >= observedAt }) == true {
+            if let storedSessionOrder = record.sessionOrderObservedAt,
+               storedSessionOrder >= observedAt {
                 return nil
             }
-            let storedOrderObservedAt = record.activityStateOrderObservedAt
-                ?? record.activityStateObservedAt
-            if storedOrderObservedAt == observedAt {
-                return nil
-            }
+            record.sessionOrderObservedAt = observedAt
 
             let isCodex = record.kind == TerminalKind.codex.rawValue
                 || record.label == TerminalLabel.codex
             let activityObservation: AppliedTerminalActivityObservation?
             if isCodex {
-                guard let applied = applyActivityObservationToRecord(
+                activityObservation = applyActivityObservationToRecord(
                     to: &record,
                     activityState: .idle,
                     source: .hookEvent("SessionStart"),
                     observedAt: observedAt,
                     replaceSameValue: true
-                ) else { return nil }
-                activityObservation = applied
+                )
             } else {
-                if let storedOrderObservedAt, storedOrderObservedAt > observedAt {
-                    return nil
+                let storedActivityOrder = record.activityStateOrderObservedAt
+                    ?? record.activityStateObservedAt
+                if storedActivityOrder.map({ $0 < observedAt }) != false {
+                    record.activityStateOrderObservedAt = observedAt
                 }
-                record.activityStateOrderObservedAt = observedAt
-                clearAwaitingInputIfNotNewer(record: &record, than: observedAt)
                 activityObservation = nil
             }
 
@@ -449,9 +446,10 @@ public struct TerminalStore: Sendable {
             if let transcriptPath {
                 record.transcriptPath = transcriptPath
             }
-            // The activity helper already performs this for Codex. Keep the
-            // call here so Claude and any future non-Codex agent share the
-            // same strict-older prompt retraction rule.
+            // The activity helper performs this when it accepts Codex's idle
+            // fact. Keep the independent call so a rejected stale activity
+            // transition and every non-Codex SessionStart still retract only
+            // a prompt known to be strictly older.
             clearAwaitingInputIfNotNewer(record: &record, than: observedAt)
             try record.update(db)
             return AppliedTerminalSessionStart(
@@ -475,6 +473,7 @@ public struct TerminalStore: Sendable {
             }
             record.claudeSessionID = nil
             record.transcriptPath = nil
+            record.sessionOrderObservedAt = nil
             record.suspendedAt = nil
             record.suspendedSnapshot = nil
             record.hibernatedAt = nil

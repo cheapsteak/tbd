@@ -2215,6 +2215,11 @@ final class AppState: ObservableObject {
         if let tp = delta.transcriptPath {
             terminal.transcriptPath = tp
         }
+        if let incomingOrder = delta.sessionOrderObservedAt {
+            terminal.sessionOrderObservedAt = incomingOrder
+        } else if identityChanged {
+            terminal.sessionOrderObservedAt = nil
+        }
         // Presentation belongs to one session identity. An ordered delta is
         // an accepted SessionStart boundary even when Codex reused the same
         // session/path; an unordered legacy delta is a boundary only when the

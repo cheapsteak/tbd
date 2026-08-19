@@ -1549,6 +1549,17 @@ public final class TBDDatabase: Sendable {
                 defaults: DatabaseValue.null)
         }
 
+        // Session identity has its own event order. Permission and activity
+        // hooks can arrive after a real SessionStart even though they describe
+        // the previous session, so neither timestamp can safely order the
+        // session ID/path pair. NULL preserves the unknown state for rows that
+        // predate this independently observed fact.
+        migrator.registerMigration("v86_terminal_session_order") { db in
+            try db.addColumnIfMissing(
+                table: "terminal", column: "sessionOrderObservedAt", type: .datetime,
+                defaults: DatabaseValue.null)
+        }
+
         return migrator
     }
 }
