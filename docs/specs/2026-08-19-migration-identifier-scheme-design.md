@@ -100,9 +100,16 @@ are idempotent in SQL already and need no help; the lint requires those forms.
 
 Three of the 84 existing migrations do procedural Swift rather than DDL — `v10`,
 `v14_worktree_location`, and `v35_worktree_nullable_repo`, all of them old. A
-post-cutover migration that genuinely needs Swift is registered inline in
-`Database.swift` under a timestamp identifier and joins the same sorted merge,
-so it lands in authoring order rather than at the end. Such a migration still
+post-cutover migration that genuinely needs Swift is registered in
+`SQLMigrationLoader.inlineTimestampMigrations` under a timestamp identifier and
+joins the same sorted merge, so it lands in authoring order rather than at the
+end. It lives there rather than in `Database.swift` so that the frozen block's
+file is never reopened for new work.
+
+Because the escape hatch is Swift, it is still bound by the idempotent helpers
+in `MigrationHelpers.swift` — and the `migration_use_helpers` SwiftLint rule
+must name its file, or the rule governs only the frozen block and can never
+fire on anything new. Such a migration still
 conflicts textually with a concurrent one. At the historical rate that is about
 one migration in twenty-five.
 
@@ -257,11 +264,20 @@ covers the test harness, where the resource bundle sits beside
 `TBDPackageTests.xctest` rather than inside it. No absolute path is baked in,
 and exhausting the list throws an error naming every path searched.
 
-The stronger check uses the database as its own manifest: if `grdb_migrations`
-holds timestamp-shaped identifiers but the bundle yielded zero `.sql` files,
-the resource bundle is missing or truncated and the daemon refuses to start.
-That catches the real hazard — a daemon shipped or copied without its
-resources, which would otherwise run happily against an under-migrated schema.
+Refusal then has two gates, checked in that order. A locator that exhausted
+every candidate throws outright, so a daemon that cannot find its resource
+bundle at all fails at startup regardless of what the database holds — a fresh
+install included.
+
+Past that, the database serves as its own manifest: if `grdb_migrations` holds
+timestamp-shaped identifiers but the bundle yielded zero `.sql` files, the
+bundle is present but truncated, and the daemon refuses to start. That catches
+the subtler hazard — a daemon shipped or copied with a hollowed-out bundle,
+which would otherwise run happily against an under-migrated schema.
+
+The second gate is dormant until the first `.sql` migration ships, since an
+empty directory and an empty applied-identifier set are the normal state at
+cutover. The first gate is live immediately.
 
 It deliberately does not fire on a partial mismatch. Downgrading to an older
 build is a legitimate way to hold applied identifiers with no corresponding
