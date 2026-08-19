@@ -16,6 +16,7 @@ private struct TranscriptParseCacheEntry {
 private struct CodexPresentationIdentity: Equatable {
     let sessionID: String?
     let transcriptPath: String?
+    let activityOrderObservedAt: Date?
 }
 
 /// Caches the last `TranscriptParser.parse` result per session file path.
@@ -513,22 +514,36 @@ extension RPCRouter {
         let params = try decoder.decode(TerminalListParams.self, from: paramsData)
         var terminals = try await db.terminals.list(worktreeID: params.worktreeID)
         var codexTargets: [CodexTranscriptActivityTracker.Target] = []
+        var durableBoundaryTargets: [CodexTranscriptActivityTracker.Target] = []
         let observedIdentities = Dictionary(uniqueKeysWithValues: terminals
             .filter(\.isCodexTerminal)
             .map {
                 ($0.id, CodexPresentationIdentity(
                     sessionID: $0.claudeSessionID,
-                    transcriptPath: $0.transcriptPath))
+                    transcriptPath: $0.transcriptPath,
+                    activityOrderObservedAt: $0.activityStateOrderObservedAt
+                        ?? $0.activityStateObservedAt))
             })
 
         for index in terminals.indices where terminals[index].isCodexTerminal {
             guard let transcriptPath = terminals[index].transcriptPath,
                   !transcriptPath.isEmpty else { continue }
-            codexTargets.append(CodexTranscriptActivityTracker.Target(
+            let target = CodexTranscriptActivityTracker.Target(
                 transcriptPath: transcriptPath,
-                worktreeID: terminals[index].worktreeID))
+                worktreeID: terminals[index].worktreeID)
+            codexTargets.append(target)
+            if terminals[index].observedActivity?.source == .hookEvent("SessionStart") {
+                durableBoundaryTargets.append(target)
+            }
         }
 
+        // SessionStart's persisted activity fact is the restart-safe boundary
+        // cue. On a fresh tracker, start at the path's current EOF rather than
+        // replaying an orphan task_started from before that lifecycle event.
+        // Existing baselines are never moved, so later appended turns remain
+        // visible even while SessionStart is still the last raw hook fact.
+        await codexActivityTracker.establishSessionBoundariesIfAbsent(
+            transcripts: durableBoundaryTargets)
         let codexObservation = await codexActivityTracker.observeStamped(
             transcripts: codexTargets,
             now: now)
@@ -548,7 +563,9 @@ extension RPCRouter {
             }
             let currentIdentity = CodexPresentationIdentity(
                 sessionID: terminals[index].claudeSessionID,
-                transcriptPath: transcriptPath)
+                transcriptPath: transcriptPath,
+                activityOrderObservedAt: terminals[index].activityStateOrderObservedAt
+                    ?? terminals[index].activityStateObservedAt)
             guard observedIdentities[terminals[index].id] == currentIdentity else {
                 terminals[index].presentationActivityState = nil
                 terminals[index].presentationActivityObservedAt = codexObservation.observedAt

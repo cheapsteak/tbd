@@ -397,9 +397,13 @@ public struct TerminalStore: Sendable {
     ///
     /// A prompt at the same timestamp wins the tie, matching
     /// `SessionStateResolver`: SessionStart cannot prove whether that more
-    /// specific wait was raised before or after it. Claude does not assert an
-    /// activity value here, but still advances the ordering watermark so an
-    /// older activity or SessionStart cannot finish late and roll the row back.
+    /// specific wait was raised before or after it. SessionStart itself is
+    /// first-wins at an equal activity watermark: a differently-identified
+    /// event cannot roll identity backward, while an exact retry is an
+    /// idempotent no-op and therefore cannot move a transcript boundary.
+    /// Claude does not assert an activity value here, but still advances the
+    /// ordering watermark so an older activity or SessionStart cannot finish
+    /// late and roll the row back.
     func applySessionStart(
         id: UUID,
         sessionID: String,
@@ -411,6 +415,11 @@ public struct TerminalStore: Sendable {
                 throw DatabaseError(message: "Terminal not found")
             }
             if record.awaitingInputObservedAt.map({ $0 >= observedAt }) == true {
+                return nil
+            }
+            let storedOrderObservedAt = record.activityStateOrderObservedAt
+                ?? record.activityStateObservedAt
+            if storedOrderObservedAt == observedAt {
                 return nil
             }
 
@@ -427,8 +436,6 @@ public struct TerminalStore: Sendable {
                 ) else { return nil }
                 activityObservation = applied
             } else {
-                let storedOrderObservedAt = record.activityStateOrderObservedAt
-                    ?? record.activityStateObservedAt
                 if let storedOrderObservedAt, storedOrderObservedAt > observedAt {
                     return nil
                 }

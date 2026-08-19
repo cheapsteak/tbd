@@ -305,6 +305,41 @@ struct TerminalSessionEventHandlerTests {
             worktreeID: worktree.id) == .working)
     }
 
+    @Test(
+        "the first differently-identified SessionStart wins an equal timestamp",
+        arguments: [TerminalKind.codex, .claude]
+    )
+    func equalTimeDifferentSessionStartPreservesFirstIdentity(
+        kind: TerminalKind
+    ) async throws {
+        let label = kind == .codex ? TerminalLabel.codex : "Claude"
+        let (terminal, _) = try await makeTerminal(label: label, kind: kind)
+        let observedAt = Date(timeIntervalSince1970: 1_700_000_100)
+        let sameTimeRouter = makeRouter(now: { observedAt })
+        let first = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "first-session",
+                transcriptPath: "/tmp/first-session.jsonl",
+                source: "SessionStart"))
+        let second = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "second-session",
+                transcriptPath: "/tmp/second-session.jsonl",
+                source: "SessionStart"))
+
+        #expect((await sameTimeRouter.handle(first)).success)
+        #expect((await sameTimeRouter.handle(second)).success)
+
+        let updated = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(updated.claudeSessionID == "first-session")
+        #expect(updated.transcriptPath == "/tmp/first-session.jsonl")
+        #expect(updated.activityStateOrderObservedAt == observedAt)
+    }
+
     @Test("unknown terminalID is a soft no-op (success, no error)")
     func unknownTerminalSoftSuccess() async throws {
         let request = try RPCRequest(

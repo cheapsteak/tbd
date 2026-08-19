@@ -168,6 +168,12 @@ final class AppState: ObservableObject {
         return index
     }
     @Published var terminals: [UUID: [Terminal]] = [:]
+    /// Ordering watermark for transcript presentation snapshots whose value
+    /// did not change. Kept outside `Terminal` so a two-second poll confirming
+    /// the same state does not publish a different row solely because its
+    /// response stamp advanced; still rejects an older overlapping response
+    /// that carries a different value.
+    var terminalPresentationOrderObservedAt: [UUID: Date] = [:]
     @Published var notes: [UUID: [Note]] = [:]
     @Published var focusedTabCloseContext: TabCloseContext?
     /// Unread notification summaries keyed by worktree ID. The cmd-K jump

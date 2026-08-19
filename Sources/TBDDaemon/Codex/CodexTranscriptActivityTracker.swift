@@ -205,6 +205,30 @@ actor CodexTranscriptActivityTracker {
     /// Bytes appended after the captured EOF are reduced normally, so the next
     /// genuine turn supersedes the boundary.
     func establishSessionBoundary(transcriptPath: String, worktreeID: UUID) {
+        establishSessionBoundary(
+            transcriptPath: transcriptPath,
+            worktreeID: worktreeID,
+            onlyIfAbsent: false)
+    }
+
+    /// Reconstruct the boundary from a persisted SessionStart activity fact
+    /// after daemon restart. Existing baselines always win: repeatedly moving
+    /// a live baseline to EOF would hide a genuine turn appended since start.
+    func establishSessionBoundariesIfAbsent(transcripts: [Target]) {
+        for transcript in transcripts where baselines[transcript.transcriptPath] == nil {
+            establishSessionBoundary(
+                transcriptPath: transcript.transcriptPath,
+                worktreeID: transcript.worktreeID,
+                onlyIfAbsent: true)
+        }
+    }
+
+    private func establishSessionBoundary(
+        transcriptPath: String,
+        worktreeID: UUID,
+        onlyIfAbsent: Bool
+    ) {
+        if onlyIfAbsent, baselines[transcriptPath] != nil { return }
         batchPathWorktreeIDs[transcriptPath] = worktreeID
         do {
             let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: transcriptPath))

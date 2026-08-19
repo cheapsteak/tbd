@@ -295,8 +295,21 @@ extension AppState {
             guard !terminalDeletionsAwaitingRecreationCompletion.contains(snapshot.id),
                   recentlyDeletedTerminalIDs[snapshot.id] == nil else { return nil }
             var merged = snapshot
-            merged.reconcileActivityObservation(against: existingByID[snapshot.id])
+            let current = existingByID[snapshot.id]
+            let presentationOrderObservedAt = merged.reconcileActivityObservation(
+                against: current,
+                presentationOrderObservedAt: terminalPresentationOrderObservedAt[snapshot.id]
+                    ?? current?.presentationActivityObservedAt)
+            if let presentationOrderObservedAt {
+                terminalPresentationOrderObservedAt[snapshot.id] = presentationOrderObservedAt
+            } else {
+                terminalPresentationOrderObservedAt.removeValue(forKey: snapshot.id)
+            }
             return merged
+        }
+        let visibleIDs = Set(visible.map(\.id))
+        for terminal in existing where !visibleIDs.contains(terminal.id) {
+            terminalPresentationOrderObservedAt.removeValue(forKey: terminal.id)
         }
         guard visible != existing else { return }
         terminals[worktreeID] = visible
@@ -708,7 +721,11 @@ extension Terminal {
     /// as a same-value legacy echo or applied with both halves cleared. When
     /// timestamps tie, explicit interrupts and permission waits are preserved,
     /// while ambiguous working/non-working ties resolve toward non-working.
-    mutating func reconcileActivityObservation(against current: Terminal?) {
+    @discardableResult
+    mutating func reconcileActivityObservation(
+        against current: Terminal?,
+        presentationOrderObservedAt: Date?
+    ) -> Date? {
         let incomingIsComplete = activityStateSource != nil && activityStateObservedAt != nil
         guard let current else {
             if !incomingIsComplete {
@@ -716,10 +733,12 @@ extension Terminal {
                 activityStateObservedAt = nil
                 activityStateOrderObservedAt = nil
             }
-            return
+            return self.presentationActivityObservedAt
         }
 
-        reconcilePresentationObservation(against: current)
+        let reconciledPresentationOrderObservedAt = reconcilePresentationObservation(
+            against: current,
+            orderObservedAt: presentationOrderObservedAt)
 
         let currentIsComplete = current.activityStateSource != nil
             && current.activityStateObservedAt != nil
@@ -763,6 +782,7 @@ extension Terminal {
             activityStateObservedAt = nil
             activityStateOrderObservedAt = nil
         }
+        return reconciledPresentationOrderObservedAt
     }
 
     /// Transcript presentation is response-derived and has its own ordering;
@@ -772,9 +792,23 @@ extension Terminal {
     /// costlier error. A timestamped nil is authoritative "could not establish
     /// activity" evidence (unreadable, incomplete, or capped), so it clears a
     /// prior working presentation instead of serving cached positive state.
-    private mutating func reconcilePresentationObservation(against current: Terminal) {
+    private mutating func reconcilePresentationObservation(
+        against current: Terminal,
+        orderObservedAt: Date?
+    ) -> Date? {
+        let identityIsUnchanged = claudeSessionID == current.claudeSessionID
+            && transcriptPath == current.transcriptPath
+        // Presentation ordering is scoped to one transcript identity. A new
+        // identity must not inherit either positive state or an ordering
+        // watermark from the transcript it replaced; legacy rows without a
+        // timestamp therefore conservatively clear a prior working result.
+        guard identityIsUnchanged else { return presentationActivityObservedAt }
+
+        let currentOrderObservedAt = orderObservedAt
+            ?? current.presentationActivityObservedAt
+        let incomingObservedAt = presentationActivityObservedAt
         let shouldKeepCurrent: Bool
-        switch (presentationActivityObservedAt, current.presentationActivityObservedAt) {
+        switch (incomingObservedAt, currentOrderObservedAt) {
         case let (incomingAt?, currentAt?) where incomingAt < currentAt:
             shouldKeepCurrent = true
         case let (incomingAt?, currentAt?) where incomingAt == currentAt:
@@ -786,10 +820,18 @@ extension Terminal {
             shouldKeepCurrent = false
         }
 
-        if shouldKeepCurrent {
+        let stableValue = presentationActivityState == current.presentationActivityState
+            && identityIsUnchanged
+        if shouldKeepCurrent || stableValue {
             presentationActivityState = current.presentationActivityState
             presentationActivityObservedAt = current.presentationActivityObservedAt
         }
+        guard !shouldKeepCurrent else { return currentOrderObservedAt }
+        if let incomingObservedAt,
+           let currentOrderObservedAt {
+            return max(incomingObservedAt, currentOrderObservedAt)
+        }
+        return incomingObservedAt ?? currentOrderObservedAt
     }
 
     private func preservesActivityAtEqualOrder(

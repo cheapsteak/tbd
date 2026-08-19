@@ -5,7 +5,10 @@ import Testing
 @testable import TBDShared
 import TestSupport
 
-@Suite("terminal.activityEvent handler")
+// Several race regressions intentionally block a synchronous date provider.
+// Serial execution prevents those waits from occupying every cooperative
+// executor thread before their test bodies can signal the matching release.
+@Suite("terminal.activityEvent handler", .serialized)
 struct TerminalActivityEventHandlerTests {
     let db: TBDDatabase
     let router: RPCRouter

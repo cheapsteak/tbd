@@ -227,6 +227,58 @@ private func decodedCodexSnapshot(
 }
 
 @MainActor
+@Test func appState_stablePresentationAdvancesOrderWithoutChangingTerminal() throws {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    let firstAt = Date(timeIntervalSinceReferenceDate: 10)
+    let stableAt = Date(timeIntervalSinceReferenceDate: 20)
+    let newerAt = Date(timeIntervalSinceReferenceDate: 30)
+    let unavailableAt = Date(timeIntervalSinceReferenceDate: 40)
+    let original = Terminal(
+        id: terminalID,
+        worktreeID: worktreeID,
+        tmuxWindowID: "@1",
+        tmuxPaneID: "%1",
+        label: "Codex",
+        kind: .codex,
+        activityState: .idle,
+        presentationActivityState: .working,
+        presentationActivityObservedAt: firstAt,
+        activityStateSource: .hookEvent("Stop"),
+        activityStateObservedAt: firstAt,
+        activityStateOrderObservedAt: firstAt)
+    state.terminals = [worktreeID: [original]]
+
+    var stable = original
+    stable.presentationActivityObservedAt = stableAt
+    state.adoptTerminalSnapshot([stable], worktreeID: worktreeID)
+    #expect(try #require(state.terminals[worktreeID]?.first) == original)
+
+    // The non-published watermark still advances, so an overlapping older
+    // response with a different value cannot roll presentation backward.
+    var delayedIdle = original
+    delayedIdle.presentationActivityState = .idle
+    delayedIdle.presentationActivityObservedAt = firstAt.addingTimeInterval(5)
+    state.adoptTerminalSnapshot([delayedIdle], worktreeID: worktreeID)
+    #expect(try #require(state.terminals[worktreeID]?.first) == original)
+
+    var newerIdle = original
+    newerIdle.presentationActivityState = .idle
+    newerIdle.presentationActivityObservedAt = newerAt
+    state.adoptTerminalSnapshot([newerIdle], worktreeID: worktreeID)
+    #expect(state.terminals[worktreeID]?.first?.presentationActivityState == .idle)
+    #expect(state.terminals[worktreeID]?.first?.presentationActivityObservedAt == newerAt)
+
+    var authoritativeUnknown = newerIdle
+    authoritativeUnknown.presentationActivityState = nil
+    authoritativeUnknown.presentationActivityObservedAt = unavailableAt
+    state.adoptTerminalSnapshot([authoritativeUnknown], worktreeID: worktreeID)
+    #expect(state.terminals[worktreeID]?.first?.presentationActivityState == nil)
+    #expect(state.terminals[worktreeID]?.first?.presentationActivityObservedAt == unavailableAt)
+}
+
+@MainActor
 @Test func appState_legacyTranscriptSnapshotsRemainArrivalOrdered() throws {
     let state = AppState()
     let worktreeID = UUID()
@@ -803,6 +855,46 @@ private func appState_halfProvenanceDeltaClearsBothHalvesWhenApplied(
     #expect(terminal.presentationActivityState == nil)
     #expect(terminal.presentationActivityObservedAt == unavailableAt)
     #expect(!WorktreeRowView.isForegroundWorking(terminal))
+}
+
+@MainActor
+@Test func appState_legacyPathRolloverDoesNotCarryPriorWorkingPresentation() {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    state.terminals = [
+        worktreeID: [
+            Terminal(
+                id: terminalID,
+                worktreeID: worktreeID,
+                tmuxWindowID: "@1",
+                tmuxPaneID: "%1",
+                label: "Codex",
+                claudeSessionID: "old-session",
+                transcriptPath: "/tmp/old-session.jsonl",
+                kind: .codex,
+                presentationActivityState: .working,
+                presentationActivityObservedAt: Date(timeIntervalSinceReferenceDate: 20))
+        ]
+    ]
+    let rollover = Terminal(
+        id: terminalID,
+        worktreeID: worktreeID,
+        tmuxWindowID: "@1",
+        tmuxPaneID: "%1",
+        label: "Codex",
+        claudeSessionID: "current-session",
+        transcriptPath: "/tmp/current-session.jsonl",
+        kind: .codex,
+        presentationActivityState: nil,
+        presentationActivityObservedAt: nil)
+
+    state.adoptTerminalSnapshot([rollover], worktreeID: worktreeID)
+
+    let terminal = state.terminals[worktreeID]![0]
+    #expect(terminal.claudeSessionID == "current-session")
+    #expect(terminal.presentationActivityState == nil)
+    #expect(terminal.presentationActivityObservedAt == nil)
 }
 
 @MainActor
