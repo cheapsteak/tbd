@@ -3070,10 +3070,7 @@ extension RPCRouter {
         // between exactly this stamp and the one `recordAwaitingInputReason`
         // writes above, so a test that cannot pin both ends cannot pin the
         // decision at all.
-        let source: FactSource = params.origin == .userInterrupt
-            ? .terminalInterrupt
-            : .hookEvent(RPCMethod.terminalActivityEvent)
-        guard terminal.isCodexTerminal || params.origin == .userInterrupt else {
+        guard terminal.isCodexTerminal else {
             // Claude and shell hooks retain their established last-writer
             // behavior. Their persisted activity is a hibernation input, not
             // Codex transcript presentation, so this fix must not impose the
@@ -3092,7 +3089,7 @@ extension RPCRouter {
             try await db.terminals.setActivityState(
                 id: terminal.id,
                 activityState: params.activityState,
-                source: source,
+                source: .hookEvent(RPCMethod.terminalActivityEvent),
                 observedAt: observedAt)
             subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
                 terminalID: terminal.id,
@@ -3101,6 +3098,9 @@ extension RPCRouter {
             )))
             return .ok()
         }
+        let source: FactSource = params.origin == .userInterrupt
+            ? .terminalInterrupt
+            : .hookEvent(RPCMethod.terminalActivityEvent)
         let activityApplication = try await db.terminals.applyActivityObservation(
             id: terminal.id,
             activityState: params.activityState,

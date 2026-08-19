@@ -296,6 +296,15 @@ extension AppState {
         let visible = snapshots.compactMap { snapshot -> Terminal? in
             guard !terminalDeletionsAwaitingRecreationCompletion.contains(snapshot.id),
                   recentlyDeletedTerminalIDs[snapshot.id] == nil else { return nil }
+            guard snapshot.isCodexTerminal else {
+                // Claude and shell rows retain terminal.list's established
+                // arrival-order replacement. The hidden ordering rails belong
+                // only to Codex transcript presentation and must not survive a
+                // terminal incarnation changing away from Codex.
+                terminalPresentationOrderObservedAt.removeValue(forKey: snapshot.id)
+                terminalSessionOrderObservedAt.removeValue(forKey: snapshot.id)
+                return snapshot
+            }
             var merged = snapshot
             let current = existingByID[snapshot.id]
             let incomingActivityOrderObservedAt = snapshot.activityStateOrderObservedAt
@@ -463,11 +472,13 @@ extension AppState {
 
         // Remaining terminals: Codex (Ctrl+C), Claude, or legacy nil-kind sessions.
         if let idx = terminals[terminal.worktreeID]?.firstIndex(where: { $0.id == terminalID }) {
-            let observedAt = Date()
             terminals[terminal.worktreeID]?[idx].activityState = .idle
-            terminals[terminal.worktreeID]?[idx].activityStateSource = .terminalInterrupt
-            terminals[terminal.worktreeID]?[idx].activityStateObservedAt = observedAt
-            terminals[terminal.worktreeID]?[idx].activityStateOrderObservedAt = observedAt
+            if isCodex {
+                let observedAt = Date()
+                terminals[terminal.worktreeID]?[idx].activityStateSource = .terminalInterrupt
+                terminals[terminal.worktreeID]?[idx].activityStateObservedAt = observedAt
+                terminals[terminal.worktreeID]?[idx].activityStateOrderObservedAt = observedAt
+            }
         }
 
         Task {
@@ -475,7 +486,7 @@ extension AppState {
                 try await daemonClient.setTerminalActivity(
                     terminalID: terminalID,
                     activityState: .idle,
-                    origin: .userInterrupt
+                    origin: isCodex ? .userInterrupt : nil
                 )
             } catch {
                 logger.debug("Failed to publish terminal interrupt state: \(error.localizedDescription, privacy: .public)")
@@ -556,6 +567,11 @@ extension AppState {
     /// UUID is reused. Seed both hidden ordering rails from that row rather
     /// than retaining watermarks from the terminal incarnation it replaced.
     private func replaceTerminalObservationOrder(with terminal: Terminal) {
+        guard terminal.isCodexTerminal else {
+            terminalPresentationOrderObservedAt.removeValue(forKey: terminal.id)
+            terminalSessionOrderObservedAt.removeValue(forKey: terminal.id)
+            return
+        }
         if let observedAt = terminal.presentationActivityObservedAt {
             terminalPresentationOrderObservedAt[terminal.id] = observedAt
         } else {

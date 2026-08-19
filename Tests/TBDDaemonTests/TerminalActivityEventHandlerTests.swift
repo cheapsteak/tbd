@@ -246,6 +246,32 @@ struct TerminalActivityEventHandlerTests {
         #expect(updated.awaitingInputObservedAt == nil)
     }
 
+    @Test("Claude user-interrupt origin retains legacy unordered persistence")
+    func claudeUserInterruptRetainsLegacyUnorderedPersistence() async throws {
+        let terminal = try await makeTerminal(kind: .claude, label: "Claude")
+        let olderInterruptAt = Date(timeIntervalSince1970: 1_700_000_100)
+        let newerStoredAt = olderInterruptAt.addingTimeInterval(1)
+        try await db.terminals.setActivityState(
+            id: terminal.id,
+            activityState: .working,
+            source: .hookEvent("UserPromptSubmit"),
+            observedAt: newerStoredAt)
+        let router = makeRouter(now: { olderInterruptAt })
+        let request = try RPCRequest(
+            method: RPCMethod.terminalActivityEvent,
+            params: TerminalActivityEventParams(
+                terminalID: terminal.id,
+                activityState: .idle,
+                origin: .userInterrupt))
+
+        #expect((await router.handle(request)).success)
+
+        let updated = try #require(await db.terminals.get(id: terminal.id))
+        #expect(updated.activityState == .idle)
+        #expect(updated.activityStateSource == .hookEvent(RPCMethod.terminalActivityEvent))
+        #expect(updated.activityStateObservedAt == olderInterruptAt)
+    }
+
     @Test("unknown terminalID is a soft no-op")
     func unknownTerminalSoftSuccess() async throws {
         let request = try RPCRequest(

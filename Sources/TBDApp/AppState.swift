@@ -2197,6 +2197,24 @@ final class AppState: ObservableObject {
         guard let idx = terminals[delta.worktreeID]?.firstIndex(where: { $0.id == delta.terminalID }) else {
             return
         }
+        guard terminals[delta.worktreeID]![idx].isCodexTerminal else {
+            // Preserve the pre-Codex-reconciliation contract for Claude and
+            // shell: the last arriving session delta wins, and nil path keeps
+            // the current path. Ordering/presentation watermarks are Codex-only.
+            let currentTerminal = terminals[delta.worktreeID]![idx]
+            var terminal = currentTerminal
+            terminal.claudeSessionID = delta.sessionID
+            if let transcriptPath = delta.transcriptPath {
+                terminal.transcriptPath = transcriptPath
+            }
+            terminal.sessionOrderObservedAt = nil
+            terminalPresentationOrderObservedAt.removeValue(forKey: delta.terminalID)
+            terminalSessionOrderObservedAt.removeValue(forKey: delta.terminalID)
+            if terminal != currentTerminal {
+                terminals[delta.worktreeID]?[idx] = terminal
+            }
+            return
+        }
         let currentTerminal = terminals[delta.worktreeID]![idx]
         var terminal = currentTerminal
         if let incomingOrder = delta.sessionOrderObservedAt,
@@ -2245,6 +2263,14 @@ final class AppState: ObservableObject {
 
     private func applyTerminalActivityDelta(_ delta: TerminalActivityDelta) {
         guard let idx = terminals[delta.worktreeID]?.firstIndex(where: { $0.id == delta.terminalID }) else {
+            return
+        }
+        guard terminals[delta.worktreeID]![idx].isCodexTerminal else {
+            // Claude and shell activity deltas remain raw last-arrival state;
+            // provenance ordering is part of the Codex presentation fix only.
+            terminals[delta.worktreeID]?[idx].activityState = delta.activityState
+            terminalPresentationOrderObservedAt.removeValue(forKey: delta.terminalID)
+            terminalSessionOrderObservedAt.removeValue(forKey: delta.terminalID)
             return
         }
         var terminal = terminals[delta.worktreeID]![idx]

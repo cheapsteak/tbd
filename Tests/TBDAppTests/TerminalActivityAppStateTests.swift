@@ -57,6 +57,144 @@ private func decodedCodexSnapshot(
 }
 
 @MainActor
+@Test(
+    "non-Codex snapshots retain legacy arrival-order replacement",
+    arguments: [TerminalKind.claude, .shell]
+)
+func appState_nonCodexSnapshotRetainsLegacyArrivalOrder(kind: TerminalKind) {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    let currentAt = Date(timeIntervalSinceReferenceDate: 20)
+    let incomingAt = Date(timeIntervalSinceReferenceDate: 10)
+    state.terminals = [
+        worktreeID: [
+            Terminal(
+                id: terminalID,
+                worktreeID: worktreeID,
+                tmuxWindowID: "@1",
+                tmuxPaneID: "%1",
+                label: kind == .claude ? "Claude" : "shell",
+                claudeSessionID: "current-session",
+                transcriptPath: "/tmp/current.jsonl",
+                sessionOrderObservedAt: currentAt,
+                kind: kind,
+                activityState: .idle,
+                activityStateSource: .terminalInterrupt,
+                activityStateObservedAt: currentAt,
+                activityStateOrderObservedAt: currentAt)
+        ]
+    ]
+    state.terminalPresentationOrderObservedAt[terminalID] = currentAt
+    state.terminalSessionOrderObservedAt[terminalID] = currentAt
+    let snapshot = Terminal(
+        id: terminalID,
+        worktreeID: worktreeID,
+        tmuxWindowID: "@1",
+        tmuxPaneID: "%1",
+        label: kind == .claude ? "Claude" : "shell",
+        claudeSessionID: "arrived-session",
+        transcriptPath: "/tmp/arrived.jsonl",
+        sessionOrderObservedAt: incomingAt,
+        kind: kind,
+        activityState: .working,
+        activityStateSource: .hookEvent("legacy"),
+        activityStateObservedAt: incomingAt,
+        activityStateOrderObservedAt: incomingAt)
+
+    state.adoptTerminalSnapshot([snapshot], worktreeID: worktreeID)
+
+    let adopted = state.terminals[worktreeID]![0]
+    #expect(adopted.claudeSessionID == "arrived-session")
+    #expect(adopted.transcriptPath == "/tmp/arrived.jsonl")
+    #expect(adopted.activityState == .working)
+    #expect(adopted.activityStateSource == .hookEvent("legacy"))
+    #expect(state.terminalPresentationOrderObservedAt[terminalID] == nil)
+    #expect(state.terminalSessionOrderObservedAt[terminalID] == nil)
+}
+
+@MainActor
+@Test(
+    "non-Codex session deltas retain legacy last-arrival identity",
+    arguments: [TerminalKind.claude, .shell]
+)
+func appState_nonCodexSessionDeltaRetainsLegacyArrivalOrder(kind: TerminalKind) {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    let currentAt = Date(timeIntervalSinceReferenceDate: 20)
+    state.terminals = [
+        worktreeID: [
+            Terminal(
+                id: terminalID,
+                worktreeID: worktreeID,
+                tmuxWindowID: "@1",
+                tmuxPaneID: "%1",
+                label: kind == .claude ? "Claude" : "shell",
+                claudeSessionID: "current-session",
+                transcriptPath: "/tmp/current.jsonl",
+                sessionOrderObservedAt: currentAt,
+                kind: kind)
+        ]
+    ]
+    state.terminalPresentationOrderObservedAt[terminalID] = currentAt
+    state.terminalSessionOrderObservedAt[terminalID] = currentAt
+
+    state.handleDelta(.terminalSessionUpdated(TerminalSessionDelta(
+        terminalID: terminalID,
+        worktreeID: worktreeID,
+        sessionID: "arrived-session",
+        transcriptPath: "/tmp/arrived.jsonl",
+        sessionOrderObservedAt: Date(timeIntervalSinceReferenceDate: 10))))
+
+    let adopted = state.terminals[worktreeID]![0]
+    #expect(adopted.claudeSessionID == "arrived-session")
+    #expect(adopted.transcriptPath == "/tmp/arrived.jsonl")
+    #expect(state.terminalPresentationOrderObservedAt[terminalID] == nil)
+    #expect(state.terminalSessionOrderObservedAt[terminalID] == nil)
+}
+
+@MainActor
+@Test(
+    "non-Codex activity deltas retain legacy raw last-arrival behavior",
+    arguments: [TerminalKind.claude, .shell]
+)
+func appState_nonCodexActivityDeltaRetainsLegacyArrivalOrder(kind: TerminalKind) {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    let currentAt = Date(timeIntervalSinceReferenceDate: 20)
+    state.terminals = [
+        worktreeID: [
+            Terminal(
+                id: terminalID,
+                worktreeID: worktreeID,
+                tmuxWindowID: "@1",
+                tmuxPaneID: "%1",
+                label: kind == .claude ? "Claude" : "shell",
+                kind: kind,
+                activityState: .working,
+                activityStateSource: .hookEvent("current"),
+                activityStateObservedAt: currentAt,
+                activityStateOrderObservedAt: currentAt)
+        ]
+    ]
+
+    state.handleDelta(.terminalActivityUpdated(TerminalActivityDelta(
+        terminalID: terminalID,
+        worktreeID: worktreeID,
+        activityState: .idle,
+        activityStateSource: .terminalInterrupt,
+        activityStateObservedAt: Date(timeIntervalSinceReferenceDate: 10),
+        activityStateOrderObservedAt: Date(timeIntervalSinceReferenceDate: 10))))
+
+    let adopted = state.terminals[worktreeID]![0]
+    #expect(adopted.activityState == .idle)
+    #expect(adopted.activityStateSource == .hookEvent("current"))
+    #expect(adopted.activityStateObservedAt == currentAt)
+}
+
+@MainActor
 @Test func appState_handlesTerminalActivityUpdatedDeltaInPlace() {
     let state = AppState()
     let worktreeID = UUID()
@@ -1612,7 +1750,40 @@ private func appState_halfProvenanceDeltaClearsBothHalvesWhenApplied(
 }
 
 @MainActor
-@Test func appState_escInterruptClearsClaudeActivityImmediately() {
+@Test(
+    "Claude Ctrl+C and Esc retain legacy raw-idle interrupt behavior",
+    arguments: [false, true]
+)
+func appState_claudeInterruptRetainsLegacyRawIdle(viaEscape: Bool) {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    let observedAt = Date(timeIntervalSinceReferenceDate: 20)
+    state.terminals = [
+        worktreeID: [
+            Terminal(
+                id: terminalID,
+                worktreeID: worktreeID,
+                tmuxWindowID: "@1",
+                tmuxPaneID: "%1",
+                label: "Claude",
+                kind: .claude,
+                activityState: .working,
+                activityStateSource: .hookEvent("UserPromptSubmit"),
+                activityStateObservedAt: observedAt
+            )
+        ]
+    ]
+
+    state.handleTerminalInterrupt(terminalID: terminalID, viaEscape: viaEscape)
+
+    #expect(state.terminals[worktreeID]?[0].activityState == .idle)
+    #expect(state.terminals[worktreeID]?[0].activityStateSource == .hookEvent("UserPromptSubmit"))
+    #expect(state.terminals[worktreeID]?[0].activityStateObservedAt == observedAt)
+}
+
+@MainActor
+@Test func appState_escDoesNotInterruptCodex() {
     let state = AppState()
     let worktreeID = UUID()
     let terminalID = UUID()
@@ -1623,14 +1794,15 @@ private func appState_halfProvenanceDeltaClearsBothHalvesWhenApplied(
                 worktreeID: worktreeID,
                 tmuxWindowID: "@1",
                 tmuxPaneID: "%1",
-                label: "Claude",
-                kind: .claude,
-                activityState: .working
-            )
+                label: "Codex",
+                kind: .codex,
+                activityState: .working,
+                presentationActivityState: .working)
         ]
     ]
 
     state.handleTerminalInterrupt(terminalID: terminalID, viaEscape: true)
 
-    #expect(state.terminals[worktreeID]?[0].activityState == .idle)
+    #expect(state.terminals[worktreeID]?[0].activityState == .working)
+    #expect(state.terminals[worktreeID]?[0].presentationActivityState == .working)
 }

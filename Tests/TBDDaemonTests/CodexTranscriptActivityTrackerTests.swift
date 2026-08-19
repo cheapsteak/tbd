@@ -75,6 +75,22 @@ struct CodexTranscriptActivityTrackerTests {
     }
 
     @Test(
+        "a mismatched no-time close idles a genuinely open successor",
+        arguments: ["task_complete", "turn_aborted"]
+    )
+    func mismatchedNoTimeCloseIdlesOpenSuccessor(type: String) {
+        var reducer = CodexTurnLifecycleReducer()
+        reducer.consume(line: event(type: "task_started", turnID: "a"))
+        reducer.consume(line: event(type: "task_started", turnID: "b"))
+
+        reducer.consume(line: event(type: type, turnID: "a"))
+
+        // With no started_at there is no trustworthy correlation key. The
+        // product policy deliberately prefers false idle to a stuck spinner.
+        #expect(reducer.activityState == .idle)
+    }
+
+    @Test(
         "a close without a turn ID prefers false idle",
         arguments: ["task_complete", "turn_aborted"]
     )
