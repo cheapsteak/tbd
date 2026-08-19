@@ -68,6 +68,10 @@ public final class RPCRouter: Sendable {
     /// restarting. `remote.*` handlers return an error response rather than
     /// crashing when this is nil — see `RPCRouter+RemoteHandlers.swift`.
     let remoteManager: RemoteProviderManager?
+    /// Whether the daemon wired the built-in `claude-cloud` provider at boot.
+    /// Captured rather than recomputed, because the answer is about what
+    /// happened at construction time and cannot change without a restart.
+    let claudeCloudLive: Bool
     /// In-memory per-profile OAuth usage poller. Wired post-construction by
     /// Daemon.swift (mirrors `claudeUsagePoller`); nil in unit tests / mock
     /// mode, where usage snapshots are simply absent.
@@ -177,12 +181,19 @@ public final class RPCRouter: Sendable {
     /// Binding policy for the multi-PR-per-worktree bindings — repo validation,
     /// dedupe, tombstones, cap.
     let prBindingCoordinator: PRBindingCoordinator
-    /// The worktree's own GitHub `owner`/`name`. The coordinator is built on
-    /// this same closure, so a caller that must name a repo before it can form a
-    /// PR reference (`pr.attach 412`) agrees with the policy that validates it.
-    /// Production resolves it via `PRStatusManager`'s `gh repo view` TTL cache;
-    /// tests inject a stub through the init parameter of the same name.
-    let prBindingRepoResolver: @Sendable (UUID) async -> (owner: String, name: String)?
+    /// The worktree's own `owner`/`name` and the host they live on. The
+    /// coordinator is built on this same closure, so a caller that must name a
+    /// repo before it can form a PR reference (`pr.attach 412`) agrees with the
+    /// policy that validates it. Production resolves it via `PRStatusManager`'s
+    /// TTL cache; tests inject a stub through the init parameter of the same
+    /// name.
+    let prBindingRepoResolver: @Sendable (UUID) async -> (owner: String, name: String, host: String)?
+    /// Whether a worktree's host is one the user configured `glab` for — nil
+    /// when there is no local directory to put the question in. The coordinator
+    /// is built on this same closure, so the guard that refuses a `github.com`
+    /// URL on a GitLab checkout and the composer that picks `/-/merge_requests/`
+    /// over `/pull/` agree about the forge.
+    let prBindingForgeResolver: @Sendable (UUID, String) async -> Bool?
     /// Queues concurrent `terminal.send` RPCs per terminal so two payloads
     /// never interleave in one composer. Different terminals still send in
     /// parallel — see `TerminalSendSerializer`.
@@ -224,9 +235,10 @@ public final class RPCRouter: Sendable {
         claudeCredentialsKeychain: ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain(),
         loginSessions: LoginSessionCoordinator = LoginSessionCoordinator(),
         remoteManager: RemoteProviderManager? = nil,
+        claudeCloudLive: Bool = false,
         codexExecutableResolver: (@Sendable () throws -> String)? = nil,
         codexHomeEnsurer: (@Sendable () throws -> URL)? = nil,
-        prBindingRepoResolver: (@Sendable (UUID) async -> (owner: String, name: String)?)? = nil,
+        prBindingRepoResolver: (@Sendable (UUID) async -> (owner: String, name: String, host: String)?)? = nil,
         now: @escaping @Sendable () -> Date = { Date() },
         actuationLog: ActuationLog
     ) {
@@ -267,8 +279,17 @@ public final class RPCRouter: Sendable {
             return await prManager.repoIdentity(repoPath: worktree.path)
         }
         self.prBindingRepoResolver = repoResolver
+        // The forge half of the same seam, captured the same way. `getLocal`
+        // again, and its nil is the same "nothing here to ask in": `glab` reads
+        // its configuration from the checkout's own directory, which a remote
+        // row does not have on this machine.
+        let forgeResolver: @Sendable (UUID, String) async -> Bool? = { [db, prManager] worktreeID, host in
+            guard let worktree = try? await db.worktrees.getLocal(id: worktreeID) else { return nil }
+            return await prManager.isGitLabHost(host, repoPath: worktree.path)
+        }
+        self.prBindingForgeResolver = forgeResolver
         self.prBindingCoordinator = PRBindingCoordinator(
-            store: db.prBindings, resolveRepo: repoResolver)
+            store: db.prBindings, resolveRepo: repoResolver, isGitLabHost: forgeResolver)
         self.pendingQuestions = pendingQuestions
         self.repoSerializer = repoSerializer
         self.configDirManager = configDirManager
@@ -278,6 +299,7 @@ public final class RPCRouter: Sendable {
         self.panelCoordinator = PanelCoordinator(
             db: db, broadcast: { [subscriptions] delta in subscriptions.broadcast(delta: delta) })
         self.remoteManager = remoteManager
+        self.claudeCloudLive = claudeCloudLive
         self.codexExecutableResolver = codexExecutableResolver ?? {
             if tmux.dryRun { return "/opt/tbd-test/bin/codex" }
             return try CodexExecutableResolver.resolve()
@@ -586,6 +608,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetDeliveryVerification(request.paramsData)
             case RPCMethod.configSetQueuedPrompt:
                 return try await handleConfigSetQueuedPrompt(request.paramsData)
+            case RPCMethod.configSetClaudeCloud:
+                return try await handleConfigSetClaudeCloud(request.paramsData)
             case RPCMethod.configSetAutoCloseSetup:
                 return try await handleConfigSetAutoCloseSetup(request.paramsData)
             case RPCMethod.configSetAutoTrustWorktrees:
@@ -697,7 +721,9 @@ public final class RPCRouter: Sendable {
             panelSurfaceEnabled: config.panelSurfaceEnabled,
             remoteBackendsEnabled: config.remoteBackendsEnabled,
             remoteBackendsLive: remoteManager != nil,
-            queuedPromptEnabled: config.queuedPromptEnabled))
+            queuedPromptEnabled: config.queuedPromptEnabled,
+            claudeCloudEnabled: config.claudeCloudEnabled,
+            claudeCloudLive: claudeCloudLive))
     }
 
     // MARK: - PR Status
@@ -962,7 +988,24 @@ public final class RPCRouter: Sendable {
     /// in comes from `pollWorkingDirectory` — the repo's own checkout for a
     /// remote row — so no caller ever sees the synthetic `remote://` path.
     static func pollableWorktrees(_ worktrees: [Worktree]) -> [Worktree] {
-        worktrees.filter { !$0.isScratch }
+        worktrees.filter(isPollable)
+    }
+
+    /// Whether one row is asked about at all. The single predicate behind BOTH
+    /// the sweep's enumeration and `pr.refresh`, because the two disagreeing is
+    /// itself the bug: a scratch row the sweep skips forever used to be queried
+    /// the moment it was selected, the query failed in a directory that is not a
+    /// checkout, and the failure was recorded as `.undetermined`, which every PR
+    /// surface renders as "PR status unknown" for a row that cannot have a pull
+    /// request. Then the next sweep's `prManager.retain(active:)` evicted the
+    /// observation again, so the indicator blinked on select and off ~30s later.
+    ///
+    /// A scratch row is repo-less and branch-less by construction, so "no pull
+    /// request applies here" is settled knowledge and the right answer is to make
+    /// no attempt at all: not `.none` (which claims the forge answered), and not
+    /// `.undetermined` (which claims someone tried and could not tell).
+    static func isPollable(_ worktree: Worktree) -> Bool {
+        !worktree.isScratch
     }
 
     /// The directory this row's poll runs `git` and `gh` in, or nil when there
@@ -1073,6 +1116,13 @@ public final class RPCRouter: Sendable {
         guard let wt = try await db.worktrees.get(id: params.worktreeID) else {
             // No observation: no attempt was made, which is a third thing again
             // from `.none` and `.undetermined` and must not be dressed as either.
+            return try RPCResponse(result: PRRefreshResult(status: nil, observation: nil))
+        }
+        // The same predicate the sweep enumerates through. A scratch row is not
+        // polled, so it must not be refreshed either: no attempt is made, and
+        // "no attempt" is reported rather than a failure invented by asking a
+        // question that has no answer here.
+        guard Self.isPollable(wt) else {
             return try RPCResponse(result: PRRefreshResult(status: nil, observation: nil))
         }
         var repo: Repo?
@@ -1249,16 +1299,61 @@ public final class RPCRouter: Sendable {
         return .resolved(parsed)
     }
 
-    /// A bare PR number as a `ParsedPRURL` in the worktree's own repo.
+    /// A bare PR or MR number as a `ParsedPRURL` in the worktree's own repo.
     ///
     /// Resolved through the same seam the coordinator validates with, so a
     /// number can never synthesise a URL the policy would then reject as
     /// wrong-repo. Returns nil when the worktree's repo cannot be named — the
-    /// caller defers rather than guessing an owner.
+    /// caller defers rather than guessing an owner or a host.
+    ///
+    /// This is the one path that must establish the forge rather than read it,
+    /// because there is no URL yet to read it from: GitLab writes
+    /// `/<namespace…>/<project>/-/merge_requests/<iid>` where GitHub writes
+    /// `/owner/name/pull/<n>`, and composing one shape for every host yields a
+    /// URL that points at nothing on the hosts that speak the other.
+    ///
+    /// So it asks the only component that can know. `PRStatusManager` answers
+    /// from `GitLabHostResolver`, which reads the hosts the user configured
+    /// `glab` for — a declaration, not an inference. The GitLab shape is
+    /// composed only for a host named there; every other host keeps `/pull/`,
+    /// which is what a GitHub Enterprise, Bitbucket, Gitea or Codeberg
+    /// checkout serves and what github.com has always been given. Reading the
+    /// hostname's own shape instead would hand all four of those fleets a
+    /// merge-request URL that 404s.
     private func prRef(worktreeID: UUID, number: Int) async -> ParsedPRURL? {
         guard let own = await prBindingRepoResolver(worktreeID) else { return nil }
+        // Two independent lookups have to succeed, and this is the second: the
+        // repo names the coordinate, the forge names the shape. Either one
+        // failing leaves a URL that could only be guessed.
+        guard let isGitLab = await isGitLabWorktree(worktreeID: worktreeID, host: own.host) else {
+            return nil
+        }
+        let path = "https://\(own.host)/\(own.owner)/\(own.name)"
+        let url = isGitLab
+            ? "\(path)/-/merge_requests/\(number)"
+            : "\(path)/pull/\(number)"
         return ParsedPRURL(
-            host: "github.com", owner: own.owner, repo: own.name, number: number,
-            url: "https://github.com/\(own.owner)/\(own.name)/pull/\(number)")
+            host: own.host, owner: own.owner, repo: own.name, number: number, url: url)
+    }
+
+    /// Whether this worktree's host speaks GitLab, asked in the worktree's own
+    /// directory because that is where `glab` reads its configuration from —
+    /// or nil when the question could not be put at all.
+    ///
+    /// Nil is a third answer and not a soft "no". A worktree with no local row
+    /// — a remote one, or one deleted between the resolve and this call —
+    /// cannot supply that directory, so nothing has answered, and answering
+    /// "not GitLab" there is a guess that composes `/pull/<n>` on a host that
+    /// may well serve `/-/merge_requests/<n>`: a binding whose URL 404s and
+    /// whose label reads "PR", persisted. `prRef` defers on nil instead, the
+    /// same way it defers when the repo cannot be named.
+    ///
+    /// A resolver that positively answers "this host is not GitLab" returns
+    /// `false` and still gets `/pull/<n>` — the shape github.com has always
+    /// been given and the one a GitHub Enterprise, Bitbucket, Gitea or
+    /// Codeberg checkout serves. `github.com` never reaches a subprocess: the
+    /// resolver short-circuits it.
+    private func isGitLabWorktree(worktreeID: UUID, host: String) async -> Bool? {
+        await prBindingForgeResolver(worktreeID, host)
     }
 }

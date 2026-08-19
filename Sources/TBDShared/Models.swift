@@ -119,6 +119,14 @@ public enum NightwatchMode: String, Codable, Sendable, CaseIterable {
     case nightwatch
 }
 
+/// The compiled provider's reserved name. Reserved **unconditionally** and not
+/// behind the cloud flag: a name that became available when a feature was off
+/// and unavailable when it was turned on would change which providers load as a
+/// side effect of a toggle.
+public enum ClaudeCloudProvider {
+    public static let name = "claude-cloud"
+}
+
 /// Where a worktree's files live. `.local` means a git worktree on this
 /// machine at the worktree's path. `.remote` means an agent session on a
 /// machine TBD does not manage, reached through a registered provider; there is
@@ -163,6 +171,31 @@ public enum WorktreeLocation: Equatable, Sendable, Hashable {
 
     private static func pathEscaped(_ component: String) -> String {
         component.addingPercentEncoding(withAllowedCharacters: unreserved) ?? component
+    }
+}
+
+/// Which provider session a lane came from, independent of where its files are
+/// now. `WorktreeLocation` answers the second question; this answers the first,
+/// and a landed lane needs both — `.local` files with the cloud session it was
+/// reconstructed from. Kept a separate field rather than a payload on
+/// `.local` so every existing `switch` over `WorktreeLocation` across the
+/// daemon and the app compiles untouched.
+public struct WorktreeOrigin: Codable, Equatable, Hashable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public init(provider: String, sessionID: String) {
+        self.provider = provider
+        self.sessionID = sessionID
+    }
+}
+
+public extension WorktreeLocation {
+    /// The origin a `.remote` location implies, or nil for `.local`. Used to
+    /// default `Worktree.origin` so a `.remote` row satisfies the
+    /// "remote implies an origin" invariant by construction.
+    var originPair: WorktreeOrigin? {
+        guard case let .remote(provider, sessionID) = self else { return nil }
+        return WorktreeOrigin(provider: provider, sessionID: sessionID)
     }
 }
 
@@ -259,11 +292,18 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     /// `.local`, which is what they are.
     public var location: WorktreeLocation = .local
 
+    /// Which provider session this lane came from, past or present. Nil for a
+    /// lane that never had one. Rows written before this field decode their
+    /// origin from the same two wire keys `location` uses.
+    public var origin: WorktreeOrigin?
+
     /// The `(provider, sessionID)` pair identifying this row's provider
-    /// session, or nil when the worktree is local.
+    /// session, or nil when the row never had one. Reads `origin` rather than
+    /// `location`, so it keeps meaning "the provider session behind this row"
+    /// across a landing.
     public var providerBinding: (provider: String, sessionID: String)? {
-        guard case let .remote(provider, sessionID) = location else { return nil }
-        return (provider, sessionID)
+        guard let origin else { return nil }
+        return (origin.provider, origin.sessionID)
     }
     /// Text the operator composed at creation time and parked for the primary
     /// agent, `nil` when nothing is parked
@@ -333,6 +373,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
                 pinnedAt: Date? = nil,
                 pinSortOrder: Int? = nil,
                 location: WorktreeLocation = .local,
+                origin: WorktreeOrigin? = nil,
                 pendingPrompt: String? = nil,
                 pendingPromptSubmit: Bool? = nil,
                 prObservation: PRObservation? = nil) {
@@ -361,6 +402,10 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         self.pinnedAt = pinnedAt
         self.pinSortOrder = pinSortOrder
         self.location = location
+        // Defaulted from the location's own pair so all existing construction
+        // sites keep satisfying "a `.remote` row has an origin" without being
+        // revisited.
+        self.origin = origin ?? location.originPair
         self.pendingPrompt = pendingPrompt
         self.pendingPromptSubmit = pendingPromptSubmit
         self.prObservation = prObservation
@@ -409,11 +454,20 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         // NEWER daemon will send an older app. Both land on `.local`: a
         // pre-v70 row genuinely is local, and an unrecognized kind is safer
         // read as local than dropped, which would fail the whole decode.
+        //
+        // The two provider keys carry the ORIGIN, and the kind decides only
+        // whether the files are also over there. A landed row therefore
+        // arrives as `locationKind: "local"` with the pair set.
         let kind = try c.decodeIfPresent(String.self, forKey: .locationKind) ?? "local"
-        if kind == "remote",
-           let provider = try c.decodeIfPresent(String.self, forKey: .providerName),
-           let sessionID = try c.decodeIfPresent(String.self, forKey: .providerSessionID) {
-            location = .remote(provider: provider, sessionID: sessionID)
+        let provider = try c.decodeIfPresent(String.self, forKey: .providerName)
+        let providerSession = try c.decodeIfPresent(String.self, forKey: .providerSessionID)
+        if let provider, let providerSession {
+            origin = WorktreeOrigin(provider: provider, sessionID: providerSession)
+        } else {
+            origin = nil
+        }
+        if kind == "remote", let provider, let providerSession {
+            location = .remote(provider: provider, sessionID: providerSession)
         } else {
             location = .local
         }
@@ -461,13 +515,12 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         try c.encodeIfPresent(pinnedAt, forKey: .pinnedAt)
         try c.encodeIfPresent(pinSortOrder, forKey: .pinSortOrder)
         switch location {
-        case .local:
-            try c.encode("local", forKey: .locationKind)
-        case let .remote(provider, sessionID):
-            try c.encode("remote", forKey: .locationKind)
-            try c.encode(provider, forKey: .providerName)
-            try c.encode(sessionID, forKey: .providerSessionID)
+        case .local: try c.encode("local", forKey: .locationKind)
+        case .remote: try c.encode("remote", forKey: .locationKind)
         }
+        // The origin rides the same two keys, whatever the kind says.
+        try c.encodeIfPresent(origin?.provider, forKey: .providerName)
+        try c.encodeIfPresent(origin?.sessionID, forKey: .providerSessionID)
         try c.encodeIfPresent(pendingPrompt, forKey: .pendingPrompt)
         try c.encodeIfPresent(pendingPromptSubmit, forKey: .pendingPromptSubmit)
         try c.encodeIfPresent(prObservation, forKey: .prObservation)
@@ -1237,6 +1290,16 @@ public struct Config: Codable, Sendable, Equatable {
     /// means "never chose" and follows the shipped default wherever it goes;
     /// `0`/`1` is an explicit gesture and is honored forever.
     public var gcProfileDirsEnabled: Bool
+    /// The Claude cloud sessions gate
+    /// (`docs/specs/2026-08-15-cloud-sessions-slice-1-design.md` §7). A second
+    /// gate INSIDE `remoteBackendsEnabled`, never a bypass: cloud is reached
+    /// through the `remote.*` verbs, so it requires both.
+    ///
+    /// **Resolved, not stored**, like `queuedPromptEnabled`: the backing column
+    /// carries no SQL default and stays NULL until somebody touches the toggle,
+    /// so this property is
+    /// `claude_cloud_enabled ?? Config.claudeCloudEnabledDefault`.
+    public var claudeCloudEnabled: Bool
 
     /// Default idle-timeout for auto-hibernation, in minutes.
     public static let defaultHibernateIdleMinutes = 30
@@ -1267,6 +1330,10 @@ public struct Config: Codable, Sendable, Equatable {
     /// this constant — no forcing `UPDATE` migration, and an explicit opt-out
     /// is left alone.
     public static let gcProfileDirsEnabledDefault = false
+    /// The shipped default for `claudeCloudEnabled`, and the single place it
+    /// lives. Cloud ships off; graduating it is a change to this constant — no
+    /// forcing `UPDATE` migration, and an explicit opt-out is left alone.
+    public static let claudeCloudEnabledDefault = false
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -1295,7 +1362,8 @@ public struct Config: Codable, Sendable, Equatable {
                 deliveryVerificationEnabled: Bool = false,
                 queuedPromptEnabled: Bool = Config.queuedPromptDefault,
                 supervisionEnabled: Bool = Config.supervisionEnabledDefault,
-                gcProfileDirsEnabled: Bool = Config.gcProfileDirsEnabledDefault) {
+                gcProfileDirsEnabled: Bool = Config.gcProfileDirsEnabledDefault,
+                claudeCloudEnabled: Bool = Config.claudeCloudEnabledDefault) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
         self.envSettingOverrides = envSettingOverrides
@@ -1324,6 +1392,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.queuedPromptEnabled = queuedPromptEnabled
         self.supervisionEnabled = supervisionEnabled
         self.gcProfileDirsEnabled = gcProfileDirsEnabled
+        self.claudeCloudEnabled = claudeCloudEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -1392,6 +1461,8 @@ public struct Config: Codable, Sendable, Equatable {
         // default rather than hardcoding `false`.
         gcProfileDirsEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .gcProfileDirsEnabled) ?? Config.gcProfileDirsEnabledDefault
+        claudeCloudEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .claudeCloudEnabled) ?? Config.claudeCloudEnabledDefault
     }
 }
 

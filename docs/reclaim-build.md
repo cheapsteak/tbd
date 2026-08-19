@@ -38,6 +38,8 @@ Both scripts write to the same log (`~/Library/Logs/tbd-reclaim-build.log`) and 
 
 Only acts on worktrees containing a `Package.swift` (SwiftPM packages) for `.build` tiers — `tbd worktree list` spans every repo TBD manages, including non-Swift ones (e.g. longeye-app, longeye-docs, agent-channels), which are skipped for Swift-only tiers.
 
+**The reaper never targets a repo root itself** — though not because the root is absent from its input. `tbd worktree list --json` does return the repo root, as a `status: "main"` row (`WorktreeStore.createMain` inserts it; `list()` excludes only `archived`). What keeps it out of the tier logic is `list_worktrees_tsv`'s `select(.status == "active")` filter, which drops `main` rows. The other enumeration source, the `<root>/.claude/worktrees/*/` glob, sits beneath the root rather than at it. So a repo root's own `.build` is outside the reaper's reach no matter how stale. Worth stating because the opposite is a natural guess: issue #677 attributed a partially-deleted `.build/checkouts` entry in a repo root to a disk-reclaim sweep, when the reaper had never once targeted that path (zero occurrences across the full `~/Library/Logs/tbd-reclaim-build.log`) and the real cause was SwiftPM's own non-atomic checkout removal.
+
 SourceKit-LSP background-indexing suppression is a **committed** `.sourcekit-lsp/config.json` (`"backgroundIndexing": false`) at the repo root, present in every worktree the moment it's checked out — the script no longer seeds it. Trade-off: cross-file LSP (workspace symbols, global find-references, cross-module go-to-definition) is disabled on TBD worktrees; live single-file diagnostics still work.
 
 The script reclaims disk from **active, idle** worktrees:
@@ -126,15 +128,17 @@ Local SwiftPM `build`, `test`, and `run` compilation goes through
 `scripts/swift-safe`. It holds a
 kernel-managed, machine-global lock at `~/tbd/runtime/swift-build.lock`, so a
 fleet of TBD worktrees cannot compile simultaneously. Compile commands default
-to two jobs and rejects an explicit job count above that configured limit unless
-a developer opts out. Non-compiling `swift package` metadata and resolution
-commands do not enter the governor.
+to two jobs and reject an explicit job count above that configured limit.
+Non-compiling `swift package` metadata and resolution commands do not enter the
+governor.
 
-- `TBD_SWIFT_JOBS` sets the default and maximum job count (default `2`).
+- `TBD_SWIFT_JOBS` sets the job count (default `2`), honored at face value with
+  no ceiling. Because the lock already allows only one build at a time, this is
+  a bound on the whole machine's compiler parallelism, and exporting it is the
+  machine owner's consent — e.g. `8` on a 12-core laptop. A `-j`/`--jobs` on
+  the command line may lower it but not raise it; raise this instead.
 - `TBD_SWIFT_LOCK_TIMEOUT_SECONDS` sets the wait timeout (default `1800`).
 - `TBD_SWIFT_LOCK_PATH` overrides the shared lock path for isolated testing.
-- `TBD_SWIFT_ALLOW_HIGH_JOBS=1` permits an explicit higher job count on an
-  otherwise idle machine.
 - `TBD_SWIFT_ALLOW_ORPHAN=1` keeps a queued build waiting even after the
   process that requested it exits. A queued wrapper otherwise records its
   ancestor chain at startup and gives up as soon as any of those processes
@@ -195,3 +199,4 @@ Notes:
 
 ## Future
 The ~4.6 GiB of compiled artifacts can only be de-duplicated across worktrees via SwiftPM compilation caching (LLVM CAS + prefix mapping) on the new Swift Build engine — currently an opt-in pitch. Track and pilot when it lands.
+For the measured cold-build cost breakdown behind that conclusion — where the 327.9 s of a cold build actually goes, and why splitting the package into core and app halves was judged low return — see [`docs/research/2026-08-19-cold-build-split/findings.md`](research/2026-08-19-cold-build-split/findings.md).

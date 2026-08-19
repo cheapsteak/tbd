@@ -19,6 +19,59 @@ struct PRBindingTests {
         )
     }
 
+    /// Per-binding text speaks the binding's own forge. Aggregate wording ("2
+    /// pull requests") deliberately does not, because a worktree can span
+    /// forges — that is asserted where the aggregates live, in TBDApp.
+    @Test("per-binding label uses each forge's own reference syntax")
+    func refLabelPerForge() {
+        let gh = PRBinding(id: UUID(), worktreeID: UUID(), host: "github.com",
+                           owner: "acme", repo: "acme-prod", number: 412,
+                           url: "https://github.com/acme/acme-prod/pull/412",
+                           source: .manual, boundAt: Date(timeIntervalSince1970: 0))
+        let gl = PRBinding(id: UUID(), worktreeID: UUID(), host: "git.acme.example",
+                           owner: "acme/platform", repo: "api-gateway", number: 412,
+                           url: "https://git.acme.example/acme/platform/api-gateway/-/merge_requests/412",
+                           source: .manual, boundAt: Date(timeIntervalSince1970: 0))
+        #expect(gh.refLabel == "PR #412")
+        #expect(gl.refLabel == "MR !412")
+    }
+
+    /// The marker travels with the URL, not with the host, so GitLab's own
+    /// SaaS host reads the same way a self-managed one does.
+    @Test("gitlab.com bindings read as merge requests too")
+    func refLabelGitLabDotCom() {
+        let gl = PRBinding(id: UUID(), worktreeID: UUID(), host: "gitlab.com",
+                           owner: "acme", repo: "api-gateway", number: 7,
+                           url: "https://gitlab.com/acme/api-gateway/-/merge_requests/7",
+                           source: .manual, boundAt: Date(timeIntervalSince1970: 0))
+        #expect(gl.refLabel == "MR !7")
+    }
+
+    /// The URL decides, not the host — because "not github.com" is not evidence
+    /// of GitLab. GitHub Enterprise, Bitbucket, Gitea and Codeberg all serve
+    /// pull requests from their own hosts, and a binding on one of them must
+    /// not be relabelled a merge request.
+    @Test("a pull request on a self-hosted host is still a PR")
+    func refLabelSelfHostedPullRequest() {
+        for host in ["github.acme.example", "bitbucket.acme.example",
+                     "git.acme.example", "codeberg.org"] {
+            let binding = PRBinding(id: UUID(), worktreeID: UUID(), host: host,
+                                    owner: "acme", repo: "acme-prod", number: 412,
+                                    url: "https://\(host)/acme/acme-prod/pull/412",
+                                    source: .manual, boundAt: Date(timeIntervalSince1970: 0))
+            #expect(binding.refLabel == "PR #412")
+        }
+    }
+
+    /// The marker is matched case-insensitively so an odd-cased URL cannot flip
+    /// a merge request into a pull request in the UI.
+    @Test("forge derivation ignores URL case")
+    func forgeDerivationIgnoresCase() {
+        #expect(Forge.forURL(
+            "https://GIT.ACME.EXAMPLE/acme/api/-/MERGE_REQUESTS/7") == .gitlab)
+        #expect(Forge.forURL("https://GITHUB.COM/acme/acme-prod/PULL/7") == .github)
+    }
+
     @Test("terminal states are merged and closed only")
     func terminalStates() {
         #expect(PRMergeableState.merged.isTerminal)

@@ -998,6 +998,16 @@ actor DaemonClient {
         )
     }
 
+    /// Persist the Claude cloud sessions gate (default OFF). The daemon builds
+    /// its provider manager only at boot, so this takes effect on the next
+    /// daemon restart rather than the next gesture.
+    func setClaudeCloud(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetClaudeCloud,
+            params: ConfigSetClaudeCloudParams(enabled: enabled)
+        )
+    }
+
     /// Park the prompt composed while a worktree was still being created, to be
     /// delivered to its primary agent whenever that agent turns up. `text: nil`
     /// unparks. A second call replaces the first — one prompt per worktree, not

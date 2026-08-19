@@ -26,14 +26,19 @@ struct PRProvenanceSeedingTests {
         let coordinator: PRBindingCoordinator
         let repoID: UUID
 
-        init(repo: (owner: String, name: String)? = ("acme", "acme-prod")) async throws {
+        init(repo: (owner: String, name: String, host: String)? =
+            ("acme", "acme-prod", "github.com")) async throws {
             db = try TBDDatabase(inMemory: true)
             let created = try await db.repos.create(
                 path: "/tmp/prseed-repo-\(UUID().uuidString)",
                 displayName: "acme-prod", defaultBranch: "main")
             repoID = created.id
             store = db.prBindings
-            coordinator = PRBindingCoordinator(store: store, resolveRepo: { _ in repo })
+            // No host is configured for `glab`, which is every non-GitLab fleet
+            // at once; seeding never turns on the forge anyway, since the
+            // worktree's own host is what these fixtures parse.
+            coordinator = PRBindingCoordinator(store: store, resolveRepo: { _ in repo },
+                                               isGitLabHost: { _, _ in false })
         }
 
         func newWorktree(prNumber: Int? = nil) async throws -> UUID {
@@ -120,7 +125,7 @@ struct PRProvenanceSeedingTests {
 
     @Test("a PR number whose PR belongs to a different repo is rejected, not bound")
     func seedingRejectsWrongRepo() async throws {
-        let fixture = try await Fixture(repo: ("acme", "other-repo"))
+        let fixture = try await Fixture(repo: ("acme", "other-repo", "github.com"))
         let wt = try await fixture.newWorktree(prNumber: 412)
 
         let outcome = await fixture.coordinator.seedProvenance(worktreeID: wt, parsed: parsed)
@@ -143,7 +148,8 @@ struct PRProvenanceSeedingTests {
         let router: RPCRouter
         let repoID: UUID
 
-        init(repo: (owner: String, name: String)? = ("acme", "acme-prod")) async throws {
+        init(repo: (owner: String, name: String, host: String)? =
+            ("acme", "acme-prod", "github.com")) async throws {
             let db = try TBDDatabase(inMemory: true)
             self.db = db
             let created = try await db.repos.create(

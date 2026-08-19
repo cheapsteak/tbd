@@ -4,11 +4,11 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-@Suite struct MigrationV80TerminalActivityOrderTests {
+@Suite struct MigrationV83TerminalActivityOrderTests {
     @Test func forwardMigrationAddsNullableOrderingWatermark() throws {
         let queue = try DatabaseQueue()
         let migrator = TBDDatabase.buildMigratorForTests()
-        try migrator.migrate(queue, upTo: "v79_reap_records_quarantine_path")
+        try migrator.migrate(queue, upTo: "v82_claude_cloud_session")
         let epoch = Date(timeIntervalSince1970: 1_700_000_000)
         let repoID = UUID().uuidString
         let worktreeID = UUID().uuidString
@@ -18,7 +18,7 @@ import Testing
             try db.execute(
                 sql: """
                     INSERT INTO repo (id, path, displayName, defaultBranch, createdAt)
-                    VALUES (?, '/tmp/v80-repo', 'V80', 'main', ?)
+                    VALUES (?, '/tmp/v83-repo', 'V83', 'main', ?)
                     """,
                 arguments: [repoID, epoch]
             )
@@ -26,7 +26,7 @@ import Testing
                 sql: """
                     INSERT INTO worktree
                         (id, repoID, name, displayName, branch, path, status, createdAt, tmuxServer)
-                    VALUES (?, ?, 'w', 'w', 'main', '/tmp/v80-wt', 'active', ?, 'tbd-v80')
+                    VALUES (?, ?, 'w', 'w', 'main', '/tmp/v83-wt', 'active', ?, 'tbd-v83')
                     """,
                 arguments: [worktreeID, repoID, epoch]
             )
@@ -47,7 +47,7 @@ import Testing
         }
         #expect(!columnsBefore.contains("activityStateOrderObservedAt"))
 
-        try migrator.migrate(queue)
+        try migrator.migrate(queue, upTo: "v83_terminal_activity_order")
 
         let column = try queue.read { db in
             try Row.fetchAll(db, sql: "PRAGMA table_info(terminal)")

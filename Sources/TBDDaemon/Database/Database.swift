@@ -29,6 +29,7 @@ public final class TBDDatabase: Sendable {
     public let remoteSessions: RemoteSessionStore
     public let watchDeskLeases: WatchDeskLeaseStore
     public let prBindings: PRBindingStore
+    public let claudeCloudSessions: ClaudeCloudSessionStore
 
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "migrations")
 
@@ -70,6 +71,7 @@ public final class TBDDatabase: Sendable {
         self.remoteSessions = RemoteSessionStore(writer: pool)
         self.watchDeskLeases = WatchDeskLeaseStore(writer: pool)
         self.prBindings = PRBindingStore(writer: pool)
+        self.claudeCloudSessions = ClaudeCloudSessionStore(writer: pool)
 
         let migrator = Self.buildMigrator()
         if fileExisted {
@@ -111,6 +113,7 @@ public final class TBDDatabase: Sendable {
         self.remoteSessions = RemoteSessionStore(writer: queue)
         self.watchDeskLeases = WatchDeskLeaseStore(writer: queue)
         self.prBindings = PRBindingStore(writer: queue)
+        self.claudeCloudSessions = ClaudeCloudSessionStore(writer: queue)
         try Self.buildMigrator().migrate(queue)
     }
 
@@ -1440,12 +1443,83 @@ public final class TBDDatabase: Sendable {
                 table: "reap_records", column: "quarantinePath", type: .text)
         }
 
+        // Clear the PR attempt outcome recorded against scratch rows. A scratch
+        // row (`repoID IS NULL`) has no repo, no branch, and a path that is not a
+        // checkout, so the poll skips it. `pr.refresh` queried it anyway on
+        // select, failed in that directory, and wrote `.undetermined` to the row.
+        // Every PR surface renders that as "PR status unknown", so a scratch lane
+        // grew a `?` badge it can never resolve.
+        //
+        // `RPCRouter.isPollable` now gates both paths, so no row can acquire one
+        // again, but the recorded ones outlive the guard, and by two separate
+        // readers: the daemon re-hydrates them into `PRStatusManager` at every
+        // start, and the app seeds `prObservations` straight off the worktree row.
+        // Both read the column, so the column is where the fix has to land.
+        //
+        // Scoped to `prObservation`. A scratch row's `prStatus` is left alone
+        // because no path ever wrote one: the failing query kept the (absent)
+        // cached value rather than replacing it.
+        migrator.registerMigration("v80_clear_scratch_pr_observation") { db in
+            try db.execute(
+                sql: "UPDATE worktree SET prObservation = NULL WHERE repoID IS NULL")
+        }
+
+        // Claude cloud sessions (design 2026-08-15 §7): the second, inner gate
+        // for the compiled `claude-cloud` provider. Shipped OFF per the house
+        // default-off-flag rule — the behavior is autonomous background polling
+        // against a network service.
+        //
+        // Tri-state like `v73_config_queued_prompt` and
+        // `v77_config_supervision_enabled`: **no SQL default**, so a
+        // pre-migration row reads NULL ("never chose") rather than 0. NULL
+        // resolves through `Config.claudeCloudEnabledDefault` in
+        // `ConfigRecord.toModel()` — the single place graduation changes, which
+        // matters more here than for most flags because somebody who turned a
+        // scheduled network call off did so deliberately.
+        migrator.registerMigration("v81_config_claude_cloud") { db in
+            try db.addColumnIfMissing(
+                table: "config", column: "claude_cloud_enabled", type: .boolean)
+        }
+
+        // The cloud create ledger: what THIS machine started, as distinct
+        // from `remote_session`, which is what the manager last observed.
+        // Daemon-internal, so it has no wire model.
+        //
+        // `archived` carries a SQL default deliberately, and the house
+        // no-SQL-default rule does not apply: that rule is about `config`
+        // feature toggles, where "unset" must stay a third state so a shipped
+        // default can be flipped later. This is data with an explicit writer
+        // at every site, and there is no default to graduate.
+        migrator.registerMigration("v82_claude_cloud_session") { db in
+            try db.createTableIfNotExists("claude_cloud_session") { t in
+                t.primaryKey("id", .text).notNull()
+                t.column("idempotencyKey", .text).notNull()
+                t.column("state", .text).notNull()
+                t.column("sessionID", .text)
+                t.column("title", .text)
+                t.column("createdAt", .datetime).notNull()
+                t.column("resolvedAt", .datetime)
+                t.column("repoKey", .text).notNull()
+                t.column("repoPath", .text).notNull()
+                t.column("branch", .text)
+                t.column("environment", .text)
+                t.column("paramsJSON", .text).notNull()
+                t.column("archived", .boolean).notNull().defaults(to: false)
+            }
+            try db.addIndexIfMissing(
+                "idx_claude_cloud_session_key", on: "claude_cloud_session",
+                columns: ["idempotencyKey"], unique: true)
+            try db.addIndexIfMissing(
+                "idx_claude_cloud_session_session", on: "claude_cloud_session",
+                columns: ["sessionID"], where: "sessionID IS NOT NULL")
+        }
+
         // Event ordering is not the same timestamp as the semantic activity
         // transition: repeated same-state observations must advance the former
         // without resetting hibernation's at-rest-since clock. Its explicit
         // NULL default preserves the unknown third state, so old rows fall back
         // to activityStateObservedAt without inventing a timestamp.
-        migrator.registerMigration("v80_terminal_activity_order") { db in
+        migrator.registerMigration("v83_terminal_activity_order") { db in
             try db.addColumnIfMissing(
                 table: "terminal", column: "activityStateOrderObservedAt", type: .datetime,
                 defaults: DatabaseValue.null)

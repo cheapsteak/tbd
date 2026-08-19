@@ -68,6 +68,14 @@ fi
 # collapsed target runs nothing and passes. The floors sit well below the real
 # counts (CI executes ~2194 + ~2342 fast, ~57 live) so ordinary test churn never
 # trips them; their job is to catch a collapse, not to track the population.
+#
+# Neither pass carries `-j`: the compile job count belongs to
+# `scripts/swift-safe`, which `scripts/test.sh` runs SwiftPM through. It
+# supplies the count itself (2 unless TBD_SWIFT_JOBS says otherwise) and
+# REFUSES a command line asking for more, so a hardcoded `-j 2` here would
+# abort every push on a box whose owner lowered that bound — and pin the build
+# at 2 on a box whose owner raised it. `--parallel` / `--no-parallel` and
+# `--filter` / `--skip` below are test-runner options, not build jobs, and stay.
 run_pass() {
   local label="$1" floor="$2" log; shift 2
   log="$(mktemp -t tbd-prepush-XXXXXXXX)"
@@ -97,7 +105,7 @@ run_pass() {
 }
 
 run_pass "fast parallel pass (scratch TBD_HOME fence)" 3700 \
-  --no-fingerprint --parallel -j 2 --skip '^TBDDaemonLiveTests\.'
+  --no-fingerprint --parallel --skip '^TBDDaemonLiveTests\.'
 
 run_pass "quiet pass (tier-3 live suites, serial)" 35 \
   --no-fingerprint --no-parallel --filter '^TBDDaemonLiveTests\.'

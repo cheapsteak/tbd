@@ -143,8 +143,8 @@
 # collision is impossible — `swift test` has no flag of either name — so
 # filtering them out everywhere is strictly safer at no cost. Last one wins.
 #   scripts/test.sh
-#   scripts/test.sh --parallel -j 2 --filter '^TBDDaemonTests\.'
-#   scripts/test.sh --no-fingerprint --parallel -j 2
+#   scripts/test.sh --parallel --filter '^TBDDaemonTests\.'
+#   scripts/test.sh --no-fingerprint --parallel
 #   scripts/test.sh --fingerprint            # deliberate local leak hunt
 #
 # TESTED BY `scripts/test.test.sh`, which drives the guards below against

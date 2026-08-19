@@ -68,9 +68,15 @@ enum PRBindingPresentation {
         guard bindings.isEmpty else { return bindings }
         guard detachedCount == 0 else { return [] }
         guard let status = legacyStatus else { return [] }
+        // The status URL is the only forge coordinate a legacy status carries,
+        // so the host comes from it rather than from `PRBinding`'s github.com
+        // default — a GitLab status lifted with that default would describe
+        // itself as a GitHub PR.
+        let syntheticHost = URL(string: status.url)?.host ?? "github.com"
         return [PRBinding(
             id: worktreeID,
             worktreeID: worktreeID,
+            host: syntheticHost,
             owner: "",
             repo: "",
             number: status.number,

@@ -1268,6 +1268,11 @@ final class AppState: ObservableObject {
     /// injectable for the same reason as `controlModeSetter`.
     lazy var queuedPromptFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setQueuedPrompt(enabled: enabled) }
+    /// How `setClaudeCloudEnabled` persists the Claude cloud gate — injectable
+    /// for the same reason as `controlModeSetter`, so the Settings toggle's
+    /// success and failure branches are testable without a real daemon.
+    lazy var claudeCloudFlagSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setClaudeCloud(enabled: enabled) }
     /// The worktree a queued prompt is being composed for, driving
     /// `ContentView`'s `.sheet(item:)`. Non-nil only while the modal is up, and
     /// only ever set when the daemon reports `queuedPromptEnabled`

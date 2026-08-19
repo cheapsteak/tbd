@@ -1,4 +1,7 @@
 import Foundation
+import os
+
+private let registryLogger = Logger(subsystem: "com.tbd.daemon", category: "remote")
 
 // MARK: - Remote provider contract types (docs/remote-provider-contract.md, v1)
 
@@ -195,7 +198,33 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
 
 public struct RemoteSessionListEnvelope: Codable, Sendable {
     public let sessions: [RemoteSessionPayload]
-    public init(sessions: [RemoteSessionPayload]) { self.sessions = sessions }
+    /// Whether `sessions` is the provider's ENTIRE inventory or only part of
+    /// it (`docs/remote-provider-contract.md` § Snapshot completeness).
+    ///
+    /// An incomplete snapshot is authoritative about **presence only**: a
+    /// caller may adopt and update on it, and MUST NOT retire anything on it
+    /// or treat it as refreshing freshness. Absent reads as `true`, so every
+    /// provider written before this field keeps its exact current meaning.
+    public let complete: Bool
+
+    public init(sessions: [RemoteSessionPayload], complete: Bool = true) {
+        self.sessions = sessions
+        self.complete = complete
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case sessions, complete
+    }
+
+    /// Hand-written so `complete` can default when absent: Swift's
+    /// synthesized `init(from:)` ignores property default values, and the
+    /// contract's absent-means-complete rule is the whole reason a v1
+    /// provider needs no edit.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        sessions = try c.decode([RemoteSessionPayload].self, forKey: .sessions)
+        complete = try c.decodeIfPresent(Bool.self, forKey: .complete) ?? true
+    }
 }
 
 /// `describe` response.
@@ -319,19 +348,27 @@ public struct RemoteProviderStatus: Codable, Sendable, Identifiable {
     /// disagreeing is how cached rows once kept rendering as confidently
     /// running in exactly the case the daemon knew the least.
     public let freshnessUnreadable: Bool
+    /// The contract major the daemon negotiated for this provider — the highest
+    /// version both sides declare. Nil when `describe` has not succeeded, and
+    /// nil in a payload from a daemon that predates negotiation; a reader with
+    /// no value falls back to `1`, which is what every emitter announced
+    /// unconditionally before.
+    public let contractVersion: Int?
     public init(config: RemoteProviderConfig, describe: ProviderDescribe?, health: ProviderHealth,
                 errorMessage: String?, remediationLabel: String?, remediationCommand: String?,
-                lastSuccessfulSnapshotAt: Date? = nil, freshnessUnreadable: Bool = false) {
+                lastSuccessfulSnapshotAt: Date? = nil, freshnessUnreadable: Bool = false,
+                contractVersion: Int? = nil) {
         self.config = config; self.describe = describe; self.health = health
         self.errorMessage = errorMessage
         self.remediationLabel = remediationLabel; self.remediationCommand = remediationCommand
         self.lastSuccessfulSnapshotAt = lastSuccessfulSnapshotAt
         self.freshnessUnreadable = freshnessUnreadable
+        self.contractVersion = contractVersion
     }
 
     private enum CodingKeys: String, CodingKey {
         case config, describe, health, errorMessage, remediationLabel, remediationCommand
-        case lastSuccessfulSnapshotAt, freshnessUnreadable
+        case lastSuccessfulSnapshotAt, freshnessUnreadable, contractVersion
     }
 
     /// Hand-written so `freshnessUnreadable` can default when absent: a
@@ -347,6 +384,7 @@ public struct RemoteProviderStatus: Codable, Sendable, Identifiable {
         remediationCommand = try c.decodeIfPresent(String.self, forKey: .remediationCommand)
         lastSuccessfulSnapshotAt = try c.decodeIfPresent(Date.self, forKey: .lastSuccessfulSnapshotAt)
         freshnessUnreadable = try c.decodeIfPresent(Bool.self, forKey: .freshnessUnreadable) ?? false
+        contractVersion = try c.decodeIfPresent(Int.self, forKey: .contractVersion)
     }
 
     /// True when there is cached state on screen that must stop being
@@ -386,20 +424,66 @@ public struct RemoteProviderStatus: Codable, Sendable, Identifiable {
 /// Loads `agent-providers.json`. Missing file = no providers (not an error);
 /// duplicate names or empty exec = configuration error.
 public enum RemoteProviderRegistry {
-    public static func load(from url: URL) throws -> [RemoteProviderConfig] {
-        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+    /// Names TBD's own compiled providers answer to. Reserved
+    /// **unconditionally** and not behind the cloud flag: a name that became
+    /// available when a feature was off and unavailable when it was turned on
+    /// would change which providers load as a side effect of a toggle.
+    public static let reservedProviderNames: Set<String> = [ClaudeCloudProvider.name]
+
+    public static func isReserved(_ name: String) -> Bool {
+        reservedProviderNames.contains(name)
+    }
+
+    /// What one registry file yielded: the entries TBD will use, and the
+    /// reserved-name entries it stepped over.
+    public struct RegistryLoad: Sendable, Equatable {
+        public let configs: [RemoteProviderConfig]
+        public let skippedReservedNames: [String]
+
+        public init(configs: [RemoteProviderConfig], skippedReservedNames: [String]) {
+            self.configs = configs
+            self.skippedReservedNames = skippedReservedNames
+        }
+    }
+
+    /// A reserved entry is SKIPPED, never a reason to reject the file. The
+    /// skip is deliberately checked BEFORE the duplicate rule so two reserved
+    /// entries are two skips rather than a whole-file failure — this function
+    /// throws for the entire registry on a duplicate, and two of its three
+    /// call sites swallow that with `try?`, so one bad entry would otherwise
+    /// silently remove every provider the user registered. Each skip is
+    /// logged here (rather than left for callers to notice) so it is
+    /// surfaced regardless of which of the three call sites triggered it.
+    public static func loadEntries(from url: URL) throws -> RegistryLoad {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return RegistryLoad(configs: [], skippedReservedNames: [])
+        }
         let data = try Data(contentsOf: url)
-        let configs = try JSONDecoder().decode([RemoteProviderConfig].self, from: data)
+        let decoded = try JSONDecoder().decode([RemoteProviderConfig].self, from: data)
+        var configs: [RemoteProviderConfig] = []
+        var skipped: [String] = []
         var seen = Set<String>()
-        for c in configs {
+        for c in decoded {
             guard !c.name.isEmpty, !c.exec.isEmpty else {
                 throw RegistryError.invalidEntry(c.name)
+            }
+            if isReserved(c.name) {
+                registryLogger.warning(
+                    "skipping registry entry for reserved provider name \(c.name, privacy: .public): reserved for TBD's compiled provider"
+                )
+                skipped.append(c.name)
+                continue
             }
             guard seen.insert(c.name).inserted else {
                 throw RegistryError.duplicateName(c.name)
             }
+            configs.append(c)
         }
-        return configs
+        return RegistryLoad(configs: configs, skippedReservedNames: skipped)
+    }
+
+    public static func load(from url: URL) throws -> [RemoteProviderConfig] {
+        try loadEntries(from: url).configs
     }
 
     public enum RegistryError: LocalizedError, Equatable {

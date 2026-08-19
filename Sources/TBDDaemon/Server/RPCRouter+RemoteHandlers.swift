@@ -52,6 +52,50 @@ extension RPCRouter {
     /// the same words when the subsystem is off.
     static let remoteBackendsDisabledResponse = RPCResponse(error: "remote backends disabled")
 
+    /// The inner gate's refusal. A separate string from the outer one because
+    /// they are separate conditions: the outer flag says remote backends are
+    /// off entirely, this says the compiled cloud provider is.
+    private static let claudeCloudDisabledResponse = RPCResponse(error: "claude cloud sessions disabled")
+
+    /// The per-invocation timeout for the `create` verb, applied to both the
+    /// initial call and its one same-key retry below. Provider-agnostic at
+    /// this layer — every `remote.*` backend's `create` gets this budget —
+    /// but for the compiled `claude-cloud` provider it is in a load-bearing
+    /// numeric relationship with `ClaudeCloudInvoker.pendingFailureWindow`
+    /// (`ClaudeCloudList.swift`): that window must stay strictly greater than
+    /// this timeout, or a `create` still running past its own timeout budget
+    /// could have its ledger row reclaimed and re-spawned out from under it.
+    /// Pinned by `ClaudeCloudTimeoutRelationshipTests`.
+    static let remoteCreateTimeout: TimeInterval = 60
+
+    /// The second, inner gate. `claude_cloud_enabled` is checked INSIDE
+    /// `remoteGate()` — cloud is reached through the same `remote.*` verbs, so
+    /// it requires BOTH flags and the inner one is never a bypass.
+    ///
+    /// The two stay separate rather than merging because
+    /// `remote_backends_enabled` was written to be DELETABLE after soak, on
+    /// the reasoning that the feature is inert without a registered provider
+    /// file. A provider compiled into the daemon is never inert, so folding
+    /// this into it would silently convert a disposable flag into a permanent
+    /// one. When the outer flag is eventually deleted, its gate goes and this
+    /// becomes the sole gate for cloud.
+    ///
+    /// Returns the refusal to send, or nil when the invocation is permitted.
+    ///
+    /// Internal rather than private for the same reason as `remoteGate()`
+    /// above: `worktree.archive` / `worktree.revive`'s remote branches
+    /// (`RPCRouter+WorktreeHandlers.swift`) reach a provider verb too — via
+    /// `RemoteLaneLifecycle+Actuate`'s `archiveDecision`/`reviveDecision` —
+    /// and must refuse with the same inner-gate message when cloud is off,
+    /// not just when the outer flag is.
+    func cloudGate(provider: String) async throws -> RPCResponse? {
+        guard provider == ClaudeCloudProvider.name else { return nil }
+        guard try await db.config.get().claudeCloudEnabled else {
+            return Self.claudeCloudDisabledResponse
+        }
+        return nil
+    }
+
     private static func staleSnapshotMutationResponse(provider: String) -> RPCResponse {
         RPCResponse(error: "provider '\(provider)' inventory is stale; refresh must recover before changing remote sessions")
     }
@@ -126,6 +170,7 @@ extension RPCRouter {
             return Self.remoteBackendsDisabledResponse
         }
         let params = try decoder.decode(RemoteCreateParams.self, from: paramsData)
+        if let refusal = try await cloudGate(provider: params.provider) { return refusal }
         if await manager.hasStaleSnapshot(provider: params.provider) {
             return Self.staleSnapshotMutationResponse(provider: params.provider)
         }
@@ -149,13 +194,13 @@ extension RPCRouter {
         let result: ProviderResult
         do {
             result = try await manager.invoke(
-                providerName: params.provider, verb: ["create"], stdin: stdin, timeout: 60)
+                providerName: params.provider, verb: ["create"], stdin: stdin, timeout: Self.remoteCreateTimeout)
         } catch is ProviderRunError {
             // One retry with the SAME key — the provider dedupes, so a
             // timed-out-but-actually-succeeded create doesn't double-spawn.
             do {
                 result = try await manager.invoke(
-                    providerName: params.provider, verb: ["create"], stdin: stdin, timeout: 60)
+                    providerName: params.provider, verb: ["create"], stdin: stdin, timeout: Self.remoteCreateTimeout)
             } catch let error as ProviderRunError {
                 remoteHandlerLogger.error(
                     "remote.create provider=\(params.provider, privacy: .public) timed out on both the initial call and the retry")
@@ -181,6 +226,9 @@ extension RPCRouter {
         }
         // Adopt immediately so the sidebar shows `starting` before the next poll.
         await manager.applyUpsert(session, provider: params.provider)
+        // …and ask for one immediate snapshot, because a provider whose rows
+        // arrive by adoption has nothing on screen until one lands.
+        await manager.refreshAfterCreate(provider: params.provider)
         await finishActuation(actuationID, .dispatched)
         return try RPCResponse(result: session)
     }
@@ -192,6 +240,7 @@ extension RPCRouter {
             return Self.remoteBackendsDisabledResponse
         }
         let params = try decoder.decode(RemoteStopParams.self, from: paramsData)
+        if let refusal = try await cloudGate(provider: params.provider) { return refusal }
         if await manager.hasStaleSnapshot(provider: params.provider) {
             return Self.staleSnapshotMutationResponse(provider: params.provider)
         }
@@ -273,6 +322,7 @@ extension RPCRouter {
             return Self.remoteBackendsDisabledResponse
         }
         let params = try decoder.decode(RemoteArchiveParams.self, from: paramsData)
+        if let refusal = try await cloudGate(provider: params.provider) { return refusal }
         return try await retire(
             verb: "archive", surface: .remoteArchive, manager: manager,
             provider: params.provider, sessionID: params.sessionID, actor: actor, now: now)
@@ -289,6 +339,7 @@ extension RPCRouter {
             return Self.remoteBackendsDisabledResponse
         }
         let params = try decoder.decode(RemoteUnarchiveParams.self, from: paramsData)
+        if let refusal = try await cloudGate(provider: params.provider) { return refusal }
         return try await retire(
             verb: "unarchive", surface: .remoteUnarchive, manager: manager,
             provider: params.provider, sessionID: params.sessionID, actor: actor, now: now)
@@ -407,6 +458,7 @@ extension RPCRouter {
             return Self.remoteBackendsDisabledResponse
         }
         let params = try decoder.decode(RemoteSendParams.self, from: paramsData)
+        if let refusal = try await cloudGate(provider: params.provider) { return refusal }
         if await manager.hasStaleSnapshot(provider: params.provider) {
             return Self.staleSnapshotMutationResponse(provider: params.provider)
         }
@@ -441,6 +493,7 @@ extension RPCRouter {
             return Self.remoteBackendsDisabledResponse
         }
         let params = try decoder.decode(RemoteLogParams.self, from: paramsData)
+        if let refusal = try await cloudGate(provider: params.provider) { return refusal }
         var verb = ["log", params.sessionID]
         if let lines = params.lines { verb += ["--lines", String(lines)] }
         let result: ProviderResult
@@ -479,6 +532,7 @@ extension RPCRouter {
             return Self.remoteBackendsDisabledResponse
         }
         let params = try decoder.decode(RemoteRenameParams.self, from: paramsData)
+        if let refusal = try await cloudGate(provider: params.provider) { return refusal }
         if await manager.hasStaleSnapshot(provider: params.provider) {
             return Self.staleSnapshotMutationResponse(provider: params.provider)
         }
@@ -509,6 +563,7 @@ extension RPCRouter {
             return Self.remoteBackendsDisabledResponse
         }
         let params = try decoder.decode(RemoteDismissParams.self, from: paramsData)
+        if let refusal = try await cloudGate(provider: params.provider) { return refusal }
         let changed = try await db.remoteSessions.dismiss(provider: params.provider, sessionID: params.sessionID)
         if changed {
             subscriptions.broadcast(delta: .remoteSessionsChanged)
@@ -531,6 +586,7 @@ extension RPCRouter {
             return Self.remoteBackendsDisabledResponse
         }
         let params = try decoder.decode(RemoteSetPinParams.self, from: paramsData)
+        if let refusal = try await cloudGate(provider: params.provider) { return refusal }
         let changed = try await db.remoteSessions.setPinned(
             provider: params.provider, sessionID: params.sessionID,
             pinnedAt: params.pinned ? Date() : nil)
@@ -557,6 +613,7 @@ extension RPCRouter {
             return Self.remoteBackendsDisabledResponse
         }
         let params = try decoder.decode(RemoteReportAttachExitParams.self, from: paramsData)
+        if let refusal = try await cloudGate(provider: params.provider) { return refusal }
         try await manager.recordAttachExit(provider: params.provider, exitCode: params.exitCode)
         return .ok()
     }

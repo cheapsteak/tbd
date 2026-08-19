@@ -294,6 +294,85 @@ public final class Daemon: Sendable {
         return verifier
     }
 
+    /// The construction behind `remote_backends_enabled` / `claude_cloud_enabled`
+    /// at boot (Task 7) — the sole place `RemoteProviderManager` is
+    /// constructed in production. Extracted from `start()` for the same
+    /// reason `wireDeliveryVerification` was: a flag's states are distinct
+    /// behaviors, and none of them was reachable from a test while this was
+    /// inline — every cloud test built the manager by hand instead, which is
+    /// how an earlier draft of this delivery nearly shipped without
+    /// `actuationLog:` (dropping it silently disables `syncFilingDecisions`
+    /// for every provider, `RemoteProviderManager.swift`, behind one `.debug`
+    /// log line — no crash, no error, suite still green). `actuationLog` has
+    /// no default here, unlike on `RemoteProviderManager`'s own initializer,
+    /// so the omission that mattered cannot happen silently at this, the one
+    /// production call site.
+    ///
+    /// Three outcomes:
+    /// - `remote_backends_enabled` off (or mock mode never calls this at
+    ///   all): `(nil, false)`.
+    /// - on, `claude_cloud_enabled` off: a manager with no `claude-cloud`
+    ///   entry, `claudeCloudLive == false`.
+    /// - on, `claude_cloud_enabled` on: a manager whose `claude-cloud` entry
+    ///   depends on `resolveClaudeExecutable` — present with
+    ///   `claudeCloudLive == true` when it succeeds, absent with
+    ///   `claudeCloudLive == false` when it throws (no `claude` on this box;
+    ///   registering a provider whose every verb would fail is worse than
+    ///   registering none). Both keep the manager itself non-nil, so every
+    ///   other registered backend stays live regardless of cloud's own state.
+    ///
+    /// Both gates are read once, here: the built-in provider is registered
+    /// into the dispatcher at this same moment, so a manager built while the
+    /// cloud flag was off has no `claude-cloud` entry at all, and flipping
+    /// the flag without a restart cannot conjure one into a running actor.
+    /// `claudeCloudLive` is what lets the app say "on, but needs a restart"
+    /// without calling a `remote.*` verb and parsing its error string.
+    ///
+    /// `registryURL` and `subprocess` are injection seams for tests only —
+    /// both default to production's real values (`TBDConstants.agentProvidersPath`,
+    /// a genuine `ProviderRunner`), so the one production call site
+    /// (`start()`) never passes either and behavior there is unchanged.
+    static func makeRemoteProviderManager(
+        database: TBDDatabase, subs: StateSubscriptionManager, actuationLog: ActuationLog,
+        registryURL: URL = URL(fileURLWithPath: TBDConstants.agentProvidersPath),
+        subprocess: any RemoteProviderInvoking = ProviderRunner(),
+        resolveClaudeExecutable: () throws -> String = { try ClaudeExecutableResolver.resolve() }
+    ) async -> (manager: RemoteProviderManager?, claudeCloudLive: Bool) {
+        let bootConfig = try? await database.config.get()
+        guard bootConfig?.remoteBackendsEnabled == true else { return (nil, false) }
+        var builtIns: [String: any RemoteProviderInvoking] = [:]
+        var builtInConfigs: [RemoteProviderConfig] = []
+        if bootConfig?.claudeCloudEnabled == true {
+            do {
+                let claudePath = try resolveClaudeExecutable()
+                builtIns[ClaudeCloudProvider.name] = ClaudeCloudInvoker(
+                    db: database,
+                    spawner: BoundedProcessClaudeSpawner(executable: claudePath))
+                // `RemoteProviderConfig` requires an `exec` the built-in
+                // provider has no honest use for: the dispatcher routes the
+                // reserved name in-process before `exec` is ever read. It
+                // carries the resolved `claude` path because the app-side
+                // attach path needs a real path to spawn.
+                builtInConfigs = [
+                    RemoteProviderConfig(name: ClaudeCloudProvider.name, exec: claudePath)
+                ]
+            } catch {
+                // No `claude` on this box. Registering a provider whose
+                // every verb would fail is worse than registering none, and
+                // `claudeCloudLive` staying false is what says so on screen.
+                daemonLogger.error(
+                    "claude cloud is enabled but no claude executable resolved: \(String(describing: error), privacy: .public)")
+            }
+        }
+        let manager = RemoteProviderManager(
+            db: database, subscriptions: subs,
+            runner: ProviderDispatcher(subprocess: subprocess, builtIns: builtIns),
+            registryURL: registryURL,
+            actuationLog: actuationLog,
+            builtInProviders: builtInConfigs)
+        return (manager, !builtIns.isEmpty)
+    }
+
     /// Recreate the base scratch directory if it's missing. Safe to call every startup.
     static func ensureScratchDir() {
         let fm = FileManager.default
@@ -501,13 +580,13 @@ public final class Daemon: Sendable {
         let actuationLog = ActuationLog(path: TBDConstants.actuationLogPath)
 
         var remoteManager: RemoteProviderManager?
-        if mockMode == nil, (try? await database.config.get())?.remoteBackendsEnabled == true {
-            let manager = RemoteProviderManager(
-                db: database, subscriptions: subs, runner: ProviderRunner(),
-                registryURL: URL(fileURLWithPath: TBDConstants.agentProvidersPath),
-                actuationLog: actuationLog)
-            self.remoteManager = manager
-            remoteManager = manager
+        var claudeCloudLive = false
+        if mockMode == nil {
+            let outcome = await Self.makeRemoteProviderManager(
+                database: database, subs: subs, actuationLog: actuationLog)
+            remoteManager = outcome.manager
+            claudeCloudLive = outcome.claudeCloudLive
+            self.remoteManager = outcome.manager
         }
 
         let prManager = PRStatusManager()
@@ -542,6 +621,7 @@ public final class Daemon: Sendable {
             modelProfileResolver: modelProfileResolver,
             pendingQuestions: pendingQuestions,
             remoteManager: remoteManager,
+            claudeCloudLive: claudeCloudLive,
             actuationLog: actuationLog
         )
         // Wire the shared input activity tracker to the coordinator

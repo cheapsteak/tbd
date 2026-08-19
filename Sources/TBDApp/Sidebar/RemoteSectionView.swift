@@ -181,6 +181,37 @@ struct RemoteProviderHeaderRow: View {
         RemoteProviderStatusPresentation.issueSummary(provider)
     }
 
+    /// Whether this header's `+` and its `RemoteCreateSheet` may be offered
+    /// at all — the third create surface routed through
+    /// `CloudCreateEntryPresentation`, alongside `RepoSectionView`'s context
+    /// menu (`remoteSessionMenuProviders`) and `+` picker
+    /// (`cloudSessionProvider`). True for every non-cloud provider regardless
+    /// of the flag; false for the compiled cloud provider once
+    /// `claude_cloud_enabled` has been turned off, even though the daemon
+    /// booted with it on and still keeps the provider registered here — the
+    /// state `remote.create` refuses with "claude cloud sessions disabled".
+    /// Omitted (not merely disabled) to match the same convention the
+    /// context menu and `+` picker already follow for this gate; staleness
+    /// stays a separate, disabled-not-omitted axis on the button below.
+    private var canCreate: Bool {
+        RemoteProviderHeaderRow.canCreate(
+            provider: provider,
+            claudeCloudEnabled: appState.daemonCapabilities?.claudeCloudEnabled ?? false)
+    }
+
+    /// Pure form of `canCreate`, over a single provider — split out so a test
+    /// can call the exact decision this row renders from without an
+    /// `AppState`/view hierarchy, and so a parity test can check it against
+    /// `RepoSectionView`'s two create surfaces directly (see
+    /// `CloudCreateEntryPresentationTests`'s cross-surface parity suite).
+    nonisolated static func canCreate(
+        provider: RemoteProviderStatus, claudeCloudEnabled: Bool
+    ) -> Bool {
+        !CloudCreateEntryPresentation.createProviders(
+            [provider], claudeCloudEnabled: claudeCloudEnabled
+        ).isEmpty
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: -1) {
             HStack(spacing: 4) {
@@ -204,20 +235,22 @@ struct RemoteProviderHeaderRow: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Open \(provider.describe?.name ?? provider.config.name) provider desk")
                 healthSuffix
-                Button {
-                    showingCreateSheet = true
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 16, height: 16)
-                        .contentShape(Rectangle())
+                if canCreate {
+                    Button {
+                        showingCreateSheet = true
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 16, height: 16)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(provider.hasStaleSnapshot)
+                    .help(provider.hasStaleSnapshot
+                          ? "Inventory is stale; refresh must recover before creating sessions"
+                          : "New \(provider.describe?.name ?? provider.config.name) session")
                 }
-                .buttonStyle(.plain)
-                .disabled(provider.hasStaleSnapshot)
-                .help(provider.hasStaleSnapshot
-                      ? "Inventory is stale; refresh must recover before creating sessions"
-                      : "New \(provider.describe?.name ?? provider.config.name) session")
             }
             if let issueSummary {
                 Text(issueSummary)
