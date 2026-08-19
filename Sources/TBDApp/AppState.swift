@@ -2196,17 +2196,7 @@ final class AppState: ObservableObject {
         guard let idx = terminals[delta.worktreeID]?.firstIndex(where: { $0.id == delta.terminalID }) else {
             return
         }
-        terminals[delta.worktreeID]?[idx].activityState = delta.activityState
-        if let source = delta.activityStateSource,
-           let observedAt = delta.activityStateObservedAt {
-            terminals[delta.worktreeID]?[idx].activityStateSource = source
-            terminals[delta.worktreeID]?[idx].activityStateObservedAt = observedAt
-            if terminals[delta.worktreeID]?[idx].isCodexTerminal == true,
-               delta.activityState == .idle,
-               source == .hookEvent("SessionStart") {
-                terminals[delta.worktreeID]?[idx].presentationActivityState = .idle
-            }
-        }
+        terminals[delta.worktreeID]?[idx].applyActivityDelta(delta)
     }
 
     /// Seamless in-place "Switch account": the terminal row is unchanged except

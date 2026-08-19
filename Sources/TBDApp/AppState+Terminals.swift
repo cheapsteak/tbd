@@ -289,11 +289,15 @@ extension AppState {
         date: Date = Date()
     ) {
         pruneRecentTerminalDeletions(date: date)
-        let visible = snapshots.filter {
-            !terminalDeletionsAwaitingRecreationCompletion.contains($0.id)
-                && recentlyDeletedTerminalIDs[$0.id] == nil
-        }
         let existing = terminals[worktreeID] ?? []
+        let existingByID = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
+        let visible = snapshots.compactMap { snapshot -> Terminal? in
+            guard !terminalDeletionsAwaitingRecreationCompletion.contains(snapshot.id),
+                  recentlyDeletedTerminalIDs[snapshot.id] == nil else { return nil }
+            var merged = snapshot
+            merged.reconcileActivityObservation(against: existingByID[snapshot.id])
+            return merged
+        }
         guard visible != existing else { return }
         terminals[worktreeID] = visible
         reconcileTabs(worktreeID: worktreeID, terminals: visible)
@@ -691,6 +695,90 @@ extension AppState {
         } catch {
             showAlert("Failed to cancel scheduled resume: \(error.localizedDescription)",
                       isError: true)
+        }
+    }
+}
+
+extension Terminal {
+    /// Merge the activity fact carried by a `terminal.list` row without
+    /// letting an older response roll back a newer local or pushed fact.
+    /// Provenance is one atomic pair: a partial incoming pair is either ignored
+    /// as a same-value legacy echo or applied with both halves cleared. When
+    /// timestamps tie, an explicit interrupt wins over a hook fact because the
+    /// clock cannot establish order and a false working indicator is costlier.
+    mutating func reconcileActivityObservation(against current: Terminal?) {
+        let incomingIsComplete = activityStateSource != nil && activityStateObservedAt != nil
+        guard let current else {
+            if !incomingIsComplete {
+                activityStateSource = nil
+                activityStateObservedAt = nil
+            }
+            return
+        }
+
+        let currentIsComplete = current.activityStateSource != nil
+            && current.activityStateObservedAt != nil
+        let shouldKeepCurrent: Bool
+        if incomingIsComplete,
+           currentIsComplete,
+           let incomingObservedAt = activityStateObservedAt,
+           let currentObservedAt = current.activityStateObservedAt {
+            shouldKeepCurrent = incomingObservedAt < currentObservedAt
+                || (incomingObservedAt == currentObservedAt
+                    && current.activityStateSource == .terminalInterrupt
+                    && activityStateSource != .terminalInterrupt)
+        } else if !incomingIsComplete, currentIsComplete {
+            shouldKeepCurrent = activityState == current.activityState
+        } else {
+            shouldKeepCurrent = false
+        }
+
+        if shouldKeepCurrent {
+            activityState = current.activityState
+            activityStateSource = current.activityStateSource
+            activityStateObservedAt = current.activityStateObservedAt
+            presentationActivityState = current.presentationActivityState
+        } else if !incomingIsComplete {
+            activityStateSource = nil
+            activityStateObservedAt = nil
+        }
+    }
+
+    /// Apply a pushed activity observation under the same ordering and legacy
+    /// rules used for snapshots. SessionStart is the sole idle hook entitled
+    /// to clear transcript presentation, and only after its complete fact wins
+    /// the timestamp comparison.
+    mutating func applyActivityDelta(_ delta: TerminalActivityDelta) {
+        let incomingIsComplete = delta.activityStateSource != nil
+            && delta.activityStateObservedAt != nil
+        let currentIsComplete = activityStateSource != nil && activityStateObservedAt != nil
+
+        if incomingIsComplete,
+           currentIsComplete,
+           let incomingObservedAt = delta.activityStateObservedAt,
+           let currentObservedAt = activityStateObservedAt,
+           incomingObservedAt < currentObservedAt
+            || (incomingObservedAt == currentObservedAt
+                && activityStateSource == .terminalInterrupt
+                && delta.activityStateSource != .terminalInterrupt) {
+            return
+        }
+
+        if !incomingIsComplete {
+            if currentIsComplete, delta.activityState == activityState { return }
+            activityState = delta.activityState
+            activityStateSource = nil
+            activityStateObservedAt = nil
+            return
+        }
+
+        activityState = delta.activityState
+        activityStateSource = delta.activityStateSource
+        activityStateObservedAt = delta.activityStateObservedAt
+        if isCodexTerminal,
+           delta.activityState == .idle,
+           delta.activityStateSource == .hookEvent("SessionStart") {
+            presentationActivityState = .idle
         }
     }
 }

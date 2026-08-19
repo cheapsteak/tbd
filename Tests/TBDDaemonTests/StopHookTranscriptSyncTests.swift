@@ -71,10 +71,18 @@ struct StopHookTranscriptSyncTests {
         return (terminal, worktreePath, transcript, derived)
     }
 
-    private func send(_ terminalID: UUID, _ state: TerminalActivityState) async throws -> RPCResponse {
+    private func send(
+        _ terminalID: UUID,
+        _ state: TerminalActivityState,
+        origin: TerminalActivityEventOrigin? = nil
+    ) async throws -> RPCResponse {
         await router.handle(try RPCRequest(
             method: RPCMethod.terminalActivityEvent,
-            params: TerminalActivityEventParams(terminalID: terminalID, activityState: state)))
+            params: TerminalActivityEventParams(
+                terminalID: terminalID,
+                activityState: state,
+                origin: origin
+            )))
     }
 
     @Test func idleSyncsTranscriptStoredOutsideDerivedDir() async throws {
@@ -112,6 +120,17 @@ struct StopHookTranscriptSyncTests {
         let fx = try await makeFixture(outsideDerivedDir: true)
 
         let resp = try await send(fx.terminal.id, .working)
+
+        #expect(resp.success)
+        #expect(!FileManager.default.fileExists(
+            atPath: fx.derived.appendingPathComponent("sess-1.jsonl").path))
+    }
+
+    @Test func userInterruptIdleDoesNotSyncTranscript() async throws {
+        defer { try? FileManager.default.removeItem(at: home) }
+        let fx = try await makeFixture(outsideDerivedDir: true)
+
+        let resp = try await send(fx.terminal.id, .idle, origin: .userInterrupt)
 
         #expect(resp.success)
         #expect(!FileManager.default.fileExists(

@@ -391,6 +391,55 @@ public struct TerminalStore: Sendable {
         }
     }
 
+    /// Apply an externally observed activity fact only when it is not older
+    /// than the fact already stored for the terminal.
+    ///
+    /// The timestamp comparison and the complete `{state, source, observedAt}`
+    /// write share one database-writer transaction. Callers may therefore do
+    /// arbitrary asynchronous work between observing an event and reaching
+    /// this method without allowing that older event to roll back a newer one.
+    ///
+    /// Repeated hook values remain no-ops by default so a generic idle echo
+    /// cannot erase more specific provenance such as an explicit interrupt.
+    /// Events that establish meaningful same-value provenance (currently a
+    /// user interrupt and SessionStart) opt into replacement. Exact timestamp
+    /// ties cannot establish event order, so an already-stored user interrupt
+    /// wins over a hook observation; the next strictly newer hook supersedes it.
+    public func applyActivityObservation(
+        id: UUID,
+        activityState: TerminalActivityState,
+        source: FactSource,
+        observedAt: Date,
+        replaceSameValue: Bool = false
+    ) async throws -> Bool {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            if let storedObservedAt = record.activityStateObservedAt,
+               storedObservedAt > observedAt {
+                return false
+            }
+            if record.activityStateObservedAt == observedAt,
+               FactColumnJSON.decode(FactSource.self, from: record.activityStateSource)
+                == .terminalInterrupt,
+               source != .terminalInterrupt {
+                return false
+            }
+            if record.activityState == activityState.rawValue, !replaceSameValue {
+                return false
+            }
+
+            record.activityState = activityState.rawValue
+            record.activityStateSource = FactColumnJSON.encode(source)
+            record.activityStateObservedAt = observedAt
+            record.awaitingInputReason = nil
+            record.awaitingInputObservedAt = nil
+            try record.update(db)
+            return true
+        }
+    }
+
     /// Record a wait reason observed by a hook, WITHOUT asserting an activity
     /// state.
     ///

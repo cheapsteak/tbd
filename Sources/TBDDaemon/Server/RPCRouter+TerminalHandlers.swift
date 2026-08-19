@@ -2791,6 +2791,12 @@ extension RPCRouter {
     /// terminal may have been deleted between hook fire and arrival).
     func handleTerminalSessionEvent(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalSessionEventParams.self, from: paramsData)
+        // Establish event order before the first suspension. SessionStart and
+        // terminal.activityEvent share this activity-fact clock, so a fact with
+        // a later timestamp wins even when earlier handler work finishes
+        // afterward. The store gives explicit interrupts the safety tie-break
+        // when the date source returns an identical timestamp.
+        let observedAt = now()
 
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
             // Soft success — caller is a fire-and-forget hook, returning an
@@ -2798,7 +2804,7 @@ extension RPCRouter {
             logger.debug("sessionEvent: unknown terminalID=\(params.terminalID.uuidString, privacy: .public) — ignoring")
             return .ok()
         }
-        await sessionCounters.recordHookEvent(terminalID: terminal.id, at: now())
+        await sessionCounters.recordHookEvent(terminalID: terminal.id, at: observedAt)
 
         // `cwd` is optional for backward compatibility — when absent we cannot
         // validate, so we fall back to the old behavior.
@@ -2836,10 +2842,12 @@ extension RPCRouter {
         // otherwise clear the columns — no-ops when the row already reads idle
         // and can be lost on its own while this call lands.
         //
-        // Deliberately NOT `setActivityState`: this event says a session
-        // exists, not what it is doing, and `activityState` gates hibernation.
+        // Claude SessionStart says only that a session exists, not what it is
+        // doing, so it does not assert activity. Codex SessionStart is also
+        // the machine signal that the pane is between turns; its ordered idle
+        // observation is applied below.
         try await db.terminals.clearAwaitingInputReason(id: terminal.id)
-        let codexActivityObservedAt: Date?
+        let codexActivityApplied: Bool
         if terminal.kind == .codex || terminal.label == TerminalLabel.codex {
             // This handler is driven by the session-start hook, which is what
             // told us the session exists and is between turns.
@@ -2848,13 +2856,11 @@ extension RPCRouter {
             // every other stamp this file writes: `SessionStateResolver`'s
             // rung 4 *compares* it, and the store's default `Date()` is a
             // timestamp nothing outside the store can name.
-            let observedAt = now()
-            codexActivityObservedAt = observedAt
-            try await db.terminals.setActivityState(
+            codexActivityApplied = try await db.terminals.applyActivityObservation(
                 id: terminal.id, activityState: .idle, source: .hookEvent("SessionStart"),
-                observedAt: observedAt)
+                observedAt: observedAt, replaceSameValue: true)
         } else {
-            codexActivityObservedAt = nil
+            codexActivityApplied = false
         }
 
         // Invalidate cached transcript parse for the OLD session file (if any)
@@ -2877,13 +2883,13 @@ extension RPCRouter {
             sessionID: params.sessionID,
             transcriptPath: cleanedPath
         )))
-        if let codexActivityObservedAt {
+        if codexActivityApplied {
             subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
                 terminalID: terminal.id,
                 worktreeID: terminal.worktreeID,
                 activityState: .idle,
                 activityStateSource: .hookEvent("SessionStart"),
-                activityStateObservedAt: codexActivityObservedAt
+                activityStateObservedAt: observedAt
             )))
         }
         return .ok()
@@ -2960,6 +2966,13 @@ extension RPCRouter {
 
     func handleTerminalActivityEvent(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalActivityEventParams.self, from: paramsData)
+        guard params.origin != .userInterrupt || params.activityState == .idle else {
+            return RPCResponse(error: "user_interrupt origin requires idle activity")
+        }
+        // Timestamp receipt before any actor or database suspension. The
+        // conditional store write below uses this to prevent an earlier event
+        // whose handler finishes late from replacing a later observation.
+        let observedAt = now()
 
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
             logger.debug("activityEvent: unknown terminalID=\(params.terminalID.uuidString, privacy: .public) — ignoring")
@@ -2974,7 +2987,7 @@ extension RPCRouter {
         // An app-originated interrupt shares this RPC but is a user action, not
         // an agent hook, so it must not inflate the hook-event counter.
         if params.origin == nil {
-            await sessionCounters.recordHookEvent(terminalID: terminal.id, at: now())
+            await sessionCounters.recordHookEvent(terminalID: terminal.id, at: observedAt)
         }
 
         // UserPromptSubmit reaches the daemon as activity=working. If a
@@ -2999,7 +3012,7 @@ extension RPCRouter {
         // BEFORE the unchanged-state guard so repeated Stops keep converging.
         // Never rewrites terminal.transcriptPath: the live session keeps
         // appending to the original file; we only copy.
-        if params.activityState == .idle,
+        if params.origin == nil, params.activityState == .idle,
            let storedPath = terminal.transcriptPath, !storedPath.isEmpty,
            FileManager.default.fileExists(atPath: storedPath),
            let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) {
@@ -3017,14 +3030,6 @@ extension RPCRouter {
             }
         }
 
-        // A user interrupt must replace provenance even when the raw value was
-        // already idle. Conversely, a repeated idle hook must not erase that
-        // explicit override; only a later value transition (notably a genuine
-        // working hook) supersedes it.
-        guard terminal.activityState != params.activityState || params.origin == .userInterrupt else {
-            return .ok()
-        }
-
         // Hook callers are bridged through `tbd terminal-activity`; the params
         // do not yet carry WHICH hook event fired, so the RPC surface stands in
         // as their source name. The app's explicit interrupt declares its
@@ -3037,12 +3042,13 @@ extension RPCRouter {
         let source: FactSource = params.origin == .userInterrupt
             ? .terminalInterrupt
             : .hookEvent(RPCMethod.terminalActivityEvent)
-        let observedAt = now()
-        try await db.terminals.setActivityState(
+        let activityApplied = try await db.terminals.applyActivityObservation(
             id: terminal.id,
             activityState: params.activityState,
             source: source,
-            observedAt: observedAt)
+            observedAt: observedAt,
+            replaceSameValue: params.origin == .userInterrupt)
+        guard activityApplied else { return .ok() }
         subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
             terminalID: terminal.id,
             worktreeID: terminal.worktreeID,
