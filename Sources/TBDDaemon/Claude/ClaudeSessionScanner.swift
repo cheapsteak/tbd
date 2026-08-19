@@ -292,6 +292,16 @@ enum ClaudeSessionScanner {
     /// If `transcriptFilePath` is provided and the file exists, it takes
     /// precedence over project directory resolution. This bypasses stale
     /// cache entries and mirrors the pattern used by `handleTerminalTranscript`.
+    ///
+    /// Queued prompts are deliberately NOT counted, unlike in `parseSummary`
+    /// above, and the asymmetry is safe rather than an oversight: a prompt can
+    /// only be QUEUED while the agent is mid-turn, so a file carrying one
+    /// always carries the user and assistant rows of the turn it interrupted.
+    /// A "blank" session holding nothing but a queued prompt is therefore not
+    /// a reachable state — measured 0 of 701 local session files. Teaching
+    /// this scan the attachment shape would cost a JSON decode of every
+    /// attachment row on a path whose whole point is to stop at the first
+    /// content-bearing line.
     static func isSessionBlank(
         sessionID: String,
         worktreePath: String,
