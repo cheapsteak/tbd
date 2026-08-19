@@ -1440,6 +1440,17 @@ public final class TBDDatabase: Sendable {
                 table: "reap_records", column: "quarantinePath", type: .text)
         }
 
+        // Event ordering is not the same timestamp as the semantic activity
+        // transition: repeated same-state observations must advance the former
+        // without resetting hibernation's at-rest-since clock. Its explicit
+        // NULL default preserves the unknown third state, so old rows fall back
+        // to activityStateObservedAt without inventing a timestamp.
+        migrator.registerMigration("v80_terminal_activity_order") { db in
+            try db.addColumnIfMissing(
+                table: "terminal", column: "activityStateOrderObservedAt", type: .datetime,
+                defaults: DatabaseValue.null)
+        }
+
         return migrator
     }
 }

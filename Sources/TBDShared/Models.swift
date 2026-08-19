@@ -550,6 +550,9 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     /// Activity reconstructed for display from the current agent transcript.
     /// This is response-derived and is never persisted as hook activity.
     public var presentationActivityState: TerminalActivityState?
+    /// When the daemon completed the transcript observation that produced
+    /// `presentationActivityState`. Response-derived and never persisted.
+    public var presentationActivityObservedAt: Date?
     /// When set, the terminal is HIBERNATED: its `claude` process was
     /// gracefully terminated to reclaim memory, but the tmux window (and its
     /// shell) is kept alive. `claudeSessionID` still points at the session to
@@ -582,6 +585,11 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     /// When `activityState` was observed — the moment the machine fact was
     /// read, not the moment the row was written.
     public var activityStateObservedAt: Date?
+    /// Ordering watermark for activity events. Unlike
+    /// `activityStateObservedAt`, this advances for a newer observation that
+    /// confirms the same semantic state, so it must not be used as an
+    /// at-rest-since timestamp.
+    public var activityStateOrderObservedAt: Date?
     /// The structured reason this session is waiting, carried verbatim from
     /// Claude Code's `Notification` hook. Superseded by the next activity
     /// observation, so it describes the *current* wait or nothing at all.
@@ -634,6 +642,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
                 kind: TerminalKind? = nil,
                 activityState: TerminalActivityState = .unknown,
                 presentationActivityState: TerminalActivityState? = nil,
+                presentationActivityObservedAt: Date? = nil,
                 hibernatedAt: Date? = nil,
                 hibernateReason: HibernateReason? = nil,
                 keepWarm: Bool = false,
@@ -641,6 +650,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
                 watchDeskRole: WatchDeskRole? = nil,
                 activityStateSource: FactSource? = nil,
                 activityStateObservedAt: Date? = nil,
+                activityStateOrderObservedAt: Date? = nil,
                 awaitingInputReason: AwaitingInputReason? = nil,
                 awaitingInputObservedAt: Date? = nil) {
         self.id = id
@@ -658,6 +668,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         self.kind = kind
         self.activityState = activityState
         self.presentationActivityState = presentationActivityState
+        self.presentationActivityObservedAt = presentationActivityObservedAt
         self.hibernatedAt = hibernatedAt
         self.hibernateReason = hibernateReason
         self.keepWarm = keepWarm
@@ -665,6 +676,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         self.watchDeskRole = watchDeskRole
         self.activityStateSource = activityStateSource
         self.activityStateObservedAt = activityStateObservedAt
+        self.activityStateOrderObservedAt = activityStateOrderObservedAt
         self.awaitingInputReason = awaitingInputReason
         self.awaitingInputObservedAt = awaitingInputObservedAt
     }
@@ -672,9 +684,9 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     enum CodingKeys: String, CodingKey {
         case id, worktreeID, tmuxWindowID, tmuxPaneID, label, createdAt
         case pinnedAt, claudeSessionID, suspendedAt, suspendedSnapshot, profileID, transcriptPath, kind
-        case activityState, presentationActivityState
+        case activityState, presentationActivityState, presentationActivityObservedAt
         case hibernatedAt, hibernateReason, keepWarm, pendingResumeAt, watchDeskRole
-        case activityStateSource, activityStateObservedAt
+        case activityStateSource, activityStateObservedAt, activityStateOrderObservedAt
         case awaitingInputReason, awaitingInputObservedAt
     }
 
@@ -696,6 +708,8 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         activityState = try c.decodeIfPresent(TerminalActivityState.self, forKey: .activityState) ?? .unknown
         presentationActivityState = try c.decodeIfPresent(
             TerminalActivityState.self, forKey: .presentationActivityState)
+        presentationActivityObservedAt = try c.decodeIfPresent(
+            Date.self, forKey: .presentationActivityObservedAt)
         hibernatedAt = try c.decodeIfPresent(Date.self, forKey: .hibernatedAt)
         hibernateReason = try c.decodeIfPresent(HibernateReason.self, forKey: .hibernateReason)
         keepWarm = try c.decodeIfPresent(Bool.self, forKey: .keepWarm) ?? false
@@ -706,6 +720,8 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         // `observedActivity` reports exactly that by returning nil.
         activityStateSource = try c.decodeIfPresent(FactSource.self, forKey: .activityStateSource)
         activityStateObservedAt = try c.decodeIfPresent(Date.self, forKey: .activityStateObservedAt)
+        activityStateOrderObservedAt = try c.decodeIfPresent(
+            Date.self, forKey: .activityStateOrderObservedAt)
         awaitingInputReason = try c.decodeIfPresent(AwaitingInputReason.self, forKey: .awaitingInputReason)
         awaitingInputObservedAt = try c.decodeIfPresent(Date.self, forKey: .awaitingInputObservedAt)
     }

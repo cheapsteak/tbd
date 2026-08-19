@@ -519,10 +519,15 @@ extension RPCRouter {
                 worktreeID: terminals[index].worktreeID))
         }
 
-        let codexStates = await codexActivityTracker.observe(transcripts: codexTargets)
+        let codexObservation = await codexActivityTracker.observeStamped(
+            transcripts: codexTargets,
+            now: now)
         for index in terminals.indices where terminals[index].isCodexTerminal {
-            guard let transcriptPath = terminals[index].transcriptPath else { continue }
-            terminals[index].presentationActivityState = codexStates[transcriptPath]
+            let transcriptPath = terminals[index].transcriptPath
+            terminals[index].presentationActivityState = transcriptPath.flatMap {
+                codexObservation.states[$0]
+            }
+            terminals[index].presentationActivityObservedAt = codexObservation.observedAt
         }
 
         await codexActivityTracker.retain(
@@ -2854,7 +2859,7 @@ extension RPCRouter {
         // the machine signal that the pane is between turns; its ordered idle
         // observation is applied below.
         try await db.terminals.clearAwaitingInputReason(id: terminal.id)
-        let codexActivityApplied: Bool
+        let codexActivityApplication: AppliedTerminalActivityObservation?
         if terminal.kind == .codex || terminal.label == TerminalLabel.codex {
             // This handler is driven by the session-start hook, which is what
             // told us the session exists and is between turns.
@@ -2863,11 +2868,11 @@ extension RPCRouter {
             // every other stamp this file writes: `SessionStateResolver`'s
             // rung 4 *compares* it, and the store's default `Date()` is a
             // timestamp nothing outside the store can name.
-            codexActivityApplied = try await db.terminals.applyActivityObservation(
+            codexActivityApplication = try await db.terminals.applyActivityObservation(
                 id: terminal.id, activityState: .idle, source: .hookEvent("SessionStart"),
                 observedAt: observedAt, replaceSameValue: true)
         } else {
-            codexActivityApplied = false
+            codexActivityApplication = nil
         }
 
         // Invalidate cached transcript parse for the OLD session file (if any)
@@ -2890,13 +2895,14 @@ extension RPCRouter {
             sessionID: params.sessionID,
             transcriptPath: cleanedPath
         )))
-        if codexActivityApplied {
+        if let application = codexActivityApplication {
             subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
                 terminalID: terminal.id,
                 worktreeID: terminal.worktreeID,
-                activityState: .idle,
-                activityStateSource: .hookEvent("SessionStart"),
-                activityStateObservedAt: observedAt
+                activityState: application.activityState,
+                activityStateSource: application.source,
+                activityStateObservedAt: application.observedAt,
+                activityStateOrderObservedAt: application.orderObservedAt
             )))
         }
         return .ok()
@@ -3049,19 +3055,20 @@ extension RPCRouter {
         let source: FactSource = params.origin == .userInterrupt
             ? .terminalInterrupt
             : .hookEvent(RPCMethod.terminalActivityEvent)
-        let activityApplied = try await db.terminals.applyActivityObservation(
+        let activityApplication = try await db.terminals.applyActivityObservation(
             id: terminal.id,
             activityState: params.activityState,
             source: source,
             observedAt: observedAt,
             replaceSameValue: params.origin == .userInterrupt)
-        guard activityApplied else { return .ok() }
+        guard let activityApplication else { return .ok() }
         subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
             terminalID: terminal.id,
             worktreeID: terminal.worktreeID,
-            activityState: params.activityState,
-            activityStateSource: source,
-            activityStateObservedAt: observedAt
+            activityState: activityApplication.activityState,
+            activityStateSource: activityApplication.source,
+            activityStateObservedAt: activityApplication.observedAt,
+            activityStateOrderObservedAt: activityApplication.orderObservedAt
         )))
         return .ok()
     }

@@ -66,6 +66,11 @@ actor CodexTranscriptActivityTracker {
         let worktreeID: UUID
     }
 
+    struct StampedObservation: Sendable {
+        let states: [String: TerminalActivityState]
+        let observedAt: Date
+    }
+
     private struct Baseline {
         var worktreeID: UUID
         var offset: UInt64
@@ -176,6 +181,21 @@ actor CodexTranscriptActivityTracker {
         }
 
         return states
+    }
+
+    /// Couples a batch result to the actor order in which its transcript
+    /// observation completed. Minting the timestamp before this actor accepts
+    /// another call prevents reversed RPC completions from assigning a newer
+    /// timestamp to an older transcript result.
+    func observeStamped(
+        transcripts: [Target],
+        totalByteLimit: UInt64 = requestReadByteLimit,
+        now: @Sendable () -> Date
+    ) -> StampedObservation {
+        StampedObservation(
+            states: observe(transcripts: transcripts, totalByteLimit: totalByteLimit),
+            observedAt: now()
+        )
     }
 
     private func advanceBatchPath(_ transcriptPath: String) {

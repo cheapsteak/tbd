@@ -8,10 +8,13 @@ import TestSupport
 struct CodexActivityReconciliationTests {
     let db: TBDDatabase
     let router: RPCRouter
+    let presentationObservedAt: Date
 
     init() throws {
         let db = try TBDDatabase(inMemory: true)
+        let presentationObservedAt = Date(timeIntervalSince1970: 1_790_000_000)
         self.db = db
+        self.presentationObservedAt = presentationObservedAt
         self.router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
@@ -22,6 +25,7 @@ struct CodexActivityReconciliationTests {
             ),
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
+            now: { presentationObservedAt },
             actuationLog: makeTestActuationLog()
         )
     }
@@ -72,12 +76,14 @@ struct CodexActivityReconciliationTests {
         let terminals = try response.decodeResult([Terminal].self)
         #expect(terminals.count == 1)
         #expect(terminals[0].presentationActivityState == .working)
+        #expect(terminals[0].presentationActivityObservedAt == presentationObservedAt)
         #expect(terminals[0].activityState == .idle)
         #expect(terminals[0].activityStateSource == .hookEvent("Stop"))
         #expect(terminals[0].activityStateObservedAt == observedAt)
 
         let persisted = try await db.terminals.get(id: terminal.id)
         #expect(persisted?.presentationActivityState == nil)
+        #expect(persisted?.presentationActivityObservedAt == nil)
         #expect(persisted?.activityState == .idle)
         #expect(persisted?.activityStateSource == .hookEvent("Stop"))
         #expect(persisted?.activityStateObservedAt == observedAt)
@@ -179,8 +185,11 @@ struct CodexActivityReconciliationTests {
 
         let terminals = try response.decodeResult([Terminal].self)
         #expect(terminals.first(where: { $0.id == codex.id })?.presentationActivityState == nil)
+        #expect(terminals.first(where: { $0.id == codex.id })?.presentationActivityObservedAt
+            == presentationObservedAt)
         #expect(terminals.first(where: { $0.id == codex.id })?.activityState == .working)
         #expect(terminals.first(where: { $0.id == claude.id })?.presentationActivityState == nil)
+        #expect(terminals.first(where: { $0.id == claude.id })?.presentationActivityObservedAt == nil)
     }
 
     @Test("terminal.list retention respects worktree and fleet scopes")

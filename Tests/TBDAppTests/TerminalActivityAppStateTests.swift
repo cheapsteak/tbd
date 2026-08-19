@@ -34,6 +34,28 @@ private enum PartialActivityProvenance: Sendable {
     case observedAtOnly
 }
 
+private func decodedCodexSnapshot(
+    terminalID: UUID,
+    worktreeID: UUID,
+    presentationState: String?,
+    presentationObservedAt: Double?
+) throws -> Terminal {
+    let presentation = presentationState.map {
+        ",\"presentationActivityState\":\"\($0)\""
+    } ?? ""
+    let presentationTime = presentationObservedAt.map {
+        ",\"presentationActivityObservedAt\":\($0)"
+    } ?? ""
+    return try JSONDecoder().decode(
+        Terminal.self,
+        from: Data(
+            """
+            {"id":"\(terminalID.uuidString)","worktreeID":"\(worktreeID.uuidString)","tmuxWindowID":"@1","tmuxPaneID":"%1","label":"Codex","createdAt":0,"kind":"codex","activityState":"idle"\(presentation)\(presentationTime),"activityStateSource":{"kind":"hook","detail":"Stop"},"activityStateObservedAt":5}
+            """.utf8
+        )
+    )
+}
+
 @MainActor
 @Test func appState_handlesTerminalActivityUpdatedDeltaInPlace() {
     let state = AppState()
@@ -87,6 +109,148 @@ private enum PartialActivityProvenance: Sendable {
 }
 
 @MainActor
+@Test func appState_staleRawSnapshotStillAdoptsFreshTranscriptPresentation() {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    state.terminals = [
+        worktreeID: [
+            Terminal(
+                id: terminalID,
+                worktreeID: worktreeID,
+                tmuxWindowID: "@1",
+                tmuxPaneID: "%1",
+                label: "Codex",
+                kind: .codex,
+                activityState: .idle,
+                presentationActivityState: .working,
+                activityStateSource: .hookEvent("Stop"),
+                activityStateObservedAt: Date(timeIntervalSinceReferenceDate: 20)
+            )
+        ]
+    ]
+    let snapshot = Terminal(
+        id: terminalID,
+        worktreeID: worktreeID,
+        tmuxWindowID: "@1",
+        tmuxPaneID: "%1",
+        label: "Codex",
+        kind: .codex,
+        activityState: .working,
+        presentationActivityState: .idle,
+        activityStateSource: .hookEvent(RPCMethod.terminalActivityEvent),
+        activityStateObservedAt: Date(timeIntervalSinceReferenceDate: 10)
+    )
+
+    state.adoptTerminalSnapshot([snapshot], worktreeID: worktreeID)
+
+    let terminal = state.terminals[worktreeID]![0]
+    #expect(terminal.activityState == .idle)
+    #expect(terminal.activityStateSource == .hookEvent("Stop"))
+    #expect(terminal.activityStateObservedAt == Date(timeIntervalSinceReferenceDate: 20))
+    #expect(terminal.presentationActivityState == .idle)
+    #expect(!WorktreeRowView.isForegroundWorking(terminal))
+}
+
+@MainActor
+@Test func appState_reversedTranscriptSnapshotsKeepNewerIdlePresentation() throws {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    let newerIdle = try decodedCodexSnapshot(
+        terminalID: terminalID,
+        worktreeID: worktreeID,
+        presentationState: "idle",
+        presentationObservedAt: 20
+    )
+    let olderWorking = try decodedCodexSnapshot(
+        terminalID: terminalID,
+        worktreeID: worktreeID,
+        presentationState: "working",
+        presentationObservedAt: 10
+    )
+
+    state.adoptTerminalSnapshot([newerIdle], worktreeID: worktreeID)
+    state.adoptTerminalSnapshot([olderWorking], worktreeID: worktreeID)
+
+    let terminal = state.terminals[worktreeID]![0]
+    #expect(terminal.presentationActivityState == .idle)
+    #expect(!WorktreeRowView.isForegroundWorking(terminal))
+}
+
+@MainActor
+@Test func appState_equalTranscriptTimestampPrefersIdleOverWorking() throws {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    let idle = try decodedCodexSnapshot(
+        terminalID: terminalID,
+        worktreeID: worktreeID,
+        presentationState: "idle",
+        presentationObservedAt: 20
+    )
+    let working = try decodedCodexSnapshot(
+        terminalID: terminalID,
+        worktreeID: worktreeID,
+        presentationState: "working",
+        presentationObservedAt: 20
+    )
+
+    state.adoptTerminalSnapshot([idle], worktreeID: worktreeID)
+    state.adoptTerminalSnapshot([working], worktreeID: worktreeID)
+
+    #expect(state.terminals[worktreeID]?[0].presentationActivityState == .idle)
+}
+
+@MainActor
+@Test func appState_reversedTranscriptSnapshotsKeepNewerUnknownPresentation() throws {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    let newerUnknown = try decodedCodexSnapshot(
+        terminalID: terminalID,
+        worktreeID: worktreeID,
+        presentationState: nil,
+        presentationObservedAt: 20
+    )
+    let olderWorking = try decodedCodexSnapshot(
+        terminalID: terminalID,
+        worktreeID: worktreeID,
+        presentationState: "working",
+        presentationObservedAt: 10
+    )
+
+    state.adoptTerminalSnapshot([newerUnknown], worktreeID: worktreeID)
+    state.adoptTerminalSnapshot([olderWorking], worktreeID: worktreeID)
+
+    #expect(state.terminals[worktreeID]?[0].presentationActivityState == nil)
+}
+
+@MainActor
+@Test func appState_legacyTranscriptSnapshotsRemainArrivalOrdered() throws {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    let idle = try decodedCodexSnapshot(
+        terminalID: terminalID,
+        worktreeID: worktreeID,
+        presentationState: "idle",
+        presentationObservedAt: nil
+    )
+    let working = try decodedCodexSnapshot(
+        terminalID: terminalID,
+        worktreeID: worktreeID,
+        presentationState: "working",
+        presentationObservedAt: nil
+    )
+
+    state.adoptTerminalSnapshot([idle], worktreeID: worktreeID)
+    state.adoptTerminalSnapshot([working], worktreeID: worktreeID)
+
+    #expect(state.terminals[worktreeID]?[0].presentationActivityState == .working)
+}
+
+@MainActor
 @Test func appState_olderDeltaDoesNotRollbackCodexInterrupt() {
     let fixture = interruptedCodexState()
 
@@ -103,6 +267,43 @@ private enum PartialActivityProvenance: Sendable {
     #expect(terminal.activityStateSource == .terminalInterrupt)
     #expect(terminal.activityStateObservedAt == Date(timeIntervalSinceReferenceDate: 20))
     #expect(!WorktreeRowView.isForegroundWorking(terminal))
+}
+
+@MainActor
+@Test func appState_activityDeltaUsesOrderingWatermarkInsteadOfTransitionTime() throws {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    state.terminals = [
+        worktreeID: [
+            Terminal(
+                id: terminalID,
+                worktreeID: worktreeID,
+                tmuxWindowID: "@1",
+                tmuxPaneID: "%1",
+                label: "Codex",
+                kind: .codex,
+                activityState: .idle,
+                activityStateSource: .hookEvent("Stop"),
+                activityStateObservedAt: Date(timeIntervalSinceReferenceDate: 20)
+            )
+        ]
+    ]
+    let delta = try JSONDecoder().decode(
+        TerminalActivityDelta.self,
+        from: Data(
+            """
+            {"terminalID":"\(terminalID.uuidString)","worktreeID":"\(worktreeID.uuidString)","activityState":"working","activityStateSource":{"kind":"hook","detail":"UserPromptSubmit"},"activityStateObservedAt":10,"activityStateOrderObservedAt":30}
+            """.utf8
+        )
+    )
+
+    state.handleDelta(.terminalActivityUpdated(delta))
+
+    let terminal = state.terminals[worktreeID]![0]
+    #expect(terminal.activityState == .working)
+    #expect(terminal.activityStateSource == .hookEvent("UserPromptSubmit"))
+    #expect(terminal.activityStateObservedAt == Date(timeIntervalSinceReferenceDate: 10))
 }
 
 @MainActor
@@ -147,6 +348,122 @@ private enum PartialActivityProvenance: Sendable {
     #expect(terminal.activityStateSource == .terminalInterrupt)
     #expect(terminal.activityStateObservedAt == Date(timeIntervalSinceReferenceDate: 20))
     #expect(!WorktreeRowView.isForegroundWorking(terminal))
+}
+
+@MainActor
+@Test func appState_equalTimestampWorkingDeltaDoesNotOverrideIdle() {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    let instant = Date(timeIntervalSinceReferenceDate: 20)
+    state.terminals = [
+        worktreeID: [
+            Terminal(
+                id: terminalID,
+                worktreeID: worktreeID,
+                tmuxWindowID: "@1",
+                tmuxPaneID: "%1",
+                label: "Codex",
+                kind: .codex,
+                activityState: .idle,
+                activityStateSource: .hookEvent("Stop"),
+                activityStateObservedAt: instant,
+                activityStateOrderObservedAt: instant
+            )
+        ]
+    ]
+
+    state.handleDelta(.terminalActivityUpdated(TerminalActivityDelta(
+        terminalID: terminalID,
+        worktreeID: worktreeID,
+        activityState: .working,
+        activityStateSource: .hookEvent("UserPromptSubmit"),
+        activityStateObservedAt: instant,
+        activityStateOrderObservedAt: instant
+    )))
+
+    let terminal = state.terminals[worktreeID]![0]
+    #expect(terminal.activityState == .idle)
+    #expect(terminal.activityStateSource == .hookEvent("Stop"))
+}
+
+@MainActor
+@Test func appState_equalTimestampWorkingSnapshotDoesNotOverrideIdle() {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    let instant = Date(timeIntervalSinceReferenceDate: 20)
+    state.terminals = [
+        worktreeID: [
+            Terminal(
+                id: terminalID,
+                worktreeID: worktreeID,
+                tmuxWindowID: "@1",
+                tmuxPaneID: "%1",
+                label: "Codex",
+                kind: .codex,
+                activityState: .idle,
+                activityStateSource: .hookEvent("Stop"),
+                activityStateObservedAt: instant,
+                activityStateOrderObservedAt: instant
+            )
+        ]
+    ]
+    let snapshot = Terminal(
+        id: terminalID,
+        worktreeID: worktreeID,
+        tmuxWindowID: "@1",
+        tmuxPaneID: "%1",
+        label: "Codex",
+        kind: .codex,
+        activityState: .working,
+        activityStateSource: .hookEvent("UserPromptSubmit"),
+        activityStateObservedAt: instant,
+        activityStateOrderObservedAt: instant
+    )
+
+    state.adoptTerminalSnapshot([snapshot], worktreeID: worktreeID)
+
+    let terminal = state.terminals[worktreeID]![0]
+    #expect(terminal.activityState == .idle)
+    #expect(terminal.activityStateSource == .hookEvent("Stop"))
+}
+
+@MainActor
+@Test func appState_equalTimestampIdleDeltaDoesNotOverrideWaitingForUser() {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    let instant = Date(timeIntervalSinceReferenceDate: 20)
+    state.terminals = [
+        worktreeID: [
+            Terminal(
+                id: terminalID,
+                worktreeID: worktreeID,
+                tmuxWindowID: "@1",
+                tmuxPaneID: "%1",
+                label: "Codex",
+                kind: .codex,
+                activityState: .waitingForUser,
+                activityStateSource: .hookEvent("PermissionRequest"),
+                activityStateObservedAt: instant,
+                activityStateOrderObservedAt: instant
+            )
+        ]
+    ]
+
+    state.handleDelta(.terminalActivityUpdated(TerminalActivityDelta(
+        terminalID: terminalID,
+        worktreeID: worktreeID,
+        activityState: .idle,
+        activityStateSource: .hookEvent("Stop"),
+        activityStateObservedAt: instant,
+        activityStateOrderObservedAt: instant
+    )))
+
+    let terminal = state.terminals[worktreeID]![0]
+    #expect(terminal.activityState == .waitingForUser)
+    #expect(terminal.activityStateSource == .hookEvent("PermissionRequest"))
 }
 
 @MainActor

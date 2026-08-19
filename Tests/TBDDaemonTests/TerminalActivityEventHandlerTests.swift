@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -317,6 +318,95 @@ struct TerminalActivityEventHandlerTests {
         #expect(updated.activityStateObservedAt == new)
     }
 
+    @Test("a later same-state working hook advances order ahead of a delayed idle")
+    func laterSameStateWorkingAdvancesOrderAheadOfDelayedIdle() async throws {
+        let terminal = try await makeTerminal()
+        let initial = Date(timeIntervalSince1970: 1_700_000_000)
+        let earlierIdleAt = initial.addingTimeInterval(1)
+        let laterWorkingAt = initial.addingTimeInterval(2)
+        let originalSource = FactSource.hookEvent("UserPromptSubmit")
+        try await db.terminals.setActivityState(
+            id: terminal.id,
+            activityState: .working,
+            source: originalSource,
+            observedAt: initial,
+            awaitingInputReason: AwaitingInputReason(
+                message: "stale prompt",
+                hookEventName: "Notification",
+                notificationType: "permission_prompt"
+            )
+        )
+        let dates = BlockingDateSequence(first: earlierIdleAt, subsequent: laterWorkingAt)
+        let router = makeRouter(now: dates.provider)
+        let idle = try RPCRequest(
+            method: RPCMethod.terminalActivityEvent,
+            params: TerminalActivityEventParams(terminalID: terminal.id, activityState: .idle)
+        )
+        let working = try RPCRequest(
+            method: RPCMethod.terminalActivityEvent,
+            params: TerminalActivityEventParams(terminalID: terminal.id, activityState: .working)
+        )
+
+        let earlier = Task { await router.handle(idle) }
+        guard await waitUntil({ dates.firstCallIsBlocked }) else {
+            dates.releaseFirstCall()
+            _ = await earlier.value
+            Issue.record("earlier idle event never reached the date seam")
+            return
+        }
+        #expect((await router.handle(working)).success)
+        dates.releaseFirstCall()
+        #expect((await earlier.value).success)
+
+        let updated = try #require(await db.terminals.get(id: terminal.id))
+        #expect(updated.activityState == .working)
+        #expect(updated.activityStateSource == originalSource)
+        #expect(updated.activityStateObservedAt == initial)
+        #expect(updated.awaitingInputReason == nil)
+        #expect(updated.awaitingInputObservedAt == nil)
+        let orderObservedAt = try await db.writerForTests.read { db in
+            try Date.fetchOne(
+                db,
+                sql: "SELECT activityStateOrderObservedAt FROM terminal WHERE id = ?",
+                arguments: [terminal.id.uuidString]
+            )
+        }
+        #expect(orderObservedAt == laterWorkingAt)
+    }
+
+    @Test("a newer same-state idle hook advances order without erasing interrupt provenance")
+    func newerSameStateIdleAdvancesOrderWithoutErasingInterrupt() async throws {
+        let terminal = try await makeTerminal()
+        let interruptedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let refreshedAt = interruptedAt.addingTimeInterval(1)
+        try await db.terminals.setActivityState(
+            id: terminal.id,
+            activityState: .idle,
+            source: .terminalInterrupt,
+            observedAt: interruptedAt
+        )
+
+        _ = try await db.terminals.applyActivityObservation(
+            id: terminal.id,
+            activityState: .idle,
+            source: .hookEvent(RPCMethod.terminalActivityEvent),
+            observedAt: refreshedAt
+        )
+
+        let updated = try #require(await db.terminals.get(id: terminal.id))
+        #expect(updated.activityState == .idle)
+        #expect(updated.activityStateSource == .terminalInterrupt)
+        #expect(updated.activityStateObservedAt == interruptedAt)
+        let orderObservedAt = try await db.writerForTests.read { db in
+            try Date.fetchOne(
+                db,
+                sql: "SELECT activityStateOrderObservedAt FROM terminal WHERE id = ?",
+                arguments: [terminal.id.uuidString]
+            )
+        }
+        #expect(orderObservedAt == refreshedAt)
+    }
+
     @Test("a same-time earlier working hook cannot erase a later interrupt")
     func sameTimeEarlierWorkingCannotEraseLaterInterrupt() async throws {
         let terminal = try await makeTerminal()
@@ -346,6 +436,70 @@ struct TerminalActivityEventHandlerTests {
         let updated = try #require(await db.terminals.get(id: terminal.id))
         #expect(updated.activityState == .idle)
         #expect(updated.activityStateSource == .terminalInterrupt)
+        #expect(updated.activityStateObservedAt == instant)
+    }
+
+    @Test("a same-time earlier working hook cannot erase a later idle hook")
+    func sameTimeEarlierWorkingCannotEraseLaterIdle() async throws {
+        let terminal = try await makeTerminal()
+        let instant = Date(timeIntervalSince1970: 1_700_000_000)
+        let dates = BlockingDateSequence(first: instant, subsequent: instant)
+        let router = makeRouter(now: dates.provider)
+        let working = try RPCRequest(
+            method: RPCMethod.terminalActivityEvent,
+            params: TerminalActivityEventParams(terminalID: terminal.id, activityState: .working)
+        )
+        let idle = try RPCRequest(
+            method: RPCMethod.terminalActivityEvent,
+            params: TerminalActivityEventParams(terminalID: terminal.id, activityState: .idle)
+        )
+
+        let earlier = Task { await router.handle(working) }
+        guard await waitUntil({ dates.firstCallIsBlocked }) else {
+            dates.releaseFirstCall()
+            _ = await earlier.value
+            Issue.record("earlier working event never reached the date seam")
+            return
+        }
+        #expect((await router.handle(idle)).success)
+        dates.releaseFirstCall()
+        #expect((await earlier.value).success)
+
+        let updated = try #require(await db.terminals.get(id: terminal.id))
+        #expect(updated.activityState == .idle)
+        #expect(updated.activityStateSource == .hookEvent(RPCMethod.terminalActivityEvent))
+        #expect(updated.activityStateObservedAt == instant)
+        let orderObservedAt = try await db.writerForTests.read { db in
+            try Date.fetchOne(
+                db,
+                sql: "SELECT activityStateOrderObservedAt FROM terminal WHERE id = ?",
+                arguments: [terminal.id.uuidString]
+            )
+        }
+        #expect(orderObservedAt == instant)
+    }
+
+    @Test("a same-time idle hook cannot erase a permission wait")
+    func sameTimeIdleCannotEraseWaitingForUser() async throws {
+        let terminal = try await makeTerminal()
+        let instant = Date(timeIntervalSince1970: 1_700_000_000)
+        try await db.terminals.setActivityState(
+            id: terminal.id,
+            activityState: .waitingForUser,
+            source: .hookEvent("PermissionRequest"),
+            observedAt: instant
+        )
+
+        _ = try await db.terminals.applyActivityObservation(
+            id: terminal.id,
+            activityState: .idle,
+            source: .hookEvent("Stop"),
+            observedAt: instant
+        )
+
+        let updated = try #require(await db.terminals.get(id: terminal.id))
+        #expect(updated.activityState == .waitingForUser)
+        #expect(updated.activityStateSource == .hookEvent("PermissionRequest"))
         #expect(updated.activityStateObservedAt == instant)
     }
 

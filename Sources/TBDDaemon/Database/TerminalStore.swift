@@ -32,6 +32,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// written before v70 and on any row stamped without provenance.
     var activityStateSource: String?
     var activityStateObservedAt: Date?
+    var activityStateOrderObservedAt: Date?
     /// JSON-encoded `AwaitingInputReason`, carried verbatim from the
     /// `Notification` hook. nil when the session is not waiting, or when the
     /// wait carried no structured reason.
@@ -60,6 +61,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.watch_desk_role = terminal.watchDeskRole?.rawValue
         self.activityStateSource = FactColumnJSON.encode(terminal.activityStateSource)
         self.activityStateObservedAt = terminal.activityStateObservedAt
+        self.activityStateOrderObservedAt = terminal.activityStateOrderObservedAt
         self.awaitingInputReason = FactColumnJSON.encode(terminal.awaitingInputReason)
         self.awaitingInputObservedAt = terminal.awaitingInputObservedAt
     }
@@ -100,6 +102,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             },
             activityStateSource: FactColumnJSON.decode(FactSource.self, from: activityStateSource),
             activityStateObservedAt: activityStateObservedAt,
+            activityStateOrderObservedAt: activityStateOrderObservedAt,
             awaitingInputReason: FactColumnJSON.decode(AwaitingInputReason.self, from: awaitingInputReason),
             awaitingInputObservedAt: awaitingInputObservedAt
         )
@@ -123,6 +126,25 @@ enum FactColumnJSON {
         guard let json, let data = json.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(type, from: data)
     }
+}
+
+public struct AppliedTerminalActivityObservation: Sendable {
+    public let activityState: TerminalActivityState
+    public let source: FactSource
+    public let observedAt: Date
+    public let orderObservedAt: Date
+}
+
+private func preservesStoredActivityAtEqualOrder(
+    storedState: TerminalActivityState,
+    storedSource: FactSource?,
+    incomingState: TerminalActivityState,
+    incomingSource: FactSource
+) -> Bool {
+    if incomingSource == .terminalInterrupt { return false }
+    if storedSource == .terminalInterrupt { return true }
+    if storedState == .waitingForUser, incomingState != .waitingForUser { return true }
+    return storedState != .working && incomingState == .working
 }
 
 /// Provides CRUD operations for terminals.
@@ -322,6 +344,7 @@ public struct TerminalStore: Sendable {
             record.activityState = TerminalActivityState.unknown.rawValue
             record.activityStateSource = FactColumnJSON.encode(FactSource.derived)
             record.activityStateObservedAt = date
+            record.activityStateOrderObservedAt = date
             record.awaitingInputReason = nil
             record.awaitingInputObservedAt = nil
             try record.update(db)
@@ -379,6 +402,7 @@ public struct TerminalStore: Sendable {
             record.activityState = activityState.rawValue
             record.activityStateSource = FactColumnJSON.encode(source)
             record.activityStateObservedAt = observedAt
+            record.activityStateOrderObservedAt = observedAt
             // Unconditional, including the nil case: this IS the superseding
             // rail. A caller that observes a new activity state without naming
             // a reason clears the old one, so a "needs your permission"
@@ -392,51 +416,83 @@ public struct TerminalStore: Sendable {
     }
 
     /// Apply an externally observed activity fact only when it is not older
-    /// than the fact already stored for the terminal.
+    /// than the ordering watermark already stored for the terminal.
     ///
-    /// The timestamp comparison and the complete `{state, source, observedAt}`
-    /// write share one database-writer transaction. Callers may therefore do
+    /// The ordering comparison and write share one database-writer
+    /// transaction. Callers may therefore do
     /// arbitrary asynchronous work between observing an event and reaching
     /// this method without allowing that older event to roll back a newer one.
     ///
-    /// Repeated hook values remain no-ops by default so a generic idle echo
-    /// cannot erase more specific provenance such as an explicit interrupt.
-    /// Events that establish meaningful same-value provenance (currently a
-    /// user interrupt and SessionStart) opt into replacement. Exact timestamp
-    /// ties cannot establish event order, so an already-stored user interrupt
-    /// wins over a hook observation; the next strictly newer hook supersedes it.
+    /// A repeated generic value advances only the ordering watermark and clears
+    /// an obsolete awaiting-input reason. Its semantic transition timestamp and
+    /// source remain unchanged, which both preserves hibernation's at-rest
+    /// clock and prevents an idle echo from erasing an explicit interrupt.
+    /// Events that establish meaningful same-value provenance (currently a user
+    /// interrupt and SessionStart) opt into replacement. Exact timestamp ties
+    /// cannot establish event order, so explicit interrupts and permission
+    /// waits are preserved, while ambiguous working/non-working ties resolve
+    /// toward non-working; the next strictly newer hook advances order.
     public func applyActivityObservation(
         id: UUID,
         activityState: TerminalActivityState,
         source: FactSource,
         observedAt: Date,
         replaceSameValue: Bool = false
-    ) async throws -> Bool {
+    ) async throws -> AppliedTerminalActivityObservation? {
         try await writer.write { db in
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Terminal not found")
             }
-            if let storedObservedAt = record.activityStateObservedAt,
-               storedObservedAt > observedAt {
-                return false
+            let storedOrderObservedAt = record.activityStateOrderObservedAt
+                ?? record.activityStateObservedAt
+            if let storedOrderObservedAt, storedOrderObservedAt > observedAt {
+                return nil
             }
-            if record.activityStateObservedAt == observedAt,
-               FactColumnJSON.decode(FactSource.self, from: record.activityStateSource)
-                == .terminalInterrupt,
-               source != .terminalInterrupt {
-                return false
+            let storedSource = FactColumnJSON.decode(
+                FactSource.self, from: record.activityStateSource)
+            let storedState = record.activityState.flatMap(TerminalActivityState.init(rawValue:))
+                ?? .unknown
+            if storedOrderObservedAt == observedAt,
+               preservesStoredActivityAtEqualOrder(
+                   storedState: storedState,
+                   storedSource: storedSource,
+                   incomingState: activityState,
+                   incomingSource: source) {
+                return nil
             }
-            if record.activityState == activityState.rawValue, !replaceSameValue {
-                return false
+
+            let sameCompleteFact = record.activityState == activityState.rawValue
+                && storedSource != nil
+                && record.activityStateObservedAt != nil
+                && !replaceSameValue
+            if sameCompleteFact,
+               let storedSource,
+               let storedObservedAt = record.activityStateObservedAt {
+                record.activityStateOrderObservedAt = observedAt
+                record.awaitingInputReason = nil
+                record.awaitingInputObservedAt = nil
+                try record.update(db)
+                return AppliedTerminalActivityObservation(
+                    activityState: activityState,
+                    source: storedSource,
+                    observedAt: storedObservedAt,
+                    orderObservedAt: observedAt
+                )
             }
 
             record.activityState = activityState.rawValue
             record.activityStateSource = FactColumnJSON.encode(source)
             record.activityStateObservedAt = observedAt
+            record.activityStateOrderObservedAt = observedAt
             record.awaitingInputReason = nil
             record.awaitingInputObservedAt = nil
             try record.update(db)
-            return true
+            return AppliedTerminalActivityObservation(
+                activityState: activityState,
+                source: source,
+                observedAt: observedAt,
+                orderObservedAt: observedAt
+            )
         }
     }
 
@@ -576,6 +632,7 @@ public struct TerminalStore: Sendable {
             // awaiting-input reason is cleared with it.
             record.activityStateSource = FactColumnJSON.encode(FactSource.database)
             record.activityStateObservedAt = date
+            record.activityStateOrderObservedAt = date
             record.awaitingInputReason = nil
             record.awaitingInputObservedAt = nil
             try record.update(db)

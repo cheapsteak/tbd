@@ -388,9 +388,11 @@ extension AppState {
 
         // Remaining terminals: Codex (Ctrl+C), Claude, or legacy nil-kind sessions.
         if let idx = terminals[terminal.worktreeID]?.firstIndex(where: { $0.id == terminalID }) {
+            let observedAt = Date()
             terminals[terminal.worktreeID]?[idx].activityState = .idle
             terminals[terminal.worktreeID]?[idx].activityStateSource = .terminalInterrupt
-            terminals[terminal.worktreeID]?[idx].activityStateObservedAt = Date()
+            terminals[terminal.worktreeID]?[idx].activityStateObservedAt = observedAt
+            terminals[terminal.worktreeID]?[idx].activityStateOrderObservedAt = observedAt
         }
 
         Task {
@@ -704,29 +706,37 @@ extension Terminal {
     /// letting an older response roll back a newer local or pushed fact.
     /// Provenance is one atomic pair: a partial incoming pair is either ignored
     /// as a same-value legacy echo or applied with both halves cleared. When
-    /// timestamps tie, an explicit interrupt wins over a hook fact because the
-    /// clock cannot establish order and a false working indicator is costlier.
+    /// timestamps tie, explicit interrupts and permission waits are preserved,
+    /// while ambiguous working/non-working ties resolve toward non-working.
     mutating func reconcileActivityObservation(against current: Terminal?) {
         let incomingIsComplete = activityStateSource != nil && activityStateObservedAt != nil
         guard let current else {
             if !incomingIsComplete {
                 activityStateSource = nil
                 activityStateObservedAt = nil
+                activityStateOrderObservedAt = nil
             }
             return
         }
 
+        reconcilePresentationObservation(against: current)
+
         let currentIsComplete = current.activityStateSource != nil
             && current.activityStateObservedAt != nil
+        let incomingOrderObservedAt = activityStateOrderObservedAt
+            ?? activityStateObservedAt
+        let currentOrderObservedAt = current.activityStateOrderObservedAt
+            ?? current.activityStateObservedAt
         let shouldKeepCurrent: Bool
         if incomingIsComplete,
            currentIsComplete,
-           let incomingObservedAt = activityStateObservedAt,
-           let currentObservedAt = current.activityStateObservedAt {
-            shouldKeepCurrent = incomingObservedAt < currentObservedAt
-                || (incomingObservedAt == currentObservedAt
-                    && current.activityStateSource == .terminalInterrupt
-                    && activityStateSource != .terminalInterrupt)
+           let incomingOrderObservedAt,
+           let currentOrderObservedAt {
+            shouldKeepCurrent = incomingOrderObservedAt < currentOrderObservedAt
+                || (incomingOrderObservedAt == currentOrderObservedAt
+                    && current.preservesActivityAtEqualOrder(
+                        over: activityState,
+                        source: activityStateSource))
         } else if !incomingIsComplete, currentIsComplete {
             shouldKeepCurrent = activityState == current.activityState
         } else {
@@ -737,11 +747,47 @@ extension Terminal {
             activityState = current.activityState
             activityStateSource = current.activityStateSource
             activityStateObservedAt = current.activityStateObservedAt
-            presentationActivityState = current.presentationActivityState
+            activityStateOrderObservedAt = current.activityStateOrderObservedAt
         } else if !incomingIsComplete {
             activityStateSource = nil
             activityStateObservedAt = nil
+            activityStateOrderObservedAt = nil
         }
+    }
+
+    /// Transcript presentation is response-derived and has its own ordering;
+    /// raw hook timestamps do not order it. Legacy responses with no timestamp
+    /// remain arrival-ordered until a timestamped observation has been adopted.
+    /// On an exact tie, a non-working result wins because false working is the
+    /// costlier error and nil is a real "could not establish activity" result.
+    private mutating func reconcilePresentationObservation(against current: Terminal) {
+        let shouldKeepCurrent: Bool
+        switch (presentationActivityObservedAt, current.presentationActivityObservedAt) {
+        case let (incomingAt?, currentAt?) where incomingAt < currentAt:
+            shouldKeepCurrent = true
+        case let (incomingAt?, currentAt?) where incomingAt == currentAt:
+            shouldKeepCurrent = presentationActivityState == .working
+                && current.presentationActivityState != .working
+        case (nil, .some):
+            shouldKeepCurrent = true
+        default:
+            shouldKeepCurrent = false
+        }
+
+        if shouldKeepCurrent {
+            presentationActivityState = current.presentationActivityState
+            presentationActivityObservedAt = current.presentationActivityObservedAt
+        }
+    }
+
+    private func preservesActivityAtEqualOrder(
+        over incomingState: TerminalActivityState,
+        source incomingSource: FactSource?
+    ) -> Bool {
+        if incomingSource == .terminalInterrupt { return false }
+        if activityStateSource == .terminalInterrupt { return true }
+        if activityState == .waitingForUser, incomingState != .waitingForUser { return true }
+        return activityState != .working && incomingState == .working
     }
 
     /// Apply a pushed activity observation under the same ordering and legacy
@@ -752,15 +798,20 @@ extension Terminal {
         let incomingIsComplete = delta.activityStateSource != nil
             && delta.activityStateObservedAt != nil
         let currentIsComplete = activityStateSource != nil && activityStateObservedAt != nil
+        let incomingOrderObservedAt = delta.activityStateOrderObservedAt
+            ?? delta.activityStateObservedAt
+        let currentOrderObservedAt = activityStateOrderObservedAt
+            ?? activityStateObservedAt
 
         if incomingIsComplete,
            currentIsComplete,
-           let incomingObservedAt = delta.activityStateObservedAt,
-           let currentObservedAt = activityStateObservedAt,
-           incomingObservedAt < currentObservedAt
-            || (incomingObservedAt == currentObservedAt
-                && activityStateSource == .terminalInterrupt
-                && delta.activityStateSource != .terminalInterrupt) {
+           let incomingOrderObservedAt,
+           let currentOrderObservedAt,
+           incomingOrderObservedAt < currentOrderObservedAt
+            || (incomingOrderObservedAt == currentOrderObservedAt
+                && preservesActivityAtEqualOrder(
+                    over: delta.activityState,
+                    source: delta.activityStateSource)) {
             return
         }
 
@@ -769,16 +820,19 @@ extension Terminal {
             activityState = delta.activityState
             activityStateSource = nil
             activityStateObservedAt = nil
+            activityStateOrderObservedAt = nil
             return
         }
 
         activityState = delta.activityState
         activityStateSource = delta.activityStateSource
         activityStateObservedAt = delta.activityStateObservedAt
+        activityStateOrderObservedAt = delta.activityStateOrderObservedAt
         if isCodexTerminal,
            delta.activityState == .idle,
            delta.activityStateSource == .hookEvent("SessionStart") {
             presentationActivityState = .idle
+            presentationActivityObservedAt = incomingOrderObservedAt
         }
     }
 }
