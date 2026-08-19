@@ -333,6 +333,141 @@ private func decodedCodexSnapshot(
 }
 
 @MainActor
+@Test func appState_delayedSessionStartCannotRegressHiddenUnknownPresentationOrder() throws {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    let oldAt = Date(timeIntervalSinceReferenceDate: 20)
+    let sessionStartAt = Date(timeIntervalSinceReferenceDate: 30)
+    let delayedWorkingAt = Date(timeIntervalSinceReferenceDate: 35)
+    let unknownAt = Date(timeIntervalSinceReferenceDate: 40)
+    let newerSessionStartAt = Date(timeIntervalSinceReferenceDate: 50)
+    let original = Terminal(
+        id: terminalID,
+        worktreeID: worktreeID,
+        tmuxWindowID: "@1",
+        tmuxPaneID: "%1",
+        label: "Codex",
+        claudeSessionID: "session",
+        transcriptPath: "/tmp/session.jsonl",
+        kind: .codex,
+        activityState: .working,
+        presentationActivityState: .working,
+        presentationActivityObservedAt: oldAt,
+        activityStateSource: .hookEvent("UserPromptSubmit"),
+        activityStateObservedAt: oldAt,
+        activityStateOrderObservedAt: oldAt)
+    state.terminals = [worktreeID: [original]]
+
+    state.handleDelta(.terminalSessionUpdated(TerminalSessionDelta(
+        terminalID: terminalID,
+        worktreeID: worktreeID,
+        sessionID: "session",
+        transcriptPath: "/tmp/session.jsonl",
+        sessionOrderObservedAt: sessionStartAt)))
+
+    var authoritativeUnknown = try #require(state.terminals[worktreeID]?.first)
+    authoritativeUnknown.activityState = .idle
+    authoritativeUnknown.activityStateSource = .hookEvent("SessionStart")
+    authoritativeUnknown.activityStateObservedAt = sessionStartAt
+    authoritativeUnknown.activityStateOrderObservedAt = sessionStartAt
+    authoritativeUnknown.presentationActivityState = nil
+    authoritativeUnknown.presentationActivityObservedAt = unknownAt
+    state.adoptTerminalSnapshot([authoritativeUnknown], worktreeID: worktreeID)
+
+    #expect(state.terminals[worktreeID]?.first?.presentationActivityState == nil)
+    #expect(state.terminals[worktreeID]?.first?.presentationActivityObservedAt == nil)
+    #expect(state.terminalPresentationOrderObservedAt[terminalID] == unknownAt)
+
+    state.handleDelta(.terminalActivityUpdated(TerminalActivityDelta(
+        terminalID: terminalID,
+        worktreeID: worktreeID,
+        activityState: .idle,
+        activityStateSource: .hookEvent("SessionStart"),
+        activityStateObservedAt: sessionStartAt,
+        activityStateOrderObservedAt: sessionStartAt)))
+
+    var delayedWorking = try #require(state.terminals[worktreeID]?.first)
+    delayedWorking.presentationActivityState = .working
+    delayedWorking.presentationActivityObservedAt = delayedWorkingAt
+    state.adoptTerminalSnapshot([delayedWorking], worktreeID: worktreeID)
+
+    #expect(state.terminals[worktreeID]?.first?.presentationActivityState == nil)
+    #expect(state.terminalPresentationOrderObservedAt[terminalID] == unknownAt)
+
+    state.handleDelta(.terminalActivityUpdated(TerminalActivityDelta(
+        terminalID: terminalID,
+        worktreeID: worktreeID,
+        activityState: .idle,
+        activityStateSource: .hookEvent("SessionStart"),
+        activityStateObservedAt: unknownAt,
+        activityStateOrderObservedAt: unknownAt)))
+    #expect(state.terminals[worktreeID]?.first?.presentationActivityState == .idle)
+    #expect(state.terminalPresentationOrderObservedAt[terminalID] == unknownAt)
+
+    state.handleDelta(.terminalActivityUpdated(TerminalActivityDelta(
+        terminalID: terminalID,
+        worktreeID: worktreeID,
+        activityState: .idle,
+        activityStateSource: .hookEvent("SessionStart"),
+        activityStateObservedAt: newerSessionStartAt,
+        activityStateOrderObservedAt: newerSessionStartAt)))
+    #expect(state.terminals[worktreeID]?.first?.presentationActivityState == .idle)
+    #expect(state.terminalPresentationOrderObservedAt[terminalID] == newerSessionStartAt)
+}
+
+@MainActor
+@Test func appState_samePathSessionBoundaryRejectsPreBoundaryPresentation() throws {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    let oldAt = Date(timeIntervalSinceReferenceDate: 20)
+    let sessionStartAt = Date(timeIntervalSinceReferenceDate: 30)
+    let stalePresentationAt = Date(timeIntervalSinceReferenceDate: 40)
+    let preBoundary = Terminal(
+        id: terminalID,
+        worktreeID: worktreeID,
+        tmuxWindowID: "@1",
+        tmuxPaneID: "%1",
+        label: "Codex",
+        claudeSessionID: "session",
+        transcriptPath: "/tmp/session.jsonl",
+        kind: .codex,
+        activityState: .working,
+        presentationActivityState: .working,
+        presentationActivityObservedAt: stalePresentationAt,
+        activityStateSource: .hookEvent("UserPromptSubmit"),
+        activityStateObservedAt: oldAt,
+        activityStateOrderObservedAt: oldAt)
+    state.terminals = [worktreeID: [preBoundary]]
+
+    state.handleDelta(.terminalSessionUpdated(TerminalSessionDelta(
+        terminalID: terminalID,
+        worktreeID: worktreeID,
+        sessionID: "session",
+        transcriptPath: "/tmp/session.jsonl",
+        sessionOrderObservedAt: sessionStartAt)))
+    state.adoptTerminalSnapshot([preBoundary], worktreeID: worktreeID)
+
+    var terminal = try #require(state.terminals[worktreeID]?.first)
+    #expect(terminal.presentationActivityState == nil)
+    #expect(terminal.presentationActivityObservedAt == nil)
+    #expect(state.terminalPresentationOrderObservedAt[terminalID] == sessionStartAt)
+
+    state.handleDelta(.terminalActivityUpdated(TerminalActivityDelta(
+        terminalID: terminalID,
+        worktreeID: worktreeID,
+        activityState: .idle,
+        activityStateSource: .hookEvent("SessionStart"),
+        activityStateObservedAt: sessionStartAt,
+        activityStateOrderObservedAt: sessionStartAt)))
+
+    terminal = try #require(state.terminals[worktreeID]?.first)
+    #expect(terminal.presentationActivityState == .idle)
+    #expect(!WorktreeRowView.isForegroundWorking(terminal))
+}
+
+@MainActor
 @Test func appState_sessionIdentityRolloverResetsPresentationOrder() {
     let state = AppState()
     let worktreeID = UUID()

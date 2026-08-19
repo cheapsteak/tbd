@@ -2238,16 +2238,14 @@ final class AppState: ObservableObject {
             return
         }
         var terminal = terminals[delta.worktreeID]![idx]
-        let previousPresentationState = terminal.presentationActivityState
-        let previousPresentationObservedAt = terminal.presentationActivityObservedAt
-        terminal.applyActivityDelta(delta)
-        if terminal.presentationActivityState != previousPresentationState
-            || terminal.presentationActivityObservedAt != previousPresentationObservedAt {
-            if let observedAt = terminal.presentationActivityObservedAt {
-                terminalPresentationOrderObservedAt[delta.terminalID] = observedAt
-            } else {
-                terminalPresentationOrderObservedAt.removeValue(forKey: delta.terminalID)
-            }
+        let presentationOrderObservedAt = terminal.applyActivityDelta(
+            delta,
+            presentationOrderObservedAt: terminalPresentationOrderObservedAt[delta.terminalID]
+                ?? terminal.presentationActivityObservedAt)
+        if let presentationOrderObservedAt {
+            terminalPresentationOrderObservedAt[delta.terminalID] = presentationOrderObservedAt
+        } else {
+            terminalPresentationOrderObservedAt.removeValue(forKey: delta.terminalID)
         }
         terminals[delta.worktreeID]?[idx] = terminal
     }

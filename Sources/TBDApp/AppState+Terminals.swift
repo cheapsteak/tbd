@@ -316,6 +316,10 @@ extension AppState {
                 && currentSessionOrderObservedAt.map { currentOrder in
                     incomingActivityOrderObservedAt.map { $0 <= currentOrder } ?? true
                 } == true
+            let snapshotPredatesCurrentSession = current != nil
+                && currentSessionOrderObservedAt.map { currentOrder in
+                    incomingActivityOrderObservedAt.map { $0 < currentOrder } ?? true
+                } == true
             if shouldKeepCurrentIdentity, let current {
                 merged.claudeSessionID = current.claudeSessionID
                 merged.transcriptPath = current.transcriptPath
@@ -326,6 +330,14 @@ extension AppState {
                 } else {
                     terminalSessionOrderObservedAt.removeValue(forKey: snapshot.id)
                 }
+            }
+            // A list response may have scanned the same transcript path before
+            // an accepted SessionStart boundary. Its later response timestamp
+            // does not make that pre-boundary presentation current.
+            if shouldKeepCurrentIdentity || snapshotPredatesCurrentSession,
+               let current {
+                merged.presentationActivityState = current.presentationActivityState
+                merged.presentationActivityObservedAt = current.presentationActivityObservedAt
             }
             let presentationOrderObservedAt = merged.reconcileActivityObservation(
                 against: current,
@@ -900,17 +912,27 @@ extension Terminal {
         source == .terminalInterrupt || source == .hookEvent("SessionStart")
     }
 
-    private func canReplacePresentation(observedAt incomingObservedAt: Date?) -> Bool {
-        guard let presentationActivityObservedAt else { return true }
+    private func canReplacePresentation(
+        observedAt incomingObservedAt: Date?,
+        orderObservedAt: Date?
+    ) -> Bool {
+        guard let currentObservedAt = orderObservedAt
+            ?? presentationActivityObservedAt else { return true }
         guard let incomingObservedAt else { return false }
-        return incomingObservedAt >= presentationActivityObservedAt
+        return incomingObservedAt >= currentObservedAt
     }
 
     /// Apply a pushed activity observation under the same ordering and legacy
     /// rules used for snapshots. SessionStart is the sole idle hook entitled
     /// to clear transcript presentation, and only after its complete fact wins
     /// the timestamp comparison.
-    mutating func applyActivityDelta(_ delta: TerminalActivityDelta) {
+    @discardableResult
+    mutating func applyActivityDelta(
+        _ delta: TerminalActivityDelta,
+        presentationOrderObservedAt: Date?
+    ) -> Date? {
+        let currentPresentationOrderObservedAt = presentationOrderObservedAt
+            ?? self.presentationActivityObservedAt
         let incomingIsComplete = delta.activityStateSource != nil
             && delta.activityStateObservedAt != nil
         let currentIsComplete = activityStateSource != nil && activityStateObservedAt != nil
@@ -928,23 +950,25 @@ extension Terminal {
                 && preservesActivityAtEqualOrder(
                     over: delta.activityState,
                     source: delta.activityStateSource)) {
-            return
+            return currentPresentationOrderObservedAt
         }
 
         if !incomingIsComplete {
-            if currentIsComplete, delta.activityState == activityState { return }
+            if currentIsComplete, delta.activityState == activityState {
+                return currentPresentationOrderObservedAt
+            }
             activityState = delta.activityState
             activityStateSource = nil
             activityStateObservedAt = nil
             activityStateOrderObservedAt = nil
-            return
+            return currentPresentationOrderObservedAt
         }
 
         if currentIsComplete,
            delta.activityState == activityState,
            !isMeaningfulSameStateReplacement(source: delta.activityStateSource) {
             activityStateOrderObservedAt = incomingOrderObservedAt
-            return
+            return currentPresentationOrderObservedAt
         }
 
         activityState = delta.activityState
@@ -954,9 +978,13 @@ extension Terminal {
         if isCodexTerminal,
            delta.activityState == .idle,
            delta.activityStateSource == .hookEvent("SessionStart"),
-           canReplacePresentation(observedAt: incomingOrderObservedAt) {
+           canReplacePresentation(
+               observedAt: incomingOrderObservedAt,
+               orderObservedAt: currentPresentationOrderObservedAt) {
             presentationActivityState = .idle
             presentationActivityObservedAt = incomingOrderObservedAt
+            return incomingOrderObservedAt
         }
+        return currentPresentationOrderObservedAt
     }
 }
