@@ -10,7 +10,8 @@ public enum OrphanGCError: LocalizedError, CustomStringConvertible, Equatable {
     /// No `ReapRecord` exists with the given id.
     case recordNotFound(UUID)
     /// `restore(recordID:)` only supports `.agentWorktree` records — scratchpads
-    /// have no restore path (there's nothing to recreate a bare tmp dir from).
+    /// have no restore path (there's nothing to recreate a bare tmp dir from),
+    /// and an `.orphanProcess` record describes a kill, which nothing can undo.
     case unsupportedKind(ReapKind)
     /// The record was already restored once; restoring twice would attempt to
     /// recreate a worktree that (probably) already exists on disk.
@@ -82,6 +83,18 @@ public actor OrphanGC {
     /// deterministically. `nil` in production (both public inits omit it), so
     /// the sweep is unchanged there.
     private let beforeProfileDirReap: (@Sendable () async -> Void)?
+    /// Test seam for the pid-to-cwd half of the sweep's `lsof` pass. `nil` in
+    /// production, where the map comes from the same single pass that produces
+    /// `liveCWDsProvider`'s path list — no second subprocess, no per-pid
+    /// syscall.
+    private let processCWDsProvider: (@Sendable () async -> [Int32: String]?)?
+    /// The `ps` snapshot reader. Returning `nil` means "the process graph
+    /// could not be determined", which skips the orphan-process phase — never
+    /// "there are no orphans". Injected in tests; the real `/bin/ps` reader in
+    /// production. The same closure is handed to `OrphanProcessCollector`,
+    /// which re-reads through it immediately before each signal volley.
+    private let processSnapshotProvider: @Sendable () async -> [ProcessSnapshotEntry]?
+    private let orphanProcessCollector: OrphanProcessCollector
 
     /// Production seam: an injected `lsofProvider` returns a non-optional
     /// `[String]` — by definition authoritative, it can't signal
@@ -94,7 +107,8 @@ public actor OrphanGC {
         scratchpadBase: URL? = nil,
         now: (@Sendable () -> Date)? = nil,
         profileDirBase: URL? = nil,
-        credentialsKeychain: any ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain()
+        credentialsKeychain: any ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain(),
+        signaller: any ProcessSignaller = ProductionProcessSignaller()
     ) {
         var wrapped: (@Sendable () async -> [String]?)?
         if let lsofProvider {
@@ -103,7 +117,8 @@ public actor OrphanGC {
         self.init(
             db: db, git: git, broadcast: broadcast, liveCWDsProvider: wrapped,
             scratchpadBase: scratchpadBase, now: now,
-            profileDirBase: profileDirBase, credentialsKeychain: credentialsKeychain
+            profileDirBase: profileDirBase, credentialsKeychain: credentialsKeychain,
+            signaller: signaller
         )
     }
 
@@ -122,7 +137,13 @@ public actor OrphanGC {
         beforeInterruptedArchiveReap: (@Sendable () async -> Void)? = nil,
         profileDirBase: URL? = nil,
         credentialsKeychain: any ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain(),
-        beforeProfileDirReap: (@Sendable () async -> Void)? = nil
+        beforeProfileDirReap: (@Sendable () async -> Void)? = nil,
+        processCWDsProvider: (@Sendable () async -> [Int32: String]?)? = nil,
+        processSnapshotProvider: (@Sendable () async -> [ProcessSnapshotEntry]?)? = nil,
+        signaller: any ProcessSignaller = ProductionProcessSignaller(),
+        orphanProcessGraceAttempts: Int = 30,
+        orphanProcessPollInterval: Duration = .milliseconds(100),
+        clock: any Clock<Duration> = ContinuousClock()
     ) {
         let resolvedNow = now ?? Date.init
         let resolvedScratchpadBase = scratchpadBase ?? TBDConstants.claudeScratchpadBase
@@ -148,6 +169,15 @@ public actor OrphanGC {
         self.deletionQueueCollector = DeletionQueueCollector(git: git, now: resolvedNow)
         self.profileDirCollector = ProfileDirCollector(
             base: resolvedProfileDirBase, now: resolvedNow)
+        self.processCWDsProvider = processCWDsProvider
+        let resolvedSnapshotProvider: @Sendable () async -> [ProcessSnapshotEntry]? =
+            processSnapshotProvider ?? { await OrphanProcessCollector.realProcessSnapshot() }
+        self.processSnapshotProvider = resolvedSnapshotProvider
+        self.orphanProcessCollector = OrphanProcessCollector(
+            signaller: signaller, snapshotProvider: resolvedSnapshotProvider, now: resolvedNow,
+            graceAttempts: orphanProcessGraceAttempts,
+            pollInterval: orphanProcessPollInterval,
+            clock: clock)
     }
 
     // MARK: - Sweep
@@ -172,7 +202,8 @@ public actor OrphanGC {
         for repo in repos {
             let candidates = await agentCollector.candidates(repoPath: repo.path)
             for candidate in candidates {
-                switch await agentCollector.decide(candidate, liveCWDs: live, graceSeconds: config.gcGraceSeconds) {
+                switch await agentCollector.decide(
+                    candidate, liveCWDs: live.paths, graceSeconds: config.gcGraceSeconds) {
                 case .keep(let reason):
                     planned.append("KEEP \(reason) \(candidate.path)")
                     logger.debug("gc: keep \(reason, privacy: .public) \(candidate.path, privacy: .public)")
@@ -181,7 +212,8 @@ public actor OrphanGC {
                     // The outer `gcEnabled || dryRun` guard means a non-dry
                     // run here always has gcEnabled == true.
                     guard !dryRun else { continue }
-                    if let record = await agentCollector.reap(candidate, freshLiveCWDs: { await self.liveCWDs() }) {
+                    if let record = await agentCollector.reap(
+                        candidate, freshLiveCWDs: { await self.liveCWDs()?.paths }) {
                         await insertReapRecord(record)
                         reaped += 1
                         logger.info("""
@@ -211,7 +243,7 @@ public actor OrphanGC {
         let archived = (try? await db.worktrees.list(status: .archived)) ?? []
 
         await reclaimDeletionQueue(
-            repos: repos, archived: archived, live: live,
+            repos: repos, archived: archived, live: live.paths,
             graceSeconds: config.gcGraceSeconds, dryRun: dryRun,
             planned: &planned, reaped: &reaped
         )
@@ -223,6 +255,11 @@ public actor OrphanGC {
 
         await reclaimProfileDirs(
             config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
+        )
+
+        await reclaimOrphanProcesses(
+            config: config, repos: repos, live: live,
+            dryRun: dryRun, planned: &planned, reaped: &reaped
         )
 
         // Snapshot retention never runs in dryRun; the outer guard already
@@ -629,6 +666,248 @@ public actor OrphanGC {
         }
     }
 
+    // MARK: - Orphaned processes
+
+    /// Reclaims processes that outlived the worktree they were rooted in —
+    /// `disown`ed and `nohup`ed jobs reparented to launchd, which no pane,
+    /// tmux server or `AgentReaper` structure can reach
+    /// (`docs/specs/2026-08-18-orphan-process-gc-design.md`).
+    ///
+    /// Gated by `gcOrphanProcessesEnabled` on top of `gcEnabled`, the same
+    /// shape `reclaimProfileDirs` uses and for the same reason: this is the
+    /// only GC phase that signals processes rather than moving bytes, and what
+    /// it misjudges cannot be restored. `dryRun` bypasses the flag exactly as
+    /// `sweep` lets it bypass `gcEnabled` — someone deciding whether to enable
+    /// a default-off flag needs to see what enabling it would reclaim first —
+    /// and touches nothing either way.
+    ///
+    /// Every input skips the phase rather than proceeding on a partial
+    /// picture: a `ps` snapshot that could not be taken, and either of the two
+    /// row reads. That is the keep-favoring direction every other gate in this
+    /// sweep takes.
+    ///
+    /// Both row reads happen HERE rather than being handed down from `sweep`,
+    /// and back to back, so the live list and the archived list are one view of
+    /// one instant. The sweep's own `archived` list is taken before the
+    /// deletion-queue, scratchpad and profile-dir phases have run — `du` shells
+    /// and Keychain calls, so a wide window — and a worktree archived inside
+    /// that window would be missing from the old `archived` list while already
+    /// excluded from the fresh live list, leaving the phase to judge it on two
+    /// readings that disagree. Reading both together closes that. A failure on
+    /// either read skips the phase and says so, where `sweep`'s `try? … ?? []`
+    /// would have read "no archived worktrees" and reported a clean sweep of a
+    /// phase that never ran.
+    private func reclaimOrphanProcesses(
+        config: Config, repos: [Repo], live: LiveCWDs,
+        dryRun: Bool, planned: inout [String], reaped: inout Int
+    ) async {
+        guard config.gcOrphanProcessesEnabled || dryRun else { return }
+
+        // Stamped BEFORE the reading, so the start instants derived from it
+        // sit no later than the truth — the direction that widens apparent
+        // drift at signal time rather than hiding it.
+        let processesCapturedAt = now()
+        guard let processes = await processSnapshot() else {
+            logger.error("gc: ps unavailable this sweep — skipping the orphan-process phase")
+            planned.append("KEEP ps-unavailable orphan-processes")
+            return
+        }
+        guard let liveRows = try? await db.worktrees.listLocal(excludeArchived: true),
+              let archived = try? await db.worktrees.list(status: .archived) else {
+            logger.warning("gc: orphan-process phase skipped — DB read failed")
+            planned.append("KEEP db-unavailable orphan-processes")
+            return
+        }
+
+        let (roots, repoPathByPool) = orphanProcessRoots(
+            repos: repos, archived: archived, liveRows: liveRows)
+        let candidates = orphanProcessCollector.candidates(
+            processes: processes,
+            cwdByPID: live.cwdByPID,
+            cwdsCapturedAt: live.capturedAt,
+            roots: roots,
+            ourUID: getuid(),
+            ourPID: getpid(),
+            graceSeconds: config.gcGraceSeconds
+        )
+        guard !candidates.isEmpty else { return }
+
+        let protected = orphanProcessCollector.protectedPIDs(
+            processes: processes, ourPID: getpid(), ourUID: getuid())
+        // Every tree is planned from the ONE snapshot before anything is
+        // signalled, so the plan is a single consistent reading of the process
+        // graph rather than one that interleaves with its own destruction.
+        // It does not by itself bound how stale a pid can be by the time it is
+        // signalled — each reap below blocks for up to
+        // `graceAttempts × pollInterval` before the next one starts — which is
+        // why `reap` re-reads identities immediately before each volley.
+        let plan = candidates.map { candidate in
+            (candidate, orphanProcessCollector.descendantClosure(
+                of: candidate.pid, processes: processes, protected: protected))
+        }
+        // The start instant recorded for every pid in the plan. `reap` refuses
+        // to signal a pid whose live start instant no longer matches, which is
+        // what keeps a pid the kernel reissued mid-sweep — to a descendant slot
+        // or to a late candidate's root — out of the volley.
+        let plannedStarts = OrphanProcessCollector.startInstants(
+            processes, capturedAt: processesCapturedAt)
+        for (candidate, tree) in plan {
+            planned.append(
+                "REAP orphan-process pid=\(candidate.pid) tree=\(tree.count) \(candidate.rootPath)")
+        }
+        // This phase's guard is `gcOrphanProcessesEnabled || dryRun`, so every
+        // line below runs only with the flag actually on.
+        guard !dryRun else { return }
+        for (candidate, tree) in plan {
+            guard let record = await orphanProcessCollector.reap(
+                candidate, tree: tree, plannedStarts: plannedStarts,
+                repoPath: Self.repoPath(forRoot: candidate.rootPath, in: repoPathByPool)
+            ) else {
+                planned.append("KEEP nothing-signalled \(candidate.rootPath)")
+                continue
+            }
+            await insertReapRecord(record)
+            reaped += 1
+        }
+    }
+
+    /// The TBD-managed path universe this sweep classifies cwds against, plus
+    /// a pool-to-repo map so a reap record can still name the owning repo.
+    ///
+    /// Every path goes through `DeletionQueueCollector.resolvedPath`, which
+    /// walks up to the deepest ancestor that exists and canonicalizes that.
+    /// Both sides have to be resolved because `lsof` reports fully resolved
+    /// paths (`/private/var/...`), and a plain `realpath` would resolve nothing
+    /// for an archived row whose directory is already gone.
+    private func orphanProcessRoots(
+        repos: [Repo], archived: [Worktree], liveRows: [LocalWorktree]
+    ) -> (TBDProcessRoots, [String: String]) {
+        let layout = WorktreeLayout()
+        var pools: [String] = []
+        var repoPathByPool: [String: String] = [:]
+        var repoPathByID: [UUID: String] = [:]
+        for repo in repos {
+            repoPathByID[repo.id] = repo.path
+            for prefix in layout.legacyAndCanonicalPrefixes(for: repo) {
+                let resolved = deletionQueueCollector.resolvedPath(prefix)
+                pools.append(resolved)
+                repoPathByPool[resolved] = repo.path
+            }
+        }
+        // The scratch-worktree pool is TBD's outright, and belongs to no repo —
+        // hence no `repoPathByPool` entry, which stamps the record with `""`
+        // the same way the scratchpad phase does.
+        pools.append(deletionQueueCollector.resolvedPath(TBDConstants.scratchDir.path))
+        // The Claude scratchpad base is SHARED, not owned. Claude Code creates
+        // one directory there per project it has ever run in, and TBD manages
+        // almost none of them — a single census of one developer machine found
+        // 86 entries, of which 9 named no worktree at all (plain checkouts, a
+        // home directory, and loose files). A pool is where TBD's own
+        // `.deleting/` queues live and the only place an entry carrying no row
+        // is reclaimable at all; TBD queues no deletions here, so listing this
+        // base as a pool would extend that claim over a tree that is mostly
+        // other software's. `ScratchpadCollector.reconcile` already takes the
+        // whitelist side here for a merely destructive operation ("Unrelated
+        // directories in the base are untouched"); this phase kills processes,
+        // so it takes the same side.
+        var sharedRoots = [deletionQueueCollector.resolvedPath(scratchpadBase.path)]
+
+        // `adoptWorktree` inserts a row at a path the user chose, so an adopted
+        // worktree sits under no pool at all. `ownership(ofCWD:roots:)` gates on
+        // pool-or-shared-root membership BEFORE it consults `dead`, so without
+        // an entry here a process inside an archived adopted worktree would
+        // classify `.outside` forever — the exact leak this phase exists to
+        // close, for that whole class of worktree.
+        //
+        // The row's own path goes in as a SHARED root, never as a pool, and
+        // never its parent directory. A pool means "TBD owns this tree
+        // outright" — it is where TBD's own `.deleting/` queues live, and the
+        // only place an entry carrying no row is reclaimable at all — and that
+        // is false of a directory the user picked: its neighbours are a home
+        // directory's, a projects folder's, someone else's checkouts. A shared
+        // root classifies only what an explicit `live`/`dead` entry names,
+        // which is precisely the adopted worktree itself and nothing beside
+        // it, the same line the Claude scratchpad base above is drawn on.
+        //
+        // `reclaimDeletionQueue` widens its own set from adopted rows for the
+        // same reason; it can take the parent because draining a `.deleting/`
+        // entry TBD itself renamed needs no provenance gate, while killing a
+        // process does.
+        for row in liveRows + archived.compactMap(LocalWorktree.init) {
+            let resolved = deletionQueueCollector.resolvedPath(row.path)
+            guard !pools.contains(where: { Self.isUnder(resolved, prefix: $0) }) else { continue }
+            sharedRoots.append(resolved)
+            // No pool contains this path, so `repoPath(forRoot:in:)` would
+            // stamp the reap record with `""`. The row names its repo directly,
+            // so map the worktree path itself; longest-prefix lookup means the
+            // entry answers for exactly this worktree and nothing above it.
+            if let repoID = row.repoID, let repoPath = repoPathByID[repoID] {
+                repoPathByPool[resolved] = repoPath
+            }
+        }
+
+        // A worktree's Claude scratchpad answers to the same owner as the
+        // worktree itself — `ScratchpadCollector`'s slug is derived from the
+        // worktree path, so the owner is always recoverable. Classifying the
+        // scratchpad alongside its worktree is what makes an archived
+        // worktree's scratchpad reclaimable and a live one's explicitly not,
+        // rather than leaving a directory the sweep can see go unjudged.
+        func scratchpadPath(forWorktreePath path: String) -> String {
+            deletionQueueCollector.resolvedPath(
+                scratchpadBase.appendingPathComponent(
+                    ScratchpadCollector.slug(forWorktreePath: path)).path)
+        }
+        let livePaths = liveRows.flatMap {
+            [deletionQueueCollector.resolvedPath($0.path), scratchpadPath(forWorktreePath: $0.path)]
+        }
+        let deadRoots = archived
+            .compactMap(LocalWorktree.init)
+            .flatMap {
+                [
+                    DeadWorktreeRoot(
+                        path: deletionQueueCollector.resolvedPath($0.path),
+                        archivedAt: $0.archivedAt),
+                    DeadWorktreeRoot(
+                        path: scratchpadPath(forWorktreePath: $0.path),
+                        archivedAt: $0.archivedAt),
+                ]
+            }
+        return (
+            TBDProcessRoots(
+                pools: pools, sharedRoots: sharedRoots, live: livePaths, dead: deadRoots),
+            repoPathByPool
+        )
+    }
+
+    /// The repo whose pool owns `root`, or `""` when none does (a scratch
+    /// worktree, a scratchpad, or a repo row that has since been removed).
+    /// Longest matching pool wins, so nested pools resolve to the inner one.
+    private static func repoPath(forRoot root: String, in repoPathByPool: [String: String]) -> String {
+        var best: (pool: String, repo: String)?
+        for (pool, repo) in repoPathByPool where root == pool || root.hasPrefix(pool + "/") {
+            if best == nil || pool.count > best!.pool.count {
+                best = (pool, repo)
+            }
+        }
+        return best?.repo ?? ""
+    }
+
+    /// `path` is `prefix` itself or strictly below it. Component-wise, so
+    /// `/a/pool-2` is never read as living under `/a/pool` — the same rule
+    /// `OrphanProcessCollector` classifies with, so a row this method judges
+    /// pool-covered is exactly one the collector would too.
+    private static func isUnder(_ path: String, prefix: String) -> Bool {
+        guard !prefix.isEmpty else { return false }
+        return path == prefix || path.hasPrefix(prefix.hasSuffix("/") ? prefix : prefix + "/")
+    }
+
+    /// The sweep's planning `ps` snapshot, or `nil` when it could not be
+    /// taken — which skips the orphan-process phase, never "there are no
+    /// orphans".
+    private func processSnapshot() async -> [ProcessSnapshotEntry]? {
+        await processSnapshotProvider()
+    }
+
     /// Entry point for `repo.remove` (review Medium 2): `db.worktrees.deleteForRepo`
     /// deletes EVERY worktree row for `repoID` — every status, including
     /// archived — with no further chance for the sweep's own reconciliation
@@ -713,7 +992,19 @@ public actor OrphanGC {
         guard let record = try await db.reapRecords.get(id: recordID) else {
             throw OrphanGCError.recordNotFound(recordID)
         }
-        guard record.kind == .agentWorktree else {
+        // Exhaustive and default-less on purpose: a new `ReapKind` must not
+        // silently inherit either answer — it has to be classified here.
+        switch record.kind {
+        case .agentWorktree:
+            break
+        case .scratchpad, .archivedWorktree, .profileDir:
+            // Directory-shaped kinds with no way back: a bare tmp dir has
+            // nothing to recreate it from, an archived worktree's directory was
+            // drained, and a quarantined profile dir's row is already gone.
+            throw OrphanGCError.unsupportedKind(record.kind)
+        case .orphanProcess:
+            // A killed process cannot be restored at all. The record is an
+            // audit trail, not an undo.
             throw OrphanGCError.unsupportedKind(record.kind)
         }
         guard record.restoredAt == nil else {
@@ -788,17 +1079,28 @@ public actor OrphanGC {
     /// `nil` when that can't be determined reliably (lsof timed out or failed
     /// to spawn) — callers MUST treat `nil` as "skip the sweep", never as
     /// "no live processes".
-    private func liveCWDs() async -> [String]? {
+    private func liveCWDs() async -> LiveCWDs? {
         if let liveCWDsProvider {
-            return await liveCWDsProvider()
+            guard let paths = await liveCWDsProvider() else { return nil }
+            // Two seams rather than one so every existing test keeps injecting
+            // a plain `[String]`. An injected path list with no injected map
+            // yields an EMPTY map, which makes the orphan-process phase find no
+            // candidates — the keep-favoring reading. It is never read as "this
+            // process is not in a worktree", because candidacy requires a cwd
+            // that IS under a dead root; a missing entry can only subtract.
+            guard let processCWDsProvider else {
+                return LiveCWDs(paths: paths, cwdByPID: [:], capturedAt: now())
+            }
+            guard let map = await processCWDsProvider() else { return nil }
+            return LiveCWDs(paths: paths, cwdByPID: map, capturedAt: now())
         }
-        return await Self.realLiveCWDs()
+        return await Self.realLiveCWDs(capturedAt: now())
     }
 
     /// Real `lsof`-backed live-cwd provider: runs `lsof -d cwd -Fn` under a
     /// 60s deadline and hands the outcome to `parseLiveCWDs`. A spawn failure
     /// is the same "unavailable" sentinel as a timeout: `nil`, skip the sweep.
-    private static func realLiveCWDs() async -> [String]? {
+    private static func realLiveCWDs(capturedAt: Date) async -> LiveCWDs? {
         let outcome: BoundedProcessOutcome
         do {
             outcome = try await runBoundedProcess(
@@ -811,7 +1113,7 @@ public actor OrphanGC {
             logger.error("gc: lsof spawn failed: \(String(describing: error), privacy: .public)")
             return nil
         }
-        return parseLiveCWDs(outcome)
+        return parseLiveCWDs(outcome, capturedAt: capturedAt)
     }
 
     /// Pure parser for the lsof outcome — extracted so the safety-relevant
@@ -828,7 +1130,9 @@ public actor OrphanGC {
     /// - non-zero exit: lsof's output on failure is not a complete cwd
     ///   picture, so it gets the same keep-biased treatment as a timeout.
     /// - non-UTF-8 stdout: unparseable output is no picture at all.
-    static func parseLiveCWDs(_ outcome: BoundedProcessOutcome) -> [String]? {
+    static func parseLiveCWDs(
+        _ outcome: BoundedProcessOutcome, capturedAt: Date = Date()
+    ) -> LiveCWDs? {
         switch outcome {
         case .timedOut:
             logger.error("gc: lsof timed out after 60s")
@@ -844,16 +1148,49 @@ public actor OrphanGC {
             }
             var seen = Set<String>()
             var result: [String] = []
+            var cwdByPID: [Int32: String] = [:]
+            // The `p<pid>` header the old parser discarded. Retaining it yields
+            // a pid-to-cwd map for every process on the machine at no
+            // additional cost, which is what the orphan-process phase runs on.
+            var currentPID: Int32?
             for line in text.split(separator: "\n") {
+                if line.hasPrefix("p") {
+                    currentPID = Int32(line.dropFirst())
+                    continue
+                }
                 guard line.hasPrefix("n") else { continue }
                 let raw = String(line.dropFirst())
                 guard !raw.isEmpty else { continue }
                 let canonical = AgentWorktreeCollector.canon(raw)
+                if let pid = currentPID {
+                    cwdByPID[pid] = canonical
+                }
                 if seen.insert(canonical).inserted {
                     result.append(canonical)
                 }
             }
-            return result
+            return LiveCWDs(paths: result, cwdByPID: cwdByPID, capturedAt: capturedAt)
         }
     }
+}
+
+/// One sweep's reading of `lsof -d cwd -Fn`, in both shapes its consumers
+/// need: the deduped path list the directory collectors gate on, and the
+/// pid-to-cwd map the orphan-process collector classifies against. Both come
+/// from the SAME single pass — the pid header was always in the output and was
+/// simply discarded.
+///
+/// The whole value being `nil` is the "unavailable" sentinel that skips the
+/// sweep. It is never partially available: a timeout, a non-zero exit or
+/// unparseable output invalidate both halves together.
+struct LiveCWDs: Sendable, Equatable {
+    /// Canonicalized cwds, deduped, in first-seen order.
+    var paths: [String]
+    /// Canonicalized cwd per pid.
+    var cwdByPID: [Int32: String]
+    /// When the pass was read. The orphan-process phase joins `cwdByPID` to a
+    /// `ps` snapshot taken later in the same sweep, by pid alone, and macOS
+    /// recycles pids — so it needs to know how stale this reading is before it
+    /// trusts a pid to still mean the same process.
+    var capturedAt: Date
 }

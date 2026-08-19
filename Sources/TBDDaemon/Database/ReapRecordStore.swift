@@ -20,6 +20,9 @@ struct ReapRecordRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// Set by quarantining reaps (`profileDir`) only; NULL for kinds that
     /// delete outright.
     var quarantinePath: String?
+    /// Set by `orphanProcess` reaps only — the pid and a truncated argv of
+    /// what was killed. NULL for every directory-shaped kind.
+    var processDescription: String?
     var reapedAt: Date
     var restoredAt: Date?
 
@@ -33,6 +36,7 @@ struct ReapRecordRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.snapshotRef = record.snapshotRef
         self.apparentBytes = record.apparentBytes
         self.quarantinePath = record.quarantinePath
+        self.processDescription = record.processDescription
         self.reapedAt = record.reapedAt
         self.restoredAt = record.restoredAt
     }
@@ -60,6 +64,7 @@ struct ReapRecordRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             snapshotRef: snapshotRef,
             apparentBytes: apparentBytes,
             quarantinePath: quarantinePath,
+            processDescription: processDescription,
             reapedAt: reapedAt,
             restoredAt: restoredAt
         )

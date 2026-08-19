@@ -200,6 +200,27 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the orphaned-process collector gate — the default-off soak
+    /// switch for reclaiming processes that outlived the worktree they were
+    /// rooted in, read on top of the GC master switch.
+    ///
+    /// This is how the soak is turned on. Its sibling gates all have an RPC,
+    /// and this one is the phase that signals processes, so leaving it
+    /// reachable only by hand-editing `~/tbd/state.db` would have made the one
+    /// irreversible phase the one with no supported way to enable it — against
+    /// a database the project's own rules say not to go behind.
+    ///
+    /// Like the master switch, flipping it off does not cancel an in-progress
+    /// sweep: `OrphanGC.sweep` re-reads the flag on its next pass.
+    func handleConfigSetGCOrphanProcessesEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetGCOrphanProcessesEnabledParams.self, from: paramsData)
+        try await db.config.setGCOrphanProcessesEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the fleet supervision brake (design 2026-07-26 §3, §7) — the
     /// fleet-wide on/off switch for supervision. Shipped OFF; nothing in the
     /// daemon reads this column to gate an actuation yet, because the acting
