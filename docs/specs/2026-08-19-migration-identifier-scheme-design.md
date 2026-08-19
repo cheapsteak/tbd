@@ -44,9 +44,13 @@ counter is a poor way to obtain it.
 
 New migrations are `.sql` files under
 `Sources/TBDDaemon/Database/Migrations/`, named
-`YYYYMMDDTHHMM_lower_snake_description.sql`. The filename stem is the GRDB
+`YYYYMMDDHHMMSS_lower_snake_description.sql`. The filename stem is the GRDB
 migration identifier. Adding a migration means adding one file that no other
 branch has touched.
+
+The 14-digit shape is dbmate's, adopted rather than invented. Seconds matter
+here beyond convention: two agents on a parallel fleet can plausibly author
+migrations in the same minute, and much less plausibly in the same second.
 
 The directory is declared on `TBDDaemonLib` as
 `resources: [.copy("Database/Migrations")]`. `.copy` rather than `.process`,
@@ -101,8 +105,8 @@ one migration in twenty-five.
 
 ### Application order is machine-dependent, deliberately
 
-A developer who has applied `20260901T…` and then pulls a branch adding
-`20260819T…` runs them in a different order than a fresh install does. This is
+A developer who has applied `20260901…` and then pulls a branch adding
+`20260819…` runs them in a different order than a fresh install does. This is
 inherent to every timestamp scheme — Rails and dbmate both have it — and it is
 safe only because migrations are idempotent and mutually independent. The lint
 below is what holds that property.
@@ -117,7 +121,7 @@ archive staleness check — so the migration lint costs seconds, not a compile.
 Checks, all whitelist-shaped: they assert what is permitted rather than
 enumerating what is banned.
 
-- **Filename shape** — `^\d{8}T\d{4}_[a-z0-9_]+\.sql$`, and nothing else may
+- **Filename shape** — `^\d{14}_[a-z0-9_]+\.sql$`, and nothing else may
   live in the directory.
 - **Identifier uniqueness** — across `.sql` files, post-cutover inline Swift
   migrations, and the frozen `v1`–`v84` names.
@@ -271,10 +275,18 @@ This preserves everything — GRDB's DDL builder, the existing helpers, the
 stronger candidate on machinery alone, and it remains the fallback if the
 resource-bundle spike fails.
 
-Rejected because it would be the package's first SwiftPM plugin, landing in a
-repository whose build caching is already delicate, and because it cannot
-express the history-is-frozen check: with 84 bodies inside one Swift function,
-no diff shape means "you edited history."
+Rejected on two grounds. First, the incremental-build tax is documented rather
+than hypothetical: `swiftlang/swift-build#305` ("SwiftPM Build Tool Plugin
+excessively runs causing recompilation", open since February 2025) reports a
+build-tool plugin re-running on every incremental build and invalidating
+already-compiled targets, pushing incremental compiles past 100 seconds. This
+package has no plugins today, and its build caching is already delicate.
+Second, a plugin cannot express the history-is-frozen check: with 84 bodies
+inside one Swift function, no diff shape means "you edited history."
+
+If the resource-bundle spike fails, this becomes the design, and the mitigation
+is to make the generated output strictly stamped — write only when content
+changes — so the plugin does not invalidate the world on every build.
 
 **Committed generated registry with a CI check.** A script writes the array and
 CI asserts it matches the directory. No plugin. But two branches adding
@@ -299,11 +311,45 @@ implementing the same feature produce two distinct migrations that add the same
 column. On a fleet of parallel agents that is TBD's normal workload, not an
 edge case.
 
+**Adopting an existing migration engine.** None can run in-process here.
+Flyway is JVM-only; dbmate, goose, golang-migrate and Atlas are Go libraries or
+CLI binaries with no maintained C ABI to bridge from Swift; Alembic is Python.
+Migrations must run at daemon startup against the user's database, so a
+developer-run CLI cannot be the runtime path. `SQLiteMigrationManager.swift` is
+the one Swift-native file-based migrator with the right shape — `<version>_<name>.sql`
+discovered from a bundle — but it is built on SQLite.swift, so adopting it
+means running a second SQLite abstraction beside GRDB, and it shows no Swift 6
+or strict-concurrency support.
+
+**Atlas as the linter.** `atlas migrate lint` is the one survivor of that
+survey: it supports SQLite via `sqlite://dev?mode=memory`, it is git-aware via
+`--git-base`, and it would cover two of our six checks — replaying the chain,
+and detecting edits to existing migration files.
+
+Rejected because its versioned workflow is built on `atlas.sum`, a committed
+integrity file listing a checksum per migration. Atlas's own documentation
+states that adding a migration changes that file and "will raise merge
+conflicts in most version control systems", and presents this as the point:
+it "forces developers to address conflicts before merging". That is a coherent
+position and the exact opposite of this design's. Adopting Atlas would
+reintroduce, by intent, the single always-touched file we are paying to remove
+— alongside a Go binary dependency in CI and in every contributor's pre-push
+hook, for two checks that are a few dozen lines of Python here.
+
 ## Consequences
 
 Three shapes coexist permanently — the frozen Swift block, `.sql` files, and
 the Swift escape hatch — where today there is one. That is the main cost of
 this design, and `Sources/TBDDaemon/Database/CLAUDE.md` has to carry it.
+
+We also give up a forcing function, and it is worth naming because Atlas
+charges for it deliberately. Today a merge conflict makes two people notice
+that they both added a migration and look at the pair together. After this
+change, two concurrent migrations merge silently. What stands in for that
+review moment is mechanical rather than human: statements are idempotent and
+order-independent by lint, the ADD COLUMN guard absorbs the common collision,
+and history cannot be edited. If a class of defect starts slipping through that
+a conflict would have caught, that is evidence against this design.
 
 In exchange, schema archaeology becomes a grep over one file per change rather
 than a scroll through a 1500-line function, each migration diffs in isolation
