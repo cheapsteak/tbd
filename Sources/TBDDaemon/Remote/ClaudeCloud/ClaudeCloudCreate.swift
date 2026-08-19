@@ -176,6 +176,10 @@ extension ClaudeCloudInvoker {
                     let title = ClaudeCloudCreateOutputParser.title(fromOutput: output)
                     try await db.claudeCloudSessions.resolve(
                         id: row.id, sessionID: sessionID, title: title, now: now())
+                    if title == nil {
+                        claudeCloudLogger.error(
+                            "claude-cloud create parsed a session id but not its title; received: \(ClaudeCloudCreateOutputParser.boundedQuote(output), privacy: .public)")
+                    }
                     claudeCloudLogger.error(
                         "claude-cloud create exited \(status, privacy: .public) after printing a session id; recording it before reporting failure")
                     return Self.errorResult(
@@ -203,8 +207,16 @@ extension ClaudeCloudInvoker {
                 return Self.errorResult(exitCode: 2, code: "contract_bug", message: message)
             case .success(let sessionID):
                 // Lenient by design: a missing title costs friendliness, not
-                // the lane, so it never fails a create that succeeded.
+                // the lane, so it never fails a create that succeeded. It is
+                // not silent, though — a title that failed to parse despite a
+                // readable id is otherwise undetectable except by a human
+                // noticing a session named from its raw id, which is exactly
+                // how this bug shipped.
                 let title = ClaudeCloudCreateOutputParser.title(fromOutput: output)
+                if title == nil {
+                    claudeCloudLogger.error(
+                        "claude-cloud create parsed a session id but not its title; received: \(ClaudeCloudCreateOutputParser.boundedQuote(output), privacy: .public)")
+                }
                 let resolvedAt = now()
                 try await db.claudeCloudSessions.resolve(
                     id: row.id, sessionID: sessionID, title: title, now: resolvedAt)

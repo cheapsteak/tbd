@@ -89,6 +89,15 @@ enum ClaudeCloudCreateOutputParser {
     /// Everything after the prefix up to the next KNOWN line is joined with
     /// single spaces, because a child that formatted to a narrower width than
     /// the pty reports inserts a real newline mid-title.
+    ///
+    /// The prefix is located WITHIN the line, not required at position 0.
+    /// `ANSIEscape.strip` covers every escape form measured so far, but a
+    /// pty's leading terminal-setup bytes are not all escape sequences — bare
+    /// C0 controls (a capture backspace) and capture-tool artifacts survive
+    /// stripping and land before the real text. `hasPrefix` would silently
+    /// drop the title on any such residue; searching for the prefix and
+    /// taking the title from after it tolerates leading noise this parser
+    /// cannot fully enumerate in advance.
     static func title(fromOutput raw: String) -> String? {
         let text = ANSIEscape.strip(raw)
         // `split(separator: "\n")` treats `\n` as one specific Character and
@@ -99,10 +108,12 @@ enum ClaudeCloudCreateOutputParser {
         // `\r\n`, lone `\r`, and lone `\n` alike as one separator each.
         let lines = text.split(omittingEmptySubsequences: false, whereSeparator: { $0.isNewline })
             .map { String($0).trimmingCharacters(in: .whitespaces) }
-        guard let start = lines.firstIndex(where: { $0.hasPrefix(titlePrefix) }) else {
+        guard let start = lines.firstIndex(where: { $0.contains(titlePrefix) }),
+              let prefixRange = lines[start].range(of: titlePrefix)
+        else {
             return nil
         }
-        var parts = [String(lines[start].dropFirst(titlePrefix.count))]
+        var parts = [String(lines[start][prefixRange.upperBound...])]
         for line in lines[(start + 1)...] {
             // The two other measured lines end the title; so does a blank one.
             if line.isEmpty || line.hasPrefix("View:") || line.hasPrefix("Resume with:") { break }

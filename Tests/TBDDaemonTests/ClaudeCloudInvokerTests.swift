@@ -400,6 +400,13 @@ struct ClaudeCloudInvokerTests {
 
     /// The opposite posture, and the pair that discriminates: an unreadable
     /// TITLE must never fail a create that produced a readable id.
+    ///
+    /// This is also the only exercisable coverage for the `.error` log this
+    /// case now emits (`claudeCloudLogger`, `ClaudeCloudCreate.swift`): there
+    /// is no injected-logger or `OSLogStore` seam in this tree to assert the
+    /// line itself was written, so this test proves the TRIGGER condition —
+    /// a readable id paired with a nil title — reaches the exact branch the
+    /// log call sits in, without asserting the log call's side effect.
     @Test func anUnreadableTitleStillSucceedsAndNamesTheRowFromItsID() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await seedRepo(db)
