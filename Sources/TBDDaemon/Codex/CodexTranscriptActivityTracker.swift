@@ -90,6 +90,7 @@ actor CodexTranscriptActivityTracker {
     static let initialTailByteLimit: UInt64 = 1024 * 1024
     static let incrementalReadByteLimit = initialTailByteLimit
     static let requestReadByteLimit = incrementalReadByteLimit
+    static let requestStepLimit = Int(requestReadByteLimit) / readChunkSize
     static let maxBufferedRecordByteCount = Int(initialTailByteLimit)
     private var baselines: [String: Baseline] = [:]
     private var nextBatchPathOrder: [String] = []
@@ -138,11 +139,13 @@ actor CodexTranscriptActivityTracker {
         var activeCount = targets.count
         var cursor = 0
         var remainingByteCount = totalByteLimit
+        var remainingStepCount = Self.requestStepLimit
         var states: [String: TerminalActivityState] = [:]
 
-        while remainingByteCount > 0, activeCount > 0 {
+        while remainingByteCount > 0, remainingStepCount > 0, activeCount > 0 {
             if active[cursor] {
                 let target = targets[cursor]
+                remainingStepCount -= 1
                 let result = observeStep(
                     transcriptPath: target.transcriptPath,
                     worktreeID: target.worktreeID,

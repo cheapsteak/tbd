@@ -561,6 +561,39 @@ struct CodexTranscriptActivityTrackerTests {
         #expect(caughtUp[fixture.path] == .working)
     }
 
+    @Test func batchStepLimitBoundsCaughtUpAndUnreadablePaths() async throws {
+        let stepLimit = 16
+        let unreadable = try (0..<(stepLimit / 2)).map { _ in
+            try TranscriptFixture()
+        }
+        let readable = try (0...(stepLimit / 2)).map { _ in
+            try TranscriptFixture()
+        }
+        defer {
+            for fixture in unreadable + readable {
+                fixture.remove()
+            }
+        }
+        let tracker = CodexTranscriptActivityTracker()
+        let worktreeID = UUID()
+        for fixture in readable {
+            try fixture.write(event(type: "task_complete", turnID: fixture.path))
+            _ = await tracker.observe(
+                transcriptPath: fixture.path, worktreeID: worktreeID)
+        }
+        let targets = (unreadable + readable).map {
+            CodexTranscriptActivityTracker.Target(
+                transcriptPath: $0.path, worktreeID: worktreeID)
+        }
+
+        let first = await tracker.observe(transcripts: targets)
+        let second = await tracker.observe(transcripts: targets)
+
+        #expect(first.count == stepLimit / 2)
+        #expect(first[readable.last!.path] == nil)
+        #expect(second[readable.last!.path] == .idle)
+    }
+
     @Test func batchCursorRotatesWhenTheFirstTranscriptKeepsGrowing() async throws {
         let first = try TranscriptFixture()
         let second = try TranscriptFixture()
