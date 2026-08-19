@@ -34,8 +34,8 @@ be hot at sweep time.
 How TBD spawns and tracks agents:
 
 - **Spawn**: `ClaudeSpawnCommandBuilder` builds a command string; `TmuxManager.createWindow`
-  runs `tmux -L <server> new-window … <shell> -ilc <cmd>` (csh-family shells get `-ic`;
-  see `newWindowCommand` in `Sources/TBDDaemon/Tmux/TmuxManager.swift`). The shell
+  runs `tmux -L <server> new-window … <shell> -i -l -c <cmd>` (csh-family shells omit
+  `-l`; see `newWindowCommand` in `Sources/TBDDaemon/Tmux/TmuxManager.swift`). The shell
   exec's into `claude`, so the pane process *is* the agent (confirmed live 2026-06-15
   under the then-current `-ic` spawn shape: agent `ppid` == the tmux server pid, not a
   shell; re-verified 2026-08-19 that `zsh -ilc` still execs into the final command for

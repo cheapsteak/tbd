@@ -91,17 +91,25 @@ import Testing
 }
 
 @Test func testShellFlagsPerShellFamily() {
-    // Each branch of the flag choice: csh and tcsh cannot combine -l with -c
-    // (measured: "Unknown option: `-lc'", and tcsh accepts -l only as the
-    // sole flag), so they keep the pre-login-shell -ic. Every other shell
-    // gets the interactive login -ilc.
-    #expect(TmuxManager.shellFlags(forShell: "/bin/tcsh") == "-ic")
-    #expect(TmuxManager.shellFlags(forShell: "/bin/csh") == "-ic")
-    // The basename decides, not the full path.
-    #expect(TmuxManager.shellFlags(forShell: "/usr/local/bin/tcsh") == "-ic")
-    #expect(TmuxManager.shellFlags(forShell: "/bin/zsh") == "-ilc")
-    #expect(TmuxManager.shellFlags(forShell: "/bin/bash") == "-ilc")
-    #expect(TmuxManager.shellFlags(forShell: "/opt/homebrew/bin/fish") == "-ilc")
+    // Each branch of the flag choice, with hardcoded expectations: csh and
+    // tcsh reject -l when combined with -c (measured: "Unknown option: `-l'"),
+    // so they keep the pre-login-shell -i -c. Every other shell gets the
+    // interactive login -i -l -c. Flags are separate argv elements, never
+    // clustered, because some shells (e.g. nushell) reject GNU-style
+    // clustering while accepting the individual flags.
+    #expect(TmuxManager.shellFlags(forShell: "/bin/tcsh") == ["-i", "-c"])
+    #expect(TmuxManager.shellFlags(forShell: "/bin/csh") == ["-i", "-c"])
+    // The lowercased basename decides, not the full path or its case.
+    #expect(TmuxManager.shellFlags(forShell: "/usr/local/bin/tcsh") == ["-i", "-c"])
+    #expect(TmuxManager.shellFlags(forShell: "/bin/TCSH") == ["-i", "-c"])
+    #expect(TmuxManager.shellFlags(forShell: "/opt/weird/wrappers/deep/path/csh") == ["-i", "-c"])
+    #expect(TmuxManager.shellFlags(forShell: "/bin/zsh") == ["-i", "-l", "-c"])
+    #expect(TmuxManager.shellFlags(forShell: "/bin/bash") == ["-i", "-l", "-c"])
+    #expect(TmuxManager.shellFlags(forShell: "/opt/homebrew/bin/fish") == ["-i", "-l", "-c"])
+    // Degenerate paths fall into the default branch rather than crashing.
+    #expect(TmuxManager.shellFlags(forShell: "") == ["-i", "-l", "-c"])
+    #expect(TmuxManager.shellFlags(forShell: "/") == ["-i", "-l", "-c"])
+    #expect(TmuxManager.shellFlags(forShell: "/bin/") == ["-i", "-l", "-c"])
 }
 
 @Test func testNewWindowCommandRunsLoginShell() throws {
@@ -110,34 +118,55 @@ import Testing
     // profile files only, relying on the near-universal convention that
     // .bash_profile sources .bashrc (same behavior as Terminal.app).
     // /etc/zprofile's path_helper and ~/.zprofile supply /usr/local/bin and
-    // the Homebrew PATH entries; a non-login -ic shell skips profile files
-    // and leaves user tools like `code` unresolvable. csh/tcsh keep -ic
-    // (see testShellFlagsPerShellFamily), so the expected flag is derived
-    // from the same function the builder uses, keyed on the test process's
-    // ambient SHELL. See docs/specs/2026-08-19-login-shell-panes-design.md.
+    // the Homebrew PATH entries; a non-login -i -c shell skips profile files
+    // and leaves user tools like `code` unresolvable. The environment seam
+    // pins SHELL so the expected argv tail is hardcoded, not derived.
+    // See docs/specs/2026-08-19-login-shell-panes-design.md.
     let args = TmuxManager.newWindowCommand(
         server: "tbd-a1b2c3d4",
         session: "main",
         cwd: "/tmp/worktree",
         shellCommand: "claude",
         env: ["TBD_TERMINAL_ID": "abc-123"],
-        sensitiveEnv: ["ANTHROPIC_API_KEY": "sk-test"]
+        sensitiveEnv: ["ANTHROPIC_API_KEY": "sk-test"],
+        environment: ["SHELL": "/bin/zsh"]
     )
-    let expectedFlags = TmuxManager.shellFlags(
-        forShell: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh")
-    let flagIndex = try #require(args.firstIndex(of: expectedFlags))
-    // The flag sits between the shell and the command string, which stays
-    // the final positional argument.
-    #expect(flagIndex == args.count - 2)
-    // The env map is still inlined as an export prefix on the command string,
-    // which runs after every startup file (profile and rc), so it stays the
-    // last writer.
-    #expect(args.last == "export TBD_TERMINAL_ID='abc-123'; claude")
+    // The shell invocation is the exact argv tail: shell, separate flags,
+    // then the command string as the final positional argument. The env map
+    // is inlined as an export prefix on the command string, which runs after
+    // every startup file (profile and rc), so it stays the last writer.
+    #expect(args.suffix(5) == ["/bin/zsh", "-i", "-l", "-c", "export TBD_TERMINAL_ID='abc-123'; claude"])
     // sensitiveEnv still lands via tmux -e: in the process environment before
     // the shell starts, visible during profile files and rc files alike.
     let eIndex = try #require(args.firstIndex(of: "ANTHROPIC_API_KEY=sk-test"))
     #expect(eIndex > 0)
     #expect(args[eIndex - 1] == "-e")
+}
+
+@Test func testNewWindowCommandCshFamilyOmitsLoginFlag() {
+    // csh/tcsh reject -l combined with -c, so the csh branch must reach the
+    // real builder: pin SHELL to tcsh through the environment seam and assert
+    // the hardcoded -i -c tail.
+    let args = TmuxManager.newWindowCommand(
+        server: "tbd-a1b2c3d4",
+        session: "main",
+        cwd: "/tmp/worktree",
+        shellCommand: "claude",
+        environment: ["SHELL": "/bin/tcsh"]
+    )
+    #expect(args.suffix(4) == ["/bin/tcsh", "-i", "-c", "claude"])
+}
+
+@Test func testNewWindowCommandFallsBackToZshWithoutSHELL() {
+    // An empty environment (no SHELL) falls back to /bin/zsh.
+    let args = TmuxManager.newWindowCommand(
+        server: "tbd-a1b2c3d4",
+        session: "main",
+        cwd: "/tmp/worktree",
+        shellCommand: "claude",
+        environment: [:]
+    )
+    #expect(args.suffix(5) == ["/bin/zsh", "-i", "-l", "-c", "claude"])
 }
 
 @Test func testRespawnWindowCommandRunsLoginShell() throws {
@@ -150,18 +179,28 @@ import Testing
         cwd: "/tmp/worktree",
         shellCommand: "claude --resume",
         env: ["CLAUDE_CONFIG_DIR": "/tmp/profile"],
-        sensitiveEnv: ["ANTHROPIC_API_KEY": "sk-test"]
+        sensitiveEnv: ["ANTHROPIC_API_KEY": "sk-test"],
+        environment: ["SHELL": "/bin/zsh"]
     )
     #expect(args.contains("respawn-window"))
     #expect(args.contains("-k"))
-    let expectedFlags = TmuxManager.shellFlags(
-        forShell: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh")
-    let flagIndex = try #require(args.firstIndex(of: expectedFlags))
-    #expect(flagIndex == args.count - 2)
-    #expect(args.last == "export CLAUDE_CONFIG_DIR='/tmp/profile'; claude --resume")
+    #expect(args.suffix(5) == ["/bin/zsh", "-i", "-l", "-c", "export CLAUDE_CONFIG_DIR='/tmp/profile'; claude --resume"])
     let eIndex = try #require(args.firstIndex(of: "ANTHROPIC_API_KEY=sk-test"))
     #expect(eIndex > 0)
     #expect(args[eIndex - 1] == "-e")
+}
+
+@Test func testRespawnWindowCommandCshFamilyOmitsLoginFlag() {
+    // The respawn builder must fork on the same csh branch as
+    // newWindowCommand: same seam, same hardcoded -i -c tail.
+    let args = TmuxManager.respawnWindowCommand(
+        server: "tbd-a1b2c3d4",
+        windowID: "@5",
+        cwd: "/tmp/worktree",
+        shellCommand: "claude --resume",
+        environment: ["SHELL": "/bin/tcsh"]
+    )
+    #expect(args.suffix(4) == ["/bin/tcsh", "-i", "-c", "claude --resume"])
 }
 
 @Test func testNewWindowCommandSensitiveEnvUsesEFlag() {

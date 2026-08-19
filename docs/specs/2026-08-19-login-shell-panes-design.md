@@ -36,13 +36,15 @@ with rc-file directories but no `/usr/local/bin` or `/opt/homebrew/bin`.
 ## Design
 
 Spawned panes run the user's shell as an interactive **login** shell: the two
-spawn builders in `TmuxManager` (`newWindowCommand` and
-`respawnWindowCommand`) pass `-ilc` instead of `-ic`, through one shared
-shell-invocation helper. Exception: `csh` and `tcsh` reject the clustered
-`-ilc` (and tcsh accepts `-l` only as the sole flag, so login cannot be
-combined with `-c` at all), so csh-family shells, detected by the shell
-path's basename, keep `-ic`: their pre-change behavior, since the
-alternative is a pane whose shell exits immediately. This is the convention
+spawn builders in `TmuxManager` pass the separate flags `-i -l -c` instead of
+`-ic`, through one shared shell-invocation helper. Separate argv elements
+rather than a clustered `-ilc` string, because clustering is a GNU-ism some
+shells reject even though they accept each flag individually, and a rejected
+flag means a pane whose shell exits instantly with the error destroyed by the
+pane closing. Exception: csh-family shells (`csh`, `tcsh`, matched on the
+shell path's lowercased basename) cannot combine `-l` with `-c` at all (tcsh
+accepts `-l` only as its sole argument), so they omit `-l` and keep their
+pre-change interactive non-login behavior. This is the convention
 every terminal emulator follows (Terminal.app, iTerm2, the VS Code integrated
 terminal), for exactly this reason: the base environment handed to a GUI-born
 process is minimal, and the user's own profile is the authoritative,
@@ -59,10 +61,14 @@ Terminal.app already does to the same user, and sourcing `.bashrc` from
 `.bash_profile` is the near-universal convention that terminal-emulator
 behavior has enforced for decades.
 
-This also removes the `restart.sh` poisoning loop at its root. A login pane
-rebuilds `PATH` from profile files even over a bare inherited base
-(`path_helper` and `brew shellenv` prepend their directories regardless), so a
-`restart.sh` run from inside a TBD tab captures a healthy `PATH`.
+This also removes the `restart.sh` poisoning loop for every login-capable
+shell. A login pane rebuilds `PATH` from profile files even over a bare
+inherited base (`path_helper` and `brew shellenv` prepend their directories
+regardless), so a `restart.sh` run from inside a TBD tab captures a healthy
+`PATH`. Residual: csh-family panes keep the non-login flags, so for a
+csh-family `SHELL` the deficient pane `PATH` and the capture loop persist;
+accepted, because those shells offer no compatible login-plus-command
+invocation at all.
 
 ### Preserved contracts
 
@@ -161,6 +167,21 @@ behavior the well-understood default.
   shell is interactive non-login, inherits the outer's exported environment,
   and re-runs only rc files. Directories can appear twice in `PATH`; harmless
   and already true of the rc-added directories today.
+- **Profiles that exec into another shell** (`exec fish` behind an
+  interactivity guard is a known pattern for users who avoid `chsh`) swallow
+  the `-c` command: the replacement shell knows nothing about the payload, so
+  the pane lands at that shell's prompt and the agent or hook command never
+  starts. Accepted: the failure is visible (a shell prompt where an agent
+  should be) rather than silent, and unlike a hanging profile this pattern
+  does not break Terminal.app, so it can persist in the wild; a user who hits
+  it must guard the exec against non-login or TBD-spawned shells. Hook panes
+  under such a profile consume their marker-wait budget as described above.
+- **Agent binary resolution follows the profile PATH.** A bare `claude` or
+  `codex` in a spawn command now resolves through the profile-rebuilt `PATH`,
+  so panes launch the same binary the user's own terminal would, which can
+  differ from what the daemon-captured `PATH` would have chosen (for example
+  a Homebrew-installed copy shadowing another install). This is the intended
+  alignment: the pane behaves like the user's terminal.
 - **Existing tmux servers** keep their old global environment until they
   exit, but because the login shell rebuilds `PATH` itself, new panes are
   healed even on stale servers as soon as the new daemon binary spawns them.
@@ -168,8 +189,8 @@ behavior the well-understood default.
 ## Verification
 
 - Unit: `TmuxManagerTests` assert both spawn builders emit the login-shell
-  invocation, that the flag choice branches correctly per shell basename
-  (csh-family gets `-ic`, everything else `-ilc`), and that the env-export
-  prefix and `-e` flag handling are unchanged.
+  invocation through an injected environment (csh-family omits `-l`,
+  everything else gets `-i -l -c`, unset `SHELL` falls back to `/bin/zsh`),
+  and that the env-export prefix and `-e` flag handling are unchanged.
 - Field: after `scripts/restart.sh`, a new shell tab resolves `code` and
   `tmux`, and its `PATH` contains the `path_helper` and profile directories.
