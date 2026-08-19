@@ -125,6 +125,12 @@ jobs:
     # steps already `tee` to /tmp on these runners.
     env:
       TBD_RETRY_METRICS_PATH: /tmp/retry-metrics.jsonl
+      # The ~7 GB runner's OOM cap, pinned HERE rather than inherited from
+      # `scripts/swift-safe`'s default — see the "Two parallel swift-frontend
+      # processes" block below. Job-level so all three `scripts/test.sh` steps
+      # get it; the bare `swift build -j 2` at the end of the job does not read
+      # this variable and names its own count.
+      TBD_SWIFT_JOBS: "2"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -214,12 +220,15 @@ jobs:
       # now — kept as safety margin; candidate for re-validation.
       #
       # The test steps below do NOT pass `-j` themselves: `scripts/swift-safe`,
-      # which `scripts/test.sh` runs SwiftPM through, supplies `--jobs 2` and
-      # refuses a command line above TBD_SWIFT_JOBS. Nothing sets that variable
-      # in this workflow, so the effective count here is the wrapper's 2 —
-      # unchanged — while a box whose owner lowered it is no longer failed by a
-      # hardcoded number. The bare `swift build` at the end of the job bypasses
-      # the wrapper, so it still names `-j 2` itself.
+      # which `scripts/test.sh` runs SwiftPM through, supplies `--jobs` from
+      # TBD_SWIFT_JOBS and refuses a command line above it. That variable is
+      # pinned to 2 in this job's `env:` block, so the cap above is stated
+      # explicitly here instead of riding on the wrapper's default — raising
+      # that default would otherwise lift CI past the runner's memory ceiling
+      # silently. A developer box, which sets its own TBD_SWIFT_JOBS, is no
+      # longer failed or throttled by a hardcoded number. The bare
+      # `swift build` at the end of the job bypasses the wrapper and does not
+      # read the variable, so it still names `-j 2` itself.
       #
       # Three sequential steps, one job (docs/specs/2026-07-24-test-hardening-design.md
       # §4): the tier-3 live suites live in their own target so they can run
