@@ -131,9 +131,12 @@ struct CodexTranscriptActivityTrackerTests {
         try fixture.write(prefix + event(type: "task_started", turnID: "latest"))
         let tracker = CodexTranscriptActivityTracker()
 
+        let firstSlice = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: UUID())
         let state = await tracker.observe(
             transcriptPath: fixture.path, worktreeID: UUID())
 
+        #expect(firstSlice == nil)
         #expect(state == .working)
     }
 
@@ -148,9 +151,12 @@ struct CodexTranscriptActivityTrackerTests {
         try fixture.write(prefix + start + tailPadding)
         let tracker = CodexTranscriptActivityTracker()
 
+        let firstSlice = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: UUID())
         let state = await tracker.observe(
             transcriptPath: fixture.path, worktreeID: UUID())
 
+        #expect(firstSlice == nil)
         #expect(state == .working)
     }
 
@@ -163,9 +169,12 @@ struct CodexTranscriptActivityTrackerTests {
         try fixture.write(partialStart + event(type: "task_complete", turnID: "other"))
         let tracker = CodexTranscriptActivityTracker()
 
+        let firstSlice = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: UUID())
         let state = await tracker.observe(
             transcriptPath: fixture.path, worktreeID: UUID())
 
+        #expect(firstSlice == nil)
         #expect(state == .idle)
     }
 
@@ -181,6 +190,8 @@ struct CodexTranscriptActivityTrackerTests {
         try fixture.write(prefix + initialStart)
         let tracker = CodexTranscriptActivityTracker()
         let worktreeID = UUID()
+        let initialSlice = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
         let initial = await tracker.observe(
             transcriptPath: fixture.path, worktreeID: worktreeID)
 
@@ -189,6 +200,7 @@ struct CodexTranscriptActivityTrackerTests {
         let completed = await tracker.observe(
             transcriptPath: fixture.path, worktreeID: worktreeID)
 
+        #expect(initialSlice == nil)
         #expect(initial == .working)
         #expect(completed == .idle)
     }
@@ -447,6 +459,107 @@ struct CodexTranscriptActivityTrackerTests {
         #expect(firstState == .working)
         #expect(secondState == .idle)
         #expect(firstAgain == .working)
+    }
+
+    @Test func zeroBatchBudgetDoesNotReadOrCreateABaseline() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        let record = event(type: "task_started", turnID: "a")
+        try fixture.write(record)
+        let tracker = CodexTranscriptActivityTracker()
+        let target = CodexTranscriptActivityTracker.Target(
+            transcriptPath: fixture.path, worktreeID: UUID())
+
+        let noBudget = await tracker.observe(
+            transcripts: [target], totalByteLimit: 0)
+
+        #expect(noBudget.isEmpty)
+        #expect(!(await tracker.hasBaseline(transcriptPath: fixture.path)))
+
+        let caughtUp = await tracker.observe(
+            transcripts: [target], totalByteLimit: UInt64(record.count))
+        #expect(caughtUp[fixture.path] == .working)
+    }
+
+    @Test func batchCursorRotatesWhenTheFirstTranscriptKeepsGrowing() async throws {
+        let first = try TranscriptFixture()
+        let second = try TranscriptFixture()
+        defer {
+            first.remove()
+            second.remove()
+        }
+        let tracker = CodexTranscriptActivityTracker()
+        let worktreeID = UUID()
+        let targets = [first, second].map {
+            CodexTranscriptActivityTracker.Target(
+                transcriptPath: $0.path, worktreeID: worktreeID)
+        }
+        for fixture in [first, second] {
+            try fixture.write(
+                event(type: "task_complete", turnID: fixture.path)
+                    + event(
+                        type: "agent_message", turnID: "backlog",
+                        terminated: false,
+                        exactByteCount: Self.initialTailByteLimit))
+        }
+        let onePathBudget: UInt64 = 2
+
+        _ = await tracker.observe(transcripts: targets, totalByteLimit: onePathBudget)
+        let firstAfterOne = await tracker.bufferedRecordState(transcriptPath: first.path)
+        let secondAfterOne = await tracker.bufferedRecordState(transcriptPath: second.path)
+        #expect([firstAfterOne?.byteCount, secondAfterOne?.byteCount].compactMap { $0 }
+            .sorted() == [Int(onePathBudget) - 1])
+
+        try first.append(event(type: "agent_message", turnID: "still-growing"))
+        _ = await tracker.observe(transcripts: targets, totalByteLimit: onePathBudget)
+        let firstAfterTwo = await tracker.bufferedRecordState(transcriptPath: first.path)
+        let secondAfterTwo = await tracker.bufferedRecordState(transcriptPath: second.path)
+
+        #expect(firstAfterTwo?.byteCount == Int(onePathBudget) - 1)
+        #expect(secondAfterTwo?.byteCount == Int(onePathBudget) - 1)
+    }
+
+    @Test func batchCursorRecoversWhenItsSavedPathDisappearsAndInputsReorder() async throws {
+        let first = try TranscriptFixture()
+        let removed = try TranscriptFixture()
+        let third = try TranscriptFixture()
+        defer {
+            first.remove()
+            removed.remove()
+            third.remove()
+        }
+        let tracker = CodexTranscriptActivityTracker()
+        let worktreeID = UUID()
+        let targets = [first, removed, third].map {
+            CodexTranscriptActivityTracker.Target(
+                transcriptPath: $0.path, worktreeID: worktreeID)
+        }
+        for fixture in [first, removed, third] {
+            try fixture.write(
+                event(type: "task_complete", turnID: fixture.path)
+                    + event(
+                        type: "agent_message", turnID: "backlog",
+                        terminated: false,
+                        exactByteCount: Self.initialTailByteLimit))
+        }
+        let onePathBudget: UInt64 = 2
+
+        _ = await tracker.observe(transcripts: targets, totalByteLimit: onePathBudget)
+        #expect(await tracker.bufferedRecordState(transcriptPath: first.path)?.byteCount
+            == Int(onePathBudget) - 1)
+
+        let withoutSavedPath = [targets[2], targets[0]]
+        _ = await tracker.observe(
+            transcripts: withoutSavedPath, totalByteLimit: onePathBudget)
+        #expect(await tracker.bufferedRecordState(transcriptPath: third.path)?.byteCount
+            == Int(onePathBudget) - 1)
+        #expect(await tracker.bufferedRecordState(transcriptPath: first.path)?.byteCount
+            == Int(onePathBudget) - 1)
+
+        _ = await tracker.observe(
+            transcripts: withoutSavedPath, totalByteLimit: onePathBudget)
+        #expect(await tracker.bufferedRecordState(transcriptPath: first.path)?.byteCount
+            == Int(onePathBudget) * 2 - 1)
     }
 
     @Test func unreadablePathReturnsNilInsteadOfCachedWorking() async throws {

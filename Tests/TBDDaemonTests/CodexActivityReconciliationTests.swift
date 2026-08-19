@@ -229,6 +229,87 @@ struct CodexActivityReconciliationTests {
         #expect(await router.codexActivityTracker.baselineCount == 0)
     }
 
+    @Test("terminal.list shares its transcript byte budget fairly across Codex terminals")
+    func terminalListSharesTranscriptBudgetFairly() async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/car-budget-repo-\(UUID().uuidString)",
+            displayName: "car-budget-repo", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "main",
+            path: "/tmp/car-budget-wt-\(UUID().uuidString)", tmuxServer: "tbd-car-budget")
+        let paths = try ["first", "second"].map { turnID in
+            try makeTranscript(String(decoding: lifecycleEvent(
+                type: "task_complete", turnID: turnID), as: UTF8.self))
+        }
+        defer {
+            for path in paths {
+                try? FileManager.default.removeItem(at: path.deletingLastPathComponent())
+            }
+        }
+
+        for (index, path) in paths.enumerated() {
+            let terminal = try await db.terminals.create(
+                worktreeID: wt.id,
+                tmuxWindowID: "@\(index + 1)", tmuxPaneID: "%\(index + 1)",
+                label: "Codex \(index + 1)", kind: .codex)
+            try await db.terminals.updateSession(
+                id: terminal.id, sessionID: "codex-\(index + 1)", transcriptPath: path.path)
+        }
+
+        let request = try RPCRequest(
+            method: RPCMethod.terminalList,
+            params: TerminalListParams(worktreeID: wt.id))
+        #expect(await router.handle(request).success)
+
+        let oversizedRecordByteCount = CodexTranscriptActivityTracker.maxBufferedRecordByteCount + 128
+        for (index, path) in paths.enumerated() {
+            try append(
+                lifecycleEvent(
+                    type: "agent_message", turnID: "padding-\(index)",
+                    exactByteCount: oversizedRecordByteCount)
+                    + lifecycleEvent(type: "task_started", turnID: "turn-\(index)"),
+                to: path)
+        }
+
+        let firstResponse = await router.handle(request)
+        #expect(firstResponse.success)
+        let firstTerminals = try firstResponse.decodeResult([Terminal].self)
+        #expect(firstTerminals.allSatisfy { $0.presentationActivityState == nil })
+
+        var bufferedByteCount = 0
+        var progressedPathCount = 0
+        for path in paths {
+            let buffered = await router.codexActivityTracker.bufferedRecordState(
+                transcriptPath: path.path)
+            bufferedByteCount += buffered?.byteCount ?? 0
+            if let buffered, buffered.byteCount > 0 {
+                progressedPathCount += 1
+            }
+        }
+        #expect(bufferedByteCount == Int(CodexTranscriptActivityTracker.requestReadByteLimit))
+        #expect(progressedPathCount == paths.count)
+
+        try append(
+            lifecycleEvent(
+                type: "agent_message", turnID: "first-keeps-growing",
+                exactByteCount: 64 * 1024),
+            to: paths[0])
+        let secondResponse = await router.handle(request)
+        #expect(secondResponse.success)
+        let secondTerminals = try secondResponse.decodeResult([Terminal].self)
+        #expect(secondTerminals.allSatisfy { $0.presentationActivityState == nil })
+
+        try append(
+            lifecycleEvent(
+                type: "agent_message", turnID: "first-still-growing",
+                exactByteCount: 64 * 1024),
+            to: paths[0])
+        let finalResponse = await router.handle(request)
+        #expect(finalResponse.success)
+        let finalTerminals = try finalResponse.decodeResult([Terminal].self)
+        #expect(finalTerminals.allSatisfy { $0.presentationActivityState == .working })
+    }
+
     private func makeTranscript(_ contents: String) throws -> URL {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-codex-activity-\(UUID().uuidString)", isDirectory: true)
@@ -236,6 +317,31 @@ struct CodexActivityReconciliationTests {
         let path = directory.appendingPathComponent("session.jsonl")
         try contents.write(to: path, atomically: true, encoding: .utf8)
         return path
+    }
+
+    private func lifecycleEvent(
+        type: String,
+        turnID: String,
+        exactByteCount: Int? = nil
+    ) -> Data {
+        func encoded(padding: String?) -> Data {
+            let paddingField = padding.map { #", "padding":"\#($0)""# } ?? ""
+            return Data((
+                #"{"type":"event_msg","payload":{"type":"\#(type)","turn_id":"\#(turnID)"\#(paddingField)}}"#
+                    + "\n").utf8)
+        }
+
+        guard let exactByteCount else { return encoded(padding: nil) }
+        let emptyPadded = encoded(padding: "")
+        precondition(exactByteCount >= emptyPadded.count)
+        return encoded(padding: String(repeating: "x", count: exactByteCount - emptyPadded.count))
+    }
+
+    private func append(_ data: Data, to path: URL) throws {
+        let handle = try FileHandle(forWritingTo: path)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: data)
     }
 
     // MARK: - The date seam on the two handlers that WRITE codex activity

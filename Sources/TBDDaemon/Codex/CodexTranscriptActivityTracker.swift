@@ -51,6 +51,11 @@ struct CodexTurnLifecycleReducer: Sendable {
 /// advances by a bounded amount and reports no state until it reaches the EOF
 /// captured at its start, so partially-reduced lifecycle history is never shown.
 actor CodexTranscriptActivityTracker {
+    struct Target: Sendable {
+        let transcriptPath: String
+        let worktreeID: UUID
+    }
+
     private struct Baseline {
         var worktreeID: UUID
         var offset: UInt64
@@ -59,11 +64,25 @@ actor CodexTranscriptActivityTracker {
         var reducer: CodexTurnLifecycleReducer
     }
 
+    private struct StepResult {
+        enum Status {
+            case caughtUp
+            case behind
+            case unavailable
+        }
+
+        let state: TerminalActivityState?
+        let bytesRead: UInt64
+        let status: Status
+    }
+
     private static let readChunkSize = 64 * 1024
     static let initialTailByteLimit: UInt64 = 1024 * 1024
     static let incrementalReadByteLimit = initialTailByteLimit
+    static let requestReadByteLimit = incrementalReadByteLimit
     static let maxBufferedRecordByteCount = Int(initialTailByteLimit)
     private var baselines: [String: Baseline] = [:]
+    private var nextBatchStartPath: String?
 
     var baselineCount: Int { baselines.count }
 
@@ -71,7 +90,84 @@ actor CodexTranscriptActivityTracker {
     /// In particular, a cached positive state is never served as evidence that
     /// an inaccessible transcript is still active.
     func observe(transcriptPath: String, worktreeID: UUID) -> TerminalActivityState? {
+        let result = observeStep(
+            transcriptPath: transcriptPath,
+            worktreeID: worktreeID,
+            byteLimit: Self.incrementalReadByteLimit)
+        guard case .caughtUp = result.status else { return nil }
+        return result.state
+    }
+
+    /// Observes several transcripts under one shared byte budget. Paths still
+    /// behind their observed EOF are revisited in round-robin order, including
+    /// across calls, and do not publish an intermediate reducer state.
+    func observe(
+        transcripts: [Target],
+        totalByteLimit: UInt64 = requestReadByteLimit
+    ) -> [String: TerminalActivityState] {
+        guard totalByteLimit > 0 else { return [:] }
+
+        var seenPaths: Set<String> = []
+        let uniqueTargets = transcripts.filter {
+            seenPaths.insert($0.transcriptPath).inserted
+        }
+        guard !uniqueTargets.isEmpty else { return [:] }
+
+        let startIndex = nextBatchStartPath.flatMap { path in
+            uniqueTargets.firstIndex { $0.transcriptPath == path }
+        } ?? 0
+        let targets = Array(uniqueTargets[startIndex...] + uniqueTargets[..<startIndex])
+        var active = Array(repeating: true, count: targets.count)
+        var activeCount = targets.count
+        var cursor = 0
+        var remainingByteCount = totalByteLimit
+        var states: [String: TerminalActivityState] = [:]
+
+        while remainingByteCount > 0, activeCount > 0 {
+            if active[cursor] {
+                let target = targets[cursor]
+                let result = observeStep(
+                    transcriptPath: target.transcriptPath,
+                    worktreeID: target.worktreeID,
+                    byteLimit: min(UInt64(Self.readChunkSize), remainingByteCount))
+                remainingByteCount -= result.bytesRead
+
+                switch result.status {
+                case .caughtUp:
+                    if let state = result.state {
+                        states[target.transcriptPath] = state
+                    }
+                    active[cursor] = false
+                    activeCount -= 1
+                case .unavailable:
+                    active[cursor] = false
+                    activeCount -= 1
+                case .behind:
+                    if result.bytesRead == 0 {
+                        // A future scanner change must not turn a no-progress
+                        // result into a tight loop on the terminal-list path.
+                        active[cursor] = false
+                        activeCount -= 1
+                    }
+                }
+            }
+            cursor = (cursor + 1) % targets.count
+        }
+
+        nextBatchStartPath = targets[cursor].transcriptPath
+        return states
+    }
+
+    private func observeStep(
+        transcriptPath: String,
+        worktreeID: UUID,
+        byteLimit: UInt64
+    ) -> StepResult {
+        guard byteLimit > 0 else {
+            return StepResult(state: nil, bytesRead: 0, status: .behind)
+        }
         let previous = baselines[transcriptPath]
+        var bytesRead: UInt64 = 0
 
         do {
             let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: transcriptPath))
@@ -83,29 +179,39 @@ actor CodexTranscriptActivityTracker {
                 baseline = previous
                 baseline.worktreeID = worktreeID
             } else {
-                baseline = try makeTailBaseline(
+                let prepared = try makeTailBaseline(
                     handle: handle,
                     fileSize: fileSize,
                     worktreeID: worktreeID)
+                baseline = prepared.baseline
+                bytesRead = prepared.bytesRead
             }
 
             let unreadByteCount = fileSize - baseline.offset
-            let readByteCount = min(unreadByteCount, Self.incrementalReadByteLimit)
+            let readByteCount = min(unreadByteCount, byteLimit - bytesRead)
             let observationEndOffset = baseline.offset + readByteCount
             try handle.seek(toOffset: baseline.offset)
             while baseline.offset < observationEndOffset {
                 let remaining = observationEndOffset - baseline.offset
                 let count = Int(min(UInt64(Self.readChunkSize), remaining))
-                guard let chunk = try handle.read(upToCount: count), !chunk.isEmpty else { return nil }
+                guard let chunk = try handle.read(upToCount: count), !chunk.isEmpty else {
+                    return StepResult(state: nil, bytesRead: bytesRead, status: .unavailable)
+                }
                 baseline.offset += UInt64(chunk.count)
+                bytesRead += UInt64(chunk.count)
                 consumeCompleteLines(from: chunk, into: &baseline)
             }
 
             baselines[transcriptPath] = baseline
-            guard baseline.offset == fileSize else { return nil }
-            return baseline.reducer.activityState
+            guard baseline.offset == fileSize else {
+                return StepResult(state: nil, bytesRead: bytesRead, status: .behind)
+            }
+            return StepResult(
+                state: baseline.reducer.activityState,
+                bytesRead: bytesRead,
+                status: .caughtUp)
         } catch {
-            return nil
+            return StepResult(state: nil, bytesRead: bytesRead, status: .unavailable)
         }
     }
 
@@ -134,24 +240,28 @@ actor CodexTranscriptActivityTracker {
         handle: FileHandle,
         fileSize: UInt64,
         worktreeID: UUID
-    ) throws -> Baseline {
+    ) throws -> (baseline: Baseline, bytesRead: UInt64) {
         let startOffset = fileSize > Self.initialTailByteLimit
             ? fileSize - Self.initialTailByteLimit
             : 0
         var discardingCurrentLine = false
+        var bytesRead: UInt64 = 0
 
         if startOffset > 0 {
             try handle.seek(toOffset: startOffset - 1)
             let precedingByte = try handle.read(upToCount: 1)?.first
+            bytesRead = precedingByte == nil ? 0 : 1
             discardingCurrentLine = precedingByte != 0x0A
         }
 
-        return Baseline(
-            worktreeID: worktreeID,
-            offset: startOffset,
-            pendingFragment: Data(),
-            discardingCurrentLine: discardingCurrentLine,
-            reducer: CodexTurnLifecycleReducer())
+        return (
+            Baseline(
+                worktreeID: worktreeID,
+                offset: startOffset,
+                pendingFragment: Data(),
+                discardingCurrentLine: discardingCurrentLine,
+                reducer: CodexTurnLifecycleReducer()),
+            bytesRead)
     }
 
     private func consumeCompleteLines(from chunk: Data, into baseline: inout Baseline) {

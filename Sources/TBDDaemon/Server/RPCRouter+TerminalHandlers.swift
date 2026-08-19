@@ -508,14 +508,21 @@ extension RPCRouter {
         let params = try decoder.decode(TerminalListParams.self, from: paramsData)
         var terminals = try await db.terminals.list(worktreeID: params.worktreeID)
         var codexTranscriptPaths: Set<String> = []
+        var codexTargets: [CodexTranscriptActivityTracker.Target] = []
 
         for index in terminals.indices where terminals[index].isCodexTerminal {
             guard let transcriptPath = terminals[index].transcriptPath,
                   !transcriptPath.isEmpty else { continue }
             codexTranscriptPaths.insert(transcriptPath)
-            terminals[index].presentationActivityState = await codexActivityTracker.observe(
+            codexTargets.append(CodexTranscriptActivityTracker.Target(
                 transcriptPath: transcriptPath,
-                worktreeID: terminals[index].worktreeID)
+                worktreeID: terminals[index].worktreeID))
+        }
+
+        let codexStates = await codexActivityTracker.observe(transcripts: codexTargets)
+        for index in terminals.indices where terminals[index].isCodexTerminal {
+            guard let transcriptPath = terminals[index].transcriptPath else { continue }
+            terminals[index].presentationActivityState = codexStates[transcriptPath]
         }
 
         await codexActivityTracker.retain(
