@@ -468,6 +468,45 @@ struct TerminalActivityEventHandlerTests {
         #expect(resolved.observedAt == laterPromptAt)
     }
 
+    @Test(
+        "an equal-time activity observation preserves a permission prompt",
+        arguments: [TerminalActivityState.working, .idle]
+    )
+    func equalTimeActivityPreservesPermissionPrompt(
+        activityState: TerminalActivityState
+    ) async throws {
+        let terminal = try await makeTerminal(kind: .claude, label: "Claude")
+        let baseline = Date(timeIntervalSince1970: 1_700_000_000)
+        let instant = baseline.addingTimeInterval(1)
+        let reason = AwaitingInputReason(
+            message: "Claude needs permission",
+            hookEventName: "Notification",
+            notificationType: "permission_prompt")
+        try await db.terminals.setActivityState(
+            id: terminal.id,
+            activityState: .working,
+            source: .hookEvent("UserPromptSubmit"),
+            observedAt: baseline)
+        try await db.terminals.recordAwaitingInputReason(
+            id: terminal.id,
+            reason: reason,
+            observedAt: instant)
+
+        _ = try await db.terminals.applyActivityObservation(
+            id: terminal.id,
+            activityState: activityState,
+            source: .hookEvent(RPCMethod.terminalActivityEvent),
+            observedAt: instant)
+
+        let updated = try #require(await db.terminals.get(id: terminal.id))
+        #expect(updated.awaitingInputReason == reason)
+        #expect(updated.awaitingInputObservedAt == instant)
+        let resolved = SessionStateResolver(now: { instant }).resolve(
+            SessionStateFacts(terminal: updated))
+        #expect(resolved.value == .awaitingInput(reason: reason))
+        #expect(resolved.observedAt == instant)
+    }
+
     @Test("a same-time earlier working hook cannot erase a later interrupt")
     func sameTimeEarlierWorkingCannotEraseLaterInterrupt() async throws {
         let terminal = try await makeTerminal()

@@ -89,6 +89,65 @@ struct CodexActivityReconciliationTests {
         #expect(persisted?.activityStateObservedAt == observedAt)
     }
 
+    @Test("accepted same-path SessionStart supersedes an orphan transcript turn")
+    func samePathSessionStartResetsTranscriptLifecycle() async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/car-reset-repo-\(UUID().uuidString)",
+            displayName: "car-reset-repo",
+            defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id,
+            name: "wt",
+            branch: "main",
+            path: "/tmp/car-reset-wt-\(UUID().uuidString)",
+            tmuxServer: "tbd-car-reset")
+        let transcript = try makeTranscript(
+            #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"orphan"}}"#
+                + "\n")
+        defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id,
+            tmuxWindowID: "@1",
+            tmuxPaneID: "%1",
+            label: "Codex",
+            kind: .codex)
+        try await db.terminals.updateSession(
+            id: terminal.id,
+            sessionID: "same-session",
+            transcriptPath: transcript.path)
+        let list = try RPCRequest(
+            method: RPCMethod.terminalList,
+            params: TerminalListParams(worktreeID: wt.id))
+
+        let before = await router.handle(list)
+        #expect(before.success)
+        #expect(try before.decodeResult([Terminal].self).first?
+            .presentationActivityState == .working)
+
+        let sessionStart = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "same-session",
+                transcriptPath: transcript.path,
+                source: "resume"))
+        #expect((await router.handle(sessionStart)).success)
+
+        let afterBoundary = await router.handle(list)
+        #expect(afterBoundary.success)
+        #expect(try afterBoundary.decodeResult([Terminal].self).first?
+            .presentationActivityState == nil)
+
+        try append(
+            Data((#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"later"}}"#
+                + "\n").utf8),
+            to: transcript)
+        let afterLaterTurn = await router.handle(list)
+        #expect(afterLaterTurn.success)
+        #expect(try afterLaterTurn.decodeResult([Terminal].self).first?
+            .presentationActivityState == .working)
+    }
+
     @Test("matching transcript completion clears presentation while missed Stop remains persisted working")
     func terminalListObservesAppendedCompletionWithoutMutation() async throws {
         let repo = try await db.repos.create(
@@ -262,11 +321,22 @@ struct CodexActivityReconciliationTests {
             Issue.record("first terminal.list never reached its transcript stamp")
             return
         }
-        #expect((await router.handle(sessionStart)).success)
+        let sessionUpdate = Task { await router.handle(sessionStart) }
+        guard await waitUntilAsync({
+            let current = try? await db.terminals.get(id: terminal.id)
+            return current?.claudeSessionID == "current-session"
+        }) else {
+            dates.releaseFirstCall()
+            _ = await staleList.value
+            _ = await sessionUpdate.value
+            Issue.record("SessionStart never committed its atomic retarget")
+            return
+        }
         let currentList = Task { await router.handle(list) }
         dates.releaseFirstCall()
 
         let staleResponse = await staleList.value
+        #expect((await sessionUpdate.value).success)
         let currentResponse = await currentList.value
         #expect(staleResponse.success)
         #expect(currentResponse.success)
@@ -280,7 +350,9 @@ struct CodexActivityReconciliationTests {
         #expect(staleTerminal.presentationActivityState == nil)
         #expect(staleTerminal.presentationActivityObservedAt == firstAt)
         #expect(currentTerminal.transcriptPath == currentTranscript.path)
-        #expect(currentTerminal.presentationActivityState == .idle)
+        // SessionStart establishes a boundary at the transcript's current EOF,
+        // so pre-boundary lifecycle events are not evidence for the new session.
+        #expect(currentTerminal.presentationActivityState == nil)
         #expect(currentTerminal.presentationActivityObservedAt == currentAt)
         #expect(!(await router.codexActivityTracker.hasBaseline(
             transcriptPath: oldTranscript.path)))
@@ -537,6 +609,19 @@ struct CodexActivityReconciliationTests {
         #expect(after.activityStateObservedAt == Self.observedAt)
         #expect(after.observedActivity?.observedAt == Self.observedAt)
     }
+}
+
+private func waitUntilAsync(
+    _ condition: @escaping @Sendable () async -> Bool,
+    timeout: Duration = .seconds(2)
+) async -> Bool {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    repeat {
+        if await condition() { return true }
+        await Task.yield()
+    } while clock.now < deadline
+    return false
 }
 
 private final class BlockingListDates: @unchecked Sendable {

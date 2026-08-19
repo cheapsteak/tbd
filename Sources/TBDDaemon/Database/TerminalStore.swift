@@ -135,6 +135,12 @@ public struct AppliedTerminalActivityObservation: Sendable {
     public let orderObservedAt: Date
 }
 
+struct AppliedTerminalSessionStart: Sendable {
+    let sessionID: String
+    let transcriptPath: String?
+    let activityObservation: AppliedTerminalActivityObservation?
+}
+
 private func preservesStoredActivityAtEqualOrder(
     storedState: TerminalActivityState,
     storedSource: FactSource?,
@@ -151,9 +157,64 @@ private func clearAwaitingInputIfNotNewer(
     record: inout TerminalRecord,
     than observedAt: Date
 ) {
-    guard record.awaitingInputObservedAt.map({ $0 > observedAt }) != true else { return }
+    guard record.awaitingInputObservedAt.map({ $0 >= observedAt }) != true else { return }
     record.awaitingInputReason = nil
     record.awaitingInputObservedAt = nil
+}
+
+private func applyActivityObservationToRecord(
+    to record: inout TerminalRecord,
+    activityState: TerminalActivityState,
+    source: FactSource,
+    observedAt: Date,
+    replaceSameValue: Bool
+) -> AppliedTerminalActivityObservation? {
+    let storedOrderObservedAt = record.activityStateOrderObservedAt
+        ?? record.activityStateObservedAt
+    if let storedOrderObservedAt, storedOrderObservedAt > observedAt {
+        return nil
+    }
+    let storedSource = FactColumnJSON.decode(
+        FactSource.self, from: record.activityStateSource)
+    let storedState = record.activityState.flatMap(TerminalActivityState.init(rawValue:))
+        ?? .unknown
+    if storedOrderObservedAt == observedAt,
+       preservesStoredActivityAtEqualOrder(
+           storedState: storedState,
+           storedSource: storedSource,
+           incomingState: activityState,
+           incomingSource: source) {
+        return nil
+    }
+
+    let sameCompleteFact = record.activityState == activityState.rawValue
+        && storedSource != nil
+        && record.activityStateObservedAt != nil
+        && !replaceSameValue
+    if sameCompleteFact,
+       let storedSource,
+       let storedObservedAt = record.activityStateObservedAt {
+        record.activityStateOrderObservedAt = observedAt
+        clearAwaitingInputIfNotNewer(record: &record, than: observedAt)
+        return AppliedTerminalActivityObservation(
+            activityState: activityState,
+            source: storedSource,
+            observedAt: storedObservedAt,
+            orderObservedAt: observedAt
+        )
+    }
+
+    record.activityState = activityState.rawValue
+    record.activityStateSource = FactColumnJSON.encode(source)
+    record.activityStateObservedAt = observedAt
+    record.activityStateOrderObservedAt = observedAt
+    clearAwaitingInputIfNotNewer(record: &record, than: observedAt)
+    return AppliedTerminalActivityObservation(
+        activityState: activityState,
+        source: source,
+        observedAt: observedAt,
+        orderObservedAt: observedAt
+    )
 }
 
 /// Provides CRUD operations for terminals.
@@ -309,10 +370,9 @@ public struct TerminalStore: Sendable {
     }
 
     /// Update the Claude session ID and the absolute JSONL transcript path for
-    /// a terminal in one write. Used by the SessionStart hook bridge so the
-    /// transcript handler can target the exact file Claude is writing without
-    /// re-deriving the project directory from cwd (which is fragile across
-    /// `/clear` and `/compact` rollovers).
+    /// a terminal in one write. Direct lifecycle callers use this when they do
+    /// not have a SessionStart observation to order; the hook bridge uses
+    /// `applySessionStart` below.
     public func updateSession(id: UUID, sessionID: String, transcriptPath: String?) async throws {
         try await writer.write { db in
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
@@ -328,6 +388,68 @@ public struct TerminalStore: Sendable {
                 record.transcriptPath = transcriptPath
             }
             try record.update(db)
+        }
+    }
+
+    /// Apply a SessionStart as one ordered database fact. Session identity,
+    /// prompt retraction, the shared event-order watermark, and Codex's idle
+    /// transition either all advance together or none do.
+    ///
+    /// A prompt at the same timestamp wins the tie, matching
+    /// `SessionStateResolver`: SessionStart cannot prove whether that more
+    /// specific wait was raised before or after it. Claude does not assert an
+    /// activity value here, but still advances the ordering watermark so an
+    /// older activity or SessionStart cannot finish late and roll the row back.
+    func applySessionStart(
+        id: UUID,
+        sessionID: String,
+        transcriptPath: String?,
+        observedAt: Date
+    ) async throws -> AppliedTerminalSessionStart? {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            if record.awaitingInputObservedAt.map({ $0 >= observedAt }) == true {
+                return nil
+            }
+
+            let isCodex = record.kind == TerminalKind.codex.rawValue
+                || record.label == TerminalLabel.codex
+            let activityObservation: AppliedTerminalActivityObservation?
+            if isCodex {
+                guard let applied = applyActivityObservationToRecord(
+                    to: &record,
+                    activityState: .idle,
+                    source: .hookEvent("SessionStart"),
+                    observedAt: observedAt,
+                    replaceSameValue: true
+                ) else { return nil }
+                activityObservation = applied
+            } else {
+                let storedOrderObservedAt = record.activityStateOrderObservedAt
+                    ?? record.activityStateObservedAt
+                if let storedOrderObservedAt, storedOrderObservedAt > observedAt {
+                    return nil
+                }
+                record.activityStateOrderObservedAt = observedAt
+                clearAwaitingInputIfNotNewer(record: &record, than: observedAt)
+                activityObservation = nil
+            }
+
+            record.claudeSessionID = sessionID
+            if let transcriptPath {
+                record.transcriptPath = transcriptPath
+            }
+            // The activity helper already performs this for Codex. Keep the
+            // call here so Claude and any future non-Codex agent share the
+            // same strict-older prompt retraction rule.
+            clearAwaitingInputIfNotNewer(record: &record, than: observedAt)
+            try record.update(db)
+            return AppliedTerminalSessionStart(
+                sessionID: sessionID,
+                transcriptPath: record.transcriptPath,
+                activityObservation: activityObservation)
         }
     }
 
@@ -433,7 +555,7 @@ public struct TerminalStore: Sendable {
     /// this method without allowing that older event to roll back a newer one.
     ///
     /// A repeated generic value advances only the ordering watermark and clears
-    /// an awaiting-input reason no newer than itself. Its semantic transition
+    /// an awaiting-input reason strictly older than itself. Its semantic transition
     /// timestamp and source remain unchanged, which both preserves
     /// hibernation's at-rest clock and prevents an idle echo from erasing an
     /// explicit interrupt.
@@ -453,54 +575,15 @@ public struct TerminalStore: Sendable {
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Terminal not found")
             }
-            let storedOrderObservedAt = record.activityStateOrderObservedAt
-                ?? record.activityStateObservedAt
-            if let storedOrderObservedAt, storedOrderObservedAt > observedAt {
-                return nil
-            }
-            let storedSource = FactColumnJSON.decode(
-                FactSource.self, from: record.activityStateSource)
-            let storedState = record.activityState.flatMap(TerminalActivityState.init(rawValue:))
-                ?? .unknown
-            if storedOrderObservedAt == observedAt,
-               preservesStoredActivityAtEqualOrder(
-                   storedState: storedState,
-                   storedSource: storedSource,
-                   incomingState: activityState,
-                   incomingSource: source) {
-                return nil
-            }
-
-            let sameCompleteFact = record.activityState == activityState.rawValue
-                && storedSource != nil
-                && record.activityStateObservedAt != nil
-                && !replaceSameValue
-            if sameCompleteFact,
-               let storedSource,
-               let storedObservedAt = record.activityStateObservedAt {
-                record.activityStateOrderObservedAt = observedAt
-                clearAwaitingInputIfNotNewer(record: &record, than: observedAt)
-                try record.update(db)
-                return AppliedTerminalActivityObservation(
-                    activityState: activityState,
-                    source: storedSource,
-                    observedAt: storedObservedAt,
-                    orderObservedAt: observedAt
-                )
-            }
-
-            record.activityState = activityState.rawValue
-            record.activityStateSource = FactColumnJSON.encode(source)
-            record.activityStateObservedAt = observedAt
-            record.activityStateOrderObservedAt = observedAt
-            clearAwaitingInputIfNotNewer(record: &record, than: observedAt)
-            try record.update(db)
-            return AppliedTerminalActivityObservation(
+            guard let application = applyActivityObservationToRecord(
+                to: &record,
                 activityState: activityState,
                 source: source,
                 observedAt: observedAt,
-                orderObservedAt: observedAt
-            )
+                replaceSameValue: replaceSameValue
+            ) else { return nil }
+            try record.update(db)
+            return application
         }
     }
 

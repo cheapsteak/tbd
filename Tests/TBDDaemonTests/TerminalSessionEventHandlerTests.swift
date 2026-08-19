@@ -26,7 +26,27 @@ struct TerminalSessionEventHandlerTests {
         )
     }
 
-    private func makeTerminal(initialSession: String? = nil) async throws -> (Terminal, Worktree) {
+    private func makeRouter(now: @escaping @Sendable () -> Date) -> RPCRouter {
+        RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()
+            ),
+            tmux: TmuxManager(dryRun: true),
+            startTime: Date(),
+            now: now,
+            actuationLog: makeTestActuationLog()
+        )
+    }
+
+    private func makeTerminal(
+        initialSession: String? = nil,
+        label: String = "claude",
+        kind: TerminalKind? = nil
+    ) async throws -> (Terminal, Worktree) {
         let repo = try await db.repos.create(
             path: "/tmp/se-repo-\(UUID().uuidString)",
             displayName: "se-repo",
@@ -43,8 +63,9 @@ struct TerminalSessionEventHandlerTests {
             worktreeID: wt.id,
             tmuxWindowID: "@1",
             tmuxPaneID: "%1",
-            label: "claude",
-            claudeSessionID: initialSession
+            label: label,
+            claudeSessionID: initialSession,
+            kind: kind
         )
         return (terminal, wt)
     }
@@ -214,6 +235,76 @@ struct TerminalSessionEventHandlerTests {
         #expect(after.activityStateObservedAt == idleAt)
     }
 
+    @Test("an older SessionStart cannot roll back identity or erase a newer prompt")
+    func olderSessionStartPreservesNewerSessionAndPrompt() async throws {
+        let (terminal, worktree) = try await makeTerminal(
+            initialSession: "current-session", label: "Codex", kind: .codex)
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-session-race-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let transcript = directory.appendingPathComponent("current.jsonl")
+        try (#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"current"}}"#
+            + "\n").write(to: transcript, atomically: true, encoding: .utf8)
+        try await db.terminals.updateSession(
+            id: terminal.id,
+            sessionID: "current-session",
+            transcriptPath: transcript.path)
+
+        let baseline = Date(timeIntervalSince1970: 1_700_000_000)
+        let earlierSessionAt = baseline.addingTimeInterval(1)
+        let laterPromptAt = baseline.addingTimeInterval(2)
+        try await db.terminals.setActivityState(
+            id: terminal.id,
+            activityState: .working,
+            source: .hookEvent("UserPromptSubmit"),
+            observedAt: baseline)
+        let dates = BlockingSessionDates(first: earlierSessionAt, subsequent: laterPromptAt)
+        let raceRouter = makeRouter(now: dates.provider)
+        #expect(await raceRouter.codexActivityTracker.observe(
+            transcriptPath: transcript.path,
+            worktreeID: worktree.id) == .working)
+
+        let staleSession = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "stale-session",
+                transcriptPath: transcript.path,
+                source: "resume"))
+        let prompt = try RPCRequest(
+            method: RPCMethod.terminalNotificationEvent,
+            params: TerminalNotificationEventParams(
+                terminalID: terminal.id,
+                notificationType: "permission_prompt",
+                message: "Codex needs permission"))
+
+        let earlier = Task { await raceRouter.handle(staleSession) }
+        guard await waitUntil({ dates.firstCallIsBlocked }) else {
+            dates.releaseFirstCall()
+            _ = await earlier.value
+            Issue.record("earlier SessionStart never reached the date seam")
+            return
+        }
+        #expect((await raceRouter.handle(prompt)).success)
+        dates.releaseFirstCall()
+        #expect((await earlier.value).success)
+
+        let updated = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(updated.claudeSessionID == "current-session")
+        #expect(updated.transcriptPath == transcript.path)
+        #expect(updated.awaitingInputReason?.classification == .promptOnScreen)
+        #expect(updated.awaitingInputObservedAt == laterPromptAt)
+        #expect(SessionStateResolver(now: { laterPromptAt })
+            .resolve(SessionStateFacts(terminal: updated)).value
+            == .awaitingInput(reason: updated.awaitingInputReason))
+        // A rejected old SessionStart must not reset the current transcript's
+        // reducer; only an accepted lifecycle boundary may do that.
+        #expect(await raceRouter.codexActivityTracker.observe(
+            transcriptPath: transcript.path,
+            worktreeID: worktree.id) == .working)
+    }
+
     @Test("unknown terminalID is a soft no-op (success, no error)")
     func unknownTerminalSoftSuccess() async throws {
         let request = try RPCRequest(
@@ -373,5 +464,41 @@ struct TerminalSessionEventHandlerTests {
         let result = try resp.decodeResult(TerminalTranscriptResult.self)
         #expect(result.sessionID == "logical-session-id")
         #expect(!result.messages.isEmpty)
+    }
+}
+
+private final class BlockingSessionDates: @unchecked Sendable {
+    private let lock = NSLock()
+    private let first: Date
+    private let subsequent: Date
+    private let release = DispatchSemaphore(value: 0)
+    private var callCount = 0
+    private var firstBlocked = false
+
+    init(first: Date, subsequent: Date) {
+        self.first = first
+        self.subsequent = subsequent
+    }
+
+    var firstCallIsBlocked: Bool {
+        lock.withLock { firstBlocked }
+    }
+
+    var provider: @Sendable () -> Date {
+        { [self] in
+            let call = lock.withLock { () -> Int in
+                let call = callCount
+                callCount += 1
+                if call == 0 { firstBlocked = true }
+                return call
+            }
+            guard call == 0 else { return subsequent }
+            release.wait()
+            return first
+        }
+    }
+
+    func releaseFirstCall() {
+        release.signal()
     }
 }

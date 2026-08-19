@@ -198,6 +198,38 @@ actor CodexTranscriptActivityTracker {
         )
     }
 
+    /// Establish a lifecycle boundary for an accepted SessionStart without
+    /// re-reading history before that event. This matters when Codex reuses the
+    /// same transcript path after an interrupted turn: an unmatched historical
+    /// `task_started` must not become current-session working evidence again.
+    /// Bytes appended after the captured EOF are reduced normally, so the next
+    /// genuine turn supersedes the boundary.
+    func establishSessionBoundary(transcriptPath: String, worktreeID: UUID) {
+        batchPathWorktreeIDs[transcriptPath] = worktreeID
+        do {
+            let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: transcriptPath))
+            defer { try? handle.close() }
+            let fileSize = try handle.seekToEnd()
+            var discardingCurrentLine = false
+            if fileSize > 0 {
+                try handle.seek(toOffset: fileSize - 1)
+                let lastByte = try handle.read(upToCount: 1)?.first
+                discardingCurrentLine = lastByte != 0x0A
+            }
+            baselines[transcriptPath] = Baseline(
+                worktreeID: worktreeID,
+                offset: fileSize,
+                pendingFragment: Data(),
+                discardingCurrentLine: discardingCurrentLine,
+                reducer: CodexTurnLifecycleReducer())
+        } catch {
+            // Never retain positive evidence across a session boundary when
+            // the file is temporarily unavailable. A later list observation
+            // may bootstrap once the new session creates the path.
+            baselines.removeValue(forKey: transcriptPath)
+        }
+    }
+
     private func advanceBatchPath(_ transcriptPath: String) {
         guard let index = nextBatchPathOrder.firstIndex(of: transcriptPath) else { return }
         nextBatchPathOrder.remove(at: index)

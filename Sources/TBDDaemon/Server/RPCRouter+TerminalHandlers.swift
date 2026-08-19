@@ -2867,42 +2867,27 @@ extension RPCRouter {
             return p
         }()
 
-        try await db.terminals.updateSession(
+        // Session identity, prompt retraction, and (for Codex) the idle fact
+        // are one ordered store transaction. A delayed older SessionStart must
+        // not rewrite identity or clear a prompt before its activity fact is
+        // rejected as stale.
+        guard let sessionApplication = try await db.terminals.applySessionStart(
             id: terminal.id,
             sessionID: params.sessionID,
-            transcriptPath: cleanedPath
-        )
-        // A new session context has started in this pane — a `/clear`, a
-        // resume after an in-place profile swap, or a hand relaunch — so a
-        // wait reason recorded against the PREVIOUS one is not on screen any
-        // more. It has to be retracted here, from the event that establishes
-        // it, for two reasons `SessionStateResolver`'s rung 4 makes concrete.
-        // A `/clear` points `transcriptPath` at a file Claude Code creates
-        // lazily, so the growth fact is nil and "we could not look is not
-        // evidence it went away" keeps the dead prompt standing; and the
-        // overlay's own `tbd terminal-activity idle` — the rail that would
-        // otherwise clear the columns — no-ops when the row already reads idle
-        // and can be lost on its own while this call lands.
-        //
-        // Claude SessionStart says only that a session exists, not what it is
-        // doing, so it does not assert activity. Codex SessionStart is also
-        // the machine signal that the pane is between turns; its ordered idle
-        // observation is applied below.
-        try await db.terminals.clearAwaitingInputReason(id: terminal.id)
-        let codexActivityApplication: AppliedTerminalActivityObservation?
-        if terminal.kind == .codex || terminal.label == TerminalLabel.codex {
-            // This handler is driven by the session-start hook, which is what
-            // told us the session exists and is between turns.
-            //
-            // `observedAt` from the router's date seam, for the same reason as
-            // every other stamp this file writes: `SessionStateResolver`'s
-            // rung 4 *compares* it, and the store's default `Date()` is a
-            // timestamp nothing outside the store can name.
-            codexActivityApplication = try await db.terminals.applyActivityObservation(
-                id: terminal.id, activityState: .idle, source: .hookEvent("SessionStart"),
-                observedAt: observedAt, replaceSameValue: true)
-        } else {
-            codexActivityApplication = nil
+            transcriptPath: cleanedPath,
+            observedAt: observedAt
+        ) else { return .ok() }
+
+        // The accepted SessionStart is also a lifecycle boundary in the Codex
+        // transcript reducer. Capture the current EOF even when the path is
+        // unchanged, so an unmatched task_started from the interrupted session
+        // cannot be re-published as working; later appended turns still win.
+        if sessionApplication.activityObservation != nil,
+           let transcriptPath = sessionApplication.transcriptPath,
+           !transcriptPath.isEmpty {
+            await codexActivityTracker.establishSessionBoundary(
+                transcriptPath: transcriptPath,
+                worktreeID: terminal.worktreeID)
         }
 
         // Invalidate cached transcript parse for the OLD session file (if any)
@@ -2911,7 +2896,7 @@ extension RPCRouter {
         // misses cache and re-parses — no explicit invalidation needed.)
 
         let source = params.source ?? "unknown"
-        logger.info("sessionEvent: terminal \(terminal.id.uuidString, privacy: .public) -> session \(params.sessionID, privacy: .public) (source=\(source, privacy: .public))")
+        logger.info("sessionEvent: terminal \(terminal.id.uuidString, privacy: .public) -> session \(sessionApplication.sessionID, privacy: .public) (source=\(source, privacy: .public))")
 
         // The readiness signal for a parked prompt on the paste path. This
         // hook is the machine fact that the agent is up — never the pane's
@@ -2922,10 +2907,10 @@ extension RPCRouter {
         subscriptions.broadcast(delta: .terminalSessionUpdated(TerminalSessionDelta(
             terminalID: terminal.id,
             worktreeID: terminal.worktreeID,
-            sessionID: params.sessionID,
-            transcriptPath: cleanedPath
+            sessionID: sessionApplication.sessionID,
+            transcriptPath: sessionApplication.transcriptPath
         )))
-        if let application = codexActivityApplication {
+        if let application = sessionApplication.activityObservation {
             subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
                 terminalID: terminal.id,
                 worktreeID: terminal.worktreeID,
