@@ -1,41 +1,195 @@
 # Database / Migrations
 
-## Use the idempotent helpers in new migrations
+Migrations come in three shapes, and only one of them is for new work.
 
-New migrations that add columns, tables, or indexes MUST go through
-`MigrationHelpers.swift`:
+- **The frozen `v1`–`v84` Swift block** in `Database.swift` — closures with
+  hand-picked `vN` identifiers. Those identifiers have run on user machines.
+  Read them, never edit them, never extend the sequence.
+- **`.sql` files** under `Database/Migrations/`, named
+  `YYYYMMDDHHMMSS_lower_snake_description.sql` and discovered from the
+  `TBD_TBDDaemonLib` resource bundle at startup. **This is the default for
+  every new migration.**
+- **The Swift escape hatch** — an entry in
+  `SQLMigrationLoader.inlineTimestampMigrations`, carrying the same 14-digit
+  identifier a file would. For the rare migration that needs procedural Swift
+  rather than DDL. Three of the 84 legacy migrations are that kind (`v10`,
+  `v14_worktree_location`, `v35_worktree_nullable_repo`); expect roughly that
+  rate.
+
+The filename stem is the GRDB migration identifier:
+`20260819143000_add_thing.sql` registers as `20260819143000_add_thing`. That is
+the whole contract GRDB needs — it runs every registered migration whose
+identifier is absent from `grdb_migrations`, and nothing else about the name is
+load-bearing.
+
+Design and rationale: [`docs/specs/2026-08-19-migration-identifier-scheme-design.md`](../../../docs/specs/2026-08-19-migration-identifier-scheme-design.md).
+
+## Adding a migration
+
+1. Mint an identifier: `date -u +%Y%m%d%H%M%S`. Seconds resolution earns its
+   place — two agents on a parallel fleet plausibly author migrations in the
+   same minute, and much less plausibly in the same second.
+2. Write `Sources/TBDDaemon/Database/Migrations/<stamp>_<description>.sql`.
+   Lower snake case after the stamp; nothing but `.sql` files may live in the
+   directory.
+3. Update the GRDB record type in this directory and the Codable model in
+   `Sources/TBDShared/Models.swift`, in the same commit. See the root
+   `CLAUDE.md`, "Database migrations must update the shared model".
+
+Adding a migration touches one file no other branch has, so two branches can
+neither pick the same identifier nor edit the same text.
+
+## What a `.sql` file may contain
+
+Every statement must lead with one of these forms; `scripts/lint-migrations.py`
+rejects anything else:
+
+`CREATE TABLE IF NOT EXISTS`, `CREATE [UNIQUE] INDEX IF NOT EXISTS`,
+`ALTER TABLE … ADD [COLUMN]`, `ALTER TABLE … RENAME`, `DROP TABLE IF EXISTS`,
+`DROP INDEX IF EXISTS`, `INSERT OR IGNORE`, `INSERT OR REPLACE`, `UPDATE`,
+`DELETE FROM`, `PRAGMA`.
+
+The list is a whitelist: it says what is permitted rather than what is banned.
+Anything outside it either gets rewritten into one of these forms or takes the
+Swift escape hatch. Widening the list is a deliberate edit with a reviewer,
+because each addition claims that the new form is idempotent and
+order-independent.
+
+`CREATE` needs `IF NOT EXISTS` and `DROP` needs `IF EXISTS`; the lint checks
+that too.
+
+## Idempotence is the load-bearing property
+
+Every statement must be safe to run against a schema that already has the thing
+it creates, and safe to run in any order relative to its siblings. Two
+mechanisms deliver that:
+
+- **In SQL** — the `IF NOT EXISTS` / `IF EXISTS` forms above.
+- **In the loader** — `SQLMigrationLoader` splits the file into statements with
+  SQLite's own `sqlite3_complete()`, then checks any statement matching a strict
+  `ALTER TABLE <table> ADD [COLUMN] <column>` shape against
+  `PRAGMA table_info(<table>)` and skips it with a log line when the column is
+  already there. Anything the match does not recognize executes unmodified, so
+  the guard can never silently swallow a statement it misread.
+
+The splitting happens before SQLite prepares anything, because `duplicate column
+name` is raised at prepare time. A loader that handed the whole file to
+`execute(sql:)` and caught the error could not recover — earlier statements
+would already have run, and the migration's transaction would roll back.
+
+Idempotence is not decoration. Renumbering an additive migration bricked the
+daemon twice: GRDB keys applied migrations by identifier string, so a
+renamed-but-equivalent migration is unapplied under its new name while its
+column already exists, and SQLite throws `duplicate column name`. Unique
+timestamp identifiers remove that particular collision, but a second path to it
+survives — two agents independently implementing the same feature write two
+distinct migrations that add the same column. On a fleet of parallel agents
+that is the normal workload, not an edge case.
+
+## Application order differs between machines
+
+A developer who has applied `20260901…` and then pulls a branch adding
+`20260819…` runs the pair in a different order than a fresh install does. Every
+timestamp scheme has this property. It is safe only because migrations are
+idempotent and mutually independent, which is exactly what the statement
+allowlist buys. Never write a migration that assumes an earlier timestamp
+already ran.
+
+`buildMigrator()` registers the frozen `v1`–`v84` block first, then the `.sql`
+files and inline Swift escape-hatch migrations merged into one
+identifier-sorted list. An escape-hatch migration therefore lands in authoring
+order among the files rather than at the end.
+
+## Migration history is frozen
+
+A migration file that has landed on `origin/main` may not be modified or
+deleted, and the same goes for the `v1`–`v84` bodies. Those migrations have
+already run on user machines; editing one is either a no-op, because GRDB skips
+an identifier it has recorded, or a fresh divergence between one developer's
+schema and everyone else's. Fix a mistake with a new migration.
+
+`scripts/lint-migrations.py` enforces this in the `lint` CI job and the pre-push
+hook: every entry in the migrations directory must be an addition relative to
+the merge base with `origin/main`.
+
+## The Swift escape hatch
+
+Register procedural migrations in `SQLMigrationLoader.inlineTimestampMigrations`
+under a 14-digit identifier. They still conflict textually with a concurrent
+one, which is why a `.sql` file is the default.
+
+Any Swift migration body goes through the idempotent helpers in
+`MigrationHelpers.swift` rather than raw DDL:
 
 - `addColumnIfMissing(table:column:type:defaults:)`
 - `createTableIfNotExists(_:body:)`
 - `addIndexIfMissing(_:on:columns:unique:where:)`
 
-Do not call `t.add(column:)`, `db.create(table:)`, or raw `CREATE INDEX`
-directly in a new migration. Reason: parallel branches that renumber the same
-additive migration have bricked the daemon twice (May 6 and May 13 2026). When
-the schema already has the column but the renamed migration ID is unapplied,
-GRDB re-runs the body and SQLite throws `duplicate column name`. The helpers
-turn that scenario into a logged no-op.
+The `migration_use_helpers` SwiftLint rule catches `create(table:)`,
+`.add(column:)`, and raw `CREATE TABLE` / `CREATE INDEX` in `Database.swift`;
+it does not reach `SQLMigrationLoader.swift`, so an escape-hatch body observes
+the rule by discipline. `.sql` files need no helpers at all — the loader gives
+them the equivalent ADD COLUMN guard, and the `IF NOT EXISTS` forms cover the
+rest.
 
-## Migration ID convention
+For a feature-flag column, omit the SQL `DEFAULT` clause so "unset" stays a
+third state distinct from `0` and `1`. The root `CLAUDE.md` explains why under
+"Large or risky new behavior ships behind a default-off flag".
 
-Continue `v<N>_descriptive_suffix` (e.g. `v23_repo_archived_at`). The numeric
-prefix preserves ordering; the suffix makes parallel branch collisions
-debuggable.
+## The resource bundle
 
-## Don't edit existing migration bodies
+`Package.swift` declares `resources: [.copy("Database/Migrations")]` on
+`TBDDaemonLib`. `.copy` preserves the directory verbatim, dotfiles included, so
+the `.gitkeep` that lets git track it while empty ships too — the loader filters
+to `.sql` rather than trusting what it finds. SwiftPM treats an undeclared
+non-source file inside a target path as an error, so the declaration is not
+optional.
 
-v1 through v23 are frozen. They have run on user machines; mutating them now
-would either be a no-op (because GRDB skips them) or cause a fresh
-divergence between dev and prod schemas. The helpers are for FUTURE
-migrations only. (v23 landed on `main` in #143 before this PR opened, so it
-is grandfathered into the frozen range even though its body uses raw
-`t.add(column:)`.)
+`SQLMigrationLoader` deliberately does **not** use `Bundle.module`. SwiftPM
+generates that accessor with a hardcoded absolute path into the building
+worktree's `.build`, so a daemon binary copied anywhere on the same machine
+still resolves it and silently reads migrations out of the tree it was built in
+instead of failing. The loader instead searches an ordered candidate list — the
+executable's own directory, the directory of the bundle owning a marker type,
+and that directory's parent, which is where the resource bundle sits under the
+test harness — and throws an error naming every path it searched when the list
+is exhausted.
+
+`init(path:)` calls `verifyResourceIntegrity` before migrating. It uses the
+database as its own manifest: if `grdb_migrations` holds timestamp-shaped
+identifiers while the bundle yielded zero `.sql` files, the resources are
+missing or truncated, this build cannot tell whether the schema is current, and
+the daemon refuses to start rather than run against an under-migrated schema. A
+*partial* mismatch is fine and deliberately does not fire — downgrading to an
+older build legitimately leaves applied identifiers with no corresponding file,
+and GRDB's `hasBeenSuperseded` already covers that.
+
+## The frozen baseline fixture
+
+`Tests/TBDDaemonTests/Fixtures/schema-baseline-v84.sql` is the schema `v1`–`v84`
+produce against an empty database. The lint's chain-apply check replays the
+`.sql` migrations against it without needing a Swift build, and
+`SchemaBaselineDriftTests` asserts the block still produces exactly that
+fixture.
+
+`scripts/gen-migration-baseline.sh` regenerates it, and should essentially never
+run: the block it snapshots is frozen. A diff against the committed fixture
+means the frozen block changed, which is the bug to chase — not a chore to
+resolve by committing the regenerated file.
+
+## Splitter parity
+
+The loader and the lint split statements with two bindings to one C function —
+`sqlite3_complete()` from Swift, `sqlite3.complete_statement()` from Python.
+`Tests/TBDDaemonTests/Fixtures/MigrationSplitter/` holds adversarial SQL both
+sides must agree on, and its README states the contract they pin. A
+disagreement means one side's framing code drifted, not that SQLite changed.
 
 ## Pre-migration snapshot
 
-`init(path:)` automatically copies `~/tbd/state.db` to
+`init(path:)` writes `~/tbd/state.db` to
 `~/tbd/state.db.pre-migration.<UTC-timestamp>` (e.g.
-`state.db.pre-migration.20260513T143055Z`) whenever there is pending
-migration work AND the DB file already existed. Failures are logged at error
+`state.db.pre-migration.20260513T143055Z`) via `VACUUM INTO` whenever migration
+work is pending AND the database file already existed. Failures log at error
 level but do not block the migration — best effort only. Safe to delete the
-snapshot after confirming the upgrade was clean.
+snapshot once the upgrade looks clean.
