@@ -6,6 +6,8 @@ import TestSupport
 
 @Suite("codex activity reconciliation")
 struct CodexActivityReconciliationTests {
+    private static let raceRendezvousTimeout: Duration = .seconds(30)
+
     let db: TBDDatabase
     let router: RPCRouter
     let presentationObservedAt: Date
@@ -399,17 +401,22 @@ struct CodexActivityReconciliationTests {
                 source: "SessionStart"))
 
         let staleList = Task { await router.handle(list) }
-        guard await waitUntil({ dates.firstCallIsBlocked }) else {
+        guard await waitUntil(
+            { dates.firstCallIsBlocked }, timeout: Self.raceRendezvousTimeout
+        ) else {
             dates.releaseFirstCall()
             _ = await staleList.value
             Issue.record("first terminal.list never reached its transcript stamp")
             return
         }
         let sessionUpdate = Task { await router.handle(sessionStart) }
-        guard await waitUntilAsync({
-            let current = try? await db.terminals.get(id: terminal.id)
-            return current?.claudeSessionID == "current-session"
-        }) else {
+        guard await waitUntilAsync(
+            {
+                let current = try? await db.terminals.get(id: terminal.id)
+                return current?.claudeSessionID == "current-session"
+            },
+            timeout: Self.raceRendezvousTimeout
+        ) else {
             dates.releaseFirstCall()
             _ = await staleList.value
             _ = await sessionUpdate.value
@@ -482,17 +489,22 @@ struct CodexActivityReconciliationTests {
                 transcriptPath: transcript.path, source: "SessionStart"))
 
         let staleList = Task { await raceRouter.handle(list) }
-        guard await waitUntil({ dates.firstCallIsBlocked }) else {
+        guard await waitUntil(
+            { dates.firstCallIsBlocked }, timeout: Self.raceRendezvousTimeout
+        ) else {
             dates.releaseFirstCall()
             _ = await staleList.value
             Issue.record("terminal.list never reached its transcript stamp")
             return
         }
         let sessionUpdate = Task { await raceRouter.handle(sessionStart) }
-        guard await waitUntilAsync({
-            let current = try? await db.terminals.get(id: terminal.id)
-            return current?.activityStateOrderObservedAt == sessionAt
-        }) else {
+        guard await waitUntilAsync(
+            {
+                let current = try? await db.terminals.get(id: terminal.id)
+                return current?.activityStateOrderObservedAt == sessionAt
+            },
+            timeout: Self.raceRendezvousTimeout
+        ) else {
             dates.releaseFirstCall()
             _ = await staleList.value
             _ = await sessionUpdate.value
