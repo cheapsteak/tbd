@@ -93,6 +93,7 @@ actor CodexTranscriptActivityTracker {
     static let maxBufferedRecordByteCount = Int(initialTailByteLimit)
     private var baselines: [String: Baseline] = [:]
     private var nextBatchPathOrder: [String] = []
+    private var batchPathWorktreeIDs: [String: UUID] = [:]
 
     var baselineCount: Int { baselines.count }
 
@@ -123,12 +124,16 @@ actor CodexTranscriptActivityTracker {
         }
         guard !uniqueTargets.isEmpty else { return [:] }
 
-        let currentPaths = Set(uniqueTargets.map(\.transcriptPath))
-        let nextBatchStartPath = nextBatchPathOrder.first(where: currentPaths.contains)
-        let startIndex = nextBatchStartPath.flatMap { path in
-            uniqueTargets.firstIndex { $0.transcriptPath == path }
-        } ?? 0
-        let targets = Array(uniqueTargets[startIndex...] + uniqueTargets[..<startIndex])
+        let targetsByPath = Dictionary(
+            uniqueKeysWithValues: uniqueTargets.map { ($0.transcriptPath, $0) })
+        var knownPaths = Set(nextBatchPathOrder)
+        for target in uniqueTargets {
+            batchPathWorktreeIDs[target.transcriptPath] = target.worktreeID
+            if knownPaths.insert(target.transcriptPath).inserted {
+                nextBatchPathOrder.append(target.transcriptPath)
+            }
+        }
+        let targets = nextBatchPathOrder.compactMap { targetsByPath[$0] }
         var active = Array(repeating: true, count: targets.count)
         var activeCount = targets.count
         var cursor = 0
@@ -143,6 +148,7 @@ actor CodexTranscriptActivityTracker {
                     worktreeID: target.worktreeID,
                     byteLimit: min(UInt64(Self.readChunkSize), remainingByteCount))
                 remainingByteCount -= result.bytesRead
+                advanceBatchPath(target.transcriptPath)
 
                 switch result.status {
                 case .caughtUp:
@@ -166,10 +172,13 @@ actor CodexTranscriptActivityTracker {
             cursor = (cursor + 1) % targets.count
         }
 
-        nextBatchPathOrder =
-            targets[cursor...].map(\.transcriptPath)
-            + targets[..<cursor].map(\.transcriptPath)
         return states
+    }
+
+    private func advanceBatchPath(_ transcriptPath: String) {
+        guard let index = nextBatchPathOrder.firstIndex(of: transcriptPath) else { return }
+        nextBatchPathOrder.remove(at: index)
+        nextBatchPathOrder.append(transcriptPath)
     }
 
     private func observeStep(
@@ -238,10 +247,21 @@ actor CodexTranscriptActivityTracker {
     func retain(transcriptPaths: Set<String>, scope worktreeID: UUID?) {
         guard let worktreeID else {
             baselines = baselines.filter { transcriptPaths.contains($0.key) }
+            nextBatchPathOrder.removeAll { !transcriptPaths.contains($0) }
+            batchPathWorktreeIDs = batchPathWorktreeIDs.filter {
+                transcriptPaths.contains($0.key)
+            }
             return
         }
         baselines = baselines.filter {
             $0.value.worktreeID != worktreeID || transcriptPaths.contains($0.key)
+        }
+        let removedPaths = Set(batchPathWorktreeIDs.compactMap { path, owner in
+            owner == worktreeID && !transcriptPaths.contains(path) ? path : nil
+        })
+        nextBatchPathOrder.removeAll { removedPaths.contains($0) }
+        batchPathWorktreeIDs = batchPathWorktreeIDs.filter {
+            !removedPaths.contains($0.key)
         }
     }
 

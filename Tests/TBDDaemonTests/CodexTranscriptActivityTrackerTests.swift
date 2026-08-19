@@ -643,6 +643,52 @@ struct CodexTranscriptActivityTrackerTests {
             == Int(onePathBudget) * 2 - 1)
     }
 
+    @Test func scopedPollDoesNotResetFleetBatchCursor() async throws {
+        let first = try TranscriptFixture()
+        let second = try TranscriptFixture()
+        defer {
+            first.remove()
+            second.remove()
+        }
+        let tracker = CodexTranscriptActivityTracker()
+        let firstWorktreeID = UUID()
+        let secondWorktreeID = UUID()
+        let firstTarget = CodexTranscriptActivityTracker.Target(
+            transcriptPath: first.path, worktreeID: firstWorktreeID)
+        let secondTarget = CodexTranscriptActivityTracker.Target(
+            transcriptPath: second.path, worktreeID: secondWorktreeID)
+        for fixture in [first, second] {
+            try fixture.write(
+                event(type: "task_complete", turnID: fixture.path)
+                    + event(
+                        type: "agent_message", turnID: "backlog",
+                        terminated: false,
+                        exactByteCount: Self.initialTailByteLimit))
+        }
+        let onePathBudget: UInt64 = 2
+
+        _ = await tracker.observe(
+            transcripts: [firstTarget, secondTarget], totalByteLimit: onePathBudget)
+        await tracker.retain(
+            transcriptPaths: [first.path, second.path], scope: nil)
+
+        _ = await tracker.observe(
+            transcripts: [firstTarget], totalByteLimit: onePathBudget)
+        await tracker.retain(
+            transcriptPaths: [first.path], scope: firstWorktreeID)
+        let firstAfterScopedPoll = await tracker.bufferedRecordState(
+            transcriptPath: first.path)?.byteCount
+
+        _ = await tracker.observe(
+            transcripts: [firstTarget, secondTarget], totalByteLimit: onePathBudget)
+
+        #expect(firstAfterScopedPoll == Int(onePathBudget) * 2 - 1)
+        #expect(await tracker.bufferedRecordState(transcriptPath: first.path)?.byteCount
+            == firstAfterScopedPoll)
+        #expect(await tracker.bufferedRecordState(transcriptPath: second.path)?.byteCount
+            == Int(onePathBudget) - 1)
+    }
+
     @Test func unreadablePathReturnsNilInsteadOfCachedWorking() async throws {
         let fixture = try TranscriptFixture()
         defer { fixture.remove() }
