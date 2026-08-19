@@ -10,7 +10,7 @@ import Testing
 ///
 /// The column is added with **no SQL default**, so "never chose" (NULL) stays
 /// distinguishable from "explicitly off" (0). If someone adds `defaults: false`
-/// to `v80_config_claude_cloud`, `claudeCloudIsNullBeforeAnyGesture` goes red —
+/// to `v81_config_claude_cloud`, `claudeCloudIsNullBeforeAnyGesture` goes red —
 /// that is its only job. The distinction matters more here than for most flags:
 /// this feature calls a network service on a schedule, so somebody who turned it
 /// off did so deliberately.
@@ -34,7 +34,7 @@ struct ClaudeCloudFlagSchemaTests {
             """
             config.claude_cloud_enabled must be NULL until the toggle is \
             touched — read back \(String(describing: record.claude_cloud_enabled)). \
-            A non-nil value here means v80_config_claude_cloud grew a \
+            A non-nil value here means v81_config_claude_cloud grew a \
             `defaults:` argument; remove it.
             """)
     }

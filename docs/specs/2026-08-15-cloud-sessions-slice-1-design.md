@@ -1527,7 +1527,7 @@ autonomous background polling against a network service, squarely inside the
 default-off rule.
 
 **The column is added with no SQL default**, so unset stays a genuine third
-state. Migration `v80_config_claude_cloud` calls
+state. Migration `v81_config_claude_cloud` calls
 `addColumnIfMissing(table:column:type:)` with `defaults:` **omitted** —
 `v73_config_queued_prompt` (`Database.swift`:1334) and `v77_config_supervision_enabled`
 (:1406) are the precedents, and the long comment above the former states the

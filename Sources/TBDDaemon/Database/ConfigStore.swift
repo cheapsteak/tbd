@@ -64,7 +64,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var gc_profile_dirs_enabled: Bool?
     /// The Claude cloud sessions gate (design 2026-08-15 §7). **Genuinely
     /// tri-state**, same shape as `queued_prompt_enabled`: the
-    /// `v80_config_claude_cloud` column carries no SQL default, so `nil` here
+    /// `v81_config_claude_cloud` column carries no SQL default, so `nil` here
     /// means "never chose" rather than "off". Resolve it through
     /// `Config.claudeCloudEnabledDefault`, never through `?? false`.
     var claude_cloud_enabled: Bool?

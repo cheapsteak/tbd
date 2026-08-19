@@ -1462,6 +1462,8 @@ public final class TBDDatabase: Sendable {
         migrator.registerMigration("v80_clear_scratch_pr_observation") { db in
             try db.execute(
                 sql: "UPDATE worktree SET prObservation = NULL WHERE repoID IS NULL")
+        }
+
         // Claude cloud sessions (design 2026-08-15 §7): the second, inner gate
         // for the compiled `claude-cloud` provider. Shipped OFF per the house
         // default-off-flag rule — the behavior is autonomous background polling
@@ -1488,7 +1490,7 @@ public final class TBDDatabase: Sendable {
         // feature toggles, where "unset" must stay a third state so a shipped
         // default can be flipped later. This is data with an explicit writer
         // at every site, and there is no default to graduate.
-        migrator.registerMigration("v81_claude_cloud_session") { db in
+        migrator.registerMigration("v82_claude_cloud_session") { db in
             try db.createTableIfNotExists("claude_cloud_session") { t in
                 t.primaryKey("id", .text).notNull()
                 t.column("idempotencyKey", .text).notNull()
