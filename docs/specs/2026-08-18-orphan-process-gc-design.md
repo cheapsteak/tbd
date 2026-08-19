@@ -274,7 +274,8 @@ A new `ReapKind.orphanProcess` case joins `agentWorktree`, `scratchpad`,
 `archivedWorktree` and `profileDir`. `worktreePath` carries the dead worktree the
 process was rooted in, and a new optional `processDescription` field carries the
 pid and a truncated argv, so a reap record says what was killed and not merely
-where it lived.
+where it lived. `tbd gc list` prints it: this is the one kind whose reap removed
+nothing from disk, so `worktreePath` alone would say only where.
 
 `ReapRecord`'s remaining fields (`branch`, `headSHA`, `snapshotRef`,
 `quarantinePath`) are path- and git-shaped and go unused. That is a real cost of

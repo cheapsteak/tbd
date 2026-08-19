@@ -497,6 +497,35 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
         #expect(signaller.terminated == [4243])
     }
 
+    /// The sibling of the `ps`-unavailable skip, and the reason both row reads
+    /// moved inside the phase: a partial view of which worktrees are alive is
+    /// the one input that could turn live work into a candidate.
+    @Test("a failed row read skips the phase rather than proceeding on a partial view")
+    func dbUnavailableSkipsThePhase() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let dead = try await makeWorktree(db: db, repo: repo, name: "gone", archived: true)
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[4242] = .init(aliveAfterTerminate: false)
+        // Make every worktree read fail, the way a corrupt or locked database
+        // would, rather than return an empty list.
+        try await db.writerForTests.write { conn in
+            try conn.execute(sql: "DROP TABLE worktree")
+        }
+
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            processes: [entry(pid: 4242)], cwdByPID: [4242: dead],
+            now: Date().addingTimeInterval(7200)
+        ).sweep()
+
+        #expect(signaller.terminated.isEmpty)
+        #expect(signaller.killed.isEmpty)
+        #expect(result.planned.contains("KEEP db-unavailable orphan-processes"))
+    }
+
     @Test("a process outside every TBD pool is never a candidate")
     func outsideEveryPoolIsNeverACandidate() async throws {
         let db = try TBDDatabase(inMemory: true)

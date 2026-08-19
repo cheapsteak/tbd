@@ -34,10 +34,11 @@ public protocol ProcessSignaller: Sendable {
 }
 
 public extension ProcessSignaller {
-    /// Defaults so existing conformers — the test fakes in particular — keep
-    /// recording through the signalling method they already implement. Only
-    /// `ProductionProcessSignaller` needs the distinction, because only it
-    /// reaches a real `kill(2)`.
+    /// Defaults so adding these requirements does not break a conformer that
+    /// has no use for the distinction: only an implementation that reaches a
+    /// real `kill(2)` can widen a signal to a process group in the first
+    /// place, so for everyone else the pid-exact door and the ordinary one are
+    /// the same door.
     func terminateProcessOnly(_ pid: Int32) { terminate(pid) }
     func forceKillProcessOnly(_ pid: Int32) { forceKill(pid) }
 }
