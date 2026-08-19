@@ -171,6 +171,22 @@ struct CodexTranscriptActivityTrackerTests {
         #expect(reducer.activityState == .idle)
     }
 
+    @Test func threadSpawnChildCloseDoesNotRestoreCopiedParentTurn() {
+        var reducer = CodexTurnLifecycleReducer()
+        reducer.consume(line: Data(
+            #"{"type":"session_meta","payload":{"source":{"subagent":{"thread_spawn":{"depth":1}}}}}"#.utf8))
+        reducer.consume(line: event(
+            type: "task_started", turnID: "copied-parent", startedAt: 100))
+        reducer.consume(line: event(
+            type: "task_started", turnID: "child", startedAt: 200))
+
+        reducer.consume(line: event(
+            type: "task_complete", turnID: "child", startedAt: 200,
+            completedAt: 300))
+
+        #expect(reducer.activityState == .idle)
+    }
+
     @Test func subagentRolloutUsesTheSameLifecycleCorrelation() {
         var reducer = CodexTurnLifecycleReducer()
         reducer.consume(line: Data(#"{"type":"session_meta","payload":{"source":{"subagent":{"thread_spawn":{"depth":2}}}}}"#.utf8))
