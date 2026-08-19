@@ -54,7 +54,10 @@ migrations in the same minute, and much less plausibly in the same second.
 
 The directory is declared on `TBDDaemonLib` as
 `resources: [.copy("Database/Migrations")]`. `.copy` rather than `.process`,
-so the directory is preserved verbatim in `TBD_TBDDaemonLib.bundle`. The
+so the directory is preserved verbatim in `TBD_TBDDaemonLib.bundle` — verbatim
+including dotfiles, so the `.gitkeep` that lets git track an empty directory is
+copied too, and the loader filters to `.sql` rather than taking whatever it
+finds. The
 declaration is not optional: SwiftPM treats an undeclared non-source file
 inside a target path as an error. The `TBDDaemon` executable target shares the
 same `path: "Sources/TBDDaemon"` but already excludes `Database`, so it needs
@@ -217,21 +220,42 @@ harness.
 from `.build/debug/TBDDaemon` by `scripts/restart.sh`, and `scripts/test.sh`.
 `TBDCLI` never opens the database, so it is not a third.
 
-This is not a formality. `scripts/restart.sh` hand-copies `TBD_TBDApp.bundle`
-into the assembled `.app` precisely because this failure already happened here
-once — without the copy, app launch fails with "could not load resource
-bundle". CLAUDE.md's unbundled-executable section is a standing warning against
-assuming bundle APIs work in this package.
+This was not assumed. `scripts/restart.sh` hand-copies `TBD_TBDApp.bundle` into
+the assembled `.app` precisely because this failure already happened here once —
+without the copy, app launch fails with "could not load resource bundle" — and
+CLAUDE.md's unbundled-executable section is a standing warning against assuming
+bundle APIs work in this package.
 
-**Proving it is the first task, and a negative result kills this design** in
-favor of the rejected plugin alternative below. The daemon's case is
-structurally easier than the app's, since the daemon is never relocated and the
-bundle sits beside the binary, but easier is not proven.
+Measured, it resolves in both contexts. SwiftPM places the directory at
+`.build/arm64-apple-macosx/debug/TBD_TBDDaemonLib.bundle/Migrations/`, reachable
+as `.build/debug/…` through the symlink, with no `Info.plist` generated — the
+same shape as the working `TBD_TBDApp.bundle`. The `TBDDaemon` executable target
+needs no exclude change, since it already excludes `Database` and pins
+`sources: ["main.swift"]`.
+
+Two measurements worth keeping. Adding a `.sql` file costs **7 seconds**
+incrementally — a copy step only, with no relink and no advance in the daemon
+binary's mtime — and an entirely empty `Migrations/` builds in 2.7 seconds,
+which is what makes the inert cutover below real rather than notional.
 
 ### Failing loudly when it is absent
 
-SwiftPM's generated `Bundle.module` accessor traps with an opaque `fatalError`.
-The loader instead locates the directory itself and throws a described error.
+**The loader must not use `Bundle.module`**, and the reason is sharper than its
+opaque `fatalError`. SwiftPM generates that accessor with two candidates: a
+path relative to `Bundle.main`, and a **hardcoded absolute path into the
+building worktree's `.build`**. The second one is the hazard. A daemon binary
+copied or relocated anywhere on the same machine still resolves through it, so
+it silently reads migrations out of the tree it was built in rather than
+failing. Under the test harness the absolute path is in fact the *only*
+candidate that resolves, because `Bundle.main` there is the toolchain's test
+helper — so a green test proves less about deployment than it appears to.
+
+The loader instead searches an ordered candidate list, each joined with
+`TBD_TBDDaemonLib.bundle`: the executable's own directory, the directory of the
+bundle owning a marker type, and that directory's parent. The last of those
+covers the test harness, where the resource bundle sits beside
+`TBDPackageTests.xctest` rather than inside it. No absolute path is baked in,
+and exhausting the list throws an error naming every path searched.
 
 The stronger check uses the database as its own manifest: if `grdb_migrations`
 holds timestamp-shaped identifiers but the bundle yielded zero `.sql` files,
@@ -280,7 +304,9 @@ than hypothetical: `swiftlang/swift-build#305` ("SwiftPM Build Tool Plugin
 excessively runs causing recompilation", open since February 2025) reports a
 build-tool plugin re-running on every incremental build and invalidating
 already-compiled targets, pushing incremental compiles past 100 seconds. This
-package has no plugins today, and its build caching is already delicate.
+package has no plugins today, and its build caching is already delicate. The
+resource-bundle path was measured against exactly this concern: adding a
+migration costs 7 seconds and does not relink the daemon.
 Second, a plugin cannot express the history-is-frozen check: with 84 bodies
 inside one Swift function, no diff shape means "you edited history."
 
