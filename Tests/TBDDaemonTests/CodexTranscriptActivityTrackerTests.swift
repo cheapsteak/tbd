@@ -61,11 +61,24 @@ struct CodexTranscriptActivityTrackerTests {
         #expect(reducer.activityState == .idle)
     }
 
-    @Test func completionForUnknownTurnDoesNotCloseOpenTurn() {
+    @Test(
+        "a rewritten close without start time prefers false idle",
+        arguments: ["task_complete", "turn_aborted"]
+    )
+    func rewrittenCloseWithoutStartTimePrefersFalseIdle(type: String) {
         var reducer = CodexTurnLifecycleReducer()
-        reducer.consume(line: event(type: "task_started", turnID: "a"))
+        reducer.consume(line: event(type: "task_started", turnID: "started-id"))
 
-        reducer.consume(line: event(type: "task_complete", turnID: "b"))
+        reducer.consume(line: event(type: type, turnID: "rewritten-close-id"))
+
+        #expect(reducer.activityState == .idle)
+    }
+
+    @Test func closeForKnownOlderStartTimeDoesNotCloseOpenTurn() {
+        var reducer = CodexTurnLifecycleReducer()
+        reducer.consume(line: event(type: "task_started", turnID: "current", startedAt: 200))
+
+        reducer.consume(line: event(type: "task_complete", turnID: "older", startedAt: 100))
 
         #expect(reducer.activityState == .working)
     }
@@ -92,13 +105,13 @@ struct CodexTranscriptActivityTrackerTests {
 
     @Test func lateCloseForSupersededTurnDoesNotCloseCurrentTurn() {
         var reducer = CodexTurnLifecycleReducer()
-        reducer.consume(line: event(type: "task_started", turnID: "a"))
-        reducer.consume(line: event(type: "task_started", turnID: "b"))
+        reducer.consume(line: event(type: "task_started", turnID: "a", startedAt: 100))
+        reducer.consume(line: event(type: "task_started", turnID: "b", startedAt: 200))
 
-        reducer.consume(line: event(type: "task_complete", turnID: "a"))
+        reducer.consume(line: event(type: "task_complete", turnID: "a", startedAt: 100))
         #expect(reducer.activityState == .working)
 
-        reducer.consume(line: event(type: "task_complete", turnID: "b"))
+        reducer.consume(line: event(type: "task_complete", turnID: "b", startedAt: 200))
         #expect(reducer.activityState == .idle)
     }
 
@@ -307,7 +320,7 @@ struct CodexTranscriptActivityTrackerTests {
         let worktreeID = UUID()
         _ = await tracker.observe(transcriptPath: fixture.path, worktreeID: worktreeID)
 
-        let crossingStart = event(type: "task_started", turnID: "a")
+        let crossingStart = event(type: "task_started", turnID: "a", startedAt: 200)
         let firstPadding = event(
             type: "agent_message", turnID: "first-padding",
             exactByteCount: Self.incrementalReadByteLimit - crossingStart.count / 2)
@@ -318,7 +331,7 @@ struct CodexTranscriptActivityTrackerTests {
             firstPadding
                 + crossingStart
                 + secondPadding
-                + event(type: "task_complete", turnID: "different-turn"))
+                + event(type: "task_complete", turnID: "different-turn", startedAt: 100))
 
         let firstCatchUp = await tracker.observe(
             transcriptPath: fixture.path, worktreeID: worktreeID)

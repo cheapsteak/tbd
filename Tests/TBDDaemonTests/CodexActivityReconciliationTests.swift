@@ -103,6 +103,74 @@ struct CodexActivityReconciliationTests {
         #expect(persisted?.activityStateObservedAt == observedAt)
     }
 
+    @Test("ordinary activity hooks do not invalidate an in-flight transcript observation")
+    func ordinaryActivityHookKeepsTranscriptEvidence() async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/car-hook-race-repo-\(UUID().uuidString)",
+            displayName: "car-hook-race-repo",
+            defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id,
+            name: "wt",
+            branch: "main",
+            path: "/tmp/car-hook-race-wt-\(UUID().uuidString)",
+            tmuxServer: "tbd-car-hook-race")
+        let transcript = try makeTranscript(
+            #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"current"}}"#
+                + "\n")
+        defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id,
+            tmuxWindowID: "@1",
+            tmuxPaneID: "%1",
+            label: "Codex",
+            kind: .codex)
+        try await db.terminals.updateSession(
+            id: terminal.id,
+            sessionID: "current-session",
+            transcriptPath: transcript.path)
+        let initialActivityAt = Date(timeIntervalSince1970: 1_790_000_010)
+        try await db.terminals.setActivityState(
+            id: terminal.id,
+            activityState: .idle,
+            source: .hookEvent("Stop"),
+            observedAt: initialActivityAt)
+
+        let listAt = initialActivityAt.addingTimeInterval(1)
+        let hookAt = listAt.addingTimeInterval(1)
+        let dates = BlockingListDates(first: listAt, subsequent: hookAt)
+        let raceRouter = makeRouter(now: dates.provider)
+        let list = try RPCRequest(
+            method: RPCMethod.terminalList,
+            params: TerminalListParams(worktreeID: wt.id))
+        let hook = try RPCRequest(
+            method: RPCMethod.terminalActivityEvent,
+            params: TerminalActivityEventParams(
+                terminalID: terminal.id,
+                activityState: .working))
+
+        let inFlightList = Task { await raceRouter.handle(list) }
+        guard await waitUntil(
+            { dates.firstCallIsBlocked }, timeout: Self.raceRendezvousTimeout
+        ) else {
+            dates.releaseFirstCall()
+            _ = await inFlightList.value
+            Issue.record("terminal.list never reached its transcript stamp")
+            return
+        }
+        #expect((await raceRouter.handle(hook)).success)
+        dates.releaseFirstCall()
+
+        let response = await inFlightList.value
+        #expect(response.success)
+        let listed = try #require(
+            response.decodeResult([Terminal].self).first(where: { $0.id == terminal.id }))
+        #expect(listed.activityState == .working)
+        #expect(listed.activityStateOrderObservedAt == hookAt)
+        #expect(listed.presentationActivityState == .working)
+        #expect(listed.presentationActivityObservedAt == listAt)
+    }
+
     @Test("accepted same-path SessionStart supersedes an orphan transcript turn")
     func samePathSessionStartResetsTranscriptLifecycle() async throws {
         let repo = try await db.repos.create(
@@ -185,6 +253,11 @@ struct CodexActivityReconciliationTests {
                 terminalID: terminal.id, sessionID: "same-session",
                 transcriptPath: transcript.path, source: "SessionStart"))
         #expect((await router.handle(sessionStart)).success)
+        _ = try await db.terminals.applyActivityObservation(
+            id: terminal.id,
+            activityState: .working,
+            source: .hookEvent(RPCMethod.terminalActivityEvent),
+            observedAt: presentationObservedAt.addingTimeInterval(1))
 
         let restartedRouter = makeRouter(now: { presentationObservedAt })
         let list = try RPCRequest(

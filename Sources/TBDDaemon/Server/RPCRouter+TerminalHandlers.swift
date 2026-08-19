@@ -16,7 +16,7 @@ private struct TranscriptParseCacheEntry {
 private struct CodexPresentationIdentity: Equatable {
     let sessionID: String?
     let transcriptPath: String?
-    let activityOrderObservedAt: Date?
+    let sessionOrderObservedAt: Date?
 }
 
 /// Caches the last `TranscriptParser.parse` result per session file path.
@@ -521,8 +521,7 @@ extension RPCRouter {
                 ($0.id, CodexPresentationIdentity(
                     sessionID: $0.claudeSessionID,
                     transcriptPath: $0.transcriptPath,
-                    activityOrderObservedAt: $0.activityStateOrderObservedAt
-                        ?? $0.activityStateObservedAt))
+                    sessionOrderObservedAt: $0.sessionOrderObservedAt))
             })
 
         for index in terminals.indices where terminals[index].isCodexTerminal {
@@ -532,16 +531,16 @@ extension RPCRouter {
                 transcriptPath: transcriptPath,
                 worktreeID: terminals[index].worktreeID)
             codexTargets.append(target)
-            if terminals[index].observedActivity?.source == .hookEvent("SessionStart") {
+            if terminals[index].sessionOrderObservedAt != nil {
                 durableBoundaryTargets.append(target)
             }
         }
 
-        // SessionStart's persisted activity fact is the restart-safe boundary
+        // SessionStart's persisted session generation is the restart-safe boundary
         // cue. On a fresh tracker, start at the path's current EOF rather than
         // replaying an orphan task_started from before that lifecycle event.
         // Existing baselines are never moved, so later appended turns remain
-        // visible even while SessionStart is still the last raw hook fact.
+        // visible after ordinary hooks replace the raw activity fact.
         await codexActivityTracker.establishSessionBoundariesIfAbsent(
             transcripts: durableBoundaryTargets)
         let codexObservation = await codexActivityTracker.observeStamped(
@@ -564,8 +563,7 @@ extension RPCRouter {
             let currentIdentity = CodexPresentationIdentity(
                 sessionID: terminals[index].claudeSessionID,
                 transcriptPath: transcriptPath,
-                activityOrderObservedAt: terminals[index].activityStateOrderObservedAt
-                    ?? terminals[index].activityStateObservedAt)
+                sessionOrderObservedAt: terminals[index].sessionOrderObservedAt)
             guard observedIdentities[terminals[index].id] == currentIdentity else {
                 terminals[index].presentationActivityState = nil
                 terminals[index].presentationActivityObservedAt = codexObservation.observedAt

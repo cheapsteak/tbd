@@ -43,10 +43,15 @@ struct CodexTurnLifecycleReducer: Sendable {
             currentTurn = Turn(id: turnID, startedAt: envelope.payload.startedAt)
         case "task_complete", "turn_aborted":
             hasLifecycleEvidence = true
+            // Some rollout writers rewrite the close ID and omit started_at.
+            // With no correlation key left, prefer false idle to a permanent
+            // false-working indicator. A present timestamp still protects a
+            // newer turn from a late close belonging to an older one.
             if let currentTurn,
                currentTurn.id == turnID
                 || currentTurn.startedAt != nil
-                && currentTurn.startedAt == envelope.payload.startedAt {
+                && currentTurn.startedAt == envelope.payload.startedAt
+                || envelope.payload.startedAt == nil {
                 self.currentTurn = nil
             }
         default:
@@ -91,11 +96,19 @@ actor CodexTranscriptActivityTracker {
         let status: Status
     }
 
+    // A 64 KiB read is the fairness and I/O quantum: each active transcript
+    // gets one bounded step before another path can consume the shared budget.
     private static let readChunkSize = 64 * 1024
+    // terminal.list is a two-second polling hot path. One MiB bounds all
+    // transcript work per request while still covering ordinary rollout tails.
     static let initialTailByteLimit: UInt64 = 1024 * 1024
     static let incrementalReadByteLimit = initialTailByteLimit
     static let requestReadByteLimit = incrementalReadByteLimit
+    // Sixteen 64 KiB steps cap zero-byte metadata work as well as byte reads,
+    // so missing or truncated files cannot expand one request without bound.
     static let requestStepLimit = Int(requestReadByteLimit) / readChunkSize
+    // Observed lifecycle records are tens of KiB or less; one MiB leaves broad
+    // margin while preventing a malformed unterminated record from growing.
     static let maxBufferedRecordByteCount = Int(initialTailByteLimit)
     private var baselines: [String: Baseline] = [:]
     private var nextBatchPathOrder: [String] = []
@@ -211,7 +224,7 @@ actor CodexTranscriptActivityTracker {
             onlyIfAbsent: false)
     }
 
-    /// Reconstruct the boundary from a persisted SessionStart activity fact
+    /// Reconstruct the boundary from a persisted SessionStart generation
     /// after daemon restart. Existing baselines always win: repeatedly moving
     /// a live baseline to EOF would hide a genuine turn appended since start.
     func establishSessionBoundariesIfAbsent(transcripts: [Target]) {
