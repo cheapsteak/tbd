@@ -129,7 +129,8 @@ A process is a candidate for reclamation when **all** of these hold:
 - `ppid == 1`. It has been reparented to launchd, i.e. it really did escape.
   A process still held by a live parent is that parent's business.
 - Its resolved cwd lies inside a TBD-managed root: a worktree pool directory,
-  a `<pool>/.deleting/` entry, or a scratchpad directory.
+  a `<pool>/.deleting/` entry, an adopted worktree's own directory, or a
+  scratchpad directory.
 - The worktree owning that path is archived or absent from the database.
 - It is at least as old as the cwd reading it was matched against.
 
@@ -151,17 +152,36 @@ construction. Two kinds of root therefore behave differently:
   scratch-worktree pool. Everything under one of these was put there by TBD, so
   a child naming no row is a leftover this sweep owns, and `.deleting/<uuid>`
   entries land here.
-- **Shared** — the Claude scratchpad base. Claude Code creates one directory
-  there per project it has ever been run in, and TBD manages almost none of
-  them: a census of one developer machine found 86 entries, of which 9 named
-  no worktree at all — plain checkouts, a home directory, and loose files. A
-  cwd under a shared root is classified only by an explicit live or dead entry,
-  derived from a worktree row via `ScratchpadCollector`'s slug; an unrecognized
-  child is never a candidate.
+- **Shared** — the Claude scratchpad base, and every adopted worktree's own
+  directory. Claude Code creates one directory in the scratchpad base per
+  project it has ever been run in, and TBD manages almost none of them: a
+  census of one developer machine found 86 entries, of which 9 named no
+  worktree at all — plain checkouts, a home directory, and loose files. A cwd
+  under a shared root is classified only by an explicit live or dead entry —
+  derived from a worktree row via `ScratchpadCollector`'s slug for a
+  scratchpad, and from the row's own path for an adopted worktree; an
+  unrecognized child is never a candidate.
 
 `ScratchpadCollector.reconcile` already draws exactly this line for a merely
 destructive operation — "Unrelated directories in the base are untouched" — and
 this phase kills processes, so it draws the line no further out.
+
+`adoptWorktree` inserts a worktree row at a path the user chose, so an adopted
+worktree lies under no pool at all. Without an entry of its own it would fail
+the root test above and stay `.outside` forever, reproducing this phase's whole
+subject for that class of worktree — so the row's own path is admitted, as a
+shared root. Not as a pool, and not its parent directory: the location is the
+user's, its neighbours are unrelated checkouts and loose files, and admitting
+the neighbourhood as owned would put every one of them in the "absent from the
+database" arm and make a stranger's live session reclaimable. A shared root
+classifies exactly the adopted worktree and nothing beside it. Since no pool
+contains the path, the reap record takes its repo from the row's own `repoID`
+rather than from the pool-to-repo map.
+
+`reclaimDeletionQueue` widens its own pool set from adopted rows for a related
+reason, and can take the whole parent directory: an entry sitting in
+`.deleting/<uuid>` is there because TBD renamed it there, so draining it needs
+no provenance gate. Killing a process does.
 
 ### Two readings, joined by pid
 

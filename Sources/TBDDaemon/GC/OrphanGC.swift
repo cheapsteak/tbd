@@ -761,7 +761,9 @@ public actor OrphanGC {
         let layout = WorktreeLayout()
         var pools: [String] = []
         var repoPathByPool: [String: String] = [:]
+        var repoPathByID: [UUID: String] = [:]
         for repo in repos {
+            repoPathByID[repo.id] = repo.path
             for prefix in layout.legacyAndCanonicalPrefixes(for: repo) {
                 let resolved = deletionQueueCollector.resolvedPath(prefix)
                 pools.append(resolved)
@@ -782,7 +784,44 @@ public actor OrphanGC {
         // already takes the whitelist side here for a merely destructive
         // operation ("Unrelated directories in the base are untouched"); this
         // phase kills processes, so it takes the same side.
-        let sharedRoots = [deletionQueueCollector.resolvedPath(scratchpadBase.path)]
+        var sharedRoots = [deletionQueueCollector.resolvedPath(scratchpadBase.path)]
+
+        // `adoptWorktree` inserts a row at a path the user chose, so an adopted
+        // worktree sits under no pool at all. `ownership(ofCWD:roots:)` gates on
+        // pool-or-shared-root membership BEFORE it consults `dead`, so without
+        // an entry here a process inside an archived adopted worktree would
+        // classify `.outside` forever — the exact leak this phase exists to
+        // close, for that whole class of worktree.
+        //
+        // The row's own path goes in as a SHARED root, never as a pool, and
+        // never its parent directory. A pool means "TBD owns every child
+        // outright, so a stray here is TBD's", which is false of a directory
+        // the user picked: its neighbours are a home directory's, a projects
+        // folder's, someone else's checkouts. Admitting the parent as a pool —
+        // or the path as one, which for a nested layout amounts to the same
+        // widening — would put every one of those neighbours in the
+        // "absent from the database" arm and make a stranger's live session
+        // reclaimable, the same mistake the Claude scratchpad base is listed
+        // above to avoid. A shared root classifies only what an explicit
+        // `live`/`dead` entry names, which is precisely the adopted worktree
+        // itself and nothing beside it.
+        //
+        // `reclaimDeletionQueue` widens its own set from adopted rows for the
+        // same reason; it can take the parent because draining a `.deleting/`
+        // entry TBD itself renamed needs no provenance gate, while killing a
+        // process does.
+        for row in liveRows + archived.compactMap(LocalWorktree.init) {
+            let resolved = deletionQueueCollector.resolvedPath(row.path)
+            guard !pools.contains(where: { Self.isUnder(resolved, prefix: $0) }) else { continue }
+            sharedRoots.append(resolved)
+            // No pool contains this path, so `repoPath(forRoot:in:)` would
+            // stamp the reap record with `""`. The row names its repo directly,
+            // so map the worktree path itself; longest-prefix lookup means the
+            // entry answers for exactly this worktree and nothing above it.
+            if let repoID = row.repoID, let repoPath = repoPathByID[repoID] {
+                repoPathByPool[resolved] = repoPath
+            }
+        }
 
         // A worktree's Claude scratchpad answers to the same owner as the
         // worktree itself — `ScratchpadCollector`'s slug is derived from the
@@ -828,6 +867,15 @@ public actor OrphanGC {
             }
         }
         return best?.repo ?? ""
+    }
+
+    /// `path` is `prefix` itself or strictly below it. Component-wise, so
+    /// `/a/pool-2` is never read as living under `/a/pool` — the same rule
+    /// `OrphanProcessCollector` classifies with, so a row this method judges
+    /// pool-covered is exactly one the collector would too.
+    private static func isUnder(_ path: String, prefix: String) -> Bool {
+        guard !prefix.isEmpty else { return false }
+        return path == prefix || path.hasPrefix(prefix.hasSuffix("/") ? prefix : prefix + "/")
     }
 
     /// One `ps` snapshot per sweep, or `nil` when it could not be taken —

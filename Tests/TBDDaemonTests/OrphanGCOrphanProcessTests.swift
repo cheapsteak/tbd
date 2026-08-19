@@ -21,6 +21,10 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
     /// Injected scratchpad base, so the sweep's scratchpad phase can never
     /// reach the developer's real Claude store.
     let scratchpadBase: URL
+    /// A directory of the user's own, standing in for the arbitrary location an
+    /// adopted worktree lives at. Deliberately outside `pool`, and it holds
+    /// things TBD has never managed.
+    let adoptionParent: URL
 
     init() {
         sandbox = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
@@ -28,9 +32,11 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
         pool = sandbox.appendingPathComponent("pool", isDirectory: true)
         repoDir = sandbox.appendingPathComponent("repo", isDirectory: true)
         scratchpadBase = sandbox.appendingPathComponent("scratchpads", isDirectory: true)
+        adoptionParent = sandbox.appendingPathComponent("user-projects", isDirectory: true)
         try? fm.createDirectory(at: pool, withIntermediateDirectories: true)
         try? fm.createDirectory(at: repoDir, withIntermediateDirectories: true)
         try? fm.createDirectory(at: scratchpadBase, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: adoptionParent, withIntermediateDirectories: true)
     }
 
     deinit {
@@ -90,6 +96,24 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
         db: TBDDatabase, repo: Repo, name: String, archived: Bool
     ) async throws -> String {
         let dir = pool.appendingPathComponent(name, isDirectory: true)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let row = try await db.worktrees.create(
+            repoID: repo.id, name: name, branch: name,
+            path: dir.path, tmuxServer: "tbd-test")
+        if archived {
+            try await db.worktrees.archive(id: row.id)
+        }
+        return canon(dir)
+    }
+
+    /// A worktree row at a path the user chose, the way `adoptWorktree` makes
+    /// one: under no worktree pool at all, next to whatever else the user keeps
+    /// in that directory.
+    @discardableResult
+    private func makeAdoptedWorktree(
+        db: TBDDatabase, repo: Repo, name: String, archived: Bool
+    ) async throws -> String {
+        let dir = adoptionParent.appendingPathComponent(name, isDirectory: true)
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         let row = try await db.worktrees.create(
             repoID: repo.id, name: name, branch: name,
@@ -524,6 +548,76 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
         #expect(signaller.terminated.isEmpty)
         #expect(signaller.killed.isEmpty)
         #expect(result.planned.contains("KEEP db-unavailable orphan-processes"))
+    }
+
+    // MARK: - Adopted worktrees
+
+    /// `adoptWorktree` puts a row at a path the user chose, under no pool at
+    /// all. The classifier gates on pool-or-shared-root membership before it
+    /// ever consults the dead list, so without the row's own path admitted as a
+    /// shared root this orphan would be `.outside` forever — the very leak this
+    /// phase exists to close, for every adopted worktree.
+    @Test("an orphan inside an ARCHIVED adopted worktree is reclaimed")
+    func archivedAdoptedWorktreeYieldsItsOrphan() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let adopted = try await makeAdoptedWorktree(
+            db: db, repo: repo, name: "adopted-gone", archived: true)
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[5100] = .init(aliveAfterTerminate: false)
+
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            processes: [entry(pid: 5100, command: "/usr/bin/node server.js --port 4000")],
+            cwdByPID: [5100: adopted + "/sub"],
+            now: Date().addingTimeInterval(7200)
+        ).sweep()
+
+        #expect(signaller.terminated == [5100])
+        #expect(result.planned.contains("REAP orphan-process pid=5100 tree=1 \(adopted)"))
+        let record = try #require(
+            try await db.reapRecords.list(repoPath: nil).first { $0.kind == .orphanProcess })
+        #expect(record.worktreePath == adopted)
+        // The row names its repo even though no pool contains its path.
+        #expect(record.repoPath == repoDir.path)
+    }
+
+    /// The other half, and the reason the adopted path goes in as a SHARED
+    /// root rather than a pool: the directory the user picked is the user's,
+    /// and its neighbours are unrelated checkouts, loose files, sometimes a
+    /// home directory. A pool would put every one of them in the
+    /// "absent from the database" arm and make a stranger's live session
+    /// reclaimable.
+    @Test("an unrelated sibling of an adopted worktree is never a candidate")
+    func adoptedWorktreeSiblingIsNeverACandidate() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let adopted = try await makeAdoptedWorktree(
+            db: db, repo: repo, name: "adopted-gone", archived: true)
+        // A checkout of the user's own, sitting next to the adopted worktree
+        // and never known to TBD.
+        let sibling = adoptionParent.appendingPathComponent("unrelated", isDirectory: true)
+        try fm.createDirectory(at: sibling, withIntermediateDirectories: true)
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[5200] = .init(aliveAfterTerminate: false)
+        signaller.behaviors[5201] = .init(aliveAfterTerminate: false)
+
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            processes: [entry(pid: 5200), entry(pid: 5201)],
+            cwdByPID: [5200: canon(sibling) + "/src", 5201: adopted],
+            now: Date().addingTimeInterval(7200)
+        ).sweep()
+
+        #expect(!signaller.terminated.contains(5200))
+        #expect(!result.planned.contains { $0.contains("pid=5200") })
+        // The adopted worktree's own orphan in the same sweep proves the
+        // sibling survived a phase that genuinely ran.
+        #expect(signaller.terminated == [5201])
     }
 
     @Test("a process outside every TBD pool is never a candidate")
