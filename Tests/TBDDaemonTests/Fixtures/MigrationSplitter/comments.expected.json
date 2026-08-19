@@ -1,0 +1,4 @@
+[
+  "-- leading comment; with a semicolon\nCREATE TABLE IF NOT EXISTS c (x TEXT);",
+  "/* block comment;\n   still a comment; even here */\nINSERT OR IGNORE INTO c (x) VALUES ('y');"
+]

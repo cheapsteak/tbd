@@ -74,6 +74,11 @@ public final class TBDDatabase: Sendable {
         self.claudeCloudSessions = ClaudeCloudSessionStore(writer: pool)
 
         let migrator = Self.buildMigrator()
+        // Use the database as its own manifest before touching it: rethrows a
+        // resource-bundle locator failure, and refuses to start if
+        // `grdb_migrations` holds timestamp identifiers while the bundle
+        // yielded no `.sql` files at all.
+        try pool.read { db in try SQLMigrationLoader.verifyResourceIntegrity(db) }
         if fileExisted {
             let hasPending = try pool.read { db in
                 try !migrator.hasCompletedMigrations(db)
@@ -1571,6 +1576,17 @@ public final class TBDDatabase: Sendable {
         migrator.registerMigration("v87_worktree_pull_request_title") { db in
             try db.addColumnIfMissing(
                 table: "worktree_pull_request", column: "title", type: .text)
+        }
+
+        // Everything above is the frozen `v1`–`v87` block: those identifiers
+        // have run on user machines and never change. Everything below is the
+        // timestamp scheme — one `.sql` file per migration under
+        // `Database/Migrations/`, shipped in `TBD_TBDDaemonLib.bundle`, merged
+        // with any inline Swift escape-hatch migrations and sorted by
+        // identifier so the two kinds interleave by authoring time.
+        // See docs/specs/2026-08-19-migration-identifier-scheme-design.md.
+        for migration in SQLMigrationLoader.migrationsForRegistration() {
+            migrator.registerMigration(migration.identifier, migrate: migration.body)
         }
 
         return migrator

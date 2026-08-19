@@ -81,6 +81,7 @@ let package = Package(
             ],
             path: "Sources/TBDDaemon",
             exclude: ["main.swift"],
+            resources: [.copy("Database/Migrations")],
             // Swift 6.2 WMO-debug OOM workaround — see noWMODebugWorkaround above.
             swiftSettings: noWMODebugWorkaround
         ),
