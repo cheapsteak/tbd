@@ -328,9 +328,10 @@ actor ProviderEventsSupervisor {
         // Teardown is driven by process EXIT, not by pipe EOF. A provider that
         // leaves a grandchild holding the pipe's write end (the stub in the
         // live test does exactly that, and `BoundedProcessRunner` documents
-        // the same caveat for `[shell, -ilc, cmd]` call sites) never delivers
-        // EOF, so waiting for it would wedge this supervisor permanently. The
-        // short grace lets bytes already in the kernel buffer land first.
+        // the same caveat: any spawned process can fork grandchildren that
+        // inherit the write ends) never delivers EOF, so waiting for it would
+        // wedge this supervisor permanently. The short grace lets bytes
+        // already in the kernel buffer land first.
         let exitWatcher = Task { [clock] in
             await exitGate.wait()
             try? await clock.sleep(for: Self.drainGrace)

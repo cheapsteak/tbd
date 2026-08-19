@@ -37,7 +37,12 @@ with rc-file directories but no `/usr/local/bin` or `/opt/homebrew/bin`.
 
 Spawned panes run the user's shell as an interactive **login** shell: the two
 spawn builders in `TmuxManager` (`newWindowCommand` and
-`respawnWindowCommand`) pass `-ilc` instead of `-ic`. This is the convention
+`respawnWindowCommand`) pass `-ilc` instead of `-ic`, through one shared
+shell-invocation helper. Exception: `csh` and `tcsh` reject the clustered
+`-ilc` (and tcsh accepts `-l` only as the sole flag, so login cannot be
+combined with `-c` at all), so csh-family shells, detected by the shell
+path's basename, keep `-ic`: their pre-change behavior, since the
+alternative is a pane whose shell exits immediately. This is the convention
 every terminal emulator follows (Terminal.app, iTerm2, the VS Code integrated
 terminal), for exactly this reason: the base environment handed to a GUI-born
 process is minimal, and the user's own profile is the authoritative,
@@ -46,10 +51,13 @@ policy; nix, MacPorts, Homebrew, and hand-rolled setups all get whatever their
 own profile says.
 
 For zsh this adds `/etc/zprofile` and `~/.zprofile` (and the zlogin files) to
-the existing zshenv/zshrc sequence. For bash, a login shell reads
-`~/.bash_profile` (or `~/.profile`) rather than only `~/.bashrc`;
-conventionally `.bash_profile` sources `.bashrc`, which matches what the same
-user already experiences in Terminal.app.
+the existing zshenv/zshrc sequence. Bash is different: a login shell reads
+`~/.bash_profile` (or `~/.profile`) **instead of** `~/.bashrc`, so a bash
+user whose `.bash_profile` does not source `.bashrc` loses rc-only
+configuration in panes. This is accepted deliberately: it is exactly what
+Terminal.app already does to the same user, and sourcing `.bashrc` from
+`.bash_profile` is the near-universal convention that terminal-emulator
+behavior has enforced for decades.
 
 This also removes the `restart.sh` poisoning loop at its root. A login pane
 rebuilds `PATH` from profile files even over a bare inherited base
@@ -64,8 +72,17 @@ rebuilds `PATH` from profile files even over a bare inherited base
   to the command.
 - **sensitiveEnv** still lands via tmux `-e KEY=VALUE` in the process
   environment before the shell starts, and is therefore visible during all
-  startup files: now including the profile files, which is a strict widening
-  of the previous guarantee (rc files only).
+  startup files, now including the profile files. Visibility widens, but
+  survivability narrows: startup files could always overwrite a `-e` value
+  before the command runs, and the profile files join that set. Profile
+  routing keys are already defended by the inline re-export (which runs after
+  every startup file and wins deterministically). Values that cannot be
+  inlined without leaking into `ps` argv, such as `ANTHROPIC_API_KEY` and the
+  env overrides that ride sensitiveEnv, accept the widened clobber surface: a
+  user profile that exports the same variable wins, exactly as it always has
+  for the rc files. Anyone adding a new `-e`-only key must weigh this; the
+  inline re-export is the defense, and it is only available for non-secret
+  values.
 - **Pane identity**: `resolvePaneTerminalID` parses the
   `export TBD_TERMINAL_ID='…'` shape out of `#{pane_start_command}`. The
   command string is unchanged; only the shell's flag argument changes. Tests
@@ -133,6 +150,13 @@ behavior the well-understood default.
   new Terminal.app window. Profiles that print output add noise before the
   command starts; profiles that hang would hang the pane, as they would any
   terminal tab.
+- **Pre-session hook panes** share the pane spawn path, so a profile that
+  blocks (a passphrase prompt, a hung network mount) now consumes the hook's
+  marker-wait budget; on timeout the existing behavior notifies and spawns
+  agents on the unprepared tree anyway. Accepted: a profile that blocks
+  breaks every terminal on the machine, so it does not survive long in the
+  wild, and special-casing hook panes to non-login would silently deny hooks
+  the same PATH repair this change exists to provide.
 - **Nested shells**: a plain shell tab runs `$SHELL -ilc $SHELL`. The inner
   shell is interactive non-login, inherits the outer's exported environment,
   and re-runs only rc files. Directories can appear twice in `PATH`; harmless
@@ -143,7 +167,9 @@ behavior the well-understood default.
 
 ## Verification
 
-- Unit: `TmuxManagerTests` assert both spawn builders emit `-ilc`, and that
-  the env-export prefix and `-e` flag handling are unchanged.
+- Unit: `TmuxManagerTests` assert both spawn builders emit the login-shell
+  invocation, that the flag choice branches correctly per shell basename
+  (csh-family gets `-ic`, everything else `-ilc`), and that the env-export
+  prefix and `-e` flag handling are unchanged.
 - Field: after `scripts/restart.sh`, a new shell tab resolves `code` and
   `tmux`, and its `PATH` contains the `path_helper` and profile directories.

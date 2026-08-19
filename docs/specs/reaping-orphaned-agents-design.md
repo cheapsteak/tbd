@@ -34,10 +34,14 @@ be hot at sweep time.
 How TBD spawns and tracks agents:
 
 - **Spawn**: `ClaudeSpawnCommandBuilder` builds a command string; `TmuxManager.createWindow`
-  runs `tmux -L <server> new-window … <shell> -ilc <cmd>`
-  (`Sources/TBDDaemon/Tmux/TmuxManager.swift:128`). The shell exec's into `claude`, so the
-  pane process *is* the agent (confirmed live: agent `ppid` == the tmux server pid, not a
-  shell).
+  runs `tmux -L <server> new-window … <shell> -ilc <cmd>` (csh-family shells get `-ic`;
+  see `newWindowCommand` in `Sources/TBDDaemon/Tmux/TmuxManager.swift`). The shell
+  exec's into `claude`, so the pane process *is* the agent (confirmed live 2026-06-15
+  under the then-current `-ic` spawn shape: agent `ppid` == the tmux server pid, not a
+  shell; re-verified 2026-08-19 that `zsh -ilc` still execs into the final command for
+  default configs). Caveat: an EXIT trap in any sourced startup file (including the
+  profile files `-l` adds) defeats the exec, leaving the shell as the pane process and
+  `claude` as a grandchild that PID-based kill/reap paths do not see.
 - **What TBD records**: only tmux identifiers — `Terminal.tmuxWindowID` (`@3`),
   `tmuxPaneID` (`%5`), `Worktree.tmuxServer` (`tbd-<hash>`), and the resumable
   `claudeSessionID` (`Sources/TBDShared/Models.swift`). **No OS PID is ever persisted.**

@@ -90,13 +90,31 @@ import Testing
     #expect(args.contains("claude --dangerously-skip-permissions"))
 }
 
+@Test func testShellFlagsPerShellFamily() {
+    // Each branch of the flag choice: csh and tcsh cannot combine -l with -c
+    // (measured: "Unknown option: `-lc'", and tcsh accepts -l only as the
+    // sole flag), so they keep the pre-login-shell -ic. Every other shell
+    // gets the interactive login -ilc.
+    #expect(TmuxManager.shellFlags(forShell: "/bin/tcsh") == "-ic")
+    #expect(TmuxManager.shellFlags(forShell: "/bin/csh") == "-ic")
+    // The basename decides, not the full path.
+    #expect(TmuxManager.shellFlags(forShell: "/usr/local/bin/tcsh") == "-ic")
+    #expect(TmuxManager.shellFlags(forShell: "/bin/zsh") == "-ilc")
+    #expect(TmuxManager.shellFlags(forShell: "/bin/bash") == "-ilc")
+    #expect(TmuxManager.shellFlags(forShell: "/opt/homebrew/bin/fish") == "-ilc")
+}
+
 @Test func testNewWindowCommandRunsLoginShell() throws {
     // Spawned panes run the user's shell as an interactive LOGIN shell:
-    // -i sources rc files, -l sources profile files (/etc/zprofile's
-    // path_helper and ~/.zprofile, which supply /usr/local/bin and the
-    // Homebrew PATH entries), -c runs the command. A non-login -ic shell
-    // skips profile files and leaves user tools like `code` unresolvable.
-    // See docs/specs/2026-08-19-login-shell-panes-design.md.
+    // zsh sources zshenv + zprofile + zshrc; bash login shells source
+    // profile files only, relying on the near-universal convention that
+    // .bash_profile sources .bashrc (same behavior as Terminal.app).
+    // /etc/zprofile's path_helper and ~/.zprofile supply /usr/local/bin and
+    // the Homebrew PATH entries; a non-login -ic shell skips profile files
+    // and leaves user tools like `code` unresolvable. csh/tcsh keep -ic
+    // (see testShellFlagsPerShellFamily), so the expected flag is derived
+    // from the same function the builder uses, keyed on the test process's
+    // ambient SHELL. See docs/specs/2026-08-19-login-shell-panes-design.md.
     let args = TmuxManager.newWindowCommand(
         server: "tbd-a1b2c3d4",
         session: "main",
@@ -105,8 +123,9 @@ import Testing
         env: ["TBD_TERMINAL_ID": "abc-123"],
         sensitiveEnv: ["ANTHROPIC_API_KEY": "sk-test"]
     )
-    #expect(!args.contains("-ic"), "non-login interactive shells skip profile files")
-    let flagIndex = try #require(args.firstIndex(of: "-ilc"))
+    let expectedFlags = TmuxManager.shellFlags(
+        forShell: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh")
+    let flagIndex = try #require(args.firstIndex(of: expectedFlags))
     // The flag sits between the shell and the command string, which stays
     // the final positional argument.
     #expect(flagIndex == args.count - 2)
@@ -135,8 +154,9 @@ import Testing
     )
     #expect(args.contains("respawn-window"))
     #expect(args.contains("-k"))
-    #expect(!args.contains("-ic"), "non-login interactive shells skip profile files")
-    let flagIndex = try #require(args.firstIndex(of: "-ilc"))
+    let expectedFlags = TmuxManager.shellFlags(
+        forShell: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh")
+    let flagIndex = try #require(args.firstIndex(of: expectedFlags))
     #expect(flagIndex == args.count - 2)
     #expect(args.last == "export CLAUDE_CONFIG_DIR='/tmp/profile'; claude --resume")
     let eIndex = try #require(args.firstIndex(of: "ANTHROPIC_API_KEY=sk-test"))
