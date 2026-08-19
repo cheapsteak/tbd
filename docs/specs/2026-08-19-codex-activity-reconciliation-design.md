@@ -40,7 +40,7 @@ The Codex presentation state follows this precedence:
 
 Ctrl+C is an explicit user action and must not wait for Codex to append `turn_aborted`. A later valid event from the current session may supersede the interrupt. A permission request must remain visible even while the transcript contains an open task.
 
-This path is enabled by default and has no feature flag. Although it wholesale replaces the Codex working/idle presentation signal, it is classified as a bug fix under the repository's rollout policy: it restores the existing indicator's intended meaning instead of adding an optional capability. It performs no destructive or autonomous action and fails conservatively to idle. Maintaining two selectable interpretations would create competing answers to the same status question and preserve the failure mode this design removes.
+This path is the shipped default for every Codex terminal and has no feature flag. Although it wholesale replaces the Codex working/idle presentation signal, it is classified as a bug fix under the repository's rollout policy: it restores the existing indicator's intended meaning instead of adding an optional capability. It performs no destructive or autonomous action and fails conservatively to idle. The stale legacy interpretation is not a supported mode; maintaining two selectable interpretations would create competing answers to the same status question and preserve the failure mode this design removes.
 
 ## Required invariants
 
