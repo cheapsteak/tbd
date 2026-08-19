@@ -369,4 +369,134 @@ struct ConfigStoreTests {
         try await db.config.setGCProfileDirsEnabled(false)
         #expect(try await db.config.get().gcProfileDirsEnabled == false)
     }
+
+    // MARK: - v81: `gc_orphan_processes_enabled` is genuinely tri-state
+
+    /// **The storage guard.** The `config` singleton row is inserted by v1, so
+    /// every install — fresh or years old — has a row that predates v81. After
+    /// v81 that row's `gc_orphan_processes_enabled` must read NULL, not `0`: a
+    /// SQL default would backfill it and make "never chose" indistinguishable
+    /// from a deliberate opt-out. If someone adds `defaults:` to
+    /// `v81_config_gc_orphan_processes`, this goes red — that is its only job.
+    @Test func gcOrphanProcessesIsNullBeforeAnyGesture() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let record = try #require(try await fetchConfigRecord(db))
+        #expect(
+            record.gc_orphan_processes_enabled == nil,
+            """
+            config.gc_orphan_processes_enabled must be NULL until the toggle is \
+            touched — read back \
+            \(String(describing: record.gc_orphan_processes_enabled)). A non-nil \
+            value here means v81_config_gc_orphan_processes grew a `defaults:` \
+            argument; remove it.
+            """
+        )
+    }
+
+    /// The same guard against a row written by a real pre-v81 daemon: migrate
+    /// only through v80, write to the config row, then finish migrating.
+    @Test func rowWrittenBeforeV81StillReadsNull() throws {
+        let queue = try DatabaseQueue()
+        let migrator = TBDDatabase.buildMigratorForTests()
+        try migrator.migrate(queue, upTo: "v80_clear_scratch_pr_observation")
+
+        try queue.write { db in
+            try db.execute(
+                sql: "UPDATE config SET gc_enabled = 1 WHERE id = ?",
+                arguments: [ConfigStore.singletonID]
+            )
+        }
+
+        try migrator.migrate(queue)
+
+        try queue.read { db in
+            let row = try #require(try Row.fetchOne(
+                db, sql: "SELECT * FROM config WHERE id = ?",
+                arguments: [ConfigStore.singletonID]))
+            let raw: DatabaseValue = row["gc_orphan_processes_enabled"]
+            #expect(
+                raw.isNull,
+                "a config row written before v81 must read NULL, not \(raw)"
+            )
+            // The pre-existing write survived — v81 is purely additive.
+            #expect(row["gc_enabled"] == true)
+        }
+    }
+
+    /// NULL follows `Config.gcOrphanProcessesEnabledDefault` wherever it goes;
+    /// an explicit `false` does not. That property is what makes graduation a
+    /// one-line constant change with no forcing `UPDATE` migration. Exercised
+    /// against BOTH possible default values, so it fails if the resolution is
+    /// ever wired as `?? false`.
+    @Test func gcOrphanProcessesExplicitFalseSurvivesADefaultFlipWhileNullFollowsIt() async throws {
+        let db = try TBDDatabase(inMemory: true)
+
+        let untouched = try #require(try await fetchConfigRecord(db))
+        #expect(untouched.gc_orphan_processes_enabled == nil)
+        #expect(untouched.toModel(gcOrphanProcessesDefault: false).gcOrphanProcessesEnabled == false)
+        #expect(
+            untouched.toModel(gcOrphanProcessesDefault: true).gcOrphanProcessesEnabled == true,
+            "a never-chosen row must pick up a changed shipped default"
+        )
+
+        try await db.config.setGCOrphanProcessesEnabled(false)
+        let explicitlyOff = try #require(try await fetchConfigRecord(db))
+        #expect(explicitlyOff.gc_orphan_processes_enabled == false)
+        #expect(
+            explicitlyOff.toModel(gcOrphanProcessesDefault: false).gcOrphanProcessesEnabled == false)
+        #expect(
+            explicitlyOff.toModel(gcOrphanProcessesDefault: true).gcOrphanProcessesEnabled == false,
+            "an explicit opt-out must be honored forever, whatever the shipped default becomes"
+        )
+    }
+
+    /// Mirrored for an explicit `true`: an operator who opted into the soak
+    /// stays opted in even if the shipped default never moves.
+    @Test func gcOrphanProcessesExplicitTrueSticks() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let explicitlyOn = try #require(try await fetchConfigRecord(db))
+        #expect(explicitlyOn.gc_orphan_processes_enabled == true)
+        #expect(explicitlyOn.toModel(gcOrphanProcessesDefault: false).gcOrphanProcessesEnabled == true)
+        #expect(explicitlyOn.toModel(gcOrphanProcessesDefault: true).gcOrphanProcessesEnabled == true)
+    }
+
+    /// Isolates the RESOLUTION guard from the STORAGE guard by constructing a
+    /// `ConfigRecord` directly — no database, no migration. It catches a
+    /// hardening of `?? gcOrphanProcessesDefault` into `?? false` even if the
+    /// migration guard were broken at the same time.
+    @Test func gcOrphanProcessesToModelResolvesNullThroughTheInjectedDefault() {
+        let record = ConfigRecord(id: "unstored", gc_orphan_processes_enabled: nil)
+        #expect(record.toModel(gcOrphanProcessesDefault: false).gcOrphanProcessesEnabled == false)
+        #expect(
+            record.toModel(gcOrphanProcessesDefault: true).gcOrphanProcessesEnabled == true,
+            "a NULL record must pick up whatever default is injected, not a hardcoded false"
+        )
+    }
+
+    /// The shipped default today: OFF. This is the one GC phase that signals
+    /// processes rather than moving bytes, and what it misjudges cannot be
+    /// restored. Graduation edits this constant and nothing else.
+    @Test func gcOrphanProcessesShipsOff() async throws {
+        #expect(Config.gcOrphanProcessesEnabledDefault == false)
+        let db = try TBDDatabase(inMemory: true)
+        #expect(try await db.config.get().gcOrphanProcessesEnabled == false)
+    }
+
+    @Test func setGCOrphanProcessesEnabledRoundtrips() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        #expect(try await db.config.get().gcOrphanProcessesEnabled == true)
+        try await db.config.setGCOrphanProcessesEnabled(false)
+        #expect(try await db.config.get().gcOrphanProcessesEnabled == false)
+    }
+
+    /// An absent JSON key means the sender knew nothing about the flag — the
+    /// NULL column's situation — so it follows the shipped default rather than
+    /// decoding as a hardcoded `false`.
+    @Test func gcOrphanProcessesDecodesFromJSONWithoutTheKey() throws {
+        let json = Data("{}".utf8)
+        let decoded = try JSONDecoder().decode(Config.self, from: json)
+        #expect(decoded.gcOrphanProcessesEnabled == Config.gcOrphanProcessesEnabledDefault)
+    }
 }

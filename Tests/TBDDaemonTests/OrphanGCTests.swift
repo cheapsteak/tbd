@@ -354,7 +354,7 @@ struct OrphanGCTests {
         """
         let outcome = BoundedProcessOutcome.completed(status: 0, stdout: Data(stdout.utf8), stderr: Data())
         let parsed = OrphanGC.parseLiveCWDs(outcome)
-        #expect(parsed == ["/nonexistent/gc-test/wt-a", "/nonexistent/gc-test/wt-b"])
+        #expect(parsed?.paths == ["/nonexistent/gc-test/wt-a", "/nonexistent/gc-test/wt-b"])
     }
 
     // MARK: - lsof unavailable skips the entire sweep
