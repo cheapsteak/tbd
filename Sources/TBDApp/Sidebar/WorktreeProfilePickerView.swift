@@ -34,6 +34,11 @@ struct WorktreeProfilePickerView: View {
     /// `@Environment(\.dismiss)` of its own (that's a SwiftUI popover/sheet
     /// concept). Wired to the owning `HoverMenuModel.closeNow()`.
     var onClose: () -> Void = {}
+    /// Opens the cloud-session create sheet. **Nil omits the row entirely** —
+    /// the repo header's `+` supplies it only when there is a cloud provider
+    /// to create against, and the nested `+` on a worktree row never does: a
+    /// cloud session is created against a repository, not beneath a lane.
+    var onSelectCloudSession: (() -> Void)? = nil
     @EnvironmentObject var appState: AppState
     @Environment(\.dismiss) private var dismiss
 
@@ -100,6 +105,18 @@ struct WorktreeProfilePickerView: View {
                 page = .branches
             }
             .padding(.top, 2)
+
+            if let onSelectCloudSession {
+                ProfilePickerRow(
+                    title: "New cloud session…",
+                    subtitle: "Runs on Anthropic's infrastructure",
+                    systemImage: "cloud"
+                ) {
+                    dismiss()
+                    onClose()
+                    onSelectCloudSession()
+                }
+            }
 
             Divider()
                 .padding(.vertical, 2)

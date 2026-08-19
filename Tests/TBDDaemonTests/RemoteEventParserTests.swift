@@ -13,8 +13,11 @@ struct RemoteEventParserTests {
         #expect(RemoteEventParser.parse(line: #"{"event": "removed", "id": "x"}"#) == .removed(id: "x"))
         let snap = RemoteEventParser.parse(
             line: #"{"event": "snapshot", "sessions": [{"id": "a", "state": "running"}]}"#)
-        guard case .snapshot(let sessions) = snap else { Issue.record("not a snapshot"); return }
+        guard case .snapshot(let sessions, let complete) = snap else {
+            Issue.record("not a snapshot"); return
+        }
         #expect(sessions.map(\.id) == ["a"])
+        #expect(complete, "an absent `complete` on a snapshot event reads as true")
         let sess = RemoteEventParser.parse(
             line: #"{"event": "session", "session": {"id": "b", "state": "exited"}}"#)
         guard case .session(let s) = sess else { Issue.record("not a session"); return }
@@ -38,5 +41,21 @@ struct RemoteEventParserTests {
         #expect(RemoteEventParser.parse(line: "   ") == nil)
         #expect(RemoteEventParser.parse(line: #"{"event": "future_thing"}"#) == nil)
         #expect(RemoteEventParser.parse(line: "not json") == nil)
+    }
+
+    /// The contract states `complete` on the events snapshot with exactly the
+    /// meaning and the caller rules it has on `list`, so the parser must not
+    /// silently drop it — a caller that only honored the `list` half would let
+    /// an events-capable partial provider retire its own live sessions.
+    @Test func theSnapshotEventCarriesCompleteness() {
+        #expect(
+            RemoteEventParser.parse(line: #"{"event": "snapshot", "complete": false, "sessions": []}"#)
+                == .snapshot([], complete: false))
+        #expect(
+            RemoteEventParser.parse(line: #"{"event": "snapshot", "complete": true, "sessions": []}"#)
+                == .snapshot([], complete: true))
+        #expect(
+            RemoteEventParser.parse(line: #"{"event": "snapshot", "sessions": []}"#)
+                == .snapshot([], complete: true))
     }
 }

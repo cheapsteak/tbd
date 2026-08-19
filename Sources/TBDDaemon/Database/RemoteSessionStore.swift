@@ -169,12 +169,29 @@ public struct RemoteSessionStore: Sendable {
         return resolved
     }
 
-    /// Reconcile one provider's full session list against the mirror table.
+    /// Reconcile one provider's session list against the mirror table.
     /// Rows for OTHER providers are never touched — snapshots are
     /// provider-scoped, so an empty snapshot from provider B must not affect
     /// provider A's rows.
+    ///
+    /// `complete` is the contract's snapshot-completeness claim
+    /// (`docs/remote-provider-contract.md` § Snapshot completeness). It splits
+    /// the three things a snapshot does. An INCOMPLETE snapshot still
+    /// **adopts** and **updates** the sessions it sighted — a session observed
+    /// in a partial view has been positively observed, and that observation is
+    /// as good as any other — while advancing **neither** the absence
+    /// bookkeeping **nor** freshness. Absence from a snapshot that never
+    /// claimed to see everything is evidence of nothing.
+    ///
+    /// Both halves of freshness are suppressed, and the persisted one is why
+    /// this is not cosmetic: the in-memory stamp lives in
+    /// `RemoteProviderManager.lastSuccessfulSnapshotAt`, but the `tbd_meta`
+    /// row below is what a daemon restart recovers from, so writing it on a
+    /// partial view would make that view survive a restart looking current.
+    /// Defaulted to `true` so every caller that predates the field keeps its
+    /// exact behavior.
     public func applySnapshot(
-        provider: String, sessions: [RemoteSessionPayload], now: Date
+        provider: String, sessions: [RemoteSessionPayload], complete: Bool = true, now: Date
     ) async throws -> SnapshotOutcome {
         try await writer.write { db in
             var changed = false
@@ -201,23 +218,36 @@ public struct RemoteSessionStore: Sendable {
 
             // Everything left in byID was absent from this snapshot. Two
             // consecutive absences mark a row gone (transports flake); a row
-            // already gone is left alone.
-            for var row in byID.values where !row.gone {
-                row.missingCount += 1
-                if row.missingCount >= 2 { row.gone = true }
-                changed = true
-                try row.update(db)
+            // already gone is left alone. Skipped entirely for an incomplete
+            // snapshot — it is authoritative about presence only, and per the
+            // contract an unbroken run of incomplete snapshots leaves the
+            // mirror exactly where it stands.
+            if complete {
+                for var row in byID.values where !row.gone {
+                    row.missingCount += 1
+                    if row.missingCount >= 2 { row.gone = true }
+                    changed = true
+                    try row.update(db)
+                }
             }
 
             // Persist the authoritative full-inventory observation in this
             // same transaction. Event-stream upserts deliberately do not
             // touch this key: a healthy single-session stream must never make
-            // a broken full-list path look fresh after daemon restart.
-            try db.execute(
-                sql: "INSERT INTO tbd_meta (key, value) VALUES (?, ?) "
-                    + "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                arguments: [Self.snapshotTimestampKey(provider: provider), String(now.timeIntervalSince1970)]
-            )
+            // a broken full-list path look fresh after daemon restart. An
+            // incomplete snapshot is excluded for the same reason — it is not
+            // a full-inventory observation, and one written here would outlive
+            // the daemon looking like one.
+            if complete {
+                try db.execute(
+                    sql: "INSERT INTO tbd_meta (key, value) VALUES (?, ?) "
+                        + "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    arguments: [
+                        Self.snapshotTimestampKey(provider: provider),
+                        String(now.timeIntervalSince1970),
+                    ]
+                )
+            }
             return SnapshotOutcome(changed: changed, attention: attention)
         }
     }

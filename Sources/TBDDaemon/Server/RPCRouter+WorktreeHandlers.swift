@@ -280,6 +280,15 @@ extension RPCRouter {
         guard let manager = try await remoteGate() else {
             return Self.remoteBackendsDisabledResponse
         }
+        // Same inner gate `remote.archive` goes through — this route reaches
+        // the identical provider verb, addressed by worktree row instead of
+        // by params, and must refuse the same way when cloud is off. Above
+        // `beginActuation` for the same reason every other refusal here is:
+        // nothing was attempted.
+        if case .remote(let provider, _) = worktree.location,
+           let refusal = try await cloudGate(provider: provider) {
+            return refusal
+        }
         let lanes = RemoteLaneLifecycle(db: db, subscriptions: subscriptions, manager: manager)
         let step: RemoteLaneLifecycle.ArchiveStep
         switch try await lanes.archiveDecision(for: worktree, force: force) {
@@ -318,6 +327,13 @@ extension RPCRouter {
     ) async throws -> RPCResponse {
         guard let manager = try await remoteGate() else {
             return Self.remoteBackendsDisabledResponse
+        }
+        // See `archiveRemoteLane`'s matching comment: same inner gate as
+        // `remote.unarchive`, same worktree-addressed route to the same
+        // provider verb, same pre-`beginActuation` placement.
+        if case .remote(let provider, _) = worktree.location,
+           let refusal = try await cloudGate(provider: provider) {
+            return refusal
         }
         let lanes = RemoteLaneLifecycle(db: db, subscriptions: subscriptions, manager: manager)
         let step: RemoteLaneLifecycle.ReviveStep

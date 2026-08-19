@@ -68,6 +68,10 @@ public final class RPCRouter: Sendable {
     /// restarting. `remote.*` handlers return an error response rather than
     /// crashing when this is nil — see `RPCRouter+RemoteHandlers.swift`.
     let remoteManager: RemoteProviderManager?
+    /// Whether the daemon wired the built-in `claude-cloud` provider at boot.
+    /// Captured rather than recomputed, because the answer is about what
+    /// happened at construction time and cannot change without a restart.
+    let claudeCloudLive: Bool
     /// In-memory per-profile OAuth usage poller. Wired post-construction by
     /// Daemon.swift (mirrors `claudeUsagePoller`); nil in unit tests / mock
     /// mode, where usage snapshots are simply absent.
@@ -228,6 +232,7 @@ public final class RPCRouter: Sendable {
         claudeCredentialsKeychain: ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain(),
         loginSessions: LoginSessionCoordinator = LoginSessionCoordinator(),
         remoteManager: RemoteProviderManager? = nil,
+        claudeCloudLive: Bool = false,
         codexExecutableResolver: (@Sendable () throws -> String)? = nil,
         codexHomeEnsurer: (@Sendable () throws -> URL)? = nil,
         prBindingRepoResolver: (@Sendable (UUID) async -> (owner: String, name: String, host: String)?)? = nil,
@@ -291,6 +296,7 @@ public final class RPCRouter: Sendable {
         self.panelCoordinator = PanelCoordinator(
             db: db, broadcast: { [subscriptions] delta in subscriptions.broadcast(delta: delta) })
         self.remoteManager = remoteManager
+        self.claudeCloudLive = claudeCloudLive
         self.codexExecutableResolver = codexExecutableResolver ?? {
             if tmux.dryRun { return "/opt/tbd-test/bin/codex" }
             return try CodexExecutableResolver.resolve()
@@ -599,6 +605,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetDeliveryVerification(request.paramsData)
             case RPCMethod.configSetQueuedPrompt:
                 return try await handleConfigSetQueuedPrompt(request.paramsData)
+            case RPCMethod.configSetClaudeCloud:
+                return try await handleConfigSetClaudeCloud(request.paramsData)
             case RPCMethod.configSetAutoCloseSetup:
                 return try await handleConfigSetAutoCloseSetup(request.paramsData)
             case RPCMethod.configSetAutoTrustWorktrees:
@@ -710,7 +718,9 @@ public final class RPCRouter: Sendable {
             panelSurfaceEnabled: config.panelSurfaceEnabled,
             remoteBackendsEnabled: config.remoteBackendsEnabled,
             remoteBackendsLive: remoteManager != nil,
-            queuedPromptEnabled: config.queuedPromptEnabled))
+            queuedPromptEnabled: config.queuedPromptEnabled,
+            claudeCloudEnabled: config.claudeCloudEnabled,
+            claudeCloudLive: claudeCloudLive))
     }
 
     // MARK: - PR Status

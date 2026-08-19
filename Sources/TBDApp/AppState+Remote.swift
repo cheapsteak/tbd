@@ -281,4 +281,91 @@ extension AppState {
             return "Off, but a poller from before this change is still running in the daemon — restart to fully stop it."
         }
     }
+
+    /// Persist the Claude cloud gate, then re-fetch capabilities so the
+    /// Settings toggle reflects the daemon's persisted state. Cloud requires
+    /// BOTH this flag and the outer remote-backends flag, and neither takes
+    /// effect until the daemon restarts.
+    func setClaudeCloudEnabled(_ enabled: Bool) async {
+        do {
+            try await claudeCloudFlagSetter(enabled)
+            await refreshDaemonCapabilities()
+        } catch {
+            remoteLogger.error("Failed to set Claude cloud sessions: \(error, privacy: .public)")
+            showAlert(
+                "Failed to set Claude cloud sessions: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Caption for the Claude cloud toggle, telling the user which state they
+    /// are actually in across three inputs: the persisted cloud flag
+    /// (`enabled`), whether the built-in provider is actually live in the
+    /// daemon right now (`live`, frozen at boot), and the persisted state of
+    /// the OUTER remote-sessions flag (`remoteBackendsEnabled`, re-read on
+    /// every fetch). Cloud requires both flags simultaneously true AT BOOT to
+    /// go live (`Daemon.swift`), but `config.setClaudeCloud` persists this
+    /// flag unconditionally — it does not check the outer flag
+    /// (`RPCRouter+ConfigHandlers.swift`) — so `enabled` can be true while
+    /// `remoteBackendsEnabled` is false, and a caption built from `(enabled,
+    /// live)` alone would call that state "on" when a restart right now would
+    /// not actually start cloud sessions.
+    ///
+    /// `remoteBackendsLive` (the outer flag's own boot-frozen liveness) is
+    /// deliberately NOT a parameter here: whenever `live` is true, the outer
+    /// manager was necessarily live at that same boot (cloud's boot-time gate
+    /// checks `remoteBackendsEnabled` before constructing the manager at all),
+    /// so `live` already implies the outer manager was live — a separate
+    /// `remoteBackendsLive` input could never disagree with `live` in any
+    /// reachable state and would only add branches nothing can distinguish.
+    /// The outer flag's OWN restart/live nuance is already surfaced by the
+    /// sibling `remoteBackendsStatusCaption`, rendered directly above this
+    /// toggle — this caption only needs to say when the outer flag's CURRENT
+    /// value changes what a restart would do to cloud.
+    nonisolated static func claudeCloudStatusCaption(
+        enabled: Bool, live: Bool, remoteBackendsEnabled: Bool
+    ) -> String {
+        switch (enabled, live, remoteBackendsEnabled) {
+        case (false, false, false):
+            return "Off. Turning this on requires remote sessions above enabled and a daemon restart before cloud sessions appear."
+        case (false, false, true):
+            return "Off. Turning this on requires a daemon restart before cloud sessions appear."
+        case (false, true, _):
+            return "Off, but the provider registered before this change is still live in the daemon — restart to fully stop it."
+        case (true, false, false):
+            return "On, but remote sessions above are off — enable both, then restart the daemon before cloud sessions appear."
+        case (true, false, true):
+            return "On, but restart the daemon before cloud sessions appear."
+        case (true, true, false):
+            return "On, but remote sessions above are now off — restarting will stop cloud sessions unless you re-enable remote sessions above first."
+        case (true, true, true):
+            return "On and running — cloud sessions are being polled."
+        }
+    }
+
+    /// Whether the cloud toggle can be operated at all. Cloud is reached
+    /// through the same `remote.*` verbs as every other provider, so it is a
+    /// second gate INSIDE the remote-sessions switch and never a bypass —
+    /// turning it on while the outer switch is off would promise something no
+    /// verb can deliver. A named function rather than an inline `.disabled(…)`
+    /// expression, so both branches are assertable without a view harness.
+    nonisolated static func claudeCloudToggleOperable(remoteBackendsEnabled: Bool) -> Bool {
+        remoteBackendsEnabled
+    }
+
+    /// What cloud sessions TBD can see, stated once and independently of
+    /// which flag state the user is in.
+    ///
+    /// `list` answers from the ledger of what THIS machine started, because no
+    /// supported interface enumerates an account's cloud sessions. So a
+    /// session begun on claude.ai, in the mobile app, or by `claude --cloud`
+    /// in a terminal TBD did not spawn has no row here at all — not a partial
+    /// one, not a stale one, simply none. Saying so makes the absence read as
+    /// a property of the feature rather than as a bug.
+    ///
+    /// A separate value from `claudeCloudStatusCaption` deliberately: that
+    /// function's seven arms answer "which state am I in", they are pinned
+    /// byte-for-byte by tests, and this sentence is true in all seven.
+    nonisolated static let claudeCloudScopeCaption =
+        "Only sessions started from TBD on this Mac appear here — one begun on claude.ai, in the "
+        + "mobile app, or from a terminal TBD did not spawn is not listed."
 }

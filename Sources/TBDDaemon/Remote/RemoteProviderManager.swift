@@ -17,6 +17,12 @@ public actor RemoteProviderManager {
     private let adopter: RemoteSessionAdopter
     private let runner: any RemoteProviderInvoking
     private let registryURL: URL
+    /// Providers TBD compiles in rather than reading from the registry file.
+    /// Empty unless the daemon wired one at boot. They are registered and
+    /// described exactly like registry entries, so their health, negotiated
+    /// major and poll loop all work the same way — a built-in provider is a
+    /// provider.
+    private let builtInProviders: [RemoteProviderConfig]
     private let clock: any Clock<Duration>
     /// Where the filing sync records the archives and revives it performs.
     /// Optional only so the many fixtures that construct this actor for
@@ -29,6 +35,10 @@ public actor RemoteProviderManager {
 
     private var providers: [String: RemoteProviderConfig] = [:]
     private var describes: [String: ProviderDescribe] = [:]
+    /// The contract major negotiated per provider — the highest version both
+    /// TBD and the provider declare. Absent until `describe` has succeeded,
+    /// which is why `contractMajor(for:)` falls back rather than trapping.
+    private var negotiatedMajors: [String: Int] = [:]
     private var health:
         [String: (state: ProviderHealth, message: String?, remediation: ProviderRemediation?)] = [:]
     /// Most recent complete inventory accepted for each provider. Kept
@@ -72,6 +82,7 @@ public actor RemoteProviderManager {
         db: TBDDatabase, subscriptions: StateSubscriptionManager,
         runner: any RemoteProviderInvoking, registryURL: URL,
         actuationLog: ActuationLog? = nil,
+        builtInProviders: [RemoteProviderConfig] = [],
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.db = db
@@ -80,11 +91,16 @@ public actor RemoteProviderManager {
         self.runner = runner
         self.registryURL = registryURL
         self.actuationLog = actuationLog
+        self.builtInProviders = builtInProviders
         self.clock = clock
         // RPC becomes available before `start()` runs, so seed the registry
         // synchronously. The first status or mutation-gate read can then recover
         // persisted freshness instead of briefly treating an existing mirror as
         // current while the initial provider poll is pending.
+        for config in builtInProviders {
+            providers[config.name] = config
+            health[config.name] = (.ok, nil, nil)
+        }
         if let configs = try? RemoteProviderRegistry.load(from: registryURL) {
             for config in configs {
                 providers[config.name] = config
@@ -113,13 +129,22 @@ public actor RemoteProviderManager {
     /// bounds this to at most one `describe` child process in flight rather
     /// than one per remaining provider.
     func loadRegistryAndDescribe() async {
-        let configs: [RemoteProviderConfig]
+        var configs: [RemoteProviderConfig] = builtInProviders
         do {
-            configs = try RemoteProviderRegistry.load(from: registryURL)
+            let loaded = try RemoteProviderRegistry.loadEntries(from: registryURL)
+            for name in loaded.skippedReservedNames {
+                remoteLogger.error(
+                    """
+                    provider registry entry named \(name, privacy: .public) was skipped: \
+                    that name is reserved for a provider compiled into TBD
+                    """)
+            }
+            configs += loaded.configs
         } catch {
             remoteLogger.error(
                 "provider registry unreadable: \(String(describing: error), privacy: .public)")
-            return
+            // The built-ins are still described: a malformed registry FILE
+            // says nothing about a provider that does not come from it.
         }
         for config in configs {
             guard !Task.isCancelled else { return }
@@ -141,7 +166,9 @@ public actor RemoteProviderManager {
     private func describeProvider(_ config: RemoteProviderConfig) async {
         let result: ProviderResult
         do {
-            result = try await runner.run(config, verb: ["describe"], stdin: nil, timeout: 10)
+            result = try await runner.run(
+                config, verb: ["describe"], stdin: nil, timeout: 10,
+                contractVersion: contractMajor(for: config.name))
         } catch {
             remoteLogger.error(
                 "describe \(config.name, privacy: .public) couldn't run: \(String(describing: error), privacy: .public)"
@@ -158,11 +185,25 @@ public actor RemoteProviderManager {
                 provider: config.name, to: (.error, "describe returned an unparseable response", nil))
             return
         }
-        guard describe.contractVersions.contains(1) else {
+        // An INTERSECTION with TBD's own supported set, not a hard requirement
+        // on major 1. A provider is free to declare only the versions it can
+        // actually serve — `claude-cloud` declares `[2]` alone because nothing
+        // exposed terminates a running cloud session, so it cannot implement
+        // `stop`, which major 1 requires.
+        guard let negotiated = Self.negotiate(declared: describe.contractVersions) else {
             setHealth(provider: config.name, to: (.error, "no common contract version", nil))
             return
         }
+        negotiatedMajors[config.name] = negotiated
         describes[config.name] = describe
+    }
+
+    /// Contract majors this build of TBD can speak.
+    static let supportedContractMajors: Set<Int> = [1, 2]
+
+    /// The highest major both sides declare, or nil when they share none.
+    static func negotiate(declared: [Int]) -> Int? {
+        declared.filter { supportedContractMajors.contains($0) }.max()
     }
 
     /// Spawns/re-spawns the 60s poll loop for every provider with a valid
@@ -254,7 +295,9 @@ public actor RemoteProviderManager {
     /// supervised low-latency NDJSON stream.
     private func startLoop(for config: RemoteProviderConfig) async {
         if describes[config.name]?.capabilities.contains("events") == true {
-            let supervisor = ProviderEventsSupervisor(config: config, manager: self, clock: clock)
+            let supervisor = ProviderEventsSupervisor(
+                config: config, manager: self,
+                contractVersion: contractMajor(for: config.name), clock: clock)
             supervisors[config.name] = supervisor
             // Awaiting `supervisor.start()` (a different actor) suspends this
             // actor's executor, which by itself does NOT close the race
@@ -284,7 +327,9 @@ public actor RemoteProviderManager {
         // accounted for a local filing decision. See `syncFilingDecisions`.
         let requestStartedAt = Date()
         do {
-            let result = try await runner.run(provider, verb: ["list"], stdin: nil, timeout: 30)
+            let result = try await runner.run(
+                provider, verb: ["list"], stdin: nil, timeout: 30,
+                contractVersion: contractMajor(for: provider.name))
             if let failure = result.failureClass {
                 await recordPollFailure(provider: provider.name, class: failure, result: result)
                 return
@@ -292,7 +337,8 @@ public actor RemoteProviderManager {
             let envelope = try result.decoded(RemoteSessionListEnvelope.self)
             let snapshotAt = Date()
             try await apply(
-                snapshot: envelope.sessions, provider: provider.name, now: snapshotAt,
+                snapshot: envelope.sessions, provider: provider.name,
+                complete: envelope.complete, now: snapshotAt,
                 requestStartedAt: requestStartedAt)
         } catch {
             remoteLogger.debug(
@@ -303,7 +349,16 @@ public actor RemoteProviderManager {
         }
     }
 
-    /// Shared by the poll path and the events snapshot path (Task 6).
+    /// Shared by the poll path and the events snapshot path.
+    ///
+    /// `complete` carries the contract's snapshot-completeness claim through
+    /// to the mirror and to freshness. An INCOMPLETE snapshot still adopts
+    /// what it sighted, still files the decisions those sightings imply, and
+    /// still clears degraded health — the provider answered — while claiming
+    /// no complete inventory in either store: not the in-memory stamp below,
+    /// and not the persisted `tbd_meta` row `applySnapshot` writes. Defaulted
+    /// to `true` so every caller that predates the field keeps its exact
+    /// behavior.
     ///
     /// `now` is arrival — when this response landed. `requestStartedAt` is
     /// when the question behind it was posed: the poll stamps it before
@@ -314,28 +369,41 @@ public actor RemoteProviderManager {
     /// `applyUpsert`'s pushed `session` line — reads correctly without
     /// inventing a start time.
     func apply(
-        snapshot sessions: [RemoteSessionPayload], provider: String, now: Date = Date(),
+        snapshot sessions: [RemoteSessionPayload], provider: String,
+        complete: Bool = true, now: Date = Date(),
         requestStartedAt: Date? = nil
     ) async throws {
         let outcome = try await db.remoteSessions.applySnapshot(
-            provider: provider, sessions: sessions, now: now)
+            provider: provider, sessions: sessions, complete: complete, now: now)
         // After the mirror, never before: adoption reads the repo association
         // `applySnapshot` just pinned rather than resolving `meta["repo"]` a
         // second time. Unconditional on `outcome.changed` — a session can
         // become adoptable without its payload changing at all, because the
         // mirror re-attempts resolution on every poll while its pin is null,
         // and the poll after the user registers the repo is exactly that case.
+        // Also unconditional on `complete`: an incomplete snapshot is
+        // authoritative about presence, so a session it sighted is adopted.
         broadcastAdoptions(await adopter.adopt(sessions: sessions, provider: provider))
         // After adoption, never before: a session first sighted in this very
         // snapshot already reporting `archived: true` must be filed on the
         // row adoption just minted, not skipped for lack of one.
+        //
+        // Unconditional on `complete`, for the same reason adoption is: this
+        // reads each sighted session's own `archived` claim and never infers
+        // anything from absence, so an incomplete snapshot is as authoritative
+        // here as a complete one. Completeness gates only the absence-derived
+        // and inventory-freshness conclusions below.
         await syncFilingDecisions(
             sessions: sessions, provider: provider,
             requestStartedAt: requestStartedAt ?? now, now: now)
-        lastSuccessfulSnapshotAt[provider] = now
-        // A live snapshot supersedes whatever the persisted row would have
-        // said, so an earlier unreadable read no longer gates anything.
-        snapshotFreshnessUnreadable.remove(provider)
+        if complete {
+            lastSuccessfulSnapshotAt[provider] = now
+            // A live COMPLETE snapshot supersedes whatever the persisted row
+            // would have said, so an earlier unreadable read no longer gates
+            // anything. An incomplete one supersedes nothing — it wrote no
+            // persisted row — so the unreadable flag is left where it stands.
+            snapshotFreshnessUnreadable.remove(provider)
+        }
         markHealthy(provider: provider)
         if outcome.changed {
             subscriptions.broadcast(delta: .remoteSessionsChanged)
@@ -822,6 +890,33 @@ public actor RemoteProviderManager {
         supervisors[name] != nil
     }
 
+    /// Test seam: `snapshotFreshnessUnreadable`'s raw value for `name`, with
+    /// no recovery attempt in between. Every *production* reader
+    /// (`providerStatuses()`, `hasStaleSnapshot(provider:)`) calls
+    /// `recoverLastSuccessfulSnapshotAtIfNeeded` first, which — whenever
+    /// `lastSuccessfulSnapshotAt[name]` is still nil — unconditionally
+    /// re-derives this flag from a fresh `tbd_meta` read and overwrites
+    /// whatever `apply(snapshot:provider:complete:now:)` just left there. That
+    /// is correct production behavior (the freshest read should win) but it
+    /// means those accessors cannot discriminate a regression in `apply`'s own
+    /// gate: whether or not the incomplete branch clears the flag, the very
+    /// next status read silently recomputes the same answer from the
+    /// database. This seam reads the field directly so a test can observe
+    /// `apply`'s effect before any recovery call has a chance to launder it.
+    func freshnessUnreadableForTests(provider name: String) -> Bool {
+        snapshotFreshnessUnreadable.contains(name)
+    }
+
+    /// Runs `describe` for every registered provider without arming poll loops
+    /// or event supervisors. Exists so the negotiation rule is testable without
+    /// a running actor's background tasks — the same reason `hasSupervisor`
+    /// exists.
+    func describeAllForTests() async {
+        for config in providers.values.sorted(by: { $0.name < $1.name }) {
+            await describeProvider(config)
+        }
+    }
+
     func invoke(
         providerName: String, verb: [String], stdin: Data?,
         timeout: TimeInterval
@@ -829,7 +924,9 @@ public actor RemoteProviderManager {
         guard let config = providers[providerName] ?? loadAdHoc(named: providerName) else {
             throw RemoteProviderError.unknownProvider(providerName)
         }
-        let result = try await runner.run(config, verb: verb, stdin: stdin, timeout: timeout)
+        let result = try await runner.run(
+            config, verb: verb, stdin: stdin, timeout: timeout,
+            contractVersion: contractMajor(for: providerName))
         if let failure = result.failureClass {
             recordFailure(provider: providerName, class: failure, result: result)
         }
@@ -869,6 +966,25 @@ public actor RemoteProviderManager {
         Set(describes[provider]?.capabilities ?? [])
     }
 
+    /// The contract major to announce for one provider: the negotiated value
+    /// once `describe` has landed, and the conservative fallback before that —
+    /// `describe` itself is the one invocation that necessarily precedes
+    /// negotiation.
+    func contractMajor(for provider: String) -> Int {
+        negotiatedMajors[provider] ?? Self.fallbackContractMajor
+    }
+
+    /// The negotiated major, or nil when this provider has no valid `describe`
+    /// on file. Exposed so `providerStatuses()` and tests read one value rather
+    /// than re-deriving the rule.
+    func negotiatedContractMajor(for provider: String) -> Int? {
+        negotiatedMajors[provider]
+    }
+
+    /// What TBD announces before it has negotiated anything — the conservative
+    /// reading, and the value the runner emitted unconditionally before.
+    static let fallbackContractMajor = 1
+
     func providerStatuses() async -> [RemoteProviderStatus] {
         for name in providers.keys {
             await recoverLastSuccessfulSnapshotAtIfNeeded(provider: name, markStale: true)
@@ -885,7 +1001,8 @@ public actor RemoteProviderManager {
                 remediationLabel: h.remediation?.label,
                 remediationCommand: h.remediation?.command,
                 lastSuccessfulSnapshotAt: lastSuccessfulSnapshotAt[config.name],
-                freshnessUnreadable: snapshotFreshnessUnreadable.contains(config.name))
+                freshnessUnreadable: snapshotFreshnessUnreadable.contains(config.name),
+                contractVersion: negotiatedMajors[config.name])
         }
     }
 
@@ -945,6 +1062,19 @@ public actor RemoteProviderManager {
         let inheritable = previous?.state == .needsAuth ? previous : nil
         setHealth(provider: name, to: (.needsAuth, inheritable?.message, inheritable?.remediation))
         guard previous?.state != .needsAuth else { return }
+        await pollOnce(provider: config)
+    }
+
+    /// Exactly ONE out-of-band `list` after a locally-observed create.
+    ///
+    /// The row for a created session arrives by adoption on a snapshot rather
+    /// than being minted by the create call, and the poll loop's interval is
+    /// 60 seconds, so without this a lane created from the `+` menu can sit
+    /// invisible for up to a minute after a create that already succeeded.
+    /// Bounded exactly as `recordAttachExit`'s probe is: one extra `list` per
+    /// create, never a loop, and only on a create that succeeded.
+    func refreshAfterCreate(provider name: String) async {
+        guard let config = providers[name] else { return }
         await pollOnce(provider: config)
     }
 

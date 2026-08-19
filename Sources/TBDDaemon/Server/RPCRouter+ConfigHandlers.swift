@@ -138,6 +138,21 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the Claude cloud sessions gate (design 2026-08-15 §7).
+    ///
+    /// The daemon builds its provider manager, and registers the built-in
+    /// provider into it, only at boot — so unlike the queued-prompt flag this
+    /// one does NOT take effect on the next gesture.
+    /// `DaemonCapabilitiesResult.claudeCloudLive` is what tells the user
+    /// whether a restart is still owed.
+    func handleConfigSetClaudeCloud(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConfigSetClaudeCloudParams.self, from: paramsData)
+        try await db.config.setClaudeCloud(params.enabled)
+        // Broadcast so the app reloads daemon capabilities.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the auto-close-setup-tab soak flag. Read fresh at spawn time,
     /// so it applies to the next worktree creation immediately — already-open
     /// setup tabs are unaffected.

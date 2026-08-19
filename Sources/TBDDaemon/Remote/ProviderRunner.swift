@@ -40,8 +40,12 @@ public enum ProviderRunError: LocalizedError, Sendable {
 }
 
 public protocol RemoteProviderInvoking: Sendable {
+    /// - Parameter contractVersion: the major `RemoteProviderManager` negotiated
+    ///   for this provider. Passed rather than read from a constant so both
+    ///   conformances — the subprocess runner and any in-process built-in —
+    ///   announce the same value the daemon agreed to.
     func run(_ config: RemoteProviderConfig, verb: [String], stdin: Data?,
-             timeout: TimeInterval) async throws -> ProviderResult
+             timeout: TimeInterval, contractVersion: Int) async throws -> ProviderResult
 }
 
 /// Spawns the provider executable, feeds it `stdin`, and captures stdout /
@@ -58,10 +62,22 @@ public protocol RemoteProviderInvoking: Sendable {
 public struct ProviderRunner: RemoteProviderInvoking {
     public init() {}
 
+    /// The environment one provider invocation runs under. Pure and static so
+    /// the emitted contract major is assertable without a spawn — this is one
+    /// of the daemon's two emitters, and the two disagreeing is exactly the
+    /// defect the negotiation work exists to close.
+    public static func invocationEnvironment(
+        base: [String: String], contractVersion: Int
+    ) -> [String: String] {
+        var env = base
+        env["TBD_CONTRACT_VERSION"] = String(contractVersion)
+        return env
+    }
+
     public func run(_ config: RemoteProviderConfig, verb: [String], stdin: Data?,
-                    timeout: TimeInterval) async throws -> ProviderResult {
-        var env = ProcessInfo.processInfo.environment
-        env["TBD_CONTRACT_VERSION"] = "1"
+                    timeout: TimeInterval, contractVersion: Int) async throws -> ProviderResult {
+        let env = Self.invocationEnvironment(
+            base: ProcessInfo.processInfo.environment, contractVersion: contractVersion)
         let verbName = verb.first ?? "?"
 
         switch try await runBoundedProcess(
