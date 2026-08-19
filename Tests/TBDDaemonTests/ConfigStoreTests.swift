@@ -370,14 +370,14 @@ struct ConfigStoreTests {
         #expect(try await db.config.get().gcProfileDirsEnabled == false)
     }
 
-    // MARK: - v81: `gc_orphan_processes_enabled` is genuinely tri-state
+    // MARK: - v83: `gc_orphan_processes_enabled` is genuinely tri-state
 
     /// **The storage guard.** The `config` singleton row is inserted by v1, so
-    /// every install — fresh or years old — has a row that predates v81. After
-    /// v81 that row's `gc_orphan_processes_enabled` must read NULL, not `0`: a
+    /// every install — fresh or years old — has a row that predates v83. After
+    /// v83 that row's `gc_orphan_processes_enabled` must read NULL, not `0`: a
     /// SQL default would backfill it and make "never chose" indistinguishable
     /// from a deliberate opt-out. If someone adds `defaults:` to
-    /// `v81_config_gc_orphan_processes`, this goes red — that is its only job.
+    /// `v83_config_gc_orphan_processes`, this goes red — that is its only job.
     @Test func gcOrphanProcessesIsNullBeforeAnyGesture() async throws {
         let db = try TBDDatabase(inMemory: true)
         let record = try #require(try await fetchConfigRecord(db))
@@ -387,15 +387,16 @@ struct ConfigStoreTests {
             config.gc_orphan_processes_enabled must be NULL until the toggle is \
             touched — read back \
             \(String(describing: record.gc_orphan_processes_enabled)). A non-nil \
-            value here means v81_config_gc_orphan_processes grew a `defaults:` \
+            value here means v83_config_gc_orphan_processes grew a `defaults:` \
             argument; remove it.
             """
         )
     }
 
-    /// The same guard against a row written by a real pre-v81 daemon: migrate
-    /// only through v80, write to the config row, then finish migrating.
-    @Test func rowWrittenBeforeV81StillReadsNull() throws {
+    /// The same guard against a row written by a real pre-v83 daemon: migrate
+    /// only through v80 — a schema state this column had not reached — write to
+    /// the config row, then finish migrating.
+    @Test func rowWrittenBeforeV83StillReadsNull() throws {
         let queue = try DatabaseQueue()
         let migrator = TBDDatabase.buildMigratorForTests()
         try migrator.migrate(queue, upTo: "v80_clear_scratch_pr_observation")
@@ -416,9 +417,9 @@ struct ConfigStoreTests {
             let raw: DatabaseValue = row["gc_orphan_processes_enabled"]
             #expect(
                 raw.isNull,
-                "a config row written before v81 must read NULL, not \(raw)"
+                "a config row written before v83 must read NULL, not \(raw)"
             )
-            // The pre-existing write survived — v81 is purely additive.
+            // The pre-existing write survived — v83 is purely additive.
             #expect(row["gc_enabled"] == true)
         }
     }
