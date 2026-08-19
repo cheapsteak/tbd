@@ -147,6 +147,15 @@ private func preservesStoredActivityAtEqualOrder(
     return storedState != .working && incomingState == .working
 }
 
+private func clearAwaitingInputIfNotNewer(
+    record: inout TerminalRecord,
+    than observedAt: Date
+) {
+    guard record.awaitingInputObservedAt.map({ $0 > observedAt }) != true else { return }
+    record.awaitingInputReason = nil
+    record.awaitingInputObservedAt = nil
+}
+
 /// Provides CRUD operations for terminals.
 public struct TerminalStore: Sendable {
     let writer: any DatabaseWriter
@@ -424,9 +433,10 @@ public struct TerminalStore: Sendable {
     /// this method without allowing that older event to roll back a newer one.
     ///
     /// A repeated generic value advances only the ordering watermark and clears
-    /// an obsolete awaiting-input reason. Its semantic transition timestamp and
-    /// source remain unchanged, which both preserves hibernation's at-rest
-    /// clock and prevents an idle echo from erasing an explicit interrupt.
+    /// an awaiting-input reason no newer than itself. Its semantic transition
+    /// timestamp and source remain unchanged, which both preserves
+    /// hibernation's at-rest clock and prevents an idle echo from erasing an
+    /// explicit interrupt.
     /// Events that establish meaningful same-value provenance (currently a user
     /// interrupt and SessionStart) opt into replacement. Exact timestamp ties
     /// cannot establish event order, so explicit interrupts and permission
@@ -469,8 +479,7 @@ public struct TerminalStore: Sendable {
                let storedSource,
                let storedObservedAt = record.activityStateObservedAt {
                 record.activityStateOrderObservedAt = observedAt
-                record.awaitingInputReason = nil
-                record.awaitingInputObservedAt = nil
+                clearAwaitingInputIfNotNewer(record: &record, than: observedAt)
                 try record.update(db)
                 return AppliedTerminalActivityObservation(
                     activityState: activityState,
@@ -484,8 +493,7 @@ public struct TerminalStore: Sendable {
             record.activityStateSource = FactColumnJSON.encode(source)
             record.activityStateObservedAt = observedAt
             record.activityStateOrderObservedAt = observedAt
-            record.awaitingInputReason = nil
-            record.awaitingInputObservedAt = nil
+            clearAwaitingInputIfNotNewer(record: &record, than: observedAt)
             try record.update(db)
             return AppliedTerminalActivityObservation(
                 activityState: activityState,

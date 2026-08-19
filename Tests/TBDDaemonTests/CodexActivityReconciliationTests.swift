@@ -192,6 +192,102 @@ struct CodexActivityReconciliationTests {
         #expect(terminals.first(where: { $0.id == claude.id })?.presentationActivityObservedAt == nil)
     }
 
+    @Test(
+        "terminal.list binds presentation to the post-observation transcript identity",
+        arguments: [true, false]
+    )
+    func terminalListRejectsPresentationFromRetargetedTranscript(
+        scoped: Bool
+    ) async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/car-rollover-repo-\(UUID().uuidString)",
+            displayName: "car-rollover-repo", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "main",
+            path: "/tmp/car-rollover-wt-\(UUID().uuidString)",
+            tmuxServer: "tbd-car-rollover")
+        let oldTranscript = try makeTranscript(
+            #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"old"}}"#
+                + "\n")
+        let currentTranscript = try makeTranscript(
+            #"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"current"}}"#
+                + "\n")
+        defer {
+            try? FileManager.default.removeItem(
+                at: oldTranscript.deletingLastPathComponent())
+            try? FileManager.default.removeItem(
+                at: currentTranscript.deletingLastPathComponent())
+        }
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: "Codex", kind: .codex)
+        try await db.terminals.updateSession(
+            id: terminal.id,
+            sessionID: "old-session",
+            transcriptPath: oldTranscript.path)
+
+        let firstAt = Date(timeIntervalSince1970: 1_790_000_100)
+        let currentAt = firstAt.addingTimeInterval(1)
+        let dates = BlockingListDates(first: firstAt, subsequent: currentAt)
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()),
+            tmux: TmuxManager(dryRun: true),
+            startTime: Date(),
+            now: dates.provider,
+            actuationLog: makeTestActuationLog())
+        let list = try RPCRequest(
+            method: RPCMethod.terminalList,
+            params: TerminalListParams(worktreeID: scoped ? wt.id : nil))
+        let priorResponse = await self.router.handle(list)
+        #expect(priorResponse.success)
+        let priorTerminal = try #require(
+            priorResponse.decodeResult([Terminal].self).first(where: { $0.id == terminal.id }))
+        #expect(priorTerminal.presentationActivityState == .working)
+        #expect(priorTerminal.presentationActivityObservedAt == presentationObservedAt)
+        let sessionStart = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "current-session",
+                transcriptPath: currentTranscript.path,
+                source: "SessionStart"))
+
+        let staleList = Task { await router.handle(list) }
+        guard await waitUntil({ dates.firstCallIsBlocked }) else {
+            dates.releaseFirstCall()
+            _ = await staleList.value
+            Issue.record("first terminal.list never reached its transcript stamp")
+            return
+        }
+        #expect((await router.handle(sessionStart)).success)
+        let currentList = Task { await router.handle(list) }
+        dates.releaseFirstCall()
+
+        let staleResponse = await staleList.value
+        let currentResponse = await currentList.value
+        #expect(staleResponse.success)
+        #expect(currentResponse.success)
+        let staleTerminal = try #require(
+            staleResponse.decodeResult([Terminal].self).first(where: { $0.id == terminal.id }))
+        let currentTerminal = try #require(
+            currentResponse.decodeResult([Terminal].self).first(where: { $0.id == terminal.id }))
+
+        #expect(staleTerminal.claudeSessionID == "current-session")
+        #expect(staleTerminal.transcriptPath == currentTranscript.path)
+        #expect(staleTerminal.presentationActivityState == nil)
+        #expect(staleTerminal.presentationActivityObservedAt == firstAt)
+        #expect(currentTerminal.transcriptPath == currentTranscript.path)
+        #expect(currentTerminal.presentationActivityState == .idle)
+        #expect(currentTerminal.presentationActivityObservedAt == currentAt)
+        #expect(!(await router.codexActivityTracker.hasBaseline(
+            transcriptPath: oldTranscript.path)))
+        #expect(await router.codexActivityTracker.hasBaseline(
+            transcriptPath: currentTranscript.path))
+    }
+
     @Test("terminal.list retention respects worktree and fleet scopes")
     func terminalListRetainsTrackerBaselinesByRequestScope() async throws {
         let repo = try await db.repos.create(
@@ -440,5 +536,41 @@ struct CodexActivityReconciliationTests {
         #expect(after.activityState == .unknown)
         #expect(after.activityStateObservedAt == Self.observedAt)
         #expect(after.observedActivity?.observedAt == Self.observedAt)
+    }
+}
+
+private final class BlockingListDates: @unchecked Sendable {
+    private let lock = NSLock()
+    private let first: Date
+    private let subsequent: Date
+    private let release = DispatchSemaphore(value: 0)
+    private var callCount = 0
+    private var firstBlocked = false
+
+    init(first: Date, subsequent: Date) {
+        self.first = first
+        self.subsequent = subsequent
+    }
+
+    var firstCallIsBlocked: Bool {
+        lock.withLock { firstBlocked }
+    }
+
+    var provider: @Sendable () -> Date {
+        { [self] in
+            let call = lock.withLock { () -> Int in
+                let call = callCount
+                callCount += 1
+                if call == 0 { firstBlocked = true }
+                return call
+            }
+            guard call == 0 else { return subsequent }
+            release.wait()
+            return first
+        }
+    }
+
+    func releaseFirstCall() {
+        release.signal()
     }
 }

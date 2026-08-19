@@ -43,7 +43,10 @@ struct TerminalActivityEventHandlerTests {
         )
     }
 
-    private func makeTerminal() async throws -> Terminal {
+    private func makeTerminal(
+        kind: TerminalKind = .codex,
+        label: String = "Codex"
+    ) async throws -> Terminal {
         let repo = try await db.repos.create(
             path: "/tmp/ta-repo-\(UUID().uuidString)",
             displayName: "ta-repo",
@@ -60,8 +63,8 @@ struct TerminalActivityEventHandlerTests {
             worktreeID: wt.id,
             tmuxWindowID: "@1",
             tmuxPaneID: "%1",
-            label: "Codex",
-            kind: .codex
+            label: label,
+            kind: kind
         )
     }
 
@@ -405,6 +408,64 @@ struct TerminalActivityEventHandlerTests {
             )
         }
         #expect(orderObservedAt == refreshedAt)
+    }
+
+    @Test(
+        "a delayed activity observation cannot erase a newer permission prompt",
+        arguments: [TerminalActivityState.working, .idle]
+    )
+    func delayedActivityPreservesNewerPermissionPrompt(
+        activityState: TerminalActivityState
+    ) async throws {
+        let terminal = try await makeTerminal(kind: .claude, label: "Claude")
+        let baseline = Date(timeIntervalSince1970: 1_700_000_000)
+        let earlierActivityAt = baseline.addingTimeInterval(1)
+        let laterPromptAt = baseline.addingTimeInterval(2)
+        try await db.terminals.setActivityState(
+            id: terminal.id,
+            activityState: .working,
+            source: .hookEvent("UserPromptSubmit"),
+            observedAt: baseline
+        )
+        let dates = BlockingDateSequence(
+            first: earlierActivityAt,
+            subsequent: laterPromptAt)
+        let router = makeRouter(now: dates.provider)
+        let activity = try RPCRequest(
+            method: RPCMethod.terminalActivityEvent,
+            params: TerminalActivityEventParams(
+                terminalID: terminal.id,
+                activityState: activityState
+            )
+        )
+        let notification = try RPCRequest(
+            method: RPCMethod.terminalNotificationEvent,
+            params: TerminalNotificationEventParams(
+                terminalID: terminal.id,
+                notificationType: "permission_prompt",
+                message: "Claude needs permission"
+            )
+        )
+
+        let earlier = Task { await router.handle(activity) }
+        guard await waitUntil({ dates.firstCallIsBlocked }) else {
+            dates.releaseFirstCall()
+            _ = await earlier.value
+            Issue.record("earlier activity never reached the date seam")
+            return
+        }
+        #expect((await router.handle(notification)).success)
+        dates.releaseFirstCall()
+        #expect((await earlier.value).success)
+
+        let updated = try #require(await db.terminals.get(id: terminal.id))
+        let reason = try #require(updated.awaitingInputReason)
+        #expect(reason.classification == .promptOnScreen)
+        #expect(updated.awaitingInputObservedAt == laterPromptAt)
+        let resolved = SessionStateResolver(now: { laterPromptAt }).resolve(
+            SessionStateFacts(terminal: updated))
+        #expect(resolved.value == .awaitingInput(reason: reason))
+        #expect(resolved.observedAt == laterPromptAt)
     }
 
     @Test("a same-time earlier working hook cannot erase a later interrupt")

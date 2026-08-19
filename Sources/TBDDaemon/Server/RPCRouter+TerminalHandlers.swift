@@ -13,6 +13,11 @@ private struct TranscriptParseCacheEntry {
     let result: [TranscriptItem]
 }
 
+private struct CodexPresentationIdentity: Equatable {
+    let sessionID: String?
+    let transcriptPath: String?
+}
+
 /// Caches the last `TranscriptParser.parse` result per session file path.
 /// The fingerprint is the parent JSONL's mtime+size. Subagent files are
 /// re-read on cache miss, so the cache is invalidated whenever the parent
@@ -507,13 +512,18 @@ extension RPCRouter {
     func handleTerminalList(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalListParams.self, from: paramsData)
         var terminals = try await db.terminals.list(worktreeID: params.worktreeID)
-        var codexTranscriptPaths: Set<String> = []
         var codexTargets: [CodexTranscriptActivityTracker.Target] = []
+        let observedIdentities = Dictionary(uniqueKeysWithValues: terminals
+            .filter(\.isCodexTerminal)
+            .map {
+                ($0.id, CodexPresentationIdentity(
+                    sessionID: $0.claudeSessionID,
+                    transcriptPath: $0.transcriptPath))
+            })
 
         for index in terminals.indices where terminals[index].isCodexTerminal {
             guard let transcriptPath = terminals[index].transcriptPath,
                   !transcriptPath.isEmpty else { continue }
-            codexTranscriptPaths.insert(transcriptPath)
             codexTargets.append(CodexTranscriptActivityTracker.Target(
                 transcriptPath: transcriptPath,
                 worktreeID: terminals[index].worktreeID))
@@ -522,8 +532,28 @@ extension RPCRouter {
         let codexObservation = await codexActivityTracker.observeStamped(
             transcripts: codexTargets,
             now: now)
+        // SessionStart can retarget a terminal while transcript observation is
+        // suspended on the tracker actor. Re-read as close to response encoding
+        // as possible, and only bind evidence to the exact session/path that
+        // was observed. A mismatch carries authoritative unknown at the
+        // actor-ordered observation stamp: old-path evidence cannot describe
+        // the new transcript, and leaving the stamp absent would let clients
+        // preserve stale working from the old path as a legacy observation.
+        terminals = try await db.terminals.list(worktreeID: params.worktreeID)
+        var codexTranscriptPaths: Set<String> = []
         for index in terminals.indices where terminals[index].isCodexTerminal {
             let transcriptPath = terminals[index].transcriptPath
+            if let transcriptPath, !transcriptPath.isEmpty {
+                codexTranscriptPaths.insert(transcriptPath)
+            }
+            let currentIdentity = CodexPresentationIdentity(
+                sessionID: terminals[index].claudeSessionID,
+                transcriptPath: transcriptPath)
+            guard observedIdentities[terminals[index].id] == currentIdentity else {
+                terminals[index].presentationActivityState = nil
+                terminals[index].presentationActivityObservedAt = codexObservation.observedAt
+                continue
+            }
             terminals[index].presentationActivityState = transcriptPath.flatMap {
                 codexObservation.states[$0]
             }

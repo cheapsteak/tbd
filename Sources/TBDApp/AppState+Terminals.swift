@@ -728,6 +728,7 @@ extension Terminal {
         let currentOrderObservedAt = current.activityStateOrderObservedAt
             ?? current.activityStateObservedAt
         let shouldKeepCurrent: Bool
+        let shouldPreserveCurrentSemanticFact: Bool
         if incomingIsComplete,
            currentIsComplete,
            let incomingOrderObservedAt,
@@ -737,10 +738,15 @@ extension Terminal {
                     && current.preservesActivityAtEqualOrder(
                         over: activityState,
                         source: activityStateSource))
+            shouldPreserveCurrentSemanticFact = !shouldKeepCurrent
+                && activityState == current.activityState
+                && !isMeaningfulSameStateReplacement(source: activityStateSource)
         } else if !incomingIsComplete, currentIsComplete {
             shouldKeepCurrent = activityState == current.activityState
+            shouldPreserveCurrentSemanticFact = false
         } else {
             shouldKeepCurrent = false
+            shouldPreserveCurrentSemanticFact = false
         }
 
         if shouldKeepCurrent {
@@ -748,6 +754,10 @@ extension Terminal {
             activityStateSource = current.activityStateSource
             activityStateObservedAt = current.activityStateObservedAt
             activityStateOrderObservedAt = current.activityStateOrderObservedAt
+        } else if shouldPreserveCurrentSemanticFact {
+            activityStateSource = current.activityStateSource
+            activityStateObservedAt = current.activityStateObservedAt
+            activityStateOrderObservedAt = incomingOrderObservedAt
         } else if !incomingIsComplete {
             activityStateSource = nil
             activityStateObservedAt = nil
@@ -759,7 +769,9 @@ extension Terminal {
     /// raw hook timestamps do not order it. Legacy responses with no timestamp
     /// remain arrival-ordered until a timestamped observation has been adopted.
     /// On an exact tie, a non-working result wins because false working is the
-    /// costlier error and nil is a real "could not establish activity" result.
+    /// costlier error. A timestamped nil is authoritative "could not establish
+    /// activity" evidence (unreadable, incomplete, or capped), so it clears a
+    /// prior working presentation instead of serving cached positive state.
     private mutating func reconcilePresentationObservation(against current: Terminal) {
         let shouldKeepCurrent: Bool
         switch (presentationActivityObservedAt, current.presentationActivityObservedAt) {
@@ -788,6 +800,16 @@ extension Terminal {
         if activityStateSource == .terminalInterrupt { return true }
         if activityState == .waitingForUser, incomingState != .waitingForUser { return true }
         return activityState != .working && incomingState == .working
+    }
+
+    private func isMeaningfulSameStateReplacement(source: FactSource?) -> Bool {
+        source == .terminalInterrupt || source == .hookEvent("SessionStart")
+    }
+
+    private func canReplacePresentation(observedAt incomingObservedAt: Date?) -> Bool {
+        guard let presentationActivityObservedAt else { return true }
+        guard let incomingObservedAt else { return false }
+        return incomingObservedAt >= presentationActivityObservedAt
     }
 
     /// Apply a pushed activity observation under the same ordering and legacy
@@ -824,13 +846,21 @@ extension Terminal {
             return
         }
 
+        if currentIsComplete,
+           delta.activityState == activityState,
+           !isMeaningfulSameStateReplacement(source: delta.activityStateSource) {
+            activityStateOrderObservedAt = incomingOrderObservedAt
+            return
+        }
+
         activityState = delta.activityState
         activityStateSource = delta.activityStateSource
         activityStateObservedAt = delta.activityStateObservedAt
         activityStateOrderObservedAt = delta.activityStateOrderObservedAt
         if isCodexTerminal,
            delta.activityState == .idle,
-           delta.activityStateSource == .hookEvent("SessionStart") {
+           delta.activityStateSource == .hookEvent("SessionStart"),
+           canReplacePresentation(observedAt: incomingOrderObservedAt) {
             presentationActivityState = .idle
             presentationActivityObservedAt = incomingOrderObservedAt
         }
