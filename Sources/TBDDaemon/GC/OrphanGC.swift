@@ -758,13 +758,31 @@ public actor OrphanGC {
         pools.append(deletionQueueCollector.resolvedPath(TBDConstants.scratchDir.path))
         pools.append(deletionQueueCollector.resolvedPath(scratchpadBase.path))
 
-        let livePaths = liveRows.map { deletionQueueCollector.resolvedPath($0.path) }
+        // A worktree's Claude scratchpad answers to the same owner as the
+        // worktree itself — `ScratchpadCollector`'s slug is derived from the
+        // worktree path, so the owner is always recoverable. Classifying the
+        // scratchpad alongside its worktree is what keeps a live worktree's
+        // scratchpad out of the "absent from the database" arm, where it would
+        // otherwise become reclaimable while the work is still going on.
+        func scratchpadPath(forWorktreePath path: String) -> String {
+            deletionQueueCollector.resolvedPath(
+                scratchpadBase.appendingPathComponent(
+                    ScratchpadCollector.slug(forWorktreePath: path)).path)
+        }
+        let livePaths = liveRows.flatMap {
+            [deletionQueueCollector.resolvedPath($0.path), scratchpadPath(forWorktreePath: $0.path)]
+        }
         let deadRoots = archived
             .compactMap(LocalWorktree.init)
-            .map {
-                DeadWorktreeRoot(
-                    path: deletionQueueCollector.resolvedPath($0.path),
-                    archivedAt: $0.archivedAt)
+            .flatMap {
+                [
+                    DeadWorktreeRoot(
+                        path: deletionQueueCollector.resolvedPath($0.path),
+                        archivedAt: $0.archivedAt),
+                    DeadWorktreeRoot(
+                        path: scratchpadPath(forWorktreePath: $0.path),
+                        archivedAt: $0.archivedAt),
+                ]
             }
         return (
             TBDProcessRoots(pools: pools, live: livePaths, dead: deadRoots),
