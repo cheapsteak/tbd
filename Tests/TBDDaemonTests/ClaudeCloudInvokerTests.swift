@@ -1184,6 +1184,142 @@ struct ClaudeCloudInvokerTests {
     ) -> ClaudeCloudInvoker {
         ClaudeCloudInvoker(db: db, spawner: spawner, now: now)
     }
+
+    // MARK: - markFailed compare-and-set
+
+    /// The gap `markFailed` must not stamp over: `list()` reads rows in one
+    /// transaction, computes the expired-pending ids from that snapshot, and
+    /// writes `markFailed` in a SEPARATE transaction. If a `create` resolves
+    /// in between, the batch `markFailed` receives still names a row that is
+    /// no longer pending. This drives that exact read-then-write
+    /// interleaving directly against the store — `rows()` first, `resolve`
+    /// second, `markFailed` last with the STALE ids from the first read — so
+    /// the test is deterministic instead of racing a real gap.
+    ///
+    /// Against the pre-fix unguarded UPDATE, this row is stamped back to
+    /// `failed` and loses nothing on its face (the row count never moves,
+    /// see the finding), but its `sessionID` is orphaned: `list()` only
+    /// projects `resolved` rows, so the session would vanish from every
+    /// future `list` with no discovery to recover it.
+    @Test func markFailedSkipsARowThatResolvedInTheGapSinceItWasRead() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let created = Date(timeIntervalSince1970: 1_000_000)
+        let row = try await db.claudeCloudSessions.upsertPending(
+            idempotencyKey: "tbd-1", repoKey: "acme/api", repoPath: "/tmp/api",
+            branch: "fix-ci", environment: nil, paramsJSON: "{}", now: created)
+
+        // The read `list()` takes before deciding which ids are expired.
+        let snapshot = try await db.claudeCloudSessions.rows()
+        #expect(snapshot.map(\.id) == [row.id])
+
+        // A `create` resolves in the gap between that read and the write
+        // below — this is the interleaving `list()`'s two separate
+        // transactions cannot prevent.
+        let resolvedAt = created.addingTimeInterval(650)
+        try await db.claudeCloudSessions.resolve(
+            id: row.id, sessionID: "session_01AAAAAAAAAAAAAAAAAAAAAA",
+            title: "Add probe", now: resolvedAt)
+
+        // The stale batch computed from the earlier snapshot — exactly what
+        // `list()` would pass, since `row` was still `pending` and past the
+        // window when the snapshot was taken.
+        try await db.claudeCloudSessions.markFailed(ids: snapshot.map(\.id))
+
+        let after = try #require(try await db.claudeCloudSessions.rows().first)
+        #expect(after.state == ClaudeCloudLedgerState.resolved.rawValue)
+        #expect(after.sessionID == "session_01AAAAAAAAAAAAAAAAAAAAAA")
+    }
+
+    /// The other half: a row that is genuinely still `pending` when
+    /// `markFailed` runs must still be marked `failed` — the
+    /// compare-and-set narrows WHICH rows the sweep touches, it must not
+    /// disable the sweep entirely. A CAS that never matches anything would
+    /// make the test above pass while silently breaking the whole
+    /// pending-failure mechanism, so this is the discriminating positive.
+    @Test func markFailedStillFailsARowThatIsGenuinelyStillPending() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let created = Date(timeIntervalSince1970: 1_000_000)
+        let row = try await db.claudeCloudSessions.upsertPending(
+            idempotencyKey: "tbd-1", repoKey: "acme/api", repoPath: "/tmp/api",
+            branch: "fix-ci", environment: nil, paramsJSON: "{}", now: created)
+
+        try await db.claudeCloudSessions.markFailed(ids: [row.id])
+
+        let after = try #require(try await db.claudeCloudSessions.rows().first)
+        #expect(after.state == ClaudeCloudLedgerState.failed.rawValue)
+    }
+
+    /// The downstream consequence, chained onto the exact interleaving from
+    /// `markFailedSkipsARowThatResolvedInTheGapSinceItWasRead`: read, then
+    /// resolve, then a stale `markFailed`. With that CAS in place the row
+    /// stays `resolved`, and `create`'s own fast path (a `resolved` row with
+    /// a session id is answered before `claimForSpawn` is even consulted) is
+    /// what protects a replay in the common case.
+    ///
+    /// That leaves the SECOND guard — `claimForSpawn`'s `.failed` branch —
+    /// untested by that path alone, because it is never reached once the row
+    /// stays `resolved`. So this test goes one step further and forces the
+    /// row to `failed` while it still names a session, exactly the shape
+    /// `claimForSpawn`'s doc comment names as possible ("a resolve landing
+    /// in the gap … or any future writer that stamps failed without
+    /// clearing sessionID") — a shape `markFailed`'s own CAS can no longer
+    /// produce through `list()`'s sweep, which is why it has to be written
+    /// directly here to exercise `claimForSpawn`'s guard in isolation from
+    /// `markFailed`'s.
+    ///
+    /// Asserted on the SPAWN COUNT and the returned session id, not the
+    /// ledger row count — the unique index on `idempotencyKey` pins the row
+    /// count at 1 either way, which is exactly why this class of bug hides
+    /// behind a row-count assertion. Without the guard, this row is
+    /// reclaimed unconditionally and a second real `claude --cloud` spawns,
+    /// silently overwriting the first session's id on the next `resolve`.
+    @Test func aFailedRowThatStillNamesASessionIsNeverReclaimedAndRespawned() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await seedRepo(db)
+        let created = Date(timeIntervalSince1970: 1_000_000)
+        let row = try await db.claudeCloudSessions.upsertPending(
+            idempotencyKey: "tbd-1", repoKey: "acme/api", repoPath: "/tmp/api",
+            branch: "fix-ci", environment: nil, paramsJSON: "{}", now: created)
+
+        let snapshot = try await db.claudeCloudSessions.rows()
+        let resolvedAt = created.addingTimeInterval(650)
+        try await db.claudeCloudSessions.resolve(
+            id: row.id, sessionID: "session_01AAAAAAAAAAAAAAAAAAAAAA",
+            title: "Add probe", now: resolvedAt)
+        try await db.claudeCloudSessions.markFailed(ids: snapshot.map(\.id))
+        #expect(
+            try await db.claudeCloudSessions.rows().first?.state
+                == ClaudeCloudLedgerState.resolved.rawValue,
+            "the CAS above must have left this row alone")
+
+        // The hypothetical `claimForSpawn`'s own doc comment names: some
+        // other writer stamps the row `failed` without clearing `sessionID`.
+        try await db.writerForTests.write { conn in
+            try conn.execute(
+                sql: "UPDATE claude_cloud_session SET state = ? WHERE id = ?",
+                arguments: [ClaudeCloudLedgerState.failed.rawValue, row.id])
+        }
+
+        // Scripted rather than empty, so a regression that DOES reclaim and
+        // respawn fails on a clean assertion mismatch instead of crashing
+        // the run on `FakeClaudeSpawner`'s exhausted-script precondition.
+        let respawnOutput = """
+            Created cloud session: Second spawn
+            View: https://claude.ai/code/session_01BBBBBBBBBBBBBBBBBBBBBB?from=cli&m=0
+            Resume with: claude --teleport session_01BBBBBBBBBBBBBBBBBBBBBB
+            """
+        let spawner = FakeClaudeSpawner(outcomes: [
+            .completed(status: 0, output: respawnOutput, stderr: "")
+        ])
+        let result = try await invoker(db: db, spawner: spawner, now: { resolvedAt }).run(
+            config(), verb: ["create"], stdin: createBody(), timeout: 60, contractVersion: 2)
+        #expect(result.exitCode == 0)
+        #expect(
+            spawner.requestsSnapshot().isEmpty,
+            "a failed row that still names a session must answer from it, not spawn")
+        let session = try result.decoded(RemoteSessionPayload.self)
+        #expect(session.id == "session_01AAAAAAAAAAAAAAAAAAAAAA")
+    }
 }
 
 /// Lets a test hold one spawn open and observe that it started.

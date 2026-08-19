@@ -151,6 +151,15 @@ public struct ClaudeCloudSessionStore: Sendable {
                     guard existing.sessionID == nil else { return .resolved(existing) }
                     reclaimable = ClaudeCloudLedgerState.resolved.rawValue
                 case .failed:
+                    // A failed row can still carry a session id: `resolve`
+                    // can land in the gap between `list()`'s read of a
+                    // pending row and its separate `markFailed` write, and a
+                    // row caught in exactly that gap must not be reclaimed
+                    // and re-spawned — it already names a real session, and
+                    // reclaiming it would overwrite that session's id on the
+                    // next `resolve`. Answer from the recorded session
+                    // instead, exactly like a resolved row with a session id.
+                    guard existing.sessionID == nil else { return .resolved(existing) }
                     reclaimable = ClaudeCloudLedgerState.failed.rawValue
                 case .pending:
                     reclaimable = nil
@@ -213,11 +222,25 @@ public struct ClaudeCloudSessionStore: Sendable {
     /// clause GRDB would otherwise turn into a query matching nothing (safe)
     /// or, via a hand-rolled `IN ()`, a query matching everything (not safe) —
     /// so the empty case is refused explicitly rather than trusted to SQL.
+    ///
+    /// Compare-and-set on `state = pending`: `ids` was computed from a read
+    /// taken in a SEPARATE transaction (`list()`'s snapshot), so by the time
+    /// this write runs, a row in that batch may already have resolved — a
+    /// `create` that finally read its session id in the gap between the read
+    /// and this write. Without the predicate this UPDATE would stamp that
+    /// row back to `failed`, destroying its `sessionID` even though `list()`
+    /// only projects `resolved` rows: the session would vanish from every
+    /// future `list` with no discovery to recover it, and `claimForSpawn`
+    /// would go on to reclaim the row and spawn a second real cloud session
+    /// under the same key. The predicate makes a row that resolved in the
+    /// gap skipped rather than clobbered — this is a no-op for it, not an
+    /// error, because the batch was already known to be a stale snapshot.
     public func markFailed(ids: [String]) async throws {
         guard !ids.isEmpty else { return }
         try await writer.write { db in
             try ClaudeCloudSessionRow
                 .filter(ids.contains(Column("id")))
+                .filter(Column("state") == ClaudeCloudLedgerState.pending.rawValue)
                 .updateAll(db, Column("state").set(to: ClaudeCloudLedgerState.failed.rawValue))
         }
     }
