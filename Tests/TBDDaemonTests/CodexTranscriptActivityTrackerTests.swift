@@ -548,7 +548,7 @@ struct CodexTranscriptActivityTrackerTests {
         #expect(await tracker.bufferedRecordState(transcriptPath: first.path)?.byteCount
             == Int(onePathBudget) - 1)
 
-        let withoutSavedPath = [targets[2], targets[0]]
+        let withoutSavedPath = [targets[0], targets[2]]
         _ = await tracker.observe(
             transcripts: withoutSavedPath, totalByteLimit: onePathBudget)
         #expect(await tracker.bufferedRecordState(transcriptPath: third.path)?.byteCount
@@ -556,8 +556,9 @@ struct CodexTranscriptActivityTrackerTests {
         #expect(await tracker.bufferedRecordState(transcriptPath: first.path)?.byteCount
             == Int(onePathBudget) - 1)
 
+        let reordered = [targets[2], targets[0]]
         _ = await tracker.observe(
-            transcripts: withoutSavedPath, totalByteLimit: onePathBudget)
+            transcripts: reordered, totalByteLimit: onePathBudget)
         #expect(await tracker.bufferedRecordState(transcriptPath: first.path)?.byteCount
             == Int(onePathBudget) * 2 - 1)
     }

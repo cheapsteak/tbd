@@ -82,7 +82,7 @@ actor CodexTranscriptActivityTracker {
     static let requestReadByteLimit = incrementalReadByteLimit
     static let maxBufferedRecordByteCount = Int(initialTailByteLimit)
     private var baselines: [String: Baseline] = [:]
-    private var nextBatchStartPath: String?
+    private var nextBatchPathOrder: [String] = []
 
     var baselineCount: Int { baselines.count }
 
@@ -113,6 +113,8 @@ actor CodexTranscriptActivityTracker {
         }
         guard !uniqueTargets.isEmpty else { return [:] }
 
+        let currentPaths = Set(uniqueTargets.map(\.transcriptPath))
+        let nextBatchStartPath = nextBatchPathOrder.first(where: currentPaths.contains)
         let startIndex = nextBatchStartPath.flatMap { path in
             uniqueTargets.firstIndex { $0.transcriptPath == path }
         } ?? 0
@@ -154,7 +156,9 @@ actor CodexTranscriptActivityTracker {
             cursor = (cursor + 1) % targets.count
         }
 
-        nextBatchStartPath = targets[cursor].transcriptPath
+        nextBatchPathOrder =
+            targets[cursor...].map(\.transcriptPath)
+            + targets[..<cursor].map(\.transcriptPath)
         return states
     }
 
