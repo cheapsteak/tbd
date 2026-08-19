@@ -10,19 +10,26 @@ struct CodexTurnLifecycleReducer: Sendable {
     private struct Payload: Decodable {
         let type: String
         let turnID: String?
+        let startedAt: Double?
 
         enum CodingKeys: String, CodingKey {
             case type
             case turnID = "turn_id"
+            case startedAt = "started_at"
         }
     }
 
-    private var currentTurnID: String?
+    private struct Turn: Sendable {
+        let id: String
+        let startedAt: Double?
+    }
+
+    private var currentTurn: Turn?
     private var hasLifecycleEvidence = false
 
     var activityState: TerminalActivityState? {
         guard hasLifecycleEvidence else { return nil }
-        return currentTurnID == nil ? .idle : .working
+        return currentTurn == nil ? .idle : .working
     }
 
     mutating func consume(line: Data) {
@@ -33,11 +40,14 @@ struct CodexTurnLifecycleReducer: Sendable {
         switch envelope.payload.type {
         case "task_started":
             hasLifecycleEvidence = true
-            currentTurnID = turnID
+            currentTurn = Turn(id: turnID, startedAt: envelope.payload.startedAt)
         case "task_complete", "turn_aborted":
             hasLifecycleEvidence = true
-            if currentTurnID == turnID {
-                currentTurnID = nil
+            if let currentTurn,
+               currentTurn.id == turnID
+                || currentTurn.startedAt != nil
+                && currentTurn.startedAt == envelope.payload.startedAt {
+                self.currentTurn = nil
             }
         default:
             break

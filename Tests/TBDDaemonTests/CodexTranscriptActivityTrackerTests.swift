@@ -37,6 +37,30 @@ struct CodexTranscriptActivityTrackerTests {
         #expect(reducer.activityState == .idle)
     }
 
+    @Test func rewrittenCompletionIDClosesTurnWithMatchingStartTime() {
+        var reducer = CodexTurnLifecycleReducer()
+        reducer.consume(line: event(
+            type: "task_started", turnID: "started-id", startedAt: 1_785_908_531))
+
+        reducer.consume(line: event(
+            type: "task_complete", turnID: "completed-id", startedAt: 1_785_908_531,
+            completedAt: 1_785_908_636))
+
+        #expect(reducer.activityState == .idle)
+    }
+
+    @Test func rewrittenAbortIDClosesTurnWithMatchingStartTime() {
+        var reducer = CodexTurnLifecycleReducer()
+        reducer.consume(line: event(
+            type: "task_started", turnID: "started-id", startedAt: 1_785_898_845))
+
+        reducer.consume(line: event(
+            type: "turn_aborted", turnID: "aborted-id", startedAt: 1_785_898_845,
+            completedAt: 1_785_898_898))
+
+        #expect(reducer.activityState == .idle)
+    }
+
     @Test func completionForUnknownTurnDoesNotCloseOpenTurn() {
         var reducer = CodexTurnLifecycleReducer()
         reducer.consume(line: event(type: "task_started", turnID: "a"))
@@ -75,6 +99,37 @@ struct CodexTranscriptActivityTrackerTests {
         #expect(reducer.activityState == .working)
 
         reducer.consume(line: event(type: "task_complete", turnID: "b"))
+        #expect(reducer.activityState == .idle)
+    }
+
+    @Test func lateRewrittenCloseForOlderStartTimeDoesNotCloseCurrentTurn() {
+        var reducer = CodexTurnLifecycleReducer()
+        reducer.consume(line: event(
+            type: "task_started", turnID: "older-start", startedAt: 100))
+        reducer.consume(line: event(
+            type: "task_started", turnID: "current-start", startedAt: 200))
+
+        reducer.consume(line: event(
+            type: "task_complete", turnID: "older-complete", startedAt: 100,
+            completedAt: 250))
+        #expect(reducer.activityState == .working)
+
+        reducer.consume(line: event(
+            type: "task_complete", turnID: "current-complete", startedAt: 200,
+            completedAt: 300))
+        #expect(reducer.activityState == .idle)
+    }
+
+    @Test func subagentRolloutUsesTheSameLifecycleCorrelation() {
+        var reducer = CodexTurnLifecycleReducer()
+        reducer.consume(line: Data(#"{"type":"session_meta","payload":{"source":{"subagent":{"thread_spawn":{"depth":2}}}}}"#.utf8))
+        reducer.consume(line: event(
+            type: "task_started", turnID: "nested-start", startedAt: 300))
+
+        reducer.consume(line: event(
+            type: "task_complete", turnID: "nested-complete", startedAt: 300,
+            completedAt: 400))
+
         #expect(reducer.activityState == .idle)
     }
 
@@ -633,15 +688,19 @@ struct CodexTranscriptActivityTrackerTests {
     private func event(
         type: String,
         turnID: String,
+        startedAt: Int? = nil,
+        completedAt: Int? = nil,
         terminated: Bool = true,
         padding: String? = nil,
         exactByteCount: Int? = nil
     ) -> Data {
         let newline = terminated ? "\n" : ""
         func encoded(padding: String?) -> Data {
+            let startedAtField = startedAt.map { #", "started_at":\#($0)"# } ?? ""
+            let completedAtField = completedAt.map { #", "completed_at":\#($0)"# } ?? ""
             let paddingField = padding.map { #", "padding":"\#($0)""# } ?? ""
             return Data((
-                #"{"type":"event_msg","payload":{"type":"\#(type)","turn_id":"\#(turnID)"\#(paddingField)}}"#
+                #"{"type":"event_msg","payload":{"type":"\#(type)","turn_id":"\#(turnID)"\#(startedAtField)\#(completedAtField)\#(paddingField)}}"#
                     + newline).utf8)
         }
 
