@@ -10,31 +10,31 @@ struct PRStatusManagerTests {
 
     @Test("maps OPEN + CLEAN to .mergeable")
     func mapsMergeableState() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "CLEAN")
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "CLEAN")
         #expect(status == .mergeable)
     }
 
     @Test("maps OPEN + BLOCKED to .blocked")
     func mapsBlocked() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "BLOCKED")
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "BLOCKED")
         #expect(status == .blocked)
     }
 
     @Test("maps OPEN + DIRTY to .blocked")
     func mapsDirty() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "DIRTY")
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "DIRTY")
         #expect(status == .blocked)
     }
 
     @Test("maps OPEN + BEHIND to .blocked")
     func mapsBehind() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "BEHIND")
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "BEHIND")
         #expect(status == .blocked)
     }
 
     @Test("maps OPEN + UNKNOWN to .pending")
     func mapsPendingUnknown() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "UNKNOWN")
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "UNKNOWN")
         #expect(status == .pending)
     }
 
@@ -42,7 +42,7 @@ struct PRStatusManagerTests {
     func mapsPendingChecks() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "UNKNOWN",
+            mergeVerdictRaw: "UNKNOWN",
             requiredChecksPending: true
         )
         #expect(status == .pending)
@@ -52,7 +52,7 @@ struct PRStatusManagerTests {
     func mapsPendingChecksOverClean() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "CLEAN",
+            mergeVerdictRaw: "CLEAN",
             requiredChecksPending: true
         )
         #expect(status == .pending)
@@ -62,7 +62,7 @@ struct PRStatusManagerTests {
     func mapsPendingChecksOverBlocked() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "BLOCKED",
+            mergeVerdictRaw: "BLOCKED",
             requiredChecksPending: true
         )
         #expect(status == .pending)
@@ -72,8 +72,8 @@ struct PRStatusManagerTests {
     func mapsReviewRequiredWithPassingChecksToMergeable() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "BLOCKED",
-            reviewDecision: "REVIEW_REQUIRED",
+            mergeVerdictRaw: "BLOCKED",
+            reviewVerdictRaw: "REVIEW_REQUIRED",
             requiredChecksFailing: false,
             requiredChecksPending: false
         )
@@ -84,8 +84,8 @@ struct PRStatusManagerTests {
     func mapsReviewRequiredWithPendingChecksToPending() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "BLOCKED",
-            reviewDecision: "REVIEW_REQUIRED",
+            mergeVerdictRaw: "BLOCKED",
+            reviewVerdictRaw: "REVIEW_REQUIRED",
             requiredChecksPending: true
         )
         #expect(status == .pending)
@@ -95,21 +95,21 @@ struct PRStatusManagerTests {
     func mapsBlockedWithEmptyReviewDecisionToBlocked() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "BLOCKED",
-            reviewDecision: ""
+            mergeVerdictRaw: "BLOCKED",
+            reviewVerdictRaw: ""
         )
         #expect(status == .blocked)
     }
 
     @Test("maps HAS_HOOKS to .mergeable")
     func mapsHasHooks() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "HAS_HOOKS")
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "HAS_HOOKS")
         #expect(status == .mergeable)
     }
 
     @Test("maps UNSTABLE (non-required checks failing) to .mergeable")
     func mapsUnstable() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "UNSTABLE")
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "UNSTABLE")
         #expect(status == .mergeable)
     }
 
@@ -117,7 +117,7 @@ struct PRStatusManagerTests {
     func mapsUnstablePendingChecks() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "UNSTABLE",
+            mergeVerdictRaw: "UNSTABLE",
             requiredChecksPending: true
         )
         #expect(status == .pending)
@@ -125,7 +125,7 @@ struct PRStatusManagerTests {
 
     @Test("maps unknown future merge state to .blocked")
     func mapsUnknownFutureMergeState() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "SOME_FUTURE_STATE")
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "SOME_FUTURE_STATE")
         #expect(status == .blocked)
     }
 
@@ -133,7 +133,7 @@ struct PRStatusManagerTests {
     func mapsPendingUnknownFutureMergeState() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "SOME_FUTURE_STATE",
+            mergeVerdictRaw: "SOME_FUTURE_STATE",
             requiredChecksPending: true
         )
         #expect(status == .pending)
@@ -141,31 +141,31 @@ struct PRStatusManagerTests {
 
     @Test("maps MERGED to .merged")
     func mapsMerged() {
-        let status = PRStatusManager.mapState(ghState: "MERGED", mergeStateStatus: "UNKNOWN")
+        let status = PRStatusManager.mapState(ghState: "MERGED", mergeVerdictRaw: "UNKNOWN")
         #expect(status == .merged)
     }
 
     @Test("maps CLOSED to .closed")
     func mapsClosed() {
-        let status = PRStatusManager.mapState(ghState: "CLOSED", mergeStateStatus: "BLOCKED")
+        let status = PRStatusManager.mapState(ghState: "CLOSED", mergeVerdictRaw: "BLOCKED")
         #expect(status == .closed)
     }
 
     @Test("maps OPEN + CHANGES_REQUESTED to .changesRequested")
     func mapsChangesRequested() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "BLOCKED", reviewDecision: "CHANGES_REQUESTED")
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "BLOCKED", reviewVerdictRaw: "CHANGES_REQUESTED")
         #expect(status == .changesRequested)
     }
 
     @Test("maps OPEN + CLEAN + CHANGES_REQUESTED to .changesRequested (review wins)")
     func mapsChangesRequestedOverClean() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "CLEAN", reviewDecision: "CHANGES_REQUESTED")
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "CLEAN", reviewVerdictRaw: "CHANGES_REQUESTED")
         #expect(status == .changesRequested)
     }
 
     @Test("maps draft PRs to .draft")
     func mapsDraft() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "CLEAN", isDraft: true)
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "CLEAN", isDraft: true)
         #expect(status == .draft)
     }
 
@@ -173,7 +173,7 @@ struct PRStatusManagerTests {
     func mapsNonRequiredFailingCheckStaysMergeable() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "CLEAN",
+            mergeVerdictRaw: "CLEAN",
             requiredChecksFailing: false
         )
         #expect(status == .mergeable)
@@ -183,7 +183,7 @@ struct PRStatusManagerTests {
     func mapsRequiredFailingCheckToChecksFailed() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "BLOCKED",
+            mergeVerdictRaw: "BLOCKED",
             requiredChecksFailing: true
         )
         #expect(status == .checksFailed)
@@ -193,7 +193,7 @@ struct PRStatusManagerTests {
     func mapsDraftOverFailingChecks() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "CLEAN",
+            mergeVerdictRaw: "CLEAN",
             isDraft: true,
             requiredChecksFailing: true
         )
@@ -204,7 +204,7 @@ struct PRStatusManagerTests {
     func mapsFailingOverPendingBlocked() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "BLOCKED",
+            mergeVerdictRaw: "BLOCKED",
             requiredChecksFailing: true,
             requiredChecksPending: true
         )
@@ -215,7 +215,7 @@ struct PRStatusManagerTests {
     func mapsFailingOverPendingClean() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "CLEAN",
+            mergeVerdictRaw: "CLEAN",
             requiredChecksFailing: true,
             requiredChecksPending: true
         )
@@ -226,7 +226,7 @@ struct PRStatusManagerTests {
     func mapsUnstableRequiredFailingToChecksFailed() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "UNSTABLE",
+            mergeVerdictRaw: "UNSTABLE",
             requiredChecksFailing: true
         )
         #expect(status == .checksFailed)
@@ -236,7 +236,7 @@ struct PRStatusManagerTests {
     func mapsDirtyRequiredFailingToChecksFailed() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "DIRTY",
+            mergeVerdictRaw: "DIRTY",
             requiredChecksFailing: true
         )
         #expect(status == .checksFailed)
@@ -246,7 +246,7 @@ struct PRStatusManagerTests {
     func mapsBehindRequiredFailingToChecksFailed() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "BEHIND",
+            mergeVerdictRaw: "BEHIND",
             requiredChecksFailing: true
         )
         #expect(status == .checksFailed)
@@ -256,7 +256,7 @@ struct PRStatusManagerTests {
     func mapsUnknownFutureMergeStateRequiredFailingToChecksFailed() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
-            mergeStateStatus: "SOME_FUTURE_STATE",
+            mergeVerdictRaw: "SOME_FUTURE_STATE",
             requiredChecksFailing: true
         )
         #expect(status == .checksFailed)
@@ -312,7 +312,7 @@ struct PRStatusManagerTests {
         #expect(nodes.count == 3)
         #expect(nodes[0].headRefName == "tbd/cool-feature")
         #expect(nodes[0].state == "OPEN")
-        #expect(nodes[0].mergeStateStatus == "CLEAN")
+        #expect(nodes[0].mergeVerdictRaw == "CLEAN")
         #expect(nodes[0].isDraft == true)
         #expect(nodes[0].statusCheckRollupState == "FAILURE")
         #expect(nodes[1].headRefName == "tbd/old-feature")
@@ -899,6 +899,91 @@ struct PRStatusManagerTests {
         #expect(PRStatusManager.parseOwnerRepo(fromURL: "https://example.com/not-a-pr") == nil)
     }
 
+    @Test("parseOwnerRepo splits a nested GitLab URL at the /-/ separator")
+    func parseOwnerRepoGitLab() {
+        let parsed = PRStatusManager.parseOwnerRepo(
+            fromURL: "https://git.acme.example/acme/platform/backend/api-gateway/-/merge_requests/412")
+        #expect(parsed?.owner == "acme/platform/backend")
+        #expect(parsed?.name == "api-gateway")
+    }
+
+    @Test("parseOwnerRepo still handles GitHub URLs")
+    func parseOwnerRepoGitHub() {
+        let parsed = PRStatusManager.parseOwnerRepo(
+            fromURL: "https://github.com/acme/acme-prod/pull/412")
+        #expect(parsed?.owner == "acme")
+        #expect(parsed?.name == "acme-prod")
+    }
+
+    @Test("parseOwnerRepo rejects a GitLab URL with no project segment")
+    func parseOwnerRepoGitLabTooShort() {
+        #expect(PRStatusManager.parseOwnerRepo(
+            fromURL: "https://git.acme.example/acme/-/merge_requests/1") == nil)
+    }
+
+    // MARK: - Remote identity
+
+    @Test("parseRemoteIdentity reads host, owner and name from an https remote")
+    func parseRemoteIdentityHTTPS() {
+        let parsed = PRStatusManager.parseRemoteIdentity("https://github.com/acme/acme-prod.git")
+        #expect(parsed?.host == "github.com")
+        #expect(parsed?.owner == "acme")
+        #expect(parsed?.name == "acme-prod")
+    }
+
+    @Test("parseRemoteIdentity reads an scp-style remote")
+    func parseRemoteIdentitySCP() {
+        let parsed = PRStatusManager.parseRemoteIdentity("git@git.acme.example:acme/platform/api-gateway.git")
+        #expect(parsed?.host == "git.acme.example")
+        // Everything before the last segment is the namespace, however deep.
+        #expect(parsed?.owner == "acme/platform")
+        #expect(parsed?.name == "api-gateway")
+    }
+
+    @Test("parseRemoteIdentity keeps a deeply nested GitLab namespace whole")
+    func parseRemoteIdentityNested() {
+        let parsed = PRStatusManager.parseRemoteIdentity(
+            "https://git.acme.example/acme/platform/backend/api-gateway.git")
+        #expect(parsed?.owner == "acme/platform/backend")
+        #expect(parsed?.name == "api-gateway")
+    }
+
+    @Test("parseRemoteIdentity drops an ssh port from the host")
+    func parseRemoteIdentitySSHPort() {
+        let parsed = PRStatusManager.parseRemoteIdentity("ssh://git@git.acme.example:2222/acme/api.git")
+        #expect(parsed?.host == "git.acme.example")
+        #expect(parsed?.owner == "acme")
+        #expect(parsed?.name == "api")
+    }
+
+    @Test("parseRemoteIdentity rejects a remote that names no network host")
+    func parseRemoteIdentityRejectsHostlessRemotes() {
+        // Split into segments these fabricate the hosts "Users", "srv" and
+        // ".." — each cached like a real one, each composed into an attach URL
+        // that points at nothing, and each enough to make
+        // `poisonedCacheEntries` clear a legitimately cached PR status.
+        #expect(PRStatusManager.parseRemoteIdentity("file:///Users/me/acme-prod.git") == nil)
+        #expect(PRStatusManager.parseRemoteIdentity("/srv/git/acme/acme-prod.git") == nil)
+        #expect(PRStatusManager.parseRemoteIdentity("../sibling/acme-prod.git") == nil)
+        // …while the three shapes that do name one still parse.
+        #expect(PRStatusManager.parseRemoteIdentity(
+            "https://github.com/acme/acme-prod.git")?.host == "github.com")
+        #expect(PRStatusManager.parseRemoteIdentity(
+            "git@git.acme.example:acme/api.git")?.host == "git.acme.example")
+        #expect(PRStatusManager.parseRemoteIdentity(
+            "ssh://git@git.acme.example:2222/acme/api.git")?.host == "git.acme.example")
+    }
+
+    @Test("parseRemoteIdentity returns nil rather than guessing a host")
+    func parseRemoteIdentityRejectsIncomplete() {
+        // Nothing here names a host, and a caller that cannot name the host
+        // must defer — never default to github.com.
+        #expect(PRStatusManager.parseRemoteIdentity("acme/acme-prod") == nil)
+        #expect(PRStatusManager.parseRemoteIdentity("") == nil)
+        #expect(PRStatusManager.parseRemoteIdentity("   ") == nil)
+        #expect(PRStatusManager.parseRemoteIdentity("https://github.com/acme") == nil)
+    }
+
     // MARK: - GraphQL query builder
 
     /// A malformed (unbalanced) GraphQL query is rejected by the server at parse time,
@@ -981,8 +1066,8 @@ struct PRStatusManagerTests {
     func reasonForMerged() {
         let reason = PRStatusManager.computeReason(
             ghState: "MERGED",
-            mergeStateStatus: "UNKNOWN",
-            reviewDecision: "",
+            mergeVerdictRaw: "UNKNOWN",
+            reviewVerdictRaw: "",
             isDraft: false
         )
         #expect(reason == "Merged")
@@ -992,8 +1077,8 @@ struct PRStatusManagerTests {
     func reasonForClosed() {
         let reason = PRStatusManager.computeReason(
             ghState: "CLOSED",
-            mergeStateStatus: "UNKNOWN",
-            reviewDecision: "",
+            mergeVerdictRaw: "UNKNOWN",
+            reviewVerdictRaw: "",
             isDraft: false
         )
         #expect(reason == "Closed")
@@ -1003,8 +1088,8 @@ struct PRStatusManagerTests {
     func reasonForDraft() {
         let reason = PRStatusManager.computeReason(
             ghState: "OPEN",
-            mergeStateStatus: "CLEAN",
-            reviewDecision: "",
+            mergeVerdictRaw: "CLEAN",
+            reviewVerdictRaw: "",
             isDraft: true
         )
         #expect(reason == "Draft")
@@ -1014,8 +1099,8 @@ struct PRStatusManagerTests {
     func reasonForMergeable() {
         let reason = PRStatusManager.computeReason(
             ghState: "OPEN",
-            mergeStateStatus: "CLEAN",
-            reviewDecision: "",
+            mergeVerdictRaw: "CLEAN",
+            reviewVerdictRaw: "",
             isDraft: false
         )
         #expect(reason == "Ready to merge")
@@ -1025,8 +1110,8 @@ struct PRStatusManagerTests {
     func reasonForConflicts() {
         let reason = PRStatusManager.computeReason(
             ghState: "OPEN",
-            mergeStateStatus: "DIRTY",
-            reviewDecision: "",
+            mergeVerdictRaw: "DIRTY",
+            reviewVerdictRaw: "",
             isDraft: false
         )
         #expect(reason == "Merge conflicts")
@@ -1036,8 +1121,8 @@ struct PRStatusManagerTests {
     func reasonForBehind() {
         let reason = PRStatusManager.computeReason(
             ghState: "OPEN",
-            mergeStateStatus: "BEHIND",
-            reviewDecision: "",
+            mergeVerdictRaw: "BEHIND",
+            reviewVerdictRaw: "",
             isDraft: false
         )
         #expect(reason == "Behind base branch")
@@ -1047,8 +1132,8 @@ struct PRStatusManagerTests {
     func reasonForFailingChecks() {
         let reason = PRStatusManager.computeReason(
             ghState: "OPEN",
-            mergeStateStatus: "CLEAN",
-            reviewDecision: "",
+            mergeVerdictRaw: "CLEAN",
+            reviewVerdictRaw: "",
             isDraft: false,
             requiredChecksFailing: true
         )
@@ -1059,8 +1144,8 @@ struct PRStatusManagerTests {
     func reasonForPendingChecks() {
         let reason = PRStatusManager.computeReason(
             ghState: "OPEN",
-            mergeStateStatus: "CLEAN",
-            reviewDecision: "",
+            mergeVerdictRaw: "CLEAN",
+            reviewVerdictRaw: "",
             isDraft: false,
             requiredChecksPending: true
         )
@@ -1071,7 +1156,7 @@ struct PRStatusManagerTests {
     func reasonForRequiredFailingUnderUnstable() {
         let reason = PRStatusManager.computeReason(
             ghState: "OPEN",
-            mergeStateStatus: "UNSTABLE",
+            mergeVerdictRaw: "UNSTABLE",
             requiredChecksFailing: true
         )
         #expect(reason == "Checks failing")
@@ -1081,8 +1166,8 @@ struct PRStatusManagerTests {
     func reasonForRequiredPendingUnderBlocked() {
         let reason = PRStatusManager.computeReason(
             ghState: "OPEN",
-            mergeStateStatus: "BLOCKED",
-            reviewDecision: "REVIEW_REQUIRED",
+            mergeVerdictRaw: "BLOCKED",
+            reviewVerdictRaw: "REVIEW_REQUIRED",
             requiredChecksPending: true
         )
         #expect(reason == "Checks pending")
@@ -1092,8 +1177,8 @@ struct PRStatusManagerTests {
     func reasonForChangesRequested() {
         let reason = PRStatusManager.computeReason(
             ghState: "OPEN",
-            mergeStateStatus: "BLOCKED",
-            reviewDecision: "CHANGES_REQUESTED",
+            mergeVerdictRaw: "BLOCKED",
+            reviewVerdictRaw: "CHANGES_REQUESTED",
             isDraft: false
         )
         #expect(reason == "Changes requested")
@@ -1103,8 +1188,8 @@ struct PRStatusManagerTests {
     func reasonForReviewRequired() {
         let reason = PRStatusManager.computeReason(
             ghState: "OPEN",
-            mergeStateStatus: "BLOCKED",
-            reviewDecision: "REVIEW_REQUIRED",
+            mergeVerdictRaw: "BLOCKED",
+            reviewVerdictRaw: "REVIEW_REQUIRED",
             isDraft: false
         )
         // REVIEW_REQUIRED with passing checks is actually mergeable (green), never shows a red/yellow warning
@@ -1117,8 +1202,8 @@ struct PRStatusManagerTests {
     func stateAndReasonBlockedReviewRequiredMergeable() {
         let (state, reason) = PRStatusManager.mapStateAndReason(
             ghState: "OPEN",
-            mergeStateStatus: "BLOCKED",
-            reviewDecision: "REVIEW_REQUIRED"
+            mergeVerdictRaw: "BLOCKED",
+            reviewVerdictRaw: "REVIEW_REQUIRED"
         )
         #expect(state == .mergeable)
         #expect(reason == "Ready to merge")
@@ -1128,7 +1213,7 @@ struct PRStatusManagerTests {
     func stateAndReasonUnstableNilChecksMergeable() {
         let (state, reason) = PRStatusManager.mapStateAndReason(
             ghState: "OPEN",
-            mergeStateStatus: "UNSTABLE"
+            mergeVerdictRaw: "UNSTABLE"
         )
         #expect(state == .mergeable)
         #expect(reason == "Ready to merge")
@@ -1138,7 +1223,7 @@ struct PRStatusManagerTests {
     func stateAndReasonCleanMergeable() {
         let (state, reason) = PRStatusManager.mapStateAndReason(
             ghState: "OPEN",
-            mergeStateStatus: "CLEAN"
+            mergeVerdictRaw: "CLEAN"
         )
         #expect(state == .mergeable)
         #expect(reason == "Ready to merge")
@@ -1148,7 +1233,7 @@ struct PRStatusManagerTests {
     func stateAndReasonDirtyConflicts() {
         let (state, reason) = PRStatusManager.mapStateAndReason(
             ghState: "OPEN",
-            mergeStateStatus: "DIRTY"
+            mergeVerdictRaw: "DIRTY"
         )
         #expect(state == .blocked)
         #expect(reason == "Merge conflicts")
@@ -1158,7 +1243,7 @@ struct PRStatusManagerTests {
     func stateAndReasonBehind() {
         let (state, reason) = PRStatusManager.mapStateAndReason(
             ghState: "OPEN",
-            mergeStateStatus: "BEHIND"
+            mergeVerdictRaw: "BEHIND"
         )
         #expect(state == .blocked)
         #expect(reason == "Behind base branch")
@@ -1473,8 +1558,8 @@ struct PRStatusManagerTests {
     /// Convenience PRNode factory for the matching tests.
     private func prNode(number: Int, url: String, branch: String, state: String = "OPEN",
                         createdAt: String = "2026-07-01T00:00:00Z") -> PRStatusManager.PRNode {
-        PRStatusManager.PRNode(number: number, url: url, state: state, mergeStateStatus: "CLEAN",
-                               reviewDecision: "", headRefName: branch, createdAt: createdAt,
+        PRStatusManager.PRNode(number: number, url: url, state: state, mergeVerdictRaw: "CLEAN",
+                               reviewVerdictRaw: "", headRefName: branch, createdAt: createdAt,
                                isDraft: false, statusCheckRollupState: nil, mergeQueuePosition: nil)
     }
 
@@ -2198,7 +2283,7 @@ private actor FakeGH {
     }
 
     func run(args: [String], repoPath: String) -> GHCommandResult? {
-        if args.first == "repo" { return GHCommandResult(stdout: "acme/acme-prod\n") }
+        if args.first == "repo" { return GHCommandResult(stdout: #"{"nameWithOwner":"acme/acme-prod","url":"https://github.com/acme/acme-prod"}"#) }
         guard let query = args.first(where: { $0.hasPrefix("query=") }) else { return nil }
         if query.contains("viewer {") {
             viewerQueries += 1
@@ -2559,5 +2644,196 @@ struct PRStatusManagerInvalidateReentrancyTests {
         // …and the invalidation itself still does what it always did.
         #expect(await manager.allStatuses()[wt] == nil)
         #expect(await manager.observation(for: wt) == nil)
+    }
+}
+
+/// A `gh repo view` whose answer a test can change between calls, so one test
+/// can watch a checkout go dark and come back.
+private actor RepoViewGH {
+    private var result: GHCommandResult?
+    private(set) var calls = 0
+
+    init(_ result: GHCommandResult?) { self.result = result }
+
+    func answer(_ next: GHCommandResult?) { result = next }
+
+    func run(_ args: [String]) -> GHCommandResult? {
+        calls += 1
+        return result
+    }
+}
+
+@Suite("PRStatusManager repo identity")
+struct PRStatusManagerRepoIdentityTests {
+
+    private static let forkRemote = "https://github.com/contributor/acme-prod.git"
+
+    /// gh's own wording when no remote names a host it speaks to — every GitLab
+    /// checkout, and the state the `origin` fallback exists for.
+    private static let disownment = """
+    none of the git remotes configured for this repository point to a known \
+    GitHub host. To tell gh about a new GitHub host, please use `gh auth login`
+    """
+
+    @Test("a transient gh failure defers rather than letting origin name the fork")
+    func transientGHFailureDefers() async {
+        // On a fork checkout gh resolves the PARENT repo — where the fork's
+        // pull requests live — while `origin` names the fork. A 401 is no
+        // evidence about which of those is right, and the answer would be
+        // cached for fifteen minutes, so the only safe reading is "ask again".
+        let gh = RepoViewGH(GHCommandResult(
+            stdout: "", stderr: "HTTP 401: Bad credentials (https://api.github.com/graphql)",
+            exitStatus: 1))
+        let manager = PRStatusManager(
+            ghRunner: { args, _ in await gh.run(args) },
+            remoteURLReader: { _ in Self.forkRemote })
+
+        #expect(await manager.repoIdentity(repoPath: "/wt/acme-prod") == nil)
+
+        // A deferral is never cached, so the next attempt gets gh's answer —
+        // the parent, not the fork.
+        await gh.answer(GHCommandResult(
+            stdout: #"{"nameWithOwner":"acme/acme-prod","url":"https://github.com/acme/acme-prod"}"#))
+        let healed = await manager.repoIdentity(repoPath: "/wt/acme-prod")
+        #expect(healed?.owner == "acme")
+        #expect(healed?.name == "acme-prod")
+        #expect(healed?.host == "github.com")
+    }
+
+    @Test("only gh disowning the checkout lets the origin remote name it")
+    func onlyDisownmentLicensesTheRemoteParse() async {
+        let gitLabRemote = "git@git.acme.example:acme/platform/api-gateway.git"
+        let disowned = PRStatusManager(
+            ghRunner: { _, _ in GHCommandResult(stdout: "", stderr: Self.disownment, exitStatus: 1) },
+            remoteURLReader: { _ in gitLabRemote })
+
+        let identity = await disowned.repoIdentity(repoPath: "/wt/api-gateway")
+        #expect(identity?.host == "git.acme.example")
+        #expect(identity?.owner == "acme/platform")
+        #expect(identity?.name == "api-gateway")
+
+        // The same checkout and the same remote, behind a failure that says
+        // nothing about either: no identity at all rather than a guessed one.
+        let refused = PRStatusManager(
+            ghRunner: { _, _ in
+                GHCommandResult(stdout: "", stderr: "error connecting to api.github.com",
+                                exitStatus: 1)
+            },
+            remoteURLReader: { _ in gitLabRemote })
+        #expect(await refused.repoIdentity(repoPath: "/wt/api-gateway") == nil)
+
+        // And the GitLab-only fleet with no `gh` installed at all: nobody to
+        // ask, on this checkout or any other, so the remote speaks.
+        let absent = PRStatusManager(
+            ghRunner: { _, _ in nil },
+            remoteURLReader: { _ in gitLabRemote })
+        #expect(await absent.repoIdentity(repoPath: "/wt/api-gateway")?.host == "git.acme.example")
+    }
+
+    @Test("a gh holding no credentials at all cannot speak for any checkout")
+    func unauthenticatedGHLicensesTheRemoteParse() async {
+        // gh runs its auth check BEFORE it resolves a base repo, so a gh that
+        // is installed but never logged in NEVER emits the disownment message
+        // — not on a GitLab remote, not on any remote. It exits 4 with the
+        // login prompt instead. Reading that as transient left a GitLab-only
+        // developer with an unused gh unable to name their repo on any tick,
+        // which is the whole GitLab path.
+        let gitLabRemote = "git@git.acme.example:acme/platform/api-gateway.git"
+        let loginPrompt = """
+        To get started with GitHub CLI, please run:  gh auth login
+        Alternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token.
+        """
+        let unauthenticated = PRStatusManager(
+            ghRunner: { _, _ in GHCommandResult(stdout: "", stderr: loginPrompt, exitStatus: 4) },
+            remoteURLReader: { _ in gitLabRemote })
+
+        let identity = await unauthenticated.repoIdentity(repoPath: "/wt/api-gateway")
+        #expect(identity?.host == "git.acme.example")
+        #expect(identity?.owner == "acme/platform")
+        #expect(identity?.name == "api-gateway")
+
+        // The exit code is what settles it, not the wording: gh's own
+        // `exitAuth` means "no credentials anywhere", while a REJECTED
+        // credential is exit 1 and stays transient. A stderr whitelist would
+        // have to guess which is which, so an unrecognised failure carrying
+        // the same words still defers rather than renaming a fork.
+        let rejected = PRStatusManager(
+            ghRunner: { _, _ in GHCommandResult(stdout: "", stderr: loginPrompt, exitStatus: 1) },
+            remoteURLReader: { _ in gitLabRemote })
+        #expect(await rejected.repoIdentity(repoPath: "/wt/api-gateway") == nil)
+
+        // …and the same credential-less gh over a `github.com` remote names
+        // NOTHING. gh would have been the authoritative source for that host —
+        // on a fork it names the parent while `origin` names the fork — so its
+        // silence about the machine is not licence for `origin` to answer.
+        let onGitHub = PRStatusManager(
+            ghRunner: { _, _ in GHCommandResult(stdout: "", stderr: loginPrompt, exitStatus: 4) },
+            remoteURLReader: { _ in Self.forkRemote })
+        #expect(await onGitHub.repoIdentity(repoPath: "/wt/acme-prod") == nil)
+    }
+
+    @Test("a credential-less gh cannot let a fork's origin clear its parent's cached PR")
+    func unauthenticatedGHDoesNotPoisonAForkCheckout() async {
+        // The reason the parse is withheld for `github.com`, stated as the
+        // damage it would do rather than as a preference. `poisonedCacheEntries`
+        // judges an entry cross-repo when BOTH sides resolved; a fork identity
+        // read off `origin` makes the parent's pull request — where a fork's
+        // pull requests actually live — look like another repo's, and the clear
+        // is persisted, so a restart cannot bring it back.
+        let wt = UUID()
+        let manager = PRStatusManager(
+            ghRunner: { _, _ in
+                GHCommandResult(stdout: "",
+                                stderr: "To get started with GitHub CLI, please run:  gh auth login",
+                                exitStatus: 4)
+            },
+            remoteURLReader: { _ in Self.forkRemote })
+        await manager.seedForTesting(
+            worktreeID: wt,
+            status: PRStatus(number: 412, url: "https://github.com/acme/acme-prod/pull/412",
+                             state: .mergeable))
+        let recorder = PersistedClearRecorder()
+        await manager.setOnStatusPersist { id, status in
+            await recorder.record(id, isClear: status == nil)
+        }
+
+        let outcome = await manager.fetchAll(worktrees: [Self.pollWorktree(wt)])
+
+        #expect(await manager.allStatuses()[wt]?.number == 412)
+        #expect(await recorder.clears.isEmpty)
+        #expect(outcome.disproved.isEmpty)
+    }
+
+    @Test("a hostless remote cannot fabricate an identity that clears a cached PR")
+    func hostlessRemoteDoesNotPoisonTheCache() async {
+        // `poisonedCacheEntries` clears a cached PR whose repo differs from the
+        // worktree's own, on the premise that both sides are KNOWN. An identity
+        // invented out of a local path's first segments makes every cached PR
+        // look cross-repo — and the clear is persisted, so a restart cannot
+        // bring it back.
+        let wt = UUID()
+        let manager = PRStatusManager(
+            ghRunner: { _, _ in nil },
+            remoteURLReader: { _ in "file:///Users/me/acme-prod.git" })
+        await manager.seedForTesting(
+            worktreeID: wt,
+            status: PRStatus(number: 412, url: "https://github.com/acme/acme-prod/pull/412",
+                             state: .mergeable))
+        let recorder = PersistedClearRecorder()
+        await manager.setOnStatusPersist { id, status in
+            await recorder.record(id, isClear: status == nil)
+        }
+
+        let outcome = await manager.fetchAll(worktrees: [Self.pollWorktree(wt)])
+
+        #expect(await manager.allStatuses()[wt]?.number == 412)
+        #expect(await recorder.clears.isEmpty)
+        // Nor may the heal report a binding it never disproved.
+        #expect(outcome.disproved.isEmpty)
+    }
+
+    private static func pollWorktree(_ id: UUID) -> PRStatusManager.PollWorktree {
+        (id: id, branch: "tbd/my-branch", upstreamBranch: "main", defaultBranch: "main",
+         pushBranch: .noPushDestination, worktreePath: "/wt/acme-prod", prNumber: nil)
     }
 }

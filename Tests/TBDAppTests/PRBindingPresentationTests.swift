@@ -82,6 +82,48 @@ struct PRBindingPresentationTests {
         #expect(PRBindingPresentation.menuRows(bindings).map(\.number) == [412])
     }
 
+    // MARK: - Per-binding wording versus aggregate wording
+
+    private func gitLabBinding(_ n: Int) -> PRBinding {
+        let url = "https://git.acme.example/acme/platform/api-gateway/-/merge_requests/\(n)"
+        return PRBinding(worktreeID: UUID(), host: "git.acme.example",
+                         owner: "acme/platform", repo: "api-gateway",
+                         number: n, url: url,
+                         status: PRStatus(number: n, url: url, state: .mergeable),
+                         source: .hook)
+    }
+
+    @Test("a lone GitLab binding is described in GitLab's own syntax")
+    func gitLabSplitButtonHelp() {
+        let help = ContentView.prSplitButtonHelp(
+            bindings: [gitLabBinding(412)], armed: false, hibernateArmed: false, blocked: false)
+        #expect(help.hasPrefix("Open MR !412"))
+        #expect(!help.contains("PR #"))
+    }
+
+    /// The reason aggregates stay neutral: one worktree can hold a GitHub PR
+    /// and a GitLab MR at once, and no single vocabulary is true of both.
+    @Test("a worktree spanning both forges keeps neutral aggregate wording")
+    func mixedForgeAggregateStaysNeutral() {
+        let help = ContentView.prSplitButtonHelp(
+            bindings: [binding(412, .mergeable), gitLabBinding(7)],
+            armed: false, hibernateArmed: false, blocked: false)
+        #expect(help.hasPrefix("2 pull requests"))
+        #expect(!help.contains("MR !"))
+        // And the count label, which the same set feeds.
+        #expect(PRBindingPresentation.buttonLabel(
+            [binding(412, .mergeable), gitLabBinding(7)]) == "2 PRs")
+    }
+
+    @Test("a status-bar chip carries its binding's own forge vocabulary")
+    func chipRefLabelPerForge() {
+        let chips = StatusBarView.prChips([binding(412, .mergeable), gitLabBinding(7)]).chips
+        #expect(chips.map(\.refLabel) == ["PR #412", "MR !7"])
+        // The visible chip text stays the bare number on both forges — only the
+        // tooltip, which names the thing in words, speaks a dialect.
+        #expect(chips.map(\.label) == ["#412", "#7"])
+    }
+
     @Test("several bindings never get a primary action")
     func noPrimaryActionForSeveral() {
         let bindings = [binding(412, url: "https://github.com/acme/acme-prod/pull/412"),

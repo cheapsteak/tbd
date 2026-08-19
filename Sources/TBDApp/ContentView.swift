@@ -484,8 +484,10 @@ struct ContentView: View {
             // when there IS one — a lone binding whose URL will not parse gets
             // named, not offered.
             clauses.append(prPrimaryActionURL(bindings) == nil
-                           ? "PR #\(bindings[0].number)"
-                           : "Open PR #\(bindings[0].number)")
+                           ? bindings[0].refLabel
+                           : "Open \(bindings[0].refLabel)")
+        // Neutral wording, deliberately: a worktree can hold bindings on both
+        // forges, so no single vocabulary would be true of the whole set.
         default: clauses.append("\(bindings.count) pull requests")
         }
         if armed && blocked {
@@ -1061,8 +1063,10 @@ struct PRButtonLabel: View {
     private var accessibilityLabel: String {
         var clauses: [String] = []
         switch bindings.count {
+        // The zero and several arms keep neutral wording — a worktree can span
+        // forges, so only the single-binding arm can speak one forge's dialect.
         case 0: clauses.append("No pull requests")
-        case 1: clauses.append("PR #\(bindings[0].number)")
+        case 1: clauses.append(bindings[0].refLabel)
         default: clauses.append("\(bindings.count) pull requests")
         }
         if isAutoArchiveArmed { clauses.append("auto-archive on merge is on") }

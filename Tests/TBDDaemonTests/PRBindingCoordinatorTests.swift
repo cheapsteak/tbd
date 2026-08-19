@@ -16,14 +16,23 @@ struct PRBindingCoordinatorTests {
         let coordinator: PRBindingCoordinator
         let repoID: UUID
 
-        init(repo: (owner: String, name: String)? = ("acme", "acme-prod")) async throws {
+        /// - Parameter gitLabHosts: the hosts the user configured `glab` for.
+        ///   Empty — the default — stands for every non-GitLab fleet at once:
+        ///   github.com, GitHub Enterprise, Bitbucket, Gitea, Codeberg. `nil` is
+        ///   the third answer, the state in which nothing could establish the
+        ///   worktree's forge at all.
+        init(repo: (owner: String, name: String, host: String)? =
+            ("acme", "acme-prod", "github.com"),
+             gitLabHosts: Set<String>? = []) async throws {
             db = try TBDDatabase(inMemory: true)
             let created = try await db.repos.create(
                 path: "/tmp/prbinding-coord-repo-\(UUID().uuidString)",
                 displayName: "acme-prod", defaultBranch: "main")
             repoID = created.id
             store = db.prBindings
-            coordinator = PRBindingCoordinator(store: store, resolveRepo: { _ in repo })
+            coordinator = PRBindingCoordinator(
+                store: store, resolveRepo: { _ in repo },
+                isGitLabHost: { _, host in gitLabHosts.map { $0.contains(host.lowercased()) } })
         }
 
         func newWorktree() async throws -> UUID {
@@ -53,7 +62,7 @@ struct PRBindingCoordinatorTests {
 
     @Test("rejects a PR belonging to a different repo")
     func rejectsWrongRepo() async throws {
-        let fixture = try await Fixture(repo: ("acme", "other-repo"))
+        let fixture = try await Fixture(repo: ("acme", "other-repo", "github.com"))
         let wt = try await fixture.newWorktree()
         let outcome = await fixture.coordinator.bind(worktreeID: wt, parsed: parsed, source: .hook)
         guard case .rejectedWrongRepo(let named) = outcome else {
@@ -65,8 +74,150 @@ struct PRBindingCoordinatorTests {
 
     @Test("repo comparison is case-insensitive")
     func repoCaseInsensitive() async throws {
-        let fixture = try await Fixture(repo: ("ACME", "ACME-PROD"))
+        let fixture = try await Fixture(repo: ("ACME", "ACME-PROD", "github.com"))
         let wt = try await fixture.newWorktree()
+        let outcome = await fixture.coordinator.bind(worktreeID: wt, parsed: parsed, source: .hook)
+        guard case .bound = outcome else {
+            Issue.record("expected .bound, got \(outcome)"); return
+        }
+    }
+
+    /// Extraction is the production source of every `ParsedPRURL` a hook or a
+    /// URL-shaped attach binds, so the host under test is the one the extractor
+    /// really reports rather than one this file made up.
+    private func parseOne(_ url: String) throws -> ParsedPRURL {
+        try #require(PRBindingExtractor.parsePRURLs(in: url).first)
+    }
+
+    /// The wrong-repo guard used to compare `owner`/`name` and nothing else,
+    /// which was inert only while every parsed URL was on `github.com`. Now that
+    /// a GitLab merge-request URL carries its own captured host, two different
+    /// projects that merely share an `owner/name` across two hosts would bind to
+    /// each other — and a foreign merge then satisfies `allResolved` and
+    /// auto-archives the worktree.
+    ///
+    /// Against the guard as it stood, both rows below returned `.bound` and
+    /// wrote a row.
+    @Test("rejects a merge request whose captured host is not the worktree's")
+    func rejectsRequestFromAnotherHost() async throws {
+        let cases: [(own: (owner: String, name: String, host: String), url: String, detail: String)] = [
+            // Cross-forge: the hole this closes.
+            (("acme", "acme-prod", "github.com"),
+             "https://git.acme.example/acme/acme-prod/-/merge_requests/412",
+             "git.acme.example/acme/acme-prod"),
+            // Same forge, two instances — one org name on two GitLab hosts.
+            (("acme", "acme-prod", "gitlab.acme.example"),
+             "https://git.other.example/acme/acme-prod/-/merge_requests/412",
+             "git.other.example/acme/acme-prod"),
+        ]
+        for testCase in cases {
+            let fixture = try await Fixture(repo: testCase.own)
+            let wt = try await fixture.newWorktree()
+            let parsed = try parseOne(testCase.url)
+            let outcome = await fixture.coordinator.bind(worktreeID: wt, parsed: parsed,
+                                                         source: .hook)
+            guard case .rejectedWrongRepo(let named) = outcome else {
+                Issue.record("expected .rejectedWrongRepo for \(testCase.url), got \(outcome)")
+                continue  // each row is an independent case; don't mask the second
+            }
+            // Owner and name agree here, so the rejection has to name the host
+            // or it reads as a repo rejecting itself.
+            #expect(named == testCase.detail)
+            #expect(try await fixture.store.list(worktreeID: wt, includeDetached: true).isEmpty)
+        }
+    }
+
+    /// The other half of the trade-off, and the reason the host check is not a
+    /// plain equality: `PRBindingExtractor`'s GitHub pattern is host-locked, so
+    /// `github.com` is a constant it supplies for every GitHub URL rather than
+    /// an observation about the forge. A GitHub Enterprise or self-hosted-mirror
+    /// checkout with the same `owner/name` may therefore still take such a URL,
+    /// which is what `RemoteRepoMatching` documents as a deliberately tolerated
+    /// collision.
+    ///
+    /// Neither host below is configured for `glab`, which is what makes them
+    /// *not* GitLab — the exemption survives on that answer, not on the shape of
+    /// their names. These two stand for every non-GitLab fleet off github.com:
+    /// GitHub Enterprise, Bitbucket, Gitea, Codeberg, and a mirror.
+    @Test("still binds a github.com URL to an enterprise or mirror checkout")
+    func bindsGitHubURLAgainstAnotherHostCheckout() async throws {
+        for host in ["ghe.acme.example", "git.acme.example"] {
+            let fixture = try await Fixture(repo: ("acme", "acme-prod", host))
+            let wt = try await fixture.newWorktree()
+            let outcome = await fixture.coordinator.bind(worktreeID: wt, parsed: parsed,
+                                                         source: .manual)
+            guard case .bound(let binding) = outcome else {
+                Issue.record("expected .bound on \(host), got \(outcome)"); continue
+            }
+            // The URL's host is what gets recorded — the binding is re-queried
+            // by `(host, owner, repo, number)` and must reach the real request.
+            #expect(binding.host == "github.com")
+        }
+    }
+
+    /// Where that exemption stops, and the collision it would otherwise leave
+    /// open. This worktree's host speaks GitLab, so its requests live there and
+    /// a `github.com` pull request sharing an `owner/name` is a different
+    /// project by construction. Binding it would poll a stranger's PR through
+    /// `gh` and let that stranger's merge auto-archive this worktree.
+    ///
+    /// Against the exemption as it stood — unconditional on any `github.com`
+    /// URL — this returned `.bound` and wrote a row.
+    @Test("rejects a github.com URL on a checkout whose own host speaks GitLab")
+    func rejectsGitHubURLAgainstGitLabCheckout() async throws {
+        let fixture = try await Fixture(repo: ("acme", "acme-prod", "gitlab.acme.example"),
+                                        gitLabHosts: ["gitlab.acme.example"])
+        let wt = try await fixture.newWorktree()
+        let outcome = await fixture.coordinator.bind(worktreeID: wt, parsed: parsed,
+                                                     source: .hook)
+        guard case .rejectedWrongRepo(let named) = outcome else {
+            Issue.record("expected .rejectedWrongRepo, got \(outcome)"); return
+        }
+        // Owner and name agree, so the rejection has to name the host.
+        #expect(named == "github.com/acme/acme-prod")
+        #expect(try await fixture.store.list(worktreeID: wt, includeDetached: true).isEmpty)
+    }
+
+    /// The third answer. A worktree whose forge nothing could establish gets no
+    /// binding invented for it: the two ways to be wrong are not symmetric, and
+    /// a deferral writes nothing and is retried on the next poll or attach,
+    /// while a bind can auto-archive this worktree on a stranger's merge.
+    @Test("defers a github.com URL when the checkout's forge cannot be determined")
+    func defersWhenForgeUndetermined() async throws {
+        let fixture = try await Fixture(repo: ("acme", "acme-prod", "git.acme.example"),
+                                        gitLabHosts: nil)
+        let wt = try await fixture.newWorktree()
+        let outcome = await fixture.coordinator.bind(worktreeID: wt, parsed: parsed,
+                                                     source: .hook)
+        guard case .deferredUnknownRepo = outcome else {
+            Issue.record("expected .deferredUnknownRepo, got \(outcome)"); return
+        }
+        #expect(try await fixture.store.list(worktreeID: wt, includeDetached: true).isEmpty)
+    }
+
+    /// A worktree already on the URL's own host never reaches the forge
+    /// question at all — the hosts are equal, so nothing is asked and no `glab`
+    /// subprocess could be spawned. Pinned because an undetermined forge now
+    /// defers, and a guard that asked first would turn every github.com bind
+    /// into a deferral wherever the answer is unavailable.
+    @Test("a matching host binds without consulting the forge")
+    func matchingHostSkipsForgeQuestion() async throws {
+        let fixture = try await Fixture(gitLabHosts: nil)
+        let wt = try await fixture.newWorktree()
+        let outcome = await fixture.coordinator.bind(worktreeID: wt, parsed: parsed, source: .hook)
+        guard case .bound = outcome else {
+            Issue.record("expected .bound, got \(outcome)"); return
+        }
+    }
+
+    /// Hostnames are case-insensitive, so a resolver that reports the host with
+    /// the casing `gh repo view`'s URL happened to use must not reject an
+    /// otherwise identical merge request. Comparing the raw strings fails here.
+    @Test("host comparison is case-insensitive")
+    func hostCaseInsensitive() async throws {
+        let fixture = try await Fixture(repo: ("acme", "acme-prod", "Git.ACME.Example"))
+        let wt = try await fixture.newWorktree()
+        let parsed = try parseOne("https://git.acme.example/acme/acme-prod/-/merge_requests/412")
         let outcome = await fixture.coordinator.bind(worktreeID: wt, parsed: parsed, source: .hook)
         guard case .bound = outcome else {
             Issue.record("expected .bound, got \(outcome)"); return

@@ -31,6 +31,20 @@ enum PRUndeterminedCause {
     /// truncated or malformed blob. Not the absence of a record: an attempt was
     /// made, and only what it concluded is lost.
     static let unreadableRecord = "the recorded outcome could not be read"
+    /// The CLI ran and reached the host, which refused the credentials. Named
+    /// separately from `cliUnavailable` because the remedy differs: a token
+    /// expired, and only re-authenticating that specific host fixes it. A
+    /// personal access token has no refresh, so a host that answered yesterday
+    /// starts refusing today — and letting that read as "there is no merge
+    /// request here" is the silent degradation this whole vocabulary exists to
+    /// prevent.
+    ///
+    /// The host is the one piece of forge detail this vocabulary does carry,
+    /// and deliberately: the remedy is `glab auth login --hostname <host>`, so
+    /// a report that withheld the host would name a fix nobody could apply.
+    static func forgeAuthFailed(host: String) -> String {
+        "the forge rejected the credentials for \(host)"
+    }
 }
 
 /// In-memory cache of GitHub PR status per worktree.
@@ -89,7 +103,7 @@ public actor PRStatusManager {
     /// one repo) sharing an entry is the cache working, not a collision. Entries
     /// are only ever added and expire on time; nothing prunes by row, so no
     /// worktree can evict another's.
-    private var ownerRepoCache: [String: (value: (owner: String, name: String), expiry: Date)] = [:]
+    private var ownerRepoCache: [String: (value: (owner: String, name: String, host: String), expiry: Date)] = [:]
 
     /// Reentrancy guard: a previous poll still running means a new `fetchAll` is skipped
     /// so two generations of batch data can't interleave their cache writes.
@@ -130,6 +144,109 @@ public actor PRStatusManager {
 
     private let ghRunner: GHRunner?
 
+    /// Behavior seam for the `glab` subprocess, mirroring `ghRunner`. Nil means
+    /// "shell out to the real `glab`"; a test injects one so the whole GitLab
+    /// path runs with no binary, no credentials and no network.
+    private let glRunner: GLRunner?
+
+    /// Hosts known to speak GitLab, stated outright. Tests pass the set
+    /// directly so the resolver — and the `glab auth status` subprocess behind
+    /// it — stays out of the loop; production leaves it empty and lets
+    /// `gitLabHostResolver` answer.
+    private let gitLabHosts: Set<String>
+
+    /// Production's answer to "is this host GitLab?", read from what the user
+    /// already told `glab`. Nil in the injecting init: a test that hands over
+    /// `gitLabHosts` has stated the whole answer, and consulting a resolver
+    /// behind its back would spawn `glab auth status` from a unit test.
+    private let gitLabHostResolver: GitLabHostResolver?
+
+    /// Single-flight admission for the detached GitLab mergeability recheck,
+    /// keyed by the project it is issued against.
+    ///
+    /// The recheck is deliberately fire-and-forget — nothing in the pass reads
+    /// its answer, so nothing in the pass may wait for it — but detaching it
+    /// removed the only thing that used to bound it. A detached task inherits
+    /// no cancellation, so without a bound a hung endpoint accumulated one
+    /// `glab`, one `Process` and its file descriptors per project per tick,
+    /// without limit: ~288 of them overnight at a five-minute cadence. A forge
+    /// CLI subprocess is covered by no reconciler — `AgentReaper` reaps agent
+    /// processes, not these — so the bound has to be here, at the only place
+    /// that creates one.
+    ///
+    /// This gate is half of that bound and answers "how many": a project with
+    /// a recheck outstanding issues no second one, so a tick cannot multiply a
+    /// stuck endpoint. `recheckTimeout` is the other half and answers "for how
+    /// long": the detached call is raced against that deadline and the child is
+    /// terminated when it fires, so no recheck is outstanding forever. Both are
+    /// needed — the gate alone leaves one process per project pinned for the
+    /// life of the daemon, and the deadline alone still admits a new process
+    /// per tick until it fires.
+    private actor GitLabRecheckGate {
+        private var outstanding: Set<String> = []
+
+        /// True for the caller that may issue the recheck for `key`; false when
+        /// one is still outstanding for that project.
+        func admit(_ key: String) -> Bool { outstanding.insert(key).inserted }
+
+        func finish(_ key: String) { outstanding.remove(key) }
+    }
+
+    /// `let` of a `Sendable` type, so the `nonisolated` GitLab paths reach it
+    /// without hopping onto this actor.
+    private let gitLabRecheckGate = GitLabRecheckGate()
+
+    /// How long a detached mergeability recheck may run before its `glab` is
+    /// terminated.
+    ///
+    /// Generous on purpose: the call exists to queue work on someone else's
+    /// server, so a slow instance must be allowed to finish rather than be
+    /// killed and retried on the next tick. What the deadline rules out is the
+    /// unbounded case — a process nothing ever ends, which no sweep would
+    /// reclaim either.
+    static let recheckTimeout: Duration = .seconds(60)
+
+    /// How long a forge CLI child is given to exit on its own after SIGTERM
+    /// before it is killed outright.
+    ///
+    /// `terminate()` is a request, not an outcome: a child that installs a
+    /// handler, ignores the signal, or sits in an uninterruptible state simply
+    /// stays — and `runGLBounded`'s task group awaits it before returning, so
+    /// the recheck task and that project's single-flight gate would both stay
+    /// wedged past `recheckTimeout` on a bound that only looks like one.
+    /// SIGKILL is what makes the deadline a deadline.
+    ///
+    /// Short, because everything the grace protects is already being
+    /// discarded: the deadline has fired and nobody will read this child's
+    /// output. Its only job is to let a well-behaved `glab` close its
+    /// connection and exit on its own rather than be killed for being a moment
+    /// slow about it.
+    static let childKillGrace: Duration = .seconds(5)
+
+    /// Clock seam for that deadline — existential, defaulted, and last, so no
+    /// call site changes and this actor's `Sendable` conformances are not
+    /// infected by a generic parameter. `Duration` is behavior, `Date` is data:
+    /// the deadline sleeps, so it takes a clock, while `now` above stamps facts
+    /// that get persisted and compared, so it stays a date seam.
+    private let clock: any Clock<Duration>
+
+    /// The last authentication refusal observed per forge host, lowercased.
+    ///
+    /// Keyed by host rather than by worktree or binding because that is the
+    /// scope of both the fault and its remedy: one expired token silences every
+    /// project on that instance at once, and one `glab auth login` restores
+    /// them all. Cleared the moment a call to that host succeeds.
+    private var forgeAuthFailures: [String: String] = [:]
+
+    /// Behavior seam for reading a checkout's `origin` remote URL — the second
+    /// identity source, used only when `gh` cannot name the repo, which is
+    /// every checkout on a host `gh` does not speak to. Production leaves it
+    /// nil and runs `GitManager`; the injecting init defaults it to "no
+    /// remote", so a test that stubs `gh` never spawns a `git` subprocess.
+    typealias RemoteURLReader = @Sendable (_ repoPath: String) async -> String?
+
+    private let remoteURLReader: RemoteURLReader?
+
     /// Date seam for the observed-at this actor *stamps* on the facts it
     /// records — `PRStatus.observedAt` and `PRObservation.observedAt`. Both are
     /// persisted and later compared to age a cache, so they are data, and take
@@ -137,13 +254,36 @@ public actor PRStatusManager {
     /// data). This actor schedules nothing, so it has no clock at all.
     private let now: @Sendable () -> Date
 
-    public init(now: @escaping @Sendable () -> Date = { Date() }) {
+    public init(now: @escaping @Sendable () -> Date = { Date() },
+                clock: any Clock<Duration> = ContinuousClock()) {
+        self.clock = clock
         self.ghRunner = nil
+        self.remoteURLReader = nil
+        self.glRunner = nil
+        self.gitLabHosts = []
+        // The resolver needs a runner of its own: it is constructed here, before
+        // any instance exists to capture, so it gets the static `glab` spawner
+        // rather than `runGLResult`.
+        self.gitLabHostResolver = GitLabHostResolver(glRunner: { args, repoPath in
+            await PRStatusManager.runGlab(args: args, repoPath: repoPath, clock: clock)
+        }, now: now)
         self.now = now
     }
 
-    init(ghRunner: @escaping GHRunner, now: @escaping @Sendable () -> Date = { Date() }) {
+    /// `glRunner` and `gitLabHosts` are defaulted so every existing call site
+    /// stays a GitHub-only manager that can never spawn `glab`.
+    init(ghRunner: @escaping GHRunner,
+         glRunner: GLRunner? = nil,
+         gitLabHosts: Set<String> = [],
+         remoteURLReader: @escaping RemoteURLReader = { _ in nil },
+         now: @escaping @Sendable () -> Date = { Date() },
+         clock: any Clock<Duration> = ContinuousClock()) {
+        self.clock = clock
         self.ghRunner = ghRunner
+        self.glRunner = glRunner
+        self.gitLabHosts = Set(gitLabHosts.map { $0.lowercased() })
+        self.gitLabHostResolver = nil
+        self.remoteURLReader = remoteURLReader
         self.now = now
     }
 
@@ -250,6 +390,72 @@ public actor PRStatusManager {
     /// runner counts as available: it is what stands in for the binary.
     private var forgeCLIAvailable: Bool {
         ghRunner != nil || Self.resolvedGHPath != nil
+    }
+
+    /// The same question for `glab`. `nonisolated` because the GitLab fetch
+    /// paths are, and it reads only immutable state.
+    private nonisolated var gitLabCLIAvailable: Bool {
+        glRunner != nil || Self.resolvedGlabPath != nil
+    }
+
+    /// Whether this host speaks GitLab.
+    ///
+    /// An injected set is the whole answer when there is one, so a test never
+    /// reaches the resolver; production injects nothing and the resolver reads
+    /// `glab auth status` (cached, and short-circuited for github.com before
+    /// any subprocess).
+    ///
+    /// Reachable from outside this actor because `RPCRouter` composes a URL for
+    /// `tbd pr attach <number>`, the one path with no URL to read the forge
+    /// from, and a hostname's shape is not an acceptable substitute for this
+    /// answer.
+    nonisolated func isGitLabHost(_ host: String, repoPath: String) async -> Bool {
+        if gitLabHosts.contains(host.lowercased()) { return true }
+        guard let gitLabHostResolver else { return false }
+        return await gitLabHostResolver.isGitLabHost(host, repoPath: repoPath)
+    }
+
+    /// The credential refusal last observed for a host, or nil if its most
+    /// recent call succeeded. The report is per host because the fault is:
+    /// every project on that instance goes dark together.
+    public func lastUndeterminedCause(forHost host: String) -> String? {
+        forgeAuthFailures[host.lowercased()]
+    }
+
+    /// Record — or, on `failed: false`, retract — a host's credential refusal.
+    /// A single successful call is proof the token works again, which is the
+    /// only evidence this actor ever accepts for authentication (never status
+    /// text; see `GitLabHostResolver`).
+    private func setForgeAuthFailure(_ failed: Bool, host: String) {
+        let key = host.lowercased()
+        if failed {
+            forgeAuthFailures[key] = PRUndeterminedCause.forgeAuthFailed(host: host)
+        } else {
+            forgeAuthFailures.removeValue(forKey: key)
+        }
+    }
+
+    /// Report a host's credential refusal as a per-worktree `PRObservation` —
+    /// the fact `pr.list` already carries to the sidebar and its tooltip, and
+    /// the same rail the branch-match path reports an auth failure on.
+    ///
+    /// Without this the binding path — the main path once a GitLab worktree has
+    /// a binding — keeps every chip at its last value with nothing anywhere
+    /// saying why. Keeping the values is right; an expired token proves nothing
+    /// about the merge requests. Saying nothing about them is the gap.
+    ///
+    /// Deliberately narrow: only the credential refusal is reported, not every
+    /// failure class. A query that failed once is reconfirmed by the next tick,
+    /// whereas a personal access token has no refresh — once it expires, every
+    /// later tick refuses too and nothing else will ever surface it. Reporting
+    /// the transient classes here would also relabel a worktree whose other
+    /// bindings, on another host, were read perfectly well this pass.
+    private func reportAuthFailure(host: String, bindings: [PRBinding]) async {
+        let cause = PRUndeterminedCause.forgeAuthFailed(host: host)
+        let observedAt = now()
+        for worktreeID in Set(bindings.map(\.worktreeID)) {
+            await record(.undetermined(cause: cause), for: worktreeID, at: observedAt)
+        }
     }
 
     /// Record one attempt's outcome and persist it — unless a newer attempt is
@@ -470,14 +676,27 @@ public actor PRStatusManager {
         /// rather than collapsed to a Bool so an unnumbered worktree's
         /// `.undetermined` names what actually went wrong.
         var batchFailureCause = PRUndeterminedCause.queryFailed
+        /// Which unnumbered worktrees are on a GitLab host, which of those a
+        /// project query actually answered for, and — for the ones it matched —
+        /// whether their project gates merges on the pipeline. The GitLab side
+        /// is judged per project rather than by one fleet-wide batch, so
+        /// `batchSucceeded` cannot speak for it.
+        var gitLabUnnumberedIDs: Set<UUID> = []
+        var gitLabAnsweredIDs: Set<UUID> = []
+        // Keyed only where the project said; see `fetchGitLabBranchMatches`.
+        var gitLabPipelineGated: [UUID: Bool] = [:]
+        var gitLabFailureCause = PRUndeterminedCause.queryFailed
         if !unnumbered.isEmpty {
             // Resolve each unnumbered worktree's own repo once, mirroring the
             // numbered path's `resolved` dictionary. TTL-cached, so the poll
             // doesn't spawn a `gh repo view` subprocess per worktree per tick.
+            // The host rides along because it is what decides which forge to ask.
             var unnumberedRepos: [String: (owner: String, name: String)] = [:]
+            var unnumberedHosts: [String: String] = [:]
             for path in Set(unnumbered.map(\.worktreePath)) {
                 if let ownerRepo = await cachedNameWithOwner(repoPath: path) {
-                    unnumberedRepos[path] = ownerRepo
+                    unnumberedRepos[path] = (owner: ownerRepo.owner, name: ownerRepo.name)
+                    unnumberedHosts[path] = ownerRepo.host
                 } else {
                     logger.debug("fetchAll: could not resolve owner/name for unnumbered worktree at \(path, privacy: .public)")
                 }
@@ -512,21 +731,50 @@ public actor PRStatusManager {
                 poisoned.map { (worktreeID: $0.worktreeID, url: $0.cachedURL) },
                 context: "cross-repo heal")
 
-            if let jsonData = await runGHGraphQL(repoPath: repoPath) {
-                if let nodes = try? Self.parsePRNodes(from: jsonData) {
-                    batchSucceeded = true   // empty nodes is still a valid answer (viewer has no PRs)
-                    let branchMatches = Self.matchUnnumbered(unnumbered, nodes: nodes,
-                                                             resolveRepo: { unnumberedRepos[$0] })
-                    branchMatchedIDs.formUnion(branchMatches.map(\.worktreeID))
-                    matches += branchMatches
+            // Split the by-branch path by forge. A worktree whose repo would
+            // not name itself has no host either, so it stays on the GitHub
+            // side — the pre-GitLab behavior, where it simply matches nothing.
+            var gitLabPaths: Set<String> = []
+            for (path, host) in unnumberedHosts where await isGitLabHost(host, repoPath: path) {
+                gitLabPaths.insert(path)
+            }
+            let gitLabUnnumbered = unnumbered.filter { gitLabPaths.contains($0.worktreePath) }
+            let gitHubUnnumbered = unnumbered.filter { !gitLabPaths.contains($0.worktreePath) }
+            gitLabUnnumberedIDs = Set(gitLabUnnumbered.map(\.id))
+
+            // The viewer batch is GitHub's only branch-matching route, and it is
+            // skipped outright when no worktree is on GitHub — a GitLab-only
+            // fleet never spawns `gh`.
+            if !gitHubUnnumbered.isEmpty {
+                if let jsonData = await runGHGraphQL(repoPath: repoPath) {
+                    if let nodes = try? Self.parsePRNodes(from: jsonData) {
+                        batchSucceeded = true   // empty nodes is still a valid answer (viewer has no PRs)
+                        let branchMatches = Self.matchUnnumbered(gitHubUnnumbered, nodes: nodes,
+                                                                 resolveRepo: { unnumberedRepos[$0] })
+                        branchMatchedIDs.formUnion(branchMatches.map(\.worktreeID))
+                        matches += branchMatches
+                    } else {
+                        logger.warning("Failed to parse GraphQL response")
+                        batchFailureCause = PRUndeterminedCause.unparseableResponse
+                    }
                 } else {
-                    logger.warning("Failed to parse GraphQL response")
-                    batchFailureCause = PRUndeterminedCause.unparseableResponse
+                    batchFailureCause = forgeCLIAvailable
+                        ? PRUndeterminedCause.queryFailed
+                        : PRUndeterminedCause.cliUnavailable
                 }
-            } else {
-                batchFailureCause = forgeCLIAvailable
-                    ? PRUndeterminedCause.queryFailed
-                    : PRUndeterminedCause.cliUnavailable
+            }
+
+            // GitLab asks the server for the branches instead, one query per
+            // project — author-blind, so a merge request opened through the web
+            // UI or by a teammate is found, which the viewer batch can never do.
+            if !gitLabUnnumbered.isEmpty {
+                let gitLab = await fetchGitLabBranchMatches(
+                    gitLabUnnumbered, repos: unnumberedRepos, hosts: unnumberedHosts)
+                branchMatchedIDs.formUnion(gitLab.matches.map(\.worktreeID))
+                matches += gitLab.matches
+                gitLabAnsweredIDs = gitLab.answeredIDs
+                gitLabPipelineGated = gitLab.pipelineGated
+                gitLabFailureCause = gitLab.failureCause
             }
         }
 
@@ -534,8 +782,15 @@ public actor PRStatusManager {
         // whose cached status still carries a PR number — resolve those by
         // number (one extra aliased round trip, only when such worktrees
         // exist). See `cachedNumberFallback` for the gating rationale.
+        //
+        // GitHub worktrees only: both this fallback and the head-ref
+        // verification below resolve their numbers through the `gh` by-number
+        // query, which would offer a GitLab project path to GitHub. A GitLab
+        // worktree therefore keeps its cached status when the branch query
+        // leaves it unmatched, which is the conservative direction.
+        let gitHubUnnumberedEntries = unnumbered.filter { !gitLabUnnumberedIDs.contains($0.id) }
         let fallback = Self.cachedNumberFallback(
-            unnumbered: unnumbered,
+            unnumbered: gitHubUnnumberedEntries,
             matchedIDs: Set(matches.map(\.worktreeID)),
             batchSucceeded: batchSucceeded,
             cachedStatus: { cache[$0] })
@@ -577,7 +832,7 @@ public actor PRStatusManager {
         // numbers a second time in the same tick would buy nothing. They are
         // retried on the next poll like any other unresolved entry.
         let verificationTargets = Self.headRefVerificationTargets(
-            unnumbered: unnumbered,
+            unnumbered: gitHubUnnumberedEntries,
             matchedIDs: Set(matches.map(\.worktreeID)).union(fallback.map(\.id)),
             batchSucceeded: batchSucceeded,
             verifiedIDs: headRefVerifiedIDs,
@@ -604,7 +859,10 @@ public actor PRStatusManager {
             for match in matches {
                 let node = match.node
                 let id = match.worktreeID
-                if node.state != "OPEN" || !Self.aggregateRollupIsNonSuccess(node.statusCheckRollupState) {
+                // A GitLab node carried its pipeline status in the same batch,
+                // so it never pays for GitHub's per-request check query.
+                if node.forge != .github || node.state != "OPEN"
+                    || !Self.aggregateRollupIsNonSuccess(node.statusCheckRollupState) {
                     group.addTask { (id, (failing: false, pending: false)) }
                 } else {
                     group.addTask {
@@ -635,12 +893,18 @@ public actor PRStatusManager {
                 signals = Self.aggregateFallbackSignals(match.node.statusCheckRollupState)
             }
             let (state, reason) = Self.mapStateAndReason(
+                forge: match.node.forge,
                 ghState: match.node.state,
-                mergeStateStatus: match.node.mergeStateStatus,
-                reviewDecision: match.node.reviewDecision,
+                mergeVerdictRaw: match.node.mergeVerdictRaw,
+                reviewVerdictRaw: match.node.reviewVerdictRaw,
                 isDraft: match.node.isDraft,
                 requiredChecksFailing: signals.failing,
-                requiredChecksPending: signals.pending
+                requiredChecksPending: signals.pending,
+                // Absent means the project never said, which the mapper reads
+                // as gated. A GitHub match is absent too and its arm ignores
+                // the value entirely.
+                pipelineGated: gitLabPipelineGated[match.worktreeID],
+                pipelineStatus: match.node.statusCheckRollupState
             )
             let status = PRStatus(number: match.node.number, url: match.node.url, state: state, reason: reason,
                                   mergeQueuePosition: match.node.mergeQueuePosition,
@@ -668,8 +932,17 @@ public actor PRStatusManager {
             outcomes[wt.id] = .undetermined(cause: PRUndeterminedCause.queryFailed)
         }
         for wt in unnumbered where outcomes[wt.id] == nil && !directRefreshLanded(wt.id, after: batchStartedAt) {
-            outcomes[wt.id] = batchSucceeded ? PRObservation.Outcome.none
-                                             : .undetermined(cause: batchFailureCause)
+            if gitLabUnnumberedIDs.contains(wt.id) {
+                // Judged by the project query that covered THIS worktree, never
+                // by the viewer batch — which was not asked about it, and on a
+                // GitLab-only fleet was not run at all.
+                outcomes[wt.id] = gitLabAnsweredIDs.contains(wt.id)
+                    ? PRObservation.Outcome.none
+                    : .undetermined(cause: gitLabFailureCause)
+            } else {
+                outcomes[wt.id] = batchSucceeded ? PRObservation.Outcome.none
+                                                 : .undetermined(cause: batchFailureCause)
+            }
         }
         for (id, observedOutcome) in outcomes {
             await record(observedOutcome, for: id, at: batchStartedAt)
@@ -759,7 +1032,9 @@ public actor PRStatusManager {
     /// `nonisolated` on purpose: this path must not touch `cache`,
     /// `lastDirectUpdate`, `headRefVerifiedIDs`, `onStatusPersist` or
     /// `onMergedTransition`. Persisting a binding's status — and deciding what a
-    /// merge means across several of them — belongs to the caller.
+    /// merge means across several of them — belongs to the caller. The one piece
+    /// of actor state it does write is `reportAuthFailure`'s observation, which
+    /// is an *attempt* fact about a worktree rather than any binding's value.
     ///
     /// A transient failure at any stage (gh did not launch, no data, the number
     /// did not resolve, the check query failed) yields the binding's PREVIOUS
@@ -814,14 +1089,17 @@ public actor PRStatusManager {
     /// `worktreeID`; here it carries a BINDING id. That is the whole point of
     /// this path — several bindings of one worktree must stay distinguishable.
     ///
-    /// `group.host` is not passed to `gh`: binding creation is host-locked to
-    /// github.com today (`PRBindingExtractor`), so every group resolves against
-    /// gh's default host. It still keys the grouping, so the day an enterprise
-    /// host can be bound, two hosts' repos cannot land in one query.
+    /// `group.host` chooses the forge. `groupBindingsByRepo` already keys on it,
+    /// so a group is one repo on one host and the whole group takes one path:
+    /// a GitLab host goes to `refreshGitLabBindingGroup`, everything else stays
+    /// on `gh`, whose auth is host-scoped and therefore needs no host argument.
     private nonisolated func refreshBindingGroup(
         _ group: (host: String, owner: String, name: String, bindings: [PRBinding]),
         repoPath: String
     ) async -> [UUID: PRBindingObservation] {
+        if await isGitLabHost(group.host, repoPath: repoPath) {
+            return await refreshGitLabBindingGroup(group, repoPath: repoPath)
+        }
         let aliased = group.bindings.enumerated().map {
             (alias: "pr\($0.offset)", bindingID: $0.element.id, number: $0.element.number)
         }
@@ -891,8 +1169,8 @@ public actor PRStatusManager {
             }
             let (state, reason) = Self.mapStateAndReason(
                 ghState: node.state,
-                mergeStateStatus: node.mergeStateStatus,
-                reviewDecision: node.reviewDecision,
+                mergeVerdictRaw: node.mergeVerdictRaw,
+                reviewVerdictRaw: node.reviewVerdictRaw,
                 isDraft: node.isDraft,
                 requiredChecksFailing: signals.failing,
                 requiredChecksPending: signals.pending
@@ -911,6 +1189,195 @@ public actor PRStatusManager {
                 baseRef: Self.refOrNil(node.baseRefName))
         }
         return observations
+    }
+
+    /// One GitLab project group: one batched `mergeRequests(iids:)` read, then a
+    /// fire-and-forget mergeability recheck.
+    ///
+    /// Structurally the twin of the `gh` arm above, with one shape difference
+    /// that is the point of the GitLab transport: the pipeline status rides in
+    /// the same response, so there is no per-request check query and no second
+    /// round trip to fail separately.
+    private nonisolated func refreshGitLabBindingGroup(
+        _ group: (host: String, owner: String, name: String, bindings: [PRBinding]),
+        repoPath: String
+    ) async -> [UUID: PRBindingObservation] {
+        let projectPath = "\(group.owner)/\(group.name)"
+        let iids = group.bindings.map(\.number)
+        let fetched = await fetchGitLabNodes(
+            query: GitLabQueries.mergeRequestsByIIDQuery(iids: iids),
+            host: group.host, projectPath: projectPath, repoPath: repoPath)
+        let nodes: [PRNode]
+        let pipelineGated: Bool?
+        switch fetched {
+        case .success(let fetchedNodes, let gated):
+            nodes = fetchedNodes
+            pipelineGated = gated
+        case .failure(let cause):
+            logger.debug("refreshBindings: GitLab query for \(projectPath, privacy: .public) settled nothing (\(cause, privacy: .public)); keeping previous statuses")
+            return Self.previousStatuses(group.bindings)
+        case .authenticationFailed(let host):
+            logger.debug("refreshBindings: \(host, privacy: .public) refused the credentials for \(projectPath, privacy: .public); keeping previous statuses and reporting the refusal")
+            // An expired token proves nothing about the merge requests, so every
+            // binding keeps the value it had rather than being cleared — but the
+            // worktree is told why its values stopped moving.
+            await reportAuthFailure(host: host, bindings: group.bindings)
+            return Self.previousStatuses(group.bindings)
+        }
+
+        // GitLab computes mergeability asynchronously and never recomputes on
+        // read, so a merge request can report UNCHECKED indefinitely. This asks
+        // it to recompute; the answer is deliberately dropped, and its failure
+        // cannot disturb the poll — the value it produces is read by the NEXT
+        // tick's GraphQL call, not by this one.
+        //
+        // Detached, and that is load-bearing rather than tidy.
+        // `refreshBindings` walks its groups one at a time and `fetchAll` skips
+        // the next poll while one is still in flight — so a `glab` that hangs
+        // here would stall PR polling for the entire fleet. Hanging is the
+        // plausible failure for this call in particular: it exists to queue work
+        // on someone else's server. Nothing in this pass reads the result, so
+        // nothing in this pass may wait for it.
+        //
+        // Detaching removes the stall and would, unbounded, replace it with a
+        // subprocess leak, so the detached call is bounded twice at this one
+        // creation site: `gitLabRecheckGate` caps how many are live (one per
+        // project) and `recheckTimeout` caps how long any one of them lives,
+        // terminating the child when it fires. Both bounds are reasoned about
+        // where the gate is declared.
+        //
+        // Only non-terminal merge requests are asked. A merged or closed one has
+        // a mergeability nobody will recompute and nobody will read, so
+        // including it spends a server-side job to learn nothing.
+        let recheckIIDs = nodes.filter { !Self.isTerminalGitLabState($0.state) }.map(\.number)
+        let gateKey = "\(group.host)\u{1}\(projectPath)"
+        if !recheckIIDs.isEmpty, await gitLabRecheckGate.admit(gateKey) {
+            let host = group.host
+            let recheckPath = GitLabQueries.recheckPath(projectPath: projectPath, iids: recheckIIDs)
+            Task.detached { [self] in
+                _ = await runGLBounded(args: ["api", "--hostname", host, recheckPath],
+                                       repoPath: repoPath, timeout: Self.recheckTimeout)
+                await gitLabRecheckGate.finish(gateKey)
+            }
+        }
+
+        let byIID = Dictionary(nodes.map { ($0.number, $0) }, uniquingKeysWith: { first, _ in first })
+        var observations: [UUID: PRBindingObservation] = [:]
+        for binding in group.bindings {
+            guard let node = byIID[binding.number] else {
+                logger.debug("refreshBindings: merge request !\(binding.number, privacy: .public) did not resolve by iid; keeping previous status")
+                observations[binding.id] = binding.status.map { PRBindingObservation(status: $0) }
+                continue
+            }
+            let (state, reason) = Self.mapStateAndReason(
+                forge: .gitlab,
+                ghState: node.state,
+                mergeVerdictRaw: node.mergeVerdictRaw,
+                isDraft: node.isDraft,
+                pipelineGated: pipelineGated,
+                pipelineStatus: node.statusCheckRollupState)
+            observations[binding.id] = PRBindingObservation(
+                status: PRStatus(number: node.number, url: node.url, state: state,
+                                 reason: reason, mergeQueuePosition: node.mergeQueuePosition,
+                                 observedAt: now()),
+                headBranch: Self.refOrNil(node.headRefName),
+                baseRef: Self.refOrNil(node.baseRefName))
+        }
+        return observations
+    }
+
+    /// Whether a merge request's state is settled for good.
+    ///
+    /// Compared case-insensitively because the two GitLab transports disagree:
+    /// GraphQL answers `merged`/`closed` in lower case and REST in upper, and
+    /// `PRNode.state` carries whichever the response used.
+    static func isTerminalGitLabState(_ state: String) -> Bool {
+        let normalized = state.lowercased()
+        return normalized == "merged" || normalized == "closed"
+    }
+
+    /// What one GitLab GraphQL read settled.
+    private enum GitLabFetchOutcome {
+        /// `pipelineGated` is nil when the project did not say whether merges
+        /// are gated on pipelines; the mapper reads that as gated.
+        case success(nodes: [PRNode], pipelineGated: Bool?)
+        /// A failure class from `PRUndeterminedCause`.
+        case failure(cause: String)
+        /// The host refused the credentials. A case of its own because it is the
+        /// failure that does not resolve itself: a personal access token has no
+        /// refresh, so a host that answered yesterday refuses today and every
+        /// day after, and every caller that merely keeps its previous values
+        /// would go quiet forever.
+        case authenticationFailed(host: String)
+    }
+
+    /// Run one GitLab GraphQL query and classify what came back.
+    ///
+    /// `--hostname` is on every invocation and must stay there: outside a GitLab
+    /// checkout `glab api` silently defaults to gitlab.com, so a missing flag
+    /// does not fail — it confidently answers about the wrong instance.
+    /// `fullPath` is bound as a variable because it is user data; iids and
+    /// branches are quoted into the query by `GitLabQueries`.
+    private nonisolated func fetchGitLabNodes(
+        query: String, host: String, projectPath: String, repoPath: String
+    ) async -> GitLabFetchOutcome {
+        let args = ["api", "graphql", "--hostname", host,
+                    "-f", "query=\(query)", "-f", "fullPath=\(projectPath)"]
+        guard let result = await runGLResult(args: args, repoPath: repoPath) else {
+            return .failure(cause: gitLabCLIAvailable
+                ? PRUndeterminedCause.queryFailed
+                : PRUndeterminedCause.cliUnavailable)
+        }
+        if Self.isForgeAuthFailure(result) {
+            await setForgeAuthFailure(true, host: host)
+            logger.debug("GitLab host \(host, privacy: .public) refused the credentials")
+            return .authenticationFailed(host: host)
+        }
+        guard let data = Self.graphQLOutputData(stdout: result.stdout) else {
+            let errSuffix = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            logger.debug("GitLab query for \(projectPath, privacy: .public) produced no output (exit \(result.exitStatus, privacy: .public)): \(errSuffix, privacy: .public)")
+            return .failure(cause: PRUndeterminedCause.queryFailed)
+        }
+        // The call reached the host and the host answered, which is the only
+        // evidence this actor accepts that the credentials work.
+        await setForgeAuthFailure(false, host: host)
+        switch GitLabQueries.parseMergeRequests(from: data) {
+        case .answered(let nodes, let pipelineGated):
+            return .success(nodes: nodes, pipelineGated: pipelineGated)
+        case .unreadable:
+            // The same outcome the `gh` arm reaches when `parsePRNodes` throws.
+            // A response nobody could read settles nothing, so the worktrees it
+            // covers record undetermined rather than "no merge request".
+            logger.warning("GitLab query for \(projectPath, privacy: .public) returned a response this build could not read")
+            return .failure(cause: PRUndeterminedCause.unparseableResponse)
+        }
+    }
+
+    /// Whether a forge invocation was refused for want of valid credentials.
+    ///
+    /// Two shapes, because `glab` reports the same fault two ways: a transport
+    /// refusal exits non-zero with the status line on stderr, while a request
+    /// that reached GraphQL comes back exit-zero with an error object. Both are
+    /// an expired token, and neither may read as "this project has no merge
+    /// requests".
+    static func isForgeAuthFailure(_ result: GHCommandResult) -> Bool {
+        let stderr = result.stderr.lowercased()
+        if result.exitStatus != 0 && (stderr.contains("401") || stderr.contains("unauthorized")) {
+            return true
+        }
+        return graphQLReportsUnauthenticated(result.stdout)
+    }
+
+    private static func graphQLReportsUnauthenticated(_ stdout: String) -> Bool {
+        guard let data = graphQLOutputData(stdout: stdout),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let errors = root["errors"] as? [[String: Any]] else { return false }
+        return errors.contains { error in
+            let code = ((error["extensions"] as? [String: Any])?["code"] as? String)?.lowercased() ?? ""
+            let message = (error["message"] as? String)?.lowercased() ?? ""
+            return code.contains("unauthenticated") || code.contains("authentication")
+                || message.contains("unauthenticated")
+        }
     }
 
     /// A branch name the response actually carried, or nil. An empty string is
@@ -950,6 +1417,30 @@ public actor PRStatusManager {
     public func refresh(worktreeID: UUID, branch: String, upstreamBranch: String?, defaultBranch: String?,
                         pushBranch: GitManager.PushBranchResolution,
                         repoPath: String, prNumber: Int? = nil) async -> PRStatus? {
+        // A GitLab worktree must never be answered by `gh`. Both routes below
+        // speak GitHub's API alone, and on a FLAT GitLab namespace the
+        // worktree's owner/name are valid GitHub coordinates too: with a
+        // same-named repository on github.com, `applyRefreshedNode` would write
+        // a GitHub pull request's status onto a GitLab worktree and, on a merged
+        // one, run the merged-transition machinery — auto-archive included —
+        // against a pull request from another forge. `poisonedCacheEntries`
+        // compares owner and name only, so it cannot catch that either.
+        //
+        // Nothing is written at all: not the cache, and not the outcome either.
+        // Declining to ask is not an attempt that failed, and this path is
+        // reached by a USER GESTURE — `pr.refresh` and the on-select refresh.
+        // Recording `.undetermined` here would answer a GitLab worktree whose
+        // bindings poll perfectly with "last check did not resolve" — stomping
+        // a good `.observed`, and on a worktree with no status yet lighting the
+        // "PR status unknown" indicator at the exact moment the user asked for
+        // reassurance. The binding poll is what settles this worktree, and
+        // its last word stands until it has a new one.
+        if let identity = await cachedNameWithOwner(repoPath: repoPath),
+           await isGitLabHost(identity.host, repoPath: repoPath) {
+            logger.debug("refresh: worktree \(worktreeID, privacy: .public) is on GitLab host \(identity.host, privacy: .public); its merge request is refreshed through its bindings, not by gh")
+            return cache[worktreeID]
+        }
+
         // A stored PR number (fork PRs, or a PR whose head we renamed locally)
         // can't be found by head branch — resolve it directly, mirroring
         // fetchAll's number-first path. Only fall back to the branch path when no
@@ -1068,7 +1559,7 @@ public actor PRStatusManager {
         }
         return await applyRefreshedNode(
             worktreeID: worktreeID, number: node.number, url: node.url, state: node.state,
-            mergeStateStatus: node.mergeStateStatus, reviewDecision: node.reviewDecision,
+            mergeStateStatus: node.mergeVerdictRaw, reviewDecision: node.reviewVerdictRaw,
             isDraft: node.isDraft, mergeQueuePosition: node.mergeQueuePosition, repoPath: repoPath)
     }
 
@@ -1100,8 +1591,8 @@ public actor PRStatusManager {
         }
         let (mappedState, reason) = Self.mapStateAndReason(
             ghState: state,
-            mergeStateStatus: mergeStateStatus,
-            reviewDecision: reviewDecision,
+            mergeVerdictRaw: mergeStateStatus,
+            reviewVerdictRaw: reviewDecision,
             isDraft: isDraft,
             requiredChecksFailing: signals.failing,
             requiredChecksPending: signals.pending
@@ -1139,32 +1630,62 @@ public actor PRStatusManager {
     /// Required-check awareness: a failing *required* check is red and a pending *required*
     /// check is yellow regardless of merge state; non-required checks never color the icon.
     public static func mapStateAndReason(
+        forge: Forge = .github,
         ghState: String,
-        mergeStateStatus: String,
-        reviewDecision: String = "",
+        mergeVerdictRaw: String,
+        reviewVerdictRaw: String = "",
         isDraft: Bool = false,
         requiredChecksFailing: Bool = false,
-        requiredChecksPending: Bool = false
+        requiredChecksPending: Bool = false,
+        pipelineGated: Bool? = nil,
+        pipelineStatus: String? = nil
+    ) -> (state: PRMergeableState, reason: String) {
+        switch forge {
+        case .github:
+            return mapGitHubStateAndReason(
+                ghState: ghState,
+                mergeVerdictRaw: mergeVerdictRaw,
+                reviewVerdictRaw: reviewVerdictRaw,
+                isDraft: isDraft,
+                requiredChecksFailing: requiredChecksFailing,
+                requiredChecksPending: requiredChecksPending)
+        case .gitlab:
+            return mapGitLabStateAndReason(
+                state: ghState,
+                detailed: mergeVerdictRaw,
+                isDraft: isDraft,
+                pipelineGated: pipelineGated,
+                pipelineStatus: pipelineStatus)
+        }
+    }
+
+    private static func mapGitHubStateAndReason(
+        ghState: String,
+        mergeVerdictRaw: String,
+        reviewVerdictRaw: String,
+        isDraft: Bool,
+        requiredChecksFailing: Bool,
+        requiredChecksPending: Bool
     ) -> (state: PRMergeableState, reason: String) {
         switch ghState {
         case "MERGED": return (.merged, "Merged")
         case "CLOSED": return (.closed, "Closed")
         default:
-            if isDraft || mergeStateStatus == "DRAFT" { return (.draft, "Draft") }
-            if reviewDecision == "CHANGES_REQUESTED" { return (.changesRequested, "Changes requested") }
+            if isDraft || mergeVerdictRaw == "DRAFT" { return (.draft, "Draft") }
+            if reviewVerdictRaw == "CHANGES_REQUESTED" { return (.changesRequested, "Changes requested") }
             // Uniform precedence: failing required check → red, pending required check → yellow,
             // regardless of merge state. With no required checks both are false and the
-            // mergeStateStatus switch below decides (see checkSignals).
+            // merge-verdict switch below decides (see checkSignals).
             if requiredChecksFailing { return (.checksFailed, "Checks failing") }
             if requiredChecksPending { return (.pending, "Checks pending") }
 
-            switch mergeStateStatus {
+            switch mergeVerdictRaw {
             case "CLEAN", "HAS_HOOKS", "UNSTABLE":
                 // UNSTABLE = mergeable with only non-required checks failing → not red.
                 return (.mergeable, "Ready to merge")
             case "BLOCKED":
                 // Checks are settled and passing; the only blocker is a not-yet-given review.
-                return reviewDecision == "REVIEW_REQUIRED" ? (.mergeable, "Ready to merge") : (.blocked, "Blocked")
+                return reviewVerdictRaw == "REVIEW_REQUIRED" ? (.mergeable, "Ready to merge") : (.blocked, "Blocked")
             case "DIRTY":
                 return (.blocked, "Merge conflicts")
             case "BEHIND":
@@ -1177,18 +1698,114 @@ public actor PRStatusManager {
         }
     }
 
+    /// GitLab's merge vocabulary.
+    ///
+    /// The CI signal is computed independently of `detailedMergeStatus`, which
+    /// reports only ONE blocker by a precedence GitLab owns and in which CI
+    /// ranks below approval, draft and unchecked. Field measurement: 33 failing
+    /// pipelines across 71 merge requests on a pipeline-gated project produced
+    /// zero CI_MUST_PASS. Reading CI off the merge status would therefore show
+    /// red essentially never, and — since NOT_APPROVED maps to .mergeable —
+    /// would render a merge request with a failing pipeline as "Ready to merge".
+    ///
+    /// Precedence: terminal, then draft, then an explicit change request, then
+    /// the CI signal, then the merge-status switch. The first three slots are
+    /// the GitHub arm's own order, with `REQUESTED_CHANGES` standing where
+    /// `CHANGES_REQUESTED` stands there.
+    ///
+    /// `DISCUSSIONS_NOT_RESOLVED` deliberately sits *after* the CI signal,
+    /// inside the merge-status switch, and the two must not be lumped together:
+    /// an explicit change request outranks CI, an unresolved thread does not.
+    /// The GitHub arm privileges only the explicit review decision, and an open
+    /// discussion thread is not a rejection — so when a pipeline is also
+    /// failing, the pipeline is the more actionable thing to show the author.
+    ///
+    /// Ranking a change request above a failing pipeline deliberately yields
+    /// the *lower*-severity `.changesRequested` (attention severity 4) rather
+    /// than `.checksFailed` (6) when both hold. That is what the GitHub arm
+    /// already does, and the product stance behind it is that an explicit human
+    /// rejection is the thing to tell the author about.
+    private static func mapGitLabStateAndReason(
+        state: String,
+        detailed: String,
+        isDraft: Bool,
+        pipelineGated: Bool?,
+        pipelineStatus: String?
+    ) -> (state: PRMergeableState, reason: String) {
+        switch state.lowercased() {
+        case "merged": return (.merged, "Merged")
+        case "closed": return (.closed, "Closed")
+        default: break
+        }
+
+        if isDraft || detailed == "DRAFT_STATUS" { return (.draft, "Draft") }
+
+        // Ahead of the CI signal, where the GitHub arm puts CHANGES_REQUESTED:
+        // an explicit rejection must not be masked by a red pipeline. Handled
+        // here rather than in the switch below, which is why that switch has no
+        // REQUESTED_CHANGES case.
+        if detailed == "REQUESTED_CHANGES" { return (.changesRequested, "Changes requested") }
+
+        // `onlyAllowMergeIfPipelineSucceeds` is the faithful analogue of
+        // GitHub's "required check". A failing pipeline on a project that does
+        // not gate merges is GitHub's UNSTABLE, which TBD does not colour.
+        //
+        // A nil gating answer is read as gated, so only an explicit `false`
+        // switches this branch off. The asymmetry is the whole reason the value
+        // is optional: over-colouring a project that turns out not to gate
+        // costs the reader a glance at a merge request that was fine, while
+        // under-colouring costs them the failure itself — with NOT_APPROVED
+        // mapping to .mergeable below, an unread gating answer would render a
+        // merge request with a failing pipeline as "Ready to merge". The same
+        // reading covers the pending statuses for one rule rather than two.
+        if pipelineGated != false, let pipelineStatus {
+            switch pipelineStatus {
+            case "FAILED": return (.checksFailed, "Pipeline failed")
+            case "RUNNING", "PENDING", "CREATED", "WAITING_FOR_RESOURCE", "PREPARING":
+                return (.pending, "Pipeline running")
+            case "MANUAL": return (.pending, "Pipeline awaiting manual action")
+            default: break
+            }
+        }
+
+        switch detailed {
+        case "MERGEABLE": return (.mergeable, "Ready to merge")
+        // Checks are settled and the only blocker is an approval nobody has
+        // given — the same reading the GitHub arm gives BLOCKED + REVIEW_REQUIRED.
+        case "NOT_APPROVED": return (.mergeable, "Ready to merge")
+        // Ranks below the CI signal above, unlike REQUESTED_CHANGES: a thread
+        // nobody has resolved is not an explicit rejection.
+        case "DISCUSSIONS_NOT_RESOLVED": return (.changesRequested, "Unresolved discussions")
+        case "CONFLICT": return (.blocked, "Merge conflicts")
+        case "NEED_REBASE": return (.blocked, "Behind base branch")
+        case "BLOCKED_STATUS": return (.blocked, "Blocked by another merge request")
+        case "CHECKING", "PREPARING": return (.pending, "Checks pending")
+        // Not transient: GitLab leaves a stale merge request unchecked until
+        // something re-triggers the computation, so the wording must not imply
+        // it is about to resolve.
+        case "UNCHECKED": return (.pending, "Mergeability not checked")
+        default:
+            // The enum grows between releases. Unknown means unknown — treating
+            // it as blocked would let a future GitLab version paint merge
+            // requests red for saying something new.
+            return (.pending, "Mergeability not checked")
+        }
+    }
+
     public static func mapState(
+        forge: Forge = .github,
         ghState: String,
-        mergeStateStatus: String,
-        reviewDecision: String = "",
+        mergeVerdictRaw: String,
+        reviewVerdictRaw: String = "",
         isDraft: Bool = false,
         requiredChecksFailing: Bool = false,
         requiredChecksPending: Bool = false
     ) -> PRMergeableState {
         Self.mapStateAndReason(
+            forge: forge,
             ghState: ghState,
-            mergeStateStatus: mergeStateStatus,
-            reviewDecision: reviewDecision,
+            mergeVerdictRaw: mergeVerdictRaw,
+            reviewVerdictRaw: reviewVerdictRaw,
             isDraft: isDraft,
             requiredChecksFailing: requiredChecksFailing,
             requiredChecksPending: requiredChecksPending
@@ -1335,11 +1952,24 @@ public actor PRStatusManager {
         return PRCheckDetail(contexts: result, rollupState: rollupState, truncated: truncated)
     }
 
-    /// Parse `owner` and `name` from a PR URL like
-    /// `https://github.com/<owner>/<name>/pull/<n>`.
+    /// Parse `owner` and `name` from a pull- or merge-request URL.
+    ///
+    /// GitHub: `/owner/name/pull/<n>`, matched positionally.
+    /// GitLab:  `/<namespace…>/<project>/-/merge_requests/<n>`, split at the
+    /// `/-/` separator so nesting depth is irrelevant — the namespace may run
+    /// to twenty levels, and nesting is the common case rather than the edge.
     static func parseOwnerRepo(fromURL url: String) -> (owner: String, name: String)? {
         guard let components = URLComponents(string: url) else { return nil }
-        let parts = components.path.split(separator: "/", omittingEmptySubsequences: true)
+        let path = components.path
+        if let range = path.range(of: "/-/merge_requests/") {
+            let project = path[path.startIndex..<range.lowerBound]
+                .split(separator: "/", omittingEmptySubsequences: true)
+                .map(String.init)
+            guard project.count >= 2 else { return nil }
+            return (owner: project.dropLast().joined(separator: "/"),
+                    name: project[project.count - 1])
+        }
+        let parts = path.split(separator: "/", omittingEmptySubsequences: true)
         // Expect: [owner, name, "pull", <n>]
         guard parts.count >= 4, parts[2] == "pull" else { return nil }
         return (owner: String(parts[0]), name: String(parts[1]))
@@ -1408,17 +2038,19 @@ public actor PRStatusManager {
     /// Compute human-readable reason string for the PR merge state.
     /// Delegates to mapStateAndReason() for the single source of truth.
     public static func computeReason(
+        forge: Forge = .github,
         ghState: String,
-        mergeStateStatus: String,
-        reviewDecision: String = "",
+        mergeVerdictRaw: String,
+        reviewVerdictRaw: String = "",
         isDraft: Bool = false,
         requiredChecksFailing: Bool = false,
         requiredChecksPending: Bool = false
     ) -> String {
         Self.mapStateAndReason(
+            forge: forge,
             ghState: ghState,
-            mergeStateStatus: mergeStateStatus,
-            reviewDecision: reviewDecision,
+            mergeVerdictRaw: mergeVerdictRaw,
+            reviewVerdictRaw: reviewVerdictRaw,
             isDraft: isDraft,
             requiredChecksFailing: requiredChecksFailing,
             requiredChecksPending: requiredChecksPending
@@ -1524,8 +2156,10 @@ public actor PRStatusManager {
         public let number: Int
         public let url: String
         public let state: String
-        public let mergeStateStatus: String
-        public let reviewDecision: String   // "APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED", or ""
+        public let mergeVerdictRaw: String
+        /// The forge's own verdict on review state, in whatever vocabulary that
+        /// forge speaks — never normalized here.
+        public let reviewVerdictRaw: String
         public let headRefName: String
         public let createdAt: String        // ISO 8601, e.g. "2026-03-24T15:58:27Z"
         public let isDraft: Bool
@@ -1536,25 +2170,30 @@ public actor PRStatusManager {
         /// The PR's base branch. Descriptive only — nothing matches on it — so
         /// it defaults to empty rather than being a required parse field, and a
         /// response that omits it degrades to "unknown" instead of dropping the
-        /// whole node. Declared last so the memberwise init stays
+        /// whole node. Declared late so the memberwise init stays
         /// source-compatible.
         public let baseRefName: String
+        /// The forge that produced this node. Declared last with a default so
+        /// the memberwise init stays source-compatible, the same reason
+        /// `baseRefName` is declared where it is.
+        public let forge: Forge
 
-        init(number: Int, url: String, state: String, mergeStateStatus: String,
-             reviewDecision: String, headRefName: String, createdAt: String, isDraft: Bool,
+        init(number: Int, url: String, state: String, mergeVerdictRaw: String,
+             reviewVerdictRaw: String, headRefName: String, createdAt: String, isDraft: Bool,
              statusCheckRollupState: String?, mergeQueuePosition: Int?,
-             baseRefName: String = "") {
+             baseRefName: String = "", forge: Forge = .github) {
             self.number = number
             self.url = url
             self.state = state
-            self.mergeStateStatus = mergeStateStatus
-            self.reviewDecision = reviewDecision
+            self.mergeVerdictRaw = mergeVerdictRaw
+            self.reviewVerdictRaw = reviewVerdictRaw
             self.headRefName = headRefName
             self.createdAt = createdAt
             self.isDraft = isDraft
             self.statusCheckRollupState = statusCheckRollupState
             self.mergeQueuePosition = mergeQueuePosition
             self.baseRefName = baseRefName
+            self.forge = forge
         }
     }
 
@@ -1875,8 +2514,8 @@ public actor PRStatusManager {
         let mergeQueueEntry = node["mergeQueueEntry"] as? [String: Any]
         let mergeQueuePosition = mergeQueueEntry?["position"] as? Int
         return PRNode(number: number, url: url, state: state,
-                      mergeStateStatus: mergeStateStatus,
-                      reviewDecision: reviewDecision,
+                      mergeVerdictRaw: mergeStateStatus,
+                      reviewVerdictRaw: reviewDecision,
                       headRefName: headRefName,
                       createdAt: createdAt,
                       isDraft: isDraft,
@@ -1938,6 +2577,21 @@ public actor PRStatusManager {
     public nonisolated func fetchOpenPRs(repoPath: String) async -> [OpenPRInfo] {
         guard let ownerRepo = await cachedNameWithOwner(repoPath: repoPath) else {
             logger.debug("listOpenPRs: could not resolve owner/name for \(repoPath, privacy: .public)")
+            return []
+        }
+        if await isGitLabHost(ownerRepo.host, repoPath: repoPath) {
+            // Not merely fruitless — actively wrong. What follows is a GitHub
+            // GraphQL query, and on a flat GitLab namespace the same owner/name
+            // is a valid GitHub coordinate: a same-named repository on
+            // github.com would fill the picker with pull requests this repo has
+            // nothing to do with, and creating a worktree from one would check
+            // out a branch from another forge.
+            //
+            // Listing GitLab merge requests is not built, so the picker is empty
+            // for a GitLab repo — but not silently: `.warning` is recorded by
+            // default where `.debug` is not, so "the picker shows nothing" has
+            // an answer in the log without turning debug logging on first.
+            logger.warning("listOpenPRs: \(repoPath, privacy: .public) lives on GitLab host \(ownerRepo.host, privacy: .public); listing merge requests is not implemented, so the picker stays empty")
             return []
         }
         let args = [
@@ -2010,22 +2664,294 @@ public actor PRStatusManager {
 
     // MARK: - Shell helpers
 
-    /// Resolve the checkout's `owner/name` for repo-scoped GraphQL queries.
-    /// Uses `gh repo view` (git-remote resolution) so `refresh` need not already
-    /// hold a PR URL to parse.
-    private nonisolated func resolveNameWithOwner(repoPath: String) async -> (owner: String, name: String)? {
-        let args = ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]
-        guard let output = await runGH(args: args, repoPath: repoPath) else { return nil }
-        let parts = output.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "/")
-        guard parts.count == 2 else { return nil }
-        return (owner: String(parts[0]), name: String(parts[1]))
+    /// Resolve the checkout's `owner/name` and the host it lives on, for
+    /// repo-scoped queries and for composing a reference from a bare number.
+    ///
+    /// Two sources, in this order, and the order is the whole design:
+    ///
+    /// 1. `gh repo view`, which is asked for `url` alongside `nameWithOwner` so
+    ///    the host is gh's own answer rather than an assumption. gh resolves a
+    ///    *base* repo, not merely `origin` — with an `upstream` remote present
+    ///    it names the parent, which is where a fork's pull requests actually
+    ///    live — so replacing it with a remote parse would silently break every
+    ///    fork checkout.
+    /// 2. The `origin` remote, parsed directly, and **only when gh cannot serve
+    ///    this checkout at all** — it is not installed, it holds no credentials
+    ///    for anywhere (`ghExitNoCredentials`), or it ran and disowned the
+    ///    checkout because no remote names a GitHub host it knows. Those are
+    ///    the cases every GitLab checkout is in, and this is the only route by
+    ///    which one can ever name itself.
+    ///
+    /// A gh failure that says nothing about the checkout — an expired token, a
+    /// 401, a rate limit, a network blip — is NOT licence to parse the remote.
+    /// The two sources disagree on exactly the checkout where it matters: on a
+    /// fork with an `upstream` remote gh names the parent, where the fork's pull
+    /// requests live, while `origin` names the fork. And this answer is cached
+    /// for fifteen minutes (`cachedNameWithOwner`), while a nil is not cached at
+    /// all — so a wrong answer is durable and a deferral self-heals on the next
+    /// tick. Deferring is therefore the only safe reading of a transient
+    /// failure.
+    ///
+    /// Returns nil when neither source yields a host — a caller that cannot
+    /// name the repo defers, and must never fall back to guessing `github.com`.
+    private nonisolated func resolveNameWithOwner(
+        repoPath: String
+    ) async -> (owner: String, name: String, host: String)? {
+        let unservable: GHUnservable
+        switch await resolveViaGH(repoPath: repoPath) {
+        case .resolved(let owner, let name, let host):
+            return (owner: owner, name: name, host: host)
+        case .transientFailure:
+            logger.debug("gh could not name the repo at \(repoPath, privacy: .public) this time; deferring rather than reading its origin remote")
+            return nil
+        case .unservable(let reason):
+            unservable = reason
+        }
+        guard let remote = await readRemoteURL(repoPath: repoPath),
+              let identity = Self.parseRemoteIdentity(remote) else {
+            logger.debug("could not name the repo at \(repoPath, privacy: .public) from gh or from its origin remote")
+            return nil
+        }
+        if unservable == .noCredentials, Self.ghWouldServe(host: identity.host) {
+            // gh holds no credentials, and the remote names the one host gh is
+            // certain to speak for — so gh, not `origin`, was the right source
+            // and it simply could not answer. Defer, exactly as before the
+            // exit-4 clause existed. See `ghExitNoCredentials` for why naming
+            // the fork here is worse than naming nothing.
+            logger.debug("gh holds no credentials and \(repoPath, privacy: .public) is on \(identity.host, privacy: .public), which gh would have answered for; deferring rather than letting origin name it")
+            return nil
+        }
+        return identity
     }
+
+    /// Whether gh would have been the authoritative source for this host, had
+    /// it any credentials.
+    ///
+    /// `github.com` and nothing else, deliberately. A gh configured for a
+    /// GitHub Enterprise host would speak for that host too, but with no
+    /// credentials there is no configuration to read it out of, and a GHES
+    /// hostname is indistinguishable from any other self-hosted forge in a
+    /// remote URL. That residual is accepted: a GHES checkout on a machine
+    /// whose gh has never been logged in still resolves through the remote
+    /// parse and can still name a fork instead of its parent. GHES cannot form
+    /// a binding today, and the alternative — treating every unknown host as
+    /// gh's — is the fabricated `github.com` identity this whole path exists to
+    /// refuse.
+    private static func ghWouldServe(host: String) -> Bool {
+        host.lowercased() == "github.com"
+    }
+
+    /// What one `gh repo view` settled about a checkout.
+    private enum GHRepoResolution {
+        case resolved(owner: String, name: String, host: String)
+        /// gh cannot serve this checkout, for one of two reasons that are NOT
+        /// interchangeable — see `GHUnservable`. The only state in which the
+        /// `origin` remote may speak for the repo instead.
+        case unservable(GHUnservable)
+        /// gh ran and failed at something it does serve. Says nothing about the
+        /// checkout, so it settles nothing about the checkout.
+        case transientFailure
+    }
+
+    /// Why gh cannot serve a checkout. Both license the `origin` parse, but
+    /// only one of them licenses it for a host gh itself would have answered
+    /// for.
+    private enum GHUnservable {
+        /// gh ran with credentials in hand and said none of this checkout's
+        /// remotes name a GitHub host it knows — or there is no gh binary at
+        /// all.
+        ///
+        /// The first route is about the CHECKOUT: gh will never speak for it,
+        /// on this host or any other, so `origin` may. This is the route every
+        /// GitLab checkout with a working gh takes, and it must keep behaving
+        /// exactly as it does.
+        ///
+        /// The second route is not. "No gh binary" is a fact about the MACHINE,
+        /// by exactly the argument `.noCredentials` makes for itself, and it is
+        /// grouped here pragmatically rather than because it belongs. The
+        /// residual that grouping accepts: a daemon whose PATH lacks `gh`, on a
+        /// `github.com` fork checkout with an `upstream` remote, resolves to the
+        /// fork via `origin` — so a hydrated parent-repo PR can be cleared, and
+        /// the clear persists.
+        ///
+        /// It is not fixed by routing the no-binary case to `.noCredentials`,
+        /// because that withholds the `origin` parse on every `github.com`
+        /// checkout of a gh-less machine, and the parse is also what composes
+        /// attach-by-number URLs there. Trading a working feature on every
+        /// gh-less GitHub checkout against a fork-with-upstream corner is the
+        /// worse deal.
+        case cannotServeThisCheckout
+        /// gh holds no credentials for anywhere, so it never got as far as the
+        /// checkout. The answer is about the MACHINE, and it is silence about
+        /// this repo — which is why the parse it licenses is withheld for a
+        /// host gh would have served.
+        case noCredentials
+    }
+
+    private nonisolated func resolveViaGH(repoPath: String) async -> GHRepoResolution {
+        let args = ["repo", "view", "--json", "nameWithOwner,url"]
+        guard let result = await runGHResult(args: args, repoPath: repoPath) else {
+            // gh never launched — it is absent, or the spawn itself failed.
+            // There is nobody to ask, on this checkout or any other.
+            return .unservable(.cannotServeThisCheckout)
+        }
+        let errSuffix = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard result.exitStatus == 0 else {
+            if result.exitStatus == Self.ghExitNoCredentials {
+                logger.debug("gh holds no credentials at all, so it speaks for no checkout including \(repoPath, privacy: .public): \(errSuffix, privacy: .public)")
+                return .unservable(.noCredentials)
+            }
+            if Self.ghDisownsCheckout(errSuffix) {
+                logger.debug("gh does not speak for the repo at \(repoPath, privacy: .public): \(errSuffix, privacy: .public)")
+                return .unservable(.cannotServeThisCheckout)
+            }
+            logger.debug("gh repo view exited \(result.exitStatus, privacy: .public) for \(repoPath, privacy: .public): \(errSuffix, privacy: .public)")
+            return .transientFailure
+        }
+        guard let data = result.stdout.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let nameWithOwner = root["nameWithOwner"] as? String,
+              let url = root["url"] as? String,
+              let host = URLComponents(string: url)?.host, !host.isEmpty else {
+            logger.debug("gh repo view answered for \(repoPath, privacy: .public) in a shape this build could not read")
+            return .transientFailure
+        }
+        let parts = nameWithOwner.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "/")
+        guard parts.count == 2 else { return .transientFailure }
+        return .resolved(owner: String(parts[0]), name: String(parts[1]), host: host)
+    }
+
+    /// gh's exit code for "there are no credentials on this machine at all"
+    /// (`exitAuth` in gh's own `main.go`). It is a cleaner discriminator than
+    /// any stderr string, and the only route to this state gh has: it runs its
+    /// auth check BEFORE it resolves a base repo, so an unauthenticated gh
+    /// **never** emits the disownment message below — not for a GitLab remote,
+    /// not for any remote. Reading exit 4 as transient therefore left every
+    /// checkout on a machine with an unused `gh` unnameable forever (a nil is
+    /// not cached, so it re-failed on every tick), which takes down GitLab
+    /// branch matching, provenance seeding, the open-PR picker and every hook
+    /// or `tbd pr attach` bind — for exactly the population this path exists
+    /// to serve.
+    ///
+    /// An expired or rejected token is a different state and is NOT this one:
+    /// credentials exist, gh runs the command, and the HTTP 401 comes back as
+    /// exit 1. That stays transient, which is what keeps a fork checkout from
+    /// being renamed by a flaky token.
+    ///
+    /// **What this exit code does NOT license:** naming a `github.com` checkout
+    /// from its `origin` remote. On a fork, gh names the parent — where the
+    /// fork's pull requests live — and `origin` names the fork, and that
+    /// disagreement is not harmless. `poisonedCacheEntries` rests on "both
+    /// sides resolved" meaning both are KNOWN, so a fork identity makes a
+    /// cached pull request living in the parent read as cross-repo: it is
+    /// cleared, the clear is PERSISTED, and the heal reports a binding it never
+    /// disproved. Deferring costs that checkout nothing, because with no
+    /// credentials every gh query fails anyway. So `resolveNameWithOwner`
+    /// withholds the parse on this route for any host gh would have served
+    /// (`ghWouldServe`), and grants it everywhere else — which is where the
+    /// whole benefit is: for a GitLab checkout the remote parse is the ONLY
+    /// route that ever works.
+    ///
+    /// The disownment route below is untouched by that rule and must stay so:
+    /// there gh has credentials and is speaking about the checkout, so its
+    /// silence really is a fact about the repo.
+    private static let ghExitNoCredentials: Int32 = 4
+
+    /// Whether gh's own refusal says it does not serve this checkout, as opposed
+    /// to failing at something it does serve.
+    ///
+    /// A whitelist of gh's disownment messages, deliberately not a blacklist of
+    /// failures: an unrecognised message must read as "ask again later", because
+    /// the alternative reading is cached for fifteen minutes and points every
+    /// query at the wrong repository (see `resolveNameWithOwner`). A message gh
+    /// rewords therefore costs a GitLab checkout one poll's deferral until this
+    /// list is updated; the opposite default would cost a fork checkout a wrong,
+    /// cached identity on every transient 401.
+    static func ghDisownsCheckout(_ stderr: String) -> Bool {
+        let text = stderr.lowercased()
+        // "none of the git remotes configured for this repository point to a
+        // known GitHub host" — every GitLab checkout, and the steady state this
+        // fallback exists for.
+        return text.contains("known github host")
+            // Nothing to point anywhere, and nothing for gh to be authoritative
+            // about; the remote parse will fail too, harmlessly.
+            || text.contains("no git remotes found")
+            || text.contains("not a git repository")
+    }
+
+    private nonisolated func readRemoteURL(repoPath: String) async -> String? {
+        if let remoteURLReader { return await remoteURLReader(repoPath) }
+        return await GitManager().getRemoteURL(repoPath: repoPath)
+    }
+
+    /// The host, namespace and project of a git remote URL.
+    ///
+    /// Accepts the three shapes a remote that names a NETWORK HOST can take —
+    /// `https://host/a/b`, `ssh://git@host:22/a/b`, and the scp-like
+    /// `git@host:a/b` — and keeps the FULL namespace, because a GitLab project
+    /// can nest (`acme/platform/api`) and the owner is everything before the
+    /// last segment.
+    ///
+    /// A remote that names no host is rejected outright rather than having its
+    /// first path segment read as one. `file:///Users/me/repo.git` would
+    /// otherwise resolve to the host "Users" and `/srv/git/acme/repo.git` to
+    /// "srv" — identities that are not merely useless but harmful. They are
+    /// cached like any other, so `tbd pr attach <number>` composes a binding URL
+    /// against a host that answers nothing; and `poisonedCacheEntries` rests on
+    /// "both sides resolved" meaning both sides are KNOWN, so a fabricated
+    /// identity turns a legitimately cached PR status into a cross-repo
+    /// poisoning and clears it, persistently.
+    ///
+    /// `RemoteRepoMatching` in TBDShared parses the same three shapes and is
+    /// deliberately not reused: it drops the host by design, and it keeps only
+    /// the last two segments, so it reads `acme/platform/backend/api` as
+    /// `backend/api`. Both choices are correct for what it does — matching a
+    /// provider's `meta["repo"]` against registered repos — and wrong for
+    /// naming a repo to its own forge.
+    static func parseRemoteIdentity(_ remote: String) -> (owner: String, name: String, host: String)? {
+        var rest = remote.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rest.isEmpty else { return nil }
+        if let scheme = rest.range(of: "://") {
+            // Only the schemes that carry a network host. `file://` names a
+            // path on this machine, and a path's first segment is not a host.
+            guard Self.networkRemoteSchemes.contains(String(rest[..<scheme.lowerBound]).lowercased()) else {
+                return nil
+            }
+            rest = String(rest[scheme.upperBound...])
+        } else if let colon = rest.firstIndex(of: ":"), !rest[..<colon].contains("/"),
+                  colon != rest.startIndex {
+            // scp-like syntax puts ':' where a URL puts the first '/'. The
+            // colon must come before any '/', or this is a local path with a
+            // colon somewhere in it rather than `host:namespace/project`.
+            rest.replaceSubrange(colon...colon, with: "/")
+        } else {
+            // A bare local path — `/srv/git/acme/repo.git`, `../sibling` — names
+            // no host at all, and its first segment must never be read as one.
+            return nil
+        }
+        var segments = rest.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        guard segments.count >= 3 else { return nil }
+        var host = segments.removeFirst()
+        if let at = host.lastIndex(of: "@") { host = String(host[host.index(after: at)...]) }
+        // An `ssh://git@host:22/…` port is not part of the host name.
+        if let portColon = host.firstIndex(of: ":") { host = String(host[host.startIndex..<portColon]) }
+        var name = segments.removeLast()
+        if name.lowercased().hasSuffix(".git") { name = String(name.dropLast(4)) }
+        let owner = segments.joined(separator: "/")
+        guard !host.isEmpty, !owner.isEmpty, !name.isEmpty else { return nil }
+        return (owner: owner, name: name, host: host.lowercased())
+    }
+
+    /// The URL schemes that put a network host where this parser reads one.
+    /// `file` is deliberately absent, and so is every scheme nobody has seen on
+    /// a forge remote: an unknown scheme is not evidence of a host.
+    private static let networkRemoteSchemes: Set<String> = ["ssh", "git", "git+ssh", "http", "https"]
 
     /// `resolveNameWithOwner` behind a ~15-min TTL cache so the periodic poll
     /// (by-number query) and picker (open-PR query) stop spawning a `gh repo
     /// view` subprocess on every call. A checkout's owner/name is effectively
     /// immutable, so a stale entry is harmless within the TTL.
-    private func cachedNameWithOwner(repoPath: String) async -> (owner: String, name: String)? {
+    private func cachedNameWithOwner(repoPath: String) async -> (owner: String, name: String, host: String)? {
         if let entry = ownerRepoCache[repoPath], entry.expiry > Date() {
             return entry.value
         }
@@ -2034,12 +2960,15 @@ public actor PRStatusManager {
         return resolved
     }
 
-    /// The checkout's own GitHub `owner`/`name`, through the same TTL cache the
-    /// poll and picker use. Exposed for PR *binding* validation, which has to
-    /// ask the same question on every hook fire and manual attach — resolving
-    /// it independently would both double the `gh repo view` subprocesses and
-    /// let the two answers disagree inside a TTL window.
-    public func repoIdentity(repoPath: String) async -> (owner: String, name: String)? {
+    /// The checkout's own `owner`/`name` and the host they live on, through the
+    /// same TTL cache the poll and picker use. Exposed for PR *binding*
+    /// validation, which has to ask the same question on every hook fire and
+    /// manual attach — resolving it independently would both double the `gh
+    /// repo view` subprocesses and let the two answers disagree inside a TTL
+    /// window. The host rides along because a bare number has to be composed
+    /// into a reference, and the shape of that reference is the host's to
+    /// decide.
+    public func repoIdentity(repoPath: String) async -> (owner: String, name: String, host: String)? {
         await cachedNameWithOwner(repoPath: repoPath)
     }
 
@@ -2083,11 +3012,21 @@ public actor PRStatusManager {
     ) async -> [(worktreeID: UUID, node: PRNode)] {
         var resolved: [String: (owner: String, name: String)] = [:]
         for path in Set(numbered.map(\.worktreePath)) {
-            if let ownerRepo = await cachedNameWithOwner(repoPath: path) {
-                resolved[path] = ownerRepo
-            } else {
+            guard let ownerRepo = await cachedNameWithOwner(repoPath: path) else {
                 logger.debug("fetchAll: could not resolve owner/name for numbered PRs at \(path, privacy: .public)")
+                continue
             }
+            // The by-number query is GitHub's. Offering a GitLab checkout's
+            // coordinates to it is not merely fruitless on a flat namespace —
+            // a same-named GitHub repository answers, and a MERGED answer fires
+            // auto-archive on a worktree whose merge request is somewhere else
+            // entirely. Dropping the entry degrades exactly as an unresolvable
+            // repo does: the worktree keeps its cached status.
+            guard !(await isGitLabHost(ownerRepo.host, repoPath: path)) else {
+                logger.debug("fetchAll: not offering the stored number at \(path, privacy: .public) to gh — \(ownerRepo.host, privacy: .public) is a GitLab host")
+                continue
+            }
+            resolved[path] = (owner: ownerRepo.owner, name: ownerRepo.name)
         }
         var matches: [(worktreeID: UUID, node: PRNode)] = []
         for group in Self.groupNumberedByRepo(numbered, resolve: { resolved[$0] }) {
@@ -2117,6 +3056,98 @@ public actor PRStatusManager {
             matches += Self.parseNumberedPRNodes(from: data, aliases: aliased.map { ($0.alias, $0.worktreeID) })
         }
         return matches
+    }
+
+    /// Branch matching on GitLab: one `sourceBranches` query per project.
+    ///
+    /// The counterpart of `runGHGraphQL` + `matchUnnumbered`, and deliberately
+    /// shaped differently. GitHub can only be asked for the *viewer's* pull
+    /// requests, so branch matching there is a local join over whatever the
+    /// authenticated account happens to have authored. GitLab takes the branch
+    /// list as a query argument with no author filter, so the instance does the
+    /// matching and a merge request opened by a teammate or through the web UI
+    /// is found — the coverage gap that makes this the discovery route worth
+    /// having.
+    ///
+    /// Degrades per project: a project whose query fails contributes no matches
+    /// and no answered ids, so its worktrees keep whatever they had and record
+    /// `.undetermined` rather than "no merge request".
+    ///
+    /// `pipelineGated` is keyed only for worktrees whose project stated whether
+    /// merges are gated on pipelines. An absent key is "nobody could read it",
+    /// which the mapper reads as gated.
+    private nonisolated func fetchGitLabBranchMatches(
+        _ unnumbered: [PollWorktree],
+        repos: [String: (owner: String, name: String)],
+        hosts: [String: String]
+    ) async -> (matches: [(worktreeID: UUID, node: PRNode)],
+                answeredIDs: Set<UUID>,
+                pipelineGated: [UUID: Bool],
+                failureCause: String) {
+        var matches: [(worktreeID: UUID, node: PRNode)] = []
+        var answered: Set<UUID> = []
+        var gated: [UUID: Bool] = [:]
+        var failureCause = PRUndeterminedCause.queryFailed
+
+        // One query per project, so several worktrees on one project cost one
+        // round trip — the same economy the aliased by-number query buys on the
+        // GitHub side.
+        var order: [String] = []
+        var groups: [String: (host: String, owner: String, name: String, entries: [PollWorktree])] = [:]
+        for wt in unnumbered {
+            guard let repo = repos[wt.worktreePath], let host = hosts[wt.worktreePath] else { continue }
+            let key = "\(host.lowercased())\u{1}\(repo.owner.lowercased())\u{1}\(repo.name.lowercased())"
+            if groups[key] == nil {
+                groups[key] = (host, repo.owner, repo.name, [])
+                order.append(key)
+            }
+            groups[key]?.entries.append(wt)
+        }
+
+        for key in order {
+            guard let group = groups[key] else { continue }
+            let branches = Self.orderedUniqueBranches(group.entries.flatMap(Self.candidatesFor))
+            guard !branches.isEmpty else { continue }
+            let fetched = await fetchGitLabNodes(
+                query: GitLabQueries.mergeRequestsByBranchQuery(branches: branches),
+                host: group.host,
+                projectPath: "\(group.owner)/\(group.name)",
+                repoPath: group.entries[0].worktreePath)
+            switch fetched {
+            case .failure(let cause):
+                failureCause = cause
+            case .authenticationFailed(let host):
+                // Reported here as the cause every worktree of this project
+                // records; the binding path has to report it separately,
+                // because nothing there records an outcome per worktree.
+                failureCause = PRUndeterminedCause.forgeAuthFailed(host: host)
+            case .success(let nodes, let pipelineGated):
+                answered.formUnion(group.entries.map(\.id))
+                let groupMatches = Self.matchUnnumbered(group.entries, nodes: nodes,
+                                                        resolveRepo: { repos[$0] })
+                // Keyed only when the project stated it: a worktree missing
+                // from this table is one whose gating nobody could read, and
+                // the mapper reads that absence as gated.
+                if let pipelineGated {
+                    for match in groupMatches { gated[match.worktreeID] = pipelineGated }
+                }
+                matches += groupMatches
+            }
+        }
+        return (matches, answered, gated, failureCause)
+    }
+
+    /// The branch list one project query asks about: every candidate of every
+    /// worktree in it, first-seen order kept and duplicates dropped — several
+    /// worktrees legitimately share a candidate.
+    static func orderedUniqueBranches(_ branches: [String]) -> [String] {
+        var seen: Set<String> = []
+        var out: [String] = []
+        for branch in branches {
+            guard !branch.isEmpty, seen.insert(branch).inserted else { continue }
+            out.append(branch)
+        }
+        return out
     }
 
     private nonisolated func runGHGraphQL(repoPath: String) async -> Data? {
@@ -2173,20 +3204,6 @@ public actor PRStatusManager {
         return Self.checkSignals(contexts: detail.contexts, aggregateRollupState: detail.rollupState)
     }
 
-    private nonisolated func runGH(args: [String], repoPath: String) async -> String? {
-        guard let result = await runGHResult(args: args, repoPath: repoPath) else {
-            return nil
-        }
-
-        guard result.exitStatus == 0 else {
-            let errStr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            logger.debug("gh exited \(result.exitStatus, privacy: .public): \(errStr, privacy: .public)")
-            return nil
-        }
-
-        return result.stdout
-    }
-
     static func graphQLOutputData(stdout: String) -> Data? {
         let trimmed = stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
@@ -2201,52 +3218,143 @@ public actor PRStatusManager {
             logger.debug("gh CLI not found in PATH")
             return nil
         }
+        return await Self.runCLI(executable: ghPath, args: args, repoPath: repoPath, clock: clock)
+    }
 
-        return await withCheckedContinuation { continuation in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: ghPath)
-            process.arguments = args
-            process.currentDirectoryURL = URL(fileURLWithPath: repoPath)
+    /// One `glab` invocation, through the injected seam when a test supplied one.
+    private nonisolated func runGLResult(args: [String], repoPath: String) async -> GHCommandResult? {
+        if let glRunner {
+            return await glRunner(args, repoPath)
+        }
+        return await Self.runGlab(args: args, repoPath: repoPath, clock: clock)
+    }
 
-            let stdout = Pipe()
-            let stderr = Pipe()
-            process.standardOutput = stdout
-            process.standardError = stderr
-
-            process.terminationHandler = { p in
-                let stdoutData = stdout.fileHandleForReading.readDataToEndOfFile()
-                let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
-                continuation.resume(returning: GHCommandResult(
-                    stdout: String(data: stdoutData, encoding: .utf8) ?? "",
-                    stderr: String(data: stderrData, encoding: .utf8) ?? "",
-                    exitStatus: p.terminationStatus
-                ))
+    /// One `glab` invocation that cannot outlive `timeout`, for the detached
+    /// call nobody is waiting on.
+    ///
+    /// The deadline is a race, not a poll: whichever of the call and the sleep
+    /// finishes first wins, and cancelling the group ends the other. On a
+    /// timeout that cancellation reaches `runCLI`, which terminates the child
+    /// and, if it is still there `childKillGrace` later, kills it — the bound
+    /// is on the subprocess itself rather than merely on the task awaiting it,
+    /// because a task that stops waiting leaves a `glab` nothing reclaims, and
+    /// a child that ignores SIGTERM would leave this group waiting on it. Returns nil when the deadline fired; every caller of this is
+    /// discarding the answer anyway.
+    private nonisolated func runGLBounded(args: [String], repoPath: String,
+                                          timeout: Duration) async -> GHCommandResult? {
+        enum Outcome: Sendable {
+            case finished(GHCommandResult?)
+            case timedOut
+        }
+        return await withTaskGroup(of: Outcome.self, returning: GHCommandResult?.self) { group in
+            group.addTask {
+                .finished(await self.runGLResult(args: args, repoPath: repoPath))
             }
-
-            do {
-                try process.run()
-            } catch {
-                logger.debug("Failed to launch gh: \(error)")
-                continuation.resume(returning: nil)
+            group.addTask {
+                // A cancelled sleep also reports `.timedOut`, and that is
+                // harmless: it can only happen after the other task already
+                // produced the value this returns.
+                try? await self.clock.sleep(for: timeout)
+                return .timedOut
+            }
+            defer { group.cancelAll() }
+            guard let first = await group.next() else { return nil }
+            switch first {
+            case .finished(let result):
+                return result
+            case .timedOut:
+                logger.debug("glab call exceeded \(timeout, privacy: .public); terminating it")
+                return nil
             }
         }
     }
 
-    /// Resolved once per process — gh's location doesn't change mid-process.
-    private static let resolvedGHPath: String? = {
-        let candidates = ["/usr/local/bin/gh", "/opt/homebrew/bin/gh", "/usr/bin/gh"]
+    /// The real `glab` subprocess. Static because `GitLabHostResolver` is handed
+    /// this same runner while the manager is still being initialized, so there
+    /// is no instance yet for it to capture.
+    private static func runGlab(args: [String], repoPath: String,
+                                clock: any Clock<Duration> = ContinuousClock()) async -> GHCommandResult? {
+        guard let glabPath = resolvedGlabPath else {
+            logger.debug("glab CLI not found in PATH")
+            return nil
+        }
+        return await runCLI(executable: glabPath, args: args, repoPath: repoPath, clock: clock)
+    }
+
+    /// Runs a forge CLI and answers what it printed.
+    ///
+    /// **Cancelling the calling task terminates the child.** Without that, a
+    /// caller that stops waiting — the deadline in `runGLBounded` is the one
+    /// that does — abandons a live subprocess that no reconciler reclaims, so
+    /// the deadline would bound the wait and not the leak. `ChildProcessHandle`
+    /// carries the process across to the cancellation handler and closes the
+    /// two orderings that could otherwise let one slip: a cancel that lands
+    /// before `run()` prevents the launch outright, and one that lands during
+    /// `run()` is re-checked immediately afterwards.
+    static func runCLI(executable: String, args: [String], repoPath: String,
+                       clock: any Clock<Duration> = ContinuousClock()) async -> GHCommandResult? {
+        let handle = ChildProcessHandle(clock: clock, killGrace: childKillGrace)
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: executable)
+                process.arguments = args
+                process.currentDirectoryURL = URL(fileURLWithPath: repoPath)
+
+                let stdout = Pipe()
+                let stderr = Pipe()
+                process.standardOutput = stdout
+                process.standardError = stderr
+
+                process.terminationHandler = { p in
+                    let stdoutData = stdout.fileHandleForReading.readDataToEndOfFile()
+                    let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
+                    continuation.resume(returning: GHCommandResult(
+                        stdout: String(data: stdoutData, encoding: .utf8) ?? "",
+                        stderr: String(data: stderrData, encoding: .utf8) ?? "",
+                        exitStatus: p.terminationStatus
+                    ))
+                }
+
+                guard handle.adopt(process) else {
+                    // Cancelled before the launch: the cheapest possible
+                    // termination is never starting.
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                do {
+                    try process.run()
+                    handle.terminateIfCancelled()
+                } catch {
+                    logger.debug("Failed to launch \(executable, privacy: .public): \(error)")
+                    continuation.resume(returning: nil)
+                }
+            }
+        } onCancel: {
+            handle.cancel()
+        }
+    }
+
+    /// Resolved once per process — a CLI's location doesn't change mid-process.
+    private static let resolvedGHPath: String? = resolveCLIPath("gh")
+
+    private static let resolvedGlabPath: String? = resolveCLIPath("glab")
+
+    private static func resolveCLIPath(_ tool: String) -> String? {
+        let candidates = ["/usr/local/bin/\(tool)", "/opt/homebrew/bin/\(tool)", "/usr/bin/\(tool)"]
         for path in candidates {
             if FileManager.default.isExecutableFile(atPath: path) { return path }
         }
         // Fall back to PATH search
         if let pathEnv = ProcessInfo.processInfo.environment["PATH"] {
             for dir in pathEnv.split(separator: ":") {
-                let full = "\(dir)/gh"
+                let full = "\(dir)/\(tool)"
                 if FileManager.default.isExecutableFile(atPath: full) { return full }
             }
         }
         return nil
-    }()
+    }
 }
 
 /// One `gh` invocation's outcome. Internal (not private) so the injected-runner
@@ -2264,6 +3372,85 @@ struct GHCommandResult: Sendable {
 }
 
 // MARK: - Supporting types
+
+/// The child a `runCLI` call launched, shared with that call's cancellation
+/// handler so a caller that stops waiting can end the process rather than
+/// abandon it.
+///
+/// `withCheckedContinuation`'s body and `withTaskCancellationHandler`'s
+/// `onCancel` run on different threads and either may go first, so the handoff
+/// is lock-guarded and remembers a cancellation that arrived before there was
+/// anything yet to cancel.
+private final class ChildProcessHandle: @unchecked Sendable {
+    private let lock = NSLock()
+    private var process: Process?
+    private var cancelled = false
+
+    /// Clock seam for the SIGTERM-to-SIGKILL grace — the only delay this type
+    /// has, and a delay is behavior, so it takes a clock rather than a date.
+    private let clock: any Clock<Duration>
+    private let killGrace: Duration
+
+    init(clock: any Clock<Duration>, killGrace: Duration) {
+        self.clock = clock
+        self.killGrace = killGrace
+    }
+
+    /// Takes the process, or answers false because cancellation already
+    /// arrived — in which case the caller must not launch it at all.
+    func adopt(_ process: Process) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !cancelled else { return false }
+        self.process = process
+        return true
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        let launched = process
+        lock.unlock()
+        terminate(launched)
+    }
+
+    /// Re-checked right after `run()` returns, for the cancellation that landed
+    /// mid-launch and so found nothing running to signal.
+    func terminateIfCancelled() {
+        lock.lock()
+        let launched = cancelled ? process : nil
+        lock.unlock()
+        terminate(launched)
+    }
+
+    /// Asks, then insists. SIGTERM first, and if the child is still there after
+    /// the grace, SIGKILL — the one signal it cannot catch, handle or ignore,
+    /// and so the only thing that turns the caller's deadline into a bound on
+    /// the process rather than on the wait.
+    private func terminate(_ process: Process?) {
+        guard let process, process.isRunning else { return }
+        process.terminate()
+        // Detached deliberately: this runs from a cancellation handler, and a
+        // sleep on a cancelled task returns at once — the escalation has to
+        // outlive the cancellation that armed it or it would fire immediately
+        // and give the child no grace at all.
+        Task.detached { [self] in
+            try? await clock.sleep(for: killGrace)
+            killIfStillRunning()
+        }
+    }
+
+    private func killIfStillRunning() {
+        lock.lock()
+        let launched = process
+        lock.unlock()
+        // Foundation reaps the child itself and clears `isRunning` when it
+        // does, so the pid read here is still this child's rather than one the
+        // system has since handed to somebody else.
+        guard let launched, launched.isRunning else { return }
+        kill(launched.processIdentifier, SIGKILL)
+    }
+}
 
 /// Result of the single-PR refresh query, populated by `parsePRByBranch`.
 /// (No longer `Codable`: the refresh path moved from `gh pr view --json` to

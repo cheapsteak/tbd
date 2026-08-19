@@ -21,16 +21,29 @@ public struct ParsedPRURL: Sendable, Equatable, Hashable {
 ///
 /// This reads the hook's structured `tool_input` / `tool_response` JSON — a
 /// machine interface — and never inspects rendered terminal output. The rule is
-/// deliberately narrow: the *command* must be a `gh pr create`, and URLs are
-/// taken from the *result*. A PR URL merely mentioned in unrelated output must
-/// not bind, or every `git log` that quotes a PR link would attach one.
+/// deliberately narrow: the *command* must be a `gh pr create` or a
+/// `glab mr create`, and URLs are taken from the *result*. A PR URL merely
+/// mentioned in unrelated output must not bind, or every `git log` that quotes
+/// a PR link would attach one.
 public enum PRBindingExtractor {
 
-    /// Host-locked to github.com for now; the binding's `host` column exists so
-    /// enterprise support is a later additive change. The lookaheads reject `.`
-    /// and `..` segments, which would otherwise parse as an owner or repo name.
-    private static let urlPattern =
+    /// GitHub pull-request URLs. Host-locked to github.com; the binding's `host`
+    /// column exists so enterprise support is a later additive change. The
+    /// lookaheads reject `.` and `..` segments, which would otherwise parse as
+    /// an owner or repo name.
+    private static let githubURLPattern =
         #"https://github\.com/(?!\.{1,2}/)([\w.-]+)/(?!\.{1,2}/)([\w.-]+)/pull/(\d+)"#
+
+    /// GitLab merge-request URLs on any host. `/-/merge_requests/` is the
+    /// anchor: GitLab always inserts `/-/` between the project path and the
+    /// resource, and no other forge uses that segment, so the URL identifies
+    /// its own forge with no host list. Group 1 is the host, group 2 the
+    /// namespace path — which may nest, GitLab allows up to 20 levels and the
+    /// pattern does not cap it — group 3 the project, group 4 the number.
+    /// Every segment gets the same dot-segment rejection the GitHub pattern
+    /// applies to two, so no level of a nested namespace can smuggle a `..`.
+    private static let gitlabURLPattern =
+        #"https://([\w.-]+)/((?:(?!\.{1,2}/)[\w.-]+/)*?(?!\.{1,2}/)[\w.-]+)/(?!\.{1,2}/)([\w.-]+)/-/merge_requests/(\d+)"#
 
     /// Shell metacharacters that end one command and begin the next. Runs of
     /// them collapse on their own, so `&&`, `||` and `|` need no special case.
@@ -40,8 +53,8 @@ public enum PRBindingExtractor {
     /// path of `gh --repo acme/acme-prod pr create` still reads `pr create`.
     private static let valueTakingFlags: Set<String> = ["-R", "--repo", "--hostname"]
 
-    /// True when the command actually *runs* `gh pr create`, as opposed to
-    /// merely containing that phrase.
+    /// True when the command actually *runs* `gh pr create` or
+    /// `glab mr create`, as opposed to merely containing that phrase.
     ///
     /// Substring matching was wrong in both directions. It fired on
     /// `git log --grep 'gh pr create'` — a false positive that can bind a
@@ -58,7 +71,7 @@ public enum PRBindingExtractor {
     /// pragmatic tokenizer, not a shell parser: an unusual construction fails
     /// closed.
     public static func isPRCreateCommand(_ command: String) -> Bool {
-        commandSegments(of: withoutHeredocBodies(command)).contains(where: isGHPRCreateSegment)
+        commandSegments(of: withoutHeredocBodies(command)).contains(where: isForgeCreateSegment)
     }
 
     /// Drop every heredoc *body* from a command, keeping the lines that really
@@ -204,12 +217,20 @@ public enum PRBindingExtractor {
         return segments
     }
 
-    /// One segment invokes `gh pr create`: `gh` (or a path ending in `/gh`) is
-    /// the command word, and the first two non-flag words after it are `pr`
-    /// then `create`.
-    private static func isGHPRCreateSegment(_ words: [String]) -> Bool {
-        guard let command = words.first,
-              command == "gh" || command.hasSuffix("/gh") else { return false }
+    /// One segment invokes a merge-request create: `gh` (or a path ending in
+    /// `/gh`) followed by `pr create`, or `glab` (or `/glab`) followed by
+    /// `mr create`. The verb must match its own CLI — `gh mr create` and
+    /// `glab pr create` are both rejected, and so is any other command word.
+    private static func isForgeCreateSegment(_ words: [String]) -> Bool {
+        guard let command = words.first else { return false }
+        let expected: [String]
+        if command == "gh" || command.hasSuffix("/gh") {
+            expected = ["pr", "create"]
+        } else if command == "glab" || command.hasSuffix("/glab") {
+            expected = ["mr", "create"]
+        } else {
+            return false
+        }
         var path: [String] = []
         var index = 1
         while index < words.count && path.count < 2 {
@@ -221,27 +242,45 @@ public enum PRBindingExtractor {
                 index += 1
             }
         }
-        return path == ["pr", "create"]
+        return path == expected
     }
 
-    /// Every distinct PR URL in `text`, in first-seen order.
+    /// Every distinct PR or MR URL in `text`, in first-seen order. The two
+    /// patterns are scanned separately, so the results are re-sorted by where
+    /// they were found rather than by which forge matched them.
     public static func parsePRURLs(in text: String) -> [ParsedPRURL] {
-        guard let regex = try? NSRegularExpression(pattern: urlPattern) else { return [] }
         let ns = text as NSString
         var seen = Set<String>()
-        var out: [ParsedPRURL] = []
-        for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
-            guard match.numberOfRanges == 4,
-                  let number = Int(ns.substring(with: match.range(at: 3))) else { continue }
-            let owner = ns.substring(with: match.range(at: 1))
-            let repo = ns.substring(with: match.range(at: 2))
-            let url = ns.substring(with: match.range(at: 0))
-            let parsed = ParsedPRURL(host: "github.com", owner: owner, repo: repo,
-                                     number: number, url: url)
-            guard seen.insert(parsed.url.lowercased()).inserted else { continue }
-            out.append(parsed)
+        var out: [(location: Int, parsed: ParsedPRURL)] = []
+
+        func collect(_ pattern: String, groups: Int,
+                     build: (NSTextCheckingResult, NSString) -> ParsedPRURL?) {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { return }
+            for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+                guard match.numberOfRanges == groups, let parsed = build(match, ns) else { continue }
+                guard seen.insert(parsed.url.lowercased()).inserted else { continue }
+                out.append((match.range.location, parsed))
+            }
         }
-        return out
+
+        collect(githubURLPattern, groups: 4) { match, ns in
+            guard let number = Int(ns.substring(with: match.range(at: 3))) else { return nil }
+            return ParsedPRURL(host: "github.com",
+                               owner: ns.substring(with: match.range(at: 1)),
+                               repo: ns.substring(with: match.range(at: 2)),
+                               number: number,
+                               url: ns.substring(with: match.range(at: 0)))
+        }
+        collect(gitlabURLPattern, groups: 5) { match, ns in
+            guard let number = Int(ns.substring(with: match.range(at: 4))) else { return nil }
+            return ParsedPRURL(host: ns.substring(with: match.range(at: 1)),
+                               owner: ns.substring(with: match.range(at: 2)),
+                               repo: ns.substring(with: match.range(at: 3)),
+                               number: number,
+                               url: ns.substring(with: match.range(at: 0)))
+        }
+
+        return out.sorted { $0.location < $1.location }.map(\.parsed)
     }
 
     /// Extract bindings from a raw hook payload. Returns empty for anything

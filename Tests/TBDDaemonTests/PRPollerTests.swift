@@ -34,7 +34,7 @@ private actor CountingGH {
     }
 
     func run(args: [String], repoPath: String) -> GHCommandResult? {
-        if args.first == "repo" { return GHCommandResult(stdout: "acme/acme-prod\n") }
+        if args.first == "repo" { return GHCommandResult(stdout: #"{"nameWithOwner":"acme/acme-prod","url":"https://github.com/acme/acme-prod"}"#) }
         guard let query = args.first(where: { $0.hasPrefix("query=") }) else { return nil }
         guard query.contains("viewer {") else { return nil }
         viewerQueries += 1

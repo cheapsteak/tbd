@@ -131,21 +131,27 @@ public enum ClaudeHookOverlay {
     ///
     /// **Deliberately permissive, and it must stay that way.** The prefilter is
     /// a COST OPTIMIZATION, never a gate: `PRBindingExtractor`'s tokenizer is
-    /// the sole authority on what counts as a `gh pr create`, and it can only
-    /// judge payloads this pattern lets through. A payload the grep drops never
-    /// reaches `tbd` at all, so a false negative loses the bind in silence.
+    /// the sole authority on what counts as a `gh pr create` or a
+    /// `glab mr create`, and it can only judge payloads this pattern lets
+    /// through. A payload the grep drops never reaches `tbd` at all, so a false
+    /// negative loses the bind in silence.
     ///
-    /// **What it guarantees:** every command the tokenizer accepts with `pr` and
-    /// `create` as *adjacent* subcommand words is admitted — however the segment
-    /// is quoted, whichever global flags precede the subcommand, and whether or
-    /// not `gh` is path-qualified. Two properties carry that, and neither is
-    /// obvious from the pattern alone.
+    /// **What it guarantees:** every command the tokenizer accepts with its
+    /// forge's verb (`pr` for `gh`, `mr` for `glab`) and `create` as *adjacent*
+    /// subcommand words is admitted — however the segment is quoted, whichever
+    /// global flags precede the subcommand, and whether or not the CLI is
+    /// path-qualified. Two properties carry that, and neither is obvious from
+    /// the pattern alone.
     ///
-    /// It does not require `gh` adjacency, because
+    /// It does not require the CLI name to be adjacent, because
     /// `gh -R acme/acme-prod pr create` and `gh --repo acme/acme-prod pr create`
     /// are exactly the flagged forms the tokenizer was built to accept, and a
     /// `gh[[:space:]]+pr` requirement here silently dropped every one of them
-    /// before the tokenizer ever ran.
+    /// before the tokenizer ever ran. The same holds for `glab -R … mr create`.
+    /// A consequence is that the two verbs are not tied to their own CLI here:
+    /// `gh mr create` and `glab pr create`, which the tokenizer rejects, are
+    /// admitted. That is the cheap direction — one short-lived `tbd` that then
+    /// declines to bind.
     ///
     /// And it separates the two words by any run of non-alphanumeric characters
     /// rather than by whitespace, because the tokenizer *strips quotes* while
@@ -160,7 +166,7 @@ public enum ClaudeHookOverlay {
     ///
     /// **What it does not guarantee**, so the invariant is stated rather than
     /// implied: a flag word *between* the two subcommand words
-    /// (`gh pr --draft create`, `gh pr -R acme/acme-prod create`), which the
+    /// (`gh pr --draft create`, `glab mr -R acme/acme-prod create`), which the
     /// tokenizer skips over but which no pattern can span without also matching
     /// ordinary prose — the intervening flag and its value are alphanumeric
     /// words indistinguishable from any other; and quoting *inside* a word
@@ -179,9 +185,10 @@ public enum ClaudeHookOverlay {
     /// shell command runs — hand-copying it into the test is how the two drift
     /// apart. It is embedded in a single-quoted shell word, so it must never
     /// contain a `'`.
-    static let prBindGrepPattern = #"pr([^[:alnum:]]|\\[tr])+create"#
+    static let prBindGrepPattern = #"(pr|mr)([^[:alnum:]]|\\[tr])+create"#
 
-    /// Binds any PR created by a `gh pr create` in this session.
+    /// Binds any PR or MR created by a `gh pr create` or `glab mr create` in
+    /// this session.
     ///
     /// The `grep -qE` is a deliberate prefilter: this hook fires on EVERY Bash
     /// tool call across the whole fleet, and without it each one would spawn a

@@ -48,7 +48,7 @@ private actor ScriptedGH {
     func replaceViewer(_ answer: Answer) { viewer = answer }
 
     func run(args: [String], repoPath: String) -> GHCommandResult? {
-        if args.first == "repo" { return GHCommandResult(stdout: "acme/acme-prod\n") }
+        if args.first == "repo" { return GHCommandResult(stdout: #"{"nameWithOwner":"acme/acme-prod","url":"https://github.com/acme/acme-prod"}"#) }
         guard let query = args.first(where: { $0.hasPrefix("query=") }) else { return nil }
         if query.contains("viewer {") {
             switch viewer {
@@ -311,7 +311,7 @@ struct PRObservationRecordingTests {
         let interrupt = OneShot()
         let manager = PRStatusManager(
             ghRunner: { args, _ in
-                if args.first == "repo" { return GHCommandResult(stdout: "acme/acme-prod\n") }
+                if args.first == "repo" { return GHCommandResult(stdout: #"{"nameWithOwner":"acme/acme-prod","url":"https://github.com/acme/acme-prod"}"#) }
                 guard let query = args.first(where: { $0.hasPrefix("query=") }) else { return nil }
                 // Everything except the viewer batch fails: that outage is what
                 // the user's refresh runs into.

@@ -226,4 +226,56 @@ struct PRBindingExtractorTests {
         let data = try! JSONSerialization.data(withJSONObject: obj)
         #expect(PRBindingExtractor.extract(fromHookPayload: data).first?.number == 9)
     }
+
+    @Test("parses a GitLab merge request URL with a nested namespace")
+    func parsesGitLabNested() {
+        let found = PRBindingExtractor.parsePRURLs(
+            in: "https://git.acme.example/acme/platform/backend/api-gateway/-/merge_requests/412\n")
+        #expect(found.count == 1)
+        #expect(found[0].host == "git.acme.example")
+        #expect(found[0].owner == "acme/platform/backend")
+        #expect(found[0].repo == "api-gateway")
+        #expect(found[0].number == 412)
+    }
+
+    @Test("parses a flat GitLab namespace")
+    func parsesGitLabFlat() {
+        let found = PRBindingExtractor.parsePRURLs(
+            in: "https://gitlab.com/acme/api-gateway/-/merge_requests/7")
+        #expect(found.count == 1)
+        #expect(found[0].owner == "acme")
+        #expect(found[0].repo == "api-gateway")
+        #expect(found[0].number == 7)
+    }
+
+    @Test("rejects merge_requests paths without the /-/ separator")
+    func rejectsMergeRequestsWithoutSeparator() {
+        #expect(PRBindingExtractor.parsePRURLs(
+            in: "https://git.acme.example/acme/api/merge_requests/412").isEmpty)
+    }
+
+    @Test("rejects dot segments in a GitLab namespace")
+    func rejectsGitLabDotSegments() {
+        #expect(PRBindingExtractor.parsePRURLs(
+            in: "https://git.acme.example/acme/../evil/-/merge_requests/1").isEmpty)
+    }
+
+    @Test("still parses GitHub URLs with github.com as the host")
+    func githubStillParses() {
+        let found = PRBindingExtractor.parsePRURLs(
+            in: "https://github.com/acme/acme-prod/pull/412")
+        #expect(found.count == 1)
+        #expect(found[0].host == "github.com")
+        #expect(found[0].owner == "acme")
+    }
+
+    @Test("recognizes glab mr create and rejects other glab verbs")
+    func recognizesGlabCreate() {
+        #expect(PRBindingExtractor.isPRCreateCommand("glab mr create --fill"))
+        #expect(PRBindingExtractor.isPRCreateCommand("cd /tmp && glab  mr   create -t x"))
+        #expect(!PRBindingExtractor.isPRCreateCommand("glab mr view 12"))
+        #expect(!PRBindingExtractor.isPRCreateCommand("glab mr list"))
+        #expect(!PRBindingExtractor.isPRCreateCommand("gh mr create"))
+        #expect(!PRBindingExtractor.isPRCreateCommand("glab pr create"))
+    }
 }

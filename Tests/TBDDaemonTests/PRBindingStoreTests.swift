@@ -260,4 +260,43 @@ struct PRBindingStoreTests {
         for n in [30, 10, 20] { _ = try await fixture.store.upsert(binding(n, worktreeID: wt)) }
         #expect(try await fixture.store.list(worktreeID: wt).map(\.number) == [30, 10, 20])
     }
+
+    @Test("a nested namespace survives the identity key, the parse and the unique index")
+    func nestedNamespaceIdentityRoundTrip() async throws {
+        let fixture = try await Fixture()
+        let wt = try await fixture.newWorktree()
+        let url = "https://git.acme.example/acme/platform/backend/api-gateway/-/merge_requests/412"
+        let nested = PRBinding(
+            worktreeID: wt, host: "git.acme.example",
+            owner: "acme/platform/backend", repo: "api-gateway", number: 412,
+            url: url, source: .manual)
+        // Four parts even though the namespace contains slashes — the key is
+        // \u{1}-delimited, so `/` is ordinary data.
+        #expect(nested.identityKey.split(separator: "\u{1}").count == 4)
+        _ = try await fixture.store.upsert(nested)
+        _ = try await fixture.store.upsert(nested)   // idempotent under the unique index
+        let loaded = try await fixture.store.list(worktreeID: wt)
+        #expect(loaded.count == 1)
+        #expect(loaded[0].owner == "acme/platform/backend")
+        #expect(loaded[0].repo == "api-gateway")
+
+        let parsed = PRStatusManager.parseOwnerRepo(fromURL: loaded[0].url)
+        #expect(parsed?.owner == loaded[0].owner)
+        #expect(parsed?.name == loaded[0].repo)
+    }
+
+    @Test("two projects differing only in namespace depth are distinct bindings")
+    func namespaceDepthDistinguishes() async throws {
+        let fixture = try await Fixture()
+        let wt = try await fixture.newWorktree()
+        func nested(owner: String) -> PRBinding {
+            PRBinding(worktreeID: wt, host: "git.acme.example",
+                      owner: owner, repo: "api", number: 1,
+                      url: "https://git.acme.example/\(owner)/api/-/merge_requests/1",
+                      source: .manual)
+        }
+        _ = try await fixture.store.upsert(nested(owner: "acme"))
+        _ = try await fixture.store.upsert(nested(owner: "acme/platform"))
+        #expect(try await fixture.store.list(worktreeID: wt).count == 2)
+    }
 }

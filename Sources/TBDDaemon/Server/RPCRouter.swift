@@ -177,12 +177,19 @@ public final class RPCRouter: Sendable {
     /// Binding policy for the multi-PR-per-worktree bindings — repo validation,
     /// dedupe, tombstones, cap.
     let prBindingCoordinator: PRBindingCoordinator
-    /// The worktree's own GitHub `owner`/`name`. The coordinator is built on
-    /// this same closure, so a caller that must name a repo before it can form a
-    /// PR reference (`pr.attach 412`) agrees with the policy that validates it.
-    /// Production resolves it via `PRStatusManager`'s `gh repo view` TTL cache;
-    /// tests inject a stub through the init parameter of the same name.
-    let prBindingRepoResolver: @Sendable (UUID) async -> (owner: String, name: String)?
+    /// The worktree's own `owner`/`name` and the host they live on. The
+    /// coordinator is built on this same closure, so a caller that must name a
+    /// repo before it can form a PR reference (`pr.attach 412`) agrees with the
+    /// policy that validates it. Production resolves it via `PRStatusManager`'s
+    /// TTL cache; tests inject a stub through the init parameter of the same
+    /// name.
+    let prBindingRepoResolver: @Sendable (UUID) async -> (owner: String, name: String, host: String)?
+    /// Whether a worktree's host is one the user configured `glab` for — nil
+    /// when there is no local directory to put the question in. The coordinator
+    /// is built on this same closure, so the guard that refuses a `github.com`
+    /// URL on a GitLab checkout and the composer that picks `/-/merge_requests/`
+    /// over `/pull/` agree about the forge.
+    let prBindingForgeResolver: @Sendable (UUID, String) async -> Bool?
     /// Queues concurrent `terminal.send` RPCs per terminal so two payloads
     /// never interleave in one composer. Different terminals still send in
     /// parallel — see `TerminalSendSerializer`.
@@ -223,7 +230,7 @@ public final class RPCRouter: Sendable {
         remoteManager: RemoteProviderManager? = nil,
         codexExecutableResolver: (@Sendable () throws -> String)? = nil,
         codexHomeEnsurer: (@Sendable () throws -> URL)? = nil,
-        prBindingRepoResolver: (@Sendable (UUID) async -> (owner: String, name: String)?)? = nil,
+        prBindingRepoResolver: (@Sendable (UUID) async -> (owner: String, name: String, host: String)?)? = nil,
         now: @escaping @Sendable () -> Date = { Date() },
         actuationLog: ActuationLog
     ) {
@@ -264,8 +271,17 @@ public final class RPCRouter: Sendable {
             return await prManager.repoIdentity(repoPath: worktree.path)
         }
         self.prBindingRepoResolver = repoResolver
+        // The forge half of the same seam, captured the same way. `getLocal`
+        // again, and its nil is the same "nothing here to ask in": `glab` reads
+        // its configuration from the checkout's own directory, which a remote
+        // row does not have on this machine.
+        let forgeResolver: @Sendable (UUID, String) async -> Bool? = { [db, prManager] worktreeID, host in
+            guard let worktree = try? await db.worktrees.getLocal(id: worktreeID) else { return nil }
+            return await prManager.isGitLabHost(host, repoPath: worktree.path)
+        }
+        self.prBindingForgeResolver = forgeResolver
         self.prBindingCoordinator = PRBindingCoordinator(
-            store: db.prBindings, resolveRepo: repoResolver)
+            store: db.prBindings, resolveRepo: repoResolver, isGitLabHost: forgeResolver)
         self.pendingQuestions = pendingQuestions
         self.repoSerializer = repoSerializer
         self.configDirManager = configDirManager
@@ -1270,16 +1286,61 @@ public final class RPCRouter: Sendable {
         return .resolved(parsed)
     }
 
-    /// A bare PR number as a `ParsedPRURL` in the worktree's own repo.
+    /// A bare PR or MR number as a `ParsedPRURL` in the worktree's own repo.
     ///
     /// Resolved through the same seam the coordinator validates with, so a
     /// number can never synthesise a URL the policy would then reject as
     /// wrong-repo. Returns nil when the worktree's repo cannot be named — the
-    /// caller defers rather than guessing an owner.
+    /// caller defers rather than guessing an owner or a host.
+    ///
+    /// This is the one path that must establish the forge rather than read it,
+    /// because there is no URL yet to read it from: GitLab writes
+    /// `/<namespace…>/<project>/-/merge_requests/<iid>` where GitHub writes
+    /// `/owner/name/pull/<n>`, and composing one shape for every host yields a
+    /// URL that points at nothing on the hosts that speak the other.
+    ///
+    /// So it asks the only component that can know. `PRStatusManager` answers
+    /// from `GitLabHostResolver`, which reads the hosts the user configured
+    /// `glab` for — a declaration, not an inference. The GitLab shape is
+    /// composed only for a host named there; every other host keeps `/pull/`,
+    /// which is what a GitHub Enterprise, Bitbucket, Gitea or Codeberg
+    /// checkout serves and what github.com has always been given. Reading the
+    /// hostname's own shape instead would hand all four of those fleets a
+    /// merge-request URL that 404s.
     private func prRef(worktreeID: UUID, number: Int) async -> ParsedPRURL? {
         guard let own = await prBindingRepoResolver(worktreeID) else { return nil }
+        // Two independent lookups have to succeed, and this is the second: the
+        // repo names the coordinate, the forge names the shape. Either one
+        // failing leaves a URL that could only be guessed.
+        guard let isGitLab = await isGitLabWorktree(worktreeID: worktreeID, host: own.host) else {
+            return nil
+        }
+        let path = "https://\(own.host)/\(own.owner)/\(own.name)"
+        let url = isGitLab
+            ? "\(path)/-/merge_requests/\(number)"
+            : "\(path)/pull/\(number)"
         return ParsedPRURL(
-            host: "github.com", owner: own.owner, repo: own.name, number: number,
-            url: "https://github.com/\(own.owner)/\(own.name)/pull/\(number)")
+            host: own.host, owner: own.owner, repo: own.name, number: number, url: url)
+    }
+
+    /// Whether this worktree's host speaks GitLab, asked in the worktree's own
+    /// directory because that is where `glab` reads its configuration from —
+    /// or nil when the question could not be put at all.
+    ///
+    /// Nil is a third answer and not a soft "no". A worktree with no local row
+    /// — a remote one, or one deleted between the resolve and this call —
+    /// cannot supply that directory, so nothing has answered, and answering
+    /// "not GitLab" there is a guess that composes `/pull/<n>` on a host that
+    /// may well serve `/-/merge_requests/<n>`: a binding whose URL 404s and
+    /// whose label reads "PR", persisted. `prRef` defers on nil instead, the
+    /// same way it defers when the repo cannot be named.
+    ///
+    /// A resolver that positively answers "this host is not GitLab" returns
+    /// `false` and still gets `/pull/<n>` — the shape github.com has always
+    /// been given and the one a GitHub Enterprise, Bitbucket, Gitea or
+    /// Codeberg checkout serves. `github.com` never reaches a subprocess: the
+    /// resolver short-circuits it.
+    private func isGitLabWorktree(worktreeID: UUID, host: String) async -> Bool? {
+        await prBindingForgeResolver(worktreeID, host)
     }
 }
