@@ -120,3 +120,46 @@ private let identity: @Sendable (String) -> String = { $0 }
     let resolved = DaemonBuildSkew.defaultResolvePath("/Users/me/proj/tbd/./.build/debug/TBDDaemon")
     #expect(resolved == "/Users/me/proj/tbd/.build/debug/TBDDaemon")
 }
+
+// MARK: - Cross-source consistency
+
+/// `DaemonBuildSkew.buildConfigurations` hand-mirrors the configurations
+/// `scripts/restart.sh` can launch a daemon from. Nothing in the compiler ties
+/// those two lists together, so a future third `build_config` value in the
+/// script would silently reintroduce the false-positive skew warning this
+/// check exists to prevent. This test is that tie: it reads the script and
+/// fails if the script grows a configuration the Swift list does not know.
+@Test func buildConfigurations_matchesEveryConfigurationRestartScriptCanLaunch() throws {
+    // Walk up from this source file to the repo root (the dir holding `scripts/`).
+    var dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    while !FileManager.default.fileExists(atPath: dir.appendingPathComponent("scripts/restart.sh").path) {
+        let parent = dir.deletingLastPathComponent()
+        // Reached the filesystem root without finding it — skip rather than
+        // fail, so a packaged/sandboxed test run doesn't red for the wrong reason.
+        guard parent.path != dir.path else { return }
+        dir = parent
+    }
+    let script = try String(contentsOf: dir.appendingPathComponent("scripts/restart.sh"), encoding: .utf8)
+
+    // Every literal assigned to build_config, e.g. `build_config=debug` and
+    // `--release) build_config=release ;;`.
+    var found: Set<String> = []
+    let pattern = try NSRegularExpression(pattern: #"build_config=([A-Za-z0-9_]+)"#)
+    let ns = script as NSString
+    for m in pattern.matches(in: script, range: NSRange(location: 0, length: ns.length)) {
+        found.insert(ns.substring(with: m.range(at: 1)))
+    }
+
+    #expect(!found.isEmpty, "found no build_config assignments — did restart.sh change shape?")
+    let known = Set(DaemonBuildSkew.buildConfigurations)
+    let unknown = found.subtracting(known)
+    #expect(
+        unknown.isEmpty,
+        """
+        restart.sh can launch build configuration(s) \(unknown.sorted()) that \
+        DaemonBuildSkew.buildConfigurations does not list \(known.sorted()). \
+        A daemon launched in that configuration would be misreported as \
+        cross-build skew. Add it to buildConfigurations.
+        """
+    )
+}
