@@ -174,6 +174,10 @@ final class AppState: ObservableObject {
     /// response stamp advanced; still rejects an older overlapping response
     /// that carries a different value.
     var terminalPresentationOrderObservedAt: [UUID: Date] = [:]
+    /// Session identity ordering is independent of the published Terminal row
+    /// so a pushed SessionStart can fence an older list response even in the
+    /// brief interval before its activity delta arrives.
+    var terminalSessionOrderObservedAt: [UUID: Date] = [:]
     @Published var notes: [UUID: [Note]] = [:]
     @Published var focusedTabCloseContext: TabCloseContext?
     /// Unread notification summaries keyed by worktree ID. The cmd-K jump
@@ -2188,13 +2192,44 @@ final class AppState: ObservableObject {
         guard let idx = terminals[delta.worktreeID]?.firstIndex(where: { $0.id == delta.terminalID }) else {
             return
         }
-        terminals[delta.worktreeID]?[idx].claudeSessionID = delta.sessionID
+        let currentTerminal = terminals[delta.worktreeID]![idx]
+        var terminal = currentTerminal
+        if let incomingOrder = delta.sessionOrderObservedAt,
+           let currentOrder = terminalSessionOrderObservedAt[delta.terminalID],
+           incomingOrder <= currentOrder {
+            return
+        }
+        let effectiveTranscriptPath = delta.transcriptPath ?? terminal.transcriptPath
+        let identityChanged = terminal.claudeSessionID != delta.sessionID
+            || terminal.transcriptPath != effectiveTranscriptPath
+        terminal.claudeSessionID = delta.sessionID
         // Mirror TerminalStore.updateSession's preserve-on-nil: a delta with
         // nil transcriptPath means the SessionStart payload didn't carry a
         // path even though sessionID rolled. Keep the previous value so the
         // in-memory model doesn't drift from the DB.
         if let tp = delta.transcriptPath {
-            terminals[delta.worktreeID]?[idx].transcriptPath = tp
+            terminal.transcriptPath = tp
+        }
+        // Presentation belongs to one session identity. An ordered delta is
+        // an accepted SessionStart boundary even when Codex reused the same
+        // session/path; an unordered legacy delta is a boundary only when the
+        // effective identity changed.
+        if identityChanged || delta.sessionOrderObservedAt != nil {
+            terminal.presentationActivityState = nil
+            terminal.presentationActivityObservedAt = nil
+            if let incomingOrder = delta.sessionOrderObservedAt {
+                terminalPresentationOrderObservedAt[delta.terminalID] = incomingOrder
+            } else {
+                terminalPresentationOrderObservedAt.removeValue(forKey: delta.terminalID)
+            }
+        }
+        if let incomingOrder = delta.sessionOrderObservedAt {
+            terminalSessionOrderObservedAt[delta.terminalID] = incomingOrder
+        } else if identityChanged {
+            terminalSessionOrderObservedAt.removeValue(forKey: delta.terminalID)
+        }
+        if terminal != currentTerminal {
+            terminals[delta.worktreeID]?[idx] = terminal
         }
     }
 
@@ -2202,7 +2237,19 @@ final class AppState: ObservableObject {
         guard let idx = terminals[delta.worktreeID]?.firstIndex(where: { $0.id == delta.terminalID }) else {
             return
         }
-        terminals[delta.worktreeID]?[idx].applyActivityDelta(delta)
+        var terminal = terminals[delta.worktreeID]![idx]
+        let previousPresentationState = terminal.presentationActivityState
+        let previousPresentationObservedAt = terminal.presentationActivityObservedAt
+        terminal.applyActivityDelta(delta)
+        if terminal.presentationActivityState != previousPresentationState
+            || terminal.presentationActivityObservedAt != previousPresentationObservedAt {
+            if let observedAt = terminal.presentationActivityObservedAt {
+                terminalPresentationOrderObservedAt[delta.terminalID] = observedAt
+            } else {
+                terminalPresentationOrderObservedAt.removeValue(forKey: delta.terminalID)
+            }
+        }
+        terminals[delta.worktreeID]?[idx] = terminal
     }
 
     /// Seamless in-place "Switch account": the terminal row is unchanged except

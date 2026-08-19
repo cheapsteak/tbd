@@ -279,6 +279,386 @@ private func decodedCodexSnapshot(
 }
 
 @MainActor
+@Test func appState_sessionStartDeltaAdvancesPresentationOrderPastDelayedList() throws {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    let initialAt = Date(timeIntervalSinceReferenceDate: 10)
+    let stableAt = Date(timeIntervalSinceReferenceDate: 20)
+    let delayedAt = Date(timeIntervalSinceReferenceDate: 25)
+    let sessionStartAt = Date(timeIntervalSinceReferenceDate: 30)
+    let newerAt = Date(timeIntervalSinceReferenceDate: 40)
+    let original = Terminal(
+        id: terminalID,
+        worktreeID: worktreeID,
+        tmuxWindowID: "@1",
+        tmuxPaneID: "%1",
+        label: "Codex",
+        kind: .codex,
+        activityState: .idle,
+        presentationActivityState: .working,
+        presentationActivityObservedAt: initialAt,
+        activityStateSource: .hookEvent("Stop"),
+        activityStateObservedAt: initialAt,
+        activityStateOrderObservedAt: initialAt)
+    state.terminals = [worktreeID: [original]]
+
+    var stable = original
+    stable.presentationActivityObservedAt = stableAt
+    state.adoptTerminalSnapshot([stable], worktreeID: worktreeID)
+    #expect(state.terminalPresentationOrderObservedAt[terminalID] == stableAt)
+
+    state.handleDelta(.terminalActivityUpdated(TerminalActivityDelta(
+        terminalID: terminalID,
+        worktreeID: worktreeID,
+        activityState: .idle,
+        activityStateSource: .hookEvent("SessionStart"),
+        activityStateObservedAt: sessionStartAt,
+        activityStateOrderObservedAt: sessionStartAt)))
+    #expect(state.terminals[worktreeID]?.first?.presentationActivityState == .idle)
+    #expect(state.terminalPresentationOrderObservedAt[terminalID] == sessionStartAt)
+
+    var delayedWorking = try #require(state.terminals[worktreeID]?.first)
+    delayedWorking.presentationActivityState = .working
+    delayedWorking.presentationActivityObservedAt = delayedAt
+    state.adoptTerminalSnapshot([delayedWorking], worktreeID: worktreeID)
+    #expect(state.terminals[worktreeID]?.first?.presentationActivityState == .idle)
+
+    var newerWorking = try #require(state.terminals[worktreeID]?.first)
+    newerWorking.presentationActivityState = .working
+    newerWorking.presentationActivityObservedAt = newerAt
+    state.adoptTerminalSnapshot([newerWorking], worktreeID: worktreeID)
+    #expect(state.terminals[worktreeID]?.first?.presentationActivityState == .working)
+    #expect(state.terminalPresentationOrderObservedAt[terminalID] == newerAt)
+}
+
+@MainActor
+@Test func appState_sessionIdentityRolloverResetsPresentationOrder() {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    state.terminals = [
+        worktreeID: [
+            Terminal(
+                id: terminalID,
+                worktreeID: worktreeID,
+                tmuxWindowID: "@1",
+                tmuxPaneID: "%1",
+                label: "Codex",
+                claudeSessionID: "old-session",
+                transcriptPath: "/tmp/old-session.jsonl",
+                kind: .codex,
+                presentationActivityState: .working,
+                presentationActivityObservedAt:
+                    Date(timeIntervalSinceReferenceDate: 40))
+        ]
+    ]
+    state.terminalPresentationOrderObservedAt[terminalID] =
+        Date(timeIntervalSinceReferenceDate: 20)
+    state.terminalSessionOrderObservedAt[terminalID] =
+        Date(timeIntervalSinceReferenceDate: 20)
+    let sessionStartAt = Date(timeIntervalSinceReferenceDate: 30)
+
+    state.handleDelta(.terminalSessionUpdated(TerminalSessionDelta(
+        terminalID: terminalID,
+        worktreeID: worktreeID,
+        sessionID: "new-session",
+        transcriptPath: "/tmp/new-session.jsonl",
+        sessionOrderObservedAt: sessionStartAt)))
+
+    #expect(state.terminalPresentationOrderObservedAt[terminalID] == sessionStartAt)
+    #expect(state.terminalSessionOrderObservedAt[terminalID] == sessionStartAt)
+    #expect(state.terminals[worktreeID]?.first?.presentationActivityState == nil)
+    #expect(state.terminals[worktreeID]?.first?.presentationActivityObservedAt == nil)
+
+    // The activity delta belongs to the new identity. Its older wall-clock
+    // stamp must not be compared with presentation evidence from the old one.
+    state.handleDelta(.terminalActivityUpdated(TerminalActivityDelta(
+        terminalID: terminalID,
+        worktreeID: worktreeID,
+        activityState: .idle,
+        activityStateSource: .hookEvent("SessionStart"),
+        activityStateObservedAt: sessionStartAt,
+        activityStateOrderObservedAt: sessionStartAt)))
+    #expect(state.terminals[worktreeID]?.first?.presentationActivityState == .idle)
+    #expect(state.terminals[worktreeID]?.first?.presentationActivityObservedAt == sessionStartAt)
+    #expect(state.terminalPresentationOrderObservedAt[terminalID] == sessionStartAt)
+}
+
+@MainActor
+@Test func appState_legacyNilPathSessionRolloverClearsOldPresentation() {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    let oldPath = "/tmp/existing-session.jsonl"
+    state.terminals = [
+        worktreeID: [
+            Terminal(
+                id: terminalID,
+                worktreeID: worktreeID,
+                tmuxWindowID: "@1",
+                tmuxPaneID: "%1",
+                label: "Codex",
+                claudeSessionID: "old-session",
+                transcriptPath: oldPath,
+                kind: .codex,
+                presentationActivityState: .working,
+                presentationActivityObservedAt:
+                    Date(timeIntervalSinceReferenceDate: 40))
+        ]
+    ]
+    state.terminalPresentationOrderObservedAt[terminalID] =
+        Date(timeIntervalSinceReferenceDate: 40)
+
+    state.handleDelta(.terminalSessionUpdated(TerminalSessionDelta(
+        terminalID: terminalID,
+        worktreeID: worktreeID,
+        sessionID: "new-session",
+        transcriptPath: nil)))
+
+    let terminal = state.terminals[worktreeID]?.first
+    #expect(terminal?.transcriptPath == oldPath)
+    #expect(terminal?.presentationActivityState == nil)
+    #expect(terminal?.presentationActivityObservedAt == nil)
+    #expect(state.terminalPresentationOrderObservedAt[terminalID] == nil)
+    #expect(state.terminalSessionOrderObservedAt[terminalID] == nil)
+}
+
+@MainActor
+@Test func appState_staleOldIdentityListCannotRollbackAcceptedSessionStart() {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    let oldAt = Date(timeIntervalSinceReferenceDate: 20)
+    let sessionStartAt = Date(timeIntervalSinceReferenceDate: 30)
+    let oldSnapshot = Terminal(
+        id: terminalID,
+        worktreeID: worktreeID,
+        tmuxWindowID: "@1",
+        tmuxPaneID: "%1",
+        label: "Codex",
+        claudeSessionID: "old-session",
+        transcriptPath: "/tmp/old-session.jsonl",
+        kind: .codex,
+        activityState: .working,
+        presentationActivityState: .working,
+        presentationActivityObservedAt: oldAt,
+        activityStateSource: .hookEvent("UserPromptSubmit"),
+        activityStateObservedAt: oldAt,
+        activityStateOrderObservedAt: oldAt)
+    state.terminals = [worktreeID: [oldSnapshot]]
+    state.adoptTerminalSnapshot([oldSnapshot], worktreeID: worktreeID)
+
+    state.handleDelta(.terminalSessionUpdated(TerminalSessionDelta(
+        terminalID: terminalID,
+        worktreeID: worktreeID,
+        sessionID: "new-session",
+        transcriptPath: "/tmp/new-session.jsonl",
+        sessionOrderObservedAt: sessionStartAt)))
+    state.handleDelta(.terminalActivityUpdated(TerminalActivityDelta(
+        terminalID: terminalID,
+        worktreeID: worktreeID,
+        activityState: .idle,
+        activityStateSource: .hookEvent("SessionStart"),
+        activityStateObservedAt: sessionStartAt,
+        activityStateOrderObservedAt: sessionStartAt)))
+
+    state.adoptTerminalSnapshot([oldSnapshot], worktreeID: worktreeID)
+
+    let terminal = state.terminals[worktreeID]?.first
+    #expect(terminal?.claudeSessionID == "new-session")
+    #expect(terminal?.transcriptPath == "/tmp/new-session.jsonl")
+    #expect(terminal?.activityStateSource == .hookEvent("SessionStart"))
+    #expect(terminal?.presentationActivityState == .idle)
+}
+
+@MainActor
+@Test func appState_sessionDeltaFencesStaleListBeforeActivityDelta() {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    let oldAt = Date(timeIntervalSinceReferenceDate: 20)
+    let sessionStartAt = Date(timeIntervalSinceReferenceDate: 30)
+    let oldSnapshot = Terminal(
+        id: terminalID,
+        worktreeID: worktreeID,
+        tmuxWindowID: "@1",
+        tmuxPaneID: "%1",
+        label: "Codex",
+        claudeSessionID: "old-session",
+        transcriptPath: "/tmp/old-session.jsonl",
+        kind: .codex,
+        activityState: .working,
+        presentationActivityState: .working,
+        presentationActivityObservedAt: oldAt,
+        activityStateSource: .hookEvent("UserPromptSubmit"),
+        activityStateObservedAt: oldAt,
+        activityStateOrderObservedAt: oldAt)
+    state.terminals = [worktreeID: [oldSnapshot]]
+
+    state.handleDelta(.terminalSessionUpdated(TerminalSessionDelta(
+        terminalID: terminalID,
+        worktreeID: worktreeID,
+        sessionID: "new-session",
+        transcriptPath: "/tmp/new-session.jsonl",
+        sessionOrderObservedAt: sessionStartAt)))
+    state.adoptTerminalSnapshot([oldSnapshot], worktreeID: worktreeID)
+
+    var terminal = state.terminals[worktreeID]?.first
+    #expect(terminal?.claudeSessionID == "new-session")
+    #expect(terminal?.transcriptPath == "/tmp/new-session.jsonl")
+    #expect(terminal?.presentationActivityState == nil)
+    #expect(state.terminalSessionOrderObservedAt[terminalID] == sessionStartAt)
+
+    state.handleDelta(.terminalActivityUpdated(TerminalActivityDelta(
+        terminalID: terminalID,
+        worktreeID: worktreeID,
+        activityState: .idle,
+        activityStateSource: .hookEvent("SessionStart"),
+        activityStateObservedAt: sessionStartAt,
+        activityStateOrderObservedAt: sessionStartAt)))
+    terminal = state.terminals[worktreeID]?.first
+    #expect(terminal?.activityStateSource == .hookEvent("SessionStart"))
+    #expect(terminal?.presentationActivityState == .idle)
+}
+
+@MainActor
+@Test func appState_sameSessionIdentityPreservesPresentationOrder() {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    let observedAt = Date(timeIntervalSinceReferenceDate: 20)
+    state.terminals = [
+        worktreeID: [
+            Terminal(
+                id: terminalID,
+                worktreeID: worktreeID,
+                tmuxWindowID: "@1",
+                tmuxPaneID: "%1",
+                label: "Codex",
+                claudeSessionID: "same-session",
+                transcriptPath: "/tmp/same-session.jsonl",
+                kind: .codex)
+        ]
+    ]
+    state.terminalPresentationOrderObservedAt[terminalID] = observedAt
+
+    state.handleDelta(.terminalSessionUpdated(TerminalSessionDelta(
+        terminalID: terminalID,
+        worktreeID: worktreeID,
+        sessionID: "same-session",
+        transcriptPath: "/tmp/same-session.jsonl")))
+
+    #expect(state.terminalPresentationOrderObservedAt[terminalID] == observedAt)
+}
+
+@MainActor
+@Test func appState_terminalRemovalClearsPresentationOrder() {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    state.terminals = [
+        worktreeID: [
+            Terminal(
+                id: terminalID,
+                worktreeID: worktreeID,
+                tmuxWindowID: "@1",
+                tmuxPaneID: "%1",
+                label: "Codex",
+                kind: .codex)
+        ]
+    ]
+    state.terminalPresentationOrderObservedAt[terminalID] =
+        Date(timeIntervalSinceReferenceDate: 20)
+
+    state.removeDeletedTerminalFromState(
+        terminalID: terminalID,
+        worktreeID: worktreeID)
+
+    #expect(state.terminalPresentationOrderObservedAt[terminalID] == nil)
+}
+
+@MainActor
+@Test func appState_recreatedTerminalReplacesPresentationOrder() {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    let replacementAt = Date(timeIntervalSinceReferenceDate: 30)
+    state.terminals = [
+        worktreeID: [
+            Terminal(
+                id: terminalID,
+                worktreeID: worktreeID,
+                tmuxWindowID: "@1",
+                tmuxPaneID: "%1",
+                label: "Codex",
+                claudeSessionID: "old-session",
+                transcriptPath: "/tmp/old-session.jsonl",
+                kind: .codex)
+        ]
+    ]
+    state.terminalPresentationOrderObservedAt[terminalID] =
+        Date(timeIntervalSinceReferenceDate: 20)
+    state.terminalSessionOrderObservedAt[terminalID] =
+        Date(timeIntervalSinceReferenceDate: 20)
+    let replacement = Terminal(
+        id: terminalID,
+        worktreeID: worktreeID,
+        tmuxWindowID: "@2",
+        tmuxPaneID: "%2",
+        label: "Codex",
+        claudeSessionID: "new-session",
+        transcriptPath: "/tmp/new-session.jsonl",
+        kind: .codex,
+        presentationActivityState: .idle,
+        presentationActivityObservedAt: replacementAt,
+        activityStateSource: .hookEvent("SessionStart"),
+        activityStateObservedAt: replacementAt,
+        activityStateOrderObservedAt: replacementAt)
+
+    state.adoptRecreatedTerminal(replacement)
+
+    #expect(state.terminalPresentationOrderObservedAt[terminalID] == replacementAt)
+    #expect(state.terminalSessionOrderObservedAt[terminalID] == replacementAt)
+}
+
+@MainActor
+@Test func appState_createdTerminalReplacementResetsPresentationOrder() {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    state.terminals = [
+        worktreeID: [
+            Terminal(
+                id: terminalID,
+                worktreeID: worktreeID,
+                tmuxWindowID: "@1",
+                tmuxPaneID: "%1",
+                label: "Codex",
+                claudeSessionID: "old-session",
+                transcriptPath: "/tmp/old-session.jsonl",
+                kind: .codex)
+        ]
+    ]
+    state.terminalPresentationOrderObservedAt[terminalID] =
+        Date(timeIntervalSinceReferenceDate: 20)
+    state.terminalSessionOrderObservedAt[terminalID] =
+        Date(timeIntervalSinceReferenceDate: 20)
+    let replacement = Terminal(
+        id: terminalID,
+        worktreeID: worktreeID,
+        tmuxWindowID: "@2",
+        tmuxPaneID: "%2",
+        label: "Codex",
+        kind: .codex)
+
+    state.mergeCreatedTerminal(replacement)
+
+    #expect(state.terminalPresentationOrderObservedAt[terminalID] == nil)
+    #expect(state.terminalSessionOrderObservedAt[terminalID] == nil)
+}
+
+@MainActor
 @Test func appState_legacyTranscriptSnapshotsRemainArrivalOrdered() throws {
     let state = AppState()
     let worktreeID = UUID()

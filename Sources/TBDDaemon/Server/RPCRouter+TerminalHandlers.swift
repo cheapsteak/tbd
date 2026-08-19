@@ -2925,7 +2925,8 @@ extension RPCRouter {
             terminalID: terminal.id,
             worktreeID: terminal.worktreeID,
             sessionID: sessionApplication.sessionID,
-            transcriptPath: sessionApplication.transcriptPath
+            transcriptPath: sessionApplication.transcriptPath,
+            sessionOrderObservedAt: sessionApplication.orderObservedAt
         )))
         if let application = sessionApplication.activityObservation {
             subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(

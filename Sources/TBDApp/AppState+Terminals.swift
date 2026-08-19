@@ -186,6 +186,7 @@ extension AppState {
             terminals[worktreeID, default: []].append(terminal)
             inserted = true
         }
+        replaceTerminalObservationOrder(with: terminal)
         let splitRepresentationTabIDs = Set((tabs[worktreeID] ?? []).compactMap { tab -> UUID? in
             guard let layout = layouts[tab.id],
                   case .split = layout,
@@ -277,6 +278,7 @@ extension AppState {
                   $0.id == terminal.id
               }) else { return }
         terminals[terminal.worktreeID]?[index] = terminal
+        replaceTerminalObservationOrder(with: terminal)
     }
 
     /// Adopt a daemon snapshot without allowing a response that overlaps an
@@ -296,6 +298,35 @@ extension AppState {
                   recentlyDeletedTerminalIDs[snapshot.id] == nil else { return nil }
             var merged = snapshot
             let current = existingByID[snapshot.id]
+            let incomingActivityOrderObservedAt = snapshot.activityStateOrderObservedAt
+                ?? snapshot.activityStateObservedAt
+            let currentSessionOrderObservedAt = terminalSessionOrderObservedAt[snapshot.id]
+                ?? current.flatMap { terminal in
+                    guard terminal.activityStateSource == .hookEvent("SessionStart") else {
+                        return nil
+                    }
+                    return terminal.activityStateOrderObservedAt
+                        ?? terminal.activityStateObservedAt
+                }
+            let identityChanged = current.map {
+                snapshot.claudeSessionID != $0.claudeSessionID
+                    || snapshot.transcriptPath != $0.transcriptPath
+            } ?? false
+            let shouldKeepCurrentIdentity = identityChanged
+                && currentSessionOrderObservedAt.map { currentOrder in
+                    incomingActivityOrderObservedAt.map { $0 <= currentOrder } ?? true
+                } == true
+            if shouldKeepCurrentIdentity, let current {
+                merged.claudeSessionID = current.claudeSessionID
+                merged.transcriptPath = current.transcriptPath
+            } else if current == nil || identityChanged {
+                if let incomingActivityOrderObservedAt,
+                   snapshot.claudeSessionID != nil || snapshot.transcriptPath != nil {
+                    terminalSessionOrderObservedAt[snapshot.id] = incomingActivityOrderObservedAt
+                } else {
+                    terminalSessionOrderObservedAt.removeValue(forKey: snapshot.id)
+                }
+            }
             let presentationOrderObservedAt = merged.reconcileActivityObservation(
                 against: current,
                 presentationOrderObservedAt: terminalPresentationOrderObservedAt[snapshot.id]
@@ -310,6 +341,7 @@ extension AppState {
         let visibleIDs = Set(visible.map(\.id))
         for terminal in existing where !visibleIDs.contains(terminal.id) {
             terminalPresentationOrderObservedAt.removeValue(forKey: terminal.id)
+            terminalSessionOrderObservedAt.removeValue(forKey: terminal.id)
         }
         guard visible != existing else { return }
         terminals[worktreeID] = visible
@@ -479,12 +511,32 @@ extension AppState {
     /// Preserve an active recreation claim across removal; otherwise discard
     /// recovery history immediately. Shared by terminal and worktree removal.
     func recordTerminalRemoval(terminalID: UUID, date: Date = Date()) {
+        terminalPresentationOrderObservedAt.removeValue(forKey: terminalID)
+        terminalSessionOrderObservedAt.removeValue(forKey: terminalID)
         pruneRecentTerminalDeletions(date: date)
         recentlyDeletedTerminalIDs[terminalID] = date
         if recreatingTerminalIDs.contains(terminalID) {
             terminalDeletionsAwaitingRecreationCompletion.insert(terminalID)
         } else {
             terminalRecoveryBudget.reset(for: terminalID)
+        }
+    }
+
+    /// A replacement Terminal is a new observation generation even when its
+    /// UUID is reused. Seed both hidden ordering rails from that row rather
+    /// than retaining watermarks from the terminal incarnation it replaced.
+    private func replaceTerminalObservationOrder(with terminal: Terminal) {
+        if let observedAt = terminal.presentationActivityObservedAt {
+            terminalPresentationOrderObservedAt[terminal.id] = observedAt
+        } else {
+            terminalPresentationOrderObservedAt.removeValue(forKey: terminal.id)
+        }
+        if terminal.claudeSessionID != nil || terminal.transcriptPath != nil,
+           let observedAt = terminal.activityStateOrderObservedAt
+            ?? terminal.activityStateObservedAt {
+            terminalSessionOrderObservedAt[terminal.id] = observedAt
+        } else {
+            terminalSessionOrderObservedAt.removeValue(forKey: terminal.id)
         }
     }
 

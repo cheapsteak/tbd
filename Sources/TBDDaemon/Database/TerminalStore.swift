@@ -138,6 +138,7 @@ public struct AppliedTerminalActivityObservation: Sendable {
 struct AppliedTerminalSessionStart: Sendable {
     let sessionID: String
     let transcriptPath: String?
+    let orderObservedAt: Date
     let activityObservation: AppliedTerminalActivityObservation?
 }
 
@@ -456,6 +457,7 @@ public struct TerminalStore: Sendable {
             return AppliedTerminalSessionStart(
                 sessionID: sessionID,
                 transcriptPath: record.transcriptPath,
+                orderObservedAt: observedAt,
                 activityObservation: activityObservation)
         }
     }

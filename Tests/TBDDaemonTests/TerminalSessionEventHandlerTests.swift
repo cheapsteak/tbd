@@ -90,6 +90,13 @@ struct TerminalSessionEventHandlerTests {
     @Test("updates sessionID + transcriptPath in DB on a fresh SessionStart")
     func updatesSessionAndBroadcasts() async throws {
         let (terminal, _) = try await makeTerminal(initialSession: "old-id")
+        let observedAt = Date(timeIntervalSinceReferenceDate: 123)
+        let orderedRouter = makeRouter(now: { observedAt })
+        let captured = SessionDeltaCapture()
+        orderedRouter.subscriptions.addSubscriber { data in
+            captured.append(data)
+            return true
+        }
         let request = try RPCRequest(
             method: RPCMethod.terminalSessionEvent,
             params: TerminalSessionEventParams(
@@ -99,12 +106,20 @@ struct TerminalSessionEventHandlerTests {
                 source: "clear"
             )
         )
-        let response = await router.handle(request)
+        let response = await orderedRouter.handle(request)
         #expect(response.success)
 
         let updated = try await db.terminals.get(id: terminal.id)
         #expect(updated?.claudeSessionID == "new-id")
         #expect(updated?.transcriptPath == "/Users/me/.claude/projects/-x/new-id.jsonl")
+        let delta = try #require(captured.values.compactMap {
+            try? JSONDecoder().decode(StateDelta.self, from: $0)
+        }.first)
+        guard case let .terminalSessionUpdated(session) = delta else {
+            Issue.record("expected terminalSessionUpdated")
+            return
+        }
+        #expect(session.sessionOrderObservedAt == observedAt)
     }
 
     @Test("ignores non-absolute transcriptPath but still updates sessionID")
@@ -499,6 +514,17 @@ struct TerminalSessionEventHandlerTests {
         let result = try resp.decodeResult(TerminalTranscriptResult.self)
         #expect(result.sessionID == "logical-session-id")
         #expect(!result.messages.isEmpty)
+    }
+}
+
+private final class SessionDeltaCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [Data] = []
+
+    var values: [Data] { lock.withLock { storage } }
+
+    func append(_ data: Data) {
+        lock.withLock { storage.append(data) }
     }
 }
 

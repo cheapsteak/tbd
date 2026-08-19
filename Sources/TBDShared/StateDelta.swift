@@ -157,11 +157,21 @@ public struct TerminalSessionDelta: Codable, Sendable {
     public let worktreeID: UUID
     public let sessionID: String
     public let transcriptPath: String?
-    public init(terminalID: UUID, worktreeID: UUID, sessionID: String, transcriptPath: String?) {
+    /// Ordering generation of the accepted SessionStart. Optional for wire
+    /// compatibility with older daemons and for non-hook session updates.
+    public let sessionOrderObservedAt: Date?
+    public init(
+        terminalID: UUID,
+        worktreeID: UUID,
+        sessionID: String,
+        transcriptPath: String?,
+        sessionOrderObservedAt: Date? = nil
+    ) {
         self.terminalID = terminalID
         self.worktreeID = worktreeID
         self.sessionID = sessionID
         self.transcriptPath = transcriptPath
+        self.sessionOrderObservedAt = sessionOrderObservedAt
     }
 }
 
