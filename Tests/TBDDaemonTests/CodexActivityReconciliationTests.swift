@@ -339,6 +339,7 @@ struct CodexActivityReconciliationTests {
 
     @Test(
         "terminal.list binds presentation to the post-observation transcript identity",
+        .serialized,
         arguments: [true, false]
     )
     func terminalListRejectsPresentationFromRetargetedTranscript(
@@ -453,6 +454,7 @@ struct CodexActivityReconciliationTests {
 
     @Test(
         "terminal.list rejects a pre-boundary observation when the path is unchanged",
+        .serialized,
         arguments: [true, false]
     )
     func terminalListRejectsPreBoundarySamePathObservation(
