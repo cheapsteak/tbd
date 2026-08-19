@@ -327,9 +327,9 @@ enum BoundedProcessRunnerError: Error, Equatable, LocalizedError {
 /// runs — a macOS pipe buffer is 64KB, so a child emitting more (e.g. `ps -Ao`
 /// on a busy machine, ~72KB) would otherwise block writing to the full pipe
 /// while we wait for it to exit — a mutual deadlock resolved only by the
-/// timeout. The drain never waits for pipe EOF: real call sites run
-/// `[shell, "-ic", cmd]`, and rc files can fork background grandchildren that
-/// inherit the write ends, so EOF may never arrive after the direct child dies.
+/// timeout. The drain never waits for pipe EOF: any spawned process can fork
+/// background grandchildren that inherit the pipe write ends, so EOF may
+/// never arrive after the direct child dies.
 /// Termination, timeout, and spawn-failure all snapshot what has already arrived
 /// and close the parent read ends — no thread, FD, or closure outlives the call.
 ///
