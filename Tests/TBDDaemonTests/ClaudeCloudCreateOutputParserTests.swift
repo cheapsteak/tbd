@@ -143,4 +143,44 @@ struct ClaudeCloudCreateOutputParserTests {
         #expect(ClaudeCloudCreateOutputParser.title(fromOutput: output)
             == "Add probe pong reply")
     }
+
+    // MARK: - Tolerant of leading residue (the field bug this pins)
+
+    /// The exact bytes measured from a real `claude --cloud` pty capture
+    /// (`claude` 2.1.235, `TERM=xterm-256color COLUMNS=400 LINES=200`), built
+    /// by explicit concatenation rather than a string literal so every
+    /// control byte and escape sequence is unambiguous — a triple-quoted
+    /// literal normalizes to bare `\n` and could not construct this. Before
+    /// this fix, `ANSIEscape.strip` left `ESC 7`, `ESC 8` and the
+    /// `<`/`>`-prefixed CSI queries in place, and even with those stripped,
+    /// `title(fromOutput:)`'s `hasPrefix` required the prefix at position 0
+    /// — so the bare backspaces and the capture tool's leading `^D` (two
+    /// literal characters, not the 0x04 byte) alone were enough to lose the
+    /// title. The ledger row still resolved from the id on the other two
+    /// lines; only the title came back nil.
+    @Test func theRealCapturedLeadInStillYieldsTheTitle() throws {
+        let firstLine = "^D" + "\u{08}\u{08}"
+            + "\u{1B}7" + "\u{1B}[r" + "\u{1B}8"
+            + "\u{1B}[?25h" + "\u{1B}[?25l" + "\u{1B}[?2004h" + "\u{1B}[?1004h" + "\u{1B}[?2031h"
+            + "\u{1B}[<u" + "\u{1B}[>1u" + "\u{1B}[>4;2m" + "\u{1B}[>0q"
+            + "Created cloud session: Probe reply OK then stop"
+        let secondLine = "View: https://claude.ai/code/session_01BBBBBBBBBBBBBBBBBBBBBB?from=cli&m=0\r"
+        let thirdLine = "Resume with: claude --teleport session_01BBBBBBBBBBBBBBBBBBBBBB\r"
+        let raw = firstLine + "\r\n" + secondLine + "\n" + thirdLine
+        #expect(ClaudeCloudCreateOutputParser.title(fromOutput: raw)
+            == "Probe reply OK then stop")
+        #expect(try ClaudeCloudCreateOutputParser.sessionID(fromOutput: raw).get()
+            == "session_01BBBBBBBBBBBBBBBBBBBBBB")
+    }
+
+    /// The title-line prefix is located WITHIN the line, not required at
+    /// position 0 — synthetic version of the case above, isolating just the
+    /// leading-residue tolerance without the full captured byte sequence.
+    @Test func aPrefixNotAtTheStartOfTheLineStillYieldsTheTitle() {
+        let output = "^D\u{08}\u{08}Created cloud session: Probe reply OK then stop\n"
+            + "View: https://claude.ai/code/session_01AAA?from=cli\n"
+            + "Resume with: claude --teleport session_01AAA\n"
+        #expect(ClaudeCloudCreateOutputParser.title(fromOutput: output)
+            == "Probe reply OK then stop")
+    }
 }
