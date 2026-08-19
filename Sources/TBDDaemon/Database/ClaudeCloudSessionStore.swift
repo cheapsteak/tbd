@@ -200,17 +200,59 @@ public struct ClaudeCloudSessionStore: Sendable {
     /// fail a create that otherwise succeeded. A retry that resolves the same
     /// `id` twice, or names an `id` this store has never seen, is a harmless
     /// no-op: there is nothing to double-apply and nothing to update.
+    ///
+    /// Compare-and-set on `sessionID`, deliberately **not** on `state`. The
+    /// two invariants that matter here are narrower than "the row is still
+    /// pending": a session id must never be lost, and it must never be
+    /// overwritten by a *different* one. `WHERE id = ? AND (sessionID IS NULL
+    /// OR sessionID = ?)` enforces exactly those two and nothing more:
+    ///
+    /// - a `pending` row (`sessionID` NULL) resolves normally;
+    /// - a row that reached `failed` while its spawn was still in flight —
+    ///   `markFailed`'s own doc comment describes the gap that produces this
+    ///   — still had no session id recorded, so it still resolves rather than
+    ///   orphaning the session that was actually created;
+    /// - a same-id retry is the harmless idempotent no-op already promised
+    ///   above;
+    /// - a row already naming a **different** session refuses. That case
+    ///   means two sessions exist under one ledger row, which this store has
+    ///   no way to reconcile on its own, so it is logged loudly rather than
+    ///   silently dropped or silently overwritten.
+    ///
+    /// A `state = 'pending'` predicate — the shape `claimForSpawn` and
+    /// `markFailed` use — was considered and rejected: it would make this
+    /// call silently DROP the write whenever the row is not `pending`,
+    /// including the `failed`-with-no-id case above, and losing a real
+    /// session's id is the exact harm this ledger exists to prevent. A guard
+    /// that causes that harm is worse than no guard at all.
     public func resolve(id: String, sessionID: String, title: String?, now: Date) async throws {
         try await writer.write { db in
             try db.execute(
                 sql: """
                 UPDATE claude_cloud_session
                 SET state = ?, sessionID = ?, title = ?, resolvedAt = ?
-                WHERE id = ?
+                WHERE id = ? AND (sessionID IS NULL OR sessionID = ?)
                 """,
                 arguments: [
-                    ClaudeCloudLedgerState.resolved.rawValue, sessionID, title, now, id,
+                    ClaudeCloudLedgerState.resolved.rawValue, sessionID, title, now, id, sessionID,
                 ])
+            guard db.changesCount == 1 else {
+                // Either the id does not exist (the documented no-op above) or
+                // it exists but already names a DIFFERENT session — the only
+                // other way this UPDATE can affect zero rows. Only the latter
+                // is worth a human's attention, so check which one this was.
+                if let existing = try ClaudeCloudSessionRow
+                    .filter(Column("id") == id).fetchOne(db),
+                    let existingSessionID = existing.sessionID, existingSessionID != sessionID {
+                    claudeCloudLogger.error(
+                        """
+                        claude-cloud resolve refused: row \(id, privacy: .public) already names \
+                        session \(existingSessionID, privacy: .public); refusing to overwrite with \
+                        \(sessionID, privacy: .public) — two sessions now exist under one ledger row
+                        """)
+                }
+                return
+            }
         }
     }
 

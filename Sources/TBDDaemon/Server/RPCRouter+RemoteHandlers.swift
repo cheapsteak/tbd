@@ -57,6 +57,17 @@ extension RPCRouter {
     /// off entirely, this says the compiled cloud provider is.
     private static let claudeCloudDisabledResponse = RPCResponse(error: "claude cloud sessions disabled")
 
+    /// The per-invocation timeout for the `create` verb, applied to both the
+    /// initial call and its one same-key retry below. Provider-agnostic at
+    /// this layer — every `remote.*` backend's `create` gets this budget —
+    /// but for the compiled `claude-cloud` provider it is in a load-bearing
+    /// numeric relationship with `ClaudeCloudInvoker.pendingFailureWindow`
+    /// (`ClaudeCloudList.swift`): that window must stay strictly greater than
+    /// this timeout, or a `create` still running past its own timeout budget
+    /// could have its ledger row reclaimed and re-spawned out from under it.
+    /// Pinned by `ClaudeCloudTimeoutRelationshipTests`.
+    static let remoteCreateTimeout: TimeInterval = 60
+
     /// The second, inner gate. `claude_cloud_enabled` is checked INSIDE
     /// `remoteGate()` — cloud is reached through the same `remote.*` verbs, so
     /// it requires BOTH flags and the inner one is never a bypass.
@@ -183,13 +194,13 @@ extension RPCRouter {
         let result: ProviderResult
         do {
             result = try await manager.invoke(
-                providerName: params.provider, verb: ["create"], stdin: stdin, timeout: 60)
+                providerName: params.provider, verb: ["create"], stdin: stdin, timeout: Self.remoteCreateTimeout)
         } catch is ProviderRunError {
             // One retry with the SAME key — the provider dedupes, so a
             // timed-out-but-actually-succeeded create doesn't double-spawn.
             do {
                 result = try await manager.invoke(
-                    providerName: params.provider, verb: ["create"], stdin: stdin, timeout: 60)
+                    providerName: params.provider, verb: ["create"], stdin: stdin, timeout: Self.remoteCreateTimeout)
             } catch let error as ProviderRunError {
                 remoteHandlerLogger.error(
                     "remote.create provider=\(params.provider, privacy: .public) timed out on both the initial call and the retry")

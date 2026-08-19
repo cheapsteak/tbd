@@ -134,6 +134,86 @@ struct ClaudeCloudLedgerStoreTests {
         #expect(try await db.claudeCloudSessions.rows().count == 1)
     }
 
+    /// The ungated path: a `pending` row (no session id yet) must still
+    /// resolve normally. Proves the id-based guard did not disable ordinary
+    /// resolution — only a NAMED different id is refused.
+    @Test func resolveOnAPendingRowRecordsTheSession() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let row = try await db.claudeCloudSessions.upsertPending(
+            idempotencyKey: "tbd-1", repoKey: "a/b", repoPath: "/a", branch: nil,
+            environment: nil, paramsJSON: "{}", now: Date(timeIntervalSince1970: 1))
+        #expect(row.sessionID == nil)
+        try await db.claudeCloudSessions.resolve(
+            id: row.id, sessionID: "session_01AAA", title: "first",
+            now: Date(timeIntervalSince1970: 2))
+        let stored = try #require(try await db.claudeCloudSessions.rows().first)
+        #expect(stored.state == ClaudeCloudLedgerState.resolved.rawValue)
+        #expect(stored.sessionID == "session_01AAA")
+    }
+
+    /// Resolving the SAME session id twice must remain the harmless idempotent
+    /// no-op already promised by the doc comment — the guard is on the id,
+    /// not on the state, so a same-id retry must not be refused.
+    @Test func resolveWithTheSameSessionIDTwiceIsANoOpThatKeepsTheRowIntact() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let row = try await db.claudeCloudSessions.upsertPending(
+            idempotencyKey: "tbd-1", repoKey: "a/b", repoPath: "/a", branch: nil,
+            environment: nil, paramsJSON: "{}", now: Date(timeIntervalSince1970: 1))
+        try await db.claudeCloudSessions.resolve(
+            id: row.id, sessionID: "session_01AAA", title: "first",
+            now: Date(timeIntervalSince1970: 2))
+        try await db.claudeCloudSessions.resolve(
+            id: row.id, sessionID: "session_01AAA", title: "second",
+            now: Date(timeIntervalSince1970: 3))
+        let stored = try #require(try await db.claudeCloudSessions.rows().first)
+        #expect(stored.state == ClaudeCloudLedgerState.resolved.rawValue)
+        #expect(stored.sessionID == "session_01AAA")
+        #expect(stored.title == "second")
+        #expect(stored.resolvedAt == Date(timeIntervalSince1970: 3))
+        #expect(try await db.claudeCloudSessions.rows().count == 1)
+    }
+
+    /// A row that already names a DIFFERENT session must refuse — the harm a
+    /// state-based predicate would not catch, and the harm a bare
+    /// `WHERE id = ?` never guarded against. The original id and its
+    /// resolvedAt survive untouched.
+    @Test func resolveRefusesToOverwriteADifferentSessionID() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let row = try await db.claudeCloudSessions.upsertPending(
+            idempotencyKey: "tbd-1", repoKey: "a/b", repoPath: "/a", branch: nil,
+            environment: nil, paramsJSON: "{}", now: Date(timeIntervalSince1970: 1))
+        try await db.claudeCloudSessions.resolve(
+            id: row.id, sessionID: "session_01AAA", title: "original",
+            now: Date(timeIntervalSince1970: 2))
+        try await db.claudeCloudSessions.resolve(
+            id: row.id, sessionID: "session_02BBB", title: "different",
+            now: Date(timeIntervalSince1970: 3))
+        let stored = try #require(try await db.claudeCloudSessions.rows().first)
+        #expect(stored.state == ClaudeCloudLedgerState.resolved.rawValue)
+        // The original id, title and resolvedAt all survive — not silently
+        // overwritten by the second call naming a different session.
+        #expect(stored.sessionID == "session_01AAA")
+        #expect(stored.title == "original")
+        #expect(stored.resolvedAt == Date(timeIntervalSince1970: 2))
+        #expect(try await db.claudeCloudSessions.rows().count == 1)
+    }
+
+    /// `resolve` must not throw when the guard refuses the write — the
+    /// refusal is loud in the log, not in the caller's control flow.
+    @Test func resolveRefusingADifferentSessionIDDoesNotThrow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let row = try await db.claudeCloudSessions.upsertPending(
+            idempotencyKey: "tbd-1", repoKey: "a/b", repoPath: "/a", branch: nil,
+            environment: nil, paramsJSON: "{}", now: Date(timeIntervalSince1970: 1))
+        try await db.claudeCloudSessions.resolve(
+            id: row.id, sessionID: "session_01AAA", title: "original",
+            now: Date(timeIntervalSince1970: 2))
+        // Must not throw.
+        try await db.claudeCloudSessions.resolve(
+            id: row.id, sessionID: "session_02BBB", title: "different",
+            now: Date(timeIntervalSince1970: 3))
+    }
+
     @Test func markFailedFlipsOnlyTheNamedRowsAndRetainsThem() async throws {
         let db = try TBDDatabase(inMemory: true)
         let keep = try await db.claudeCloudSessions.upsertPending(

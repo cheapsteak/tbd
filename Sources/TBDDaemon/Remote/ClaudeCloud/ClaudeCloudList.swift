@@ -14,6 +14,17 @@ extension ClaudeCloudInvoker {
     /// within a single working session rather than the next day. What would
     /// revise it: real creates observed resolving later than this window
     /// during the soak.
+    ///
+    /// Must stay strictly greater than `RPCRouter.remoteCreateTimeout`
+    /// (`RPCRouter+RemoteHandlers.swift`) — pinned by
+    /// `ClaudeCloudTimeoutRelationshipTests`. That RPC-level timeout bounds how
+    /// long a single `create` invocation (including its one same-key retry)
+    /// may run; this window bounds how long `claimForSpawn` waits before
+    /// reclaiming a `pending` row and licensing a second spawn under the same
+    /// idempotency key. If the create timeout ever reached or exceeded this
+    /// window, a still-running first invocation could have its row reclaimed
+    /// and re-spawned while it was still in flight — the double-spawn this
+    /// ledger exists to prevent.
     static let pendingFailureWindow: TimeInterval = 600
 
     /// `list` returns the `claude_cloud_session` ledger — what this machine
