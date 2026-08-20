@@ -584,11 +584,54 @@ extension AppState {
     /// spaces are delegated to `archiveScratch(id:)` — the repo-worktree
     /// `worktree.archive` RPC rejects them with `repoNotFound` — so callers
     /// don't have to route per collection.
-    func archiveWorktree(id: UUID, force: Bool = false) async {
+    /// Archive, unless the worktree still has declared dev servers running.
+    ///
+    /// Archiving removes the checkout and kills the terminal windows the
+    /// worktree's sessions live in — but a dev server started inside it does not
+    /// necessarily die with them. A detached supervisor, or one whose parent has
+    /// already exited, is reparented to `launchd` and keeps holding memory and a
+    /// port with nothing left pointing at it. Once the directory is gone, the
+    /// only remaining pointer is a record in a registry nobody thinks to read.
+    ///
+    /// So the first archive attempt asks. Confirming calls back in with
+    /// `devServersConfirmed: true` — the question has been answered, and
+    /// re-asking would make the second click do nothing.
+    ///
+    /// `devServersConfirmed` is a SEPARATE flag from `force`, deliberately.
+    /// `force` already means "skip the archive hook" and bypasses the status
+    /// check for cascade flows; folding this into it would make confirming a
+    /// dev-server prompt silently skip the repo's archive hook, which nobody
+    /// asked for, and would make every cascade flow skip this check.
+    ///
+    /// Only `running` records prompt. A record whose process is definitively gone
+    /// describes nothing an archive could strand, and one that cannot be read is
+    /// not evidence either; prompting on those would train people to click
+    /// through the prompt, which costs more than it saves.
+    func archiveWorktree(
+        id: UUID, force: Bool = false, devServersConfirmed: Bool = false
+    ) async {
         let worktree = findWorktree(id: id)
         if worktree?.isScratch == true {
             await archiveScratch(id: id)
             return
+        }
+        // `localPath` is a filesystem path only for a LOCAL row. On a remote row
+        // it is the synthetic `remote://…` URI that exists to satisfy a NOT NULL
+        // UNIQUE column, and a dev-server registry on this machine can say
+        // nothing about a worktree that lives on another one. Skipping is the
+        // honest answer; comparing would silently never match and read as
+        // "nothing running" for a reason that has nothing to do with the facts.
+        if !devServersConfirmed, let worktree, worktree.localPath.hasPrefix("/") {
+            let running = devServerRegistry.running(inWorktree: worktree.localPath)
+            if !running.isEmpty {
+                pendingArchiveWithDevServers = PendingArchive(
+                    worktreeID: id,
+                    worktreeName: worktree.displayName,
+                    servers: running.map(\.label),
+                    force: force
+                )
+                return
+            }
         }
         let worktreeName = worktree?.displayName ?? "worktree"
         do {

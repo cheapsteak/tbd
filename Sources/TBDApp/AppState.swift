@@ -103,6 +103,15 @@ final class AppState: ObservableObject {
     /// Subscription to themeStore.$userThemes changes for reconciling the active scheme.
     private var themeStoreSubscription: AnyCancellable?
 
+    /// Reads the machine-global dev-server registry. Read-only — TBD never
+    /// writes a record; it only asks what a worktree would strand.
+    let devServerRegistry = DevServerRegistry()
+
+    /// Set when an archive was held back because the worktree still has declared
+    /// dev servers running. Confirming re-issues the archive with the same
+    /// `force` it carried, plus `devServersConfirmed: true`.
+    @Published var pendingArchiveWithDevServers: PendingArchive?
+
     @Published var repos: [Repo] = []
     @Published var worktrees: [UUID: [Worktree]] = [:] {
         didSet {

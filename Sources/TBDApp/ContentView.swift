@@ -317,6 +317,37 @@ struct ContentView: View {
             }
         }
         .alert(
+            "Still running in this worktree",
+            isPresented: Binding(
+                get: { appState.pendingArchiveWithDevServers != nil },
+                set: { if !$0 { appState.pendingArchiveWithDevServers = nil } }
+            ),
+            presenting: appState.pendingArchiveWithDevServers
+        ) { pending in
+            Button("Archive Anyway", role: .destructive) {
+                appState.pendingArchiveWithDevServers = nil
+                Task {
+                    await appState.archiveWorktree(
+                        id: pending.worktreeID,
+                        force: pending.force,
+                        devServersConfirmed: true
+                    )
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                appState.pendingArchiveWithDevServers = nil
+            }
+        } message: { pending in
+            // Names what is running, because "a dev server is running" is not
+            // actionable and "storybook is running" is. Archiving does not stop
+            // them — say so, rather than implying the archive cleans up.
+            Text(
+                "\(pending.worktreeName) still has \(pending.serverList) running. "
+                    + "Archiving removes the worktree but does not stop them, so they "
+                    + "keep running with nothing pointing at them."
+            )
+        }
+        .alert(
             appState.alertIsError ? "Error" : "Success",
             isPresented: Binding(
                 get: { appState.alertMessage != nil },
