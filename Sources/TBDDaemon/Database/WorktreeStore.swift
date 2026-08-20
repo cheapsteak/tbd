@@ -839,6 +839,28 @@ public struct WorktreeStore: Sendable {
     /// Validates: not-self, parent exists, parent is not `main`, no cycle.
     /// Renumbers siblings in the destination group so the moved row lands at
     /// the requested sortOrder.
+    ///
+    /// **On a remote row, changing the parent edge spends the row's one
+    /// adoption assignment** (`remote_parent_assigned`), exactly as
+    /// `assignParentIfUnset` and a parented `createRemote` do. This is the only
+    /// place a user's placement gesture lands — the sidebar drag and
+    /// `tbd worktree reparent` both arrive here through `worktree.move` — so it
+    /// is the only place that can record one.
+    ///
+    /// Both directions, because the invariant is "a user's placement decision
+    /// is final" and that is about the gesture, not its direction. Without the
+    /// to-root half a lane the user nested by hand and then un-nested would
+    /// arrive back at a nil parent still unmarked, `assignParentIfUnset`'s
+    /// guard would pass, and the first poll able to resolve the provider's
+    /// static stamp would re-nest it.
+    ///
+    /// Only when the edge actually changes. A move that keeps the same parent
+    /// is a reordering, and reordering inside the top-level group says nothing
+    /// about nesting — so a lane the user merely dragged up the list is still
+    /// one adoption may file under its spawning lane once the stamp resolves.
+    ///
+    /// Local rows are never adoption's business and are left alone.
+    /// `movingRecord` is already in hand, so neither test costs a read.
     public func move(worktreeID: UUID, newParentID: UUID?, newSortOrder: Int) async throws {
         try await writer.write { db in
             guard let movingRecord = try WorktreeRecord.fetchOne(db, key: worktreeID.uuidString) else {
@@ -868,10 +890,23 @@ public struct WorktreeStore: Sendable {
                 )
             }
 
-            try db.execute(
-                sql: "UPDATE worktree SET parentWorktreeID = ?, sortOrder = ? WHERE id = ?",
-                arguments: [parentArg, newSortOrder, worktreeID.uuidString]
-            )
+            let reparentsARemoteRow = movingRecord.parentWorktreeID != parentArg
+                && movingRecord.location == "remote"
+            if reparentsARemoteRow {
+                try db.execute(
+                    sql: """
+                        UPDATE worktree
+                        SET parentWorktreeID = ?, sortOrder = ?, remote_parent_assigned = 1
+                        WHERE id = ?
+                        """,
+                    arguments: [parentArg, newSortOrder, worktreeID.uuidString]
+                )
+            } else {
+                try db.execute(
+                    sql: "UPDATE worktree SET parentWorktreeID = ?, sortOrder = ? WHERE id = ?",
+                    arguments: [parentArg, newSortOrder, worktreeID.uuidString]
+                )
+            }
         }
     }
 
@@ -955,7 +990,9 @@ public struct WorktreeStore: Sendable {
     /// second half of the condition, because a row can arrive back at nil by
     /// the user un-nesting it, and a caller replaying a static provider stamp
     /// on every poll would undo that gesture within the minute. The marker is
-    /// set by the same write, so "was ever assigned" survives the removal.
+    /// set by the same write, so "was ever assigned" survives the removal —
+    /// and by `move()` too, so a first parent the user chose by hand counts
+    /// just as much as one adoption gave.
     ///
     /// Both checks and the write share one transaction: two concurrent callers
     /// must not both read "no parent" and both assign one.

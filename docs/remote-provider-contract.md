@@ -86,8 +86,9 @@ The exception is the nesting edge, and only in one direction: **a row that has n
   - **Names a worktree TBD does not have** – same: top level.
   - **Names an archived worktree, or a repository's main worktree** – same: top level, and the edge is not stored at all. TBD does not render either row's descendants, so nesting a live session beneath one would file it where nobody can find it.
   - **Names a live worktree** – the row is nested beneath it.
-  - **Arrives on a later sighting for a row that has no parent** – the row is nested then, under every rule above, plus two that only a late edge can violate: the parent may be neither the row itself nor one of the row's own descendants, since either would close a cycle. A refused late edge leaves the row at top level, exactly as an absent one would.
+  - **Arrives on a later sighting for a row nobody has ever placed** – the row is nested then, under every rule above, plus two that only a late edge can violate: the parent may be neither the row itself nor one of the row's own descendants, since either would close a cycle. A refused late edge leaves the row at top level, exactly as an absent one would.
   - **Arrives on a later sighting for a row that already has a parent** – ignored. A provider cannot move a lane the user can already see.
+  - **Arrives on a later sighting for a row the user has since moved to top level** – ignored, and this is why the rule above says "nobody has ever placed" rather than "has no parent". The two states look identical on the row's parent edge, and the stamp is static, so reading it again would undo the user's gesture on the very next poll. TBD records the fact separately: a row is offered a parent at most once in its life, whether that parent came from a stamp or from the user's own move, and after that its position is the user's alone.
 
 A provider that populates these keys is describing TBD-side facts it was told, not facts it discovered. It MUST NOT invent either value — an identifier the provider made up would name no lane, and for `tbd_worktree_id` it would defeat the echo it is meant to serve.
 

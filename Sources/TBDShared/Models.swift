@@ -332,13 +332,14 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     /// Not a queue: parking a second prompt replaces the first.
     public var pendingPrompt: String?
 
-    /// True once adoption has given this row a parent — at mint time or by
-    /// healing a parentless row later. It is the fact `parentWorktreeID == nil`
-    /// cannot carry: a nil edge on a marked row means the user un-nested a lane
-    /// adoption had already filed, and adoption must leave it alone. `false` on
-    /// every local row and on every remote row adoption has never been able to
-    /// place; the user's own `move()` never clears it, because re-nesting after
-    /// a deliberate un-nest is the bug it exists to prevent.
+    /// True once this row has been given a parent — by adoption at mint time,
+    /// by adoption healing a parentless row later, or by the user's own move.
+    /// It is the fact `parentWorktreeID == nil` cannot carry: a nil edge on a
+    /// marked row means somebody already placed this lane and then took the
+    /// parent away, and adoption must leave it alone. `false` on every local
+    /// row and on every remote row nobody has ever placed; no path clears it,
+    /// because re-nesting after a deliberate un-nest is the bug it exists to
+    /// prevent.
     public var remoteParentAssigned: Bool = false
 
     /// Whether delivering `pendingPrompt` ends with Enter, as recorded. `nil`
