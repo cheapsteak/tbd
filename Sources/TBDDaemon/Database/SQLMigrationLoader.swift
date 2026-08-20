@@ -49,9 +49,6 @@ public enum SQLMigrationLoaderError: LocalizedError, CustomStringConvertible, Se
     /// The directory resolved but could not be enumerated or read.
     case migrationsDirectoryUnreadable(path: String, underlying: String)
     case migrationFileUnreadable(path: String, underlying: String)
-    /// `grdb_migrations` holds timestamp-shaped identifiers, but the bundle
-    /// yielded no `.sql` files at all — the resources are missing or truncated.
-    case resourcesMissingButMigrationsApplied(applied: [String], directoryPath: String)
 
     public var description: String {
         switch self {
@@ -65,14 +62,6 @@ public enum SQLMigrationLoaderError: LocalizedError, CustomStringConvertible, Se
             return "Could not read the migrations directory at \(path): \(underlying)"
         case .migrationFileUnreadable(let path, let underlying):
             return "Could not read the migration file at \(path): \(underlying)"
-        case .resourcesMissingButMigrationsApplied(let applied, let directoryPath):
-            return """
-                The database records \(applied.count) timestamp-identified migration(s) \
-                (\(applied.prefix(5).joined(separator: ", "))\(applied.count > 5 ? ", …" : "")) \
-                but \(directoryPath) contains no .sql files. The migration resource bundle is \
-                missing or truncated, so this build cannot know whether the schema is current. \
-                Refusing to start rather than run against an under-migrated schema.
-                """
         }
     }
 
@@ -215,11 +204,14 @@ public enum SQLMigrationLoader {
 
     /// The merged list `buildMigrator()` registers.
     ///
-    /// A locator failure yields an empty list here rather than trapping, and is
-    /// **not** swallowed: it is cached on `bundled` and rethrown by
-    /// `verifyResourceIntegrity(_:)`, which `init(path:)` calls before it
-    /// migrates. The daemon therefore refuses to start rather than quietly
-    /// running an under-migrated schema.
+    /// A locator failure yields an empty list here rather than trapping,
+    /// because `buildMigrator()` cannot throw. It is **not** swallowed: the
+    /// failure is cached on `bundled` and rethrown by
+    /// `verifyResourceIntegrity(_:bundled:)`, which *both* `init(path:)` and
+    /// `init(inMemory:)` call before they migrate. Every caller that builds a
+    /// migrator must pair it with that check, or a missing resource bundle
+    /// degrades into scattered "no such column" failures instead of one
+    /// diagnostic naming the paths searched.
     public static func migrationsForRegistration() -> [RegisteredMigration] {
         guard let found = try? bundled.get() else { return [] }
         return merged(files: found.files, inline: inlineTimestampMigrations)
@@ -235,36 +227,72 @@ public enum SQLMigrationLoader {
         return identifier[identifier.index(identifier.startIndex, offsetBy: 14)] == "_"
     }
 
-    /// Use the database as its own manifest.
+    /// Both refusal gates, in order, before anything migrates.
     ///
-    /// If `grdb_migrations` holds timestamp-shaped identifiers but the bundle
-    /// yielded **zero** `.sql` files, the resources are missing or truncated
-    /// and this build cannot tell whether the schema is current — refuse.
+    /// **Gate one throws.** A locator that exhausted every candidate means the
+    /// daemon cannot find its migration resources at all, so it fails at
+    /// startup regardless of what the database holds — a fresh install
+    /// included.
     ///
-    /// A *partial* mismatch is deliberately fine: downgrading to an older build
-    /// legitimately leaves applied identifiers with no corresponding file, and
-    /// GRDB's own `hasBeenSuperseded` already covers that.
+    /// **Gate two only reports** — see `reportMissingResources`.
+    ///
+    /// `bundled` is a seam for tests; production passes the process-wide
+    /// discovery result.
     public static func verifyResourceIntegrity(
         _ db: GRDB.Database,
-        discoveredIdentifiers: [String],
-        directoryPath: String
+        bundled: Result<BundledMigrations, SQLMigrationLoaderError> = Self.bundled
     ) throws {
-        guard discoveredIdentifiers.isEmpty else { return }
-        guard try db.tableExists("grdb_migrations") else { return }
-        let applied = try String.fetchAll(db, sql: "SELECT identifier FROM grdb_migrations")
-        let timestamped = applied.filter(isTimestampIdentifier).sorted()
-        guard !timestamped.isEmpty else { return }
-        throw SQLMigrationLoaderError.resourcesMissingButMigrationsApplied(
-            applied: timestamped, directoryPath: directoryPath)
-    }
-
-    /// `verifyResourceIntegrity` against the shipped bundle.
-    public static func verifyResourceIntegrity(_ db: GRDB.Database) throws {
         let found = try bundled.get()
-        try verifyResourceIntegrity(
+        try reportMissingResources(
             db,
             discoveredIdentifiers: found.files.map(\.identifier),
             directoryPath: found.directoryPath)
+    }
+
+    /// Use the database as its own manifest, and log — never refuse.
+    ///
+    /// If `grdb_migrations` holds timestamp-shaped identifiers but the bundle
+    /// yielded **zero** `.sql` files, that is worth an error-level log naming
+    /// the directory and the applied identifiers. It is deliberately not a
+    /// refusal: "directory present, zero files" is the ordinary state of any
+    /// worktree branched before the first migration landed, and
+    /// `scripts/restart.sh` from any worktree replaces the daemon
+    /// machine-wide, so throwing here would brick the fleet on a routine
+    /// branch switch. The failure this gate was meant to catch — the resource
+    /// bundle not shipping at all — is gate one's, and gate one throws.
+    ///
+    /// A *partial* mismatch is deliberately silent: downgrading to an older
+    /// build legitimately leaves applied identifiers with no corresponding
+    /// file, and GRDB's own `hasBeenSuperseded` already covers that.
+    ///
+    /// Returns the message it logged, or nil when there was nothing to report,
+    /// so a test can assert on what an operator would actually see.
+    @discardableResult
+    public static func reportMissingResources(
+        _ db: GRDB.Database,
+        discoveredIdentifiers: [String],
+        directoryPath: String
+    ) throws -> String? {
+        guard discoveredIdentifiers.isEmpty else { return nil }
+        guard try db.tableExists("grdb_migrations") else { return nil }
+        let applied = try String.fetchAll(db, sql: "SELECT identifier FROM grdb_migrations")
+        let timestamped = applied.filter(isTimestampIdentifier).sorted()
+        guard !timestamped.isEmpty else { return nil }
+        let message = missingResourcesMessage(
+            applied: timestamped, directoryPath: directoryPath)
+        logger.error("\(message, privacy: .public)")
+        return message
+    }
+
+    /// The text of gate two's log line.
+    static func missingResourcesMessage(applied: [String], directoryPath: String) -> String {
+        """
+        The database records \(applied.count) timestamp-identified migration(s) \
+        (\(applied.prefix(5).joined(separator: ", "))\(applied.count > 5 ? ", …" : "")) \
+        but \(directoryPath) contains no .sql files. Either this build predates those \
+        migrations — the ordinary case on a worktree branched before they landed — or \
+        the migration resources did not ship with it.
+        """
     }
 
     // MARK: - Splitting
@@ -310,12 +338,20 @@ public enum SQLMigrationLoader {
     /// test above and for anchoring the ADD COLUMN match below. String literals
     /// are the hard part of SQL lexing and `sqlite3_complete()` owns them;
     /// leading comments are not.
+    ///
+    /// The line-comment terminator is matched with `isNewline`, not against
+    /// `"\n"`. In a CRLF file `"\r\n"` is a *single* `Character` that does not
+    /// equal `"\n"`, so `firstIndex(of: "\n")` would find nothing and this
+    /// would report the whole file as noise — the loader would then execute no
+    /// statements at all while GRDB recorded the migration as applied.
+    /// `isNewline` matches the `\r\n` grapheme, and `index(after:)` steps past
+    /// both of its scalars.
     static func strippingLeadingNoise(_ text: String) -> Substring {
         var rest = Substring(text)
         while true {
             rest = rest.drop(while: { $0.isWhitespace })
             if rest.hasPrefix("--") {
-                guard let newline = rest.firstIndex(of: "\n") else { return "" }
+                guard let newline = rest.firstIndex(where: \.isNewline) else { return "" }
                 rest = rest[rest.index(after: newline)...]
             } else if rest.hasPrefix("/*") {
                 guard let close = rest.range(of: "*/") else { return "" }

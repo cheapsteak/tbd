@@ -74,8 +74,8 @@ public final class TBDDatabase: Sendable {
         self.claudeCloudSessions = ClaudeCloudSessionStore(writer: pool)
 
         let migrator = Self.buildMigrator()
-        // Use the database as its own manifest before touching it: rethrows a
-        // resource-bundle locator failure, and refuses to start if
+        // Both refusal gates before touching the database: rethrow a
+        // resource-bundle locator failure, and log (never refuse) if
         // `grdb_migrations` holds timestamp identifiers while the bundle
         // yielded no `.sql` files at all.
         try pool.read { db in try SQLMigrationLoader.verifyResourceIntegrity(db) }
@@ -119,6 +119,12 @@ public final class TBDDatabase: Sendable {
         self.watchDeskLeases = WatchDeskLeaseStore(writer: queue)
         self.prBindings = PRBindingStore(writer: queue)
         self.claudeCloudSessions = ClaudeCloudSessionStore(writer: queue)
+        // The same gates `init(path:)` runs. `migrationsForRegistration()`
+        // cannot throw, so without this a resource bundle that failed to
+        // resolve under `scripts/test.sh` would surface as scattered "no such
+        // column" failures instead of one diagnostic naming every path
+        // searched.
+        try queue.read { db in try SQLMigrationLoader.verifyResourceIntegrity(db) }
         try Self.buildMigrator().migrate(queue)
     }
 

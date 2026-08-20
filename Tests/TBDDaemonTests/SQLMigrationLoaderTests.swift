@@ -45,7 +45,7 @@ import Testing
         let names = try FileManager.default.contentsOfDirectory(atPath: directory.path)
             .filter { $0.hasSuffix(".sql") }
             .sorted()
-        #expect(names.count >= 6, "the shared splitter fixture is missing cases: found \(names)")
+        #expect(names.count >= 7, "the shared splitter fixture is missing cases: found \(names)")
 
         for name in names {
             let stem = String(name.dropLast(".sql".count))
@@ -62,6 +62,44 @@ import Testing
     @Test func splitterEmitsNothingForAnEmptyFile() {
         #expect(SQLMigrationLoader.splitStatements("").isEmpty)
         #expect(SQLMigrationLoader.splitStatements("\n\n   \n").isEmpty)
+    }
+
+    // MARK: - CRLF
+
+    /// In Swift `"\r\n"` is a SINGLE `Character` that does not equal `"\n"`, so
+    /// scanning a line comment for `"\n"` finds nothing in a CRLF file and
+    /// reports the whole remainder as noise.
+    ///
+    /// Consequence one: a comment followed by a statement with no trailing
+    /// semicolon is dropped, the file contributes ZERO statements, and GRDB
+    /// still records the identifier as applied — a silent, permanent no-op.
+    @Test func splitterKeepsACommentedTrailerInACRLFFile() {
+        let sql = "-- note\r\nALTER TABLE config ADD COLUMN foo TEXT"
+        #expect(SQLMigrationLoader.splitStatements(sql) == [sql])
+    }
+
+    /// Consequence two: with the comment swallowing the statement, the ADD
+    /// COLUMN guard never matches, so a duplicate column reaches SQLite and
+    /// throws at prepare time — the daemon fails to start.
+    @Test func addColumnGuardSeesThroughACRLFComment() {
+        #expect(SQLMigrationLoader.addColumnTarget(in: "-- why\r\nALTER TABLE t ADD c INTEGER")
+            .map { [$0.table, $0.column] } == ["t", "c"])
+        // A bare CR is a newline too, and so is a comment that ends the file.
+        #expect(SQLMigrationLoader.addColumnTarget(in: "-- why\rALTER TABLE t ADD c INTEGER")
+            .map { [$0.table, $0.column] } == ["t", "c"])
+        #expect(SQLMigrationLoader.addColumnTarget(in: "-- no statement follows\r\n") == nil)
+    }
+
+    /// End to end: a CRLF migration file really does apply.
+    @Test func aCRLFMigrationFileApplies() throws {
+        let queue = try Self.makeGuardFixtureQueue()
+        try queue.write { db in
+            try SQLMigrationLoader.apply(
+                sql: "-- one\r\nALTER TABLE t ADD COLUMN existing TEXT;\r\n"
+                    + "-- two\r\nALTER TABLE t ADD COLUMN fresh INTEGER",
+                identifier: "test", to: db)
+        }
+        #expect(try Self.columnNames(queue, table: "t") == ["id", "existing", "fresh"])
     }
 
     // MARK: - ADD COLUMN guard: statement recognition
@@ -208,7 +246,7 @@ import Testing
         #expect(!SQLMigrationLoader.isTimestampIdentifier("20260819120000-a"))
     }
 
-    // MARK: - Integrity check, both branches
+    // MARK: - Gate two: report, never refuse
 
     private static func makeAppliedIdentifiersQueue(_ identifiers: [String]) throws -> DatabaseQueue {
         let queue = try DatabaseQueue()
@@ -223,47 +261,80 @@ import Testing
         return queue
     }
 
-    /// Branch 1: timestamp identifiers applied, zero `.sql` files discovered —
-    /// the resource bundle is missing or truncated, so refuse.
-    @Test func integrityCheckRefusesWhenTheBundleYieldedNothing() throws {
+    /// Branch 1: timestamp identifiers applied, zero `.sql` files discovered.
+    /// That gets logged, naming the directory and the identifiers — and does
+    /// NOT refuse. "Directory present, zero files" is the ordinary state of a
+    /// worktree branched before the first migration landed, and any worktree's
+    /// `scripts/restart.sh` replaces the daemon machine-wide, so refusing here
+    /// would brick the fleet on a routine branch switch.
+    @Test func gateTwoReportsAMissingBundleAndDoesNotRefuse() throws {
         let queue = try Self.makeAppliedIdentifiersQueue(["v1", "20260819120000_a"])
-        #expect(throws: SQLMigrationLoaderError.self) {
-            try queue.read { db in
-                try SQLMigrationLoader.verifyResourceIntegrity(
-                    db, discoveredIdentifiers: [], directoryPath: "/nowhere/Migrations")
-            }
+        let reported = try queue.read { db in
+            try SQLMigrationLoader.reportMissingResources(
+                db, discoveredIdentifiers: [], directoryPath: "/nowhere/Migrations")
         }
+        let message = try #require(reported, "gate two must report this case")
+        #expect(message.contains("20260819120000_a"))
+        #expect(message.contains("/nowhere/Migrations"))
     }
 
     /// Branch 2: a *partial* mismatch is legitimate — downgrading to an older
     /// build leaves applied identifiers with no corresponding file, and GRDB's
-    /// `hasBeenSuperseded` already covers that.
-    @Test func integrityCheckAllowsAPartialMismatch() throws {
+    /// `hasBeenSuperseded` already covers that. Nothing is reported.
+    @Test func gateTwoStaysSilentOnAPartialMismatch() throws {
         let queue = try Self.makeAppliedIdentifiersQueue(
             ["v1", "20260819120000_a", "20260901090000_c"])
-        try queue.read { db in
-            try SQLMigrationLoader.verifyResourceIntegrity(
+        let reported = try queue.read { db in
+            try SQLMigrationLoader.reportMissingResources(
                 db, discoveredIdentifiers: ["20260819120000_a"], directoryPath: "/somewhere")
         }
+        #expect(reported == nil)
     }
 
     /// Zero files is the normal, inert state today: with only `v`-prefixed
     /// identifiers applied there is nothing to be missing.
-    @Test func integrityCheckAllowsZeroFilesWhenNoTimestampIdentifierWasApplied() throws {
+    @Test func gateTwoStaysSilentWhenNoTimestampIdentifierWasApplied() throws {
         let queue = try Self.makeAppliedIdentifiersQueue(["v1", "v84_reap_records_process_description"])
-        try queue.read { db in
-            try SQLMigrationLoader.verifyResourceIntegrity(
+        let reported = try queue.read { db in
+            try SQLMigrationLoader.reportMissingResources(
                 db, discoveredIdentifiers: [], directoryPath: "/nowhere")
         }
+        #expect(reported == nil)
     }
 
     /// A brand-new database has no `grdb_migrations` table at all.
-    @Test func integrityCheckAllowsAFreshDatabase() throws {
+    @Test func gateTwoStaysSilentOnAFreshDatabase() throws {
         let queue = try DatabaseQueue()
-        try queue.read { db in
-            try SQLMigrationLoader.verifyResourceIntegrity(
+        let reported = try queue.read { db in
+            try SQLMigrationLoader.reportMissingResources(
                 db, discoveredIdentifiers: [], directoryPath: "/nowhere")
         }
+        #expect(reported == nil)
+    }
+
+    // MARK: - Gate one: refuse
+
+    /// Gate one throws even on a fresh database with nothing applied: a daemon
+    /// that cannot find its migration resources at all must fail at startup,
+    /// naming every path it searched. Both `init(path:)` and `init(inMemory:)`
+    /// run this before they migrate.
+    @Test func gateOneThrowsWhenTheLocatorFoundNothing() throws {
+        let queue = try DatabaseQueue()
+        let failure = Result<BundledMigrations, SQLMigrationLoaderError>.failure(
+            .resourceBundleNotFound(searched: ["/one/TBD_TBDDaemonLib.bundle/Migrations"]))
+        let thrown = #expect(throws: SQLMigrationLoaderError.self) {
+            try queue.read { db in
+                try SQLMigrationLoader.verifyResourceIntegrity(db, bundled: failure)
+            }
+        }
+        #expect(thrown?.description.contains("/one/TBD_TBDDaemonLib.bundle/Migrations") == true)
+    }
+
+    /// Gate one passes with the real bundle, and gate two then says nothing on
+    /// a fresh database — the path both initializers take today.
+    @Test func verifyResourceIntegrityPassesAgainstTheShippedBundle() throws {
+        let queue = try DatabaseQueue()
+        try queue.read { db in try SQLMigrationLoader.verifyResourceIntegrity(db) }
     }
 
     // MARK: - Locator
@@ -282,7 +353,7 @@ import Testing
 
     @Test func locatorSearchesAtLeastThreeDistinctCandidates() {
         let candidates = SQLMigrationLoader.candidateContainerURLs()
-        #expect(candidates.count >= 2)
+        #expect(candidates.count >= 3, "searched: \(candidates.map(\.path))")
         #expect(Set(candidates.map(\.path)).count == candidates.count, "candidates must be deduplicated")
     }
 
@@ -296,11 +367,11 @@ import Testing
         #expect(error.description.contains("/two/TBD_TBDDaemonLib.bundle/Migrations"))
     }
 
-    @Test func integrityFailureNamesTheIdentifiersAndTheDirectory() {
-        let error = SQLMigrationLoaderError.resourcesMissingButMigrationsApplied(
+    @Test func gateTwoMessageNamesTheIdentifiersAndTheDirectory() {
+        let message = SQLMigrationLoader.missingResourcesMessage(
             applied: ["20260819120000_a"], directoryPath: "/nowhere/Migrations")
-        #expect(error.description.contains("20260819120000_a"))
-        #expect(error.description.contains("/nowhere/Migrations"))
+        #expect(message.contains("20260819120000_a"))
+        #expect(message.contains("/nowhere/Migrations"))
     }
 
     // MARK: - The inert cutover

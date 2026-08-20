@@ -76,9 +76,34 @@ struct SchemaBaselineDriftTests {
         return statements.map { "\($0);\n" }.joined()
     }
 
+    /// The last identifier in the frozen block. `migrate(upTo:)` stops here, so
+    /// the dump covers `v1`–`v84` and nothing else.
+    static let frozenBlockLastIdentifier = "v84_reap_records_process_description"
+
+    /// Migrate a fresh database through the frozen block ONLY.
+    ///
+    /// `upTo:` is load-bearing, in both the drift check and the generator.
+    /// `buildMigrator()` appends every discovered `.sql` migration after the
+    /// frozen block, so a plain `migrate(queue)` would dump v1–v84 *plus* the
+    /// timestamp migrations. The drift check would then fail on the first real
+    /// migration with "the frozen block no longer produces the committed
+    /// schema", pointing its author at a bug that does not exist — and the
+    /// generator would bake those same migrations into the supposedly frozen
+    /// baseline, making the fixture a live schema snapshot, which is the thing
+    /// the design explicitly rejects.
     private static func migrateFreshDatabase() throws -> DatabaseQueue {
         let queue = try DatabaseQueue()
-        try TBDDatabase.buildMigratorForTests().migrate(queue)
+        try TBDDatabase.buildMigratorForTests().migrate(queue, upTo: frozenBlockLastIdentifier)
+        // Guards the `upTo:` above: if it is ever dropped, this says so
+        // directly instead of leaving the drift diff to imply that the frozen
+        // block changed.
+        let applied = try queue.read { db in
+            try String.fetchAll(db, sql: "SELECT identifier FROM grdb_migrations")
+        }
+        #expect(!applied.contains(where: SQLMigrationLoader.isTimestampIdentifier), """
+            The baseline database ran past the frozen block into the timestamp \
+            migrations. The baseline covers v1-v84 only — restore `upTo:`.
+            """)
         return queue
     }
 

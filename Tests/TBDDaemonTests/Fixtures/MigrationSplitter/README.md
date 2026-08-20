@@ -26,5 +26,21 @@ Each case is a pair:
   comments are stripped. That is what makes a file whose last statement has no
   trailing semicolon work, while a whitespace-only or comment-only trailer
   yields nothing.
+- **Line endings are part of the case.** A file is read as bytes and split
+  exactly as written, so a CRLF file yields statements containing `\r\n`.
+  Neither side normalizes: what runs against a user's database is the file's
+  actual bytes. `crlf_line_endings` pins this, and its `.expected.json`
+  therefore carries literal (JSON-escaped) `\r\n` in the interior of both
+  statements — a `--` comment terminates at the first newline however that
+  newline is spelled, `\r\n` pair and bare `\r` included.
+
+  It is the one case where reading the file casually gets a different answer
+  from reading it correctly: Swift's `String(contentsOf:)` preserves `\r\n`,
+  while Python's `Path.read_text()` applies universal-newline translation and
+  turns it into `\n` — which would make the lint's splitter agree with a loader
+  bug instead of with the loader. Both sides read these files with translation
+  off. The migration directory itself rejects CR outright, so this case is
+  defence in depth for the loader rather than a shape a real migration can
+  take.
 
 Adding a case means adding both files. Neither side may special-case a name.
