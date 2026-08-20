@@ -311,7 +311,7 @@ struct CodexActivityReconciliationTests {
         #expect((await roundedRouter.handle(start)).success)
         let stored = try #require(try await db.terminals.get(id: terminal.id))
         let persistedGeneration = try #require(stored.sessionOrderObservedAt)
-        #expect(persistedGeneration > observedAt)
+        #expect(persistedGeneration == observedAt)
 
         let list = try RPCRequest(
             method: RPCMethod.terminalList,
@@ -439,6 +439,96 @@ struct CodexActivityReconciliationTests {
         #expect(stored.sessionOrderObservedAt == secondAt)
     }
 
+    @Test("distinct SessionStarts within one millisecond retain ordered generations")
+    func sameMillisecondSessionStartsEstablishLaterBoundary() async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/car-same-millisecond-repo-\(UUID().uuidString)",
+            displayName: "car-same-millisecond-repo", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "main",
+            path: "/tmp/car-same-millisecond-wt-\(UUID().uuidString)",
+            tmuxServer: "tbd-car-same-millisecond")
+        let transcript = try makeTranscript(
+            #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"orphan"}}"#
+                + "\n")
+        defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: "Codex", kind: .codex)
+        let firstAt = Date(timeIntervalSince1970: 1_790_000_000.123_1)
+        let secondAt = Date(timeIntervalSince1970: 1_790_000_000.123_4)
+
+        let first = try #require(try await db.terminals.applySessionStart(
+            id: terminal.id, sessionID: "first-session",
+            transcriptPath: transcript.path, observedAt: firstAt))
+        let second = try #require(try await db.terminals.applySessionStart(
+            id: terminal.id, sessionID: "second-session",
+            transcriptPath: transcript.path, observedAt: secondAt))
+        let firstGeneration = try #require(first.orderObservedAt)
+        let secondGeneration = try #require(second.orderObservedAt)
+        #expect(firstGeneration < secondGeneration)
+        #expect(try await db.terminals.get(id: terminal.id)?.sessionOrderObservedAt
+            == secondGeneration)
+
+        await router.codexActivityTracker.adoptInitialSession(
+            transcriptPath: transcript.path,
+            worktreeID: wt.id,
+            terminalID: terminal.id,
+            generation: firstGeneration)
+        #expect(await router.codexActivityTracker.hasBaseline(
+            transcriptPath: transcript.path))
+        await router.codexActivityTracker.establishSessionBoundary(
+            transcriptPath: transcript.path,
+            worktreeID: wt.id,
+            terminalID: terminal.id,
+            generation: secondGeneration)
+        #expect(await router.codexActivityTracker.observe(
+            transcriptPath: transcript.path, worktreeID: wt.id) == nil)
+    }
+
+    @Test("legacy text session generation still decodes and orders")
+    func legacyTextSessionGenerationRemainsCompatible() async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/car-legacy-generation-repo-\(UUID().uuidString)",
+            displayName: "car-legacy-generation-repo", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "main",
+            path: "/tmp/car-legacy-generation-wt-\(UUID().uuidString)",
+            tmuxServer: "tbd-car-legacy-generation")
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: "Codex", kind: .codex)
+        let legacyText = "2026-08-20 12:34:56.789"
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try #require(TimeZone(secondsFromGMT: 0))
+        let legacyAt = try #require(calendar.date(from: DateComponents(
+            year: 2026, month: 8, day: 20,
+            hour: 12, minute: 34, second: 56, nanosecond: 789_000_000)))
+        try await db.writerForTests.write { database in
+            try database.execute(
+                sql: """
+                    UPDATE terminal
+                    SET claudeSessionID = ?, sessionOrderObservedAt = ?
+                    WHERE id = ?
+                    """,
+                arguments: ["legacy-session", legacyText, terminal.id.uuidString])
+        }
+
+        #expect(try await db.terminals.get(id: terminal.id)?.sessionOrderObservedAt == legacyAt)
+        #expect(try await db.terminals.applySessionStart(
+            id: terminal.id, sessionID: "stale-session", transcriptPath: nil,
+            observedAt: legacyAt.addingTimeInterval(-0.000_1)) == nil)
+        let laterAt = legacyAt.addingTimeInterval(0.000_1)
+        let later = try #require(try await db.terminals.applySessionStart(
+            id: terminal.id, sessionID: "later-session", transcriptPath: nil,
+            observedAt: laterAt))
+        let laterGeneration = try #require(later.orderObservedAt)
+        #expect(laterGeneration > legacyAt)
+        #expect(abs(laterGeneration.timeIntervalSince(laterAt)) < 0.000_001)
+        #expect(try await db.terminals.get(id: terminal.id)?.sessionOrderObservedAt
+            == laterGeneration)
+    }
+
     @Test("initial adoption supersedes same-generation list reconstruction")
     func initialAdoptionWinsAfterPersistedSessionListRace() async throws {
         let repo = try await db.repos.create(
@@ -464,7 +554,7 @@ struct CodexActivityReconciliationTests {
         #expect(application.isInitialAttachment)
         let stored = try #require(try await db.terminals.get(id: terminal.id))
         let persistedGeneration = try #require(stored.sessionOrderObservedAt)
-        #expect(persistedGeneration > observedAt)
+        #expect(persistedGeneration == observedAt)
 
         let list = try RPCRequest(
             method: RPCMethod.terminalList,
@@ -593,7 +683,7 @@ struct CodexActivityReconciliationTests {
         #expect((await roundedRouter.handle(start)).success)
         let stored = try #require(try await db.terminals.get(id: terminal.id))
         let persistedGeneration = try #require(stored.sessionOrderObservedAt)
-        #expect(persistedGeneration < observedAt)
+        #expect(persistedGeneration == observedAt)
 
         try (#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"historical"}}"#
             + "\n").write(to: missingTranscript, atomically: true, encoding: .utf8)

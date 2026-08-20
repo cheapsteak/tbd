@@ -9,6 +9,18 @@ private let decodeLogger = Logger(subsystem: "com.tbd.daemon", category: "databa
 struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     static let databaseTableName = "terminal"
 
+    static func databaseDateEncodingStrategy(
+        for column: String
+    ) -> DatabaseDateEncodingStrategy {
+        if column == "sessionOrderObservedAt" {
+            // Numeric epoch storage preserves distinct starts within one
+            // millisecond. GRDB's default decoder accepts both this numeric
+            // representation and legacy datetime text rows.
+            return .timeIntervalSince1970
+        }
+        return .deferredToDate
+    }
+
     var id: String
     var worktreeID: String
     var tmuxWindowID: String
@@ -476,8 +488,8 @@ public struct TerminalStore: Sendable {
             return AppliedTerminalSessionStart(
                 sessionID: sessionID,
                 transcriptPath: persistedRecord.transcriptPath,
-                // GRDB's datetime encoding stores millisecond precision. The
-                // tracker must use the same generation a later list reloads.
+                // The tracker must use the exact durable generation a later
+                // terminal-list read will reload.
                 orderObservedAt: persistedRecord.sessionOrderObservedAt,
                 isInitialAttachment: isInitialAttachment,
                 activityObservation: activityObservation)

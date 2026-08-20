@@ -80,7 +80,7 @@ The first accepted Codex start attaches the terminal to its initial rollout; the
 
 Codex can write `session_meta` and `task_started` before the first SessionStart hook reaches TBD, so the tracker retains an existing baseline or performs its ordinary bounded tail bootstrap. Those already-written lifecycle records are eligible to present the initial prompt as working, and a later matching close advances that baseline to idle. If the rollout is temporarily unavailable, the tracker remembers that the live generation is initial and a later poll bootstraps when the file appears.
 
-Every later accepted Codex start establishes a lifecycle boundary at the transcript's current end, including a same-path resume. Events before that boundary do not become current work in the new session. Tracker session operations carry the accepted session-order watermark read back from the updated database row, so the live handler and later terminal-list reload use the same persisted timestamp precision. A later generation defeats an older delayed tracker operation. Within the same generation, live initial-attachment knowledge defeats a conservative boundary reconstructed by a terminal-list call that raced ahead after database persistence.
+Every later accepted Codex start establishes a lifecycle boundary at the transcript's current end, including a same-path resume. Events before that boundary do not become current work in the new session. Session-order watermarks use numeric epoch storage so distinct starts within one millisecond remain distinct; the decoder also accepts legacy datetime text rows. Tracker session operations carry the watermark read back from the updated database row, so the live handler and later terminal-list reload use the same durable generation. A later generation defeats an older delayed tracker operation. Within the same generation, live initial-attachment knowledge defeats a conservative boundary reconstructed by a terminal-list call that raced ahead after database persistence.
 
 The persisted SessionStart fact lets a tracker with no in-memory generation state, such as after daemon restart, reconstruct the boundary conservatively at the current end. Boundary preparation or retry and stamped transcript observation happen in one tracker actor operation. If the file is unavailable, that reconstructed boundary remains pending and makes the transcript ineligible for ordinary bootstrap until a later poll captures its EOF. In-memory generation state is transient, terminal-keyed, and pruned with transcript baselines during worktree- or fleet-scoped retention.
 
@@ -214,7 +214,7 @@ Tracker tests cover:
 - unreadable-file recovery;
 - per-request byte and step limits;
 - fleet fairness, scoped polling, path removal, and reordering;
-- atomic first-attachment classification, including partial-history rows, concurrent starts, and sub-millisecond database normalization;
+- atomic first-attachment classification, including partial-history rows, concurrent starts, sub-millisecond ordering, and legacy datetime rows;
 - same-generation list/adoption races, pending-boundary observation, unavailable initial rollouts, later-generation precedence, and generation-state retention;
 - later SessionStart boundaries, daemon reconstruction, and same-path invalidation;
 - transcript identity rollover during concurrent list calls.
