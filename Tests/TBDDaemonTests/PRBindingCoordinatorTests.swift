@@ -348,7 +348,7 @@ struct PRBindingCoordinatorTests {
     /// indicator with no way back.
     @Test("detaching an unbound PR from another repo records nothing")
     func detachDoesNotTombstoneAForeignUnboundPR() async throws {
-        let fixture = try await Fixture(repo: ("acme", "other-repo"))
+        let fixture = try await Fixture(repo: ("acme", "other-repo", "github.com"))
         let wt = try await fixture.newWorktree()
 
         #expect(try await fixture.coordinator.detach(worktreeID: wt, parsed: parsed) == false)
@@ -432,8 +432,10 @@ struct PRBindingCoordinatorTests {
         let wt = try await fixture.newWorktree()
         _ = await fixture.coordinator.bind(worktreeID: wt, parsed: parsed, source: .hook)
 
-        let renamed = PRBindingCoordinator(store: fixture.store,
-                                           resolveRepo: { _ in ("acme", "renamed-repo") })
+        let renamed = PRBindingCoordinator(
+            store: fixture.store,
+            resolveRepo: { _ in ("acme", "renamed-repo", "github.com") },
+            isGitLabHost: { _, _ in false })
         #expect(try await renamed.detach(worktreeID: wt, parsed: parsed))
 
         #expect(try await fixture.store.list(worktreeID: wt).isEmpty)

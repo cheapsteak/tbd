@@ -299,7 +299,7 @@ struct PRBindingRPCTests {
     /// silently and with no error.
     @Test("pr.attach does not fall through from an unparseable url to the number")
     func attachDoesNotFallThroughToNumber() async throws {
-        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod"))
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod", "github.com"))
 
         await #expect(throws: (any Error).self) {
             try await harness.attach(
