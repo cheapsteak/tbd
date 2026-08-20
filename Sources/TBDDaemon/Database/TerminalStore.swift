@@ -468,10 +468,17 @@ public struct TerminalStore: Sendable {
             // transition still retracts only a prompt known to be older.
             clearAwaitingInputIfNotNewer(record: &record, than: observedAt)
             try record.update(db)
+            guard let persistedRecord = try TerminalRecord.fetchOne(
+                db, key: id.uuidString
+            ) else {
+                throw DatabaseError(message: "Terminal disappeared after SessionStart")
+            }
             return AppliedTerminalSessionStart(
                 sessionID: sessionID,
-                transcriptPath: record.transcriptPath,
-                orderObservedAt: observedAt,
+                transcriptPath: persistedRecord.transcriptPath,
+                // GRDB's datetime encoding stores millisecond precision. The
+                // tracker must use the same generation a later list reloads.
+                orderObservedAt: persistedRecord.sessionOrderObservedAt,
                 isInitialAttachment: isInitialAttachment,
                 activityObservation: activityObservation)
         }

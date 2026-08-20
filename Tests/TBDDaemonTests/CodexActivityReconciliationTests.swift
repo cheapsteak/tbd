@@ -284,6 +284,44 @@ struct CodexActivityReconciliationTests {
             .presentationActivityState == .idle)
     }
 
+    @Test("sub-millisecond initial generation survives a database round trip")
+    func submillisecondInitialGenerationRemainsWorkingAfterList() async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/car-submillisecond-initial-repo-\(UUID().uuidString)",
+            displayName: "car-submillisecond-initial-repo", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "main",
+            path: "/tmp/car-submillisecond-initial-wt-\(UUID().uuidString)",
+            tmuxServer: "tbd-car-submillisecond-initial")
+        let transcript = try makeTranscript(
+            #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"initial"}}"#
+                + "\n")
+        defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: "Codex", kind: .codex)
+        let observedAt = Date(timeIntervalSince1970: 1_790_000_000.123_6)
+        let roundedRouter = makeRouter(now: { observedAt })
+
+        let start = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id, sessionID: "initial-session",
+                transcriptPath: transcript.path, source: "SessionStart"))
+        #expect((await roundedRouter.handle(start)).success)
+        let stored = try #require(try await db.terminals.get(id: terminal.id))
+        let persistedGeneration = try #require(stored.sessionOrderObservedAt)
+        #expect(persistedGeneration > observedAt)
+
+        let list = try RPCRequest(
+            method: RPCMethod.terminalList,
+            params: TerminalListParams(worktreeID: wt.id))
+        let response = await roundedRouter.handle(list)
+        #expect(response.success)
+        #expect(try response.decodeResult([Terminal].self).first?
+            .presentationActivityState == .working)
+    }
+
     @Test("a stored transcript path makes a nil-identity SessionStart a later attachment")
     func storedTranscriptPathFencesNilIdentitySessionStart() async throws {
         let repo = try await db.repos.create(
@@ -419,10 +457,14 @@ struct CodexActivityReconciliationTests {
             worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
             label: "Codex", kind: .codex)
 
+        let observedAt = Date(timeIntervalSince1970: 1_790_000_000.123_6)
         let application = try #require(try await db.terminals.applySessionStart(
             id: terminal.id, sessionID: "initial-session",
-            transcriptPath: transcript.path, observedAt: presentationObservedAt))
+            transcriptPath: transcript.path, observedAt: observedAt))
         #expect(application.isInitialAttachment)
+        let stored = try #require(try await db.terminals.get(id: terminal.id))
+        let persistedGeneration = try #require(stored.sessionOrderObservedAt)
+        #expect(persistedGeneration > observedAt)
 
         let list = try RPCRequest(
             method: RPCMethod.terminalList,
@@ -516,6 +558,51 @@ struct CodexActivityReconciliationTests {
         let afterFileAppears = await restartedRouter.handle(list)
         #expect(afterFileAppears.success)
         #expect(try afterFileAppears.decodeResult([Terminal].self).first?
+            .presentationActivityState == nil)
+    }
+
+    @Test("sub-millisecond later boundary remains pending across database reload")
+    func submillisecondUnavailableLaterBoundaryDoesNotBootstrapHistory() async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/car-submillisecond-boundary-repo-\(UUID().uuidString)",
+            displayName: "car-submillisecond-boundary-repo", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "main",
+            path: "/tmp/car-submillisecond-boundary-wt-\(UUID().uuidString)",
+            tmuxServer: "tbd-car-submillisecond-boundary")
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "tbd-car-submillisecond-boundary-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let missingTranscript = directory.appendingPathComponent("rollout.jsonl")
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: "Codex", kind: .codex)
+        _ = try #require(try await db.terminals.applySessionStart(
+            id: terminal.id, sessionID: "initial-session",
+            transcriptPath: "/tmp/car-submillisecond-initial.jsonl",
+            observedAt: Date(timeIntervalSince1970: 1_790_000_000)))
+        let observedAt = Date(timeIntervalSince1970: 1_790_000_001.123_4)
+        let roundedRouter = makeRouter(now: { observedAt })
+
+        let start = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id, sessionID: "later-session",
+                transcriptPath: missingTranscript.path, source: "SessionStart"))
+        #expect((await roundedRouter.handle(start)).success)
+        let stored = try #require(try await db.terminals.get(id: terminal.id))
+        let persistedGeneration = try #require(stored.sessionOrderObservedAt)
+        #expect(persistedGeneration < observedAt)
+
+        try (#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"historical"}}"#
+            + "\n").write(to: missingTranscript, atomically: true, encoding: .utf8)
+        let list = try RPCRequest(
+            method: RPCMethod.terminalList,
+            params: TerminalListParams(worktreeID: wt.id))
+        let response = await roundedRouter.handle(list)
+        #expect(response.success)
+        #expect(try response.decodeResult([Terminal].self).first?
             .presentationActivityState == nil)
     }
 
