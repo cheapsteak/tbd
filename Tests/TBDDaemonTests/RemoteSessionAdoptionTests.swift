@@ -741,6 +741,44 @@ struct RemoteSessionAdoptionTests {
         #expect(try await remoteRows().first?.parentWorktreeID == nil)
     }
 
+    /// The same finality when the row's FIRST parent came from the user rather
+    /// than from adoption — the case a marker written only by the adoption
+    /// paths could not see.
+    ///
+    /// The lane is adopted top-level with a stamp nothing can resolve yet, so
+    /// healing is still open to it. The user nests it by hand, then un-nests
+    /// it. Both gestures go through `move()`. Only once the parent lane
+    /// finally exists does the stamp become resolvable — and by then the user
+    /// has already said where the lane goes, so the poll must leave it at root.
+    @Test func aLaneTheUserNestedByHandAndUnnestedIsNotReNested() async throws {
+        let repo = try await makeRepo()
+        let m = manager()
+        let parentID = UUID()
+        let stamped = session("s-1", meta: ["repo": "acme/api",
+                                            "tbd_parent_worktree_id": parentID.uuidString])
+
+        // Adopted top-level: the stamp names a lane that does not exist yet.
+        try await m.apply(snapshot: [stamped], provider: "fake")
+        let lane = try #require(try await remoteRows().first)
+        #expect(lane.parentWorktreeID == nil)
+        #expect(!lane.remoteParentAssigned)
+
+        // The user nests it under some other lane, then changes their mind.
+        let other = try await db.worktrees.create(
+            repoID: repo.id, name: "other", branch: "other",
+            path: "/tmp/other-\(UUID().uuidString)", tmuxServer: "t")
+        try await db.worktrees.move(worktreeID: lane.id, newParentID: other.id, newSortOrder: 0)
+        try await db.worktrees.move(worktreeID: lane.id, newParentID: nil, newSortOrder: 0)
+
+        // The stamped lane now exists, so the stamp finally resolves.
+        _ = try await db.worktrees.create(
+            id: parentID, repoID: repo.id, name: "lane", branch: "lane",
+            path: "/tmp/lane-\(UUID().uuidString)", tmuxServer: "t")
+        try await m.apply(snapshot: [stamped], provider: "fake")
+
+        #expect(try await remoteRows().first?.parentWorktreeID == nil)
+    }
+
     /// The other side of the same coin, and the reason the marker exists rather
     /// than a blanket "adoption never nests twice": a row created parentless was
     /// offered nothing, so a stamp that only becomes readable later must still

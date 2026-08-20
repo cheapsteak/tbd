@@ -11,8 +11,9 @@ import Testing
 /// and the provider's static `tbd_parent_worktree_id` stamp — present on every
 /// poll — re-nests the second case within the minute.
 ///
-/// These cover the column and the two writes that set it. The behaviour that
-/// depends on them lives in `RemoteSessionAdoptionTests`.
+/// These cover the column and the three writes that set it — minting a remote
+/// row under a parent, adoption's late healing, and the user's own `move()`.
+/// The behaviour that depends on them lives in `RemoteSessionAdoptionTests`.
 @Suite struct RemoteParentAssignedMarkerTests {
 
     private let epoch = Date(timeIntervalSince1970: 1_770_000_000)
@@ -88,7 +89,7 @@ import Testing
         #expect(markers == [true, false, false])
     }
 
-    // MARK: - The two writes that set it
+    // MARK: - The three writes that set it
 
     /// Minting a remote row with a parent IS an assignment, so it is recorded
     /// there and not only on the healing path.
@@ -188,6 +189,121 @@ import Testing
 
         try await db.worktrees.move(worktreeID: row.id, newParentID: other.id, newSortOrder: 0)
         #expect(try await db.worktrees.get(id: row.id)?.remoteParentAssigned == true)
+    }
+
+    // MARK: - The user's own move spends the assignment too
+
+    /// The reviewer's four-step repro, and the reason `move()` writes the
+    /// marker at all.
+    ///
+    /// A remote lane adopted top-level with no resolvable stamp is unmarked, so
+    /// healing is still available to it. The user then nests it by hand and
+    /// un-nests it again. Both gestures go through `move()`, which the adoption
+    /// path never sees — so before this, the row arrived back at nil parent
+    /// STILL unmarked, `assignParentIfUnset`'s guard passed, and the next poll
+    /// that could finally resolve the static stamp re-nested the lane. Exactly
+    /// the regression the marker exists to prevent, reached through a first
+    /// parent that came from a manual move rather than from adoption.
+    @Test func aManualNestThenUnNestLeavesTheLaneWhereTheUserPutIt() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await makeRepo(db)
+        let parent = try await db.worktrees.create(
+            repoID: repo.id, name: "p", branch: "p",
+            path: "/tmp/rpa-mn-\(UUID().uuidString)", tmuxServer: "t")
+
+        // (1) Adopted top-level, nobody could name a parent.
+        let lane = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "r", branch: "b", provider: "fake", sessionID: "s-1")
+        #expect(!lane.remoteParentAssigned)
+
+        // (2) The user nests it by hand — a drag in the sidebar, or
+        //     `tbd worktree reparent`. That is a placement decision, and it is
+        //     this row's one assignment.
+        try await db.worktrees.move(worktreeID: lane.id, newParentID: parent.id, newSortOrder: 0)
+        #expect(try await db.worktrees.get(id: lane.id)?.remoteParentAssigned == true)
+
+        // (3) The user un-nests it again. Parent nil, marker still set.
+        try await db.worktrees.move(worktreeID: lane.id, newParentID: nil, newSortOrder: 0)
+        let unNested = try #require(try await db.worktrees.get(id: lane.id))
+        #expect(unNested.parentWorktreeID == nil)
+        #expect(unNested.remoteParentAssigned)
+
+        // (4) The next poll finally resolves the stamp. It must be refused.
+        #expect(try await db.worktrees.assignParentIfUnset(
+            worktreeID: lane.id, parentID: parent.id) == nil)
+        #expect(try await db.worktrees.get(id: lane.id)?.parentWorktreeID == nil)
+    }
+
+    /// The other direction of the same rule, on the one row shape that can
+    /// still reach it: a remote row that has a parent but no marker. The
+    /// backfill closes that state for every row it can see, so this one is
+    /// built by hand — a row whose `location` was written after the backfill
+    /// ran would look exactly like it. Moving it to root is a placement
+    /// decision and spends the assignment, so healing cannot put it back.
+    @Test func aManualMoveToRootSpendsTheAssignmentToo() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await makeRepo(db)
+        let parent = try await db.worktrees.create(
+            repoID: repo.id, name: "p", branch: "p",
+            path: "/tmp/rpa-mr-\(UUID().uuidString)", tmuxServer: "t")
+        let lane = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "r", branch: "b", provider: "fake", sessionID: "s-1",
+            parentWorktreeID: parent.id)
+        try await db.writerForTests.write { dbConn in
+            try dbConn.execute(
+                sql: "UPDATE worktree SET remote_parent_assigned = 0 WHERE id = ?",
+                arguments: [lane.id.uuidString])
+        }
+        #expect(try await db.worktrees.get(id: lane.id)?.remoteParentAssigned == false)
+
+        try await db.worktrees.move(worktreeID: lane.id, newParentID: nil, newSortOrder: 0)
+
+        let moved = try #require(try await db.worktrees.get(id: lane.id))
+        #expect(moved.parentWorktreeID == nil)
+        #expect(moved.remoteParentAssigned)
+        #expect(try await db.worktrees.assignParentIfUnset(
+            worktreeID: lane.id, parentID: parent.id) == nil)
+    }
+
+    /// A move that leaves the parent edge alone is a reordering, not a
+    /// statement about nesting, so it must NOT spend the assignment: a
+    /// top-level remote lane the user merely dragged up the list is still one
+    /// adoption may file under its spawning lane once the stamp resolves.
+    /// The discriminating half of the rule above.
+    @Test func reorderingWithinTheSameGroupDoesNotSpendTheAssignment() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await makeRepo(db)
+        let parent = try await db.worktrees.create(
+            repoID: repo.id, name: "p", branch: "p",
+            path: "/tmp/rpa-ro-\(UUID().uuidString)", tmuxServer: "t")
+        let lane = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "r", branch: "b", provider: "fake", sessionID: "s-1")
+
+        try await db.worktrees.move(worktreeID: lane.id, newParentID: nil, newSortOrder: 3)
+
+        #expect(try await db.worktrees.get(id: lane.id)?.remoteParentAssigned == false)
+        #expect(try await db.worktrees.assignParentIfUnset(
+            worktreeID: lane.id, parentID: parent.id) != nil)
+    }
+
+    /// The marker is remote-only bookkeeping. A local worktree the user nests
+    /// and un-nests must never acquire it — adoption is not in that row's life,
+    /// and a marker there would only mislead a later reader.
+    @Test func movingALocalRowNeverMarksIt() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await makeRepo(db)
+        let parent = try await db.worktrees.create(
+            repoID: repo.id, name: "p", branch: "p",
+            path: "/tmp/rpa-lm-\(UUID().uuidString)", tmuxServer: "t")
+        let child = try await db.worktrees.create(
+            repoID: repo.id, name: "c", branch: "c",
+            path: "/tmp/rpa-lc2-\(UUID().uuidString)", tmuxServer: "t")
+
+        try await db.worktrees.move(worktreeID: child.id, newParentID: parent.id, newSortOrder: 0)
+        #expect(try await db.worktrees.get(id: child.id)?.remoteParentAssigned == false)
+
+        try await db.worktrees.move(worktreeID: child.id, newParentID: nil, newSortOrder: 0)
+        #expect(try await db.worktrees.get(id: child.id)?.remoteParentAssigned == false)
     }
 
     // MARK: - The wire
