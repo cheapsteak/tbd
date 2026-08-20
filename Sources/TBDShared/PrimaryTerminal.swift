@@ -13,9 +13,11 @@ import Foundation
 public enum PrimaryTerminal {
     /// The worktree's primary agent terminal, or `nil` when none has spawned.
     ///
-    /// Terminals list oldest-first and the spawn path creates the primary
-    /// before the setup tab, so the first agent-kind row is it. A row with no
-    /// kind recorded reads as a shell, which is what such a row is.
+    /// `TerminalStore.list` returns rows oldest-first and the spawn path
+    /// creates the primary before the setup tab, so the first agent-kind row is
+    /// it. That ordering is the store's, not a property of any `[Terminal]` —
+    /// pass a list in creation order, never one sorted into tab order. A row
+    /// with no kind recorded reads as a shell, which is what such a row is.
     public static func agent(in terminals: [Terminal]) -> Terminal? {
         terminals.first { ($0.kind ?? .shell) != .shell }
     }
@@ -25,12 +27,20 @@ public enum PrimaryTerminal {
     /// hook's tab.
     ///
     /// "Not yet" and "not ever" are opposite answers that look alike from a
-    /// list of terminals, and this label is what separates them. A worktree
-    /// whose `preSession` hook is still running has exactly one row — that
-    /// hook's tab, created before `worktree.create` returns — and its primary
-    /// agent spawns the moment the hook exits. A worktree whose spawn already
-    /// happened and produced a plain shell has a row carrying no such label,
-    /// and no later spawn is coming for it.
+    /// list of terminals, and this label is what separates them. A create or a
+    /// revive gated on a `preSession` hook holds exactly one row for as long as
+    /// that hook runs — the hook's tab, made before the RPC returns — and its
+    /// primary agent spawns the moment the hook exits. A worktree whose spawn
+    /// already happened and produced a plain shell has a row carrying no such
+    /// label, and no later spawn is coming for it.
+    ///
+    /// **Every row, not merely some row.** A hook tab can also sit *beside*
+    /// live ones: a manual re-run (`worktree.rerunPreSession`) appends one to a
+    /// worktree that already has its primaries, and a hook that failed or timed
+    /// out keeps its tab next to the primary phase 3 then spawns anyway. Those
+    /// worktrees have had their spawn — only a worktree holding nothing *but*
+    /// hook tabs still has one ahead of it, which is why this reads every row
+    /// rather than asking whether a hook tab is present.
     ///
     /// An empty list is vacuously still-coming, and that is the point: it is
     /// the pre-spawn shape (and, in the app, a worktree whose terminals have
@@ -39,10 +49,8 @@ public enum PrimaryTerminal {
     ///
     /// Keyed on the label rather than on `worktree.status == .creating`
     /// deliberately: the status is a coarser fact that also covers moments this
-    /// rule should not speak about, while the label names the actual cause. The
-    /// label also covers the revive path for free — a revive spawns the same
-    /// hook tab ahead of the same primaries, and is still-coming for exactly
-    /// the reason a create is.
+    /// rule should not speak about, while the label names the actual cause —
+    /// and it is the same fact whether a create or a revive spawned the tab.
     public static func spawnIsStillComing(terminals: [Terminal]) -> Bool {
         terminals.allSatisfy { $0.label == TerminalLabel.preSession }
     }

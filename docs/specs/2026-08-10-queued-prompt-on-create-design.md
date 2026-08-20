@@ -134,6 +134,16 @@ While the modal is on, `createWorktree` no longer sets `editingWorktreeID`.
 Rename-on-create and the modal cannot both own focus, and the prompt is the
 reason the modal exists; renaming stays available from the sidebar.
 
+**A first message that does not park is handed back on the pasteboard.** The
+modal dismisses on submit and there is no draft store behind it, so by the time
+a creation failure, a refusal, or a transport error comes back there is nowhere
+the operator could go looking for what they wrote — an alert on its own would
+leave the message existing nowhere at all. Every one of those paths therefore
+copies the text first and says so in the same sentence as the reason, which is
+the recovery the read-back's Copy already offers for text that was parked and
+cannot be delivered. It costs the operator's clipboard, and that is the trade:
+the clipboard is replaceable and the composed message is not.
+
 **Two surfaces for a parked message, split by one rule.** Text in the column
 means one of two things, and the app names them separately:
 

@@ -71,7 +71,11 @@ extension WorktreeLifecycle {
 
             let terminals = (try? await db.terminals.list(worktreeID: row.id)) ?? []
             let preSessionTerminal = terminals.first { $0.label == TerminalLabel.preSession }
-            let hasPrimaries = terminals.contains { $0.label != TerminalLabel.preSession }
+            // "Has phase 3 already spawned the primaries?" is the same question
+            // `park` asks before it promises a first message to a spawn, so it
+            // is asked through the same rule — a second copy here would be free
+            // to drift into disagreeing with the promise the operator was made.
+            let hasPrimaries = !PrimaryTerminal.spawnIsStillComing(terminals: terminals)
 
             // Everything past here needs a directory, so convert once. The
             // conversion also covers a local row with no path at all — the
