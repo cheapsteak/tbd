@@ -416,6 +416,71 @@ struct StatusBarViewChipsTests {
                 == "Click to stop tracking this PR in this worktree")
     }
 
+    /// The headline is the card's own name for the request, so it speaks the
+    /// chip's forge like every other sentence on the card. It read `PR#412`
+    /// under a GitLab chip whose action row, one line below, offered to open
+    /// that same request on GitLab — the card contradicting itself twice in
+    /// three lines, on the surface built so a user need not open a browser to
+    /// tell which change a chip is.
+    ///
+    /// The noun is glued to the number the chip is already drawing, which is
+    /// the bare `#412` on both forges — hence `refNoun` and not `refLabel`,
+    /// whose `!412` would disagree with the chip under the pointer.
+    @Test("the headline names the request in its own forge's vocabulary")
+    func headlineSpeaksTheChipsForge() {
+        let state = PRMergeableState.mergeable.displayReason
+        #expect(StatusBarView.chipHeadline(chip()) == "PR#412 (\(state))")
+        #expect(StatusBarView.chipHeadline(gitlabChip()) == "MR#412 (\(state))")
+
+        // Every degradation arm carries the noun too: a chip with neither state
+        // nor title is the shortest headline there is, and still not a "PR".
+        #expect(StatusBarView.chipHeadline(gitlabChip(state: nil)) == "MR#412")
+        #expect(StatusBarView.chipHeadline(gitlabChip(state: nil, title: "Trim the relay"))
+                == "MR#412 - Trim the relay")
+        #expect(StatusBarView.chipHeadline(gitlabChip(state: .merged, title: "Trim the relay"))
+                == "MR#412 (\(PRMergeableState.merged.displayReason)) - Trim the relay")
+
+        // The card renders that headline rather than composing its own, and the
+        // whole card speaks ONE forge — no headline may say "PR" over an action
+        // row that says "GitLab", which is the defect this pins.
+        let mr = gitlabChip(title: "Trim the relay")
+        let card = StatusBarView.chipHoverCard(mr)
+        #expect(card.title == StatusBarView.chipHeadline(mr))
+        #expect(card.title?.contains("PR") == false)
+        #expect(card.rows.last?.value.contains("GitLab") == true)
+    }
+
+    /// The chip itself draws the bare number on both forges, so the number
+    /// element's accessibility label — what `PRChipView` passes as
+    /// `chip.refLabel` — is where a screen reader learns which forge this is.
+    /// It was a hardcoded `PR #412` for every chip.
+    @Test("the number element announces the binding in its forge's vocabulary")
+    func numberElementAnnouncesItsForge() {
+        #expect(chip().refLabel == "PR #412")
+        #expect(gitlabChip().refLabel == "MR !412")
+        // The hint on the same element composes that value, so the element
+        // cannot announce one forge and hint another.
+        #expect(StatusBarView.openLabel(gitlabChip()).contains(gitlabChip().refLabel))
+    }
+
+    /// Both click targets already composed `refLabel`; this pins that they do,
+    /// because every earlier round of this defect fixed one surface and left
+    /// the next one asserting only GitHub.
+    @Test("both click targets name a merge request the way GitLab does")
+    func clickTargetLabelsSpeakGitLab() {
+        let mr = gitlabChip(state: .checksFailed)
+        let untrack = StatusBarView.untrackLabel(mr)
+        let open = StatusBarView.openLabel(mr)
+        #expect(untrack == "Stop tracking MR !412 in this worktree")
+        #expect(open == "Open MR !412 — \(PRMergeableState.checksFailed.displayReason)")
+        #expect(StatusBarView.iconSlotLabel(mr, isHovering: true) == untrack)
+        #expect(StatusBarView.iconSlotLabel(mr, isHovering: false) == open)
+        for label in [untrack, open] {
+            #expect(label.contains(Forge.github.refNoun) == false)
+            #expect(label.contains("#412") == false)
+        }
+    }
+
     @Test("a GitLab chip's action row says MR and GitLab")
     func actionRowSpeaksGitLab() {
         let mr = gitlabChip()

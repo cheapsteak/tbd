@@ -235,12 +235,20 @@ struct StatusBarView: View {
         return model
     }
 
-    /// The overlay's headline: `PR#412 (Checks failing) - Fix the login timeout`.
+    /// The overlay's headline: `PR#412 (Checks failing) - Fix the login timeout`,
+    /// or `MR#412 (…)` under a chip bound to a merge request.
     ///
     /// One line rather than a labelled grid. The three facts are read together —
     /// which PR, what state, what it is about — and a two-column table of them
     /// spent most of a card's width on the words "PR" and "State" saying what
     /// `#412` and "Checks failing" already say.
+    ///
+    /// The noun is the chip's own `forge.refNoun`, and `refNoun` rather than
+    /// `refLabel` because the headline is glued to the number the chip is
+    /// *already drawing*: the chip renders the bare `#412` on both forges, so a
+    /// headline built from `refLabel` would answer `MR !412` over a chip
+    /// reading `#412`. The card must never call a merge request a PR while its
+    /// own action row one line below offers to open it on GitLab.
     ///
     /// Everything but the number is optional and degrades by *omission*: a
     /// synthetic chip has no title, a never-polled binding has no state, and
@@ -249,7 +257,7 @@ struct StatusBarView: View {
     /// pointer is on already carries that color, and this card colors words
     /// only for a caution the reader must not miss.
     nonisolated static func chipHeadline(_ chip: PRChip) -> String {
-        var headline = "PR\(chip.label)"
+        var headline = "\(chip.forge.refNoun)\(chip.label)"
         // The status's own words when it has any, exactly as the overflow menu
         // and the toolbar dropdown render them.
         if let state = chip.reason?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -549,11 +557,17 @@ private struct PRChipView: View {
                 // differ: the toolbar control and its dropdown open a webview
                 // tab, while the status bar agrees with the sidebar row
                 // indicator and shells out. Not drift — the status bar is an
-                // at-a-glance strip, and a click there is a "take me to GitHub"
-                // gesture rather than a request to park a tab in the worktree.
+                // at-a-glance strip, and a click there is a "take me to the
+                // forge" gesture rather than a request to park a tab in the
+                // worktree.
                 .onTapGesture { open() }
                 .accessibilityElement()
-                .accessibilityLabel("PR \(chip.label)")
+                // The binding named in its own forge's vocabulary. The chip
+                // draws the bare number on both forges, so the announcement is
+                // where a screen reader learns which forge it belongs to —
+                // `PR #412` or `MR !412`, never a hardcoded noun. It agrees
+                // with the hint below it, which composes the same `refLabel`.
+                .accessibilityLabel(chip.refLabel)
                 .accessibilityHint(StatusBarView.openLabel(chip))
                 .accessibilityAddTraits(.isButton)
         }
