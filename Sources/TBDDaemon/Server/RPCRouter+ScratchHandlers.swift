@@ -178,7 +178,7 @@ extension RPCRouter {
     ) async throws -> RPCResponse {
         let params = try decoder.decode(ScratchArchiveParams.self, from: paramsData)
         return try await archiveScratchSpace(
-            worktreeID: params.worktreeID, surface: .scratchArchive, force: false, actor: actor)
+            worktreeID: params.worktreeID, surface: .scratchArchive, actor: actor)
     }
 
     /// The body of `scratch.archive`, shared with `worktree.archive`'s scratch
@@ -194,7 +194,7 @@ extension RPCRouter {
     /// same `kind` (`.dispose`), so this needs no `ActuationBranch`: the act is
     /// identical and only the door differs.
     func archiveScratchSpace(
-        worktreeID: UUID, surface: ActuationSurface, force: Bool, actor: ActuationActor?
+        worktreeID: UUID, surface: ActuationSurface, actor: ActuationActor?
     ) async throws -> RPCResponse {
         guard let wt = try await db.worktrees.getLocal(id: worktreeID) else {
             return RPCResponse(error: "Scratch space not found: \(worktreeID)")
@@ -203,14 +203,34 @@ extension RPCRouter {
             return RPCResponse(error: "Not a scratch space: \(worktreeID)")
         }
 
+        // The Watch Desk is a scratch row (`isNightwatchDesk` is `isScratch`
+        // plus its display name), so the routing above reaches it. Its teardown
+        // is not this one: `DeskSessionManager.closeDeskSession` also clears the
+        // in-memory desk pointer and is paired with `releaseJudgeLease`, which
+        // drops the lease row and unlinks the lease credential file. Neither
+        // resource has a reconciler, so retiring the desk through the generic
+        // body would leak both with nothing to reclaim them. Refused rather
+        // than half-torn-down.
+        guard !wt.isNightwatchDesk else {
+            return RPCResponse(
+                error: "This is the Nightwatch Watch Desk; it is retired by the desk's own "
+                    + "teardown, not by archiving. Stop the desk instead.")
+        }
+
         // Idempotent on an already-archived row, and deliberately not a
         // re-archive: `WorktreeStore.archive` re-stamps `archivedAt`
         // unconditionally, and that timestamp is the GC grace clock
-        // `OrphanProcessCollector` reaps from. A retry (a socket timeout, a
-        // hook firing twice, a sweep re-issuing the call) would otherwise push
-        // the reap of a wedged agent out by another `gcGraceSeconds` each time,
-        // and re-broadcast an archive delta for a row every client has already
-        // filed away.
+        // `OrphanProcessCollector` reaps from. A *sequential* retry (a hook
+        // firing twice, a sweep re-issuing the call, a user repeating it) would
+        // otherwise push the reap of a wedged agent out by another
+        // `gcGraceSeconds` each time, and re-broadcast an archive delta for a
+        // row every client has already filed away.
+        //
+        // This is a read in its own transaction, so it does not close the
+        // window where two calls overlap in flight; the durable fix is a status
+        // check inside `WorktreeStore.archive`'s write block beside the
+        // `.main`/`.creating` refusals, which would cover the repo path and the
+        // direct callers (reconcile, the Watch Desk) at the same time.
         guard wt.status != .archived else {
             scratchLogger.info(
                 "\(surface.method, privacy: .public): \(wt.id, privacy: .public) is already archived; no-op")
@@ -223,12 +243,17 @@ extension RPCRouter {
         // inside a scratch space mints a repo worktree whose
         // `parentWorktreeID` is this row, and `worktree.move` permits the same
         // by hand. Archiving the parent out from under a live child leaves the
-        // child rendering nowhere until reconcile nulls the pointer, so it is
-        // refused unless the caller passed `force`. The cascade flows
-        // (`repo.remove`) are the ones that legitimately bypass it.
-        if !force {
-            try await db.worktrees.assertArchivable(id: worktreeID)
-        }
+        // child rendering nowhere until reconcile nulls the pointer.
+        //
+        // Unconditional, and deliberately NOT gated on the caller's `force`:
+        // `handleWorktreeArchive` does not forward `force` to
+        // `beginArchiveWorktree` either, so this assertion always runs for a
+        // repo worktree arriving through the same door. `force` bypasses it
+        // only for the in-process cascade flows that call the lifecycle
+        // directly (`repo.remove`), and no cascade reaches a repo-less row.
+        // Honouring `force` here would have made one flag mean opposite things
+        // on the two branches of one RPC.
+        try await db.worktrees.assertArchivable(id: worktreeID)
 
         // Same teardown as `scratch.delete`, so the same row: one per call,
         // worktree-named, written before the first kill.
@@ -243,7 +268,8 @@ extension RPCRouter {
         // client's perspective the row leaves the active section identically
         // whether archived or deleted.
         subscriptions.broadcast(delta: .worktreeArchived(WorktreeIDDelta(worktreeID: wt.id)))
-        scratchLogger.info("scratch.archive: \(wt.id, privacy: .public) at \(wt.path, privacy: .public)")
+        scratchLogger.info(
+            "\(surface.method, privacy: .public): \(wt.id, privacy: .public) at \(wt.path, privacy: .public)")
         return .ok()
     }
 
@@ -275,7 +301,9 @@ extension RPCRouter {
 
     /// The body of `scratch.revive`, shared with `worktree.revive`'s scratch
     /// branch (`handleWorktreeRevive`).
-    func reviveScratchSpace(worktreeID: UUID) async throws -> ScratchReviveOutcome {
+    func reviveScratchSpace(
+        worktreeID: UUID, method: String = RPCMethod.scratchRevive
+    ) async throws -> ScratchReviveOutcome {
         guard let wt = try await db.worktrees.getLocal(id: worktreeID) else {
             return .refused("Scratch space not found: \(worktreeID)")
         }
@@ -315,7 +343,8 @@ extension RPCRouter {
 
         subscriptions.broadcast(delta: .worktreeRevived(WorktreeDelta(
             worktreeID: wt.id, repoID: nil, name: wt.name, path: wt.path)))
-        scratchLogger.info("scratch.revive: \(wt.id, privacy: .public) at \(wt.path, privacy: .public)")
+        scratchLogger.info(
+            "\(method, privacy: .public): \(wt.id, privacy: .public) at \(wt.path, privacy: .public)")
         return .revived(revived)
     }
 

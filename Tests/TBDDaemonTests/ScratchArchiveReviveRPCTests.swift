@@ -280,7 +280,11 @@ struct WorktreeArchiveScratchRoutingRPCTests {
         #expect(try await db.tabs.listForWorktree(worktreeID: wt.id).isEmpty)
     }
 
-    @Test func forceIsAcceptedAndInertOnAScratchSpace() async throws {
+    /// `--force` is accepted and changes nothing on this path. What it governs
+    /// on the repo branch is phase 2's hook skip, and the scratch body has no
+    /// phase 2; the children refusal it does NOT govern is asserted in
+    /// `archiveRefusesAScratchSpaceWithAnActiveChild`.
+    @Test func forceIsAcceptedAndChangesNothingOnAScratchSpace() async throws {
         let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
         let db = try TBDDatabase(inMemory: true)
         let (router, _) = makeRouter(db: db)
@@ -291,8 +295,8 @@ struct WorktreeArchiveScratchRoutingRPCTests {
             params: WorktreeArchiveParams(worktreeID: wt.id, force: true)))
         #expect(archive.success)
         #expect(try await db.worktrees.get(id: wt.id)?.status == .archived)
-        // Still on disk: `force` skips the archive hook on the repo path, and
-        // must not be read as license to remove anything here.
+        // Still on disk: `force` must never be read as license to remove
+        // anything here, which is what phase 2 would have done.
         #expect(FileManager.default.fileExists(atPath: wt.localPath))
     }
 
@@ -379,7 +383,7 @@ struct WorktreeArchiveScratchRoutingRPCTests {
         let parent = try await makeScratch(router, name: "wt-scratch-parent")
         let repo = try await db.repos.create(
             path: "/tmp/r-\(UUID().uuidString)", displayName: "r", defaultBranch: "main")
-        _ = try await db.worktrees.create(
+        let child = try await db.worktrees.create(
             repoID: repo.id, name: "child", branch: "b",
             path: "/tmp/w-\(UUID().uuidString)", tmuxServer: "tbd-x",
             parentWorktreeID: parent.id)
@@ -391,13 +395,76 @@ struct WorktreeArchiveScratchRoutingRPCTests {
         #expect(archive.error?.contains("Archive nested worktrees first") == true)
         #expect(try await db.worktrees.get(id: parent.id)?.status == .active)
 
-        // `--force` is the documented bypass for cascade flows, and it must
-        // still reach the scratch body rather than being swallowed as inert.
+        // `--force` must NOT bypass it, because it does not bypass it for a
+        // repo worktree arriving through this same door either:
+        // `handleWorktreeArchive` never forwards `force` to
+        // `beginArchiveWorktree`, so that assertion always runs there too. One
+        // flag meaning opposite things on the two branches of one RPC is the
+        // divergence this asserts against.
         let forced = await router.handle(try RPCRequest(
             method: RPCMethod.worktreeArchive,
             params: WorktreeArchiveParams(worktreeID: parent.id, force: true)))
-        #expect(forced.success)
+        #expect(!forced.success)
+        #expect(forced.error?.contains("Archive nested worktrees first") == true)
+        #expect(try await db.worktrees.get(id: parent.id)?.status == .active)
+
+        // Once the child is out of the way, the archive goes through.
+        try await db.worktrees.archive(id: child.id)
+        let after = await router.handle(try RPCRequest(
+            method: RPCMethod.worktreeArchive,
+            params: WorktreeArchiveParams(worktreeID: parent.id)))
+        #expect(after.success)
         #expect(try await db.worktrees.get(id: parent.id)?.status == .archived)
+    }
+
+    /// The refusal reaches the pre-existing `scratch.archive` door too, since
+    /// both doors share the body. That door is the GUI's, and it carries no
+    /// `force` on the wire at all, which is the other half of why the children
+    /// assertion is unconditional rather than `force`-gated.
+    @Test func theScratchArchiveDoorRefusesAnActiveChildToo() async throws {
+        let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
+        let db = try TBDDatabase(inMemory: true)
+        let (router, _) = makeRouter(db: db)
+        let parent = try await makeScratch(router, name: "wt-scratch-parent-door")
+        let repo = try await db.repos.create(
+            path: "/tmp/r-\(UUID().uuidString)", displayName: "r", defaultBranch: "main")
+        _ = try await db.worktrees.create(
+            repoID: repo.id, name: "child", branch: "b",
+            path: "/tmp/w-\(UUID().uuidString)", tmuxServer: "tbd-x",
+            parentWorktreeID: parent.id)
+
+        let archive = await router.handle(try RPCRequest(
+            method: RPCMethod.scratchArchive,
+            params: ScratchArchiveParams(worktreeID: parent.id)))
+        #expect(!archive.success)
+        #expect(archive.error?.contains("Archive nested worktrees first") == true)
+        #expect(try await db.worktrees.get(id: parent.id)?.status == .active)
+    }
+
+    /// The Watch Desk is a scratch row, so the routing reaches it. Its lease row
+    /// and lease credential file have no reconciler, and only
+    /// `DeskSessionManager.closeDeskSession` releases them, so the generic body
+    /// must refuse rather than half-retire the desk.
+    @Test func archiveRefusesTheNightwatchWatchDesk() async throws {
+        let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
+        let db = try TBDDatabase(inMemory: true)
+        let (router, _) = makeRouter(db: db)
+        let desk = try await db.worktrees.createScratch(
+            name: "watch-desk", displayName: NightwatchDeskPrompts.deskDisplayName,
+            path: "/tmp/desk-\(UUID().uuidString)", tmuxServer: "tbd-x")
+        #expect(desk.isNightwatchDesk)
+
+        for method in [RPCMethod.worktreeArchive, RPCMethod.scratchArchive] {
+            let archive = await router.handle(
+                method == RPCMethod.worktreeArchive
+                    ? try RPCRequest(method: method,
+                                     params: WorktreeArchiveParams(worktreeID: desk.id))
+                    : try RPCRequest(method: method,
+                                     params: ScratchArchiveParams(worktreeID: desk.id)))
+            #expect(!archive.success)
+            #expect(archive.error?.contains("Watch Desk") == true)
+            #expect(try await db.worktrees.get(id: desk.id)?.status == .active)
+        }
     }
 
     /// `archivedAt` is the GC grace clock `OrphanProcessCollector` reaps from,

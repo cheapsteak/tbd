@@ -136,37 +136,55 @@ own rule is that `method` names the door a request came through and `kind` names
 the act, so a request that arrived on `worktree.archive` records
 `method: "worktree.archive"` even though the scratch body carries it out. The
 surface is therefore a parameter of `archiveScratchSpace`, passed as
-`.scratchArchive` by its own door and `.worktreeArchive` by the routed one. This
+`.scratchArchive` by its own door and `.worktreeArchive` by the routed one, and
+both shared bodies interpolate the caller's method into their success log lines
+for the same reason. This
 needs no `ActuationBranch`: both surfaces already map to `kind: .dispose`, so
 the act is identical and only the door differs. Filing routed archives under a
 verb only the GUI sends would have made a door-based audit under-report
 `worktree.archive` and report `scratch.archive` calls nobody made.
 
-The routed revive records too, against `.worktreeRevive`. `scratch.revive`
-itself still records nothing, which is its pre-existing shape, but
-`worktree.revive` must not have one branch that skips the log: `beginActuation`
-is fail-closed, so with the log unwritable the repo and remote branches refuse
-while a repo-less row would otherwise flip `.archived` to `.active` with no
-record of who asked.
+The routed **revive**, by contrast, records nothing, and the asymmetry with the
+repo branch is the correct one. `ActuationSurface`'s boundary rule puts DB-only
+mutations out of the record ("nothing there reaches a process, so nothing there
+is an actuation"), and this branch is exactly that: a status flip, a re-read and
+a delta. The repo branch records because it really does spawn the worktree's
+primary terminals, which is what `.worktreeRevive`'s `spawn` kind names, and a
+row claiming a spawn against a worktree with zero terminals is a phantom a fleet
+reader querying "spawned but no session appeared" would flag forever. Archive is
+the opposite case and does record: killing panes disposes of sessions, which is
+squarely inside the boundary.
 
-**`force` is forwarded, and it governs one of its two jobs.**
-`worktree.archive`'s `force` flag skips two things: the archive hook and the
-archivable-children assertion. The assertion applies to a scratch space and is
-enforced (see "The refusals the routed path keeps" below), so `force` is passed
-through rather than swallowed. The hook does not apply, because the scratch body
-runs none.
+The same reasoning is why `cols`, `rows` and `preferredSessionID` are accepted
+and unused on the routed revive: there is no terminal to size and no session to
+resume, because archive deleted every terminal row and revive spawns none.
 
-That second half is a real gap, not an absence. Hook resolution is **not**
-repo-scoped: `HookResolver.resolve` checks `<worktreePath>/.worktree-hooks/<event>`
-using the worktree's own directory, and falls back to a global
+**`force` is not forwarded, and that is parity rather than a shortfall.**
+`worktree.archive`'s `force` flag has two jobs in the lifecycle: skipping the
+archive hook and skipping the archivable-children assertion. But
+`handleWorktreeArchive` does not pass it to `beginArchiveWorktree` at all, so on
+this door it reaches only phase 2's hook skip, and the children assertion always
+runs for a repo worktree too. `force` bypasses that assertion only for the
+in-process cascade flows that call the lifecycle directly (`repo.remove`), and no
+cascade reaches a repo-less row.
+
+So the scratch body asserts unconditionally. Forwarding `force` would have made
+one flag bypass the children refusal for a scratch row while leaving it in force
+for a repo worktree through the same door: a flag whose meaning depends on the
+row shape is worse than one that is simply inert here.
+
+The hook half is a real gap, not an absence. Hook resolution is only *partly*
+repo-scoped: the highest-priority leg is the app's per-repo hook path, which a
+repo-less row can never have, but the remaining legs are repo-independent,
+including `<worktreePath>/.worktree-hooks/<event>` and a global
 `~/tbd/hooks/default/<event>` that applies to every worktree regardless of repo.
 A scratch space is routinely a git repo (promotion requires `git init` plus
 commits), so `.worktree-hooks/archive` inside one is an ordinary shape. Neither
 that hook nor the global default runs when a scratch space is archived, through
 either door, and the user gets no diagnostic. This is pre-existing
-`scratch.archive` behavior that the routing now exposes to every client;
-closing it means giving the scratch body a hook call, which is a change to that
-body with its own testable surface.
+`scratch.archive` behavior that the routing now exposes to every client; closing
+it means giving the scratch body a hook call, and deciding first what the
+per-repo leg means for a row with no repo.
 
 ### The refusals the routed path keeps
 
@@ -181,21 +199,47 @@ makes them reachable without a user gesture:
   `.main` and `.archived`, so `tbd worktree new` run from inside a scratch space
   mints a repo worktree parented to it, and `worktree.move` permits the same by
   hand. Archiving the parent out from under a live child leaves the child
-  rendering nowhere until reconcile nulls the pointer. Refused unless `force`,
-  exactly as on the repo path.
+  rendering nowhere until reconcile nulls the pointer. Refused unconditionally,
+  which is what a repo worktree arriving through this same door gets. The GUI's
+  row menu pre-disables its scratch Archive item on active children, with the
+  same copy the repo-worktree Archive already uses, so the refusal is not first
+  met as an alert from an enabled control.
 - **Already archived.** `WorktreeStore.archive` re-stamps `archivedAt`
   unconditionally, and that timestamp is the grace clock
   `OrphanProcessCollector` reaps orphaned agents from. A retried call would push
   the reap of a wedged agent out by another `gcGraceSeconds` every time, and
   re-broadcast an archive delta for a row every client has already filed away.
   So an already-archived row is an idempotent no-op that re-stamps nothing,
-  rather than either a re-archive or a new user-visible refusal.
+  rather than either a re-archive or a new user-visible refusal. This guard is a
+  read in its own transaction, so it closes sequential retries and not two calls
+  overlapping in flight; the durable fix is a status check inside
+  `WorktreeStore.archive`'s write block beside the `.main`/`.creating` refusals,
+  which would cover the repo path and the direct callers at once.
 - **Promoted.** Promotion retires the row as archived with `promotedToRepoID`
   set and leaves `repoID` NULL, so `isScratch` and revive's status check both
   still pass. Only the stale path, whose folder promotion moved away,
   incidentally blocked revive; anything that recreates a directory there would
   resurrect a retired row as active. Both sibling verbs guard on the pointer
   explicitly, so revive does too.
+
+**The Watch Desk is refused.** `isNightwatchDesk` is `isScratch` plus the desk's
+display name, so the routing reaches the Nightwatch desk row. Its teardown is
+`DeskSessionManager.closeDeskSession`, which also clears the in-memory desk
+pointer and is paired with `releaseJudgeLease` to drop the lease row and unlink
+the lease credential file. Neither resource has a named reconciler, so retiring
+the desk through the generic body would leak both with nothing to reclaim them.
+Both doors refuse it and say so, which is the honest answer to the reconciler
+question this new destruction path would otherwise have to answer.
+
+The app keeps its own listings honest on daemon-originated transitions: the
+`.worktreeRevived` handler drops the row from `archivedScratchWorktrees`, and the
+archived handler refreshes that listing for a scratch row. Without the first
+half, a revive from the CLI left the row in the Scratch section's open Archived
+tab while it was live again, and that stale row's Delete button trashes the
+folder: `scratch.delete` has no status guard, deliberately, because the sidebar
+deletes active scratch spaces through it. Without the second half, an archived
+scratch space looked deleted: gone from the sidebar and absent from the only view
+that lists it.
 
 Revive also re-reads the row **before** broadcasting `.worktreeRevived`. The
 re-read exists because the caller that answers with a row must answer with the
@@ -239,11 +283,9 @@ body, testable on its own, and none is a refusal the routing removes:
   deleting terminals and preserves them across a revive that spawns no agent.
   The scratch body does neither; the two halves currently mask each other, so
   fixing either alone would clear ids that nothing had recorded.
-- **Client-side settlement.** No delta handler updates the app's
-  `archivedScratchWorktrees`, so a daemon-originated archive or revive leaves
-  the Scratch section's Archived tab stale until the user navigates away and
-  back. Related: a `tbd://` deep link to an archived scratch space returns
-  without navigating and without a diagnostic.
+- **Deep links.** A `tbd://` deep link to an archived scratch space returns
+  without navigating and without a diagnostic. Previously near-unreachable,
+  since only the GUI could archive one.
 
 The `?? worktreeID` shape appears once more, in `completeCreateWorktree`. That
 path is unreachable for a scratch space (scratch rows are minted by

@@ -245,6 +245,11 @@ struct LocalizedErrorPayloadTests {
             "WorktreeLifecycleError.repoNotFound"
         )
         assertRenders(
+            WorktreeLifecycleError.worktreeHasNoRepo(Self.worktreeID),
+            [Self.worktreeID.uuidString],
+            "WorktreeLifecycleError.worktreeHasNoRepo"
+        )
+        assertRenders(
             OrphanGCError.recordNotFound(Self.recordID),
             [Self.recordID.uuidString],
             "OrphanGCError.recordNotFound"
