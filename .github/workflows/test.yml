@@ -166,7 +166,7 @@ jobs:
       # is what decides how many blocked threads it takes to wedge the whole
       # test process. It was inferred, not measured, the one time that mattered.
       - name: Record runner CPU width
-        run: echo "runner cores: $(sysctl -n hw.ncpu)"
+        run: 'echo "runner cores: $(sysctl -n hw.ncpu)"'
 
       - name: Cache SwiftPM build artifacts and dependencies
         uses: actions/cache@v4
