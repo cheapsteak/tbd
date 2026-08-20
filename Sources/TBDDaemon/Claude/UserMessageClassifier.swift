@@ -37,7 +37,7 @@ enum UserMessageClassifier {
         else { return false }
 
         if let content = message["content"] as? String {
-            return !hasSystemPrefix(content)
+            return isRealUserMessage(text: content)
         }
 
         if let array = message["content"] as? [[String: Any]] {
@@ -48,12 +48,25 @@ enum UserMessageClassifier {
             // Check the first text block's content
             if let firstText = array.first(where: { $0["type"] as? String == "text" }),
                let text = firstText["text"] as? String {
-                return !hasSystemPrefix(text)
+                return isRealUserMessage(text: text)
             }
             return false
         }
 
         return false
+    }
+
+    /// Returns true if a prompt *body* is user-authored rather than a system
+    /// envelope.
+    ///
+    /// Claude Code records the same prompt two different ways depending on when
+    /// it lands: typed while the agent is idle it becomes a `type:"user"` line,
+    /// while a prompt queued mid-turn is only ever recorded as a
+    /// `queued_command` attachment carrying the raw text. Both shapes must
+    /// classify identically, so the rule lives here on the text and the
+    /// dictionary-shaped entry points above delegate to it.
+    static func isRealUserMessage(text: String) -> Bool {
+        !hasSystemPrefix(text)
     }
 
     /// Extracts display text from a real user message line. Returns nil if empty.
@@ -67,20 +80,31 @@ enum UserMessageClassifier {
         }
 
         if let array = message["content"] as? [[String: Any]] {
-            // EVERY text block, not just the first. Claude Code emits one text
-            // block PER attached image when it records where it spooled them
-            // (`[Image: source: …]`), so taking only the first silently dropped
-            // every image after the first in a multi-image paste. In the measured
-            // corpus that meta line is the only user message that ever carries
-            // more than one text block, so joining is a strict repair.
-            let texts = array
-                .filter { $0["type"] as? String == "text" }
-                .compactMap { $0["text"] as? String }
-                .filter { !$0.isEmpty }
-            return texts.isEmpty ? nil : texts.joined(separator: "\n")
+            return joinTextBlocks(array)
         }
 
         return nil
+    }
+
+    /// Joins EVERY `text` block of a content-block array, not just the first.
+    /// Claude Code emits one text block PER attached image when it records
+    /// where it spooled them (`[Image: source: …]`), so taking only the first
+    /// silently dropped every image after the first in a multi-image paste. In
+    /// the measured corpus that meta line is the only user message that ever
+    /// carries more than one text block, so joining is a strict repair.
+    ///
+    /// The same rule serves `queued_command.prompt`'s array form, which the
+    /// original measurement did not cover. Re-measured for that call site: the
+    /// array form appears on 11 queued rows in the local corpus and none carry
+    /// more than one text block, so joining is a strict repair there too.
+    ///
+    /// Returns nil when no non-empty text block is present.
+    static func joinTextBlocks(_ blocks: [[String: Any]]) -> String? {
+        let texts = blocks
+            .filter { $0["type"] as? String == "text" }
+            .compactMap { $0["text"] as? String }
+            .filter { !$0.isEmpty }
+        return texts.isEmpty ? nil : texts.joined(separator: "\n")
     }
 
     /// Returns the typed system kind for a user-role JSONL line if it's a
@@ -106,6 +130,14 @@ enum UserMessageClassifier {
             return nil
         }
 
+        return classify(text: text)
+    }
+
+    /// Returns the typed system kind for a prompt *body*, or nil when it is a
+    /// real user prompt. See `isRealUserMessage(text:)` for why the rule lives
+    /// on the text: a queued prompt never gets a `type:"user"` line, so the
+    /// only thing the two recording shapes share is the body itself.
+    static func classify(text: String) -> SystemKind? {
         // Background-task notifications are harness-injected into the user role.
         // Surface them as a dedicated system kind so they render as a clickable
         // activity row (with the full text available in the detail overlay).
@@ -131,11 +163,11 @@ enum UserMessageClassifier {
         // The known prefixes above match real Claude Code injections. The
         // generic-tag heuristic below is for future injections we haven't
         // seen yet — but it also catches user-typed XML/HTML prompts. If
-        // isRealUserMessage already accepts this line as a real user
+        // isRealUserMessage already accepts this text as a real user
         // message, prefer that over the speculative system-injection
         // catch-all. New unknown injections degrade to plain user prompts
         // rather than being hidden as system noise.
-        if isRealUserMessage(line) { return nil }
+        if isRealUserMessage(text: text) { return nil }
 
         // Unknown tag-like prefix → generic "other" injection. The tag must
         // start with `<`, contain only letters/underscores/hyphens, and end at

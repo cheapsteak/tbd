@@ -221,4 +221,60 @@ struct UserMessageClassifierClassifyTests {
         #expect(UserMessageClassifier.classify(line) == .taskNotification)
         #expect(UserMessageClassifier.isRealUserMessage(line) == false)
     }
+
+    // MARK: - text entry points
+    //
+    // A prompt queued while the agent was busy is recorded ONLY as a
+    // `queued_command` attachment — it has no `type:"user"` line and no
+    // `message` dict — so the classification rules must be reachable from the
+    // raw text. The dictionary-shaped entry points above delegate to these, so
+    // a queued prompt and a typed one can never be classified differently.
+
+    @Test func text_and_line_entry_points_agree() {
+        let bodies = [
+            "plain typed prompt",
+            "<cross-session-message from-name=\"acme-worker\">[note] done</cross-session-message>",
+            "<task-notification>\n<task-id>abc</task-id>\n</task-notification>",
+            "[SYSTEM NOTIFICATION - NOT USER INPUT]\nbackground event",
+            "<command-name>commit</command-name>",
+            "<system-reminder>x</system-reminder>",
+            "<local-command-stdout>ok</local-command-stdout>",
+            "<environment_details>cwd</environment_details>",
+            "Base directory for this skill: /skills/pr",
+            "# Git repository context\nbranch: main",
+            "<unknown-tag>future injection</unknown-tag>",
+            "<html>my page</html> please review",
+            "<3 hearts to you",
+        ]
+        for body in bodies {
+            let l = userLine(body)
+            #expect(UserMessageClassifier.classify(text: body) == UserMessageClassifier.classify(l),
+                    "classification diverged for: \(body)")
+            #expect(UserMessageClassifier.isRealUserMessage(text: body)
+                    == UserMessageClassifier.isRealUserMessage(l),
+                    "real-message verdict diverged for: \(body)")
+        }
+    }
+
+    @Test func text_classification_matches_the_documented_kinds() {
+        #expect(UserMessageClassifier.classify(text: "just asking a question") == nil)
+        #expect(UserMessageClassifier.isRealUserMessage(text: "just asking a question") == true)
+        #expect(UserMessageClassifier.classify(text: "<task-notification>x</task-notification>") == .taskNotification)
+        #expect(UserMessageClassifier.classify(text: "<command-name>pr</command-name>") == .slashEnvelope)
+        #expect(UserMessageClassifier.classify(text: "<system-reminder>x</system-reminder>") == .toolReminder)
+        #expect(UserMessageClassifier.isRealUserMessage(text: "<task-notification>x") == false)
+    }
+
+    /// The multi-text-block join is the same rule for a `type:"user"` content
+    /// array and a queued prompt's content-block array.
+    @Test func joinTextBlocks_joins_text_and_skips_everything_else() {
+        let blocks: [[String: Any]] = [
+            ["type": "text", "text": "first"],
+            ["type": "image", "source": ["type": "base64"]],
+            ["type": "text", "text": "second"],
+        ]
+        #expect(UserMessageClassifier.joinTextBlocks(blocks) == "first\nsecond")
+        #expect(UserMessageClassifier.joinTextBlocks([["type": "image"]]) == nil)
+        #expect(UserMessageClassifier.joinTextBlocks([]) == nil)
+    }
 }
