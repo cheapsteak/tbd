@@ -301,6 +301,51 @@ struct PRBindingStoreTests {
         #expect(all.first?.source == .hook)
     }
 
+    /// The transactional claim, run rather than reasoned about.
+    ///
+    /// `tombstone` is one method — and so one write transaction — precisely
+    /// because a bind can land a live row between a caller's look and its write.
+    /// The tests above set that state up sequentially, which pins the logic of
+    /// each arm but never actually races anything. This one starts both writes
+    /// as concurrent child tasks and lets the writer order them.
+    ///
+    /// Both orderings are legal and neither is asserted: what is asserted is the
+    /// invariant that survives either. After a bind and a detach of ONE identity,
+    /// the worktree holds exactly one row for it and that row is detached —
+    /// never a live row the user asked to remove, and never a second row for one
+    /// identity. Split into `setDetached` plus an insert-on-miss, the ordering
+    /// where the bind wins leaves the live row behind and the untrack becomes
+    /// the silent no-op the gesture exists to remove.
+    ///
+    /// Rounds alternate which child task is spawned first, so neither ordering
+    /// depends on the scheduler happening to favour one.
+    @Test("a bind racing a detach of one identity leaves one row, and it is detached")
+    func tombstoneRacingABindLeavesOneDetachedRow() async throws {
+        for round in 1...20 {
+            let fixture = try await Fixture()
+            let wt = try await fixture.newWorktree()
+            // The poll's branch matcher and the user's click, on the same PR.
+            let discovered = binding(9, worktreeID: wt, source: .branch)
+            let removal = binding(9, worktreeID: wt, source: .manual)
+
+            if round.isMultiple(of: 2) {
+                async let tombstoned = fixture.store.tombstone(removal, insertIfMissing: true)
+                async let bound = fixture.store.upsert(discovered)
+                _ = try await (tombstoned, bound)
+            } else {
+                async let bound = fixture.store.upsert(discovered)
+                async let tombstoned = fixture.store.tombstone(removal, insertIfMissing: true)
+                _ = try await (bound, tombstoned)
+            }
+
+            #expect(try await fixture.store.list(worktreeID: wt).isEmpty,
+                    "round \(round): a live row survived the detach")
+            let all = try await fixture.store.list(worktreeID: wt, includeDetached: true)
+            #expect(all.count == 1, "round \(round): expected one row, got \(all.count)")
+            #expect(all.first?.detached == true, "round \(round): the row is not detached")
+        }
+    }
+
     /// The cap counts non-detached rows, so a tombstone occupies none of the
     /// budget — and must not be able to spend any of it either. `upsert` checks
     /// the cap before writing anything, so a tombstone routed through it would

@@ -228,6 +228,15 @@ public actor PRBindingCoordinator {
     /// must work whatever the repo says now, or a repo rename would strand
     /// every binding made before it.
     ///
+    /// "Belongs to this repo" is the SAME question `bind` asks, and it is asked
+    /// with the same code — `mayMintTombstone` runs the `owner`/`name`
+    /// comparison and then `hostAgreement`, so a GitLab `acme/proj` and a GitHub
+    /// `acme/proj` stay two projects here exactly as they do there. Two host
+    /// checks that could disagree is precisely how a cross-host detach came to
+    /// mint the unclearable tombstone this paragraph describes: `pr.attach`
+    /// enforced the host and insert-on-miss did not, so the one write that could
+    /// clear the row was the one write that refused to.
+    ///
     /// **An unresolved repo is neither a match nor a mismatch, so it is decided
     /// on other evidence.** `resolveRepo` is `gh repo view` behind a TTL cache,
     /// so it answers nil exactly when `gh` is unauthenticated, offline or
@@ -247,24 +256,17 @@ public actor PRBindingCoordinator {
     /// `other-org/other-repo/pull/412` whenever the worktree's own cached PR
     /// happened to be #412 — minting the permanent foreign tombstone on a
     /// coincidence. A synthetic chip's URL always names the worktree's own
-    /// repo, so checking all three costs the offline path nothing.
+    /// repo, so checking all three costs the offline path nothing. The host is
+    /// then agreed on the same terms as the resolved path, against the cached
+    /// PR's own host — offline is not a reason to stop distinguishing two
+    /// forges, and a cached status is where a non-GitHub worktree's host is
+    /// still on record.
     ///
     /// Declining reports `false`, which is the honest answer — this worktree
     /// was not tracking that PR.
     @discardableResult
     public func detach(worktreeID: UUID, parsed: ParsedPRURL) async throws -> Bool {
-        let insertIfMissing: Bool
-        if let own = await resolveRepo(worktreeID) {
-            insertIfMissing = own.owner.lowercased() == parsed.owner.lowercased()
-                && own.name.lowercased() == parsed.repo.lowercased()
-        } else {
-            let cached = await cachedPRIdentity(worktreeID)
-            insertIfMissing = cached.map {
-                $0.owner.lowercased() == parsed.owner.lowercased()
-                    && $0.repo.lowercased() == parsed.repo.lowercased()
-                    && $0.number == parsed.number
-            } ?? false
-        }
+        let insertIfMissing = await mayMintTombstone(worktreeID: worktreeID, parsed: parsed)
         let tombstone = PRBinding(
             worktreeID: worktreeID, host: parsed.host, owner: parsed.owner,
             repo: parsed.repo, number: parsed.number, url: parsed.url,
@@ -273,9 +275,39 @@ public actor PRBindingCoordinator {
         if changed {
             logger.debug("tombstoned PR #\(parsed.number, privacy: .public) for worktree \(worktreeID.uuidString, privacy: .public)")
         } else if !insertIfMissing {
-            logger.debug("not tombstoning unbound PR #\(parsed.number, privacy: .public) for worktree \(worktreeID.uuidString, privacy: .public): nothing ties \(parsed.owner, privacy: .public)/\(parsed.repo, privacy: .public) to this worktree")
+            logger.debug("not tombstoning unbound PR #\(parsed.number, privacy: .public) for worktree \(worktreeID.uuidString, privacy: .public): nothing ties \(parsed.host, privacy: .public)/\(parsed.owner, privacy: .public)/\(parsed.repo, privacy: .public) to this worktree")
         }
         return changed
+    }
+
+    /// Whether a detach for a PR this worktree has **no row for** may mint a
+    /// brand-new tombstone.
+    ///
+    /// This gates CREATION ONLY. `detach` hands the answer to the store as
+    /// `insertIfMissing`, and the store's other arm — tombstoning a row that is
+    /// already there — ignores it entirely, which is what keeps a repo rename
+    /// from stranding bindings made before it.
+    ///
+    /// The test is `bind`'s test, reached through `bind`'s own helper: the
+    /// `owner`/`name` comparison, then `hostAgreement`. Anything `bind` would
+    /// refuse to write, this refuses to tombstone — including an
+    /// `.undetermined` forge, because a tombstone that `pr.attach` cannot clear
+    /// is worse than a detach the user repeats once the forge is known.
+    private func mayMintTombstone(worktreeID: UUID, parsed: ParsedPRURL) async -> Bool {
+        let ownHost: String
+        if let own = await resolveRepo(worktreeID) {
+            guard own.owner.lowercased() == parsed.owner.lowercased(),
+                  own.name.lowercased() == parsed.repo.lowercased() else { return false }
+            ownHost = own.host
+        } else {
+            guard let cached = await cachedPRIdentity(worktreeID),
+                  cached.owner.lowercased() == parsed.owner.lowercased(),
+                  cached.repo.lowercased() == parsed.repo.lowercased(),
+                  cached.number == parsed.number else { return false }
+            ownHost = cached.host
+        }
+        return await hostAgreement(worktreeID: worktreeID, own: ownHost,
+                                   parsed: parsed.host) == .agree
     }
 
     /// The host `PRBindingExtractor`'s GitHub pattern hard-codes. Because that

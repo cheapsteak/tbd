@@ -176,6 +176,13 @@ suppress that worktree's legacy-status fallback permanently. One mistyped
 `tbd pr detach <other-repo-url>` would retire a worktree's real PR indicator
 with no way back.
 
+"Belongs to this repo" means what `pr.attach` means by it, and is decided by the
+same code: owner and name, then the host. A GitLab `acme/proj` and a GitHub
+`acme/proj` are two projects, and a detach aimed at the wrong one of them must
+not mint a tombstone the attach that could clear it would reject. Two separate
+host checks would be free to drift apart, and the arm that skipped one is
+exactly the arm that can write a row nothing can ever remove.
+
 An **unresolved** repo is neither a match nor a mismatch, and both readings of
 it are wrong. The resolver is `gh repo view` behind a TTL cache, so it answers
 nil under exactly the conditions that produce the synthetic chip in the first
@@ -195,7 +202,10 @@ Matching on the number would admit a pasted `other-org/other-repo/pull/412`
 whenever the worktree's own cached PR happened to be #412 — minting the
 permanent foreign tombstone on a coincidence. A synthetic chip's URL always
 names the worktree's own repo, so checking all three costs the offline path
-nothing.
+nothing. The host is then agreed against the cached PR's own host, on the same
+terms as the resolved path: being offline is not a reason to stop telling two
+forges apart, and the cached status is where a non-GitHub worktree's host is
+still on record.
 
 ### Who reclaims a tombstone
 
@@ -413,10 +423,15 @@ panel, is what sits a gap away from the anchor.
   row in place instead, keeping that row's id and `source` — the arm that makes
   a concurrent bind harmless.
 - Detaching an unbound PR from another repo writes nothing and reports no
-  change. With the repo unresolvable, the worktree's cached PR is still
-  tombstoned while any other PR is not, and a worktree with no cached status
-  gets neither. Detaching a row that already exists works after the worktree's
-  repo has changed under it.
+  change, and so does one that differs only in host — the insert arm agrees
+  hosts exactly as an attach does, on the resolved path and on the cached one.
+  With the repo unresolvable, the worktree's cached PR is still tombstoned while
+  any other PR is not, and a worktree with no cached status gets neither.
+  Detaching a row that already exists works after the worktree's repo has
+  changed under it, and after its host has.
+- A bind and a detach of one identity, actually run concurrently, leave exactly
+  one row and never a live one — the invariant the single write transaction
+  exists to hold, asserted over both orderings rather than over a sequence.
 - The untrack gesture's four outcomes: the detach landed, the daemon declined
   and the chip survived, the refresh failed so the stale map is not evidence,
   and the RPC threw.
