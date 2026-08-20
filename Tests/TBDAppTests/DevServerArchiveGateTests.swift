@@ -109,6 +109,31 @@ struct DevServerArchiveGateTests {
         #expect(asked == "/tmp/some-worktree")
     }
 
+    /// A scratch space is a real directory that can host a dev server, and
+    /// archiving one closes its terminals just the same. The gate must see it —
+    /// `archiveWorktree` used to delegate scratch rows before running the check,
+    /// which made the guarantee true only for rows belonging to a repo.
+    @Test func aScratchRowIsGatedLikeAnyOther() {
+        let scratch = Worktree(
+            id: UUID(),
+            repoID: nil,
+            name: "scratch",
+            displayName: "Scratch",
+            branch: "main",
+            path: "/tmp/scratch-wt",
+            status: .active,
+            tmuxServer: "test-server"
+        )
+        #expect(scratch.isScratch)
+        let held = AppState.devServerArchiveGate(
+            worktree: scratch,
+            devServersConfirmed: false,
+            force: false,
+            runningServers: { _ in ["dev"] }
+        )
+        #expect(held?.servers == ["dev"])
+    }
+
     /// `force` means "skip the archive hook". It has to survive the round trip
     /// so confirming re-issues the SAME archive; flipping it here would run, or
     /// skip, a repo's hook against the user's intent.

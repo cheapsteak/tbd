@@ -96,9 +96,34 @@ struct RepoSectionView: View {
         let base = "This unregisters the repo from TBD. Your git repository and files on disk are not touched."
         if activeWorktreeCount > 0 {
             let plural = activeWorktreeCount == 1 ? "worktree" : "worktrees"
-            return "\(activeWorktreeCount) active \(plural) will be archived first.\n\n\(base)"
+            // Removing a repo cascade-archives its worktrees server-side, in one
+            // RPC that never passes through the per-worktree dev-server gate. So
+            // this message carries the same warning, rather than letting the one
+            // path that archives SEVERAL worktrees at once be the one that says
+            // nothing about stranding their servers.
+            let running = appState.runningDevServers(inRepo: repo.id)
+            let serverNote =
+                running.isEmpty
+                ? ""
+                : "\n\n\(Self.serverSentence(running)) still running. Archiving does not stop them."
+            return
+                "\(activeWorktreeCount) active \(plural) will be archived first.\(serverNote)\n\n\(base)"
         }
         return base
+    }
+
+    /// "storybook is", "storybook and dev are" — the sentence has to agree with
+    /// itself or the warning reads as broken and gets dismissed.
+    private static func serverSentence(_ servers: [String]) -> String {
+        let unique = Array(Set(servers)).sorted()
+        let verb = unique.count == 1 ? "is" : "are"
+        let names: String
+        switch unique.count {
+        case 1: names = unique[0]
+        case 2: names = "\(unique[0]) and \(unique[1])"
+        default: names = unique.dropLast().joined(separator: ", ") + ", and " + (unique.last ?? "")
+        }
+        return "\(names) \(verb)"
     }
 
     /// Hoisted out of the chevron `Image`'s `.foregroundStyle` so the type

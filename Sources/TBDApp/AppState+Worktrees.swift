@@ -611,10 +611,11 @@ extension AppState {
         id: UUID, force: Bool = false, devServersConfirmed: Bool = false
     ) async {
         let worktree = findWorktree(id: id)
-        if worktree?.isScratch == true {
-            await archiveScratch(id: id)
-            return
-        }
+        // The gate runs BEFORE the scratch delegation. A scratch space is a real
+        // directory on disk that can host a dev server exactly like a repo
+        // worktree, and archiving one closes its terminals just the same — so
+        // routing it past the check would leave the feature's guarantee true
+        // only for rows that happen to belong to a repo.
         if let held = Self.devServerArchiveGate(
             worktree: worktree,
             devServersConfirmed: devServersConfirmed,
@@ -622,6 +623,10 @@ extension AppState {
             runningServers: { path in devServerRegistry.running(inWorktree: path).map(\.label) }
         ) {
             pendingArchiveWithDevServers = held
+            return
+        }
+        if worktree?.isScratch == true {
+            await archiveScratch(id: id)
             return
         }
         let worktreeName = worktree?.displayName ?? "worktree"
@@ -1598,6 +1603,19 @@ extension AppState {
     /// - the selected repo worktree is the main branch or still creating
     ///   (those refuse the archive shortcut; scratch rows always proceed —
     ///   the daemon creates them `.active`, never `.main`/`.creating`).
+    /// Declared dev servers still running anywhere in `repoID`'s worktrees.
+    ///
+    /// Removing a repo cascade-archives every active worktree in it — server
+    /// side, in one RPC, without going through `archiveWorktree` — so the
+    /// per-worktree gate cannot see it. This is what the removal confirmation
+    /// asks instead, so that path tells the same truth.
+    func runningDevServers(inRepo repoID: UUID) -> [String] {
+        (worktrees[repoID] ?? [])
+            .filter { $0.status == .active || $0.status == .creating }
+            .filter { $0.localPath.hasPrefix("/") }
+            .flatMap { devServerRegistry.running(inWorktree: $0.localPath).map(\.label) }
+    }
+
     /// Decide whether an archive should be held back for still-running dev
     /// servers. Returns the prompt to show, or `nil` to proceed.
     ///

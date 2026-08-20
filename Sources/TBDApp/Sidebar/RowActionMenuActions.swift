@@ -164,7 +164,10 @@ struct RowActionMenuActions {
 
         case .archiveScratch:
             let wtID = worktree.id
-            Task { await appState.archiveScratch(id: wtID) }
+            // Through `archiveWorktree`, not `archiveScratch` directly: it
+            // self-routes scratch rows to the same RPC, and going straight to
+            // the RPC skips the dev-server gate that lives one level up.
+            Task { await appState.archiveWorktree(id: wtID) }
 
         case .deleteScratch:
             let wtID = worktree.id
