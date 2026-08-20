@@ -553,6 +553,11 @@ def merge_base_edits(facts: Facts) -> list[str]:
             f"cannot resolve `git merge-base {facts.base_ref} HEAD`, so the history-is-frozen check "
             f"cannot run. Fetch the base branch (`git fetch origin main`) and try again."
         ]
+    # RENAME DETECTION STAYS ON. A rename needs a source in the base tree, so an
+    # unshipped migration renamed on the branch has none and reads as `A`; a
+    # shipped one pairs into one `R` line carrying both paths, which is the
+    # correct signal and the only form that can name where the file went.
+    #
     # THE THREE-DOT MERGE-BASE FORM IS LOAD-BEARING. Diffing `origin/main HEAD`
     # directly reports every migration that landed on main AFTER this branch was
     # cut as a deletion, which would redden every branch older than the newest

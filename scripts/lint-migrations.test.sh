@@ -448,6 +448,63 @@ test_deleting_a_shipped_migration_fails() {
   assert_contains "reports the git status letter" "$RUN_OUT" 'git reports `D`'
 }
 
+# RENAME DETECTION IS DELIBERATELY LEFT ON, and these two cases are what pin
+# that. The pair below is the whole argument: a rename can only be *detected*
+# when the source is in the base tree, so an unshipped migration renamed on the
+# branch has no source to pair with and reads as a plain addition, while a
+# shipped one pairs into a single `R` line that names both paths at once.
+# `--no-renames` would change neither verdict — it would only split the second
+# case into an accepted `A <new>` plus a rejected `D <old>`, dropping the new
+# path from the message.
+
+test_renaming_an_unshipped_migration_on_the_branch_is_accepted() {
+  local d; d="$(mkrepo)"
+  # Added on the branch and renamed on the branch, with a body identical across
+  # the move — the shape git pairs as a 100% rename whenever it has a source in
+  # the base tree to pair against. Here it has none, so this is an addition.
+  write_migration "$d" "20260326000000_unshipped.sql" \
+    "CREATE TABLE IF NOT EXISTS lint_unshipped (id TEXT PRIMARY KEY, note TEXT);"
+  commit_fixture "$d" "add a migration on the branch"
+  git -C "$d" mv "$MIGRATIONS_REL/20260326000000_unshipped.sql" \
+    "$MIGRATIONS_REL/20260326000000_unshipped_renamed.sql" >/dev/null 2>&1
+  commit_fixture "$d" "rename it before it ever reached main"
+
+  run_lint "$SCRIPT" "$d"
+  # Asserted on the composed output rather than on the absence of a failure:
+  # exit 0 AND nothing said about frozen history, so a future change that
+  # reddens this for some new reason cannot pass as "still green".
+  assert_eq "renaming a migration that never reached main exits 0" "$RUN_RC" "0"
+  assert_lacks "and says nothing about frozen history" "$RUN_OUT" "migration history is frozen"
+  assert_contains "counting the renamed file once" "$RUN_OUT" "1 .sql migration(s)"
+}
+
+test_renaming_a_shipped_migration_fails_and_names_both_paths() {
+  local d mutant; d="$(mkrepo)"
+  write_migration "$d" "20260327000000_shipped.sql" \
+    "CREATE TABLE IF NOT EXISTS lint_shipped_rename (id TEXT PRIMARY KEY, note TEXT);"
+  commit_fixture "$d" "ship a migration"
+  git -C "$d" update-ref refs/remotes/origin/main HEAD
+  git -C "$d" mv "$MIGRATIONS_REL/20260327000000_shipped.sql" \
+    "$MIGRATIONS_REL/20260327000000_shipped_renamed.sql" >/dev/null 2>&1
+  commit_fixture "$d" "rename the shipped migration"
+
+  run_lint "$SCRIPT" "$d"
+  assert_nonzero "renaming a migration already on main fails" "$RUN_RC"
+  assert_contains "reports the git status letter" "$RUN_OUT" 'git reports `R100`'
+  # BOTH PATHS, IN ONE MESSAGE. The old path is what already ran on somebody's
+  # machine and the new one is where the author moved it; an author told only
+  # half of that has to go find the other half. This is the assertion that
+  # would catch the rename pairing being turned off.
+  assert_contains "names the path that shipped" "$RUN_OUT" "20260327000000_shipped.sql"
+  assert_contains "and the path it moved to" "$RUN_OUT" "20260327000000_shipped_renamed.sql"
+
+  # The blob leg is silent here — it only speaks about a path HEAD still holds
+  # — so disabling the merge-base leg alone must flip the verdict.
+  mutant="$(mutant_of 's/problems = merge_base_edits\(facts\)/problems = []/')"
+  run_lint "$mutant" "$d"
+  assert_ok "mutation: without the merge-base leg, the rename sails through" "$RUN_RC" "$RUN_OUT"
+}
+
 # THE THREE-DOT MERGE-BASE FORM IS LOAD-BEARING. This fixture is a branch cut
 # before an unrelated migration landed on main — the overwhelmingly common
 # shape on a fleet of parallel branches. It must lint GREEN, and the mutation
