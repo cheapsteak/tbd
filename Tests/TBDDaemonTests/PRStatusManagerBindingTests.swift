@@ -202,6 +202,7 @@ private actor GitLabFake {
     private func node(iid: Int, state: String) -> String {
         """
         {"iid":"\(iid)","state":"\(state)","draft":false,
+        "title":"Rate-limit the ingest queue",
         "detailedMergeStatus":"\(detailedMergeStatus)",
         "sourceBranch":"\(sourceBranch)","targetBranch":"main",
         "createdAt":"2026-08-01T10:00:00Z",
@@ -779,6 +780,10 @@ struct PRStatusManagerBindingTests {
         #expect(observed[binding.id]?.status.url == Self.gitLabMRURL)
         #expect(observed[binding.id]?.headBranch == "tbd/my-branch")
         #expect(observed[binding.id]?.baseRef == "main")
+        // The hover card renders `binding.title` whatever the forge, so a
+        // GitLab arm that never observed one renders a permanently degraded
+        // card: a number and a state, and nothing saying what the MR is.
+        #expect(observed[binding.id]?.title == "Rate-limit the ingest queue")
         #expect(await gl.sawGraphQL)
         #expect(await gl.waitForRecheck())
         // Outside a GitLab checkout `glab api` defaults to gitlab.com, so a

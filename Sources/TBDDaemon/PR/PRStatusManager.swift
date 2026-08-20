@@ -1289,7 +1289,11 @@ public actor PRStatusManager {
                                  reason: reason, mergeQueuePosition: node.mergeQueuePosition,
                                  observedAt: now()),
                 headBranch: Self.refOrNil(node.headRefName),
-                baseRef: Self.refOrNil(node.baseRefName))
+                baseRef: Self.refOrNil(node.baseRefName),
+                // Through `refOrNil` for the same reason the refs are: an empty
+                // string must reach the caller as "not observed", or it would
+                // survive `title ?? self.title` and blank a stored title.
+                title: Self.refOrNil(node.title ?? ""))
         }
         return observations
     }
