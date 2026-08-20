@@ -217,9 +217,25 @@ extension RPCRouter {
         // handlers. A *missing* row is deliberately not handled here: that
         // stays `beginArchiveWorktree`'s throw, recorded as transport-failed,
         // unchanged.
-        if let existing = try await db.worktrees.get(id: params.worktreeID),
-           !existing.location.isLocal {
-            return try await archiveRemoteLane(existing, force: params.force, actor: actor)
+        //
+        // A repo-less scratch space is the second such row-shaped fact, read
+        // from the same DB row. `beginArchiveWorktree` needs a repo for the
+        // archive hook, and `completeArchiveWorktree` uses it to remove the
+        // directory (a scratch space has no repo, and its folder must SURVIVE
+        // archiving), so it routes to the dedicated `scratch.archive` body
+        // instead. The GUI has been routing this client-side all along
+        // (`AppState.archiveWorktree`); doing it here means the CLI, hooks,
+        // scripts, and every future client get it without repeating the check.
+        // `force` is accepted and inert on this path: a scratch space has
+        // neither an archive hook (hooks resolve per repo) nor children.
+        if let existing = try await db.worktrees.get(id: params.worktreeID) {
+            if !existing.location.isLocal {
+                return try await archiveRemoteLane(existing, force: params.force, actor: actor)
+            }
+            if existing.isScratch {
+                return try await archiveScratchSpace(
+                    worktreeID: params.worktreeID, actor: actor)
+            }
         }
 
         // One row per call, naming the worktree and no terminal: the caller
@@ -480,9 +496,26 @@ extension RPCRouter {
         // `getLocal` and would throw for it. Pre-row validation, like
         // archive's branch above; a *missing* row still falls through to the
         // lifecycle's own throw.
-        if let existing = try await db.worktrees.get(id: params.worktreeID),
-           !existing.location.isLocal {
-            return try await reviveRemoteLane(existing, actor: actor)
+        //
+        // A repo-less scratch space likewise: revive's git-worktree recreation
+        // has nothing to recreate for it (the folder never left disk), so it
+        // routes to the `scratch.revive` body, which re-checks the folder is
+        // still there and flips the row back. Mirror of archive's branch above.
+        if let existing = try await db.worktrees.get(id: params.worktreeID) {
+            if !existing.location.isLocal {
+                return try await reviveRemoteLane(existing, actor: actor)
+            }
+            if existing.isScratch {
+                switch try await reviveScratchSpace(worktreeID: params.worktreeID) {
+                case .revived(let revived):
+                    // The row, not `.ok()`: `worktree.revive`'s clients decode
+                    // a `Worktree` from the result. The delta is broadcast
+                    // inside the helper, so this returns without repeating it.
+                    return try RPCResponse(result: revived)
+                case .refused(let message):
+                    return RPCResponse(error: message)
+                }
+            }
         }
 
         // The row names the worktree, not a terminal: revive spawns its

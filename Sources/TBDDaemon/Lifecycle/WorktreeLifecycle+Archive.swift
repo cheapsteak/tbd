@@ -60,8 +60,17 @@ extension WorktreeLifecycle {
             try await db.worktrees.assertArchivable(id: worktreeID)
         }
 
-        guard let rid = worktree.repoID, let repo = try await db.repos.get(id: rid) else {
-            throw WorktreeLifecycleError.repoNotFound(worktree.repoID ?? worktreeID)
+        // Split deliberately: a repo-less row and a row naming a missing repo
+        // are different failures, and the combined guard reported the first as
+        // the second with the worktree's own id substituted for the repo's.
+        // Repo-less rows are scratch spaces; the router routes those to the
+        // `scratch.*` path, so reaching this throw means an internal
+        // inconsistency and the message should say which one.
+        guard let rid = worktree.repoID else {
+            throw WorktreeLifecycleError.worktreeHasNoRepo(worktreeID)
+        }
+        guard let repo = try await db.repos.get(id: rid) else {
+            throw WorktreeLifecycleError.repoNotFound(rid)
         }
 
         // Collect Claude session IDs before archiving so they survive terminal deletion
@@ -298,8 +307,17 @@ extension WorktreeLifecycle {
             throw WorktreeLifecycleError.worktreeAlreadyActive(worktreeID)
         }
 
-        guard let rid = worktree.repoID, let repo = try await db.repos.get(id: rid) else {
-            throw WorktreeLifecycleError.repoNotFound(worktree.repoID ?? worktreeID)
+        // Split deliberately: a repo-less row and a row naming a missing repo
+        // are different failures, and the combined guard reported the first as
+        // the second with the worktree's own id substituted for the repo's.
+        // Repo-less rows are scratch spaces; the router routes those to the
+        // `scratch.*` path, so reaching this throw means an internal
+        // inconsistency and the message should say which one.
+        guard let rid = worktree.repoID else {
+            throw WorktreeLifecycleError.worktreeHasNoRepo(worktreeID)
+        }
+        guard let repo = try await db.repos.get(id: rid) else {
+            throw WorktreeLifecycleError.repoNotFound(rid)
         }
 
         // Create parent directory if needed

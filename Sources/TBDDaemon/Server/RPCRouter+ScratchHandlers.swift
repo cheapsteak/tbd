@@ -177,11 +177,22 @@ extension RPCRouter {
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
         let params = try decoder.decode(ScratchArchiveParams.self, from: paramsData)
-        guard let wt = try await db.worktrees.getLocal(id: params.worktreeID) else {
-            return RPCResponse(error: "Scratch space not found: \(params.worktreeID)")
+        return try await archiveScratchSpace(worktreeID: params.worktreeID, actor: actor)
+    }
+
+    /// The body of `scratch.archive`, shared with `worktree.archive`'s
+    /// scratch branch (`handleWorktreeArchive`). Extracted rather than
+    /// duplicated so there stays exactly one implementation of "archive a
+    /// scratch space": the repo-worktree archive path must never run against
+    /// one, because its phase 2 removes the directory.
+    func archiveScratchSpace(
+        worktreeID: UUID, actor: ActuationActor?
+    ) async throws -> RPCResponse {
+        guard let wt = try await db.worktrees.getLocal(id: worktreeID) else {
+            return RPCResponse(error: "Scratch space not found: \(worktreeID)")
         }
         guard wt.isScratch else {
-            return RPCResponse(error: "Not a scratch space: \(params.worktreeID)")
+            return RPCResponse(error: "Not a scratch space: \(worktreeID)")
         }
 
         // Same teardown as `scratch.delete`, so the same row: one per call,
@@ -207,17 +218,40 @@ extension RPCRouter {
     /// repo-scoped revive.
     func handleScratchRevive(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(ScratchReviveParams.self, from: paramsData)
-        guard let wt = try await db.worktrees.getLocal(id: params.worktreeID) else {
-            return RPCResponse(error: "Scratch space not found: \(params.worktreeID)")
+        switch try await reviveScratchSpace(worktreeID: params.worktreeID) {
+        case .revived:
+            // `scratch.revive`'s result shape is unchanged: its GUI caller
+            // refreshes from the delta rather than reading a returned row.
+            return .ok()
+        case .refused(let message):
+            return RPCResponse(error: message)
+        }
+    }
+
+    /// Outcome of `reviveScratchSpace`. The two callers disagree on the
+    /// success payload: `scratch.revive` answers `.ok()`, while
+    /// `worktree.revive` must answer with the row, because both its CLI and
+    /// its app client decode a `Worktree` from the result. So the shared
+    /// helper hands back the row and lets each caller shape its response.
+    enum ScratchReviveOutcome {
+        case revived(Worktree)
+        case refused(String)
+    }
+
+    /// The body of `scratch.revive`, shared with `worktree.revive`'s scratch
+    /// branch (`handleWorktreeRevive`).
+    func reviveScratchSpace(worktreeID: UUID) async throws -> ScratchReviveOutcome {
+        guard let wt = try await db.worktrees.getLocal(id: worktreeID) else {
+            return .refused("Scratch space not found: \(worktreeID)")
         }
         guard wt.isScratch else {
-            return RPCResponse(error: "Not a scratch space: \(params.worktreeID)")
+            return .refused("Not a scratch space: \(worktreeID)")
         }
         guard wt.status == .archived else {
-            return RPCResponse(error: "Scratch space is already active: \(wt.id)")
+            return .refused("Scratch space is already active: \(wt.id)")
         }
         guard FileManager.default.fileExists(atPath: wt.path) else {
-            return RPCResponse(error: "Scratch directory missing on disk: \(wt.path)")
+            return .refused("Scratch directory missing on disk: \(wt.path)")
         }
 
         try await db.worktrees.revive(id: wt.id)
@@ -225,7 +259,14 @@ extension RPCRouter {
         subscriptions.broadcast(delta: .worktreeRevived(WorktreeDelta(
             worktreeID: wt.id, repoID: nil, name: wt.name, path: wt.path)))
         scratchLogger.info("scratch.revive: \(wt.id, privacy: .public) at \(wt.path, privacy: .public)")
-        return .ok()
+
+        // Re-read rather than mutate the snapshot: the caller that returns a
+        // row must return the post-revive `status`/`archivedAt`, and the
+        // store owns how those are cleared.
+        guard let revived = try await db.worktrees.get(id: wt.id) else {
+            return .refused("Scratch space vanished while reviving: \(wt.id)")
+        }
+        return .revived(revived)
     }
 
     func handleScratchPromote(_ paramsData: Data) async throws -> RPCResponse {
