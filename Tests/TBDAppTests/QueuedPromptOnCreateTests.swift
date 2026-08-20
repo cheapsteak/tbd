@@ -40,6 +40,9 @@ struct QueuedPromptOnCreateTests {
         var parkResult: WorktreeSetPendingPromptResult = .parkedForSpawn
         var createError: Error?
         var flagWrites: [Bool] = []
+        /// Everything written to the pasteboard. Stubbed on every state this
+        /// suite builds, so no test can reach the developer's real one.
+        var copied: [String] = []
     }
 
     private struct StubError: Error {}
@@ -104,6 +107,7 @@ struct QueuedPromptOnCreateTests {
         state.queuedPromptFlagSetter = { @MainActor enabled in
             harness.flagWrites.append(enabled)
         }
+        state.pasteboardWriter = { @MainActor text in harness.copied.append(text) }
     }
 
     // MARK: - The gate, both branches
@@ -299,6 +303,9 @@ struct QueuedPromptOnCreateTests {
             await waitUntil("alert") { state.alertMessage != nil }
             #expect(harness.parked == nil)
             #expect(state.alertIsError)
+            // The row never existed, so the text has nowhere to be recovered
+            // from but the pasteboard.
+            #expect(harness.copied == ["never lands"])
         }
     }
 
@@ -318,6 +325,35 @@ struct QueuedPromptOnCreateTests {
 
             await waitUntil("alert") { state.alertMessage != nil }
             #expect(state.alertMessage?.contains("queued prompts are disabled") == true)
+        }
+    }
+
+    /// The modal is dismissed by the time a refusal comes back and there is no
+    /// draft store behind it, so an alert on its own would leave the operator's
+    /// message existing nowhere at all.
+    @Test("A refused first message is handed back on the clipboard")
+    func refusalKeepsTheComposedTextRecoverable() async throws {
+        try await withAppState { state in
+            let repoID = UUID()
+            let created = daemonWorktree(repoID: repoID)
+            let harness = Harness()
+            harness.parkResult = .refused(
+                reason: "this worktree's primary terminal is not an agent")
+            arm(state, harness, created: created)
+            state.daemonCapabilities = capabilities(queuedPrompt: true)
+
+            state.createWorktree(repoID: repoID)
+            let target = try #require(state.queuedPromptTarget)
+            state.submitQueuedPrompt(target, text: "  the thing I typed  ", submit: true)
+
+            await waitUntil("alert") { state.alertMessage != nil }
+            // Trimmed exactly as the parking RPC would have carried it.
+            #expect(harness.copied == ["the thing I typed"])
+            // The alert names the reason AND where the text went, so neither
+            // fact can arrive without the other.
+            #expect(state.alertMessage?.contains("not an agent") == true)
+            #expect(state.alertMessage?.contains("copied to your clipboard") == true)
+            #expect(state.alertIsError)
         }
     }
 

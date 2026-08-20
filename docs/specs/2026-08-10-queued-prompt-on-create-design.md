@@ -372,9 +372,12 @@ Three are answered at `park` rather than at delivery, because the app must never
 promise something the daemon will refuse. An **archived** worktree has no
 terminal rows — archive deletes them — so it looks exactly like a worktree still
 being created, and the honest answer for the two is opposite; parking there
-would leave text nothing will ever read. A worktree whose terminals already
-exist and whose primary is a **shell** has had its spawn, and nothing is coming.
-A **hibernated** primary is a pane with no composer in it. All three are
+would leave text nothing will ever read. A worktree whose spawn has already
+happened and produced a **shell** primary has nothing coming either — and the
+tell is the labels on its rows, not their number: a worktree holding nothing but
+the blocking `preSession` hook's tab (or no rows at all) still has its primary
+ahead of it, and parking there is the promise this feature is for. A
+**hibernated** primary is a pane with no composer in it. All three are
 refused, with the reason, and nothing is parked.
 
 **A hibernated primary is asked about twice — at `park` and again immediately

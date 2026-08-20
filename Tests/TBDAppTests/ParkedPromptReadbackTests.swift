@@ -75,12 +75,14 @@ struct ParkedPromptReadbackTests {
 
     private func terminal(
         worktreeID: UUID, kind: TerminalKind?,
+        label: String? = nil,
         transcriptPath: String? = nil,
         activityState: TerminalActivityState = .unknown
     ) -> Terminal {
         Terminal(
             worktreeID: worktreeID, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            transcriptPath: transcriptPath, kind: kind, activityState: activityState)
+            label: label, transcriptPath: transcriptPath, kind: kind,
+            activityState: activityState)
     }
 
     /// The single sheet slot both prompt surfaces share.
@@ -301,6 +303,39 @@ struct ParkedPromptReadbackTests {
             terminals: [terminal(worktreeID: wtID, kind: nil)]) == true)
     }
 
+    /// The `preSession` hook tab is a shell-kind row like any other, and for
+    /// as long as it is the worktree's only tab the primary agent has not
+    /// spawned yet. Reading it as "the spawn produced a shell" hides the pane
+    /// banner and greys Deliver-now for a message that is about to be typed in
+    /// normally.
+    @Test("A worktree behind its preSession hook is still waiting, not undeliverable")
+    func preSessionHookTabIsStillPending() {
+        let repoID = UUID()
+        let wt = worktree(repoID: repoID, prompt: "say this first")
+        let hookTab = terminal(
+            worktreeID: wt.id, kind: .shell, label: TerminalLabel.preSession)
+        let plainShell = terminal(worktreeID: wt.id, kind: .shell)
+
+        #expect(ParkedPromptReadback.primaryIsPlainShell(terminals: [hookTab]) == false)
+        #expect(ParkedPromptReadback(worktree: wt, terminals: [hookTab])?.phase == .pending)
+        // Which is what puts the pane footer up for the whole hook wait — the
+        // one surface that says the message is still coming.
+        #expect(QueuedPromptBannerModel.shows(
+            phase: ParkedPromptReadback(worktree: wt, terminals: [hookTab])?.phase,
+            footer: nil))
+
+        // A spawn that already happened and produced a shell is the other
+        // answer, with or without the hook tab still beside it.
+        #expect(ParkedPromptReadback(worktree: wt, terminals: [plainShell])?
+            .phase == .undeliverable(.noAgent))
+        #expect(ParkedPromptReadback(worktree: wt, terminals: [hookTab, plainShell])?
+            .phase == .undeliverable(.noAgent))
+        // And archiving still outranks both: nothing is coming for that row.
+        #expect(ParkedPromptReadback(
+            worktree: worktree(repoID: repoID, prompt: "x", status: .archived),
+            terminals: [hookTab])?.phase == .undeliverable(.archived))
+    }
+
     @Test("Deliver now is inert while its own RPC is outstanding")
     func doubleClickParksOnce() async throws {
         try await withAppState { state, harness in
@@ -411,6 +446,7 @@ struct ParkedPromptReadbackTests {
         let wt = worktree(repoID: repoID, prompt: "one message")
         let cases: [[Terminal]] = [
             [],
+            [terminal(worktreeID: wt.id, kind: .shell, label: TerminalLabel.preSession)],
             [terminal(worktreeID: wt.id, kind: .claude)],
             [terminal(worktreeID: wt.id, kind: .claude, activityState: .working)],
             [terminal(worktreeID: wt.id, kind: .shell)]
