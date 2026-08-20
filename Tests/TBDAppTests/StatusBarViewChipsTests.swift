@@ -134,6 +134,27 @@ struct StatusBarViewChipsTests {
         ]).chips[0]
     }
 
+    /// The same chip bound to a GitLab merge request instead — built through
+    /// `prChips` like every other fixture here, so the forge is read from the
+    /// binding's own URL exactly as production reads it.
+    private func gitlabChip(
+        number: Int = 412,
+        state: PRMergeableState? = .mergeable,
+        title: String? = nil
+    ) -> StatusBarView.PRChip {
+        let url = "https://gitlab.acme.example/acme/group/acme-prod/-/merge_requests/\(number)"
+        return StatusBarView.prChips([
+            PRBinding(
+                worktreeID: UUID(), host: "gitlab.acme.example",
+                owner: "acme/group", repo: "acme-prod",
+                number: number, url: url,
+                title: title,
+                status: state.map { PRStatus(number: number, url: url, state: $0) },
+                source: .hook
+            )
+        ]).chips[0]
+    }
+
     @Test("the overlay's headline names the PR, its state and its title on one line")
     func overlayWithTitle() {
         let now = Date(timeIntervalSince1970: 1_700_007_200)
@@ -352,17 +373,17 @@ struct StatusBarViewChipsTests {
 
     @Test("the action line is a function of which target the pointer is on")
     func chipActionValueFollowsTheTarget() {
-        #expect(StatusBarView.chipActionValue(untrackTarget: true)
-                == StatusBarView.chipUntrackActionValue)
-        #expect(StatusBarView.chipActionValue(untrackTarget: false)
-                == StatusBarView.chipOpenActionValue)
-        #expect(StatusBarView.chipActionValue(untrackTarget: true)
-                != StatusBarView.chipActionValue(untrackTarget: false))
+        #expect(StatusBarView.chipActionValue(untrackTarget: true, forge: .github)
+                == StatusBarView.chipUntrackActionValue(.github))
+        #expect(StatusBarView.chipActionValue(untrackTarget: false, forge: .github)
+                == StatusBarView.chipOpenActionValue(.github))
+        #expect(StatusBarView.chipActionValue(untrackTarget: true, forge: .github)
+                != StatusBarView.chipActionValue(untrackTarget: false, forge: .github))
         // Both describe the click rather than restating the PR's number or
         // state, which the rows above them already carry.
-        #expect(StatusBarView.chipOpenActionValue.hasPrefix("Click to"))
-        #expect(StatusBarView.chipUntrackActionValue.hasPrefix("Click to"))
-        #expect(StatusBarView.chipOpenActionValue.contains("#412") == false)
+        #expect(StatusBarView.chipOpenActionValue(.github).hasPrefix("Click to"))
+        #expect(StatusBarView.chipUntrackActionValue(.github).hasPrefix("Click to"))
+        #expect(StatusBarView.chipOpenActionValue(.github).contains("#412") == false)
     }
 
     /// A synthetic chip has no title and a never-polled one has no status, and
@@ -372,11 +393,61 @@ struct StatusBarViewChipsTests {
     func actionRowSurvivesAbsentFields() {
         let untitled = StatusBarView.chipHoverCard(chip(title: nil), untrackTarget: true)
         #expect(untitled.title?.contains(" - ") == false)
-        #expect(untitled.rows.last?.value == StatusBarView.chipUntrackActionValue)
+        #expect(untitled.rows.last?.value == StatusBarView.chipUntrackActionValue(.github))
 
         let unobserved = StatusBarView.chipHoverCard(chip(state: nil, observedAt: nil))
         #expect(unobserved.title == "PR#412")
-        #expect(unobserved.rows.last?.value == StatusBarView.chipOpenActionValue)
-        #expect(unobserved.rows.last?.alternateValue == StatusBarView.chipUntrackActionValue)
+        #expect(unobserved.rows.last?.value == StatusBarView.chipOpenActionValue(.github))
+        #expect(unobserved.rows.last?.alternateValue
+                == StatusBarView.chipUntrackActionValue(.github))
+    }
+
+    // MARK: - Forge vocabulary
+
+    /// The card's action row names the request the way its own forge does. It
+    /// is the last chip surface that did not: the tooltip and the accessibility
+    /// label already read `MR !412` for a merge request, and a card beside them
+    /// promising to "open this PR on GitHub" would be plainly false.
+    @Test("a GitHub chip's action row says PR and GitHub")
+    func actionRowSpeaksGitHub() {
+        let card = StatusBarView.chipHoverCard(chip())
+        #expect(card.rows.last?.value == "Click to open this PR on GitHub")
+        #expect(StatusBarView.chipHoverCard(chip(), untrackTarget: true).rows.last?.value
+                == "Click to stop tracking this PR in this worktree")
+    }
+
+    @Test("a GitLab chip's action row says MR and GitLab")
+    func actionRowSpeaksGitLab() {
+        let mr = gitlabChip()
+        #expect(mr.forge == .gitlab)
+        #expect(mr.refLabel == "MR !412")
+        let card = StatusBarView.chipHoverCard(mr)
+        #expect(card.rows.last?.value == "Click to open this MR on GitLab")
+        #expect(StatusBarView.chipHoverCard(mr, untrackTarget: true).rows.last?.value
+                == "Click to stop tracking this MR in this worktree")
+        // The vocabulary is the forge's own, not a second table beside it.
+        #expect(card.rows.last?.value.contains(Forge.gitlab.refNoun) == true)
+        #expect(card.rows.last?.value.contains("GitHub") == false)
+    }
+
+    /// The reservation is per chip, and a chip has exactly one forge, so the
+    /// hidden peer is the other sentence *for that same forge* — the pair a
+    /// pointer can actually swap between. Asserted on both forges because a
+    /// mechanism that reserved GitHub's wording under a GitLab chip would still
+    /// pin a width, just the wrong one.
+    @Test("the width reservation still pairs the two sentences of one forge")
+    func reservationHoldsPerForge() {
+        for target in [chip(), gitlabChip()] {
+            let open = StatusBarView.chipHoverCard(target).rows.last
+            let untrack = StatusBarView.chipHoverCard(target, untrackTarget: true).rows.last
+            #expect(open?.alternateValue == untrack?.value)
+            #expect(untrack?.alternateValue == open?.value)
+            #expect(open?.value != untrack?.value)
+            // Both halves speak the chip's own forge — neither the visible
+            // sentence nor its hidden peer borrows the other forge's noun.
+            #expect(open?.value.contains(target.forge.refNoun) == true)
+            #expect(open?.alternateValue?.contains(target.forge.refNoun) == true)
+            #expect(StatusBarView.chipHoverCard(target).rows.count == 1)
+        }
     }
 }

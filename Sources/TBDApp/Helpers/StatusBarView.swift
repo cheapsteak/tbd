@@ -95,11 +95,15 @@ struct StatusBarView: View {
         /// the PR names its tab `PR #N` and must not have to re-parse "#412".
         let number: Int
         let label: String
+        /// Which forge this binding lives on, read once from the binding's own
+        /// URL at build time. Carried on the chip rather than recomposed in the
+        /// view because the binding — the only thing that knows the URL — does
+        /// not reach the view, and every sentence the chip renders about the
+        /// request has to speak that forge's vocabulary.
+        let forge: Forge
         /// The binding named in its own forge's vocabulary (`PR #412` /
-        /// `MR !412`), for the tooltip. Carried on the chip rather than
-        /// recomposed in the view because the binding — the only thing that
-        /// knows the host — does not reach the view.
-        let refLabel: String
+        /// `MR !412`), for the tooltip.
+        var refLabel: String { forge.refLabel(number: number) }
         /// The PR's own URL, both the open target and how the detach names the
         /// PR to the daemon — a synthetic chip has no row to name by id.
         let url: URL?
@@ -177,7 +181,7 @@ struct StatusBarView: View {
                 worktreeID: binding.worktreeID,
                 number: binding.number,
                 label: "#\(binding.number)",
-                refLabel: binding.refLabel,
+                forge: Forge.forURL(binding.url),
                 url: URL(string: binding.url),
                 state: binding.status?.state,
                 reason: binding.status.map { $0.reason ?? $0.state.displayReason },
@@ -223,9 +227,9 @@ struct StatusBarView: View {
             // pointer is on. The alternate wording rides along so the row is
             // laid out for both sentences at once — see `HoverCardRow`.
             HoverCardRow(
-                value: chipActionValue(untrackTarget: untrackTarget),
+                value: chipActionValue(untrackTarget: untrackTarget, forge: chip.forge),
                 valueStyle: .mutedItalic,
-                alternateValue: chipActionValue(untrackTarget: !untrackTarget)
+                alternateValue: chipActionValue(untrackTarget: !untrackTarget, forge: chip.forge)
             )
         ]
         return model
@@ -267,12 +271,24 @@ struct StatusBarView: View {
     /// so the sentences start with the gesture and say nothing twice. The
     /// untrack half still names the worktree scope, for the same reason
     /// `untrackLabel` does — the gesture removes an association, not the PR.
-    nonisolated static func chipActionValue(untrackTarget: Bool) -> String {
-        untrackTarget ? chipUntrackActionValue : chipOpenActionValue
+    ///
+    /// Both sentences take the chip's own `forge`, so a GitLab-bound chip says
+    /// "MR" and "GitLab" where a GitHub-bound one says "PR" and "GitHub" — the
+    /// same vocabulary `refLabel` names the binding with, minus the number the
+    /// headline already carries. The card lays the pair out together, and a
+    /// chip has exactly one forge, so the width reservation still spans both
+    /// sentences it can swap between.
+    nonisolated static func chipActionValue(untrackTarget: Bool, forge: Forge) -> String {
+        untrackTarget ? chipUntrackActionValue(forge) : chipOpenActionValue(forge)
     }
 
-    nonisolated static let chipOpenActionValue = "Click to open this PR on GitHub"
-    nonisolated static let chipUntrackActionValue = "Click to stop tracking this PR in this worktree"
+    nonisolated static func chipOpenActionValue(_ forge: Forge) -> String {
+        "Click to open this \(forge.refNoun) on \(forge.displayName)"
+    }
+
+    nonisolated static func chipUntrackActionValue(_ forge: Forge) -> String {
+        "Click to stop tracking this \(forge.refNoun) in this worktree"
+    }
 
     /// Tooltip and accessibility label for a chip's untrack target — the xmark
     /// the status dot becomes on hover. It names the worktree scope explicitly

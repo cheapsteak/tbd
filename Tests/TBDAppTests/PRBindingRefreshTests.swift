@@ -257,6 +257,52 @@ struct PRBindingRefreshTests {
         }
     }
 
+    /// The other interleaving of the same two calls, and the reason the guard
+    /// counts PUBLISHES rather than starts.
+    ///
+    /// A poll (A) is in flight when a second refresh (B) starts and fails
+    /// outright — an RPC hiccup, which publishes nothing and leaves the maps
+    /// holding their pre-call values. A then resolves with perfectly good data.
+    /// Nothing newer has reached the screen, so A must publish: a guard that
+    /// asked only whether a later call had STARTED would withhold A's fleet on
+    /// account of a call that never put anything anywhere, and every toolbar
+    /// would sit on stale bindings until the next poll.
+    @MainActor
+    @Test("a later refresh that failed cannot suppress an earlier one that succeeded")
+    func failedLaterRefreshDoesNotSuppressAnEarlierSuccess() async {
+        await withStateAsync { state in
+            let wt = UUID()
+            let gate = RefreshGate()
+            state.prBindingsFetcher = {
+                gate.calls += 1
+                if gate.calls == 1 {
+                    // A: held open until B has failed.
+                    while !gate.open { try? await Task.sleep(for: .milliseconds(1)) }
+                    return PRBindingsAllResult(
+                        worktrees: [entry(wt, [binding(412, worktreeID: wt)], detachedCount: 1)])
+                }
+                // B: starts later, publishes nothing at all.
+                throw PRBindingRefreshTestError.boom
+            }
+
+            let taskA = Task { await state.refreshPRBindings() }
+            let entered = await waitUntil { gate.calls == 1 }
+            #expect(entered)
+
+            // B takes the later ticket and then fails.
+            #expect(await state.refreshPRBindings() == nil)
+            #expect(state.prBindings.isEmpty)
+
+            // A resolves last, and its data is still the newest anyone has —
+            // so it reaches the screen, not just its own caller.
+            gate.open = true
+            let late = await taskA.value
+            #expect(late?.bindings[wt]?.map(\.number) == [412])
+            #expect(state.prBindings[wt]?.map(\.number) == [412])
+            #expect(state.prDetachedCounts[wt] == 1)
+        }
+    }
+
     // MARK: - The untrack gesture
 
     /// `detachPR` judges its outcome by re-reading the bindings rather than by

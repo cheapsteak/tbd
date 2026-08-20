@@ -782,9 +782,15 @@ final class AppState: ObservableObject {
     /// non-zero, which is precisely the signal that suppresses the
     /// legacy-status fallback below.
     @Published var prDetachedCounts: [UUID: Int] = [:]
-    /// Start order for `refreshPRBindings`, so a response that lost the race to
-    /// a later one cannot publish its older snapshot over the newer state.
+    /// Start order for `refreshPRBindings`: every call takes the next ticket
+    /// before it fetches, so the two counters below can be compared to tell an
+    /// older snapshot from a newer one.
     private var prBindingsRefreshSeq = 0
+    /// The highest ticket that has actually PUBLISHED. Deliberately not the
+    /// same fact as the one above — a call that started later and then failed
+    /// put nothing on screen, so it must not silence an earlier call whose
+    /// fetch succeeded. Only a publish moves this.
+    private var prBindingsPublishedSeq = 0
     /// What every PR surface — toolbar split button, sidebar row indicator,
     /// status-bar chips — must read, so they cannot disagree about a worktree.
     /// Bindings when there are any; otherwise the legacy single `prStatuses`
@@ -3033,7 +3039,7 @@ final class AppState: ObservableObject {
     /// the published maps, for two reasons. On failure the maps still hold the
     /// pre-call values, which look identical to "the write did nothing". And
     /// these maps are whole-fleet: another refresh already in flight can resolve
-    /// after this one and publish its older snapshot over the top, so the maps
+    /// after this one and publish its own snapshot over the top, so the maps
     /// are not reliably what this call saw even on success.
     @discardableResult
     func refreshPRBindings() async -> PRBindingRefresh.State? {
@@ -3049,11 +3055,20 @@ final class AppState: ObservableObject {
             return nil
         }
         let next = PRBindingRefresh.state(from: result)
-        // A refresh that started later has already published, so this response
-        // is stale — return it to our own caller, who asked for it, but do not
-        // put an older snapshot back on screen. Without this a poll issued a
-        // moment before an untrack can land after it and bring the chip back.
-        guard seq == prBindingsRefreshSeq else { return next }
+        // What is already on screen came from a refresh that started LATER than
+        // this one, so this response is stale — return it to our own caller, who
+        // asked for it, but do not put an older snapshot back on screen. Without
+        // this a poll issued a moment before an untrack can land after it and
+        // bring the chip back.
+        //
+        // The comparison is against what has been PUBLISHED, not against what
+        // has merely started: a later refresh that failed returned above without
+        // touching these maps, and withholding this call's good data on account
+        // of it would leave the fleet on a snapshot older than either. Both
+        // counters are read and written on the main actor with no await in
+        // between, so no second racy read is involved.
+        guard seq > prBindingsPublishedSeq else { return next }
+        prBindingsPublishedSeq = seq
         if next.bindings != prBindings { prBindings = next.bindings }
         if next.detachedCounts != prDetachedCounts { prDetachedCounts = next.detachedCounts }
         return next
@@ -3098,7 +3113,7 @@ final class AppState: ObservableObject {
         // Judged on WHAT THIS CALL FETCHED, never on the published maps. A
         // failed refresh leaves them holding their pre-call values, which read
         // exactly like a detach that did nothing; and a whole-fleet refresh
-        // already in flight can land afterwards and publish its older snapshot
+        // already in flight can land afterwards and publish its own snapshot
         // over the top. Either would report a detach that succeeded as a
         // failure, which is its own kind of lie.
         guard let refreshed = await refreshPRBindings() else { return }

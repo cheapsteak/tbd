@@ -1306,12 +1306,14 @@ public final class RPCRouter: Sendable {
     /// number** rather than failing outright, which is what makes sending both
     /// worth doing. The status bar's untrack gesture names a PR by whatever its
     /// chip holds, and a chip lifted from a cached `Worktree.prStatus` can hold
-    /// a URL `PRBindingExtractor` will not accept — its pattern is host-locked
-    /// to `https://github.com/`, so on a worktree hosted anywhere else *every*
-    /// synthetic chip is in that state, and a url-only reference would make the
-    /// xmark fail every time on exactly the worktrees that only ever have
-    /// synthetic chips. A reference with a bad URL and no number is still
-    /// unresolvable; nothing is guessed.
+    /// a URL `PRBindingExtractor` will not accept. It parses two shapes and
+    /// only two: `https://github.com/<owner>/<repo>/pull/<n>`, host-locked to
+    /// github.com, and `/-/merge_requests/<iid>` on any host. So a pull request
+    /// served by GitHub Enterprise, Bitbucket, Gitea or Codeberg parses under
+    /// neither, every synthetic chip on such a worktree is in that state, and a
+    /// url-only reference would make the xmark fail every time on exactly the
+    /// worktrees that only ever have synthetic chips. A reference with a bad
+    /// URL and no number is still unresolvable; nothing is guessed.
     ///
     /// **Off by default, and detach-only on purpose.** The fallthrough re-reads
     /// the number against *this* worktree's repo, so for an attach a URL naming
