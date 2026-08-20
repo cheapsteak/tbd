@@ -261,6 +261,53 @@ struct PRBindingRPCTests {
                 == "https://github.com/acme/acme-prod/pull/412")
     }
 
+    /// The status bar names a PR by whatever its chip holds, and a chip lifted
+    /// from a cached `Worktree.prStatus` can hold a url `PRBindingExtractor`
+    /// will not accept — its pattern is host-locked to `https://github.com/`,
+    /// so on a worktree hosted anywhere else EVERY synthetic chip is in that
+    /// state. Sending url and number together is only worth anything if a url
+    /// that does not parse falls through to the number instead of failing.
+    @Test("a reference whose url does not parse falls through to its number")
+    func unparseableURLFallsThroughToNumber() async throws {
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod", "github.com"))
+
+        #expect(try await harness.detach(
+            url: "https://git.acme-corp.example/acme/acme-prod/pull/412", number: 412))
+
+        // Resolved against the worktree's own repo, exactly as a bare number is.
+        let recorded = try await harness.db.prBindings.list(
+            worktreeID: harness.worktreeID, includeDetached: true)
+        #expect(recorded.count == 1)
+        #expect(recorded.first?.number == 412)
+        #expect(recorded.first?.url == "https://github.com/acme/acme-prod/pull/412")
+    }
+
+    @Test("a reference with an unparseable url and no number is still an error")
+    func unparseableURLWithoutNumberIsAnError() async throws {
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod", "github.com"))
+        // Nothing is guessed — the fallthrough adds a second chance, not a
+        // default.
+        await #expect(throws: (any Error).self) {
+            try await harness.detach(url: "not a pr url at all")
+        }
+    }
+
+    /// The fallthrough is detach-only. Re-reading a number against *this*
+    /// worktree's repo is a recoverable mistake when it removes an association
+    /// and an unrecoverable one when it creates one: an attach would bind this
+    /// repo's #412 in place of the #412 the caller named on some other host,
+    /// silently and with no error.
+    @Test("pr.attach does not fall through from an unparseable url to the number")
+    func attachDoesNotFallThroughToNumber() async throws {
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod", "github.com"))
+
+        await #expect(throws: (any Error).self) {
+            try await harness.attach(
+                url: "https://git.acme-corp.example/acme/acme-prod/pull/412", number: 412)
+        }
+        #expect(try await harness.bindings().bindings.isEmpty)
+    }
+
     @Test("pr.attach reports a wrong-repo rejection instead of binding")
     func attachWrongRepo() async throws {
         let harness = try await PRBindingRPCHarness(repo: ("acme", "other-repo", "github.com"))
@@ -412,10 +459,47 @@ struct PRBindingRPCTests {
         #expect(all.worktrees.map(\.worktreeID) == [harness.worktreeID])
     }
 
-    @Test("pr.detach of an unbound PR reports false rather than erroring")
-    func detachUnknown() async throws {
+    /// The last leg of the title's round trip: the column reaches the app as a
+    /// field on the binding `pr.bindings` returns, so the status bar can say
+    /// what `#412` actually is.
+    @Test("pr.bindings carries a stored title")
+    func bindingsCarryTitle() async throws {
         let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod", "github.com"))
-        #expect(try await harness.detach(number: 999) == false)
+        let attached = try await harness.attach(number: 412)
+        let bindingID = try #require(attached.binding?.id)
+        #expect(attached.binding?.title == nil)
+
+        try await harness.db.prBindings.updateObservation(
+            bindingID: bindingID,
+            status: PRStatus(number: 412, url: "https://github.com/acme/acme-prod/pull/412",
+                             state: .mergeable),
+            title: "Fix the login timeout")
+
+        #expect(try await harness.bindings().bindings.first?.title == "Fix the login timeout")
+    }
+
+    /// A worktree with no bindings but a cached `Worktree.prStatus` renders a
+    /// synthetic chip, and the app's untrack gesture detaches it by number. If
+    /// that matched no row and reported failure, `detachedCount` would stay
+    /// zero, the legacy-status fallback would keep the chip on screen, and the
+    /// control would silently decline. So the detach records the tombstone —
+    /// and the non-zero count is the signal the app reads.
+    @Test("pr.detach of an unbound PR tombstones it and raises detachedCount")
+    func detachUnbound() async throws {
+        let harness = try await PRBindingRPCHarness(repo: ("acme", "acme-prod", "github.com"))
+        #expect(try await harness.detach(number: 999))
+
+        let listed = try await harness.bindings()
+        #expect(listed.bindings.isEmpty)
+        #expect(listed.detachedCount == 1)
+
+        // Durable, exactly like any other tombstone: an automatic source may
+        // not bring the PR back on the next poll or hook fire.
+        let rebind = try await harness.attach(number: 999, source: PRBindingSource.branch.rawValue)
+        #expect(rebind.outcome == "tombstoned")
+        // And a manual attach still reverses it.
+        #expect(try await harness.attach(number: 999).outcome == "bound")
+        #expect(try await harness.bindings().detachedCount == 0)
     }
 
     @Test("pr.attach with neither url nor number is an RPC error")

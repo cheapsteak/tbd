@@ -289,7 +289,17 @@ public final class RPCRouter: Sendable {
         }
         self.prBindingForgeResolver = forgeResolver
         self.prBindingCoordinator = PRBindingCoordinator(
-            store: db.prBindings, resolveRepo: repoResolver, isGitLabHost: forgeResolver)
+            store: db.prBindings, resolveRepo: repoResolver, isGitLabHost: forgeResolver,
+            // The cached status is the only evidence about a worktree's PRs
+            // that survives `gh` being unavailable, which is when `detach`
+            // needs it — see `PRBindingCoordinator.detach`. Parsed to a full
+            // identity rather than passed as a bare number, so corroboration
+            // cannot be satisfied by a coincidence of numbering.
+            cachedPRIdentity: { [db] worktreeID in
+                guard let url = try? await db.worktrees.get(id: worktreeID)?.prStatus?.url
+                else { return nil }
+                return PRBindingExtractor.parsePRURLs(in: url).first
+            })
         self.pendingQuestions = pendingQuestions
         self.repoSerializer = repoSerializer
         self.configDirManager = configDirManager
@@ -875,7 +885,8 @@ public final class RPCRouter: Sendable {
             if !updated.sameValue(as: binding) {
                 try? await db.prBindings.updateObservation(
                     bindingID: binding.id, status: updated.status,
-                    headBranch: updated.headBranch, baseRef: updated.baseRef)
+                    headBranch: updated.headBranch, baseRef: updated.baseRef,
+                    title: updated.title)
             }
             refreshed.append(updated)
         }
@@ -933,7 +944,8 @@ public final class RPCRouter: Sendable {
         guard let observed else { return binding }
         return binding.withObservation(status: observed.status,
                                        headBranch: observed.headBranch,
-                                       baseRef: observed.baseRef)
+                                       baseRef: observed.baseRef,
+                                       title: observed.title)
     }
 
     /// The `Worktree.prStatus` write implied by a worktree's bindings: the worst
@@ -1236,7 +1248,9 @@ public final class RPCRouter: Sendable {
     private func handlePRDetach(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(PRBindingRefParams.self, from: paramsData)
         let parsed: ParsedPRURL
-        switch await resolvePRRef(params) {
+        // Detach-only fallthrough: see `resolvePRRef`. Untracking the wrong PR
+        // is reversible; binding one silently is not.
+        switch await resolvePRRef(params, numberFallback: true) {
         case .resolved(let value):
             parsed = value
         case .unresolvable:
@@ -1287,12 +1301,33 @@ public final class RPCRouter: Sendable {
     /// The bare-number form is resolved against the worktree's own repo through
     /// the same seam the coordinator validates with, so `pr.attach 412` cannot
     /// synthesise a URL the policy would then reject as wrong-repo.
-    private func resolvePRRef(_ params: PRBindingRefParams) async -> PRRefResolution {
+    ///
+    /// With `numberFallback`, a URL that does not parse **falls through to the
+    /// number** rather than failing outright, which is what makes sending both
+    /// worth doing. The status bar's untrack gesture names a PR by whatever its
+    /// chip holds, and a chip lifted from a cached `Worktree.prStatus` can hold
+    /// a URL `PRBindingExtractor` will not accept. It parses two shapes and
+    /// only two: `https://github.com/<owner>/<repo>/pull/<n>`, host-locked to
+    /// github.com, and `/-/merge_requests/<iid>` on any host. So a pull request
+    /// served by GitHub Enterprise, Bitbucket, Gitea or Codeberg parses under
+    /// neither, every synthetic chip on such a worktree is in that state, and a
+    /// url-only reference would make the xmark fail every time on exactly the
+    /// worktrees that only ever have synthetic chips. A reference with a bad
+    /// URL and no number is still unresolvable; nothing is guessed.
+    ///
+    /// **Off by default, and detach-only on purpose.** The fallthrough re-reads
+    /// the number against *this* worktree's repo, so for an attach a URL naming
+    /// #412 on some other host would silently bind this repo's #412 — a
+    /// different pull request, bound with no error. Removing a wrong
+    /// association is recoverable; creating one quietly is the failure the
+    /// wrong-repo guard exists to prevent, so attach keeps the strict form.
+    private func resolvePRRef(_ params: PRBindingRefParams,
+                              numberFallback: Bool = false) async -> PRRefResolution {
         if let url = params.url, !url.isEmpty {
-            guard let parsed = PRBindingExtractor.parsePRURLs(in: url).first else {
-                return .unresolvable
+            if let parsed = PRBindingExtractor.parsePRURLs(in: url).first {
+                return .resolved(parsed)
             }
-            return .resolved(parsed)
+            guard numberFallback else { return .unresolvable }
         }
         guard let number = params.number, number > 0 else { return .unresolvable }
         guard let parsed = await prRef(worktreeID: params.worktreeID, number: number) else {

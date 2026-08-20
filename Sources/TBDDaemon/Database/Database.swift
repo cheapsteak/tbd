@@ -1560,6 +1560,19 @@ public final class TBDDatabase: Sendable {
                 defaults: DatabaseValue.null)
         }
 
+        // A bound PR's title, so the status-bar chips can say what `#21156`
+        // actually is (docs/specs/2026-08-16-pr-chip-untrack-design.md).
+        //
+        // Nullable with NO default, for the same reason `headBranch` and
+        // `baseRef` next to it are: the refresh folds a nil in as "not observed
+        // this pass" and keeps whatever the row holds, so a backfilled "" would
+        // be a title nobody read, and a row written before the column existed
+        // must read as "never observed" rather than as an empty title.
+        migrator.registerMigration("v87_worktree_pull_request_title") { db in
+            try db.addColumnIfMissing(
+                table: "worktree_pull_request", column: "title", type: .text)
+        }
+
         return migrator
     }
 }

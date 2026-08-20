@@ -8,7 +8,7 @@ struct GitLabQueriesTests {
 
     /// The exact GraphQL field set every merge-request query may ask for.
     static let expectedNodeFields =
-        "iid state draft detailedMergeStatus sourceBranch targetBranch createdAt webUrl "
+        "iid state draft title detailedMergeStatus sourceBranch targetBranch createdAt webUrl "
         + "headPipeline { status }"
 
     /// Runs of whitespace collapsed to one space, so a query pin survives
@@ -65,6 +65,7 @@ struct GitLabQueriesTests {
 
     static let oneNode = """
     {"iid":"412","state":"opened","draft":false,
+     "title":"Rate-limit the ingest queue",
      "detailedMergeStatus":"NOT_APPROVED",
      "sourceBranch":"feat/x","targetBranch":"main",
      "createdAt":"2026-08-01T10:00:00Z",
@@ -111,7 +112,20 @@ struct GitLabQueriesTests {
         #expect(n.headRefName == "feat/x")
         #expect(n.baseRefName == "main")
         #expect(n.statusCheckRollupState == "SUCCESS")
+        #expect(n.title == "Rate-limit the ingest queue")
         #expect(n.url.hasSuffix("/-/merge_requests/412"))
+    }
+
+    /// An instance that answers without a title must leave the stored one
+    /// alone rather than blank it — the same nil-means-unobserved contract the
+    /// `gh` parser keeps.
+    @Test("a node with no title parses, reporting the title as unobserved")
+    func missingTitleIsUnobserved() throws {
+        let node = Self.oneNode.replacingOccurrences(
+            of: #""title":"Rate-limit the ingest queue","#, with: "")
+        let (nodes, _) = try #require(Self.answered(Self.response(node)))
+        #expect(nodes.count == 1)
+        #expect(nodes[0].title == nil)
     }
 
     @Test("a null headPipeline yields a nil rollup state rather than dropping the node")

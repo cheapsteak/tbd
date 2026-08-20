@@ -2,6 +2,10 @@
 
 SwiftUI app target. See the repo-root `CLAUDE.md` and the `tbd-project` skill for architecture.
 
+## Tuning a visual constant
+
+While a purely visual value — a gap, inset, opacity, duration — is being eyeballed, iterate with `scripts/swift-safe build`, the one filtered suite that pins it, and `scripts/restart.sh`; the full `scripts/test.sh` costs ~110s, cannot tell you whether the number looks right, and belongs once on the final tree before pushing.
+
 ## macOS 26 (Tahoe) Liquid Glass toolbars — grouping rules
 
 macOS 26 redesigned toolbars: items render on **Liquid Glass capsules**, and **adjacent toolbar items are automatically fused onto one shared capsule**. Getting items onto *separate* capsules is non-obvious and cost a long trial-and-error loop — here is what actually works (verified against WWDC25 session 323 "Build a SwiftUI app with the new design" and confirmed live in this app). The working example is the PR split button in `ContentView.swift`.

@@ -22,8 +22,14 @@ enum GitLabQueries {
     /// query's schema risk. `conflicts` was requested and never read —
     /// `detailedMergeStatus` already reports CONFLICT, and that is the only
     /// conflict signal the mapper consults.
+    ///
+    /// `title` earns its place for the same reason it does in GitHub's
+    /// selection: it is what turns a bare `!412` into something a person can
+    /// decide about in the chip's hover card. It is a core Free-tier scalar on
+    /// `MergeRequest`, so it does not weaken the availability guarantee the
+    /// rest of this set is chosen for.
     static let nodeSelection = """
-    iid state draft detailedMergeStatus
+    iid state draft title detailedMergeStatus
     sourceBranch targetBranch createdAt webUrl
     headPipeline { status }
     """
@@ -156,6 +162,9 @@ enum GitLabQueries {
             statusCheckRollupState: pipeline,
             mergeQueuePosition: nil,
             baseRefName: obj["targetBranch"] as? String ?? "",
+            // Optional on purpose, like the `gh` parser's: an omitted title
+            // must read as "not observed" and leave the stored one alone.
+            title: obj["title"] as? String,
             forge: .gitlab)
     }
 

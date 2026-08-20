@@ -206,9 +206,15 @@ struct PRSplitButtonIDTests {
         // headBranch), so a new field is otherwise silently unkeyed: decide
         // whether the split button renders it and update prSplitButtonID (and
         // this count) accordingly.
-        // 13 = id, worktreeID, host, owner, repo, number, url, headBranch,
-        // baseRef, status, source, detached, boundAt.
+        // 14 = id, worktreeID, host, owner, repo, number, url, headBranch,
+        // baseRef, title, status, source, detached, boundAt.
+        //
+        // `title` is deliberately NOT in the key: the split button's menu rows
+        // render number, state, reason and head branch, and nothing else — the
+        // title is carried for the status-bar chips, which are a different view
+        // with its own identity. Fold it in here the moment a menu row starts
+        // rendering it, or the materialized menu will freeze on a stale title.
         let value = Self.binding(1, .mergeable, worktreeID: UUID())
-        #expect(Mirror(reflecting: value).children.count == 13)
+        #expect(Mirror(reflecting: value).children.count == 14)
     }
 }
