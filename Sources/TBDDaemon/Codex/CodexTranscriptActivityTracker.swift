@@ -212,6 +212,14 @@ actor CodexTranscriptActivityTracker {
         )
     }
 
+    /// Attach the first accepted session without fencing lifecycle records the
+    /// rollout wrote before its SessionStart hook reached TBD. Reuse the
+    /// ordinary bounded observation path so an existing baseline survives and
+    /// an absent baseline gets the same tail bootstrap as terminal.list.
+    func adoptInitialSession(transcriptPath: String, worktreeID: UUID) {
+        _ = observe(transcriptPath: transcriptPath, worktreeID: worktreeID)
+    }
+
     /// Establish a lifecycle boundary for an accepted SessionStart without
     /// re-reading history before that event. This matters when Codex reuses the
     /// same transcript path after an interrupted turn: an unmatched historical

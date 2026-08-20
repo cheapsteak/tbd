@@ -230,6 +230,59 @@ struct CodexActivityReconciliationTests {
             .presentationActivityState == .working)
     }
 
+    @Test("first SessionStart retains a turn that began before the hook arrived")
+    func firstSessionStartRetainsAlreadyStartedTurn() async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/car-first-start-repo-\(UUID().uuidString)",
+            displayName: "car-first-start-repo",
+            defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id,
+            name: "wt",
+            branch: "main",
+            path: "/tmp/car-first-start-wt-\(UUID().uuidString)",
+            tmuxServer: "tbd-car-first-start")
+        let transcript = try makeTranscript(
+            #"{"type":"session_meta","payload":{"id":"initial-session"}}"# + "\n"
+                + #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"initial-turn"}}"#
+                + "\n")
+        defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id,
+            tmuxWindowID: "@1",
+            tmuxPaneID: "%1",
+            label: "Codex",
+            kind: .codex)
+        #expect(terminal.claudeSessionID == nil)
+
+        let sessionStart = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "initial-session",
+                transcriptPath: transcript.path,
+                source: "SessionStart"))
+        #expect((await router.handle(sessionStart)).success)
+
+        let list = try RPCRequest(
+            method: RPCMethod.terminalList,
+            params: TerminalListParams(worktreeID: wt.id))
+        let working = await router.handle(list)
+        #expect(working.success)
+        #expect(try working.decodeResult([Terminal].self).first?
+            .presentationActivityState == .working)
+
+        try append(
+            Data((
+                #"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"initial-turn"}}"#
+                    + "\n").utf8),
+            to: transcript)
+        let idle = await router.handle(list)
+        #expect(idle.success)
+        #expect(try idle.decodeResult([Terminal].self).first?
+            .presentationActivityState == .idle)
+    }
+
     @Test("a persisted SessionStart boundary survives a fresh tracker")
     func samePathSessionBoundarySurvivesFreshTracker() async throws {
         let repo = try await db.repos.create(

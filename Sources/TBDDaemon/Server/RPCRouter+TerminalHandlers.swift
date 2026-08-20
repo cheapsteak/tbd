@@ -2893,16 +2893,23 @@ extension RPCRouter {
             observedAt: observedAt
         ) else { return .ok() }
 
-        // The accepted SessionStart is also a lifecycle boundary in the Codex
-        // transcript reducer. Capture the current EOF even when the path is
+        // The first accepted Codex session has no prior lifecycle to fence, and
+        // its rollout can write task_started before this hook reaches TBD.
+        // Later accepted starts capture the current EOF even when the path is
         // unchanged, so an unmatched task_started from the interrupted session
         // cannot be re-published as working; later appended turns still win.
         if terminal.isCodexTerminal,
            let transcriptPath = sessionApplication.transcriptPath,
            !transcriptPath.isEmpty {
-            await codexActivityTracker.establishSessionBoundary(
-                transcriptPath: transcriptPath,
-                worktreeID: terminal.worktreeID)
+            if terminal.claudeSessionID == nil {
+                await codexActivityTracker.adoptInitialSession(
+                    transcriptPath: transcriptPath,
+                    worktreeID: terminal.worktreeID)
+            } else {
+                await codexActivityTracker.establishSessionBoundary(
+                    transcriptPath: transcriptPath,
+                    worktreeID: terminal.worktreeID)
+            }
         }
 
         // Invalidate cached transcript parse for the OLD session file (if any)

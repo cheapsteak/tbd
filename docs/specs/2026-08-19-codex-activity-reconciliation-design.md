@@ -76,7 +76,9 @@ Already-running installations may still send activity events without a session i
 
 An accepted `SessionStart` establishes the current session identity and transcript path. Session identity has its own persisted observation order, separate from activity and attention timestamps. This prevents a delayed event from one rail from incorrectly ordering another rail.
 
-For Codex, an accepted start also establishes a lifecycle boundary at the transcript's current end. Events before that boundary do not become current work after a same-path resume or daemon restart. The persisted SessionStart fact lets a new tracker reconstruct the boundary conservatively at the current end when actor memory is unavailable.
+The first accepted Codex start attaches the terminal to its initial rollout; there is no earlier terminal session to fence. Codex can write `session_meta` and `task_started` before the SessionStart hook reaches TBD, so the tracker retains an existing baseline or performs its ordinary bounded tail bootstrap. Those already-written lifecycle records are eligible to present the initial prompt as working, and a later matching close advances that baseline to idle.
+
+Every later accepted Codex start establishes a lifecycle boundary at the transcript's current end, including a same-path resume. Events before that boundary do not become current work in the new session. The persisted SessionStart fact lets a tracker with no in-memory baseline, such as after daemon restart, reconstruct the boundary conservatively at the current end. An initial live attachment avoids that reconstruction because its bootstrap creates the baseline before terminal-list polling observes the persisted start.
 
 Rejected or stale SessionStart events do not change identity, transcript path, attention state, activity, or tracker boundaries. Equal-time competing starts are first-wins so completion order cannot roll identity backward. A permission fact observed at the same time as, or after, SessionStart survives it; only a strictly older permission fact is retracted.
 
@@ -159,6 +161,7 @@ Field measurements found lifecycle lines near 3 KiB at the 99th percentile and a
 - **Truncation or replacement** — rebuild from the bounded tail and do not reuse incompatible reducer evidence.
 - **Backlog beyond the request budget** — preserve incremental progress and publish unknown until caught up.
 - **Transcript identity changes during a scan** — discard the old-path result and publish an ordered unknown for the current identity.
+- **Initial task precedes SessionStart** — bootstrap or retain the first session's bounded baseline so already-written lifecycle evidence remains eligible.
 - **Daemon restart after SessionStart** — reconstruct the boundary conservatively at the current end so an orphaned historical start cannot restore working.
 - **Delayed old-session hook with identity** — reject it before any mutation.
 - **Legacy hook without identity** — accept it for upgrade compatibility; subsequent session-bound hooks restore full protection.
@@ -205,7 +208,7 @@ Tracker tests cover:
 - unreadable-file recovery;
 - per-request byte and step limits;
 - fleet fairness, scoped polling, path removal, and reordering;
-- SessionStart boundaries, daemon reconstruction, and same-path invalidation;
+- first-attachment bootstrap, later SessionStart boundaries, daemon reconstruction, and same-path invalidation;
 - transcript identity rollover during concurrent list calls.
 
 Daemon and wire tests cover:
