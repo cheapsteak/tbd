@@ -529,7 +529,9 @@ extension RPCRouter {
                   !transcriptPath.isEmpty else { continue }
             let target = CodexTranscriptActivityTracker.Target(
                 transcriptPath: transcriptPath,
-                worktreeID: terminals[index].worktreeID)
+                worktreeID: terminals[index].worktreeID,
+                terminalID: terminals[index].id,
+                sessionGeneration: terminals[index].sessionOrderObservedAt)
             codexTargets.append(target)
             if terminals[index].sessionOrderObservedAt != nil {
                 durableBoundaryTargets.append(target)
@@ -2900,15 +2902,20 @@ extension RPCRouter {
         // cannot be re-published as working; later appended turns still win.
         if terminal.isCodexTerminal,
            let transcriptPath = sessionApplication.transcriptPath,
-           !transcriptPath.isEmpty {
-            if terminal.claudeSessionID == nil {
+           !transcriptPath.isEmpty,
+           let sessionGeneration = sessionApplication.orderObservedAt {
+            if sessionApplication.isInitialAttachment {
                 await codexActivityTracker.adoptInitialSession(
                     transcriptPath: transcriptPath,
-                    worktreeID: terminal.worktreeID)
+                    worktreeID: terminal.worktreeID,
+                    terminalID: terminal.id,
+                    generation: sessionGeneration)
             } else {
                 await codexActivityTracker.establishSessionBoundary(
                     transcriptPath: transcriptPath,
-                    worktreeID: terminal.worktreeID)
+                    worktreeID: terminal.worktreeID,
+                    terminalID: terminal.id,
+                    generation: sessionGeneration)
             }
         }
 

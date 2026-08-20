@@ -142,6 +142,7 @@ struct AppliedTerminalSessionStart: Sendable {
     let sessionID: String
     let transcriptPath: String?
     let orderObservedAt: Date?
+    let isInitialAttachment: Bool
     let activityObservation: AppliedTerminalActivityObservation?
 }
 
@@ -406,7 +407,9 @@ public struct TerminalStore: Sendable {
     /// their own conservative ordering: a same/newer prompt survives, and an
     /// older SessionStart cannot regress newer activity. Codex SessionStart is
     /// first-wins at an equal session watermark; an exact retry is an
-    /// idempotent no-op and therefore cannot move a transcript boundary.
+    /// idempotent no-op and therefore cannot move a transcript boundary. The
+    /// same transaction classifies an initial attachment from the complete
+    /// prior session history so callers never decide from a stale row snapshot.
     func applySessionStart(
         id: UUID,
         sessionID: String,
@@ -436,8 +439,12 @@ public struct TerminalStore: Sendable {
                     sessionID: sessionID,
                     transcriptPath: record.transcriptPath,
                     orderObservedAt: nil,
+                    isInitialAttachment: false,
                     activityObservation: nil)
             }
+            let isInitialAttachment = record.claudeSessionID == nil
+                && record.transcriptPath == nil
+                && record.sessionOrderObservedAt == nil
             if let storedSessionOrder = record.sessionOrderObservedAt,
                storedSessionOrder >= observedAt {
                 return nil
@@ -465,6 +472,7 @@ public struct TerminalStore: Sendable {
                 sessionID: sessionID,
                 transcriptPath: record.transcriptPath,
                 orderObservedAt: observedAt,
+                isInitialAttachment: isInitialAttachment,
                 activityObservation: activityObservation)
         }
     }

@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -281,6 +282,311 @@ struct CodexActivityReconciliationTests {
         #expect(idle.success)
         #expect(try idle.decodeResult([Terminal].self).first?
             .presentationActivityState == .idle)
+    }
+
+    @Test("a stored transcript path makes a nil-identity SessionStart a later attachment")
+    func storedTranscriptPathFencesNilIdentitySessionStart() async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/car-partial-path-repo-\(UUID().uuidString)",
+            displayName: "car-partial-path-repo", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "main",
+            path: "/tmp/car-partial-path-wt-\(UUID().uuidString)",
+            tmuxServer: "tbd-car-partial-path")
+        let transcript = try makeTranscript(
+            #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"orphan"}}"#
+                + "\n")
+        defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: "Codex", kind: .codex)
+        try await db.writerForTests.write { database in
+            try database.execute(
+                sql: "UPDATE terminal SET transcriptPath = ? WHERE id = ?",
+                arguments: [transcript.path, terminal.id.uuidString])
+        }
+
+        let sessionStart = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id, sessionID: "recovered-session",
+                transcriptPath: transcript.path, source: "SessionStart"))
+        #expect((await router.handle(sessionStart)).success)
+
+        let list = try RPCRequest(
+            method: RPCMethod.terminalList,
+            params: TerminalListParams(worktreeID: wt.id))
+        let response = await router.handle(list)
+        #expect(response.success)
+        #expect(try response.decodeResult([Terminal].self).first?
+            .presentationActivityState == nil)
+    }
+
+    @Test("a stored session-order watermark makes a nil-identity SessionStart later")
+    func storedSessionOrderFencesNilIdentitySessionStart() async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/car-partial-order-repo-\(UUID().uuidString)",
+            displayName: "car-partial-order-repo", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "main",
+            path: "/tmp/car-partial-order-wt-\(UUID().uuidString)",
+            tmuxServer: "tbd-car-partial-order")
+        let transcript = try makeTranscript(
+            #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"orphan"}}"#
+                + "\n")
+        defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: "Codex", kind: .codex)
+        try await db.writerForTests.write { database in
+            try database.execute(
+                sql: "UPDATE terminal SET sessionOrderObservedAt = ? WHERE id = ?",
+                arguments: [presentationObservedAt.addingTimeInterval(-1), terminal.id.uuidString])
+        }
+
+        let sessionStart = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id, sessionID: "recovered-session",
+                transcriptPath: transcript.path, source: "SessionStart"))
+        #expect((await router.handle(sessionStart)).success)
+
+        let list = try RPCRequest(
+            method: RPCMethod.terminalList,
+            params: TerminalListParams(worktreeID: wt.id))
+        let response = await router.handle(list)
+        #expect(response.success)
+        #expect(try response.decodeResult([Terminal].self).first?
+            .presentationActivityState == nil)
+    }
+
+    @Test("concurrent accepted SessionStarts classify only the first transaction as initial")
+    func concurrentSessionStartsClassifyInitialAttachmentAtomically() async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/car-atomic-session-repo-\(UUID().uuidString)",
+            displayName: "car-atomic-session-repo", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "main",
+            path: "/tmp/car-atomic-session-wt-\(UUID().uuidString)",
+            tmuxServer: "tbd-car-atomic-session")
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: "Codex", kind: .codex)
+        let gate = OrderedAsyncGate()
+        let firstAt = presentationObservedAt
+        let secondAt = firstAt.addingTimeInterval(1)
+
+        let first = Task {
+            await gate.waitForRelease(order: 0)
+            return try await db.terminals.applySessionStart(
+                id: terminal.id, sessionID: "first-session",
+                transcriptPath: "/tmp/car-atomic-first.jsonl", observedAt: firstAt)
+        }
+        let second = Task {
+            await gate.waitForRelease(order: 1)
+            return try await db.terminals.applySessionStart(
+                id: terminal.id, sessionID: "second-session",
+                transcriptPath: "/tmp/car-atomic-second.jsonl", observedAt: secondAt)
+        }
+        await gate.releaseInOrder()
+
+        let firstApplication = try #require(await first.value)
+        let secondApplication = try #require(await second.value)
+        #expect(firstApplication.isInitialAttachment)
+        #expect(!secondApplication.isInitialAttachment)
+    }
+
+    @Test("initial adoption supersedes same-generation list reconstruction")
+    func initialAdoptionWinsAfterPersistedSessionListRace() async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/car-adoption-race-repo-\(UUID().uuidString)",
+            displayName: "car-adoption-race-repo", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "main",
+            path: "/tmp/car-adoption-race-wt-\(UUID().uuidString)",
+            tmuxServer: "tbd-car-adoption-race")
+        let transcript = try makeTranscript(
+            #"{"type":"session_meta","payload":{"id":"initial-session"}}"# + "\n"
+                + #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"initial-turn"}}"#
+                + "\n")
+        defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: "Codex", kind: .codex)
+
+        let application = try #require(try await db.terminals.applySessionStart(
+            id: terminal.id, sessionID: "initial-session",
+            transcriptPath: transcript.path, observedAt: presentationObservedAt))
+        #expect(application.isInitialAttachment)
+
+        let list = try RPCRequest(
+            method: RPCMethod.terminalList,
+            params: TerminalListParams(worktreeID: wt.id))
+        let racedList = await router.handle(list)
+        #expect(racedList.success)
+        #expect(try racedList.decodeResult([Terminal].self).first?
+            .presentationActivityState == nil)
+
+        await router.codexActivityTracker.adoptInitialSession(
+            transcriptPath: transcript.path,
+            worktreeID: wt.id,
+            terminalID: terminal.id,
+            generation: try #require(application.orderObservedAt))
+        let afterAdoption = await router.handle(list)
+        #expect(afterAdoption.success)
+        #expect(try afterAdoption.decodeResult([Terminal].self).first?
+            .presentationActivityState == .working)
+    }
+
+    @Test("an unavailable initial rollout remains eligible for later bootstrap")
+    func unavailableInitialSessionBootstrapsWhenRolloutAppears() async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/car-late-rollout-repo-\(UUID().uuidString)",
+            displayName: "car-late-rollout-repo", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "main",
+            path: "/tmp/car-late-rollout-wt-\(UUID().uuidString)",
+            tmuxServer: "tbd-car-late-rollout")
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-car-late-rollout-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let transcript = directory.appendingPathComponent("rollout.jsonl")
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: "Codex", kind: .codex)
+        let sessionStart = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id, sessionID: "initial-session",
+                transcriptPath: transcript.path, source: "SessionStart"))
+        #expect((await router.handle(sessionStart)).success)
+        #expect(!(await router.codexActivityTracker.hasBaseline(
+            transcriptPath: transcript.path)))
+
+        try (#"{"type":"session_meta","payload":{"id":"initial-session"}}"# + "\n"
+            + #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"initial-turn"}}"#
+            + "\n").write(to: transcript, atomically: true, encoding: .utf8)
+        let list = try RPCRequest(
+            method: RPCMethod.terminalList,
+            params: TerminalListParams(worktreeID: wt.id))
+        let response = await router.handle(list)
+        #expect(response.success)
+        #expect(try response.decodeResult([Terminal].self).first?
+            .presentationActivityState == .working)
+    }
+
+    @Test("a fresh tracker keeps an unavailable persisted generation conservative")
+    func unavailablePersistedSessionFencesWhenRolloutAppears() async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/car-unavailable-restart-repo-\(UUID().uuidString)",
+            displayName: "car-unavailable-restart-repo", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "main",
+            path: "/tmp/car-unavailable-restart-wt-\(UUID().uuidString)",
+            tmuxServer: "tbd-car-unavailable-restart")
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "tbd-car-unavailable-restart-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let transcript = directory.appendingPathComponent("rollout.jsonl")
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: "Codex", kind: .codex)
+        _ = try #require(try await db.terminals.applySessionStart(
+            id: terminal.id, sessionID: "persisted-session",
+            transcriptPath: transcript.path, observedAt: presentationObservedAt))
+        let restartedRouter = makeRouter(now: { presentationObservedAt })
+        let list = try RPCRequest(
+            method: RPCMethod.terminalList,
+            params: TerminalListParams(worktreeID: wt.id))
+
+        let unavailable = await restartedRouter.handle(list)
+        #expect(unavailable.success)
+        #expect(try unavailable.decodeResult([Terminal].self).first?
+            .presentationActivityState == nil)
+
+        try (#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"historical"}}"#
+            + "\n").write(to: transcript, atomically: true, encoding: .utf8)
+        let afterFileAppears = await restartedRouter.handle(list)
+        #expect(afterFileAppears.success)
+        #expect(try afterFileAppears.decodeResult([Terminal].self).first?
+            .presentationActivityState == nil)
+    }
+
+    @Test("a later session boundary defeats an older delayed initial adoption")
+    func laterGenerationBoundaryWinsOverDelayedInitialAdoption() async throws {
+        let initialTranscript = try makeTranscript(
+            #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"orphan"}}"#
+                + "\n")
+        defer {
+            try? FileManager.default.removeItem(
+                at: initialTranscript.deletingLastPathComponent())
+        }
+        let laterTranscript = try makeTranscript(
+            #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"later"}}"#
+                + "\n")
+        defer {
+            try? FileManager.default.removeItem(
+                at: laterTranscript.deletingLastPathComponent())
+        }
+        let worktreeID = UUID()
+        let terminalID = UUID()
+        let initialGeneration = presentationObservedAt
+        let laterGeneration = initialGeneration.addingTimeInterval(1)
+
+        await router.codexActivityTracker.adoptInitialSession(
+            transcriptPath: initialTranscript.path,
+            worktreeID: worktreeID,
+            terminalID: terminalID,
+            generation: initialGeneration)
+        #expect(await router.codexActivityTracker.hasBaseline(
+            transcriptPath: initialTranscript.path))
+        await router.codexActivityTracker.establishSessionBoundary(
+            transcriptPath: laterTranscript.path,
+            worktreeID: worktreeID,
+            terminalID: terminalID,
+            generation: laterGeneration)
+        await router.codexActivityTracker.adoptInitialSession(
+            transcriptPath: initialTranscript.path,
+            worktreeID: worktreeID,
+            terminalID: terminalID,
+            generation: initialGeneration)
+        #expect(!(await router.codexActivityTracker.hasBaseline(
+            transcriptPath: initialTranscript.path)))
+    }
+
+    @Test("tracker retention prunes session-generation ordering with its transcript")
+    func retentionPrunesSessionGenerationState() async throws {
+        let transcript = try makeTranscript(
+            #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"eligible"}}"#
+                + "\n")
+        defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
+        let worktreeID = UUID()
+        let terminalID = UUID()
+        let initialGeneration = presentationObservedAt
+        let laterGeneration = initialGeneration.addingTimeInterval(1)
+
+        await router.codexActivityTracker.establishSessionBoundary(
+            transcriptPath: transcript.path,
+            worktreeID: worktreeID,
+            terminalID: terminalID,
+            generation: laterGeneration)
+        await router.codexActivityTracker.retain(
+            transcriptPaths: [], scope: worktreeID)
+        await router.codexActivityTracker.adoptInitialSession(
+            transcriptPath: transcript.path,
+            worktreeID: worktreeID,
+            terminalID: terminalID,
+            generation: initialGeneration)
+        await router.codexActivityTracker.establishSessionBoundary(
+            transcriptPath: transcript.path,
+            worktreeID: worktreeID,
+            terminalID: terminalID,
+            generation: initialGeneration.addingTimeInterval(0.5))
+
+        #expect(await router.codexActivityTracker.observe(
+            transcriptPath: transcript.path, worktreeID: worktreeID) == nil)
     }
 
     @Test("a persisted SessionStart boundary survives a fresh tracker")
@@ -914,6 +1220,25 @@ private func waitUntilAsync(
         await Task.yield()
     } while clock.now < deadline
     return false
+}
+
+private actor OrderedAsyncGate {
+    private var continuations: [Int: CheckedContinuation<Void, Never>] = [:]
+
+    func waitForRelease(order: Int) async {
+        await withCheckedContinuation { continuation in
+            continuations[order] = continuation
+        }
+    }
+
+    func releaseInOrder() async {
+        while continuations.count < 2 {
+            await Task.yield()
+        }
+        continuations.removeValue(forKey: 0)?.resume()
+        await Task.yield()
+        continuations.removeValue(forKey: 1)?.resume()
+    }
 }
 
 /// Holds the first `now()` call until the test releases it, so "the earlier

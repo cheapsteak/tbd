@@ -66,10 +66,26 @@ struct CodexTurnLifecycleReducer: Sendable {
 /// from the last successfully-read offset on later observations. An observation
 /// advances by a bounded amount and reports no state until it reaches the EOF
 /// captured at its start, so partially-reduced lifecycle history is never shown.
+/// SessionStart operations are ordered by their persisted observation generation
+/// so a delayed actor hop cannot reverse initial-attachment and boundary policy.
 actor CodexTranscriptActivityTracker {
     struct Target: Sendable {
         let transcriptPath: String
         let worktreeID: UUID
+        let terminalID: UUID?
+        let sessionGeneration: Date?
+
+        init(
+            transcriptPath: String,
+            worktreeID: UUID,
+            terminalID: UUID? = nil,
+            sessionGeneration: Date? = nil
+        ) {
+            self.transcriptPath = transcriptPath
+            self.worktreeID = worktreeID
+            self.terminalID = terminalID
+            self.sessionGeneration = sessionGeneration
+        }
     }
 
     struct StampedObservation: Sendable {
@@ -83,6 +99,19 @@ actor CodexTranscriptActivityTracker {
         var pendingFragment: Data
         var discardingCurrentLine: Bool
         var reducer: CodexTurnLifecycleReducer
+    }
+
+    private struct SessionGeneration {
+        enum Attachment {
+            case initial
+            case boundary
+        }
+
+        let worktreeID: UUID
+        let transcriptPath: String
+        let observedAt: Date
+        let attachment: Attachment
+        let boundaryEstablished: Bool
     }
 
     private struct StepResult {
@@ -112,6 +141,7 @@ actor CodexTranscriptActivityTracker {
     // margin while preventing a malformed unterminated record from growing.
     static let maxBufferedRecordByteCount = Int(initialTailByteLimit)
     private var baselines: [String: Baseline] = [:]
+    private var sessionGenerations: [UUID: SessionGeneration] = [:]
     private var nextBatchPathOrder: [String] = []
     private var batchPathWorktreeIDs: [String: UUID] = [:]
 
@@ -216,7 +246,34 @@ actor CodexTranscriptActivityTracker {
     /// rollout wrote before its SessionStart hook reached TBD. Reuse the
     /// ordinary bounded observation path so an existing baseline survives and
     /// an absent baseline gets the same tail bootstrap as terminal.list.
-    func adoptInitialSession(transcriptPath: String, worktreeID: UUID) {
+    func adoptInitialSession(
+        transcriptPath: String,
+        worktreeID: UUID,
+        terminalID: UUID,
+        generation: Date
+    ) {
+        if let current = sessionGenerations[terminalID] {
+            guard current.observedAt <= generation else { return }
+            if current.observedAt == generation {
+                guard current.attachment == .boundary else {
+                    _ = observe(transcriptPath: transcriptPath, worktreeID: worktreeID)
+                    return
+                }
+                // A list raced the handler after persistence and reconstructed
+                // this same generation as a restart boundary. Initial-session
+                // knowledge is more specific, so discard that EOF baseline and
+                // perform the ordinary bounded bootstrap below.
+                baselines.removeValue(forKey: current.transcriptPath)
+            } else {
+                baselines.removeValue(forKey: current.transcriptPath)
+            }
+        }
+        sessionGenerations[terminalID] = SessionGeneration(
+            worktreeID: worktreeID,
+            transcriptPath: transcriptPath,
+            observedAt: generation,
+            attachment: .initial,
+            boundaryEstablished: false)
         _ = observe(transcriptPath: transcriptPath, worktreeID: worktreeID)
     }
 
@@ -225,32 +282,68 @@ actor CodexTranscriptActivityTracker {
     /// same transcript path after an interrupted turn: an unmatched historical
     /// `task_started` must not become current-session working evidence again.
     /// Bytes appended after the captured EOF are reduced normally, so the next
-    /// genuine turn supersedes the boundary.
-    func establishSessionBoundary(transcriptPath: String, worktreeID: UUID) {
-        establishSessionBoundary(
+    /// genuine turn supersedes the boundary. A missing file leaves a pending
+    /// boundary that terminal.list retries without replaying history.
+    func establishSessionBoundary(
+        transcriptPath: String,
+        worktreeID: UUID,
+        terminalID: UUID,
+        generation: Date
+    ) {
+        applySessionBoundary(
             transcriptPath: transcriptPath,
             worktreeID: worktreeID,
-            onlyIfAbsent: false)
+            terminalID: terminalID,
+            generation: generation)
     }
 
-    /// Reconstruct the boundary from a persisted SessionStart generation
-    /// after daemon restart. Existing baselines always win: repeatedly moving
-    /// a live baseline to EOF would hide a genuine turn appended since start.
+    /// Reconstruct the boundary from a persisted SessionStart generation after
+    /// daemon restart. An established boundary or live initial attachment wins
+    /// at the same generation; an unavailable pending boundary is retried until
+    /// it can capture EOF. Later generations always replace older actor state.
     func establishSessionBoundariesIfAbsent(transcripts: [Target]) {
-        for transcript in transcripts where baselines[transcript.transcriptPath] == nil {
-            establishSessionBoundary(
+        for transcript in transcripts {
+            guard let terminalID = transcript.terminalID,
+                  let generation = transcript.sessionGeneration else { continue }
+            applySessionBoundary(
                 transcriptPath: transcript.transcriptPath,
                 worktreeID: transcript.worktreeID,
-                onlyIfAbsent: true)
+                terminalID: terminalID,
+                generation: generation)
         }
     }
 
-    private func establishSessionBoundary(
+    private func applySessionBoundary(
         transcriptPath: String,
         worktreeID: UUID,
-        onlyIfAbsent: Bool
+        terminalID: UUID,
+        generation: Date
     ) {
-        if onlyIfAbsent, baselines[transcriptPath] != nil { return }
+        if let current = sessionGenerations[terminalID] {
+            guard current.observedAt <= generation else { return }
+            if current.observedAt == generation {
+                guard current.attachment == .boundary,
+                      !current.boundaryEstablished else { return }
+            } else {
+                baselines.removeValue(forKey: current.transcriptPath)
+            }
+        }
+        let established = captureSessionBoundary(
+            transcriptPath: transcriptPath,
+            worktreeID: worktreeID)
+        sessionGenerations[terminalID] = SessionGeneration(
+            worktreeID: worktreeID,
+            transcriptPath: transcriptPath,
+            observedAt: generation,
+            attachment: .boundary,
+            boundaryEstablished: established)
+    }
+
+    @discardableResult
+    private func captureSessionBoundary(
+        transcriptPath: String,
+        worktreeID: UUID
+    ) -> Bool {
         batchPathWorktreeIDs[transcriptPath] = worktreeID
         do {
             let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: transcriptPath))
@@ -268,11 +361,13 @@ actor CodexTranscriptActivityTracker {
                 pendingFragment: Data(),
                 discardingCurrentLine: discardingCurrentLine,
                 reducer: CodexTurnLifecycleReducer())
+            return true
         } catch {
             // Never retain positive evidence across a session boundary when
             // the file is temporarily unavailable. A later list observation
-            // may bootstrap once the new session creates the path.
+            // retries the boundary when the new session creates the path.
             baselines.removeValue(forKey: transcriptPath)
+            return false
         }
     }
 
@@ -344,10 +439,14 @@ actor CodexTranscriptActivityTracker {
     }
 
     /// `scope == nil` means the supplied paths cover the whole fleet. A UUID
-    /// limits pruning to baselines last observed in that worktree.
+    /// limits pruning to baselines and session generations last observed in
+    /// that worktree.
     func retain(transcriptPaths: Set<String>, scope worktreeID: UUID?) {
         guard let worktreeID else {
             baselines = baselines.filter { transcriptPaths.contains($0.key) }
+            sessionGenerations = sessionGenerations.filter {
+                transcriptPaths.contains($0.value.transcriptPath)
+            }
             nextBatchPathOrder.removeAll { !transcriptPaths.contains($0) }
             batchPathWorktreeIDs = batchPathWorktreeIDs.filter {
                 transcriptPaths.contains($0.key)
@@ -356,6 +455,10 @@ actor CodexTranscriptActivityTracker {
         }
         baselines = baselines.filter {
             $0.value.worktreeID != worktreeID || transcriptPaths.contains($0.key)
+        }
+        sessionGenerations = sessionGenerations.filter {
+            $0.value.worktreeID != worktreeID
+                || transcriptPaths.contains($0.value.transcriptPath)
         }
         let removedPaths = Set(batchPathWorktreeIDs.compactMap { path, owner in
             owner == worktreeID && !transcriptPaths.contains(path) ? path : nil
