@@ -102,7 +102,7 @@ mkrepo() {
   mkdir -p "$d/$MIGRATIONS_REL" "$d/Tests/TBDDaemonTests/Fixtures"
   cp "$ROOT/Sources/TBDDaemon/Database/Database.swift" "$d/Sources/TBDDaemon/Database/"
   cp "$ROOT/Sources/TBDDaemon/Database/SQLMigrationLoader.swift" "$d/Sources/TBDDaemon/Database/"
-  cp "$ROOT/Tests/TBDDaemonTests/Fixtures/schema-baseline-v84.sql" "$d/Tests/TBDDaemonTests/Fixtures/"
+  cp "$ROOT/Tests/TBDDaemonTests/Fixtures/schema-baseline-frozen-block.sql" "$d/Tests/TBDDaemonTests/Fixtures/"
   : > "$d/$MIGRATIONS_REL/.gitkeep"
   git -C "$d" init -q
   commit_fixture "$d" "base"

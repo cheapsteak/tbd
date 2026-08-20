@@ -117,7 +117,7 @@ When adding a DB column:
 3. Update the Codable model in `Sources/TBDShared/Models.swift` — new fields MUST be optional or have a default value so existing JSON/rows still decode
 4. All three changes in the same commit
 
-Migrations run through GRDB's `DatabaseMigrator`. A new one is a `.sql` file named `YYYYMMDDHHMMSS_lower_snake.sql`, whose stem is the migration identifier — one file per migration, so parallel branches can neither pick the same identifier nor edit the same text. Never modify or delete a migration that has landed; add a new one. `scripts/lint-migrations.py` enforces the naming, the statement allowlist, and the freeze. The frozen `v1`–`v84` Swift block, the escape hatch for procedural migrations, and the rest of the conventions: [`Sources/TBDDaemon/Database/CLAUDE.md`](Sources/TBDDaemon/Database/CLAUDE.md).
+Migrations run through GRDB's `DatabaseMigrator`. A new one is a `.sql` file named `YYYYMMDDHHMMSS_lower_snake.sql`, whose stem is the migration identifier — one file per migration, so parallel branches can neither pick the same identifier nor edit the same text. Never modify or delete a migration that has landed; add a new one. `scripts/lint-migrations.py` enforces the naming, the statement allowlist, and the freeze. The frozen Swift block, the escape hatch for procedural migrations, and the rest of the conventions: [`Sources/TBDDaemon/Database/CLAUDE.md`](Sources/TBDDaemon/Database/CLAUDE.md).
 
 ### Per-repo config: two storage patterns
 

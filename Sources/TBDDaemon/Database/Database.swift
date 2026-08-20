@@ -1584,8 +1584,9 @@ public final class TBDDatabase: Sendable {
                 table: "worktree_pull_request", column: "title", type: .text)
         }
 
-        // Everything above is the frozen `v1`–`v87` block: those identifiers
-        // have run on user machines and never change. Everything below is the
+        // Everything above is the frozen Swift block: those `vN` identifiers
+        // have run on user machines and never change, and the sequence is
+        // closed — a new migration is never appended here. Everything below is the
         // timestamp scheme — one `.sql` file per migration under
         // `Database/Migrations/`, shipped in `TBD_TBDDaemonLib.bundle`, merged
         // with any inline Swift escape-hatch migrations and sorted by

@@ -6,7 +6,7 @@ named by authoring timestamp, discovered from a SwiftPM resource bundle at
 startup. Two branches can no longer pick the same identifier, and no longer
 edit the same file.
 
-The existing `v1`–`v84` migrations stay exactly where they are.
+The existing `vN` migrations stay exactly where they are.
 
 ## Why this exists
 
@@ -65,7 +65,7 @@ no change.
 
 `buildMigrator()` registers, in order:
 
-1. The frozen `v1`–`v84` block, verbatim and unchanged.
+1. The frozen Swift block, verbatim and unchanged.
 2. A merged list of the discovered `.sql` files and any post-cutover Swift
    escape-hatch migrations, sorted by identifier.
 
@@ -98,7 +98,7 @@ are idempotent in SQL already and need no help; the lint requires those forms.
 
 ### The Swift escape hatch
 
-Three of the 84 existing migrations do procedural Swift rather than DDL — `v10`,
+Three of the existing `vN` migrations do procedural Swift rather than DDL — `v10`,
 `v14_worktree_location`, and `v35_worktree_nullable_repo`, all of them old. A
 post-cutover migration that genuinely needs Swift is registered in
 `SQLMigrationLoader.inlineTimestampMigrations` under a timestamp identifier and
@@ -110,8 +110,8 @@ Because the escape hatch is Swift, it is still bound by the idempotent helpers
 in `MigrationHelpers.swift` — and the `migration_use_helpers` SwiftLint rule
 must name its file, or the rule governs only the frozen block and can never
 fire on anything new. Such a migration still
-conflicts textually with a concurrent one. At the historical rate that is about
-one migration in twenty-five.
+conflicts textually with a concurrent one. At the historical rate that is a few
+percent of migrations.
 
 ### Application order is machine-dependent, deliberately
 
@@ -134,7 +134,8 @@ enumerating what is banned.
 - **Filename shape** — `^\d{14}_[a-z0-9_]+\.sql$`, and nothing else may
   live in the directory.
 - **Identifier uniqueness** — across `.sql` files, post-cutover inline Swift
-  migrations, and the frozen `v1`–`v84` names.
+  migrations, and the frozen Swift block's names, which it reads out of
+  `Database.swift` rather than holding a list of its own.
 - **Statement allowlist** — every statement must lead with one of
   `CREATE TABLE IF NOT EXISTS`, `CREATE [UNIQUE] INDEX IF NOT EXISTS`,
   `ALTER TABLE … ADD [COLUMN]`, `DROP TABLE IF EXISTS`, `DROP INDEX IF EXISTS`,
@@ -173,15 +174,26 @@ governs only the Swift escape hatch, and its message says so.
 ### The frozen baseline fixture
 
 The chain-apply check needs a schema to apply against, so the schema produced
-by `v1`–`v84` is generated once and committed as a fixture.
+by the frozen Swift block is generated and committed as a fixture,
+`Tests/TBDDaemonTests/Fixtures/schema-baseline-frozen-block.sql`. Its name
+carries no version number: the block's tail moves whenever a rebase carries new
+`vN` migrations from `main` onto a branch, and a numbered filename would make
+every such rebase a rename — the churn this design exists to remove.
 
 This is not the live schema snapshot rejected below. Rails' `schema.rb` is
 rewritten by every migration, which is why it conflicts constantly. This
-baseline is a snapshot of the legacy block, which is already forbidden from
-changing and, as of the history-is-frozen check, mechanically prevented from
-changing. It is generated once and never again. A Swift test asserts it still
-equals what `v1`–`v84` actually produce, so drift is caught rather than
-assumed.
+baseline is a snapshot of the legacy block, whose bodies are already forbidden
+from changing and, as of the history-is-frozen check, mechanically prevented
+from changing. It moves only when a rebase carries new `vN` migrations from
+`main` onto a branch and extends the block's tail — never when a `.sql`
+migration is added, which is where the churn would otherwise be. A Swift test
+asserts it still equals what the block actually produces, so drift is caught
+rather than assumed.
+
+`SchemaBaselineDriftTests.frozenBlockLastIdentifier` is the single place that
+tail is named; `migrate(upTo:)` and the generator both read it, so extending
+the block is a one-line edit plus a regeneration whose diff must be exactly the
+columns the new migrations add.
 
 The cost is that the linter reimplements the ADD COLUMN skip in about five
 lines, which is drift surface against the Swift loader. The splitter-parity
@@ -223,7 +235,8 @@ harness.
 - Splitter parity, Swift half — a shared fixture table of adversarial SQL
   (semicolons inside literals, trigger bodies, comments, trailing empties)
   splits identically in the loader and the lint.
-- Baseline drift — `v1`–`v84` still produce exactly the committed baseline.
+- Baseline drift — the frozen Swift block still produces exactly the committed
+  baseline.
 - Full-chain apply — every migration, `v1` onward, against a fresh in-memory
   database throws nothing. This is not a duplicate of the lint's chain-apply:
   the lint starts from the baseline fixture and covers only the `.sql` files,
@@ -309,10 +322,10 @@ The better soak is available for free. The mechanism lands with an **empty
 produces behavior byte-identical to today. That commit is provably inert. The
 first real `.sql` migration lands separately and is the actual soak.
 
-Cutover is a no-op for existing installs. Identifiers `v1`–`v84` are untouched,
-so no user database re-runs anything, the eleven `upTo: "vNN_…"`
-call sites across ten test files keep passing unchanged, and nothing about `grdb_migrations`
-changes shape.
+Cutover is a no-op for existing installs. The frozen block's identifiers are
+untouched, so no user database re-runs anything, the eleven `upTo: "vNN_…"` call
+sites across ten test files keep passing unchanged, and nothing about
+`grdb_migrations` changes shape.
 
 ## Rejected alternatives
 

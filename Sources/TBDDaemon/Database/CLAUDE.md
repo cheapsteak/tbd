@@ -2,9 +2,11 @@
 
 Migrations come in three shapes, and only one of them is for new work.
 
-- **The frozen `v1`–`v84` Swift block** in `Database.swift` — closures with
-  hand-picked `vN` identifiers. Those identifiers have run on user machines.
-  Read them, never edit them, never extend the sequence.
+- **The frozen Swift block** in `Database.swift` — closures with hand-picked
+  `vN` identifiers, `v1` through the identifier
+  `SchemaBaselineDriftTests.frozenBlockLastIdentifier` names. Those identifiers
+  have run on user machines. Read them, never edit them, never extend the
+  sequence.
 - **`.sql` files** under `Database/Migrations/`, named
   `YYYYMMDDHHMMSS_lower_snake_description.sql` and discovered from the
   `TBD_TBDDaemonLib` resource bundle at startup. **This is the default for
@@ -12,9 +14,9 @@ Migrations come in three shapes, and only one of them is for new work.
 - **The Swift escape hatch** — an entry in
   `SQLMigrationLoader.inlineTimestampMigrations`, carrying the same 14-digit
   identifier a file would. For the rare migration that needs procedural Swift
-  rather than DDL. Three of the 84 legacy migrations are that kind (`v10`,
-  `v14_worktree_location`, `v35_worktree_nullable_repo`); expect roughly that
-  rate.
+  rather than DDL. Three of the legacy `vN` migrations are that kind (`v10`,
+  `v14_worktree_location`, `v35_worktree_nullable_repo`) — a few percent of the
+  block; expect roughly that rate.
 
 The filename stem is the GRDB migration identifier:
 `20260819143000_add_thing.sql` registers as `20260819143000_add_thing`. That is
@@ -114,7 +116,7 @@ idempotent and mutually independent, which is exactly what the statement
 allowlist buys. Never write a migration that assumes an earlier timestamp
 already ran.
 
-`buildMigrator()` registers the frozen `v1`–`v84` block first, then the `.sql`
+`buildMigrator()` registers the frozen Swift block first, then the `.sql`
 files and inline Swift escape-hatch migrations merged into one
 identifier-sorted list. An escape-hatch migration therefore lands in authoring
 order among the files rather than at the end.
@@ -122,8 +124,8 @@ order among the files rather than at the end.
 ## Migration history is frozen
 
 A migration file that has landed on `origin/main` may not be modified or
-deleted, and the same goes for the `v1`–`v84` bodies. Those migrations have
-already run on user machines; editing one is either a no-op, because GRDB skips
+deleted, and the same goes for the frozen block's `vN` bodies. Those migrations
+have already run on user machines; editing one is either a no-op, because GRDB skips
 an identifier it has recorded, or a fresh divergence between one developer's
 schema and everyone else's. Fix a mistake with a new migration.
 
@@ -204,16 +206,23 @@ and GRDB's `hasBeenSuperseded` already covers that.
 
 ## The frozen baseline fixture
 
-`Tests/TBDDaemonTests/Fixtures/schema-baseline-v84.sql` is the schema `v1`–`v84`
-produce against an empty database. The lint's chain-apply check replays the
-`.sql` migrations against it without needing a Swift build, and
-`SchemaBaselineDriftTests` asserts the block still produces exactly that
-fixture.
+`Tests/TBDDaemonTests/Fixtures/schema-baseline-frozen-block.sql` is the schema
+the frozen Swift block produces against an empty database. The lint's
+chain-apply check replays the `.sql` migrations against it without needing a
+Swift build, and `SchemaBaselineDriftTests` asserts the block still produces
+exactly that fixture. The filename names no version, so extending the block's
+tail never renames a file.
 
 `scripts/gen-migration-baseline.sh` regenerates it, and should essentially never
 run: the block it snapshots is frozen. A diff against the committed fixture
 means the frozen block changed, which is the bug to chase — not a chore to
 resolve by committing the regenerated file.
+
+The one exception is a rebase that carries new `vN` migrations from `main` onto
+a branch, extending the block's tail. There the diff is legitimate, and it must
+consist of exactly the columns those migrations add — with
+`SchemaBaselineDriftTests.frozenBlockLastIdentifier` moved to the new tail.
+Anything else in the diff is the bug the warning is about.
 
 ## Splitter parity
 

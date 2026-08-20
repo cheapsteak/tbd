@@ -240,7 +240,8 @@ import Testing
 
     @Test func timestampIdentifierRecognition() {
         #expect(SQLMigrationLoader.isTimestampIdentifier("20260819120000_a"))
-        #expect(!SQLMigrationLoader.isTimestampIdentifier("v84_reap_records_process_description"))
+        #expect(!SQLMigrationLoader.isTimestampIdentifier(
+            SchemaBaselineDriftTests.frozenBlockLastIdentifier))
         #expect(!SQLMigrationLoader.isTimestampIdentifier("20260819120000"))
         #expect(!SQLMigrationLoader.isTimestampIdentifier("2026081912000_a"))
         #expect(!SQLMigrationLoader.isTimestampIdentifier("20260819120000-a"))
@@ -294,7 +295,8 @@ import Testing
     /// Zero files is the normal, inert state today: with only `v`-prefixed
     /// identifiers applied there is nothing to be missing.
     @Test func gateTwoStaysSilentWhenNoTimestampIdentifierWasApplied() throws {
-        let queue = try Self.makeAppliedIdentifiersQueue(["v1", "v84_reap_records_process_description"])
+        let queue = try Self.makeAppliedIdentifiersQueue(
+            ["v1", SchemaBaselineDriftTests.frozenBlockLastIdentifier])
         let reported = try queue.read { db in
             try SQLMigrationLoader.reportMissingResources(
                 db, discoveredIdentifiers: [], directoryPath: "/nowhere")
@@ -387,7 +389,7 @@ import Testing
 
         let identifiers = TBDDatabase.buildMigratorForTests().migrations
         #expect(identifiers.first == "v1")
-        #expect(identifiers.last == "v84_reap_records_process_description")
+        #expect(identifiers.last == SchemaBaselineDriftTests.frozenBlockLastIdentifier)
         #expect(!identifiers.contains(where: SQLMigrationLoader.isTimestampIdentifier))
     }
 
@@ -410,7 +412,7 @@ import Testing
             try String.fetchAll(db, sql: "SELECT identifier FROM grdb_migrations")
         }
         #expect(applied.contains("v1"))
-        #expect(applied.contains("v84_reap_records_process_description"))
+        #expect(applied.contains(SchemaBaselineDriftTests.frozenBlockLastIdentifier))
         #expect(applied.count == TBDDatabase.buildMigratorForTests().migrations.count)
     }
 

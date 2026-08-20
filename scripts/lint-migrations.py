@@ -15,7 +15,7 @@ closed instead of sailing through:
   filename-shape         `^\\d{14}_[a-z0-9_]+\\.sql$`, and nothing else in the
                          directory except `.gitkeep`.
   identifier-uniqueness  across the `.sql` stems, the inline Swift
-                         escape-hatch list, and the frozen `v1`-`v84` names.
+                         escape-hatch list, and the frozen Swift block's names.
   statement-allowlist    every statement leads with one of the nine permitted
                          forms.
   idempotent-ddl         `CREATE TABLE`/`CREATE INDEX` carry `IF NOT EXISTS`;
@@ -67,7 +67,7 @@ from pathlib import Path
 MIGRATIONS_DIR = Path("Sources/TBDDaemon/Database/Migrations")
 DATABASE_SWIFT = Path("Sources/TBDDaemon/Database/Database.swift")
 LOADER_SWIFT = Path("Sources/TBDDaemon/Database/SQLMigrationLoader.swift")
-BASELINE_SQL = Path("Tests/TBDDaemonTests/Fixtures/schema-baseline-v84.sql")
+BASELINE_SQL = Path("Tests/TBDDaemonTests/Fixtures/schema-baseline-frozen-block.sql")
 
 # The one non-`.sql` entry the directory may hold: what lets git track the
 # directory while it is empty, and what `.copy` carries verbatim into the
