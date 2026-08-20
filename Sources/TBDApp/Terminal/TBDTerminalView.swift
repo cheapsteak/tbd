@@ -241,6 +241,28 @@ class TBDTerminalView: TerminalView {
 
     /// Pure font-metric calculation, exposed so AppState can compute cols/rows
     /// for a px area without a live `TBDTerminalView` instance.
+    ///
+    /// APPROXIMATION, deliberately. SwiftTerm's own `computeFontDimensions()`
+    /// snaps both axes to device pixels before using them, and this mirror
+    /// cannot: it is static and view-less, so it has no `backingScaleFactor()`
+    /// to snap against — which is the whole reason AppState can call it without
+    /// a live view.
+    ///
+    ///     upstream width:  (advancement * scale).rounded() / scale
+    ///     upstream height: ceil(h * scale) / scale
+    ///     here:            raw advancement, and ceil(h) in POINTS
+    ///
+    /// So this runs up to one device pixel per cell small (<= 0.5pt at 2x)
+    /// against what SwiftTerm actually renders. It has always diverged; the
+    /// 16c5286 bump narrowed it, since upstream moved width from `ceil` to
+    /// round-to-nearest (87a7888) and round sits closer to the raw advancement
+    /// than ceil did.
+    ///
+    /// It matters because a cols/rows count computed here and sent to tmux is
+    /// the same desync class `ControlModeGeometry` documents — SwiftTerm
+    /// believing a size tmux never adopted. Fix it by threading the target
+    /// screen's scale in and snapping identically, the moment anyone observes
+    /// an off-by-one column against a real pane rather than a computed one.
     static func cellDimensions(for font: NSFont) -> (width: CGFloat, height: CGFloat) {
         let glyph = font.glyph(withName: "W")
         let cellWidth = font.advancement(forGlyph: glyph).width

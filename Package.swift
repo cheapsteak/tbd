@@ -42,10 +42,11 @@ let package = Package(
         // `deinit` and `terminate()` are unchanged from dae32cc, so it does NOT
         // reap its own children on the teardown paths TBD uses. `1c3f353` only
         // fixes lost exit events for FAST-EXITING children, which is a different
-        // population from the 67 long-lived zombies of #611. Re-verify again on
-        // the next bump:
-        // it exists because at this revision `LocalProcess` calls `waitpid`
-        // only from its `DispatchSourceProcess` (`.exit`) handler, and both
+        // population from the 67 long-lived zombies of #611.
+        //
+        // Re-verify again on the next bump, because the reason ChildReaper
+        // exists is a property of the pinned revision: upstream reaps only
+        // from its `DispatchSourceProcess` (`.exit`) handler, and both
         // `deinit` and `terminate()` cancel that source before the child
         // actually exits — so TBD must reap the PTY child itself. If a later
         // revision reaps its own children, `ChildReaper` becomes a competing
