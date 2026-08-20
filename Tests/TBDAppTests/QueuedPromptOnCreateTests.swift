@@ -38,6 +38,11 @@ struct QueuedPromptOnCreateTests {
         /// needs to see both.
         var parkedAll: [(worktreeID: UUID, text: String?, submit: Bool)] = []
         var parkResult: WorktreeSetPendingPromptResult = .parkedForSpawn
+        /// Makes the parking RPC itself fail — a dropped socket rather than a
+        /// refusal the daemon composed. Thrown after the call is recorded, so
+        /// "the RPC went out and nothing came back parked" is what the test
+        /// sees.
+        var parkError: Error?
         var createError: Error?
         var flagWrites: [Bool] = []
         /// Everything written to the pasteboard. Stubbed on every state this
@@ -100,6 +105,7 @@ struct QueuedPromptOnCreateTests {
         }
         state.pendingPromptSetter = { @MainActor worktreeID, text, submit in
             harness.calls.append(RPCMethod.worktreeSetPendingPrompt)
+            if let parkError = harness.parkError { throw parkError }
             harness.parked = (worktreeID, text, submit)
             harness.parkedAll.append((worktreeID, text, submit))
             return harness.parkResult
@@ -352,6 +358,33 @@ struct QueuedPromptOnCreateTests {
             // The alert names the reason AND where the text went, so neither
             // fact can arrive without the other.
             #expect(state.alertMessage?.contains("not an agent") == true)
+            #expect(state.alertMessage?.contains("copied to your clipboard") == true)
+            #expect(state.alertIsError)
+        }
+    }
+
+    /// The third way parking can end without the text in the column, and the
+    /// likeliest one in the field: the RPC never completed. A refusal at least
+    /// proves the daemon read the message; a dropped socket does not, so the
+    /// hand-back matters here most.
+    @Test("A parking RPC that throws hands the composed text back too")
+    func transportFailureKeepsTheComposedTextRecoverable() async throws {
+        try await withAppState { state in
+            let repoID = UUID()
+            let created = daemonWorktree(repoID: repoID)
+            let harness = Harness()
+            harness.parkError = StubError()
+            arm(state, harness, created: created)
+            state.daemonCapabilities = capabilities(queuedPrompt: true)
+
+            state.createWorktree(repoID: repoID)
+            let target = try #require(state.queuedPromptTarget)
+            state.submitQueuedPrompt(target, text: "the socket died", submit: true)
+
+            await waitUntil("alert") { state.alertMessage != nil }
+            #expect(harness.calls.contains(RPCMethod.worktreeSetPendingPrompt))
+            #expect(harness.parked == nil)
+            #expect(harness.copied == ["the socket died"])
             #expect(state.alertMessage?.contains("copied to your clipboard") == true)
             #expect(state.alertIsError)
         }
