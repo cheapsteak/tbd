@@ -5,23 +5,28 @@ Runs in the build-free `lint` CI job and the pre-push hook. It needs no
 SwiftPM, no compiler and no database on disk: the whole pass is a directory
 listing, a few regexes, a `git diff`, and one in-memory SQLite replay.
 
-Six checks, every one whitelist-shaped — each asserts what is *permitted*
+Seven checks, every one whitelist-shaped — each asserts what is *permitted*
 rather than enumerating what is banned, so a form nobody anticipated fails
 closed instead of sailing through:
 
+  file-encoding          the bytes are LF-terminated UTF-8 with no BOM and no
+                         NUL, so the Swift loader and this script read the same
+                         characters.
   filename-shape         `^\\d{14}_[a-z0-9_]+\\.sql$`, and nothing else in the
                          directory except `.gitkeep`.
   identifier-uniqueness  across the `.sql` stems, the inline Swift
                          escape-hatch list, and the frozen `v1`-`v84` names.
-  statement-allowlist    every statement leads with one of the eleven
-                         permitted forms.
+  statement-allowlist    every statement leads with one of the nine permitted
+                         forms.
   idempotent-ddl         `CREATE TABLE`/`CREATE INDEX` carry `IF NOT EXISTS`;
                          `DROP` carries `IF EXISTS`.
-  history-frozen         every migration file that differs from the merge base
-                         with origin/main is an ADDITION.
+  history-frozen         no migration file already on origin/main is edited or
+                         deleted, checked both against the merge base and
+                         blob-by-blob against origin/main itself.
   chain-applies          the committed baseline schema plus every `.sql`
                          migration, in identifier order, replays into an empty
-                         in-memory database without error.
+                         in-memory database — inside a transaction, with
+                         foreign keys enforced, exactly as GRDB runs them.
 
 Two pieces here are deliberate duplicates of
 `Sources/TBDDaemon/Database/SQLMigrationLoader.swift`, and both are pinned
@@ -47,6 +52,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import codecs
 import json
 import re
 import sqlite3
@@ -69,6 +75,79 @@ BASELINE_SQL = Path("Tests/TBDDaemonTests/Fixtures/schema-baseline-v84.sql")
 GITKEEP = ".gitkeep"
 
 FILENAME_RE = re.compile(r"^\d{14}_[a-z0-9_]+\.sql$")
+
+# --------------------------------------------------------------------------
+# Reading a migration file
+# --------------------------------------------------------------------------
+
+# NO NEWLINE TRANSLATION, DELIBERATELY. `Path.read_text()` opens in text mode
+# with universal newlines, which rewrites `\r\n` and a lone `\r` to `\n`
+# before anything here can see them — so a file the Swift loader reads
+# verbatim through `String(contentsOf:)` would reach this script as different
+# characters, and the two splitters would be compared on two different inputs.
+# Reading bytes and decoding once keeps them honest, and lets `file_encoding_problem`
+# below speak about what is actually on disk.
+
+
+def read_migration_bytes(path: Path) -> bytes:
+    return path.read_bytes()
+
+
+def file_encoding_problem(display_path: Path, raw: bytes) -> str | None:
+    """Why these bytes are not a migration file, or None if they are fine.
+
+    Three of the four cases are ways for the loader and this script to read
+    one file as two different things, which is the whole reason the check
+    exists rather than letting each side cope in its own way:
+
+      * A **BOM** is stripped by Swift's `String(contentsOf:)` and kept by
+        Python's decoder, so the first statement would carry an invisible
+        leading character here and not there.
+      * A **CR** is where the two splitters have actually diverged: Swift
+        iterates graphemes, and a `\r\n` pair is one Character that is not the
+        `\n` a leading-comment scan looks for, so a statement introduced by a
+        `--` comment can be dropped on one side and kept on the other. Both
+        sides handle CRLF now; rejecting it outright is the defence in depth
+        that keeps a loader regression from ever reaching a real migration.
+      * A **NUL** is a hard stop for `sqlite3.complete_statement`, which
+        raises `ValueError` rather than answering, and for SQLite's C API,
+        which treats the byte as end of string.
+
+    Rejecting all of them costs one pass over the bytes and means neither
+    reader ever has to be the one that gets it right.
+    """
+    if raw.startswith(codecs.BOM_UTF8):
+        return (
+            f"{display_path}: starts with a UTF-8 byte-order mark. Swift's reader strips a BOM and "
+            "Python's keeps it, so the two would disagree about the first statement. Save the file "
+            "as UTF-8 with no BOM."
+        )
+    if b"\x00" in raw:
+        # Bound outside the f-string: a backslash escape inside an f-string
+        # expression is a syntax error before Python 3.12.
+        offset = raw.index(b"\x00")
+        return (
+            f"{display_path}: contains a NUL byte (0x00) at offset {offset}. A migration "
+            "file is UTF-8 SQL text; SQLite's C API reads a NUL as end of string and Python's "
+            "`sqlite3.complete_statement` refuses to answer at all, so neither side can split it. "
+            "The usual cause is a binary file saved under a `.sql` name."
+        )
+    if b"\r" in raw:
+        line = raw[: raw.index(b"\r")].count(b"\n") + 1
+        return (
+            f"{display_path}: contains a carriage return (CR, 0x0D) on line {line}. Migration files "
+            "must use LF line endings. CR is the one byte the Swift loader and this lint have "
+            "historically split differently — a `\\r\\n` is a single Swift Character and not the "
+            "`\\n` a leading-comment scan looks for — and a migration whose statements are enumerated "
+            "differently at runtime than at lint time is the failure this rejects outright. Convert "
+            "the file with `tr -d '\\r'`."
+        )
+    try:
+        raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        return f"{display_path}: is not valid UTF-8 ({error}). A migration file is UTF-8 SQL text."
+    return None
+
 
 # --------------------------------------------------------------------------
 # The splitter — see the module docstring for why this exists twice
@@ -175,18 +254,29 @@ def column_exists(connection: sqlite3.Connection, table: str, column: str) -> bo
 # edit with a reviewer, which is the point: every addition is a claim that the
 # new form is idempotent and order-independent, because a developer who has
 # already applied a later migration will run this one out of authoring order.
+#
+# TWO FORMS ARE ABSENT BECAUSE THEY FAIL EXACTLY THAT CLAIM, and both look
+# harmless enough to be re-proposed:
+#
+#   ALTER TABLE ... RENAME  has no `IF EXISTS` spelling and no loader-side
+#                           skip, so it can be neither replayed nor reordered.
+#   PRAGMA foreign_keys     is a documented no-op inside a transaction, and
+#                           GRDB runs every migration inside one — so it would
+#                           appear to work in any standalone replay and
+#                           silently do nothing in production.
+#
+# Both belong to the Swift escape hatch, where GRDB's `foreignKeyChecks:`
+# parameter handles the table-rebuild case properly.
 ALLOWED_FORMS: list[tuple[str, str]] = [
     ("CREATE TABLE", r"CREATE\s+TABLE\b"),
     ("CREATE [UNIQUE] INDEX", r"CREATE\s+(?:UNIQUE\s+)?INDEX\b"),
     ("ALTER TABLE ... ADD [COLUMN]", r"ALTER\s+TABLE\s+" + IDENTIFIER + r"\s+ADD\b"),
-    ("ALTER TABLE ... RENAME", r"ALTER\s+TABLE\s+" + IDENTIFIER + r"\s+RENAME\b"),
     ("DROP TABLE", r"DROP\s+TABLE\b"),
     ("DROP INDEX", r"DROP\s+INDEX\b"),
     ("INSERT OR IGNORE", r"INSERT\s+OR\s+IGNORE\b"),
     ("INSERT OR REPLACE", r"INSERT\s+OR\s+REPLACE\b"),
     ("UPDATE", r"UPDATE\b"),
     ("DELETE FROM", r"DELETE\s+FROM\b"),
-    ("PRAGMA", r"PRAGMA\b"),
 ]
 
 ALLOWED_RES = [(name, re.compile(pattern, re.IGNORECASE | re.DOTALL)) for name, pattern in ALLOWED_FORMS]
@@ -226,6 +316,7 @@ class Facts:
         self.entries: list[str] = []
         self.migrations: list[tuple[str, str]] = []  # (identifier, sql), identifier-sorted
         self.read_errors: list[str] = []
+        self.encoding_problems: list[str] = []
 
         if not self.directory.is_dir():
             self.read_errors.append(f"{MIGRATIONS_DIR} does not exist or is not a directory")
@@ -233,11 +324,19 @@ class Facts:
         self.entries = sorted(entry.name for entry in self.directory.iterdir())
         for name in sorted(name for name in self.entries if name.endswith(".sql")):
             try:
-                sql = (self.directory / name).read_text(encoding="utf-8")
+                raw = read_migration_bytes(self.directory / name)
             except OSError as error:
                 self.read_errors.append(f"{MIGRATIONS_DIR/name}: unreadable ({error})")
                 continue
-            self.migrations.append((name[: -len(".sql")], sql))
+            # A file whose bytes are wrong is reported once and then withheld
+            # from `migrations`, so no later check tries to split it. That is
+            # what turns a NUL byte from an uncaught `ValueError` traceback
+            # deep in the allowlist pass into one sentence naming the file.
+            problem = file_encoding_problem(MIGRATIONS_DIR / name, raw)
+            if problem is not None:
+                self.encoding_problems.append(problem)
+                continue
+            self.migrations.append((name[: -len(".sql")], raw.decode("utf-8")))
 
     def read_source(self, relative: Path) -> str | None:
         try:
@@ -256,7 +355,23 @@ class Facts:
 
 
 # --------------------------------------------------------------------------
-# Check 1 — filename shape
+# Check 1 — the bytes are readable the same way by both sides
+# --------------------------------------------------------------------------
+
+
+def check_file_encoding(facts: Facts) -> list[str]:
+    """Report what `Facts` found while reading, and withheld from `migrations`.
+
+    The detection happens at read time rather than here because it has to: a
+    NUL byte makes `sqlite3.complete_statement` raise `ValueError`, so a file
+    carrying one must never reach the splitter that the allowlist, idempotency
+    and chain-apply checks all run.
+    """
+    return list(facts.encoding_problems)
+
+
+# --------------------------------------------------------------------------
+# Check 2 — filename shape
 # --------------------------------------------------------------------------
 
 
@@ -273,7 +388,7 @@ def check_filename_shape(facts: Facts) -> list[str]:
 
 
 # --------------------------------------------------------------------------
-# Check 2 — identifier uniqueness
+# Check 3 — identifier uniqueness
 # --------------------------------------------------------------------------
 
 FROZEN_IDENTIFIER_RE = re.compile(r'registerMigration\(\s*"([^"]+)"')
@@ -343,7 +458,7 @@ def check_identifier_uniqueness(facts: Facts) -> list[str]:
 
 
 # --------------------------------------------------------------------------
-# Checks 3 and 4 — statement allowlist and idempotent DDL
+# Checks 4 and 5 — statement allowlist and idempotent DDL
 # --------------------------------------------------------------------------
 
 
@@ -385,11 +500,24 @@ def summarize(statement: str) -> str:
 
 
 # --------------------------------------------------------------------------
-# Check 5 — history is frozen
+# Check 6 — history is frozen
 # --------------------------------------------------------------------------
 
 
 def check_history_frozen(facts: Facts) -> list[str]:
+    problems = merge_base_edits(facts)
+    # TWO LEGS, COVERING DIFFERENT THINGS. Keep both.
+    problems.extend(frozen_blob_edits(facts))
+    return problems
+
+
+def merge_base_edits(facts: Facts) -> list[str]:
+    """Every migration changed since the merge base must be an ADDITION.
+
+    This is the leg that sees deletions and renames — a file gone from HEAD
+    has no blob to compare — and it is the only one that can speak about a
+    file the base branch has never held.
+    """
     code, base = facts.git("merge-base", facts.base_ref, "HEAD")
     if code != 0 or not base.strip():
         return [
@@ -424,8 +552,67 @@ def check_history_frozen(facts: Facts) -> list[str]:
     return problems
 
 
+def frozen_blob_edits(facts: Facts) -> list[str]:
+    """Every migration ALSO on the base branch must be byte-identical there.
+
+    THE MERGE-BASE LEG ABOVE FAILS OPEN ON A STALE BASE REF, and the layer
+    that suffers is the pre-push hook: CI fetches immediately before it lints,
+    a developer's `origin/main` is whatever they last fetched. Where the base
+    branch already carries a migration but the merge base predates it — the
+    branch picked the file up by cherry-pick or rebase rather than by merging
+    the fetched ref — editing that file in place reads as an ADDITION relative
+    to the merge base and sails through.
+
+    Comparing blob hashes is immune to that, because it asks the base branch
+    about the file directly and never consults the merge base at all. It stays
+    silent about a path the base branch holds and HEAD does not: on a branch
+    that simply has not caught up, that is an ordinary main-side addition
+    rather than a deletion, and the merge-base leg is what tells the two apart.
+    """
+    base = sql_blobs(facts, facts.base_ref)
+    if base is None:
+        # An unresolvable base ref is already reported by the merge-base leg.
+        return []
+    head = sql_blobs(facts, "HEAD") or {}
+    problems = []
+    for path, base_blob in sorted(base.items()):
+        head_blob = head.get(path)
+        if head_blob is None or head_blob == base_blob:
+            continue
+        problems.append(
+            f"{path}: migration history is frozen — this file is already on `{facts.base_ref}` "
+            f"and HEAD changes its contents ({base_blob[:12]} -> {head_blob[:12]}). It has already "
+            "run on somebody's machine under this identifier, so GRDB will never re-run it; the "
+            "edit reaches new installs only. Add a new migration instead."
+        )
+    return problems
+
+
+def sql_blobs(facts: Facts, ref: str) -> dict[str, str] | None:
+    """`{path: blob hash}` for the `.sql` files that `ref` holds, or None.
+
+    One `ls-tree` per ref rather than a `rev-parse` per file: the listing
+    already carries the hashes, and a directory that only ever grows should not
+    cost two subprocesses per migration forever.
+    """
+    code, listing = facts.git("ls-tree", "-r", "-z", ref, "--", str(MIGRATIONS_DIR))
+    if code != 0:
+        return None
+    blobs = {}
+    for entry in listing.split("\0"):
+        if not entry:
+            continue
+        # `<mode> <type> <object>\t<path>`
+        meta, _, path = entry.partition("\t")
+        fields = meta.split()
+        if len(fields) < 3 or fields[1] != "blob" or not path.endswith(".sql"):
+            continue
+        blobs[path] = fields[2]
+    return blobs
+
+
 # --------------------------------------------------------------------------
-# Check 6 — the chain applies
+# Check 7 — the chain applies
 # --------------------------------------------------------------------------
 
 
@@ -433,15 +620,48 @@ def check_chain_applies(facts: Facts) -> list[str]:
     baseline = facts.read_source(BASELINE_SQL)
     if baseline is None:
         return [f"{BASELINE_SQL}: unreadable, cannot replay the migration chain"]
-    # isolation_level=None: no implicit transactions, so each statement lands
-    # exactly as the loader's `db.execute(sql:)` would.
+    # REPLAY IN PRODUCTION'S ENVIRONMENT, NOT PYTHON'S DEFAULT ONE. Two
+    # settings, and each of them decides whether a real class of defect is
+    # visible here or waits until a user's daemon runs the migration:
+    #
+    #   foreign_keys=ON       Python's sqlite3 leaves foreign keys OFF; GRDB
+    #                         sets `foreignKeysEnabled = true`. Without this an
+    #                         FK-violating migration replays green and throws
+    #                         at runtime.
+    #   one transaction per   GRDB wraps each migration in
+    #   migration             `db.inTransaction(.immediate)`. Deferred
+    #                         constraints are checked at COMMIT, so autocommit
+    #                         both misses violations that only surface there
+    #                         and rejects statement orders that are legal
+    #                         inside a transaction.
+    #
+    # `isolation_level=None` turns off Python's own implicit transaction
+    # management so the BEGIN/COMMIT below are the only ones in play. The
+    # PRAGMA has to precede them: inside a transaction it is a documented
+    # no-op, which is also why the statement allowlist refuses it.
     connection = sqlite3.connect(":memory:", isolation_level=None)
+    connection.execute("PRAGMA foreign_keys=ON")
     try:
         connection.executescript(baseline)
     except sqlite3.Error as error:
         return [f"{BASELINE_SQL}: the frozen baseline itself failed to replay ({error})"]
     problems = []
     for identifier, sql in facts.migrations:
+        problems.extend(replay_one(connection, identifier, sql))
+    connection.close()
+    return problems
+
+
+def replay_one(connection: sqlite3.Connection, identifier: str, sql: str) -> list[str]:
+    """Apply one migration in its own transaction, as GRDB does.
+
+    A failure rolls that migration back and reporting continues with the next
+    one, so a single bad statement yields one diagnostic rather than a cascade
+    of "no such table" from every migration that followed it.
+    """
+    problems = []
+    connection.execute("BEGIN IMMEDIATE")
+    try:
         for statement in split_statements(sql):
             target = add_column_target(statement)
             if target and column_exists(connection, target[0], target[1]):
@@ -453,7 +673,18 @@ def check_chain_applies(facts: Facts) -> list[str]:
                     f"{MIGRATIONS_DIR/identifier}.sql: failed to apply against the schema the "
                     f"preceding migrations produce ({error}). Statement: {summarize(statement)}"
                 )
-    connection.close()
+                raise
+        connection.execute("COMMIT")
+    except sqlite3.Error as error:
+        connection.execute("ROLLBACK")
+        if not problems:
+            # Nothing failed statement-by-statement, so the COMMIT itself did:
+            # a deferred constraint the transaction was holding open.
+            problems.append(
+                f"{MIGRATIONS_DIR/identifier}.sql: the migration's transaction failed to commit "
+                f"({error}). A deferred constraint is checked at COMMIT, so the offending statement "
+                "is not necessarily the last one."
+            )
     return problems
 
 
@@ -463,6 +694,7 @@ def check_chain_applies(facts: Facts) -> list[str]:
 
 # One line per guard, so a mutation harness can disable exactly one.
 CHECKS = [
+    ("file-encoding", check_file_encoding),
     ("filename-shape", check_filename_shape),
     ("identifier-uniqueness", check_identifier_uniqueness),
     ("statement-allowlist", check_statement_allowlist),
@@ -473,8 +705,14 @@ CHECKS = [
 
 
 def emit_split(path: Path) -> int:
-    """Print this side's statement boundaries in the parity fixture's format."""
-    print(json.dumps(split_statements(path.read_text(encoding="utf-8")), indent=2))
+    """Print this side's statement boundaries in the parity fixture's format.
+
+    Read as bytes for the reason at the top of this file: the parity fixture
+    includes a CRLF case, and `read_text()` would translate it away before the
+    splitter saw it — making this side agree with a loader bug instead of with
+    the loader.
+    """
+    print(json.dumps(split_statements(read_migration_bytes(path).decode("utf-8")), indent=2))
     return 0
 
 

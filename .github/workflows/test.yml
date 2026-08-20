@@ -74,10 +74,10 @@ jobs:
       - name: Lint SQL migrations
         run: python3 scripts/lint-migrations.py
 
-      # `Migrations/` ships empty, so on this tree four of the six guards have
-      # nothing real to act on. This harness is the only exercise they get: one
-      # fixture per guard that must fail, plus a mutation that disables the
-      # guard and proves its fixture then passes.
+      # `Migrations/` ships empty, so on this tree every guard but
+      # history-frozen has nothing real to act on. This harness is the only
+      # exercise they get: one fixture per guard that must fail, plus a
+      # mutation that disables the guard and proves its fixture then passes.
       - name: Test the migration lint
         run: bash scripts/lint-migrations.test.sh
 

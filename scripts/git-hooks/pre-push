@@ -29,8 +29,20 @@ if ! command -v swiftlint &>/dev/null; then
   exit 1
 fi
 
-# Determine merge base; fall back to HEAD~1 if origin/main isn't fetched.
-base="$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD~1)"
+# Determine merge base; fall back to HEAD~1, then HEAD, if origin/main isn't
+# fetched — a shallow clone, or a fresh one that has never fetched main. BOTH
+# passes below share it, and neither may hard-fail over a ref the pusher cannot
+# conjure: a hook that blocks every push because origin/main is missing is a
+# hook that gets disabled, and it punishes work that touched neither Swift nor
+# SQL. Falling back narrows what each pass can see (HEAD~1 compares only the
+# last commit; HEAD compares nothing) and says so, rather than refusing.
+if base="$(git merge-base origin/main HEAD 2>/dev/null)"; then
+  :
+else
+  base="$(git rev-parse --verify --quiet 'HEAD~1' || git rev-parse --verify HEAD)"
+  echo "[pre-push] origin/main is unfetched or shallow — comparing against ${base} instead."
+  echo "[pre-push] Run 'git fetch origin main' for the full check; CI fetches and runs it either way."
+fi
 
 # macOS ships bash 3.2 (no `mapfile`) and the hook runs under `set -u`,
 # so we read the file list with a portable while-loop and seed the array
@@ -53,7 +65,7 @@ fi
 # the push rather than after: a migration edited in place is already applied
 # under its old name on somebody's machine.
 echo "[pre-push] Linting SQL migrations..."
-python3 scripts/lint-migrations.py
+python3 scripts/lint-migrations.py --base "$base"
 
 if [ "${TBD_SKIP_PREPUSH_TESTS:-}" = "1" ]; then
   echo "[pre-push] TBD_SKIP_PREPUSH_TESTS=1 — skipping the guarded test pass."

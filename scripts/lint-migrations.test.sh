@@ -8,9 +8,9 @@
 # the four files the lint reads, and runs the lint against it with
 # `--repo-root`. The whole file runs in seconds on a shared box.
 #
-# THE MIGRATIONS DIRECTORY SHIPS EMPTY, so on the real tree checks 1-4 and 6
-# have nothing to act on. These fixtures are the only exercise those guards
-# ever get; the harness is the deliverable, not the afterthought.
+# THE MIGRATIONS DIRECTORY SHIPS EMPTY, so on the real tree every check except
+# history-frozen has nothing to act on. These fixtures are the only exercise
+# those guards ever get; the harness is the deliverable, not the afterthought.
 #
 # EVERY GUARD IS MUTATION-CHECKED. `mutant_of` builds a copy of the lint with
 # one guard deliberately disabled, the case re-runs against it, and the verdict
@@ -22,6 +22,10 @@
 #                                migration fails the chain replay.
 #   the three-dot merge base     with a two-dot diff, a branch cut before an
 #                                unrelated migration landed on main reddens.
+#   the per-migration            without it the replay runs in autocommit,
+#   transaction                  where a deferred constraint is checked after
+#                                every statement rather than at COMMIT, and a
+#                                migration GRDB would apply happily reddens.
 #
 # GIT_CONFIG_GLOBAL/SYSTEM ARE FENCED TO /dev/null below. The developer's
 # global `commit.gpgsign` would otherwise make every fixture commit prompt for
@@ -49,6 +53,7 @@ FAIL=0
 assert_ok()       { if [[ "$2" == "0" ]]; then echo "ok   - $1"; else echo "FAIL - $1: expected exit 0, got $2"; echo "$3" | sed 's/^/       /'; FAIL=1; fi; }
 assert_nonzero()  { if [[ "$2" != "0" ]]; then echo "ok   - $1"; else echo "FAIL - $1: expected a non-zero exit, got 0"; FAIL=1; fi; }
 assert_contains() { if [[ "$2" == *"$3"* ]]; then echo "ok   - $1"; else echo "FAIL - $1: output lacks [$3]"; echo "$2" | sed 's/^/       /'; FAIL=1; fi; }
+assert_lacks()    { if [[ "$2" != *"$3"* ]]; then echo "ok   - $1"; else echo "FAIL - $1: output contains [$3]"; echo "$2" | sed 's/^/       /'; FAIL=1; fi; }
 assert_eq()       { if [[ "$2" == "$3" ]]; then echo "ok   - $1"; else echo "FAIL - $1: expected [$3] got [$2]"; FAIL=1; fi; }
 mktmpd()          { mktemp -d "${TMPDIR:-/tmp}/lintmig-test.XXXXXX"; }
 
@@ -57,7 +62,12 @@ mktmpd()          { mktemp -d "${TMPDIR:-/tmp}/lintmig-test.XXXXXX"; }
 MUTANT_DIR="$(mktmpd)"
 MUTANT_SEQ=0
 FIXTURES=()
-trap 'rm -rf "$MUTANT_DIR" "${FIXTURES[@]}"' EXIT
+# `${FIXTURES[@]+"${FIXTURES[@]}"}` rather than a bare `"${FIXTURES[@]}"`: this
+# file runs under `set -u`, and macOS's bash 3.2 treats an EMPTY array as an
+# unbound variable. A case that died before the first `mkrepo` would then make
+# the trap itself error out, leaving the mutant directory on disk — cleanup
+# failing exactly in the situation cleanup exists for.
+trap 'rm -rf "$MUTANT_DIR" ${FIXTURES[@]+"${FIXTURES[@]}"}' EXIT
 
 mutant_of() {
   local sed_expr="$1" out
@@ -111,19 +121,19 @@ run_lint() {
 }
 
 # Every statement form the allowlist permits, in one file that also replays
-# cleanly against the frozen baseline. The positive control for checks 3, 4
-# and 6: if this ever reddens, a guard has become stricter than the spec.
+# cleanly against the frozen baseline. The positive control for the allowlist,
+# idempotency and chain-apply guards: if this ever reddens, one of them has
+# become stricter than the spec. `ALTER TABLE ... RENAME` and `PRAGMA` are
+# absent deliberately and have negative cases of their own below.
 ALL_ALLOWED_FORMS='CREATE TABLE IF NOT EXISTS lint_probe (id TEXT PRIMARY KEY, note TEXT);
 CREATE INDEX IF NOT EXISTS lint_probe_note ON lint_probe (note);
 CREATE UNIQUE INDEX IF NOT EXISTS lint_probe_id ON lint_probe (id);
 ALTER TABLE lint_probe ADD COLUMN added_at DATETIME;
 ALTER TABLE lint_probe ADD extra TEXT;
-ALTER TABLE lint_probe RENAME COLUMN extra TO extra2;
 INSERT OR IGNORE INTO lint_probe (id, note) VALUES ('"'"'a'"'"', '"'"'x;y'"'"');
 INSERT OR REPLACE INTO lint_probe (id, note) VALUES ('"'"'a'"'"', '"'"'z'"'"');
 UPDATE lint_probe SET note = '"'"'q'"'"' WHERE id = '"'"'a'"'"';
 DELETE FROM lint_probe WHERE id = '"'"'b'"'"';
-PRAGMA foreign_keys = ON;
 DROP INDEX IF EXISTS lint_probe_note;
 DROP TABLE IF EXISTS lint_probe;'
 
@@ -134,7 +144,7 @@ DROP TABLE IF EXISTS lint_probe;'
 test_real_tree_lints_clean() {
   run_lint "$SCRIPT" "$ROOT"
   assert_ok "the repository's own tree lints clean" "$RUN_RC" "$RUN_OUT"
-  assert_contains "reports the check count" "$RUN_OUT" "6 checks"
+  assert_contains "reports the check count" "$RUN_OUT" "7 checks"
 }
 
 test_empty_directory_is_accepted() {
@@ -149,7 +159,7 @@ test_every_allowed_form_passes() {
   write_migration "$d" "20260819120000_every_allowed_form.sql" "$ALL_ALLOWED_FORMS"
   commit_fixture "$d" "add migration"
   run_lint "$SCRIPT" "$d"
-  assert_ok "all eleven permitted forms lint clean and replay" "$RUN_RC" "$RUN_OUT"
+  assert_ok "all nine permitted forms lint clean and replay" "$RUN_RC" "$RUN_OUT"
   assert_contains "counts the migration" "$RUN_OUT" "1 .sql migration(s)"
 }
 
@@ -187,7 +197,82 @@ test_comment_only_trailer_rule_is_live() {
 }
 
 # ---------------------------------------------------------------------------
-# Check 1 — filename shape
+# Check 1 — the bytes both readers see
+#
+# Written with `printf` straight into the file rather than through
+# `write_migration`, because a shell variable cannot carry a NUL byte and
+# `$(...)` strips them.
+# ---------------------------------------------------------------------------
+
+# `MUTANT_ENCODING` disables the guard. Every case below is then expected to
+# PASS, because a file the guard rejects is also withheld from the migration
+# list — which is what keeps a NUL byte from reaching the splitter.
+MUTANT_ENCODING='/\("file-encoding", check_file_encoding\),/d'
+
+test_crlf_line_endings_are_rejected() {
+  local d mutant; d="$(mkrepo)"
+  # Valid SQL by every other guard: on the allowlist, idempotent, and it
+  # replays. Only the line endings are wrong.
+  printf 'CREATE TABLE IF NOT EXISTS lint_crlf (x TEXT);\r\n' \
+    > "$d/$MIGRATIONS_REL/20260317000000_crlf.sql"
+  commit_fixture "$d" "add a CRLF migration"
+  run_lint "$SCRIPT" "$d"
+  assert_nonzero "a migration with CRLF line endings fails" "$RUN_RC"
+  assert_contains "names the byte" "$RUN_OUT" "contains a carriage return (CR, 0x0D) on line 1"
+  assert_contains "says how to fix it" "$RUN_OUT" "tr -d"
+
+  mutant="$(mutant_of "$MUTANT_ENCODING")"
+  run_lint "$mutant" "$d"
+  assert_ok "mutation: without the encoding guard, CRLF sails through" "$RUN_RC" "$RUN_OUT"
+}
+
+# The CRLF guard covers migration files ONLY. The splitter-parity fixture under
+# Tests/ is deliberately CRLF in one case — that is the input both splitters
+# have to agree on — and must never be caught by this.
+test_the_parity_fixture_is_not_a_migration_file() {
+  run_lint "$SCRIPT" "$ROOT"
+  assert_ok "the real tree still lints clean with the encoding guard live" "$RUN_RC" "$RUN_OUT"
+  assert_lacks "and says nothing about the parity fixture" "$RUN_OUT" "MigrationSplitter"
+}
+
+test_a_nul_byte_is_reported_rather_than_thrown() {
+  local d mutant; d="$(mkrepo)"
+  printf 'CREATE TABLE IF NOT EXISTS lint_nul (x TEXT);\000\n' \
+    > "$d/$MIGRATIONS_REL/20260318000000_nul.sql"
+  commit_fixture "$d" "add a migration holding a NUL byte"
+  run_lint "$SCRIPT" "$d"
+  assert_nonzero "a migration holding a NUL byte fails" "$RUN_RC"
+  assert_contains "names the byte and its offset" "$RUN_OUT" "contains a NUL byte (0x00) at offset 45"
+  # THE POINT OF THE CASE. `sqlite3.complete_statement` raises ValueError on a
+  # NUL, so without the guard the lint dies with a stack trace naming a Python
+  # function instead of telling the author which file is wrong.
+  assert_lacks "and does not die with a traceback" "$RUN_OUT" "Traceback"
+
+  mutant="$(mutant_of "$MUTANT_ENCODING")"
+  run_lint "$mutant" "$d"
+  assert_ok "mutation: without the encoding guard, the NUL file is not even read" "$RUN_RC" "$RUN_OUT"
+}
+
+test_a_utf8_bom_is_rejected() {
+  local d mutant; d="$(mkrepo)"
+  printf '\xEF\xBB\xBFCREATE TABLE IF NOT EXISTS lint_bom (x TEXT);\n' \
+    > "$d/$MIGRATIONS_REL/20260319000000_bom.sql"
+  commit_fixture "$d" "add a BOM-prefixed migration"
+  run_lint "$SCRIPT" "$d"
+  assert_nonzero "a migration starting with a UTF-8 BOM fails" "$RUN_RC"
+  assert_contains "names the mark" "$RUN_OUT" "starts with a UTF-8 byte-order mark"
+  # Without the guard the BOM reaches the allowlist as an invisible leading
+  # character and the author is told their CREATE TABLE is not a permitted
+  # form, which is true and useless.
+  assert_lacks "rather than blaming the statement" "$RUN_OUT" "not one of the permitted forms"
+
+  mutant="$(mutant_of "$MUTANT_ENCODING")"
+  run_lint "$mutant" "$d"
+  assert_ok "mutation: without the encoding guard, the BOM file is not even read" "$RUN_RC" "$RUN_OUT"
+}
+
+# ---------------------------------------------------------------------------
+# Check 2 — filename shape
 # ---------------------------------------------------------------------------
 
 test_filename_shape() {
@@ -213,7 +298,7 @@ test_stray_file_in_the_directory() {
 }
 
 # ---------------------------------------------------------------------------
-# Check 2 — identifier uniqueness
+# Check 3 — identifier uniqueness
 # ---------------------------------------------------------------------------
 
 test_identifier_uniqueness() {
@@ -236,7 +321,7 @@ test_identifier_uniqueness() {
 }
 
 # ---------------------------------------------------------------------------
-# Check 3 — statement allowlist
+# Check 4 — statement allowlist
 # ---------------------------------------------------------------------------
 
 test_statement_allowlist() {
@@ -255,8 +340,43 @@ test_statement_allowlist() {
   assert_ok "mutation: without the allowlist, the same tree passes" "$RUN_RC" "$RUN_OUT"
 }
 
+# The two forms the spec deliberately keeps OFF the list. Both are valid SQL
+# that replays fine here, so only the allowlist can object — and both are
+# plausible enough that someone will propose re-adding them.
+
+test_alter_table_rename_is_not_permitted() {
+  local d mutant; d="$(mkrepo)"
+  # RENAME has no `IF EXISTS` spelling and no loader-side skip, so it can be
+  # neither replayed nor reordered. `tab` is in the baseline, so this applies.
+  write_migration "$d" "20260320000000_rename.sql" "ALTER TABLE tab RENAME TO tab_renamed;"
+  commit_fixture "$d" "add a RENAME migration"
+  run_lint "$SCRIPT" "$d"
+  assert_nonzero "ALTER TABLE ... RENAME fails" "$RUN_RC"
+  assert_contains "says it is not permitted" "$RUN_OUT" "not one of the permitted forms"
+  assert_contains "and does not offer RENAME as an alternative" "$RUN_OUT" "ALTER TABLE ... ADD [COLUMN]"
+  assert_lacks "the permitted list no longer names RENAME" "$RUN_OUT" "ALTER TABLE ... RENAME"
+
+  mutant="$(mutant_of '/\("statement-allowlist", check_statement_allowlist\),/d')"
+  run_lint "$mutant" "$d"
+  assert_ok "mutation: without the allowlist, RENAME sails through" "$RUN_RC" "$RUN_OUT"
+}
+
+test_pragma_is_not_permitted() {
+  local d; d="$(mkrepo)"
+  # `PRAGMA foreign_keys` is a documented no-op inside a transaction, and GRDB
+  # runs every migration inside one — so it works in any standalone replay and
+  # silently does nothing in production. That is the worst shape a permitted
+  # form can have, which is why it is not one.
+  write_migration "$d" "20260321000000_pragma.sql" "PRAGMA foreign_keys = OFF;"
+  commit_fixture "$d" "add a PRAGMA migration"
+  run_lint "$SCRIPT" "$d"
+  assert_nonzero "PRAGMA fails" "$RUN_RC"
+  assert_contains "says it is not permitted" "$RUN_OUT" "not one of the permitted forms"
+  assert_lacks "the permitted list no longer names PRAGMA" "$RUN_OUT" "PRAGMA)"
+}
+
 # ---------------------------------------------------------------------------
-# Check 4 — idempotent DDL
+# Check 5 — idempotent DDL
 # ---------------------------------------------------------------------------
 
 test_idempotent_ddl_create() {
@@ -295,7 +415,7 @@ test_idempotent_ddl_index() {
 }
 
 # ---------------------------------------------------------------------------
-# Check 5 — history is frozen
+# Check 6 — history is frozen
 # ---------------------------------------------------------------------------
 
 test_history_frozen() {
@@ -350,6 +470,52 @@ test_migration_landing_on_main_after_the_branch_point_is_not_flagged() {
   assert_contains "mutation: and blames the main-side migration" "$RUN_OUT" "20260310000000_on_main.sql"
 }
 
+# THE MERGE-BASE LEG FAILS OPEN ON A STALE BASE REF, and this is the shape
+# that exploits it: the branch carries a migration that is also on
+# `origin/main`, but picked it up by cherry-pick or rebase rather than by
+# merging the fetched ref — so the merge base predates the file, an in-place
+# edit reads as an ADDITION there, and the merge-base leg has nothing to say.
+# CI is safe because it fetches immediately before linting; the pre-push hook,
+# which runs against whatever the developer last fetched, is not. The blob
+# comparison never consults the merge base at all.
+test_editing_a_migration_that_is_on_main_but_not_at_the_merge_base() {
+  local d mutant; d="$(mkrepo)"
+  git -C "$d" branch feature
+  write_migration "$d" "20260322000000_shipped.sql" "CREATE TABLE IF NOT EXISTS lint_shipped (x TEXT);"
+  commit_fixture "$d" "a migration lands on main"
+  git -C "$d" update-ref refs/remotes/origin/main HEAD
+
+  git -C "$d" checkout -q feature
+  write_migration "$d" "20260322000000_shipped.sql" "CREATE TABLE IF NOT EXISTS lint_shipped (x TEXT);"
+  commit_fixture "$d" "the branch picks the shipped migration up without merging origin/main"
+  write_migration "$d" "20260322000000_shipped.sql" "CREATE TABLE IF NOT EXISTS lint_shipped (x TEXT, y TEXT);"
+  commit_fixture "$d" "and edits it in place"
+
+  run_lint "$SCRIPT" "$d"
+  assert_nonzero "editing a migration origin/main already holds fails" "$RUN_RC"
+  assert_contains "says history is frozen" "$RUN_OUT" "migration history is frozen"
+  assert_contains "names the base branch" "$RUN_OUT" "already on \`origin/main\`"
+
+  mutant="$(mutant_of '/problems\.extend\(frozen_blob_edits\(facts\)\)/d')"
+  run_lint "$mutant" "$d"
+  assert_ok "mutation: with only the merge-base leg, the stale base lets the edit through" "$RUN_RC" "$RUN_OUT"
+}
+
+# The blob leg must stay silent about a path origin/main holds and HEAD does
+# not: on a branch that has not caught up that is an ordinary main-side
+# addition, not a deletion. Only the merge-base leg can tell those apart, and
+# it is what the earlier three-dot case pins.
+test_a_main_side_migration_absent_from_the_branch_is_not_a_deletion() {
+  local d; d="$(mkrepo)"
+  git -C "$d" branch feature
+  write_migration "$d" "20260323000000_on_main.sql" "CREATE TABLE IF NOT EXISTS lint_main (x TEXT);"
+  commit_fixture "$d" "a migration lands on main"
+  git -C "$d" update-ref refs/remotes/origin/main HEAD
+  git -C "$d" checkout -q feature
+  run_lint "$SCRIPT" "$d"
+  assert_ok "a branch that has not caught up with main lints clean" "$RUN_RC" "$RUN_OUT"
+}
+
 test_unresolvable_base_is_reported() {
   local d; d="$(mkrepo)"
   run_lint "$SCRIPT" "$d" --base "origin/no-such-branch"
@@ -358,7 +524,7 @@ test_unresolvable_base_is_reported() {
 }
 
 # ---------------------------------------------------------------------------
-# Check 6 — the chain applies
+# Check 7 — the chain applies
 # ---------------------------------------------------------------------------
 
 test_chain_applies() {
@@ -375,6 +541,50 @@ test_chain_applies() {
   mutant="$(mutant_of '/\("chain-applies", check_chain_applies\),/d')"
   run_lint "$mutant" "$d"
   assert_ok "mutation: without the chain replay, the same tree passes" "$RUN_RC" "$RUN_OUT"
+}
+
+# THE REPLAY RUNS IN PRODUCTION'S ENVIRONMENT, NOT PYTHON'S DEFAULT ONE. Both
+# cases below are green under `sqlite3.connect(":memory:")` as it comes out of
+# the box, and that is exactly the drift they exist to catch: a lint that
+# replays in a different SQLite than the daemon is a lint that green-lights
+# migrations which throw at startup.
+
+test_chain_replay_enforces_foreign_keys() {
+  local d mutant; d="$(mkrepo)"
+  # Python's sqlite3 leaves foreign keys OFF; GRDB sets `foreignKeysEnabled`.
+  write_migration "$d" "20260324000000_fk_violation.sql" \
+    'CREATE TABLE IF NOT EXISTS lint_parent (id TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS lint_child (id TEXT PRIMARY KEY, parent TEXT REFERENCES lint_parent (id));
+INSERT OR IGNORE INTO lint_child (id, parent) VALUES ('"'"'c'"'"', '"'"'nope'"'"');'
+  commit_fixture "$d" "add an FK-violating migration"
+  run_lint "$SCRIPT" "$d"
+  assert_nonzero "a migration violating a foreign key fails" "$RUN_RC"
+  assert_contains "reports SQLite's complaint" "$RUN_OUT" "FOREIGN KEY constraint failed"
+
+  mutant="$(mutant_of 's/PRAGMA foreign_keys=ON/PRAGMA foreign_keys=OFF/')"
+  run_lint "$mutant" "$d"
+  assert_ok "mutation: with foreign keys off, the same migration replays green" "$RUN_RC" "$RUN_OUT"
+}
+
+# The reverse mutation: this migration is legal under GRDB and must lint clean.
+# A DEFERRED constraint is checked at COMMIT, so inserting the child before its
+# parent is fine inside a transaction and fails in autocommit — where every
+# statement commits on its own.
+test_chain_replay_wraps_each_migration_in_a_transaction() {
+  local d mutant; d="$(mkrepo)"
+  write_migration "$d" "20260325000000_deferred_fk.sql" \
+    'CREATE TABLE IF NOT EXISTS lint_dparent (id TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS lint_dchild (id TEXT PRIMARY KEY, parent TEXT REFERENCES lint_dparent (id) DEFERRABLE INITIALLY DEFERRED);
+INSERT OR REPLACE INTO lint_dchild (id, parent) VALUES ('"'"'c'"'"', '"'"'p'"'"');
+INSERT OR REPLACE INTO lint_dparent (id) VALUES ('"'"'p'"'"');'
+  commit_fixture "$d" "add a migration relying on deferred constraint checking"
+  run_lint "$SCRIPT" "$d"
+  assert_ok "a migration legal only inside a transaction replays clean" "$RUN_RC" "$RUN_OUT"
+
+  mutant="$(mutant_of 's/"(BEGIN IMMEDIATE|COMMIT|ROLLBACK)"/"SELECT 1"/g')"
+  run_lint "$mutant" "$d"
+  assert_nonzero "mutation: replayed in autocommit, the same migration fails" "$RUN_RC"
+  assert_contains "mutation: and SQLite says why" "$RUN_OUT" "FOREIGN KEY constraint failed"
 }
 
 # The ADD COLUMN skip, recovered from `addColumnIfMissing` and relocated into

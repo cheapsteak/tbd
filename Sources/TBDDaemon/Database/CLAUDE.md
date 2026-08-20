@@ -45,9 +45,8 @@ Every statement must lead with one of these forms; `scripts/lint-migrations.py`
 rejects anything else:
 
 `CREATE TABLE IF NOT EXISTS`, `CREATE [UNIQUE] INDEX IF NOT EXISTS`,
-`ALTER TABLE … ADD [COLUMN]`, `ALTER TABLE … RENAME`, `DROP TABLE IF EXISTS`,
-`DROP INDEX IF EXISTS`, `INSERT OR IGNORE`, `INSERT OR REPLACE`, `UPDATE`,
-`DELETE FROM`, `PRAGMA`.
+`ALTER TABLE … ADD [COLUMN]`, `DROP TABLE IF EXISTS`, `DROP INDEX IF EXISTS`,
+`INSERT OR IGNORE`, `INSERT OR REPLACE`, `UPDATE`, `DELETE FROM`.
 
 The list is a whitelist: it says what is permitted rather than what is banned.
 Anything outside it either gets rewritten into one of these forms or takes the
@@ -55,8 +54,28 @@ Swift escape hatch. Widening the list is a deliberate edit with a reviewer,
 because each addition claims that the new form is idempotent and
 order-independent.
 
+Two forms are absent for failing exactly that claim, and both are plausible
+enough to be proposed again:
+
+- **`ALTER TABLE … RENAME`** — no `IF EXISTS` spelling and no loader-side skip,
+  so it can be neither replayed nor reordered.
+- **`PRAGMA foreign_keys`** — a documented no-op inside a transaction, and GRDB
+  runs every migration inside one. It would appear to work in any standalone
+  replay and silently do nothing in production.
+
+Both belong in the Swift escape hatch, where GRDB's `foreignKeyChecks:`
+parameter handles the table-rebuild case properly.
+
 `CREATE` needs `IF NOT EXISTS` and `DROP` needs `IF EXISTS`; the lint checks
-that too.
+that too. It also replays the whole chain against the committed baseline the
+way the daemon will run it — one transaction per migration, foreign keys
+enforced — so a migration that violates a foreign key reddens the lint rather
+than a user's startup.
+
+The file itself must be UTF-8 with LF line endings, no byte-order mark and no
+NUL byte. The loader and the lint read the bytes rather than a normalized copy
+of them, and a CR is the one byte they have split differently; rejecting it
+outright keeps the two readers looking at the same statements.
 
 ## Idempotence is the load-bearing property
 
@@ -109,8 +128,12 @@ an identifier it has recorded, or a fresh divergence between one developer's
 schema and everyone else's. Fix a mistake with a new migration.
 
 `scripts/lint-migrations.py` enforces this in the `lint` CI job and the pre-push
-hook: every entry in the migrations directory must be an addition relative to
-the merge base with `origin/main`.
+hook, on two legs that cover different things. Every entry in the migrations
+directory must be an addition relative to the merge base with `origin/main` —
+that leg is what sees deletions and renames. And every migration `origin/main`
+already holds must be byte-identical here — that leg never consults the merge
+base, so it holds even where the base ref is stale, which on a developer's
+machine it usually is.
 
 ## The Swift escape hatch
 
@@ -126,11 +149,12 @@ Any Swift migration body goes through the idempotent helpers in
 - `addIndexIfMissing(_:on:columns:unique:where:)`
 
 The `migration_use_helpers` SwiftLint rule catches `create(table:)`,
-`.add(column:)`, and raw `CREATE TABLE` / `CREATE INDEX` in `Database.swift`;
-it does not reach `SQLMigrationLoader.swift`, so an escape-hatch body observes
-the rule by discipline. `.sql` files need no helpers at all — the loader gives
-them the equivalent ADD COLUMN guard, and the `IF NOT EXISTS` forms cover the
-rest.
+`.add(column:)`, and raw `CREATE TABLE` / `CREATE INDEX`. It names two files —
+`Database.swift` and `SQLMigrationLoader.swift` — at `severity: error`, so raw
+DDL in an escape-hatch body fails `swiftlint --strict` in the `lint` CI job and
+the pre-push hook rather than resting on discipline. `.sql` files need no
+helpers at all — the loader gives them the equivalent ADD COLUMN guard, and the
+`IF NOT EXISTS` forms cover the rest.
 
 For a feature-flag column, omit the SQL `DEFAULT` clause so "unset" stays a
 third state distinct from `0` and `1`. The root `CLAUDE.md` explains why under
@@ -155,12 +179,26 @@ and that directory's parent, which is where the resource bundle sits under the
 test harness — and throws an error naming every path it searched when the list
 is exhausted.
 
-`init(path:)` calls `verifyResourceIntegrity` before migrating. It uses the
-database as its own manifest: if `grdb_migrations` holds timestamp-shaped
-identifiers while the bundle yielded zero `.sql` files, the resources are
-missing or truncated, this build cannot tell whether the schema is current, and
-the daemon refuses to start rather than run against an under-migrated schema. A
-*partial* mismatch is fine and deliberately does not fire — downgrading to an
+Refusal has two gates, and only the first of them refuses.
+
+**Gate one is the locator.** A locator that exhausts every candidate throws, so
+a daemon that cannot find its resource bundle at all fails at startup whatever
+the database holds — a fresh install included.
+
+**Gate two reports.** `init(path:)` calls `verifyResourceIntegrity` before
+migrating, using the database as its own manifest: if `grdb_migrations` holds
+timestamp-shaped identifiers while the bundle yielded zero `.sql` files, it logs
+that at error level, naming the directory and the applied identifiers, and
+carries on. It does not refuse, and the distinction matters because the
+stricter-looking choice is the wrong one here. A bundle that is present but
+hollowed out is not a failure `.copy` produces — SwiftPM either ships the
+directory or does not, and "does not" is gate one. Meanwhile "directory
+present, zero files" is the ordinary state of any worktree branched before the
+first migration landed, and since `scripts/restart.sh` from any worktree
+replaces the daemon machine-wide, refusing there would brick the fleet on a
+routine branch switch.
+
+A *partial* mismatch is fine and deliberately does not fire — downgrading to an
 older build legitimately leaves applied identifiers with no corresponding file,
 and GRDB's `hasBeenSuperseded` already covers that.
 
