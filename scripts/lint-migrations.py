@@ -42,11 +42,18 @@ against it by a shared fixture rather than by good intentions:
     harness can diff it.
   * The ADD COLUMN skip, so the chain replay does not trip over a migration
     that is legitimately idempotent against the baseline. Same anchored,
-    case-insensitive shape as the loader's `addColumnRegex`.
+    case-insensitive shape as the loader's `addColumnRegex` — but here the two
+    sides are two different regex ENGINES running one pattern, not two
+    bindings to one implementation, so the pattern text itself is duplicated.
+    `Tests/TBDDaemonTests/Fixtures/MigrationAddColumn/add-column-targets.json`
+    pins what both must read out of each shape, and
+    `--emit-add-column-targets` prints this side's answers for the harness to
+    diff.
 
 Usage:
   scripts/lint-migrations.py [--repo-root DIR] [--base REF]
   scripts/lint-migrations.py --emit-split FILE
+  scripts/lint-migrations.py --emit-add-column-targets FILE
 """
 
 from __future__ import annotations
@@ -214,11 +221,28 @@ def split_statements(sql: str) -> list[str]:
 
 IDENTIFIER = r'(?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)'
 
+# What may follow the column identifier. The splitter keeps each statement's
+# `;`, so an untyped `ADD COLUMN foo;` — legal SQLite, BLOB affinity —
+# presents a `;` where a typed column presents a space. Comment openers are
+# here for the same reason: a terminator set that only knew whitespace and end
+# of input would push those shapes into the keyword-capturing backtrack that
+# `KEYWORDS_NEVER_COLUMN_NAMES` closes off.
+COLUMN_TERMINATOR = r"(?=\s|;|--|/\*|$)"
+
 ADD_COLUMN_RE = re.compile(
     r"^ALTER\s+TABLE\s+(" + IDENTIFIER + r")"
-    r"\s+ADD\s+(?:COLUMN\s+)?(" + IDENTIFIER + r")(?:\s|$)",
+    r"\s+ADD\s+(?:COLUMN\s+)?(" + IDENTIFIER + r")" + COLUMN_TERMINATOR,
     re.IGNORECASE,
 )
+
+# Words that are a keyword rather than a column name when captured **bare**.
+# `COLUMN` is optional in the shape above, so on `ALTER TABLE t ADD CONSTRAINT
+# …` — or on an untyped `ALTER TABLE t ADD column;` — the engine skips that
+# group and captures the keyword itself. Declining those captures is what
+# makes the skip able only to name the statement's real column or nothing.
+# A quoted `"column"` is a genuine identifier and is compared before
+# unquoting, so it is unaffected.
+KEYWORDS_NEVER_COLUMN_NAMES = frozenset({"column", "constraint"})
 
 
 def unquote(identifier: str) -> str:
@@ -232,12 +256,17 @@ def add_column_target(statement: str) -> tuple[str, str] | None:
 
     Deliberately strict, exactly as the loader is: anything this does not
     match is replayed unmodified, so the skip can never silently swallow a
-    statement it did not understand.
+    statement it did not understand. It either names the statement's real
+    column or declines — naming a *different* column would let the skip drop a
+    statement that had not run yet.
     """
     match = ADD_COLUMN_RE.match(strip_leading_noise(statement))
     if match is None:
         return None
-    return unquote(match.group(1)), unquote(match.group(2))
+    raw_column = match.group(2)
+    if raw_column.lower() in KEYWORDS_NEVER_COLUMN_NAMES:
+        return None
+    return unquote(match.group(1)), unquote(raw_column)
 
 
 def column_exists(connection: sqlite3.Connection, table: str, column: str) -> bool:
@@ -716,15 +745,39 @@ def emit_split(path: Path) -> int:
     return 0
 
 
+def emit_add_column_targets(path: Path) -> int:
+    """Print this side's ADD COLUMN reading of the parity fixture's cases.
+
+    `Tests/TBDDaemonTests/Fixtures/MigrationAddColumn/add-column-targets.json`
+    holds the shared cases; the Swift half asserts against the same file. Two
+    different regex engines run one pattern here, so this is the only thing
+    keeping the duplicated pattern honest.
+    """
+    cases = json.loads(path.read_text(encoding="utf-8"))
+    answers = [
+        {"name": case["name"], "target": add_column_target(case["sql"])}
+        for case in cases
+    ]
+    print(json.dumps(answers, indent=2))
+    return 0
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parent.parent)
     parser.add_argument("--base", default="origin/main", help="branch the history-frozen check diffs against")
     parser.add_argument("--emit-split", type=Path, help="print the statement split of one SQL file as JSON and exit")
+    parser.add_argument(
+        "--emit-add-column-targets",
+        type=Path,
+        help="print this side's ADD COLUMN reading of a parity fixture as JSON and exit",
+    )
     args = parser.parse_args(argv)
 
     if args.emit_split is not None:
         return emit_split(args.emit_split)
+    if args.emit_add_column_targets is not None:
+        return emit_add_column_targets(args.emit_add_column_targets)
 
     facts = Facts(args.repo_root.resolve(), args.base)
     problems = list(facts.read_errors)

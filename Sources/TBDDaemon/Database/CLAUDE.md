@@ -129,13 +129,26 @@ have already run on user machines; editing one is either a no-op, because GRDB s
 an identifier it has recorded, or a fresh divergence between one developer's
 schema and everyone else's. Fix a mistake with a new migration.
 
-`scripts/lint-migrations.py` enforces this in the `lint` CI job and the pre-push
-hook, on two legs that cover different things. Every entry in the migrations
+**For the `.sql` files, this is mechanical.** `scripts/lint-migrations.py`
+enforces it in the `lint` CI job and the pre-push hook, on two legs that cover
+different things. Every entry in the migrations
 directory must be an addition relative to the merge base with `origin/main` —
 that leg is what sees deletions and renames. And every migration `origin/main`
 already holds must be byte-identical here — that leg never consults the merge
 base, so it holds even where the base ref is stale, which on a developer's
 machine it usually is.
+
+**For the frozen Swift block, it is not.** Both legs are scoped to the
+migrations directory and never open `Database.swift`, so nothing reads a `vN`
+body and compares it to what `origin/main` holds. What covers the block instead
+is `SchemaBaselineDriftTests`, which asserts the block still produces exactly
+the committed baseline fixture — a check on the *resulting schema*, not on the
+bodies. It catches any edit that changes a column, an index, or a table, which
+is the overwhelming majority of ways a `vN` body gets edited. It cannot catch
+an edit that leaves the schema identical while changing what the migration
+does: altering the literal values a data-only `UPDATE` writes, for one. Treat
+the block's freeze as a rule a reviewer enforces, backed by a check that
+catches the schema half of it.
 
 ## The Swift escape hatch
 

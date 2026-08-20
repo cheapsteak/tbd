@@ -369,16 +369,36 @@ public enum SQLMigrationLoader {
     /// match executes unmodified, so the guard can never silently swallow a
     /// statement it did not understand.
     ///
-    /// A statement that spells its column `column` (legal, not reserved) parses
-    /// the keyword greedily and reads the *type* as the column name. That
-    /// mis-parse only ever fails to find the column in `PRAGMA table_info`, so
-    /// it falls through to executing unmodified — the safe direction.
+    /// The guard either names the statement's real column or declines. It can
+    /// never name a *different* column, because the one way a wrong name gets
+    /// captured is closed: `COLUMN` is optional in the shape, so on
+    /// `ALTER TABLE t ADD CONSTRAINT …` — or on an untyped
+    /// `ALTER TABLE t ADD column;` — the engine skips that group and captures
+    /// the keyword itself. `keywordsNeverColumnNames` declines exactly those
+    /// bare captures. Declining costs nothing: the statement executes
+    /// unmodified, which is what it would have done without a guard at all.
+    /// Naming the wrong column would be the expensive direction — a table
+    /// carrying a column literally named `column` would make the guard *skip*
+    /// a statement that had not run yet.
     private static let identifierPattern = #"(?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)"#
+    /// What may follow the column identifier. The splitter keeps each
+    /// statement's `;`, so an untyped `ADD COLUMN foo;` — legal SQLite, BLOB
+    /// affinity — presents a `;` where a typed column presents a space.
+    /// Comment openers are here for the same reason: a terminator set that
+    /// only knew whitespace and end-of-input would push those shapes into the
+    /// keyword-capturing backtrack above.
+    private static let columnTerminatorPattern = #"(?=\s|;|--|/\*|$)"#
     static let addColumnRegex: NSRegularExpression = {
         let pattern = #"^ALTER\s+TABLE\s+("# + identifierPattern + #")"#
-            + #"\s+ADD\s+(?:COLUMN\s+)?("# + identifierPattern + #")(?:\s|$)"#
+            + #"\s+ADD\s+(?:COLUMN\s+)?("# + identifierPattern + #")"#
+            + columnTerminatorPattern
         return try! NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
     }()
+
+    /// Words that are a keyword rather than a column name when captured
+    /// **bare**. A quoted `"column"` is a genuine identifier and is compared
+    /// before unquoting, so it is unaffected.
+    static let keywordsNeverColumnNames: Set<String> = ["column", "constraint"]
 
     /// The `(table, column)` an ADD COLUMN statement targets, or nil when the
     /// statement is not one.
@@ -388,7 +408,9 @@ public enum SQLMigrationLoader {
         guard let match = addColumnRegex.firstMatch(in: body, options: [], range: range),
               let tableRange = Range(match.range(at: 1), in: body),
               let columnRange = Range(match.range(at: 2), in: body) else { return nil }
-        return (unquote(String(body[tableRange])), unquote(String(body[columnRange])))
+        let rawColumn = String(body[columnRange])
+        guard !keywordsNeverColumnNames.contains(rawColumn.lowercased()) else { return nil }
+        return (unquote(String(body[tableRange])), unquote(rawColumn))
     }
 
     private static func unquote(_ identifier: String) -> String {

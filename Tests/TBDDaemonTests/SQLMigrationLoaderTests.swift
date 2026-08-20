@@ -23,6 +23,18 @@ import Testing
             .appendingPathComponent("MigrationSplitter")
     }
 
+    /// The shared ADD COLUMN fixture, read from the source tree for the same
+    /// reason: `scripts/lint-migrations.py --emit-add-column-targets` reads
+    /// exactly this file, and the two sides here are two regex *engines*
+    /// running one pattern rather than two bindings to one implementation.
+    private static var addColumnFixtureURL: URL {
+        URL(fileURLWithPath: #filePath)          // …/Tests/TBDDaemonTests/SQLMigrationLoaderTests.swift
+            .deletingLastPathComponent()          // …/Tests/TBDDaemonTests
+            .appendingPathComponent("Fixtures")
+            .appendingPathComponent("MigrationAddColumn")
+            .appendingPathComponent("add-column-targets.json")
+    }
+
     /// A scratch directory under the process temp dir — never `~/tbd`.
     private static func makeScratchDirectory() throws -> URL {
         let url = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -118,6 +130,70 @@ import Testing
             .map { [$0.table, $0.column] } == ["t", "c"])
     }
 
+    /// Every case in the shared fixture, which the lint reads too. The count
+    /// assertion guards against the file vanishing: a zero-case run would
+    /// otherwise pass silently.
+    @Test func addColumnTargetMatchesTheSharedFixture() throws {
+        let data = try Data(contentsOf: Self.addColumnFixtureURL)
+        let cases = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+            "add-column-targets.json must be a JSON array of objects")
+        #expect(cases.count >= 16, "the shared ADD COLUMN fixture is missing cases")
+
+        for testCase in cases {
+            let name = testCase["name"] as? String ?? "<unnamed>"
+            let sql = try #require(testCase["sql"] as? String, "case \(name) has no sql")
+            // `null` means "must decline". Anything that is neither null nor
+            // an array of strings is a malformed case, not a declining one —
+            // reading it as nil would turn a typo into a passing assertion.
+            let expected = testCase["target"] as? [String]
+            #expect(expected != nil || testCase["target"] is NSNull,
+                    "case \(name): target must be [table, column] or null")
+            let actual = SQLMigrationLoader.addColumnTarget(in: sql).map { [$0.table, $0.column] }
+            #expect(actual == expected, "case \(name)")
+        }
+    }
+
+    /// An untyped column is legal SQLite — it takes BLOB affinity — and the
+    /// splitter hands each statement over with its `;` still attached, so the
+    /// character after the identifier is `;` where a typed column has a space.
+    @Test func addColumnTargetReadsAnUntypedColumn() {
+        #expect(SQLMigrationLoader.addColumnTarget(in: "ALTER TABLE t ADD COLUMN foo;")
+            .map { [$0.table, $0.column] } == ["t", "foo"])
+        #expect(SQLMigrationLoader.addColumnTarget(in: "ALTER TABLE t ADD COLUMN foo")
+            .map { [$0.table, $0.column] } == ["t", "foo"])
+        #expect(SQLMigrationLoader.addColumnTarget(in: "ALTER TABLE t ADD foo;")
+            .map { [$0.table, $0.column] } == ["t", "foo"])
+    }
+
+    /// A comment may butt straight against the column identifier.
+    @Test func addColumnTargetReadsAColumnFollowedByAComment() {
+        #expect(SQLMigrationLoader.addColumnTarget(in: "ALTER TABLE t ADD COLUMN foo-- why\n")
+            .map { [$0.table, $0.column] } == ["t", "foo"])
+        #expect(SQLMigrationLoader.addColumnTarget(in: "ALTER TABLE t ADD COLUMN foo/* why */ TEXT;")
+            .map { [$0.table, $0.column] } == ["t", "foo"])
+    }
+
+    /// `COLUMN` is optional in the shape, so wherever the column identifier
+    /// cannot be matched the engine backtracks and captures the keyword
+    /// itself. Believing such a capture against a table that has a column
+    /// named `column` would SKIP a statement that never ran, so a bare keyword
+    /// capture is declined and the statement executes unmodified.
+    @Test func addColumnTargetDeclinesABareKeywordCapture() {
+        for statement in [
+            "ALTER TABLE t ADD CONSTRAINT fk FOREIGN KEY (a) REFERENCES u (b);",
+            "ALTER TABLE t ADD COLUMN column;",
+            "ALTER TABLE t ADD column;",
+            #"ALTER TABLE t ADD COLUMN "foo"TEXT;"#,
+        ] {
+            #expect(SQLMigrationLoader.addColumnTarget(in: statement) == nil, "\(statement)")
+        }
+        // Quoted, `"column"` is an ordinary identifier: the comparison happens
+        // before unquoting, so it is unaffected.
+        #expect(SQLMigrationLoader.addColumnTarget(in: #"ALTER TABLE t ADD COLUMN "column";"#)
+            .map { [$0.table, $0.column] } == ["t", "column"])
+    }
+
     /// Anything the regex does not match must execute unmodified — the guard
     /// may never silently swallow a statement it did not understand.
     @Test func addColumnTargetRejectsEverythingElse() {
@@ -173,12 +249,38 @@ import Testing
         #expect(try Self.columnNames(queue, table: "t") == ["id", "existing"])
     }
 
+    /// The shape the terminator set exists for: an untyped duplicate column.
+    /// The statement arrives from the splitter as `… ADD COLUMN existing;`, so
+    /// the identifier is followed by `;`. A terminator set of whitespace or
+    /// end-of-input backtracks there and reads the keyword `COLUMN` as the
+    /// column name, which no table has — so the duplicate reaches SQLite and
+    /// `duplicate column name` is raised at prepare time.
+    @Test func addColumnGuardSkipsAnUntypedColumnThatIsAlreadyPresent() throws {
+        let queue = try Self.makeGuardFixtureQueue()
+        try queue.write { db in
+            try SQLMigrationLoader.apply(
+                sql: "ALTER TABLE t ADD COLUMN existing;", identifier: "test", to: db)
+        }
+        #expect(try Self.columnNames(queue, table: "t") == ["id", "existing"])
+    }
+
     /// Branch 2: the column is absent, so the statement runs.
     @Test func addColumnGuardAddsAColumnThatIsMissing() throws {
         let queue = try Self.makeGuardFixtureQueue()
         try queue.write { db in
             try SQLMigrationLoader.apply(
                 sql: "ALTER TABLE t ADD COLUMN fresh INTEGER;", identifier: "test", to: db)
+        }
+        #expect(try Self.columnNames(queue, table: "t") == ["id", "existing", "fresh"])
+    }
+
+    /// And the other branch of the same shape: untyped and absent, so it runs.
+    /// SQLite gives such a column BLOB affinity.
+    @Test func addColumnGuardAddsAnUntypedColumnThatIsMissing() throws {
+        let queue = try Self.makeGuardFixtureQueue()
+        try queue.write { db in
+            try SQLMigrationLoader.apply(
+                sql: "ALTER TABLE t ADD COLUMN fresh;", identifier: "test", to: db)
         }
         #expect(try Self.columnNames(queue, table: "t") == ["id", "existing", "fresh"])
     }

@@ -41,6 +41,7 @@ ROOT="$(cd "$HERE/.." && pwd)"
 SCRIPT="$HERE/lint-migrations.py"
 MIGRATIONS_REL="Sources/TBDDaemon/Database/Migrations"
 SPLITTER_FIXTURES="$ROOT/Tests/TBDDaemonTests/Fixtures/MigrationSplitter"
+ADD_COLUMN_FIXTURE="$ROOT/Tests/TBDDaemonTests/Fixtures/MigrationAddColumn/add-column-targets.json"
 
 export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_SYSTEM=/dev/null
@@ -602,6 +603,64 @@ test_add_column_skip_is_live() {
   run_lint "$mutant" "$d"
   assert_nonzero "mutation: without the ADD COLUMN skip, the same tree fails" "$RUN_RC"
   assert_contains "mutation: and SQLite says why" "$RUN_OUT" "duplicate column name"
+}
+
+# ---------------------------------------------------------------------------
+# ADD COLUMN parity — unlike the splitter, this is two regex ENGINES running
+# one pattern, so the pattern text is genuinely duplicated between here and
+# the loader. The fixture is what keeps the duplicate honest; the Swift half
+# asserts against the same file.
+# ---------------------------------------------------------------------------
+
+test_add_column_target_matches_the_shared_fixture() {
+  local got want
+  got="$(python3 "$SCRIPT" --emit-add-column-targets "$ADD_COLUMN_FIXTURE" 2>&1)"
+  want="$(python3 -c 'import json,sys; print(json.dumps([{"name": c["name"], "target": c["target"]} for c in json.load(open(sys.argv[1]))], indent=2))' "$ADD_COLUMN_FIXTURE")"
+  assert_eq "ADD COLUMN parity: every shared fixture case" "$got" "$want"
+}
+
+# AN UNTYPED COLUMN IS LEGAL SQLITE — it takes BLOB affinity — and the splitter
+# hands each statement over with its `;` still attached, so the character after
+# the column identifier is `;` where a typed column has a space. A terminator
+# set of whitespace-or-end-of-input does not merely fail to match there: the
+# optional `COLUMN` group backtracks and the KEYWORD becomes the column name,
+# so the skip asks about a column called `column`, finds none, and lets a
+# duplicate ADD COLUMN reach SQLite.
+test_untyped_add_column_skip_is_live() {
+  local d mutant; d="$(mkrepo)"
+  write_migration "$d" "20260315000000_untyped_existing_column.sql" \
+    'ALTER TABLE config ADD COLUMN gc_enabled;'
+  commit_fixture "$d" "re-add an existing column with no type"
+  run_lint "$SCRIPT" "$d"
+  assert_ok "re-adding an existing column untyped replays clean" "$RUN_RC" "$RUN_OUT"
+
+  mutant="$(mutant_of 's/^COLUMN_TERMINATOR = .*$/COLUMN_TERMINATOR = r"(?=\\s|$)"/')"
+  run_lint "$mutant" "$d"
+  assert_nonzero "mutation: with whitespace-or-end the only terminator, the same tree fails" "$RUN_RC"
+  assert_contains "mutation: and SQLite says why" "$RUN_OUT" "duplicate column name"
+}
+
+# The keyword capture, closed from the other side. A quoted column name butted
+# straight against its type is valid SQLite and ends at a character no
+# terminator set can accept, so the engine backtracks and captures `COLUMN`
+# itself. Against a table that has a column literally named `column`, believing
+# that capture SKIPS a statement that never ran — the silent divergence the
+# guard exists to prevent. Declining a bare keyword capture is what makes the
+# skip able only to name the real column or nothing.
+test_backtracked_keyword_capture_is_declined() {
+  local d mutant; d="$(mkrepo)"
+  write_migration "$d" "20260316000000_keyword_capture.sql" \
+    'CREATE TABLE IF NOT EXISTS keyword_probe (id TEXT PRIMARY KEY, "column" TEXT);
+ALTER TABLE keyword_probe ADD COLUMN "foo"TEXT;
+CREATE INDEX IF NOT EXISTS keyword_probe_foo ON keyword_probe (foo);'
+  commit_fixture "$d" "add a column whose quoted name butts against its type"
+  run_lint "$SCRIPT" "$d"
+  assert_ok "a backtracked keyword capture does not skip the statement" "$RUN_RC" "$RUN_OUT"
+
+  mutant="$(mutant_of 's/if raw_column\.lower\(\) in KEYWORDS_NEVER_COLUMN_NAMES:/if False:/')"
+  run_lint "$mutant" "$d"
+  assert_nonzero "mutation: believing the keyword capture, the same tree fails" "$RUN_RC"
+  assert_contains "mutation: and SQLite says why" "$RUN_OUT" "no such column: foo"
 }
 
 # A statement the ADD COLUMN regex does not understand must be replayed
