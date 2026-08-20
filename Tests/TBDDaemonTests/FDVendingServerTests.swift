@@ -393,6 +393,8 @@ struct FDVendingServerTests {
         // decoded but undelivered) while the NEW connection is adopted — the
         // exact interleave that would break wire order == stream order.
         let sequence = TaggedFrameSequence()
+        // Blocks the server's dedicated receive `Thread`, never a
+        // cooperative-pool thread, so this gate needs no `gateHoldingTask`.
         let releaseSink = DispatchSemaphore(value: 0)
         let exits = TaggedFrameSequence()
         let server = FDVendingServer()

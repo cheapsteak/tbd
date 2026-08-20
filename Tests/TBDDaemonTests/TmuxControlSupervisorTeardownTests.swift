@@ -31,6 +31,10 @@ struct TmuxControlSupervisorTeardownTests {
         // The stop seam blocks until the TEST releases it, so "teardown is
         // mid-stop" is a deterministic state, not a timing window.
         let stopStarted = EventCounter()
+        // `stopConnection` runs on `DispatchQueue.global(qos: .utility)` — the
+        // production code puts blocking stops off the actor deliberately — so
+        // this gate never parks a cooperative-pool thread and needs no
+        // `gateHoldingTask`. The same holds for the other two gates below.
         let stopGate = DispatchSemaphore(value: 0)
         let supervisor = TmuxControlSupervisor(
             makeConnection: { TmuxControlConnection(serverName: $0, tmuxBinary: stub) },

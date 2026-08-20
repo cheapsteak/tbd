@@ -29,7 +29,11 @@ struct BoundedGateWaitTests {
             released.withLock { didRelease = true }
             gate.signal()
         }
-        #expect(gate.waitForGate("self-test: cross-thread", timeout: .seconds(30)))
+        // Default deadline, not a snappier number of its own: this is a
+        // hang-catcher on a `DispatchQueue.global()` hop, and 30 s was not
+        // enough for one on a saturated 3-core runner — it went red there
+        // while asserting nothing about time.
+        #expect(gate.waitForGate("self-test: cross-thread"))
         #expect(released.withLock { didRelease }, "the wait must not return before the signal")
     }
 
@@ -50,6 +54,40 @@ struct BoundedGateWaitTests {
         // one would mask a regression here.
     }
 
+    @Test("gate holders block their own threads, leaving the cooperative pool free")
+    func gateHoldersDoNotStarveTheCooperativePool() async throws {
+        // More simultaneous holders than Swift's cooperative pool is wide, so
+        // the count reproduces CI's 3-thread runner on any machine. Started
+        // with a plain `Task` these park every pool thread; the `await` below
+        // then cannot get one until a holder gives up, and the giving-up is
+        // what reds this test. Enqueueing them needs no thread, so all of them
+        // are pending before the first suspension point.
+        let holders = ProcessInfo.processInfo.activeProcessorCount + 2
+        let gate = DispatchSemaphore(value: 0)
+        let parked = Counter()
+        let tasks = (0..<holders).map { index in
+            gateHoldingTask {
+                parked.increment()
+                return gate.waitForGate("self-test: pool-starvation holder \(index)")
+            }
+        }
+        defer { for _ in 0..<holders { gate.signal() } }
+
+        // Ordinary cooperative work still gets a thread while every gate is
+        // held. Deliberately not timed: scheduling latency in the parallel
+        // pass is tens of seconds under load, so a wall-clock bound here would
+        // go red on a merely busy machine. The default gate deadline clears
+        // that latency with room to spare, which is what keeps the discrimination
+        // one-sided — a healthy run always releases first.
+        #expect(await Task { true }.value)
+
+        for _ in 0..<holders { gate.signal() }
+        var released = 0
+        for task in tasks where await task.value { released += 1 }
+        #expect(released == holders, "every holder must be released, not expire")
+        #expect(parked.value == holders, "every holder must have reached its gate")
+    }
+
     @Test("the timeout diagnostic names the gate and the deadline")
     func timeoutDescriptionCarriesTheDiagnostic() {
         let description = String(
@@ -57,4 +95,14 @@ struct BoundedGateWaitTests {
         #expect(description.contains("some gate"))
         #expect(description.contains("3"))
     }
+}
+
+
+/// Minimal thread-safe counter — the holders increment from threads that are
+/// about to block, so this cannot be an actor.
+private final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var value: Int { lock.withLock { count } }
+    func increment() { lock.withLock { count += 1 } }
 }

@@ -182,6 +182,9 @@ struct WorktreeDeletionQueueTests {
 
         // Signalled in a `defer` so a failure anywhere below cannot leave the
         // process-wide drain queue blocked for other suites.
+        // Blocks `WorktreeDeletionQueue.drainQueue` — a plain dispatch
+        // queue, not a cooperative-pool thread — so this gate needs no
+        // `gateHoldingTask`.
         let gate = DispatchSemaphore(value: 0)
         defer { gate.signal() }
         let occupied = Flag()

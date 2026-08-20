@@ -457,7 +457,7 @@ struct TerminalActivityEventHandlerTests {
             params: #"{"terminalID":"\#(terminal.id.uuidString)","activityState":"idle","origin":"user_interrupt"}"#
         )
 
-        let earlier = Task { await router.handle(idle) }
+        let earlier = gateHoldingTask { await router.handle(idle) }
         guard await waitUntil({ dates.firstCallIsBlocked }) else {
             dates.releaseFirstCall()
             _ = await earlier.value
@@ -490,7 +490,7 @@ struct TerminalActivityEventHandlerTests {
             params: TerminalActivityEventParams(terminalID: terminal.id, activityState: .working)
         )
 
-        let earlier = Task { await router.handle(interrupt) }
+        let earlier = gateHoldingTask { await router.handle(interrupt) }
         guard await waitUntil({ dates.firstCallIsBlocked }) else {
             dates.releaseFirstCall()
             _ = await earlier.value
@@ -536,7 +536,7 @@ struct TerminalActivityEventHandlerTests {
             params: TerminalActivityEventParams(terminalID: terminal.id, activityState: .working)
         )
 
-        let earlier = Task { await router.handle(idle) }
+        let earlier = gateHoldingTask { await router.handle(idle) }
         guard await waitUntil({ dates.firstCallIsBlocked }) else {
             dates.releaseFirstCall()
             _ = await earlier.value
@@ -633,7 +633,7 @@ struct TerminalActivityEventHandlerTests {
             )
         )
 
-        let earlier = Task { await router.handle(activity) }
+        let earlier = gateHoldingTask { await router.handle(activity) }
         guard await waitUntil({ dates.firstCallIsBlocked }) else {
             dates.releaseFirstCall()
             _ = await earlier.value
@@ -710,7 +710,7 @@ struct TerminalActivityEventHandlerTests {
             params: #"{"terminalID":"\#(terminal.id.uuidString)","activityState":"idle","origin":"user_interrupt"}"#
         )
 
-        let earlier = Task { await router.handle(working) }
+        let earlier = gateHoldingTask { await router.handle(working) }
         guard await waitUntil({ dates.firstCallIsBlocked }) else {
             dates.releaseFirstCall()
             _ = await earlier.value
@@ -742,7 +742,7 @@ struct TerminalActivityEventHandlerTests {
             params: TerminalActivityEventParams(terminalID: terminal.id, activityState: .idle)
         )
 
-        let earlier = Task { await router.handle(working) }
+        let earlier = gateHoldingTask { await router.handle(working) }
         guard await waitUntil({ dates.firstCallIsBlocked }) else {
             dates.releaseFirstCall()
             _ = await earlier.value
@@ -812,7 +812,7 @@ struct TerminalActivityEventHandlerTests {
             params: #"{"terminalID":"\#(terminal.id.uuidString)","activityState":"idle","origin":"user_interrupt"}"#
         )
 
-        let earlier = Task { await router.handle(sessionStart) }
+        let earlier = gateHoldingTask { await router.handle(sessionStart) }
         guard await waitUntil({ dates.firstCallIsBlocked }) else {
             dates.releaseFirstCall()
             _ = await earlier.value
@@ -830,6 +830,12 @@ struct TerminalActivityEventHandlerTests {
     }
 }
 
+/// Holds the first `now()` call until the test releases it, so "the earlier
+/// request is mid-flight" is a deterministic state rather than a timing window.
+///
+/// The held request MUST be started with `gateHoldingTask`: this blocks the
+/// thread it runs on, and a blocked cooperative-pool thread starves every
+/// other test in the process. See `Tests/TestSupport/BoundedGateSupport.swift`.
 private final class BlockingDateSequence: @unchecked Sendable {
     private let lock = NSLock()
     private let first: Date
