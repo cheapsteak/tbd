@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import TestSupport
 import Testing
 
 @testable import TBDDaemonLib
@@ -40,7 +41,9 @@ struct TmuxControlSupervisorTeardownTests {
                 // connection; gating that call too would deadlock the test
                 // against its own semaphore (the defer below can't run while
                 // the body is awaiting stopAll).
-                if stopStarted.count == 1 { stopGate.wait() }
+                if stopStarted.count == 1 {
+                    stopGate.waitForGate("TmuxControlSupervisor slow-stop teardown held mid-stop")
+                }
                 connection.stop()
             })
         defer { stopGate.signal() }  // never leave the stop thread parked on failure
@@ -105,7 +108,9 @@ struct TmuxControlSupervisorTeardownTests {
                 // Gate ONLY the teardown under test — see
                 // slowStopDoesNotBlockActor for why the closing stopAll()
                 // cleanup must pass through ungated.
-                if stopStarted.count == 1 { stopGate.wait() }
+                if stopStarted.count == 1 {
+                    stopGate.waitForGate("TmuxControlSupervisor in-flight-stop teardown held mid-stop")
+                }
                 connection.stop()
                 stopFinished.increment()
             })
@@ -158,7 +163,8 @@ struct TmuxControlSupervisorTeardownTests {
             makeConnection: { TmuxControlConnection(serverName: $0, tmuxBinary: stub) },
             stopConnection: { connection in
                 stopStarted.increment()
-                stopGate.wait()  // held open until the test signals
+                // Held open until the test signals.
+                stopGate.waitForGate("TmuxControlSupervisor stopAll() stop() held mid-stop")
                 connection.stop()
             })
         // Never leave stop threads parked on failure (one per connection below).

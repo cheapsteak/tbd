@@ -1,3 +1,4 @@
+import TestSupport
 import Testing
 import Foundation
 @testable import TBDDaemonLib
@@ -186,7 +187,7 @@ struct WorktreeDeletionQueueTests {
         let occupied = Flag()
         WorktreeDeletionQueue.drainQueue.async {
             occupied.set()
-            gate.wait()
+            gate.waitForGate("WorktreeDeletionQueue drain-queue occupancy")
         }
         try await waitUntil(occupied.isSet, "drain queue never picked up the gate item")
 

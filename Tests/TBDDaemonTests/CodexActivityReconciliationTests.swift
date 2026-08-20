@@ -889,7 +889,7 @@ private final class BlockingListDates: @unchecked Sendable {
                 return call
             }
             guard call == 0 else { return subsequent }
-            release.wait()
+            release.waitForGate("codex activity reconciliation first date-provider call")
             return first
         }
     }

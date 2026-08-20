@@ -398,7 +398,9 @@ struct FDVendingServerTests {
         let server = FDVendingServer()
         await server.setOnInput { header, _ in
             sequence.record(kind: "input", pane: header.paneID)
-            if header.paneID == "%old-1" { releaseSink.wait() }
+            if header.paneID == "%old-1" {
+                releaseSink.waitForGate("FDVendingServer superseded receive thread held mid-loop")
+            }
         }
         await server.setOnReceiveLoopExit { exits.record(kind: "exit", pane: "") }
         await server.adoptConnection(fd: oldServerFD)

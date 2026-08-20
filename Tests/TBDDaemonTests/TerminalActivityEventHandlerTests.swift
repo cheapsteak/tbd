@@ -856,7 +856,7 @@ private final class BlockingDateSequence: @unchecked Sendable {
                 return call
             }
             guard call == 0 else { return subsequent }
-            release.wait()
+            release.waitForGate("terminal.activityEvent first date-provider call")
             return first
         }
     }
