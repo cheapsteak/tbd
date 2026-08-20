@@ -172,12 +172,13 @@ actor CodexTranscriptActivityTracker {
         let uniqueTargets = transcripts.filter {
             seenPaths.insert($0.transcriptPath).inserted
         }
-        guard !uniqueTargets.isEmpty else { return [:] }
+        let observableTargets = uniqueTargets.filter { !hasPendingBoundary(for: $0) }
+        guard !observableTargets.isEmpty else { return [:] }
 
         let targetsByPath = Dictionary(
-            uniqueKeysWithValues: uniqueTargets.map { ($0.transcriptPath, $0) })
+            uniqueKeysWithValues: observableTargets.map { ($0.transcriptPath, $0) })
         var knownPaths = Set(nextBatchPathOrder)
-        for target in uniqueTargets {
+        for target in observableTargets {
             batchPathWorktreeIDs[target.transcriptPath] = target.worktreeID
             if knownPaths.insert(target.transcriptPath).inserted {
                 nextBatchPathOrder.append(target.transcriptPath)
@@ -227,6 +228,16 @@ actor CodexTranscriptActivityTracker {
         return states
     }
 
+    private func hasPendingBoundary(for target: Target) -> Bool {
+        guard let terminalID = target.terminalID,
+              let generation = target.sessionGeneration,
+              let current = sessionGenerations[terminalID] else { return false }
+        return current.observedAt == generation
+            && current.transcriptPath == target.transcriptPath
+            && current.attachment == .boundary
+            && !current.boundaryEstablished
+    }
+
     /// Couples a batch result to the actor order in which its transcript
     /// observation completed. Minting the timestamp before this actor accepts
     /// another call prevents reversed RPC completions from assigning a newer
@@ -236,7 +247,11 @@ actor CodexTranscriptActivityTracker {
         totalByteLimit: UInt64 = requestReadByteLimit,
         now: @Sendable () -> Date
     ) -> StampedObservation {
-        StampedObservation(
+        // Boundary preparation and observation must share one actor turn. If a
+        // missing persisted rollout appears between separate calls, ordinary
+        // bootstrap could otherwise replay its pre-boundary lifecycle records.
+        establishSessionBoundariesIfAbsent(transcripts: transcripts)
+        return StampedObservation(
             states: observe(transcripts: transcripts, totalByteLimit: totalByteLimit),
             observedAt: now()
         )

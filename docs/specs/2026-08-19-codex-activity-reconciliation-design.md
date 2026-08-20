@@ -82,7 +82,7 @@ Codex can write `session_meta` and `task_started` before the first SessionStart 
 
 Every later accepted Codex start establishes a lifecycle boundary at the transcript's current end, including a same-path resume. Events before that boundary do not become current work in the new session. Tracker session operations carry the accepted session-order watermark. A later generation defeats an older delayed tracker operation. Within the same generation, live initial-attachment knowledge defeats a conservative boundary reconstructed by a terminal-list call that raced ahead after database persistence.
 
-The persisted SessionStart fact lets a tracker with no in-memory generation state, such as after daemon restart, reconstruct the boundary conservatively at the current end. If the file is unavailable, that reconstructed boundary remains pending and later polls retry the EOF capture rather than bootstrap history. In-memory generation state is transient, terminal-keyed, and pruned with transcript baselines during worktree- or fleet-scoped retention.
+The persisted SessionStart fact lets a tracker with no in-memory generation state, such as after daemon restart, reconstruct the boundary conservatively at the current end. Boundary preparation or retry and stamped transcript observation happen in one tracker actor operation. If the file is unavailable, that reconstructed boundary remains pending and makes the transcript ineligible for ordinary bootstrap until a later poll captures its EOF. In-memory generation state is transient, terminal-keyed, and pruned with transcript baselines during worktree- or fleet-scoped retention.
 
 Rejected or stale SessionStart events do not change identity, transcript path, attention state, activity, or tracker boundaries. Equal-time competing starts are first-wins so completion order cannot roll identity backward. A permission fact observed at the same time as, or after, SessionStart survives it; only a strictly older permission fact is retracted.
 
@@ -215,7 +215,7 @@ Tracker tests cover:
 - per-request byte and step limits;
 - fleet fairness, scoped polling, path removal, and reordering;
 - atomic first-attachment classification, including partial-history rows and concurrent starts;
-- same-generation list/adoption races, unavailable initial rollouts, later-generation precedence, and generation-state retention;
+- same-generation list/adoption races, pending-boundary observation, unavailable initial rollouts, later-generation precedence, and generation-state retention;
 - later SessionStart boundaries, daemon reconstruction, and same-path invalidation;
 - transcript identity rollover during concurrent list calls.
 

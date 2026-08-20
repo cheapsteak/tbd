@@ -360,7 +360,7 @@ struct CodexActivityReconciliationTests {
             .presentationActivityState == nil)
     }
 
-    @Test("concurrent accepted SessionStarts classify only the first transaction as initial")
+    @Test("concurrent SessionStarts classify exactly one accepted transaction as initial")
     func concurrentSessionStartsClassifyInitialAttachmentAtomically() async throws {
         let repo = try await db.repos.create(
             path: "/tmp/car-atomic-session-repo-\(UUID().uuidString)",
@@ -372,28 +372,33 @@ struct CodexActivityReconciliationTests {
         let terminal = try await db.terminals.create(
             worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
             label: "Codex", kind: .codex)
-        let gate = OrderedAsyncGate()
+        let gate = ConcurrentAsyncGate(participantCount: 2)
         let firstAt = presentationObservedAt
         let secondAt = firstAt.addingTimeInterval(1)
 
         let first = Task {
-            await gate.waitForRelease(order: 0)
+            await gate.waitForRelease()
             return try await db.terminals.applySessionStart(
                 id: terminal.id, sessionID: "first-session",
                 transcriptPath: "/tmp/car-atomic-first.jsonl", observedAt: firstAt)
         }
         let second = Task {
-            await gate.waitForRelease(order: 1)
+            await gate.waitForRelease()
             return try await db.terminals.applySessionStart(
                 id: terminal.id, sessionID: "second-session",
                 transcriptPath: "/tmp/car-atomic-second.jsonl", observedAt: secondAt)
         }
-        await gate.releaseInOrder()
+        await gate.releaseAll()
 
-        let firstApplication = try #require(await first.value)
-        let secondApplication = try #require(await second.value)
-        #expect(firstApplication.isInitialAttachment)
-        #expect(!secondApplication.isInitialAttachment)
+        let firstApplication = try await first.value
+        let secondApplication = try await second.value
+        let applications = [firstApplication, secondApplication].compactMap { $0 }
+        #expect((1...2).contains(applications.count))
+        #expect(applications.filter(\.isInitialAttachment).count == 1)
+        let stored = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(stored.claudeSessionID == "second-session")
+        #expect(stored.transcriptPath == "/tmp/car-atomic-second.jsonl")
+        #expect(stored.sessionOrderObservedAt == secondAt)
     }
 
     @Test("initial adoption supersedes same-generation list reconstruction")
@@ -1222,22 +1227,29 @@ private func waitUntilAsync(
     return false
 }
 
-private actor OrderedAsyncGate {
-    private var continuations: [Int: CheckedContinuation<Void, Never>] = [:]
+private actor ConcurrentAsyncGate {
+    private let participantCount: Int
+    private var continuations: [CheckedContinuation<Void, Never>] = []
 
-    func waitForRelease(order: Int) async {
+    init(participantCount: Int) {
+        self.participantCount = participantCount
+    }
+
+    func waitForRelease() async {
         await withCheckedContinuation { continuation in
-            continuations[order] = continuation
+            continuations.append(continuation)
         }
     }
 
-    func releaseInOrder() async {
-        while continuations.count < 2 {
+    func releaseAll() async {
+        while continuations.count < participantCount {
             await Task.yield()
         }
-        continuations.removeValue(forKey: 0)?.resume()
-        await Task.yield()
-        continuations.removeValue(forKey: 1)?.resume()
+        let waiting = continuations
+        continuations.removeAll()
+        for continuation in waiting {
+            continuation.resume()
+        }
     }
 }
 

@@ -514,7 +514,6 @@ extension RPCRouter {
         let params = try decoder.decode(TerminalListParams.self, from: paramsData)
         var terminals = try await db.terminals.list(worktreeID: params.worktreeID)
         var codexTargets: [CodexTranscriptActivityTracker.Target] = []
-        var durableBoundaryTargets: [CodexTranscriptActivityTracker.Target] = []
         let observedIdentities = Dictionary(uniqueKeysWithValues: terminals
             .filter(\.isCodexTerminal)
             .map {
@@ -533,18 +532,14 @@ extension RPCRouter {
                 terminalID: terminals[index].id,
                 sessionGeneration: terminals[index].sessionOrderObservedAt)
             codexTargets.append(target)
-            if terminals[index].sessionOrderObservedAt != nil {
-                durableBoundaryTargets.append(target)
-            }
         }
 
         // SessionStart's persisted session generation is the restart-safe boundary
         // cue. On a fresh tracker, start at the path's current EOF rather than
-        // replaying an orphan task_started from before that lifecycle event.
-        // Existing baselines are never moved, so later appended turns remain
-        // visible after ordinary hooks replace the raw activity fact.
-        await codexActivityTracker.establishSessionBoundariesIfAbsent(
-            transcripts: durableBoundaryTargets)
+        // replaying an orphan task_started from before that lifecycle event. The
+        // tracker prepares or retries that boundary in the same actor turn as
+        // observation, so a temporarily missing file cannot bootstrap between
+        // the two operations.
         let codexObservation = await codexActivityTracker.observeStamped(
             transcripts: codexTargets,
             now: now)
