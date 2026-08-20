@@ -199,6 +199,64 @@ struct PRBindingRefreshTests {
         }
     }
 
+    /// The stale-poll race the sequence guard exists for, driven for real:
+    /// two overlapping refreshes that resolve OUT OF ORDER.
+    ///
+    /// A background poll (A) is already in flight, holding a snapshot that
+    /// still shows #412, when the user untracks it. The untrack's own refresh
+    /// (B) starts later, resolves first, and correctly publishes the chip as
+    /// gone. Then A finally lands. Without the guard A republishes its older
+    /// whole-fleet snapshot over the top and the chip the user just dismissed
+    /// comes back on screen.
+    ///
+    /// Every other poll test here awaits one refresh before starting the next,
+    /// so this is the only case that reaches the `seq == prBindingsRefreshSeq`
+    /// branch at all.
+    @MainActor
+    @Test("a stale refresh landing last does not resurrect an untracked chip")
+    func staleRefreshDoesNotResurrectAnUntrackedChip() async {
+        await withStateAsync { state in
+            let wt = UUID()
+            // The chip is on screen when the poll goes out.
+            state.prBindings = [wt: [binding(412, worktreeID: wt)]]
+
+            let gate = RefreshGate()
+            state.prBindingsFetcher = {
+                gate.calls += 1
+                if gate.calls == 1 {
+                    // A: issued before the untrack, so it still sees #412 —
+                    // and it is held open until B has published.
+                    while !gate.open { try? await Task.sleep(for: .milliseconds(1)) }
+                    return PRBindingsAllResult(
+                        worktrees: [entry(wt, [binding(412, worktreeID: wt)])])
+                }
+                // B: issued after the untrack landed, so #412 is tombstoned.
+                return PRBindingsAllResult(worktrees: [entry(wt, [], detachedCount: 1)])
+            }
+
+            // A starts first and must stamp its sequence number and enter its
+            // fetch before B starts — otherwise B's own await hands the actor
+            // back to A and the stamps invert.
+            let taskA = Task { await state.refreshPRBindings() }
+            let entered = await waitUntil { gate.calls == 1 }
+            #expect(entered)
+
+            // B supersedes A: it resolves immediately and publishes the detach.
+            await state.refreshPRBindings()
+            #expect(state.prBindings[wt] == nil)
+            #expect(state.prDetachedCounts[wt] == 1)
+
+            // Now let A's stale snapshot resolve. It still REPORTS what it
+            // fetched to its own caller — that is the return contract — but it
+            // must not put #412 back on screen.
+            gate.open = true
+            let late = await taskA.value
+            #expect(late?.bindings[wt]?.map(\.number) == [412])
+            #expect(state.prBindings[wt] == nil)
+            #expect(state.prDetachedCounts[wt] == 1)
+        }
+    }
+
     // MARK: - The untrack gesture
 
     /// `detachPR` judges its outcome by re-reading the bindings rather than by
@@ -289,6 +347,28 @@ struct PRBindingRefreshTests {
 }
 
 private enum PRBindingRefreshTestError: Error { case boom }
+
+/// Call counter + release latch for the overlapping-refresh test, so the two
+/// fetches resolve out of order by construction rather than by racing sleeps.
+@MainActor
+private final class RefreshGate {
+    var calls = 0
+    var open = false
+}
+
+/// Poll `cond` on the main actor until true or the deadline. Returns success.
+@MainActor
+private func waitUntil(
+    deadline: Duration = .seconds(15), _ cond: @MainActor () -> Bool
+) async -> Bool {
+    let clock = ContinuousClock()
+    let start = clock.now
+    while !cond() {
+        if clock.now - start > deadline { return false }
+        try? await Task.sleep(for: .milliseconds(2))
+    }
+    return true
+}
 
 private func binding(_ number: Int, worktreeID: UUID) -> PRBinding {
     let url = "https://github.com/acme/acme-prod/pull/\(number)"
