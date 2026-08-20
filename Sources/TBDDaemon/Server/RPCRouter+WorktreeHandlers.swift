@@ -226,15 +226,22 @@ extension RPCRouter {
         // instead. The GUI has been routing this client-side all along
         // (`AppState.archiveWorktree`); doing it here means the CLI, hooks,
         // scripts, and every future client get it without repeating the check.
-        // `force` is accepted and inert on this path: a scratch space has
-        // neither an archive hook (hooks resolve per repo) nor children.
+        // `force` is forwarded, not dropped: it still bypasses the
+        // active-children refusal, which a scratch space is subject to (it can
+        // be a parent). What it does NOT reach on this path is an archive hook,
+        // because the scratch body runs none at all, so a scratch space
+        // carrying `.worktree-hooks/archive`, or a user with a global
+        // `~/tbd/hooks/default/archive`, gets no archive hook and no
+        // diagnostic. Hook resolution is not repo-scoped, so that is a real
+        // gap, recorded in the design doc rather than papered over here.
         if let existing = try await db.worktrees.get(id: params.worktreeID) {
             if !existing.location.isLocal {
                 return try await archiveRemoteLane(existing, force: params.force, actor: actor)
             }
             if existing.isScratch {
                 return try await archiveScratchSpace(
-                    worktreeID: params.worktreeID, actor: actor)
+                    worktreeID: params.worktreeID, surface: .worktreeArchive,
+                    force: params.force, actor: actor)
             }
         }
 
@@ -506,13 +513,29 @@ extension RPCRouter {
                 return try await reviveRemoteLane(existing, actor: actor)
             }
             if existing.isScratch {
-                switch try await reviveScratchSpace(worktreeID: params.worktreeID) {
+                // Recorded like every other branch of this door. `beginActuation`
+                // is fail-closed, so a repo-less row must not be the one shape
+                // that flips `.archived` -> `.active` with an unwritable log and
+                // no row naming the actor who asked for it.
+                let actuationID = try await beginActuation(
+                    .worktreeRevive, actor: actor,
+                    target: ActuationTarget(worktree: params.worktreeID.uuidString))
+                let outcome: ScratchReviveOutcome
+                do {
+                    outcome = try await reviveScratchSpace(worktreeID: params.worktreeID)
+                } catch {
+                    await finishActuation(actuationID, .transportFailed, error: "\(error)")
+                    throw error
+                }
+                switch outcome {
                 case .revived(let revived):
+                    await finishActuation(actuationID, .dispatched)
                     // The row, not `.ok()`: `worktree.revive`'s clients decode
                     // a `Worktree` from the result. The delta is broadcast
                     // inside the helper, so this returns without repeating it.
                     return try RPCResponse(result: revived)
                 case .refused(let message):
+                    await finishActuation(actuationID, .transportFailed, error: message)
                     return RPCResponse(error: message)
                 }
             }

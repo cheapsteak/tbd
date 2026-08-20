@@ -192,8 +192,6 @@ struct WorktreeArchiveScratchRoutingRPCTests {
             method: RPCMethod.worktreeArchive,
             params: WorktreeArchiveParams(worktreeID: wt.id)))
         #expect(archive.success)
-        // The old failure's exact wording, asserted so a regression that
-        // reinstates the repo guard fails loudly rather than just unsuccessfully.
         #expect(archive.error == nil)
 
         let reloaded = try await db.worktrees.get(id: wt.id)
@@ -316,30 +314,148 @@ struct WorktreeArchiveScratchRoutingRPCTests {
         #expect(try await db.worktrees.get(id: wt.id)?.status == .archived)
     }
 
-    @Test func aRepoWorktreeStillTakesTheRepoPath() async throws {
+    /// The false arm of `if existing.isScratch` on the archive door. Driven
+    /// through a `.main` row so `beginArchiveWorktree` refuses at its very
+    /// first guard: that proves the repo path ran (the scratch body's own
+    /// refusal reads "Not a scratch space") while touching no tmux, no git and
+    /// no disk, and above all never reaching the detached phase 2 whose
+    /// deletion-queue rename would outlive this test's `TBD_HOME` isolation.
+    @Test func archiveDoesNotDivertARepoWorktreeIntoTheScratchBody() async throws {
         let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
         let db = try TBDDatabase(inMemory: true)
         let (router, _) = makeRouter(db: db)
-        // The routing keys on `repoID == nil`. A row that HAS a repo must not
-        // reach the scratch body: it would leave the directory and the git
-        // registration behind while reporting success.
         let repo = try await db.repos.create(
             path: "/tmp/r-\(UUID().uuidString)", displayName: "r", defaultBranch: "main")
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("wt-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
         let wt = try await db.worktrees.create(
-            repoID: repo.id, name: "w", branch: "b", path: dir.path, tmuxServer: "tbd-x")
+            repoID: repo.id, name: "w", branch: "b",
+            path: "/tmp/w-\(UUID().uuidString)", tmuxServer: "tbd-x")
         #expect(!wt.isScratch)
+        try await db.worktrees.updateStatus(id: wt.id, status: .main)
 
         let archive = await router.handle(try RPCRequest(
             method: RPCMethod.worktreeArchive,
             params: WorktreeArchiveParams(worktreeID: wt.id)))
-        // Phase 1 succeeds against a real repo row; the point is that it went
-        // through the lifecycle at all, which the scratch body would have
-        // refused with "Not a scratch space".
-        #expect(archive.error != "Not a scratch space: \(wt.id)")
+        #expect(!archive.success)
+        #expect(archive.error?.contains("Cannot archive the main branch worktree") == true)
+        #expect(archive.error?.contains("Not a scratch space") == false)
+    }
+
+    /// The false arm of `if existing.isScratch` on the revive door. An `.active`
+    /// repo worktree makes `beginReviveWorktree` refuse at its status guard,
+    /// before the repo lookup and before any git work; the scratch body would
+    /// have answered "Not a scratch space" instead. Without this, a future
+    /// refactor that widened the predicate could route repo worktrees into
+    /// `reviveScratchSpace` (flipping a row `.active` with no git worktree
+    /// recreated) with the whole suite green.
+    @Test func reviveDoesNotDivertARepoWorktreeIntoTheScratchBody() async throws {
+        let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
+        let db = try TBDDatabase(inMemory: true)
+        let (router, _) = makeRouter(db: db)
+        let repo = try await db.repos.create(
+            path: "/tmp/r-\(UUID().uuidString)", displayName: "r", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "w", branch: "b",
+            path: "/tmp/w-\(UUID().uuidString)", tmuxServer: "tbd-x")
+
+        let revive = await router.handle(try RPCRequest(
+            method: RPCMethod.worktreeRevive,
+            params: WorktreeReviveParams(worktreeID: wt.id)))
+        #expect(!revive.success)
+        #expect(revive.error?.contains("Worktree is already active") == true)
+        #expect(revive.error?.contains("Not a scratch space") == false)
+        #expect(revive.error?.contains("Scratch space") == false)
+    }
+
+    /// A scratch space can be a parent: `ParentResolver`'s `caller` arm returns
+    /// the caller id after rejecting only `.main`/`.archived`, so
+    /// `tbd worktree new` run from inside a scratch space sets that row as the
+    /// new worktree's parent. Archiving it out from under a live child is the
+    /// refusal `assertArchivable` exists for, and the routed path must give it
+    /// rather than behaving as though `--force` were always passed.
+    @Test func archiveRefusesAScratchSpaceWithAnActiveChild() async throws {
+        let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
+        let db = try TBDDatabase(inMemory: true)
+        let (router, _) = makeRouter(db: db)
+        let parent = try await makeScratch(router, name: "wt-scratch-parent")
+        let repo = try await db.repos.create(
+            path: "/tmp/r-\(UUID().uuidString)", displayName: "r", defaultBranch: "main")
+        _ = try await db.worktrees.create(
+            repoID: repo.id, name: "child", branch: "b",
+            path: "/tmp/w-\(UUID().uuidString)", tmuxServer: "tbd-x",
+            parentWorktreeID: parent.id)
+
+        let archive = await router.handle(try RPCRequest(
+            method: RPCMethod.worktreeArchive,
+            params: WorktreeArchiveParams(worktreeID: parent.id)))
+        #expect(!archive.success)
+        #expect(archive.error?.contains("Archive nested worktrees first") == true)
+        #expect(try await db.worktrees.get(id: parent.id)?.status == .active)
+
+        // `--force` is the documented bypass for cascade flows, and it must
+        // still reach the scratch body rather than being swallowed as inert.
+        let forced = await router.handle(try RPCRequest(
+            method: RPCMethod.worktreeArchive,
+            params: WorktreeArchiveParams(worktreeID: parent.id, force: true)))
+        #expect(forced.success)
+        #expect(try await db.worktrees.get(id: parent.id)?.status == .archived)
+    }
+
+    /// `archivedAt` is the GC grace clock `OrphanProcessCollector` reaps from,
+    /// so a retry must not re-stamp it and push the reap of a wedged agent out
+    /// by another grace window.
+    @Test func archivingAnAlreadyArchivedScratchRowIsAnIdempotentNoOp() async throws {
+        let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
+        let db = try TBDDatabase(inMemory: true)
+        let (router, deltas) = makeRouter(db: db)
+        let wt = try await makeScratch(router, name: "wt-archive-twice")
+        #expect(await router.handle(try RPCRequest(
+            method: RPCMethod.worktreeArchive,
+            params: WorktreeArchiveParams(worktreeID: wt.id))).success)
+        let firstStamp = try await db.worktrees.get(id: wt.id)?.archivedAt
+        #expect(firstStamp != nil)
+
+        let again = await router.handle(try RPCRequest(
+            method: RPCMethod.worktreeArchive,
+            params: WorktreeArchiveParams(worktreeID: wt.id)))
+        #expect(again.success)
+        #expect(try await db.worktrees.get(id: wt.id)?.archivedAt == firstStamp)
+        // And no second delta for a row every client already filed away.
+        let archived = deltas.snapshot().filter {
+            if case .worktreeArchived(let d) = $0 { return d.worktreeID == wt.id }
+            return false
+        }
+        #expect(archived.count == 1)
+    }
+
+    /// A promoted scratch row is retired, not archived-and-revivable. Promotion
+    /// leaves `repoID` NULL, so `isScratch` still holds and only the moved
+    /// folder incidentally blocked this before the explicit guard.
+    @Test func reviveRefusesAPromotedScratchRow() async throws {
+        let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
+        let db = try TBDDatabase(inMemory: true)
+        let (router, _) = makeRouter(db: db)
+        let wt = try await makeScratch(router, name: "wt-promoted")
+        // The production retirement path: it archives the scratch row and sets
+        // `promotedToRepoID` while leaving `repoID` NULL, which is exactly the
+        // shape that keeps `isScratch` true for a row that must not revive.
+        let repo = try await db.repos.create(
+            path: "/tmp/r-\(UUID().uuidString)", displayName: "r", defaultBranch: "main")
+        let main = try await db.worktrees.create(
+            repoID: repo.id, name: "main", branch: "main",
+            path: "/tmp/main-\(UUID().uuidString)", tmuxServer: "tbd-y", status: .main)
+        try await db.worktrees.promoteScratchMigration(
+            scratchID: wt.id, mainWorktreeID: main.id, repoID: repo.id, tmuxServer: "tbd-y")
+        // Recreate a directory at the stale scratch path, so the fileExists
+        // check cannot be what refuses this.
+        try FileManager.default.createDirectory(
+            atPath: wt.localPath, withIntermediateDirectories: true)
+
+        let revive = await router.handle(try RPCRequest(
+            method: RPCMethod.worktreeRevive,
+            params: WorktreeReviveParams(worktreeID: wt.id)))
+        #expect(!revive.success)
+        #expect(revive.error?.contains("promoted") == true)
+        #expect(try await db.worktrees.get(id: wt.id)?.status == .archived)
     }
 }
 }
