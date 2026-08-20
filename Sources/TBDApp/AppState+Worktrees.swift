@@ -615,23 +615,14 @@ extension AppState {
             await archiveScratch(id: id)
             return
         }
-        // `localPath` is a filesystem path only for a LOCAL row. On a remote row
-        // it is the synthetic `remote://…` URI that exists to satisfy a NOT NULL
-        // UNIQUE column, and a dev-server registry on this machine can say
-        // nothing about a worktree that lives on another one. Skipping is the
-        // honest answer; comparing would silently never match and read as
-        // "nothing running" for a reason that has nothing to do with the facts.
-        if !devServersConfirmed, let worktree, worktree.localPath.hasPrefix("/") {
-            let running = devServerRegistry.running(inWorktree: worktree.localPath)
-            if !running.isEmpty {
-                pendingArchiveWithDevServers = PendingArchive(
-                    worktreeID: id,
-                    worktreeName: worktree.displayName,
-                    servers: running.map(\.label),
-                    force: force
-                )
-                return
-            }
+        if let held = Self.devServerArchiveGate(
+            worktree: worktree,
+            devServersConfirmed: devServersConfirmed,
+            force: force,
+            runningServers: { path in devServerRegistry.running(inWorktree: path).map(\.label) }
+        ) {
+            pendingArchiveWithDevServers = held
+            return
         }
         let worktreeName = worktree?.displayName ?? "worktree"
         do {
@@ -1607,6 +1598,45 @@ extension AppState {
     /// - the selected repo worktree is the main branch or still creating
     ///   (those refuse the archive shortcut; scratch rows always proceed —
     ///   the daemon creates them `.active`, never `.main`/`.creating`).
+    /// Decide whether an archive should be held back for still-running dev
+    /// servers. Returns the prompt to show, or `nil` to proceed.
+    ///
+    /// Pure, and separated from `archiveWorktree` for the same reason
+    /// `archiveShortcutRoute` below is: this is the branch that decides whether
+    /// a destructive action happens, and it should be testable without standing
+    /// up a daemon. `runningServers` is passed in rather than read from the
+    /// registry here so a test can supply the answer directly.
+    ///
+    /// Three ways to proceed without asking, and each is a deliberate choice:
+    ///
+    /// - **Already confirmed.** The question has been answered; re-asking would
+    ///   make the second click appear to do nothing.
+    /// - **No worktree, or a remote one.** `localPath` is a filesystem path only
+    ///   for a local row — on a remote row it is the synthetic `remote://…` URI
+    ///   that exists to satisfy a NOT NULL UNIQUE column. A registry on this
+    ///   machine cannot speak for a worktree on another, and comparing anyway
+    ///   would silently never match, reading as "nothing running" for a reason
+    ///   that has nothing to do with the facts.
+    /// - **Nothing running.** Only `running` records reach here; a definitively
+    ///   dead record describes nothing an archive could strand.
+    nonisolated static func devServerArchiveGate(
+        worktree: Worktree?,
+        devServersConfirmed: Bool,
+        force: Bool,
+        runningServers: (String) -> [String]
+    ) -> PendingArchive? {
+        guard !devServersConfirmed else { return nil }
+        guard let worktree, worktree.localPath.hasPrefix("/") else { return nil }
+        let running = runningServers(worktree.localPath)
+        guard !running.isEmpty else { return nil }
+        return PendingArchive(
+            worktreeID: worktree.id,
+            worktreeName: worktree.displayName,
+            servers: running,
+            force: force
+        )
+    }
+
     nonisolated static func archiveShortcutRoute(
         selectedWorktree: Worktree?
     ) -> UUID? {

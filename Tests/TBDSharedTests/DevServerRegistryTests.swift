@@ -195,22 +195,22 @@ private func makeDirectory() throws -> URL {
 @Test func directoryHonoursXDGStateHome() {
     let url = DevServerRegistry.directory(
         environment: ["XDG_STATE_HOME": "/tmp/state"],
-        home: URL(fileURLWithPath: "/Users/someone"))
+        home: URL(fileURLWithPath: "/tmp/test-home"))
     #expect(url.path == "/tmp/state/dev-servers")
 }
 
 @Test func directoryFallsBackToTheHomeDefault() {
     let url = DevServerRegistry.directory(
-        environment: [:], home: URL(fileURLWithPath: "/Users/someone"))
-    #expect(url.path == "/Users/someone/.local/state/dev-servers")
+        environment: [:], home: URL(fileURLWithPath: "/tmp/test-home"))
+    #expect(url.path == "/tmp/test-home/.local/state/dev-servers")
 }
 
 /// An empty value is not a value. Treating it as one yields `/dev-servers` at
 /// the filesystem root, which silently reads nothing forever.
 @Test func directoryIgnoresAnEmptyXDGStateHome() {
     let url = DevServerRegistry.directory(
-        environment: ["XDG_STATE_HOME": ""], home: URL(fileURLWithPath: "/Users/someone"))
-    #expect(url.path == "/Users/someone/.local/state/dev-servers")
+        environment: ["XDG_STATE_HOME": ""], home: URL(fileURLWithPath: "/tmp/test-home"))
+    #expect(url.path == "/tmp/test-home/.local/state/dev-servers")
 }
 
 // MARK: - The real probe is wired to the kernel
