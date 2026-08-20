@@ -314,7 +314,7 @@ struct TerminalSessionEventHandlerTests {
                 notificationType: "permission_prompt",
                 message: "The old session needs permission"))
 
-        let sessionUpdate = Task { await raceRouter.handle(sessionStart) }
+        let sessionUpdate = gateHoldingTask { await raceRouter.handle(sessionStart) }
         guard await waitUntil({ dates.firstCallIsBlocked }) else {
             dates.releaseFirstCall()
             _ = await sessionUpdate.value
@@ -387,7 +387,7 @@ struct TerminalSessionEventHandlerTests {
                 notificationType: "permission_prompt",
                 message: "Codex needs permission"))
 
-        let earlier = Task { await raceRouter.handle(staleSession) }
+        let earlier = gateHoldingTask { await raceRouter.handle(staleSession) }
         guard await waitUntil({ dates.firstCallIsBlocked }) else {
             dates.releaseFirstCall()
             _ = await earlier.value
@@ -639,6 +639,12 @@ private final class SessionDeltaCapture: @unchecked Sendable {
     }
 }
 
+/// Holds the first `now()` call until the test releases it, so "the earlier
+/// request is mid-flight" is a deterministic state rather than a timing window.
+///
+/// The held request MUST be started with `gateHoldingTask`: this blocks the
+/// thread it runs on, and a blocked cooperative-pool thread starves every
+/// other test in the process. See `Tests/TestSupport/BoundedGateSupport.swift`.
 private final class BlockingSessionDates: @unchecked Sendable {
     private let lock = NSLock()
     private let first: Date
@@ -665,7 +671,7 @@ private final class BlockingSessionDates: @unchecked Sendable {
                 return call
             }
             guard call == 0 else { return subsequent }
-            release.wait()
+            release.waitForGate("terminal.sessionEvent first date-provider call")
             return first
         }
     }

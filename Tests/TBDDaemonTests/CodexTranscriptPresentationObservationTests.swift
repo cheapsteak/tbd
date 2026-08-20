@@ -27,7 +27,10 @@ struct CodexPresentationObservationTests {
             worktreeID: UUID()
         )]
 
-        let first = Task {
+        // `observeStamped` is a synchronous actor method, so the gate below
+        // holds the tracker actor itself. Off the cooperative pool, that costs
+        // one thread this test owns; on it, it would cost a shared one.
+        let first = gateHoldingTask {
             await tracker.observeStamped(transcripts: targets, now: dates.provider)
         }
         guard await waitUntil({ dates.firstCallIsBlocked }) else {
@@ -58,6 +61,12 @@ struct CodexPresentationObservationTests {
     }
 }
 
+/// Holds the first `now()` call until the test releases it, so "the earlier
+/// request is mid-flight" is a deterministic state rather than a timing window.
+///
+/// The held request MUST be started with `gateHoldingTask`: this blocks the
+/// thread it runs on, and a blocked cooperative-pool thread starves every
+/// other test in the process. See `Tests/TestSupport/BoundedGateSupport.swift`.
 private final class BlockingPresentationDates: @unchecked Sendable {
     private let lock = NSLock()
     private let first: Date
@@ -84,7 +93,7 @@ private final class BlockingPresentationDates: @unchecked Sendable {
                 return call
             }
             guard call == 0 else { return subsequent }
-            release.wait()
+            release.waitForGate("codex transcript presentation first date-provider call")
             return first
         }
     }

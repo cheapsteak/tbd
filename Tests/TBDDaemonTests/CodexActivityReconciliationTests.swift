@@ -149,7 +149,7 @@ struct CodexActivityReconciliationTests {
                 terminalID: terminal.id,
                 activityState: .working))
 
-        let inFlightList = Task { await raceRouter.handle(list) }
+        let inFlightList = gateHoldingTask { await raceRouter.handle(list) }
         guard await waitUntil(
             { dates.firstCallIsBlocked }, timeout: Self.raceRendezvousTimeout
         ) else {
@@ -474,7 +474,7 @@ struct CodexActivityReconciliationTests {
                 transcriptPath: currentTranscript.path,
                 source: "SessionStart"))
 
-        let staleList = Task { await router.handle(list) }
+        let staleList = gateHoldingTask { await router.handle(list) }
         guard await waitUntil(
             { dates.firstCallIsBlocked }, timeout: Self.raceRendezvousTimeout
         ) else {
@@ -563,7 +563,7 @@ struct CodexActivityReconciliationTests {
                 terminalID: terminal.id, sessionID: "same-session",
                 transcriptPath: transcript.path, source: "SessionStart"))
 
-        let staleList = Task { await raceRouter.handle(list) }
+        let staleList = gateHoldingTask { await raceRouter.handle(list) }
         guard await waitUntil(
             { dates.firstCallIsBlocked }, timeout: Self.raceRendezvousTimeout
         ) else {
@@ -863,6 +863,12 @@ private func waitUntilAsync(
     return false
 }
 
+/// Holds the first `now()` call until the test releases it, so "the earlier
+/// request is mid-flight" is a deterministic state rather than a timing window.
+///
+/// The held request MUST be started with `gateHoldingTask`: this blocks the
+/// thread it runs on, and a blocked cooperative-pool thread starves every
+/// other test in the process. See `Tests/TestSupport/BoundedGateSupport.swift`.
 private final class BlockingListDates: @unchecked Sendable {
     private let lock = NSLock()
     private let first: Date
@@ -889,7 +895,7 @@ private final class BlockingListDates: @unchecked Sendable {
                 return call
             }
             guard call == 0 else { return subsequent }
-            release.wait()
+            release.waitForGate("codex activity reconciliation first date-provider call")
             return first
         }
     }

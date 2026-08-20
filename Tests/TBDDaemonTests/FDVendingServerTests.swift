@@ -393,12 +393,16 @@ struct FDVendingServerTests {
         // decoded but undelivered) while the NEW connection is adopted — the
         // exact interleave that would break wire order == stream order.
         let sequence = TaggedFrameSequence()
+        // Blocks the server's dedicated receive `Thread`, never a
+        // cooperative-pool thread, so this gate needs no `gateHoldingTask`.
         let releaseSink = DispatchSemaphore(value: 0)
         let exits = TaggedFrameSequence()
         let server = FDVendingServer()
         await server.setOnInput { header, _ in
             sequence.record(kind: "input", pane: header.paneID)
-            if header.paneID == "%old-1" { releaseSink.wait() }
+            if header.paneID == "%old-1" {
+                releaseSink.waitForGate("FDVendingServer superseded receive thread held mid-loop")
+            }
         }
         await server.setOnReceiveLoopExit { exits.record(kind: "exit", pane: "") }
         await server.adoptConnection(fd: oldServerFD)

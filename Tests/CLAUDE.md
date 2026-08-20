@@ -349,6 +349,33 @@ New tests should state their tier. Tier-1 tests put no real sleep in the
 time. The scheduling handshake that observes it may still sleep; see "Clock and
 date seams" below for why that is not a tier violation.
 
+## Thread-blocking gates run off the cooperative pool
+
+Some seams can only be held still by blocking the thread that reaches them —
+a synchronous date provider, a sink called from a receive loop, a teardown
+closure. `DispatchSemaphore` is the right primitive there; **which thread it
+blocks is the safety question.**
+
+Swift's cooperative pool is only as wide as the machine has cores, and CI's
+`macos-26-arm64` runner has 3. Every suspended task in the process draws on
+that pool, including the statement that would release the gate. Park as many
+gates as the pool is wide and nothing can reach a `signal()`: the run goes
+silent and dies on the step's `timeout-minutes` with zero failing tests, and no
+per-test `.timeLimit` fires, because a blocked thread is where cooperative
+cancellation cannot reach. Bounding the wait converts the wedge into
+starvation, not into health — a bounded holder still owns its thread for the
+whole deadline, and innocent suites blow their own 90 s and 120 s
+hang-catchers first.
+
+So start the side that will be held with `gateHoldingTask`
+(`Tests/TestSupport/BoundedGateSupport.swift`), which pins it and every
+default-actor hop it makes to threads the tests own. A gate already reached
+from a dedicated `Thread` or a `DispatchQueue` needs nothing. Bound every wait
+with `waitForGate` regardless: it is the net under the rule, naming the gate
+instead of leaving an anonymous job timeout. `BoundedGateWaitTests` reproduces
+the wedge on any machine by deriving its holder count from
+`activeProcessorCount`.
+
 ## Quarantine — `.flaky(issue:)`
 
 There is no blanket retry policy, in any tier, and there will not be one:
