@@ -47,6 +47,13 @@ public enum PrimaryTerminal {
     /// not loaded yet), which wants the same answer for the same reason rather
     /// than a second rule beside this one.
     ///
+    /// The label carries that much weight because nothing outside the daemon
+    /// can write it: caller text reaches a row only through
+    /// `TerminalLabel.userSupplied(_:)`, which drops any claim to a reserved
+    /// identity. That boundary is the whole guarantee — this reads the label
+    /// alone, with no second condition standing behind it, so which check is
+    /// load-bearing stays plain.
+    ///
     /// Keyed on the label rather than on `worktree.status == .creating`
     /// deliberately: the status is a coarser fact that also covers moments this
     /// rule should not speak about, while the label names the actual cause —

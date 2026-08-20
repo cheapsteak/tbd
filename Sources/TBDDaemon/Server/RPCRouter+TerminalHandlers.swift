@@ -333,7 +333,13 @@ extension RPCRouter {
             claudeSessionID = nil
             freshSessionID = nil
             appendSystemPrompt = nil
-            label = cmd
+            // The command doubles as the tab's title, but it is caller text and
+            // may not claim one of the daemon's own identities: a row labelled
+            // `pre-session` reads as a spawn still on its way, `Codex` reads as
+            // a codex session, `login` as a profile login tab. A colliding
+            // command still spawns; it just gets the generic title a labelless
+            // shell gets.
+            label = TerminalLabel.userSupplied(cmd)
         } else {
             claudeSessionID = nil
             freshSessionID = nil
