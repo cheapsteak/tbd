@@ -3,7 +3,7 @@
 ## Problem
 
 The status bar renders one chip per PR bound to the selected worktree — a
-status dot plus `#21156` — capped at four, with the rest collapsed into `+N`.
+status dot plus `#412` — capped at four, with the rest collapsed into `+N`.
 Three things are missing from that strip.
 
 **A chip cannot be removed.** A worktree that has been alive for a week
@@ -13,7 +13,7 @@ while the thing being removed is on screen; nobody runs it. So the cluster only
 ever grows, and the chips that matter get pushed behind `+N` by chips that do
 not.
 
-**A chip says only its number.** `#21156` identifies a PR to GitHub and to
+**A chip says only its number.** `#412` identifies a PR to GitHub and to
 nobody else. Deciding whether a chip is worth keeping — or worth clicking —
 means opening it in a browser, which is the action the strip exists to make
 unnecessary.
@@ -274,20 +274,20 @@ payload, and a decision for its own spec rather than a detail of this one.
 
 Resting on a chip shows an overlay carrying the PR **number, title, state, and
 the age of that observation**. The title is the whole point: it is what turns
-`#21156` into something a person can decide about.
+`#412` into something a person can decide about.
 
 Those first three are **one headline**, not a labelled grid:
 
 ```
-PR#21485 (Merged) - longdesk relay: adding a GitHub event no longer means
-redeploying the team-shared relay
+PR#412 (Merged) - acme-relay: stop redeploying the shared relay just to add
+an event
 ```
 
 They are read together — which PR, what state, what it is about — and a
 two-column table of them spent most of the card's width on the words "PR" and
-"State" saying what `#21485` and "Merged" already say. Everything but the number
-is optional and degrades by **omission**: no state gives `PR#21485 - <title>`,
-no title gives `PR#21485 (Merged)`, neither gives `PR#21485`, and no combination
+"State" saying what `#412` and "Merged" already say. Everything but the number
+is optional and degrades by **omission**: no state gives `PR#412 - <title>`,
+no title gives `PR#412 (Merged)`, neither gives `PR#412`, and no combination
 leaves an empty `()` or a separator with nothing after it. The headline wraps
 inside the card's width rather than widening it.
 
