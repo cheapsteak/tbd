@@ -329,6 +329,54 @@ struct StatusBarView: View {
         isHovering ? untrackLabel(chip) : openLabel(chip)
     }
 
+    /// What the bar says when the selected worktree is armed to archive itself
+    /// on merge. A plain value so the wording can be asserted without a view.
+    ///
+    /// `nonisolated` for the same reason as `PRChip` above — `StatusBarView`'s
+    /// `View` conformance infers whole-type `@MainActor` isolation onto a
+    /// nested value type, and a main-actor `init` reached from a nonisolated
+    /// context traps at runtime rather than failing to compile.
+    nonisolated struct AutoArchiveChip: Equatable {
+        let label: String
+        let tooltip: String
+        let accessibilityLabel: String
+    }
+
+    /// nil when nothing is armed: the resting state gets no chip, because a
+    /// chip on every worktree would say nothing and cost the bar its width.
+    ///
+    /// `blocked` deliberately changes the tooltip and not the label. The arming
+    /// is a property of the worktree, and it survives a blocked merge, so the
+    /// label keeps stating what the worktree is armed to do and the tooltip
+    /// carries the qualification — the same division the toolbar makes, whose
+    /// armed badge keys on `armed` alone while only its help string mentions
+    /// the block (`ContentView.prSplitButtonHelp`).
+    ///
+    /// The qualification says the archive is **skipped**, not paused, because
+    /// nothing re-attempts it when the children go away.
+    /// `AutoArchiveOnMergeCoordinator` bails on `hasActiveChildren`, and the
+    /// `AllResolvedMergeTrigger` that drives the fan-out reaching it is
+    /// edge-triggered on all-bindings-resolved going false→true — so a
+    /// skipped archive runs only
+    /// on a fresh edge (a `tbd pr detach`/`attach`, or the trigger's
+    /// deliberately unpersisted memory being lost across a daemon restart).
+    /// A tooltip promising "paused" would have the operator wait for something
+    /// that never arrives.
+    nonisolated static func autoArchiveChip(
+        armed: Bool,
+        blocked: Bool,
+        displayName: String
+    ) -> AutoArchiveChip? {
+        guard armed else { return nil }
+        return AutoArchiveChip(
+            label: "Archive on merge",
+            tooltip: blocked
+                ? "Auto-archive is armed, but archiving is skipped while child worktrees exist. Click to cancel."
+                : "This worktree archives itself when its PR merges. Click to cancel.",
+            accessibilityLabel: "Archive on merge armed for \(displayName)"
+        )
+    }
+
     private var footerLabel: (text: String, tooltip: String?) {
         let version = "v\(TBDConstants.version)"
         guard let sourcePath = Self.sourceWorktreePath,
@@ -399,6 +447,23 @@ struct StatusBarView: View {
                         // version/display-name label rather than squeezing it.
                         .layoutPriority(-1)
                 }
+            }
+            // Arming is otherwise nearly invisible — a badge baked into the
+            // toolbar's PR icon — while what it promises is a worktree that
+            // disappears when its PR merges. The bar is the surface that is
+            // always on screen and already scoped to the selection, so this is
+            // where that promise gets said out loud, with its own way out.
+            //
+            // Local worktrees only, like every other cluster in this bar:
+            // `selected` is a `LocalWorktree`, which a remote row cannot be.
+            // The daemon does auto-archive remote lanes, so a remote worktree's
+            // arming is still stated by the toolbar badge and its help text.
+            if let selected,
+               let chip = Self.autoArchiveChip(
+                   armed: appState.effectiveAutoArchive(for: selected.worktree),
+                   blocked: !appState.children(of: selected.id).isEmpty,
+                   displayName: selected.displayName) {
+                AutoArchiveChipView(worktreeID: selected.id, chip: chip)
             }
             Spacer()
             if let info = selectedInfo {
@@ -759,6 +824,116 @@ private struct ParkedPromptStatusItem: View {
         .accessibilityLabel("First message cannot be delivered for \(worktree.displayName)")
         .accessibilityHint(tooltip)
         .accessibilityAddTraits(.isButton)
+    }
+}
+
+/// The armed auto-archive-on-merge chip.
+///
+/// The one loud thing in a bar of grey secondary text, and deliberately so: it
+/// is the only always-visible statement that this worktree will archive itself,
+/// and nobody should meet that outcome by surprise. The purple is taken from
+/// the shared PR palette rather than written here, so the chip reads as the
+/// state it is waiting for and cannot drift from the merged-PR glyph beside it
+/// — the same reason `PRChipView.dotColor` reaches for that palette.
+///
+/// The whole capsule is the way out, so cancelling never requires finding the
+/// toolbar menu and never requires hitting a glyph-sized target. The leading
+/// icon carries that: `archivebox` at rest, the same symbol the toolbar's armed
+/// badge uses so both surfaces name this state alike, swapping to an `xmark`
+/// under the pointer to say what a click will do before it lands. The container
+/// carries the accessibility element, so its default action performs the same
+/// cancel for anyone activating the chip rather than clicking it.
+///
+/// ## Why this does not reuse `PRChipView`'s icon slot
+///
+/// `PRChipView` grew a hover-swapped icon slot in the same bar, and the two
+/// share exactly one rule — a fixed square holding both glyphs, so a chip is
+/// the same width hovered as at rest. Everything else that slot carries exists
+/// to arbitrate between **two sibling click targets**: `untrackHitSide`'s
+/// transparent overlay, the `zIndex(1)` that wins the hit test against the
+/// number's leading padding, `iconTextGap` applied as padding so the gap
+/// belongs to the open target, and `iconSlotLabel`, which derives the slot's
+/// *action* from the same flag as its *glyph* so a drawn dot can never untrack.
+///
+/// This chip has one target and one action. The glyph announces the cancel; it
+/// does not own it, so a stale `isHovering` can only draw the wrong symbol,
+/// never perform the wrong gesture — the hazard that machinery is there to
+/// close cannot arise here. Adopting it would add three constants and an
+/// overlay that resolve an ambiguity this chip does not have.
+private struct AutoArchiveChipView: View {
+    @EnvironmentObject var appState: AppState
+    let worktreeID: UUID
+    let chip: StatusBarView.AutoArchiveChip
+
+    @State private var isHovering = false
+
+    /// The fixed square `archivebox` and `xmark` share, named to match
+    /// `PRChipView.iconSlotSide` because it holds the same invariant: sized for
+    /// the larger of the two glyphs, both centred, so the capsule cannot change
+    /// width when the pointer crosses it.
+    ///
+    /// 11, not `PRChipView`'s 9, and the difference is not drift. That slot is
+    /// sized to a 6pt status dot; this one holds SF Symbols, so it takes the
+    /// size the bar's other symbol slot already uses — `CopyableStatusText`
+    /// frames its leading `GitBranchIcon` at 11×11 to match the caption text
+    /// this bar is set in. Following the neighbour that hosts the same kind of
+    /// glyph is what keeps the bar even.
+    private static let iconSlotSide: CGFloat = 11
+
+    /// Writes an explicit `false` override even when the arming came from the
+    /// global default — the same thing the toolbar's toggle does, and the only
+    /// reading of the gesture that survives the next default change.
+    private func cancel() {
+        Task { await appState.setAutoArchive(worktreeID: worktreeID, enabled: false) }
+    }
+
+    /// The capsule fill, resolved through the shared PR palette so it tracks
+    /// whatever `.merged` is tuned to. The synthetic `PRStatus` exists only to
+    /// reach that palette — the same trick, and the same reason, as
+    /// `PRChipView.dotColor`.
+    private var mergePurple: Color {
+        PRStatusPresentation.make(
+            for: PRStatus(number: 0, url: "", state: .merged)
+        )?.color ?? .purple
+    }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            // `archivebox` and `xmark` are different widths, so a slot that
+            // hugged the symbol would shove the label sideways every time the
+            // pointer crossed the capsule — see `iconSlotSide`. `.small` keeps
+            // the boxier `archivebox` inside the slot while both symbols still
+            // read at this size. The swap is deliberately instant — the chip is
+            // a cancel affordance, and the glyph has to answer "what does a
+            // click do" the moment the pointer lands, not a beat later.
+            Image(systemName: isHovering ? "xmark" : "archivebox")
+                .imageScale(.small)
+                .frame(width: Self.iconSlotSide, height: Self.iconSlotSide)
+                .animation(nil, value: isHovering)
+            // `lineLimit(1)` for the same reason the status items beside it
+            // carry it — `CopyableStatusText`, `PRChipView`, the `+N` menu,
+            // `ParkedPromptStatusItem`: the bar is one line tall, so a squeeze
+            // has to truncate the label rather than wrap it and grow the bar.
+            Text(chip.label)
+                .lineLimit(1)
+        }
+        .font(.caption)
+        .fontWeight(.semibold)
+        .foregroundStyle(.white)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 2)
+        .background(mergePurple, in: Capsule())
+        // The capsule, padding included, is one click target — the icon is
+        // where the cancel is *announced*, not the only place it can be aimed.
+        .contentShape(Capsule())
+        .help(chip.tooltip)
+        .modifier(StatusBarHoverAffordance(isHovering: $isHovering))
+        .onTapGesture(perform: cancel)
+        .accessibilityElement()
+        .accessibilityLabel(chip.accessibilityLabel)
+        .accessibilityHint(chip.tooltip)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { cancel() }
     }
 }
 
