@@ -114,6 +114,10 @@ struct LocalizedErrorPayloadTests {
             ),
             ("WorktreeLifecycleError.repoNotFound", WorktreeLifecycleError.repoNotFound(Self.repoID)),
             ("WorktreeLifecycleError.worktreeNotFound", WorktreeLifecycleError.worktreeNotFound(Self.worktreeID)),
+            (
+                "WorktreeLifecycleError.worktreeHasNoRepo",
+                WorktreeLifecycleError.worktreeHasNoRepo(Self.worktreeID)
+            ),
             ("WorktreeLifecycleError.worktreeNotArchived", WorktreeLifecycleError.worktreeNotArchived(Self.worktreeID)),
             ("WorktreeLifecycleError.createFailed", WorktreeLifecycleError.createFailed("branch already checked out")),
             (
@@ -239,6 +243,11 @@ struct LocalizedErrorPayloadTests {
             WorktreeLifecycleError.repoNotFound(Self.repoID),
             [Self.repoID.uuidString],
             "WorktreeLifecycleError.repoNotFound"
+        )
+        assertRenders(
+            WorktreeLifecycleError.worktreeHasNoRepo(Self.worktreeID),
+            [Self.worktreeID.uuidString],
+            "WorktreeLifecycleError.worktreeHasNoRepo"
         )
         assertRenders(
             OrphanGCError.recordNotFound(Self.recordID),

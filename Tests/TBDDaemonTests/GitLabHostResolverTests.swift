@@ -1,0 +1,229 @@
+import Foundation
+import TestSupport
+import Testing
+@testable import TBDDaemonLib
+
+@Suite("GitLab host resolution")
+struct GitLabHostResolverTests {
+
+    /// Real `glab auth status` output shape: host lines are flush-left, detail
+    /// lines are indented. Reproduced from a self-managed instance (#673).
+    static let realOutput = """
+    git.acme.example
+      ✓ Logged in to git.acme.example as someone (/Users/x/.config/glab-cli/config.yml)
+      ! Invalid token provided in configuration file
+      ✓ Git operations for git.acme.example configured to use ssh protocol.
+    gitlab.com
+      x gitlab.com: API call failed: GET https://gitlab.com/api/v4/user: 401 {message: 401 Unauthorized}
+      ! No token found (checked config file, keyring, and environment variables).
+    """
+
+    @Test("extracts every configured host from flush-left lines")
+    func parsesHosts() {
+        let hosts = GitLabHostResolver.parseAuthStatusHosts(Self.realOutput)
+        #expect(hosts == ["git.acme.example", "gitlab.com"])
+    }
+
+    @Test("a host reporting both logged-in and invalid-token is still a GitLab host")
+    func contradictoryBlockStillYieldsHost() {
+        // TBD reads the host LIST, never the auth verdict — the verdict text is
+        // measurably self-contradictory while calls succeed (#673).
+        #expect(GitLabHostResolver.parseAuthStatusHosts(Self.realOutput).contains("git.acme.example"))
+    }
+
+    @Test("exit status 1 does not suppress the host list")
+    func exitOneStillYieldsHosts() async {
+        // glab exits 1 if ANY configured host fails, so a working setup reports
+        // failure whenever an unused gitlab.com entry sits alongside it.
+        let resolver = GitLabHostResolver(glRunner: { _, _ in
+            GHCommandResult(stdout: Self.realOutput, stderr: "", exitStatus: 1)
+        })
+        #expect(await resolver.isGitLabHost("git.acme.example", repoPath: "/tmp/x"))
+    }
+
+    @Test("github.com is never probed")
+    func githubIsNotProbed() async {
+        let probed = Probe()
+        let resolver = GitLabHostResolver(glRunner: { _, _ in
+            await probed.mark()
+            return GHCommandResult(stdout: Self.realOutput)
+        })
+        #expect(await resolver.isGitLabHost("github.com", repoPath: "/tmp/x") == false)
+        #expect(await probed.count == 0)
+    }
+
+    @Test("an unlisted host is not GitLab")
+    func unlistedHostIsNotGitLab() async {
+        let resolver = GitLabHostResolver(glRunner: { _, _ in
+            GHCommandResult(stdout: Self.realOutput)
+        })
+        #expect(await resolver.isGitLabHost("git.other.example", repoPath: "/tmp/x") == false)
+    }
+
+    @Test("absent glab yields no hosts")
+    func absentGlab() async {
+        let resolver = GitLabHostResolver(glRunner: { _, _ in nil })
+        #expect(await resolver.isGitLabHost("git.acme.example", repoPath: "/tmp/x") == false)
+    }
+
+    /// A `glab` that never launched produced no answer, only a failed
+    /// question. `glab` may be installed, or authenticated against a new host,
+    /// at any point during a daemon run that lasts days — and one transient
+    /// launch failure on the first poll after boot must not disable GitLab
+    /// until the next restart.
+    @Test("an empty derivation is retried, not remembered")
+    func emptyDerivationIsRetried() async {
+        let attempts = Probe()
+        let resolver = GitLabHostResolver(glRunner: { _, _ in
+            let seen = await attempts.mark()
+            // First call: glab is not on PATH. Afterwards the user has run
+            // `glab auth login --hostname git.acme.example`.
+            return seen == 1 ? nil : GHCommandResult(stdout: Self.realOutput)
+        })
+        #expect(await resolver.isGitLabHost("git.acme.example", repoPath: "/tmp/x") == false)
+        #expect(await resolver.isGitLabHost("git.acme.example", repoPath: "/tmp/x"))
+        #expect(await attempts.count == 2)
+    }
+
+    /// The steady state of every fleet that has `glab` installed and no GitLab
+    /// host configured. `glab` ran, answered, and named nobody — an
+    /// observation, unlike a launch failure — so asking again on the next call
+    /// buys nothing. `github.com` short-circuits before the probe, but a GitHub
+    /// Enterprise, Bitbucket, gitea or codeberg host does not, so without this
+    /// the fleet pays one `glab auth status` per worktree per poll tick forever.
+    @Test("a configured-nothing answer is not re-probed on every call")
+    func emptyStatusIsNotReprobedEveryCall() async {
+        let probed = Probe()
+        let resolver = GitLabHostResolver(glRunner: { _, _ in
+            await probed.mark()
+            return GHCommandResult(stdout: "",
+                                   stderr: "You are not logged into any GitLab hosts. Run glab auth login\n",
+                                   exitStatus: 1)
+        })
+        for _ in 0..<3 {
+            #expect(await resolver.isGitLabHost("ghe.acme.example", repoPath: "/tmp/x") == false)
+        }
+        #expect(await probed.count == 1)
+    }
+
+    /// The other half of the same knob: the answer is remembered for a bounded
+    /// window, never for the run, so `glab auth login --hostname …` mid-run
+    /// still takes effect without restarting TBD. Driven through the `now:`
+    /// date seam — the value is compared, not slept on.
+    @Test("a configured-nothing answer is re-derived once its window passes")
+    func emptyStatusAgesOut() async {
+        let dates = TestDateSource()
+        let attempts = Probe()
+        let resolver = GitLabHostResolver(glRunner: { _, _ in
+            let seen = await attempts.mark()
+            // The user runs `glab auth login --hostname git.acme.example`
+            // somewhere between the first probe and the second.
+            return seen == 1
+                ? GHCommandResult(stdout: "", exitStatus: 1)
+                : GHCommandResult(stdout: Self.realOutput)
+        }, now: dates.provider)
+
+        #expect(await resolver.isGitLabHost("git.acme.example", repoPath: "/tmp/x") == false)
+
+        dates.advance(by: GitLabHostResolver.emptyStatusLifetime - 1)
+        #expect(await resolver.isGitLabHost("git.acme.example", repoPath: "/tmp/x") == false)
+        #expect(await attempts.count == 1)
+
+        dates.advance(by: 2)
+        #expect(await resolver.isGitLabHost("git.acme.example", repoPath: "/tmp/x"))
+        #expect(await attempts.count == 2)
+    }
+
+    /// The window covers only an answer. A `glab` that did not launch is
+    /// retried on the very next call even with the clock held still, because
+    /// nothing was observed — and in the case that dominates, `glab` absent,
+    /// the retry resolves a static nil path and spawns nothing.
+    @Test("a launch failure is retried inside the window an answer would hold")
+    func launchFailureIsNotHeldByTheWindow() async {
+        let dates = TestDateSource()
+        let attempts = Probe()
+        let resolver = GitLabHostResolver(glRunner: { _, _ in
+            let seen = await attempts.mark()
+            return seen == 1 ? nil : GHCommandResult(stdout: Self.realOutput)
+        }, now: dates.provider)
+
+        #expect(await resolver.isGitLabHost("git.acme.example", repoPath: "/tmp/x") == false)
+        #expect(await resolver.isGitLabHost("git.acme.example", repoPath: "/tmp/x"))
+        #expect(await attempts.count == 2)
+    }
+
+    /// The window is a magnitude, so a wall clock that steps backwards
+    /// re-derives early rather than pinning the empty answer in place until the
+    /// clock catches up.
+    @Test("a backwards wall-clock step re-derives rather than extending the window")
+    func backwardsClockStepRederives() async {
+        let dates = TestDateSource()
+        let attempts = Probe()
+        let resolver = GitLabHostResolver(glRunner: { _, _ in
+            let seen = await attempts.mark()
+            return seen == 1
+                ? GHCommandResult(stdout: "", exitStatus: 1)
+                : GHCommandResult(stdout: Self.realOutput)
+        }, now: dates.provider)
+
+        #expect(await resolver.isGitLabHost("git.acme.example", repoPath: "/tmp/x") == false)
+        dates.advance(by: -(GitLabHostResolver.emptyStatusLifetime + 1))
+        #expect(await resolver.isGitLabHost("git.acme.example", repoPath: "/tmp/x"))
+        #expect(await attempts.count == 2)
+    }
+
+    @Test("the host list is fetched once and cached for the resolver's life")
+    func cachesAcrossCalls() async {
+        let probed = Probe()
+        let resolver = GitLabHostResolver(glRunner: { _, _ in
+            await probed.mark()
+            return GHCommandResult(stdout: Self.realOutput)
+        })
+        _ = await resolver.isGitLabHost("git.acme.example", repoPath: "/tmp/x")
+        _ = await resolver.isGitLabHost("git.acme.example", repoPath: "/tmp/x")
+        #expect(await probed.count == 1)
+    }
+
+    @Test("host matching is case-insensitive in both directions")
+    func hostMatchingIsCaseInsensitive() async {
+        let resolver = GitLabHostResolver(glRunner: { _, _ in
+            GHCommandResult(stdout: "GIT.Acme.Example\n  ✓ Logged in\n")
+        })
+        #expect(await resolver.isGitLabHost("git.ACME.example", repoPath: "/tmp/x"))
+    }
+
+    @Test("indented detail lines never become hosts")
+    func indentedLinesAreNotHosts() {
+        // The failing host's detail line contains a bare "gitlab.com:" token and
+        // a full URL; neither may be mistaken for a declared host.
+        let hosts = GitLabHostResolver.parseAuthStatusHosts("""
+        git.acme.example
+          x gitlab.com: API call failed: GET https://gitlab.com/api/v4/user
+        """)
+        #expect(hosts == ["git.acme.example"])
+    }
+
+    /// CRLF is not exotic here: `glab auth status` is read through a pipe whose
+    /// contents come from whatever the host and the user's terminal settings
+    /// produced. A trailing `\r` clears both guards below the split — it is not
+    /// a space and it is not a dot — so the parse "succeeds" with a host name
+    /// nobody will ever ask about, and GitLab is silently off with no error
+    /// anywhere.
+    @Test("a CRLF-terminated host line still resolves")
+    func crlfTerminatedHostResolves() async {
+        let crlf = "git.acme.example\r\n  ✓ Logged in to git.acme.example as someone\r\n"
+        #expect(GitLabHostResolver.parseAuthStatusHosts(crlf) == ["git.acme.example"])
+
+        let resolver = GitLabHostResolver(glRunner: { _, _ in GHCommandResult(stdout: crlf) })
+        #expect(await resolver.isGitLabHost("git.acme.example", repoPath: "/tmp/x"))
+    }
+}
+
+private actor Probe {
+    private(set) var count = 0
+    @discardableResult
+    func mark() -> Int {
+        count += 1
+        return count
+    }
+}

@@ -119,4 +119,148 @@ struct BoundedProcessRunnerTests {
         }
         #expect(status == 7)
     }
+
+    /// Every other `.pseudoTerminal` test in this file drives a child that
+    /// exits 0, so none of them can tell a correctly-read exit status from one
+    /// hardcoded to zero. `childExitingBeforeReadingLargeStdinFailsTheCallNotTheProcess`
+    /// above proves status 7 survives under `.pipes`; this is its `.pseudoTerminal`
+    /// twin, closing the one gap that shape leaves — a status-reading bug
+    /// (e.g. reading the wrong process, or a stray `status == 0` fallback)
+    /// specific to the pty branch would pass every existing pty test here and
+    /// only show up on a nonzero exit.
+    @Test func pseudoTerminalModePreservesTheChildsNonzeroExitStatus() async throws {
+        let outcome = try await runBoundedProcess(
+            executable: "/bin/sh", arguments: ["-c", "echo hello; exit 7"],
+            currentDirectory: nil, timeout: .seconds(10), stdio: .pseudoTerminal)
+        guard case .completed(let status, let stdout, let stderr) = outcome else {
+            Issue.record("expected .completed under .pseudoTerminal, got \(outcome)")
+            return
+        }
+        #expect(status == 7)
+        #expect((String(data: stdout, encoding: .utf8) ?? "").contains("hello"))
+        #expect(stderr.isEmpty)
+    }
+
+    /// The whole point of the mode. The vendor CLI refuses `--cloud` creation
+    /// when stdout is not a terminal, so a probe that reports what it sees is
+    /// the only assertion that proves the child got one. Both arms run the SAME
+    /// probe, so the test discriminates rather than merely passing.
+    @Test func pseudoTerminalModeGivesTheChildATty() async throws {
+        let probe = "if [ -t 1 ]; then echo tty; else echo pipe; fi"
+
+        let pty = try await runBoundedProcess(
+            executable: "/bin/sh", arguments: ["-c", probe],
+            currentDirectory: nil, timeout: .seconds(10), stdio: .pseudoTerminal)
+        guard case .completed(let ptyStatus, let ptyOut, let ptyErr) = pty else {
+            Issue.record("expected .completed under .pseudoTerminal, got \(pty)")
+            return
+        }
+        #expect(ptyStatus == 0)
+        #expect((String(data: ptyOut, encoding: .utf8) ?? "").contains("tty"))
+        // One file descriptor: everything the child wrote is on stdout.
+        #expect(ptyErr.isEmpty)
+
+        let piped = try await runBoundedProcess(
+            executable: "/bin/sh", arguments: ["-c", probe],
+            currentDirectory: nil, timeout: .seconds(10))
+        guard case .completed(let pipeStatus, let pipeOut, _) = piped else {
+            Issue.record("expected .completed under the default .pipes, got \(piped)")
+            return
+        }
+        #expect(pipeStatus == 0)
+        #expect((String(data: pipeOut, encoding: .utf8) ?? "").contains("pipe"))
+    }
+
+    /// A pty has a small kernel buffer, so the incremental drain matters here
+    /// at least as much as it does for a pipe: a child that outruns it would
+    /// otherwise block on write while the parent waits for exit.
+    @Test func pseudoTerminalModeDrainsMoreThanOneBufferful() async throws {
+        let outcome = try await runBoundedProcess(
+            executable: "/bin/sh",
+            arguments: ["-c", "head -c 200000 /dev/zero | tr '\\0' 'x'"],
+            currentDirectory: nil, timeout: .seconds(20), stdio: .pseudoTerminal)
+        guard case .completed(let status, let stdout, _) = outcome else {
+            Issue.record("expected .completed, got \(outcome)")
+            return
+        }
+        #expect(status == 0)
+        // Raw mode, so no CR is inserted and the byte count is exact.
+        #expect(stdout.count == 200_000)
+    }
+
+    /// The replica is the child's stdin AND its stdout on one descriptor, so
+    /// there is no write end to close and a child waiting for EOF would hang
+    /// forever. Refusing loudly beats hanging quietly; `create` passes no stdin.
+    @Test func pseudoTerminalModeRefusesAStdinPayload() async {
+        await #expect(throws: BoundedProcessRunnerError.stdinUnsupportedOnPseudoTerminal) {
+            _ = try await runBoundedProcess(
+                executable: "/bin/cat", arguments: [],
+                currentDirectory: nil, stdin: Data("hi".utf8),
+                timeout: .seconds(10), stdio: .pseudoTerminal)
+        }
+    }
+
+    /// The reported terminal geometry is wide ON PURPOSE and a comment alone
+    /// cannot stop someone "restoring" it to the 24x80 that
+    /// `TmuxControlConnection` uses. A pty never wraps by itself — `winsize` is
+    /// advisory metadata — but a child that reads `TIOCGWINSZ` formats to it and
+    /// inserts REAL newlines at the wrap, which then corrupt the captured bytes.
+    /// At 80 columns the headroom over a realistic output line was six
+    /// characters. `stty size` is what the child sees, so this pins the actual
+    /// contract rather than the constant's spelling.
+    @Test func pseudoTerminalReportsAWideGeometryToTheChild() async throws {
+        let outcome = try await runBoundedProcess(
+            executable: "/bin/sh", arguments: ["-c", "stty size"],
+            currentDirectory: nil, timeout: .seconds(10), stdio: .pseudoTerminal)
+        guard case .completed(let status, let stdout, _) = outcome else {
+            Issue.record("expected .completed under .pseudoTerminal, got \(outcome)")
+            return
+        }
+        #expect(status == 0)
+        let reported = (String(data: stdout, encoding: .utf8) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(reported == "200 400", "child saw rows/cols \(reported.debugDescription), wanted \"200 400\"")
+    }
+
+    /// The merge itself, asserted directly rather than inferred from an empty
+    /// `stderr`. `pseudoTerminalModeGivesTheChildATty` checks only that the
+    /// reported stderr is empty, and emptiness is the WRONG witness: deleting
+    /// `process.standardError = replicaHandle` leaves it empty too — the
+    /// child's stderr would simply escape to the daemon's own stderr, where the
+    /// CLI's error text vanishes unlogged and a nonzero status arrives with
+    /// nothing to diagnose from. Requiring BOTH streams to appear in `stdout`
+    /// is the contract; the empty `stderr` is only its consequence.
+    ///
+    /// Its `.pipes` twin is `defaultStdioIsStillPipes` below, which runs the
+    /// same probe and requires the two streams to stay SEPARATE — so between
+    /// them the merge is pinned in both directions.
+    @Test func pseudoTerminalModeMergesStderrIntoStdout() async throws {
+        let outcome = try await runBoundedProcess(
+            executable: "/bin/sh", arguments: ["-c", "echo out; echo err 1>&2"],
+            currentDirectory: nil, timeout: .seconds(10), stdio: .pseudoTerminal)
+        guard case .completed(let status, let stdout, let stderr) = outcome else {
+            Issue.record("expected .completed under .pseudoTerminal, got \(outcome)")
+            return
+        }
+        #expect(status == 0)
+        let merged = String(data: stdout, encoding: .utf8) ?? ""
+        #expect(merged.contains("out"), "child's stdout missing from the merged capture: \(merged.debugDescription)")
+        #expect(merged.contains("err"), "child's stderr missing from the merged capture: \(merged.debugDescription)")
+        // One descriptor, so there is nothing left to report separately.
+        #expect(stderr.isEmpty)
+    }
+
+    /// The default is unchanged, which is what keeps every existing call site
+    /// on pipes without being revisited.
+    @Test func defaultStdioIsStillPipes() async throws {
+        let outcome = try await runBoundedProcess(
+            executable: "/bin/sh", arguments: ["-c", "echo out; echo err 1>&2"],
+            currentDirectory: nil, timeout: .seconds(10))
+        guard case .completed(_, let stdout, let stderr) = outcome else {
+            Issue.record("expected .completed, got \(outcome)")
+            return
+        }
+        #expect((String(data: stdout, encoding: .utf8) ?? "").contains("out"))
+        #expect((String(data: stderr, encoding: .utf8) ?? "").contains("err"))
+    }
 }

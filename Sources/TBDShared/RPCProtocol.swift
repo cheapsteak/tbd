@@ -260,6 +260,7 @@ public enum RPCMethod {
     public static let configSetHibernateInputVeto = "config.setHibernateInputVeto"
     public static let configSetDeliveryVerification = "config.setDeliveryVerification"
     public static let configSetQueuedPrompt = "config.setQueuedPrompt"
+    public static let configSetClaudeCloud = "config.setClaudeCloud"
     public static let configSetSupervisionEnabled = "config.setSupervisionEnabled"
     public static let superviseStatus = "supervise.status"
     public static let superviseSetProjectMark = "supervise.setProjectMark"
@@ -281,6 +282,7 @@ public enum RPCMethod {
     public static let gcSweepNow = "gc.sweepNow"
     public static let configSetGCEnabled = "config.setGCEnabled"
     public static let configSetGCProfileDirsEnabled = "config.setGCProfileDirsEnabled"
+    public static let configSetGCOrphanProcessesEnabled = "config.setGCOrphanProcessesEnabled"
     public static let remoteProviders = "remote.providers"
     public static let remoteSessions = "remote.sessions"
     public static let remoteCreate = "remote.create"
@@ -293,6 +295,29 @@ public enum RPCMethod {
     public static let remoteDismiss = "remote.dismiss"
     public static let remoteSetPin = "remote.setPin"
     public static let remoteReportAttachExit = "remote.reportAttachExit"
+
+    /// Every `remote.*` verb addressed by a `provider` field in its params (or,
+    /// for the two worktree-addressed retirement routes, by the worktree's
+    /// bound `location`) — as opposed to `remoteProviders`/`remoteSessions`,
+    /// which enumerate across every provider and take none.
+    ///
+    /// This is the single list the daemon's cloud gate (`RPCRouter.cloudGate`)
+    /// must cover and `ClaudeCloudGateTests` asserts against, so the two
+    /// cannot independently go stale against each other the way they did
+    /// before `remote.archive`/`remote.unarchive` were found ungated — the
+    /// test's list had quietly come to describe the bug instead of the
+    /// contract. It is still a hand-maintained array, not something the
+    /// compiler enforces: `RPCMethod` is a namespace of static string
+    /// constants, not a `CaseIterable` enum, so nothing stops a new
+    /// `remote.*` case from being added to `RPCRouter.handle`'s switch
+    /// without a matching entry here. Add any new provider-named `remote.*`
+    /// method to this array in the same commit that adds its RPC case.
+    public static let providerNamedRemoteMethods: [String] = [
+        remoteCreate, remoteStop, remoteArchive, remoteUnarchive,
+        remoteSend, remoteLog, remoteRename, remoteDismiss,
+        remoteSetPin, remoteReportAttachExit,
+    ]
+
     public static let configSetRemoteBackends = "config.setRemoteBackends"
     public static let panelGet = "panel.get"
     public static let panelApply = "panel.apply"
@@ -1039,7 +1064,19 @@ public struct PRAttachResult: Codable, Sendable {
 }
 
 public struct PRDetachResult: Codable, Sendable {
-    /// False when this worktree had no such binding — not an error.
+    /// Whether the call **changed the record**, never whether it succeeded —
+    /// false is not an error.
+    ///
+    /// True when a live binding was tombstoned, and when a tombstone was
+    /// recorded for a PR this worktree had no row for at all (a detach asserts
+    /// that a PR does not belong here; it does not merely edit a row that
+    /// happens to exist). False when the PR was already tombstoned, and when
+    /// there was nothing to tombstone and nothing tied the reference to this
+    /// worktree — in both of those the PR is not tracked here, which is what
+    /// the caller asked for, and callers may say exactly that.
+    ///
+    /// A request that could not be honoured at all is an RPC **error**, never a
+    /// false, precisely so that sentence stays true.
     public let detached: Bool
     public init(detached: Bool) { self.detached = detached }
 }
@@ -2085,6 +2122,18 @@ public struct ConfigSetQueuedPromptParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setClaudeCloud` — the Claude cloud sessions gate
+/// (design 2026-08-15 §7, default OFF). A second gate inside
+/// `remote_backends_enabled`, never a bypass.
+///
+/// Sending either value is an explicit gesture: the backing column is NULL
+/// until this verb writes to it, and a written `false` stays off even after the
+/// shipped default graduates.
+public struct ConfigSetClaudeCloudParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 // MARK: - Supervision
 
 /// Params for `config.setSupervisionEnabled` — the fleet brake
@@ -2530,6 +2579,15 @@ public struct ConfigSetGCProfileDirsEnabledParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setGCOrphanProcessesEnabled` — the gate for the
+/// orphaned-process collector, which reclaims processes that outlived the
+/// worktree they were rooted in (default OFF during soak, on top of the GC
+/// master switch). Design: `docs/specs/2026-08-18-orphan-process-gc-design.md`.
+public struct ConfigSetGCOrphanProcessesEnabledParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 /// Params for `repo.setEnvOverrides` — per-repo free-form env overrides.
 public struct SetRepoEnvOverridesParams: Codable, Sendable, Equatable {
     public let repoID: UUID
@@ -2709,6 +2767,19 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// `Config.queuedPromptDefault`, so an install that never touched the
     /// toggle reports whatever the shipped default currently is.
     public let queuedPromptEnabled: Bool
+    /// Whether the Claude cloud sessions gate is currently set (design
+    /// 2026-08-15 §7). Default OFF while it soaks. Resolved through
+    /// `Config.claudeCloudEnabledDefault`, so an install that never touched the
+    /// toggle reports whatever the shipped default currently is.
+    public let claudeCloudEnabled: Bool
+    /// Whether the daemon actually wired the built-in cloud provider at boot.
+    /// `false` when either gate was off at that moment — AND when the flag was
+    /// flipped on afterwards, since the provider manager is constructed only at
+    /// boot and flipping a flag cannot conjure a provider into a running actor.
+    /// Lets the app say "on, but needs a restart" without calling a `remote.*`
+    /// verb and parsing its error string, exactly as `remoteBackendsLive` does
+    /// for the outer flag.
+    public let claudeCloudLive: Bool
 
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
@@ -2720,7 +2791,9 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
                 panelSurfaceEnabled: Bool = false,
                 remoteBackendsEnabled: Bool = false,
                 remoteBackendsLive: Bool = false,
-                queuedPromptEnabled: Bool = Config.queuedPromptDefault) {
+                queuedPromptEnabled: Bool = Config.queuedPromptDefault,
+                claudeCloudEnabled: Bool = Config.claudeCloudEnabledDefault,
+                claudeCloudLive: Bool = false) {
         self.controlModeEnabled = controlModeEnabled
         self.tmuxVersion = tmuxVersion
         self.controlModeSupported = controlModeSupported
@@ -2732,6 +2805,8 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         self.remoteBackendsEnabled = remoteBackendsEnabled
         self.remoteBackendsLive = remoteBackendsLive
         self.queuedPromptEnabled = queuedPromptEnabled
+        self.claudeCloudEnabled = claudeCloudEnabled
+        self.claudeCloudLive = claudeCloudLive
     }
 
     public init(from decoder: Decoder) throws {
@@ -2761,6 +2836,13 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         // default rather than assuming the feature is live.
         queuedPromptEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .queuedPromptEnabled) ?? Config.queuedPromptDefault
+        // New fields for the Claude cloud gate. A daemon that does not send
+        // `claudeCloudEnabled` cannot serve the feature either, so fall through
+        // to the shipped default rather than assuming it is live. `live` is a
+        // fact about THIS daemon's boot, so an absent value is honestly false.
+        claudeCloudEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .claudeCloudEnabled) ?? Config.claudeCloudEnabledDefault
+        claudeCloudLive = try c.decodeIfPresent(Bool.self, forKey: .claudeCloudLive) ?? false
     }
 }
 
@@ -3066,12 +3148,30 @@ public struct TerminalSessionEventParams: Codable, Sendable {
     }
 }
 
+public enum TerminalActivityEventOrigin: String, Codable, Sendable {
+    /// The app observed the user explicitly interrupting the foreground agent.
+    case userInterrupt = "user_interrupt"
+}
+
 public struct TerminalActivityEventParams: Codable, Sendable {
     public let terminalID: UUID
     public let activityState: TerminalActivityState
-    public init(terminalID: UUID, activityState: TerminalActivityState) {
+    /// Codex hook session identity when the caller consumed hook stdin.
+    /// Optional for older hook overlays and non-hook callers.
+    public let sessionID: String?
+    /// Absent for the existing agent-hook bridge. Optional so older clients'
+    /// payloads continue to decode unchanged.
+    public let origin: TerminalActivityEventOrigin?
+    public init(
+        terminalID: UUID,
+        activityState: TerminalActivityState,
+        sessionID: String? = nil,
+        origin: TerminalActivityEventOrigin? = nil
+    ) {
         self.terminalID = terminalID
         self.activityState = activityState
+        self.sessionID = sessionID
+        self.origin = origin
     }
 }
 

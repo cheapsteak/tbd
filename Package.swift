@@ -15,6 +15,9 @@ let noWMODebugWorkaround: [SwiftSetting] = [
 ]
 #endif
 
+// Thinking about splitting this package (core vs app)? Read
+// docs/research/2026-08-19-cold-build-split/findings.md first: a measured cold
+// build is ~70% core / ~30% app, and the split was judged low-ROI on that evidence.
 let package = Package(
     name: "TBD",
     platforms: [
@@ -93,6 +96,7 @@ let package = Package(
             ],
             path: "Sources/TBDDaemon",
             exclude: ["main.swift"],
+            resources: [.copy("Database/Migrations")],
             // Swift 6.2 WMO-debug OOM workaround — see noWMODebugWorkaround above.
             swiftSettings: noWMODebugWorkaround
         ),

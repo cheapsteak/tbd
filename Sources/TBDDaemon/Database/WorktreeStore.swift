@@ -38,8 +38,13 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var pinnedAt: Date?  // sidebar dock pin; nil = unpinned
     var pinSortOrder: Int?  // sidebar dock ordering; nil = falls back to pinnedAt
     var location: String?  // "local" | "remote"; nil reads as local
-    var providerName: String?  // set only alongside location == "remote"
-    var providerSessionID: String?  // set only alongside location == "remote"
+    // The provider session behind this row, PAST OR PRESENT. Set whenever the
+    // row has one — a landed lane keeps both while its `location` says
+    // "local". `idx_worktree_provider_session` (v72) indexes the pair, which is
+    // what lets `findRemote` keep matching a landed row and stops adoption from
+    // minting a second lane for a session that already has one.
+    var providerName: String?
+    var providerSessionID: String?
     // Prompt parked at creation time, delivered when the primary agent turns up
     // (v71). nil = nothing parked.
     var pending_prompt: String?
@@ -83,16 +88,13 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.panel_surface_imported_at = nil  // new worktrees start unimported; stamped via stampPanelSurfaceImported
         self.pinnedAt = wt.pinnedAt
         self.pinSortOrder = wt.pinSortOrder
-        switch wt.location {
-        case .local:
-            self.location = "local"
-            self.providerName = nil
-            self.providerSessionID = nil
-        case let .remote(provider, sessionID):
-            self.location = "remote"
-            self.providerName = provider
-            self.providerSessionID = sessionID
-        }
+        // Symmetric with `toModel()`: the location string says where the files
+        // are, the two provider columns say where the lane came from. Writing
+        // them from `wt.origin` rather than from `wt.location` is what stops a
+        // landed row's provenance being erased on save.
+        self.location = wt.location.isLocal ? "local" : "remote"
+        self.providerName = wt.origin?.provider
+        self.providerSessionID = wt.origin?.sessionID
         self.pending_prompt = wt.pendingPrompt
         self.pending_prompt_submit = wt.pendingPromptSubmit
         self.prObservation = FactColumnJSON.encode(wt.prObservation)
@@ -132,10 +134,17 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             decodeLogger.warning("worktree row \(id, privacy: .public): unknown status \(status, privacy: .public); defaulting to .active")
             worktreeStatus = .active
         }
-        // Mirrors `Worktree.init(from:)`: only a complete "remote" triple is a
-        // remote row. A null column (pre-v70), an unknown kind, or a "remote"
-        // missing either provider field reads as local rather than dropping
-        // the row.
+        // Mirrors `Worktree.init(from:)`. The two provider columns are the
+        // ORIGIN and are read whenever both are present; the location string
+        // decides only whether the files are also over there. A "remote" string
+        // missing either column, an unknown kind, or a null column (pre-v70)
+        // all read as local rather than dropping the row.
+        let worktreeOrigin: WorktreeOrigin?
+        if let providerName, let providerSessionID {
+            worktreeOrigin = WorktreeOrigin(provider: providerName, sessionID: providerSessionID)
+        } else {
+            worktreeOrigin = nil
+        }
         let worktreeLocation: WorktreeLocation
         if location == "remote", let providerName, let providerSessionID {
             worktreeLocation = .remote(provider: providerName, sessionID: providerSessionID)
@@ -167,6 +176,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             pinnedAt: pinnedAt,
             pinSortOrder: pinSortOrder,
             location: worktreeLocation,
+            origin: worktreeOrigin,
             pendingPrompt: pending_prompt,
             pendingPromptSubmit: pending_prompt_submit,
             prObservation: Self.decodePRObservation(prObservation)

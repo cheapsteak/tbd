@@ -23,6 +23,13 @@ public struct PRBinding: Codable, Sendable, Equatable, Identifiable {
     public let url: String
     public let headBranch: String?
     public let baseRef: String?
+    /// The PR's title, as the last refresh that resolved it reported.
+    ///
+    /// Descriptive, like `headBranch` and `baseRef`: nothing matches on it, and
+    /// nil means "never observed" rather than "this PR has no title". A binding
+    /// hydrated from a cached `Worktree.prStatus` has none, and every row
+    /// written before the column existed decodes as nil.
+    public let title: String?
     /// Last observed status. nil = never polled since binding.
     public let status: PRStatus?
     public let source: PRBindingSource
@@ -32,6 +39,7 @@ public struct PRBinding: Codable, Sendable, Equatable, Identifiable {
     public init(id: UUID = UUID(), worktreeID: UUID, host: String = "github.com",
                 owner: String, repo: String, number: Int, url: String,
                 headBranch: String? = nil, baseRef: String? = nil,
+                title: String? = nil,
                 status: PRStatus? = nil, source: PRBindingSource,
                 detached: Bool = false, boundAt: Date = Date()) {
         self.id = id
@@ -43,6 +51,7 @@ public struct PRBinding: Codable, Sendable, Equatable, Identifiable {
         self.url = url
         self.headBranch = headBranch
         self.baseRef = baseRef
+        self.title = title
         self.status = status
         self.source = source
         self.detached = detached
@@ -50,23 +59,25 @@ public struct PRBinding: Codable, Sendable, Equatable, Identifiable {
     }
 
     /// A copy carrying everything a refresh observed: the status plus the head
-    /// and base refs the PR reported. The poll folds its observations back onto
-    /// the bindings through this before `worst(of:)`, `allResolved(_:)` or
-    /// `mergedBindingIsOwnWork` can judge them.
+    /// ref, base ref and title the PR reported. The poll folds its observations
+    /// back onto the bindings through this before `worst(of:)`,
+    /// `allResolved(_:)` or `mergedBindingIsOwnWork` can judge them.
     ///
-    /// A **nil** ref means "not observed", never "cleared" — the stored value
-    /// survives, the same rule the persisted row follows, so a transient failure
-    /// cannot blank the branch the CLI renders.
+    /// A **nil** ref or title means "not observed", never "cleared" — the
+    /// stored value survives, the same rule the persisted row follows, so a
+    /// transient failure cannot blank the branch the CLI renders or the title
+    /// the status bar has on screen.
     ///
-    /// Status and refs move together deliberately, rather than through a
-    /// status-only sibling: the merge rule judges ownership on `headBranch`, so
-    /// a binding folded with this pass's status but the previous pass's head ref
-    /// would hold the gate shut for one poll on evidence it already had.
+    /// Status and descriptive fields move together deliberately, rather than
+    /// through a status-only sibling: the merge rule judges ownership on
+    /// `headBranch`, so a binding folded with this pass's status but the
+    /// previous pass's head ref would hold the gate shut for one poll on
+    /// evidence it already had.
     public func withObservation(status: PRStatus?, headBranch: String?,
-                                baseRef: String?) -> PRBinding {
+                                baseRef: String?, title: String?) -> PRBinding {
         PRBinding(id: id, worktreeID: worktreeID, host: host, owner: owner, repo: repo,
                   number: number, url: url, headBranch: headBranch ?? self.headBranch,
-                  baseRef: baseRef ?? self.baseRef,
+                  baseRef: baseRef ?? self.baseRef, title: title ?? self.title,
                   status: status, source: source, detached: detached, boundAt: boundAt)
     }
 
@@ -86,10 +97,27 @@ public struct PRBinding: Codable, Sendable, Equatable, Identifiable {
     }
 
     /// This binding with its status's freshness stamp cleared, so the compiler
-    /// writes the field-by-field comparison `sameValue(as:)` needs.
+    /// writes the field-by-field comparison `sameValue(as:)` needs. Every
+    /// descriptive field is passed through unchanged — the stamp is the only
+    /// thing excluded, so a retitled PR still reads as changed and persists.
     private var unstamped: PRBinding {
         withObservation(status: status?.withObservedAt(nil),
-                        headBranch: headBranch, baseRef: baseRef)
+                        headBranch: headBranch, baseRef: baseRef, title: title)
+    }
+
+    /// How this one binding is named in the UI: `PR #412` on GitHub, `MR !412`
+    /// on GitLab, whose own reference syntax is `!iid`.
+    ///
+    /// Read from the binding's own `url`, which carries GitLab's
+    /// `/-/merge_requests/` marker, and not from its `host` — a host is not
+    /// evidence of a forge, so a `host`-shaped derivation renames every
+    /// GitHub Enterprise, Bitbucket, Gitea and Codeberg pull request a merge
+    /// request. `Forge.forURL` documents the coordinate.
+    ///
+    /// Per-binding text only. Anything summarising several bindings keeps the
+    /// neutral wording, because a worktree can span forges.
+    public var refLabel: String {
+        Forge.forURL(url).refLabel(number: number)
     }
 
     /// Identity for deduplication — matches the table's UNIQUE constraint.

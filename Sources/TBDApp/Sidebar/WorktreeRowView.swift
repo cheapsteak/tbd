@@ -92,7 +92,28 @@ struct WorktreeRowView: View {
 
     private var hasWorkingTerminal: Bool {
         let terminals = appState.terminals[worktree.id] ?? []
-        return terminals.contains { $0.activityState == .working }
+        return Self.hasForegroundWork(in: terminals)
+    }
+
+    /// Whether one terminal has trustworthy foreground work to animate in the
+    /// sidebar. Codex's hook state can remain latched after a turn ends, so its
+    /// transcript-derived presentation state is authoritative here unless the
+    /// hook reports that Codex is waiting for the user. Missing transcript
+    /// evidence deliberately renders idle instead of preserving a false
+    /// thinking indicator. Other terminal kinds retain their existing
+    /// hook-backed behavior.
+    nonisolated static func isForegroundWorking(_ terminal: Terminal) -> Bool {
+        if terminal.isCodexTerminal {
+            return terminal.activityStateSource != .terminalInterrupt
+                && terminal.activityState != .waitingForUser
+                && terminal.presentationActivityState == .working
+        }
+        return terminal.activityState == .working
+    }
+
+    /// The collection form used by the row and by pure presentation tests.
+    nonisolated static func hasForegroundWork(in terminals: [Terminal]) -> Bool {
+        terminals.contains(where: isForegroundWorking)
     }
 
     @ViewBuilder
@@ -201,7 +222,12 @@ struct WorktreeRowView: View {
             hasUndeterminedPR: prUnknownTooltip != nil
         ) {
         case .prStatus:
-            if let presentation = prPresentation, let status = prStatus {
+            // The binding, not just its status, because the row names the
+            // request in its own forge's vocabulary and only the binding
+            // carries the host. `prStatus` IS `indicatorBinding?.status`, so
+            // this cannot select a different request.
+            if let presentation = prPresentation, let binding = indicatorBinding,
+               let status = binding.status {
                 // A queued PR describes itself by its queue position, not its
                 // underlying (UNKNOWN→pending) check reason.
                 let detail = presentation.badge.map { "in merge queue, position \($0)" }
@@ -210,7 +236,7 @@ struct WorktreeRowView: View {
                 // never hides that its last re-read failed.
                 let freshness = PRFreshness.clauses(
                     status: status, observation: prObservation, now: Date())
-                let tooltip = (["PR #\(status.number)", detail] + freshness)
+                let tooltip = ([binding.refLabel, detail] + freshness)
                     .joined(separator: " · ")
                 Button(action: openPR) {
                     prGlyph(presentation)
@@ -220,7 +246,7 @@ struct WorktreeRowView: View {
                 .buttonStyle(.plain)
                 .onHover { isPRIconHovered = $0 }
                 .accessibilityLabel(
-                    "PR #\(status.number): \(([detail] + freshness).joined(separator: ", "))")
+                    "\(binding.refLabel): \(([detail] + freshness).joined(separator: ", "))")
                 .anchorPreference(key: RowTooltipPreferenceKey.self, value: .bounds) { anchor in
                     isPRIconHovered ? RowTooltipPreference(text: tooltip, anchor: anchor) : nil
                 }

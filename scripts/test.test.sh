@@ -137,7 +137,12 @@ STUB
 #
 # The `-u` list matters: this harness may itself be running under a fenced
 # session, and an inherited TBD_HOME or TBD_SWIFT_LOCK_PATH would silently
-# change which branch of the lock resolution is under test.
+# change which branch of the lock resolution is under test. Every OTHER knob
+# `scripts/swift-safe` reads is cleared for the same reason — the cases below
+# run the REAL wrapper, so a developer's exported TBD_SWIFT_JOBS decides
+# whether a forwarded `-j 2` is admitted at all, and an exported timeout,
+# heartbeat or orphan hatch decides how the admission-lock cases wait.
+# TBD_SWIFT_BIN is the deliberate exception: this harness sets it itself, below.
 #
 # `TMUX_TMPDIR` is pinned rather than unset, and it stands in for the
 # DEVELOPER'S REAL socket directory: the wrapper overwrites it for the run, so
@@ -151,6 +156,8 @@ run_script() {
   local script="$1" fix="$2"; shift 2
   RUN_OUT="$(env -u CI -u TBD_HOME -u TBD_SOCKET_PATH -u TBD_CLAUDE_HOST_HOME \
                  -u TBD_TEST_CODEX_HOME -u TBD_SWIFT_LOCK_PATH -u CFFIXED_USER_HOME \
+                 -u TBD_SWIFT_JOBS -u TBD_SWIFT_LOCK_TIMEOUT_SECONDS \
+                 -u TBD_SWIFT_HEARTBEAT_SECONDS -u TBD_SWIFT_ALLOW_ORPHAN \
                  -u FAKE_SWIFT_DISARM -u FAKE_SWIFT_LEAK -u FAKE_SWIFT_RC \
                  -u FAKE_SWIFT_TMUX_SOCKETS \
                  ${RUN_ENV[@]+"${RUN_ENV[@]}"} \
@@ -580,7 +587,10 @@ test_detection_is_off_by_default_off_ci() {
 # Position-independent, last one wins, and neither flag reaches `swift test`.
 test_fingerprint_flags_are_consumed_and_last_wins() {
   local fix; fix="$(mkfix)"
-  RUN_ENV=(FAKE_SWIFT_LEAK="$fix/home/tbd/profiles")
+  # TBD_SWIFT_JOBS is pinned because the forwarded `-j 2` must clear
+  # swift-safe's bound: left unset it rides on that wrapper's DEFAULT_JOBS, and
+  # lowering that constant would red this case as if forwarding had broken.
+  RUN_ENV=(FAKE_SWIFT_LEAK="$fix/home/tbd/profiles" TBD_SWIFT_JOBS=2)
   run_wrapper "$fix" --parallel --fingerprint -j 2 --no-fingerprint
   assert_ok "a trailing --no-fingerprint wins" "$RUN_RC"
   assert_missing "flags are not forwarded to swift" "$(dump_of "$fix")" "fingerprint"

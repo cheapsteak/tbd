@@ -15,7 +15,8 @@ struct ProviderRunnerTimeoutTests {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path.path)
         let config = RemoteProviderConfig(name: "hang", exec: path.path)
         await #expect(throws: ProviderRunError.self) {
-            _ = try await ProviderRunner().run(config, verb: ["list"], stdin: nil, timeout: 1)
+            _ = try await ProviderRunner().run(
+                config, verb: ["list"], stdin: nil, timeout: 1, contractVersion: 1)
         }
     }
 }

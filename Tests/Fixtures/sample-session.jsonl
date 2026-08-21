@@ -8,4 +8,6 @@
 {"type":"assistant","message":{"role":"assistant","content":"Here are the tests..."},"sessionId":"abc123de-0000-0000-0000-000000000001"}
 {"type":"user","message":{"role":"user","content":"<tool_result>tool output here</tool_result>"},"sessionId":"abc123de-0000-0000-0000-000000000001"}
 {"type":"user","message":{"role":"user","content":"What does this error mean?"},"sessionId":"abc123de-0000-0000-0000-000000000001"}
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-08-19T21:10:05.400Z","content":"Also check the retry path while you are in there.","sessionId":"abc123de-0000-0000-0000-000000000001"}
+{"type":"attachment","uuid":"queued-1","timestamp":"2026-08-19T21:10:05.458Z","attachment":{"type":"queued_command","prompt":"Also check the retry path while you are in there.","commandMode":"prompt","origin":{"kind":"human"}},"sessionId":"abc123de-0000-0000-0000-000000000001"}
 {"type":"file-history-snapshot","snapshot":{},"sessionId":"abc123de-0000-0000-0000-000000000001"}

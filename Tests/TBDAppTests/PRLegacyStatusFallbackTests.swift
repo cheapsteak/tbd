@@ -29,6 +29,29 @@ struct PRLegacyStatusFallbackTests {
                          source: .hook)
     }
 
+    /// `PRBinding.host` defaults to github.com, and a lifted legacy status used
+    /// to take that default whatever forge it came from — so a GitLab status
+    /// described itself as living on GitHub. The status URL is the only forge
+    /// coordinate the legacy shape carries, so the host comes from there.
+    @Test("a lifted legacy status takes its host from its own URL")
+    func syntheticHostFollowsTheStatusURL() {
+        let wt = UUID()
+        let gitlab = PRStatus(
+            number: 412,
+            url: "https://git.acme.example/acme/platform/api-gateway/-/merge_requests/412",
+            state: .mergeable)
+        let lifted = PRBindingPresentation.effectiveBindings(
+            [], legacyStatus: gitlab, worktreeID: wt)
+        #expect(lifted.first?.host == "git.acme.example")
+
+        // A GitHub status is unchanged, and so is a URL nothing can parse.
+        #expect(PRBindingPresentation.effectiveBindings(
+            [], legacyStatus: status(99), worktreeID: wt).first?.host == "github.com")
+        let unparseable = PRStatus(number: 5, url: "", state: .mergeable)
+        #expect(PRBindingPresentation.effectiveBindings(
+            [], legacyStatus: unparseable, worktreeID: wt).first?.host == "github.com")
+    }
+
     @Test("one binding and no legacy status: the binding drives the control")
     func bindingOnly() {
         let wt = UUID()

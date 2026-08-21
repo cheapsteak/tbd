@@ -36,10 +36,13 @@ The main chat session agent should not write code directly. Delegate all impleme
 - No prose tables in markdown docs — use lists (bolded lead term, en-dash, prose; nested bullets when a row has several fields). A table is acceptable only when its cells are mostly short numerical or scannable values: counts, defaults, thresholds, old→new line numbers. Prose crammed into cells gets squished and unreadable.
 - Spec and doc edits must leave a document that stands alone for a first-time reader. Never write revision history into prose: no "Amended \<date\>" notes, no "an earlier draft…" retracing, no reversal narratives — rewrite the superseded passage to state the current design as if it were always so; git history is the archive. Keep **evidence** ("field measurement showed X"), drop **chronology** ("removed \<date\> after review Y"). A rejected-alternatives section is welcome as timeless why-not rationale — written as rationale, never as a revision log. The one exemption is an **as-built audit record** of an existing system (e.g. [`docs/nightwatch.md`](docs/nightwatch.md)): there, dated banners recording what was measured against which tree are the evidence, and the document must declare that purpose at the top.
 - Verify your changes compile (`scripts/swift-safe build`) before committing.
+- **`swift package resolve` can print `error:` on a run that succeeded.** SwiftPM removes a dependency checkout by unlinking it in place; a removal that doesn't complete leaves a tree the next resolve reads as "has uncommitted changes" and refuses to finish removing — gone from `Package.resolved`, still on disk, `error:` on stderr, **exit 0**. So an `error:` line in resolve output is not by itself evidence that the resolve failed: check the exit code, and to confirm the workspace really is clean compare `.build/checkouts` against the `identity` values in `Package.resolved` — they should match exactly (case-insensitively).
 - Run `scripts/test.sh` if you changed daemon or shared code. It fences the run
   against the developer's real `~/tbd` and `~/.claude` (see "Tests must not
   touch ~/tbd") and invokes SwiftPM through `scripts/swift-safe`, which
-  serializes builds across TBD worktrees and defaults to two compiler jobs;
+  serializes builds across TBD worktrees and defaults to two compiler jobs —
+  the machine's owner can raise that by exporting `TBD_SWIFT_JOBS` (builds are
+  serialized, so it is a machine-wide ceiling: e.g. 8 on a 12-core machine);
   raw `swift build/test/run` is blocked by the repo guardrail because
   concurrent default `-j12` builds can exhaust this development machine. The
   two wrappers are orthogonal — admission control and filesystem isolation —
@@ -62,7 +65,7 @@ Not required for bug fixes, small additive UI, or refactors — don't sprawl fla
 
 Mechanics: daemon-side behavior gates on a `config` column added by migration (follow "Database migrations must update the shared model" below); app-only behavior may gate on a UserDefaults key (precedent: `enableTranscript`, default-off). Test both branches (see Workflow above). State the flag name, how to enable it for the soak, and the graduation plan in the PR description.
 
-**Add the column with no SQL default, so "unset" stays a third state.** Call `addColumnIfMissing(table:column:type:)` and omit `defaults:`. NULL then means nobody has chosen, `0`/`1` mean somebody did, and the shipped default lives in exactly one place: the `?? Config.<flag>Default` in `ConfigRecord.toModel()`. Graduation becomes a one-line change to that constant — it reaches everyone who never touched the toggle and preserves every explicit opt-out. Test that the three states are distinguishable: a pre-migration row must read NULL rather than `0`, and an explicit `false` must survive a change to the default constant while NULL follows it.
+**Add the column with no SQL default, so "unset" stays a third state.** In a `.sql` migration write `ALTER TABLE config ADD COLUMN <flag>_enabled INTEGER;` with no `DEFAULT` clause; in the Swift escape hatch call `addColumnIfMissing(table:column:type:)` and omit `defaults:`. NULL then means nobody has chosen, `0`/`1` mean somebody did, and the shipped default lives in exactly one place: the `?? Config.<flag>Default` in `ConfigRecord.toModel()`. Graduation becomes a one-line change to that constant — it reaches everyone who never touched the toggle and preserves every explicit opt-out. Test that the three states are distinguishable: a pre-migration row must read NULL rather than `0`, and an explicit `false` must survive a change to the default constant while NULL follows it.
 
 Cautionary precedent, and the reason for that rule: `auto_hibernate_enabled` shipped default-ON in `v39_session_hibernation` and had to be force-disabled in `v50` once the eat-typed-input risk was understood. Passing `defaults:` makes `ADD COLUMN ... DEFAULT` backfill existing rows, so flipping a default later needs a forcing `UPDATE` migration (a Swift-side default change alone is a no-op for existing installs) — and after the force-off, a user's deliberate opt-in was indistinguishable from the backfilled value, so it got reset too. Every flag added before `queued_prompt_enabled` carries `defaults: false` and has this defect: its `?? false` fallback is unreachable in any real install, because the singleton `config` row is seeded naming only two columns (`Database.swift`) and takes the schema default for everything else. Those flags are not retrofittable — the distinction was destroyed on write, and migrating `0` to NULL would read every deliberate opt-out as "never chose". Shipping default-OFF first still matters independently. Good precedents for the OFF-first half: `control_mode_enabled`, `hibernate_input_veto_enabled` (v51).
 
@@ -108,13 +111,13 @@ Two shapes cause that leak, and both are worth recognizing:
 **Teardown must restore `TBD_HOME`, `TBD_CLAUDE_HOST_HOME` and `TBD_TEST_CODEX_HOME`, never `unsetenv` them.** Unsetting does not return to the harness's scratch home — it returns to the developer's real `~/tbd`, `~/.claude` or `~/.codex`, process-wide, for every concurrently running suite. Use `setTBDHome(_:)` / `restoreTBDHome(_:)`, `setClaudeHostHome(_:)` / `restoreClaudeHostHome(_:)` and `setCodexTestHome(_:)` / `restoreCodexTestHome(_:)` from `TestSupport`, and mutate any of the three only from a suite nested under `TBDHomeSerialized`.
 
 ### Database migrations must update the shared model
-When adding a DB column in `Sources/TBDDaemon/Database/Database.swift`:
-1. Add the column with a `.defaults(to:)` value in the migration
+When adding a DB column:
+1. Add the column in a new migration file under `Sources/TBDDaemon/Database/Migrations/`. Omit the SQL `DEFAULT` clause unless every existing row genuinely wants that value backfilled — feature flags always omit it, per the rule above.
 2. Update the GRDB Record type in `Sources/TBDDaemon/Database/`
 3. Update the Codable model in `Sources/TBDShared/Models.swift` — new fields MUST be optional or have a default value so existing JSON/rows still decode
 4. All three changes in the same commit
 
-Migrations use GRDB's `DatabaseMigrator`, numbered sequentially (`v1`, `v2`, `v3`...). Never modify an existing migration — always add a new one.
+Migrations run through GRDB's `DatabaseMigrator`. A new one is a `.sql` file named `YYYYMMDDHHMMSS_lower_snake.sql`, whose stem is the migration identifier — one file per migration, so parallel branches can neither pick the same identifier nor edit the same text. Never modify or delete a migration that has landed; add a new one. `scripts/lint-migrations.py` enforces the naming, the statement allowlist, and the freeze. The frozen Swift block, the escape hatch for procedural migrations, and the rest of the conventions: [`Sources/TBDDaemon/Database/CLAUDE.md`](Sources/TBDDaemon/Database/CLAUDE.md).
 
 ### Per-repo config: two storage patterns
 

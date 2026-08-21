@@ -82,6 +82,78 @@ struct PRBindingPresentationTests {
         #expect(PRBindingPresentation.menuRows(bindings).map(\.number) == [412])
     }
 
+    // MARK: - Per-binding wording versus aggregate wording
+
+    private func gitLabBinding(_ n: Int) -> PRBinding {
+        let url = "https://git.acme.example/acme/platform/api-gateway/-/merge_requests/\(n)"
+        return PRBinding(worktreeID: UUID(), host: "git.acme.example",
+                         owner: "acme/platform", repo: "api-gateway",
+                         number: n, url: url,
+                         status: PRStatus(number: n, url: url, state: .mergeable),
+                         source: .hook)
+    }
+
+    @Test("a lone GitLab binding is described in GitLab's own syntax")
+    func gitLabSplitButtonHelp() {
+        let help = ContentView.prSplitButtonHelp(
+            bindings: [gitLabBinding(412)], armed: false, hibernateArmed: false, blocked: false)
+        #expect(help.hasPrefix("Open MR !412"))
+        #expect(!help.contains("PR #"))
+    }
+
+    /// The reason aggregates stay neutral: one worktree can hold a GitHub PR
+    /// and a GitLab MR at once, and no single vocabulary is true of both.
+    @Test("a worktree spanning both forges keeps neutral aggregate wording")
+    func mixedForgeAggregateStaysNeutral() {
+        let help = ContentView.prSplitButtonHelp(
+            bindings: [binding(412, .mergeable), gitLabBinding(7)],
+            armed: false, hibernateArmed: false, blocked: false)
+        #expect(help.hasPrefix("2 pull requests"))
+        #expect(!help.contains("MR !"))
+        // And the count label, which the same set feeds.
+        #expect(PRBindingPresentation.buttonLabel(
+            [binding(412, .mergeable), gitLabBinding(7)]) == "2 PRs")
+
+        // The `+N` chip counts a set too, so its wording keeps the neutral noun
+        // for the same reason — it has no single binding to take a forge from,
+        // and its signature carries none.
+        let tooltip = PRBindingPresentation.overflowChipTooltip(total: 2, overflow: 1)
+        let announced = PRBindingPresentation.overflowChipAccessibilityLabel(
+            total: 2, overflow: 1)
+        for aggregate in [tooltip, announced] {
+            #expect(aggregate.contains("2 pull requests"))
+            #expect(!aggregate.contains(Forge.gitlab.refNoun))
+        }
+    }
+
+    /// A menu row describes ONE binding, so it takes the per-binding rule the
+    /// aggregates above are exempt from — and each row in one menu can take a
+    /// different forge. A bare `#7` named a merge request in GitHub's syntax;
+    /// `#7` is an issue reference on GitLab, whose syntax for this row's
+    /// subject is `!7`.
+    @Test("each menu row names its own binding's forge")
+    func menuRowsSpeakPerBindingForge() {
+        let rows = PRBindingPresentation.menuRows(
+            [binding(412, .mergeable), gitLabBinding(7)])
+        #expect(rows.map(\.title) == ["PR #412  Ready to merge",
+                                      "MR !7  Ready to merge"])
+        // The GitLab row borrows nothing from the forge beside it.
+        #expect(!rows[1].title.contains("#7"))
+        #expect(!rows[1].title.contains(Forge.github.refNoun))
+        // …and it is the same wording the split button's help gives a lone
+        // binding, rather than a second vocabulary beside it.
+        #expect(rows[1].title.hasPrefix(gitLabBinding(7).refLabel))
+    }
+
+    @Test("a status-bar chip carries its binding's own forge vocabulary")
+    func chipRefLabelPerForge() {
+        let chips = StatusBarView.prChips([binding(412, .mergeable), gitLabBinding(7)]).chips
+        #expect(chips.map(\.refLabel) == ["PR #412", "MR !7"])
+        // The visible chip text stays the bare number on both forges — only the
+        // tooltip, which names the thing in words, speaks a dialect.
+        #expect(chips.map(\.label) == ["#412", "#7"])
+    }
+
     @Test("several bindings never get a primary action")
     func noPrimaryActionForSeveral() {
         let bindings = [binding(412, url: "https://github.com/acme/acme-prod/pull/412"),
@@ -148,6 +220,7 @@ struct PRBindingPresentationTests {
                       status: b.status, source: b.source, detached: false, boundAt: b.boundAt)
         let row = PRBindingPresentation.menuRows([b])[0]
         #expect(row.number == 412)
+        #expect(row.title == "PR #412  Checks failing  fix-login-timeout")
         #expect(row.title.contains("#412"))
         #expect(row.title.contains("Checks failing"))
         #expect(row.title.contains("fix-login-timeout"))

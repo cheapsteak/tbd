@@ -279,6 +279,61 @@ struct ActuationLogTeardownWiringTests {
         #expect(try await db.worktrees.get(id: scratch.id)?.status == .archived)
     }
 
+    @Test("a scratch archive routed from worktree.archive is filed under that door")
+    func routedScratchArchiveRecordsTheWorktreeArchiveMethod() async throws {
+        let logPath = try makeLogPath()
+        let db = try TBDDatabase(inMemory: true)
+        let router = makeRouter(db: db, logPath: logPath)
+        let scratch = try await makeScratch(in: db)
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.worktreeArchive,
+            params: WorktreeArchiveParams(worktreeID: scratch.id),
+            actor: .app))
+        #expect(response.success)
+
+        // `method` names the door the request came through, `kind` the act, so
+        // the same body reached from the other door must not file the request
+        // under a verb only the GUI ever sends. Both surfaces carry `dispose`,
+        // which is why this needs no `ActuationBranch`.
+        let written = try rows(at: logPath)
+        #expect(written.count == 2)
+        #expect(written.first?["method"] as? String == "worktree.archive")
+        #expect(written.first?["kind"] as? String == "dispose")
+        #expect(written.last?["result"] as? String == "dispatched")
+        #expect(try await db.worktrees.get(id: scratch.id)?.status == .archived)
+    }
+
+    @Test("a scratch revive routed from worktree.revive writes no row: it reaches no process")
+    func routedScratchReviveWritesNothing() async throws {
+        let logPath = try makeLogPath()
+        let db = try TBDDatabase(inMemory: true)
+        let router = makeRouter(db: db, logPath: logPath)
+        let scratch = try await makeScratch(in: db)
+        // Revive requires the folder to still be there, and this suite's
+        // fixture only writes the row.
+        try FileManager.default.createDirectory(
+            atPath: scratch.localPath, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: scratch.localPath) }
+        #expect(await router.handle(try RPCRequest(
+            method: RPCMethod.worktreeArchive,
+            params: WorktreeArchiveParams(worktreeID: scratch.id), actor: .app)).success)
+        let afterArchive = try rows(at: logPath).count
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.worktreeRevive,
+            params: WorktreeReviveParams(worktreeID: scratch.id), actor: .app))
+        #expect(response.success)
+
+        // The actuation boundary puts DB-only mutations OUT, and this branch is
+        // a status flip plus a delta: no tmux, no pty, no process. The repo
+        // branch records because it spawns the worktree's primary terminals,
+        // which is what `.worktreeRevive`'s `spawn` kind names. Recording here
+        // would post a phantom spawn against a worktree with zero terminals.
+        #expect(try rows(at: logPath).count == afterArchive)
+        #expect(try await db.worktrees.get(id: scratch.id)?.status == .active)
+    }
+
     @Test("a scratch space that does not exist is declined before any row exists")
     func scratchDeleteOfAbsentRowWritesNothing() async throws {
         let logPath = try makeLogPath()

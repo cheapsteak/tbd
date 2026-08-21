@@ -162,6 +162,10 @@ actor ProviderEventsSupervisor {
     /// available — a supervisor that keeps spawning provider children forever
     /// while every event it parses applies to nobody, silently.
     private let manager: RemoteProviderManager
+    /// The contract major `RemoteProviderManager` negotiated for this provider,
+    /// captured at construction. The supervisor's whole lifetime belongs to one
+    /// `describe`, so re-reading it per spawn would buy nothing.
+    private let contractVersion: Int
     private var supervision: Task<Void, Never>?
     private var currentProcess: Process?
     /// Incremented per `runOnce`, so a previous run's teardown can never nil
@@ -199,13 +203,26 @@ actor ProviderEventsSupervisor {
     private static let killGrace: Duration = .milliseconds(500)
     private static let drainGrace: Duration = .milliseconds(50)
 
+    /// The environment the `events` child runs under. Pure and static for the
+    /// same reason `ProviderRunner.invocationEnvironment` is: the two daemon
+    /// emitters agreeing is a property worth asserting without a spawn.
+    static func streamEnvironment(
+        base: [String: String], contractVersion: Int
+    ) -> [String: String] {
+        var env = base
+        env["TBD_CONTRACT_VERSION"] = String(contractVersion)
+        return env
+    }
+
     init(config: RemoteProviderConfig, manager: RemoteProviderManager,
+         contractVersion: Int,
          silenceLimit: TimeInterval = 90, backoffCap: TimeInterval = 60,
          healthyResetUptime: TimeInterval = 300,
          clock: any Clock<Duration> = ContinuousClock(),
          now: @Sendable @escaping () -> Date = { Date() }) {
         self.config = config
         self.manager = manager
+        self.contractVersion = contractVersion
         self.silenceLimit = silenceLimit
         self.backoffCap = backoffCap
         self.healthyResetUptime = healthyResetUptime
@@ -270,8 +287,8 @@ actor ProviderEventsSupervisor {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: config.exec)
         process.arguments = (config.args ?? []) + ["events"]
-        var env = ProcessInfo.processInfo.environment
-        env["TBD_CONTRACT_VERSION"] = "1"
+        let env = Self.streamEnvironment(
+            base: ProcessInfo.processInfo.environment, contractVersion: contractVersion)
         process.environment = env
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -311,9 +328,10 @@ actor ProviderEventsSupervisor {
         // Teardown is driven by process EXIT, not by pipe EOF. A provider that
         // leaves a grandchild holding the pipe's write end (the stub in the
         // live test does exactly that, and `BoundedProcessRunner` documents
-        // the same caveat for `[shell, -ic, cmd]` call sites) never delivers
-        // EOF, so waiting for it would wedge this supervisor permanently. The
-        // short grace lets bytes already in the kernel buffer land first.
+        // the same caveat: any spawned process can fork grandchildren that
+        // inherit the write ends) never delivers EOF, so waiting for it would
+        // wedge this supervisor permanently. The short grace lets bytes
+        // already in the kernel buffer land first.
         let exitWatcher = Task { [clock] in
             await exitGate.wait()
             try? await clock.sleep(for: Self.drainGrace)
@@ -400,9 +418,9 @@ actor ProviderEventsSupervisor {
         switch event {
         case .hello, .ping:
             break   // activity timestamp already updated by the caller
-        case .snapshot(let sessions):
+        case .snapshot(let sessions, let complete):
             try? await manager.apply(
-                snapshot: sessions, provider: config.name,
+                snapshot: sessions, provider: config.name, complete: complete,
                 requestStartedAt: connectionOpenedAt)
         case .session(let session):
             await manager.applyUpsert(session, provider: config.name)

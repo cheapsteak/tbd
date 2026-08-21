@@ -6,7 +6,8 @@ import Testing
 @testable import TBDShared
 
 // Shared fixtures for the pre-session hook suites (`PreSessionHookTests`,
-// `PreSessionRerunTests`). Both are nested under `extension TBDHomeSerialized`
+// `PreSessionRerunTests`); `isolateTBDHome()` is target-wide and other suites
+// use it too. Every caller is nested under `extension TBDHomeSerialized`
 // because `isolateTBDHome()` mutates the process-global `TBD_HOME` env var —
 // see TBDHomeSerializedSuites.swift for why that requires serialization.
 //

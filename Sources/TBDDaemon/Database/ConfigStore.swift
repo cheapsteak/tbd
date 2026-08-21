@@ -62,6 +62,19 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// Resolve it through `Config.gcProfileDirsEnabledDefault`, never through
     /// `?? false`.
     var gc_profile_dirs_enabled: Bool?
+    /// The Claude cloud sessions gate (design 2026-08-15 §7). **Genuinely
+    /// tri-state**, same shape as `queued_prompt_enabled`: the
+    /// `v81_config_claude_cloud` column carries no SQL default, so `nil` here
+    /// means "never chose" rather than "off". Resolve it through
+    /// `Config.claudeCloudEnabledDefault`, never through `?? false`.
+    var claude_cloud_enabled: Bool?
+    /// Gate for the orphaned-process collector
+    /// (design 2026-08-18). **Genuinely tri-state**, same shape as
+    /// `gc_profile_dirs_enabled`: the `v83_config_gc_orphan_processes` column
+    /// carries no SQL default, so `nil` here means "never chose" rather than
+    /// "off". Resolve it through `Config.gcOrphanProcessesEnabledDefault`,
+    /// never through `?? false`.
+    var gc_orphan_processes_enabled: Bool?
 
     /// - Parameter queuedPromptDefault: the shipped default a NULL
     ///   `queued_prompt_enabled` resolves to. Defaulted to the real constant;
@@ -74,10 +87,18 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   constant to change.
     /// - Parameter gcProfileDirsDefault: same shape again, for
     ///   `gc_profile_dirs_enabled` — the profile-dir collector's own soak gate.
+    /// - Parameter claudeCloudEnabledDefault: same shape again, for the Claude
+    ///   cloud gate — the parameter exists so tests can prove NULL follows a
+    ///   changed default while an explicit `false` does not.
+    /// - Parameter gcOrphanProcessesDefault: same shape once more, for
+    ///   `gc_orphan_processes_enabled` — the orphaned-process collector's soak
+    ///   gate.
     func toModel(
         queuedPromptDefault: Bool = Config.queuedPromptDefault,
         supervisionEnabledDefault: Bool = Config.supervisionEnabledDefault,
-        gcProfileDirsDefault: Bool = Config.gcProfileDirsEnabledDefault
+        gcProfileDirsDefault: Bool = Config.gcProfileDirsEnabledDefault,
+        claudeCloudEnabledDefault: Bool = Config.claudeCloudEnabledDefault,
+        gcOrphanProcessesDefault: Bool = Config.gcOrphanProcessesEnabledDefault
     ) -> Config {
         Config(
             defaultProfileID: default_profile_id.flatMap(UUID.init(uuidString:)),
@@ -125,7 +146,12 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             supervisionEnabled: supervision_enabled ?? supervisionEnabledDefault,
             // Same reasoning again, for the profile-dir collector's gate —
             // NOT `?? false`.
-            gcProfileDirsEnabled: gc_profile_dirs_enabled ?? gcProfileDirsDefault
+            gcProfileDirsEnabled: gc_profile_dirs_enabled ?? gcProfileDirsDefault,
+            // Same reasoning again, for the Claude cloud gate — NOT `?? false`.
+            claudeCloudEnabled: claude_cloud_enabled ?? claudeCloudEnabledDefault,
+            // And once more, for the orphaned-process collector's gate —
+            // NOT `?? false`.
+            gcOrphanProcessesEnabled: gc_orphan_processes_enabled ?? gcOrphanProcessesDefault
         )
     }
 }
@@ -408,6 +434,24 @@ public struct ConfigStore: Sendable {
         }
     }
 
+    /// Persist the Claude cloud sessions gate (design 2026-08-15 §7). Off is the
+    /// shipped default. Writing either value is an explicit gesture that leaves
+    /// the column non-NULL forever after — including `false`, which is the
+    /// point: somebody who turned a scheduled network call off stays off when
+    /// the shipped default eventually graduates.
+    ///
+    /// The daemon builds its provider manager and registers the built-in
+    /// provider only at boot, so flipping this on does not start anything until
+    /// a restart — `DaemonCapabilitiesResult.claudeCloudLive` is what tells the
+    /// user which of the two states they are in.
+    public func setClaudeCloud(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET claude_cloud_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID])
+        }
+    }
+
     /// Persist the auto-close-setup-tab opt-in (default OFF, soaking). Read
     /// fresh at spawn time, so no daemon restart is required — applies to the
     /// next worktree creation.
@@ -452,6 +496,19 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET gc_profile_dirs_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the orphaned-process collector gate (default OFF, soaking) —
+    /// read on top of the GC master switch, so both must be on for the phase to
+    /// run. The column is written on every call, because writing either value
+    /// is the explicit gesture that lifts it out of NULL forever after.
+    public func setGCOrphanProcessesEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET gc_orphan_processes_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

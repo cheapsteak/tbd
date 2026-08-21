@@ -18,6 +18,7 @@ struct PRBindingRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var url: String
     var headBranch: String?
     var baseRef: String?
+    var title: String?
     var prStatus: String?
     var source: String
     var detached: Bool
@@ -33,6 +34,7 @@ struct PRBindingRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.url = binding.url
         self.headBranch = binding.headBranch
         self.baseRef = binding.baseRef
+        self.title = binding.title
         self.prStatus = binding.status.flatMap { status in
             (try? JSONEncoder().encode(status)).flatMap { String(data: $0, encoding: .utf8) }
         }
@@ -61,7 +63,8 @@ struct PRBindingRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             .flatMap { try? JSONDecoder().decode(PRStatus.self, from: $0) }
         return PRBinding(id: uuid, worktreeID: wtID, host: host, owner: owner,
                          repo: repo, number: number, url: url,
-                         headBranch: headBranch, baseRef: baseRef, status: status,
+                         headBranch: headBranch, baseRef: baseRef, title: title,
+                         status: status,
                          source: bindingSource, detached: detached, boundAt: boundAt)
     }
 }
@@ -81,6 +84,26 @@ public struct AllWorktreeBindings: Sendable {
     }
 }
 
+/// Why a binding write could not be honoured at all — distinct from the
+/// ordinary "nothing changed" a `Bool` reports, which every caller renders as
+/// "this worktree is not tracking that PR".
+public enum PRBindingStoreError: Error, LocalizedError, CustomStringConvertible {
+    /// A worktree has accumulated `cap` tombstones, so `tombstone`'s insert arm
+    /// refused to mint another. Reaching this legitimately is not possible; it
+    /// means something is detaching PRs in a loop.
+    case tombstoneCapReached(worktreeID: String, cap: Int)
+
+    public var description: String {
+        switch self {
+        case .tombstoneCapReached(let worktreeID, let cap):
+            return "worktree \(worktreeID) already records \(cap) detached pull "
+                + "requests; nothing was written"
+        }
+    }
+
+    public var errorDescription: String? { description }
+}
+
 /// Persistence for PR bindings. Enforces first-source-wins deduplication,
 /// tombstone semantics, and the per-worktree cap.
 public struct PRBindingStore: Sendable {
@@ -88,6 +111,23 @@ public struct PRBindingStore: Sendable {
     /// that has genuinely opened twenty live PRs is already pathological; the
     /// cap keeps one runaway session from unbounded polling.
     static let maxBindingsPerWorktree = 20
+
+    /// Bounds rows created by `tombstone`'s INSERT arm — a detach of a PR the
+    /// worktree never bound.
+    ///
+    /// Every other row in this table corresponds to a PR something actually
+    /// discovered, so the live cap bounds them all indirectly. Insert-on-miss is
+    /// the one path that mints a row for a PR nothing found, one per gesture and
+    /// one per distinct number, and nothing ever deletes a tombstone — so a
+    /// scripted or fat-fingered loop could otherwise grow a worktree's slice of
+    /// a table that `listAllByWorktree` decodes whole on every app refresh.
+    ///
+    /// Deliberately far above the live cap rather than equal to it: tombstones
+    /// legitimately outnumber live bindings on a long-lived worktree, which
+    /// accumulates one per PR it ever opened and detached, and evicting any of
+    /// them would resurrect a PR the user removed. This is a runaway stop, not a
+    /// budget. Past it the detach still tombstones any row that exists.
+    static let maxTombstonesPerWorktree = 200
 
     let writer: any DatabaseWriter
 
@@ -202,6 +242,71 @@ public struct PRBindingStore: Sendable {
         }
     }
 
+    /// Tombstone a PR whether or not this worktree has a row for it: mark the
+    /// existing row detached, or insert the tombstone when there is none.
+    ///
+    /// The insert arm is what lets a detach assert "this does not belong here"
+    /// about a PR nothing ever bound — a chip synthesized from the cached
+    /// `Worktree.prStatus`, or a `tbd pr detach` issued before discovery got
+    /// there.
+    ///
+    /// **One write transaction covers both arms**, and that is the point of
+    /// having a single method rather than a `setDetached` call followed by an
+    /// insert-on-miss. Split across two transactions, a concurrent bind — the
+    /// poll's branch matcher or a hook's `pr attach`, both of which run while
+    /// the user is clicking — can insert a live row in the gap; the insert then
+    /// finds an identity already on record, declines, and the untrack silently
+    /// does nothing, which is the exact failure this gesture exists to remove.
+    ///
+    /// Returns whether the record **changed**: true when a live row was
+    /// tombstoned or a tombstone was inserted, false when the PR was already
+    /// tombstoned — and false when there is no row and `insertIfMissing` is
+    /// false, which is the truthful answer there: nothing was tracking it. An
+    /// existing row keeps its own `source` and `boundAt` — only a tombstone
+    /// with no prior row records nothing but the caller's decision.
+    ///
+    /// `insertIfMissing` is the caller's policy hook rather than a convenience:
+    /// tombstoning a PR the worktree has no row for is only safe when the
+    /// caller has established that the PR could belong to it. Marking an
+    /// existing row detached always is — the row is this worktree's own record
+    /// of the PR whatever any policy says about it now.
+    ///
+    /// Deliberately NOT routed through `upsert`. The cap counts only
+    /// non-detached rows, so a tombstone can never breach it, but `upsert`
+    /// checks that count before writing anything and would evict a live
+    /// terminal binding — or drop the write entirely — to make room for a row
+    /// that occupies none of the budget.
+    @discardableResult
+    public func tombstone(_ binding: PRBinding, insertIfMissing: Bool) async throws -> Bool {
+        try await writer.write { db in
+            var record = PRBindingRecord(from: binding)
+            record.detached = true
+            if let existing = try Self.fetchIdentity(db, record: record) {
+                guard !existing.detached else { return false }
+                try PRBindingRecord
+                    .filter(key: existing.id)
+                    .updateAll(db, Column("detached").set(to: true))
+                return true
+            }
+            guard insertIfMissing else { return false }
+            let tombstones = try PRBindingRecord
+                .filter(Column("worktreeID") == record.worktreeID)
+                .filter(Column("detached") == true)
+                .fetchCount(db)
+            guard tombstones < Self.maxTombstonesPerWorktree else {
+                // THROWN, not reported as "changed nothing". False means the PR
+                // is not tracked here, and every caller says so in those words;
+                // hitting the ceiling means the opposite — the request was not
+                // honoured and the PR may well still be tracked.
+                logger.warning("refusing tombstone for PR #\(record.number, privacy: .public) on worktree \(record.worktreeID, privacy: .public): \(Self.maxTombstonesPerWorktree, privacy: .public) tombstones already recorded")
+                throw PRBindingStoreError.tombstoneCapReached(
+                    worktreeID: record.worktreeID, cap: Self.maxTombstonesPerWorktree)
+            }
+            try record.insert(db)
+            return true
+        }
+    }
+
     /// Hard-delete a `branch`-sourced binding — the poll's heal path.
     ///
     /// A **delete, not a tombstone**, and only for `branch`. A tombstone records
@@ -228,12 +333,14 @@ public struct PRBindingStore: Sendable {
     }
 
     /// Persist what a refresh observed for one binding: its status, and the
-    /// descriptive `headBranch` / `baseRef` the same response carried. A nil ref
-    /// means "not observed this pass" and leaves that column alone — a `gh`
-    /// outage must not blank a branch name the CLI renders.
+    /// descriptive `headBranch` / `baseRef` / `title` the same response carried.
+    /// A nil one of those means "not observed this pass" and leaves that column
+    /// alone — a `gh` outage must not blank a branch name the CLI renders or a
+    /// title the status bar has on screen.
     public func updateObservation(bindingID: UUID, status: PRStatus?,
                                   headBranch: String? = nil,
-                                  baseRef: String? = nil) async throws {
+                                  baseRef: String? = nil,
+                                  title: String? = nil) async throws {
         let encoded = status.flatMap { value in
             (try? JSONEncoder().encode(value)).flatMap { String(data: $0, encoding: .utf8) }
         }
@@ -243,6 +350,7 @@ public struct PRBindingStore: Sendable {
             var assignments: [ColumnAssignment] = [Column("prStatus").set(to: encoded)]
             if let headBranch { assignments.append(Column("headBranch").set(to: headBranch)) }
             if let baseRef { assignments.append(Column("baseRef").set(to: baseRef)) }
+            if let title { assignments.append(Column("title").set(to: title)) }
             return try PRBindingRecord
                 .filter(key: bindingID.uuidString)
                 .updateAll(db, assignments)

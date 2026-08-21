@@ -33,8 +33,10 @@ private final class RecordedCommands: @unchecked Sendable {
 }
 
 /// Returns the shell command body (last argument of `new-window`) for any
-/// recorded `new-window` invocation. tmux argv ends with `<shell> -ic <body>`
-/// when env vars are inlined, so the body is the last element.
+/// recorded `new-window` invocation. tmux argv ends with
+/// `<shell> -i -l -c <body>` (separate flag elements, see
+/// TmuxManager.shellFlags(forShell:)) when env vars are inlined, so the body
+/// is the last element.
 private func newWindowBodies(_ recorded: [[String]]) -> [String] {
     recorded.compactMap { call in
         guard call.contains("new-window") else { return nil }
@@ -694,12 +696,20 @@ struct CodexLaunchCommandTests {
         let response = await router.handle(request)
         #expect(response.success, "expected success; error: \(response.error ?? "nil")")
 
-        let bodies = newWindowBodies(recorded.snapshot())
-        #expect(bodies.contains {
+        let commands = recorded.snapshot()
+        let stagedBodies = newWindowBodies(commands)
+        let respawnBodies = commands.compactMap { command -> String? in
+            guard command.contains("respawn-window") else { return nil }
+            return command.last
+        }
+        #expect(!stagedBodies.contains {
             containsCodexProfileLaunch($0)
-        }, "recreated codex tab must launch codex with the TBD profile; got bodies: \(bodies)")
-        #expect(!bodies.contains { $0.contains("codex --full-auto") },
-                "recreated codex tab must not use removed --full-auto flag; got bodies: \(bodies)")
+        }, "recreated codex tab must not launch codex before its durable reset; got bodies: \(stagedBodies)")
+        #expect(respawnBodies.contains {
+            containsCodexProfileLaunch($0)
+        }, "recreated codex tab must respawn codex with the TBD profile; got bodies: \(respawnBodies)")
+        #expect(!respawnBodies.contains { $0.contains("codex --full-auto") },
+                "recreated codex tab must not use removed --full-auto flag; got bodies: \(respawnBodies)")
     }
 
     @Test("handleTerminalCreate uses current Codex launch command")

@@ -1,5 +1,6 @@
 import Clocks
 import Foundation
+import GRDB
 import TestSupport
 import Testing
 @testable import TBDDaemonLib
@@ -761,6 +762,46 @@ struct QueuedPromptDeliveryTests {
         }
     }
 
+    /// A row holding a prompt with **no** submit bit recorded. Delivery stages
+    /// it: submitting is opt-in, and nothing here asked for it.
+    ///
+    /// **No production writer makes this row.** `setPendingPrompt` names both
+    /// columns on every write, and the two arrived in one migration, so a
+    /// prompt never outlives its submit bit — which is why the column is nulled
+    /// by hand here rather than through `park`. What the test pins is the
+    /// resolution, not a state the daemon can reach: the read-back sheet reads
+    /// that same resolution over that same row shape
+    /// (`ParkedPromptReadbackTests.resolvedBitIsWhatTheSheetShows`), so the two
+    /// surfaces cannot answer differently about it.
+    @Test("a row with no submit bit recorded is staged, not sent")
+    func absentSubmitBitIsStagedNotSent() async throws {
+        let clock = TestClock()
+        let fixture = try await makeSpawnFixture(clock: clock)
+        try await fixture.db.config.setQueuedPrompt(true)
+        let terminal = try await fixture.db.terminals.create(
+            worktreeID: fixture.worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            kind: .claude)
+
+        #expect(await fixture.coordinator.park(
+            worktreeID: fixture.worktree.id, text: "no submit bit on this row",
+            submit: true) == .awaitingReady)
+        try await fixture.db.writerForTests.write { db in
+            try db.execute(
+                sql: "UPDATE worktree SET pending_prompt_submit = NULL WHERE id = ?",
+                arguments: [fixture.worktree.id.uuidString])
+        }
+        let staged = try await fixture.db.worktrees.get(id: fixture.worktree.id)
+        #expect(staged?.pendingPromptSubmit == nil)
+
+        await fixture.coordinator.noteSessionReady(
+            worktreeID: fixture.worktree.id, terminalID: terminal.id)
+        await advancePastSettle(clock, fixture)
+        await awaitDeliveries(fixture.coordinator)
+
+        #expect(fixture.sends.calls == [SendRecorder.Call(
+            terminalID: terminal.id, text: "no submit bit on this row", submit: false)])
+    }
+
     // MARK: - Verbatim, with the envelope suppressed
 
     /// The bytes that actually reach the pane, from the real send core: the
@@ -947,6 +988,93 @@ struct QueuedPromptDeliveryTests {
 
         let result = await fixture.coordinator.park(
             worktreeID: fixture.worktree.id, text: "no composer here", submit: true)
+
+        guard case .refused(let reason) = result else {
+            Issue.record("expected a refusal, got \(result)")
+            return
+        }
+        #expect(reason.contains("not an agent"))
+        #expect(try await pendingPrompt(fixture.db, fixture.worktree.id) == nil)
+    }
+
+    // MARK: - Behind a blocking preSession hook
+
+    /// Installs a `preSession` hook where `spawnPreSessionTerminal` resolves
+    /// it, so the hook tab under test is made by the path that makes the live
+    /// one rather than hand-written into the terminals table.
+    private func installPreSessionHook(at worktreePath: String) throws {
+        let hooksDir = URL(fileURLWithPath: worktreePath)
+            .appendingPathComponent(".worktree-hooks", isDirectory: true)
+        try FileManager.default.createDirectory(at: hooksDir, withIntermediateDirectories: true)
+        let hook = hooksDir.appendingPathComponent(HookEvent.preSession.rawValue)
+        try "#!/bin/sh\nexit 0\n".write(to: hook, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: hook.path)
+    }
+
+    /// The wait this feature exists for. A blocking `preSession` hook owns the
+    /// worktree's only tab for as long as it runs — ten minutes is a normal
+    /// hook — and the primary agent spawns after it exits. A park during that
+    /// window is "not yet", and answering "not ever" throws away the message
+    /// the operator composed on the creation modal.
+    @Test("a prompt parked behind a running preSession hook rides the spawn")
+    func parkedBehindPreSessionHookIsDelivered() async throws {
+        let clock = TestClock()
+        let fixture = try await makeSpawnFixture(clock: clock)
+        try await fixture.db.config.setQueuedPrompt(true)
+        try installPreSessionHook(at: fixture.worktree.localPath)
+
+        let preSession = try #require(try await fixture.lifecycle.spawnPreSessionTerminal(
+            worktree: fixture.worktree, repo: fixture.repo,
+            worktreePath: fixture.worktree.localPath))
+        let hookTab = try #require(try await fixture.db.terminals.get(id: preSession.terminalID))
+        // The shape the refusal used to read as "the spawn already happened":
+        // one shell-kind row, and only its label says otherwise.
+        #expect(hookTab.label == TerminalLabel.preSession)
+        #expect((hookTab.kind ?? .shell) == .shell)
+
+        #expect(await fixture.coordinator.park(
+            worktreeID: fixture.worktree.id, text: Self.multiLinePrompt,
+            submit: true) == .parkedForSpawn)
+        #expect(try await pendingPrompt(fixture.db, fixture.worktree.id) == Self.multiLinePrompt)
+
+        // The hook exits; phase 3 spawns the primary and tells the coordinator.
+        let created = try await fixture.lifecycle.spawnPrimaryTerminals(
+            worktree: fixture.worktree, repo: fixture.repo, skipClaude: false,
+            preSessionTerminalID: preSession.terminalID)
+        let primary = try #require(created.first?.id)
+        #expect(fixture.sends.calls.isEmpty)
+
+        await fixture.coordinator.noteSessionReady(
+            worktreeID: fixture.worktree.id, terminalID: primary)
+        await advancePastSettle(clock, fixture)
+        await awaitDeliveries(fixture.coordinator)
+
+        #expect(fixture.sends.calls == [SendRecorder.Call(
+            terminalID: primary, text: Self.multiLinePrompt, submit: true)])
+        #expect(try await pendingPrompt(fixture.db, fixture.worktree.id) == nil)
+        #expect(try await fixture.db.notifications.unread(
+            worktreeID: fixture.worktree.id).isEmpty)
+    }
+
+    /// A hook tab present does not make a worktree pre-spawn: a manual hook
+    /// re-run appends one beside live tabs, and a spawn that produced a shell
+    /// keeps its hook tab when the hook failed. The refusal is owed to every
+    /// row, not to the absence of one.
+    @Test("undeliverable: a shell beside the hook tab is a spawn that already happened")
+    func parkingOnAShellPrimaryBesideTheHookTabIsRefused() async throws {
+        let fixture = try await makeSpawnFixture()
+        try await fixture.db.config.setQueuedPrompt(true)
+        try installPreSessionHook(at: fixture.worktree.localPath)
+        _ = try #require(try await fixture.lifecycle.spawnPreSessionTerminal(
+            worktree: fixture.worktree, repo: fixture.repo,
+            worktreePath: fixture.worktree.localPath))
+        _ = try await fixture.db.terminals.create(
+            worktreeID: fixture.worktree.id, tmuxWindowID: "@9", tmuxPaneID: "%9",
+            kind: .shell)
+
+        let result = await fixture.coordinator.park(
+            worktreeID: fixture.worktree.id, text: "no composer here either", submit: true)
 
         guard case .refused(let reason) = result else {
             Issue.record("expected a refusal, got \(result)")

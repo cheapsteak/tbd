@@ -9,6 +9,18 @@ private let decodeLogger = Logger(subsystem: "com.tbd.daemon", category: "databa
 struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     static let databaseTableName = "terminal"
 
+    static func databaseDateEncodingStrategy(
+        for column: String
+    ) -> DatabaseDateEncodingStrategy {
+        if column == "sessionOrderObservedAt" {
+            // Numeric epoch storage preserves distinct starts within one
+            // millisecond. GRDB's default decoder accepts both this numeric
+            // representation and legacy datetime text rows.
+            return .timeIntervalSince1970
+        }
+        return .deferredToDate
+    }
+
     var id: String
     var worktreeID: String
     var tmuxWindowID: String
@@ -21,6 +33,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var suspendedSnapshot: String?
     var profile_id: String?
     var transcriptPath: String?
+    var sessionOrderObservedAt: Date?
     var kind: String?
     var activityState: String?
     var hibernatedAt: Date?
@@ -32,6 +45,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// written before v70 and on any row stamped without provenance.
     var activityStateSource: String?
     var activityStateObservedAt: Date?
+    var activityStateOrderObservedAt: Date?
     /// JSON-encoded `AwaitingInputReason`, carried verbatim from the
     /// `Notification` hook. nil when the session is not waiting, or when the
     /// wait carried no structured reason.
@@ -51,6 +65,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.suspendedSnapshot = terminal.suspendedSnapshot
         self.profile_id = terminal.profileID?.uuidString
         self.transcriptPath = terminal.transcriptPath
+        self.sessionOrderObservedAt = terminal.sessionOrderObservedAt
         self.kind = terminal.kind?.rawValue
         self.activityState = terminal.activityState.rawValue
         self.hibernatedAt = terminal.hibernatedAt
@@ -60,6 +75,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.watch_desk_role = terminal.watchDeskRole?.rawValue
         self.activityStateSource = FactColumnJSON.encode(terminal.activityStateSource)
         self.activityStateObservedAt = terminal.activityStateObservedAt
+        self.activityStateOrderObservedAt = terminal.activityStateOrderObservedAt
         self.awaitingInputReason = FactColumnJSON.encode(terminal.awaitingInputReason)
         self.awaitingInputObservedAt = terminal.awaitingInputObservedAt
     }
@@ -89,6 +105,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             suspendedSnapshot: suspendedSnapshot,
             profileID: profile_id.flatMap(UUID.init(uuidString:)),
             transcriptPath: transcriptPath,
+            sessionOrderObservedAt: sessionOrderObservedAt,
             kind: kind.flatMap(TerminalKind.init(rawValue:)),
             activityState: activityState.flatMap(TerminalActivityState.init(rawValue:)) ?? .unknown,
             hibernatedAt: hibernatedAt,
@@ -100,6 +117,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             },
             activityStateSource: FactColumnJSON.decode(FactSource.self, from: activityStateSource),
             activityStateObservedAt: activityStateObservedAt,
+            activityStateOrderObservedAt: activityStateOrderObservedAt,
             awaitingInputReason: FactColumnJSON.decode(AwaitingInputReason.self, from: awaitingInputReason),
             awaitingInputObservedAt: awaitingInputObservedAt
         )
@@ -123,6 +141,97 @@ enum FactColumnJSON {
         guard let json, let data = json.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(type, from: data)
     }
+}
+
+public struct AppliedTerminalActivityObservation: Sendable {
+    public let activityState: TerminalActivityState
+    public let source: FactSource
+    public let observedAt: Date
+    public let orderObservedAt: Date
+}
+
+struct AppliedTerminalSessionStart: Sendable {
+    let sessionID: String
+    let transcriptPath: String?
+    let orderObservedAt: Date?
+    let isInitialAttachment: Bool
+    let activityObservation: AppliedTerminalActivityObservation?
+}
+
+private func preservesStoredActivityAtEqualOrder(
+    storedState: TerminalActivityState,
+    storedSource: FactSource?,
+    incomingState: TerminalActivityState,
+    incomingSource: FactSource
+) -> Bool {
+    if incomingSource == .terminalInterrupt { return false }
+    if storedSource == .terminalInterrupt { return true }
+    if storedState == .waitingForUser, incomingState != .waitingForUser { return true }
+    return storedState != .working && incomingState == .working
+}
+
+private func clearAwaitingInputIfNotNewer(
+    record: inout TerminalRecord,
+    than observedAt: Date
+) {
+    guard record.awaitingInputObservedAt.map({ $0 >= observedAt }) != true else { return }
+    record.awaitingInputReason = nil
+    record.awaitingInputObservedAt = nil
+}
+
+private func applyActivityObservationToRecord(
+    to record: inout TerminalRecord,
+    activityState: TerminalActivityState,
+    source: FactSource,
+    observedAt: Date,
+    replaceSameValue: Bool
+) -> AppliedTerminalActivityObservation? {
+    let storedOrderObservedAt = record.activityStateOrderObservedAt
+        ?? record.activityStateObservedAt
+    if let storedOrderObservedAt, storedOrderObservedAt > observedAt {
+        return nil
+    }
+    let storedSource = FactColumnJSON.decode(
+        FactSource.self, from: record.activityStateSource)
+    let storedState = record.activityState.flatMap(TerminalActivityState.init(rawValue:))
+        ?? .unknown
+    if storedOrderObservedAt == observedAt,
+       preservesStoredActivityAtEqualOrder(
+           storedState: storedState,
+           storedSource: storedSource,
+           incomingState: activityState,
+           incomingSource: source) {
+        return nil
+    }
+
+    let sameCompleteFact = record.activityState == activityState.rawValue
+        && storedSource != nil
+        && record.activityStateObservedAt != nil
+        && !replaceSameValue
+    if sameCompleteFact,
+       let storedSource,
+       let storedObservedAt = record.activityStateObservedAt {
+        record.activityStateOrderObservedAt = observedAt
+        clearAwaitingInputIfNotNewer(record: &record, than: observedAt)
+        return AppliedTerminalActivityObservation(
+            activityState: activityState,
+            source: storedSource,
+            observedAt: storedObservedAt,
+            orderObservedAt: observedAt
+        )
+    }
+
+    record.activityState = activityState.rawValue
+    record.activityStateSource = FactColumnJSON.encode(source)
+    record.activityStateObservedAt = observedAt
+    record.activityStateOrderObservedAt = observedAt
+    clearAwaitingInputIfNotNewer(record: &record, than: observedAt)
+    return AppliedTerminalActivityObservation(
+        activityState: activityState,
+        source: source,
+        observedAt: observedAt,
+        orderObservedAt: observedAt
+    )
 }
 
 /// Provides CRUD operations for terminals.
@@ -278,10 +387,9 @@ public struct TerminalStore: Sendable {
     }
 
     /// Update the Claude session ID and the absolute JSONL transcript path for
-    /// a terminal in one write. Used by the SessionStart hook bridge so the
-    /// transcript handler can target the exact file Claude is writing without
-    /// re-deriving the project directory from cwd (which is fragile across
-    /// `/clear` and `/compact` rollovers).
+    /// a terminal in one write. Direct lifecycle callers use this when they do
+    /// not have a SessionStart observation to order; the hook bridge uses
+    /// `applySessionStart` below.
     public func updateSession(id: UUID, sessionID: String, transcriptPath: String?) async throws {
         try await writer.write { db in
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
@@ -300,6 +408,94 @@ public struct TerminalStore: Sendable {
         }
     }
 
+    /// Apply a SessionStart in one database transaction. Codex session,
+    /// prompt, and activity facts use independent ordering rails; other agent
+    /// kinds retain their established last-writer session semantics.
+    ///
+    /// Codex session identity is ordered only against other SessionStarts. A
+    /// delayed permission or activity hook can carry a later server-receipt
+    /// timestamp while still describing the previous session, so it must not
+    /// suppress a genuine identity rollover. Prompt and activity each retain
+    /// their own conservative ordering: a same/newer prompt survives, and an
+    /// older SessionStart cannot regress newer activity. Codex SessionStart is
+    /// first-wins at an equal session watermark; an exact retry is an
+    /// idempotent no-op and therefore cannot move a transcript boundary. The
+    /// same transaction classifies an initial attachment from the complete
+    /// prior session history so callers never decide from a stale row snapshot.
+    func applySessionStart(
+        id: UUID,
+        sessionID: String,
+        transcriptPath: String?,
+        observedAt: Date
+    ) async throws -> AppliedTerminalSessionStart? {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            let isCodex = record.kind == TerminalKind.codex.rawValue
+                || record.label == TerminalLabel.codex
+            guard isCodex else {
+                // Preserve the established Claude/shell hook behavior: the
+                // last SessionStart to finish replaces identity and retracts
+                // the prior prompt without changing activity. The ordering
+                // rail exists only for Codex transcript reconciliation.
+                record.claudeSessionID = sessionID
+                if let transcriptPath {
+                    record.transcriptPath = transcriptPath
+                }
+                record.sessionOrderObservedAt = nil
+                record.awaitingInputReason = nil
+                record.awaitingInputObservedAt = nil
+                try record.update(db)
+                return AppliedTerminalSessionStart(
+                    sessionID: sessionID,
+                    transcriptPath: record.transcriptPath,
+                    orderObservedAt: nil,
+                    isInitialAttachment: false,
+                    activityObservation: nil)
+            }
+            let isInitialAttachment = record.claudeSessionID == nil
+                && record.transcriptPath == nil
+                && record.sessionOrderObservedAt == nil
+            if let storedSessionOrder = record.sessionOrderObservedAt,
+               storedSessionOrder >= observedAt {
+                return nil
+            }
+            record.sessionOrderObservedAt = observedAt
+
+            let activityObservation = applyActivityObservationToRecord(
+                to: &record,
+                activityState: .idle,
+                source: .hookEvent("SessionStart"),
+                observedAt: observedAt,
+                replaceSameValue: true
+            )
+
+            record.claudeSessionID = sessionID
+            if let transcriptPath {
+                record.transcriptPath = transcriptPath
+            }
+            // The activity helper performs this when it accepts Codex's idle
+            // fact. Keep the independent call so a rejected stale activity
+            // transition still retracts only a prompt known to be older.
+            clearAwaitingInputIfNotNewer(record: &record, than: observedAt)
+            try record.update(db)
+            guard let persistedRecord = try TerminalRecord.fetchOne(
+                db, key: id.uuidString
+            ) else {
+                throw DatabaseError(message: "Terminal disappeared after SessionStart")
+            }
+            return AppliedTerminalSessionStart(
+                sessionID: sessionID,
+                transcriptPath: persistedRecord.transcriptPath,
+                // The tracker must use the exact durable generation a later
+                // terminal-list read will reload.
+                orderObservedAt: persistedRecord.sessionOrderObservedAt,
+                isInitialAttachment: isInitialAttachment,
+                activityObservation: activityObservation)
+        }
+    }
+
     /// Clear Claude-specific metadata after window recreation.
     /// The recreated window runs a plain shell, not Claude.
     ///
@@ -313,6 +509,7 @@ public struct TerminalStore: Sendable {
             }
             record.claudeSessionID = nil
             record.transcriptPath = nil
+            record.sessionOrderObservedAt = nil
             record.suspendedAt = nil
             record.suspendedSnapshot = nil
             record.hibernatedAt = nil
@@ -322,6 +519,40 @@ public struct TerminalStore: Sendable {
             record.activityState = TerminalActivityState.unknown.rawValue
             record.activityStateSource = FactColumnJSON.encode(FactSource.derived)
             record.activityStateObservedAt = date
+            record.activityStateOrderObservedAt = date
+            record.awaitingInputReason = nil
+            record.awaitingInputObservedAt = nil
+            try record.update(db)
+        }
+    }
+
+    /// Replace a dead Codex window with a fresh process while keeping the tab's
+    /// Codex identity. The replacement process has not announced a session yet,
+    /// so prior session and activity facts must not make its first SessionStart
+    /// look like a resume of the dead process.
+    func replaceRecreatedCodexWindow(
+        id: UUID,
+        windowID: String,
+        paneID: String,
+        at date: Date
+    ) async throws {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            record.tmuxWindowID = windowID
+            record.tmuxPaneID = paneID
+            record.claudeSessionID = nil
+            record.transcriptPath = nil
+            record.sessionOrderObservedAt = nil
+            record.suspendedAt = nil
+            record.suspendedSnapshot = nil
+            record.hibernatedAt = nil
+            record.hibernateReason = nil
+            record.activityState = TerminalActivityState.unknown.rawValue
+            record.activityStateSource = FactColumnJSON.encode(FactSource.derived)
+            record.activityStateObservedAt = date
+            record.activityStateOrderObservedAt = date
             record.awaitingInputReason = nil
             record.awaitingInputObservedAt = nil
             try record.update(db)
@@ -379,6 +610,7 @@ public struct TerminalStore: Sendable {
             record.activityState = activityState.rawValue
             record.activityStateSource = FactColumnJSON.encode(source)
             record.activityStateObservedAt = observedAt
+            record.activityStateOrderObservedAt = observedAt
             // Unconditional, including the nil case: this IS the superseding
             // rail. A caller that observes a new activity state without naming
             // a reason clears the old one, so a "needs your permission"
@@ -388,6 +620,81 @@ public struct TerminalStore: Sendable {
             record.awaitingInputReason = FactColumnJSON.encode(awaitingInputReason)
             record.awaitingInputObservedAt = awaitingInputReason == nil ? nil : observedAt
             try record.update(db)
+        }
+    }
+
+    /// Apply a Codex or explicit-interrupt activity fact only when it is not
+    /// older than the ordering watermark already stored for the terminal.
+    ///
+    /// The ordering comparison and write share one database-writer
+    /// transaction. Callers may therefore do
+    /// arbitrary asynchronous work between observing an event and reaching
+    /// this method without allowing that older event to roll back a newer one.
+    ///
+    /// A repeated Codex value advances only the ordering watermark and clears
+    /// an awaiting-input reason strictly older than itself. Its semantic transition
+    /// timestamp and source remain unchanged, which both preserves
+    /// hibernation's at-rest clock and prevents an idle echo from erasing an
+    /// explicit interrupt.
+    /// Events that establish meaningful same-value provenance (currently a user
+    /// interrupt and SessionStart) opt into replacement. Exact timestamp ties
+    /// cannot establish event order, so explicit interrupts and permission
+    /// waits are preserved, while ambiguous working/non-working ties resolve
+    /// toward non-working; the next strictly newer hook advances order. Other
+    /// agent hooks retain their established changed-value replacement and
+    /// same-value no-op behavior.
+    public func applyActivityObservation(
+        id: UUID,
+        activityState: TerminalActivityState,
+        source: FactSource,
+        observedAt: Date,
+        sessionID: String? = nil,
+        replaceSameValue: Bool = false
+    ) async throws -> AppliedTerminalActivityObservation? {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            let usesOrderedCodexActivity = record.kind == TerminalKind.codex.rawValue
+                || record.label == TerminalLabel.codex
+                || source == .terminalInterrupt
+            guard usesOrderedCodexActivity else {
+                // This API is public to the daemon module, so keep the scope
+                // boundary here as well as at the RPC router. An accidental
+                // non-Codex caller must retain the pre-existing changed-value
+                // replacement and same-value no-op behavior.
+                guard record.activityState != activityState.rawValue else { return nil }
+                record.activityState = activityState.rawValue
+                record.activityStateSource = FactColumnJSON.encode(source)
+                record.activityStateObservedAt = observedAt
+                record.activityStateOrderObservedAt = observedAt
+                record.awaitingInputReason = nil
+                record.awaitingInputObservedAt = nil
+                try record.update(db)
+                return AppliedTerminalActivityObservation(
+                    activityState: activityState,
+                    source: source,
+                    observedAt: observedAt,
+                    orderObservedAt: observedAt)
+            }
+            // Codex writes session identity into every supported hook payload.
+            // Check it in this transaction, rather than against the terminal
+            // loaded by the router, so a delayed old-session event cannot race
+            // an accepted SessionStart. Identity-free callers retain legacy
+            // behavior for already-running sessions with an older hook overlay
+            // and for the app's explicit interrupt.
+            if let sessionID, sessionID != record.claudeSessionID {
+                return nil
+            }
+            guard let application = applyActivityObservationToRecord(
+                to: &record,
+                activityState: activityState,
+                source: source,
+                observedAt: observedAt,
+                replaceSameValue: replaceSameValue
+            ) else { return nil }
+            try record.update(db)
+            return application
         }
     }
 
@@ -527,6 +834,7 @@ public struct TerminalStore: Sendable {
             // awaiting-input reason is cleared with it.
             record.activityStateSource = FactColumnJSON.encode(FactSource.database)
             record.activityStateObservedAt = date
+            record.activityStateOrderObservedAt = date
             record.awaitingInputReason = nil
             record.awaitingInputObservedAt = nil
             try record.update(db)

@@ -134,6 +134,16 @@ While the modal is on, `createWorktree` no longer sets `editingWorktreeID`.
 Rename-on-create and the modal cannot both own focus, and the prompt is the
 reason the modal exists; renaming stays available from the sidebar.
 
+**A first message that does not park is handed back on the pasteboard.** The
+modal dismisses on submit and there is no draft store behind it, so by the time
+a creation failure, a refusal, or a transport error comes back there is nowhere
+the operator could go looking for what they wrote — an alert on its own would
+leave the message existing nowhere at all. Every one of those paths therefore
+copies the text first and says so in the same sentence as the reason, which is
+the recovery the read-back's Copy already offers for text that was parked and
+cannot be delivered. It costs the operator's clipboard, and that is the trade:
+the clipboard is replaceable and the composed message is not.
+
 **Two surfaces for a parked message, split by one rule.** Text in the column
 means one of two things, and the app names them separately:
 
@@ -372,9 +382,12 @@ Three are answered at `park` rather than at delivery, because the app must never
 promise something the daemon will refuse. An **archived** worktree has no
 terminal rows — archive deletes them — so it looks exactly like a worktree still
 being created, and the honest answer for the two is opposite; parking there
-would leave text nothing will ever read. A worktree whose terminals already
-exist and whose primary is a **shell** has had its spawn, and nothing is coming.
-A **hibernated** primary is a pane with no composer in it. All three are
+would leave text nothing will ever read. A worktree whose spawn has already
+happened and produced a **shell** primary has nothing coming either — and the
+tell is the labels on its rows, not their number: a worktree holding nothing but
+the blocking `preSession` hook's tab (or no rows at all) still has its primary
+ahead of it, and parking there is the promise this feature is for. A
+**hibernated** primary is a pane with no composer in it. All three are
 refused, with the reason, and nothing is parked.
 
 **A hibernated primary is asked about twice — at `park` and again immediately

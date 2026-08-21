@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import os
 
@@ -213,6 +214,66 @@ enum BoundedProcessOutcome {
     case timedOut
 }
 
+/// How the child's standard streams are wired.
+///
+/// `.pipes` is the default and what every pre-existing call site gets.
+/// `.pseudoTerminal` substitutes one `openpty(3)` pair for both pipes and hands
+/// the replica to the child as stdin, stdout and stderr — the same allocation
+/// `TmuxControlConnection.start()` performs, including the detail that matters:
+/// the parent closes its copy of the replica after spawn so the primary sees
+/// EOF when the child exits.
+///
+/// **PTY mode is opt-in per invocation, not a property of a caller, and the
+/// reason is a real loss.** A pseudo-terminal is one file descriptor, so the
+/// child's stdout and stderr merge on it. Any verb that returns a control
+/// record in a stderr envelope cannot survive that separation collapsing, so
+/// only a caller that returns no envelope may set it.
+enum BoundedProcessStdio: Sendable {
+    case pipes
+    case pseudoTerminal
+}
+
+/// The `winsize` reported to a `.pseudoTerminal` child via `TIOCGWINSZ`.
+///
+/// **This is a capture surface, not a display surface — do NOT "restore" it to
+/// the 24x80 that `TmuxControlConnection` uses.** That site is not a precedent:
+/// what crosses its pty is tmux's `-CC` control protocol, which is not
+/// width-formatted at all, so the reported width cannot affect its bytes.
+///
+/// Here it can, and does. The pty itself never wraps — `winsize` is advisory
+/// metadata and the kernel line discipline inserts nothing — but a child that
+/// ASKS will format to it, and the CLIs this mode exists for do exactly that:
+/// an ANSI-rendering layer formats to `process.stdout.columns` and inserts REAL
+/// newlines at the wrap, which then land in the captured bytes and corrupt any
+/// downstream parse. The measured headroom at 80 was six columns: a reference
+/// output's longest line is 74 characters, and a `Created cloud session: `
+/// prefix (23 characters) leaves 57 for a title that a parser reads with no
+/// cross-check. Reporting a width no realistic output reaches removes the whole
+/// class of failure; the cost of an over-wide report is nil, because nothing
+/// pads to the full width.
+private enum PseudoTerminalGeometry {
+    static let columns: UInt16 = 400
+    static let rows: UInt16 = 200
+}
+
+/// Refusals that belong to the runner itself rather than to the child.
+enum BoundedProcessRunnerError: Error, Equatable, LocalizedError {
+    /// A `stdin` payload was supplied under `.pseudoTerminal`. The replica is
+    /// the child's stdin AND its stdout on one descriptor, so there is no write
+    /// end to close and a child that waits for EOF would hang until the
+    /// deadline. Refusing is louder than hanging.
+    case stdinUnsupportedOnPseudoTerminal
+
+    var errorDescription: String? {
+        switch self {
+        case .stdinUnsupportedOnPseudoTerminal:
+            return "a stdin payload cannot be delivered under the pseudo-terminal stdio mode: "
+                + "the pty replica is the child's stdin and stdout on one descriptor, so there "
+                + "is no write end to close and a child waiting for EOF would hang"
+        }
+    }
+}
+
 /// Runs an external command with a hard timeout, draining stdout/stderr, and
 /// resolves to `.completed(status, stdout, stderr)` or `.timedOut` — or throws
 /// the spawn error if `Process.run()` fails. Shared by
@@ -239,6 +300,14 @@ enum BoundedProcessOutcome {
 /// child reads enough to make room, the same way an undrained large stdout
 /// would block the child.
 ///
+/// `stdio` defaults to `.pipes`, which is exactly what every call site got
+/// before the parameter existed. `.pseudoTerminal` swaps the two pipes for one
+/// `openpty(3)` pair — for a child that refuses to run unless its stdout is a
+/// terminal — and is deliberately opt-in per invocation: the two output streams
+/// merge onto that single descriptor, so the reported `stderr` is always empty
+/// and a `stdin` payload is REFUSED rather than silently hanging (there is no
+/// separate write end to close). See `BoundedProcessStdio`.
+///
 /// The deadline is immune to GCD-pool starvation via two independent guarantees:
 ///
 /// 1. SCHEDULING — the deadline AND the SIGTERM→SIGKILL escalation fire on the
@@ -258,9 +327,9 @@ enum BoundedProcessOutcome {
 /// runs — a macOS pipe buffer is 64KB, so a child emitting more (e.g. `ps -Ao`
 /// on a busy machine, ~72KB) would otherwise block writing to the full pipe
 /// while we wait for it to exit — a mutual deadlock resolved only by the
-/// timeout. The drain never waits for pipe EOF: real call sites run
-/// `[shell, "-ic", cmd]`, and rc files can fork background grandchildren that
-/// inherit the write ends, so EOF may never arrive after the direct child dies.
+/// timeout. The drain never waits for pipe EOF: any spawned process can fork
+/// background grandchildren that inherit the pipe write ends, so EOF may
+/// never arrive after the direct child dies.
 /// Termination, timeout, and spawn-failure all snapshot what has already arrived
 /// and close the parent read ends — no thread, FD, or closure outlives the call.
 ///
@@ -287,8 +356,12 @@ func runBoundedProcess(
     environment: [String: String]? = nil,
     stdin: Data? = nil,
     timeout: Duration,
+    stdio: BoundedProcessStdio = .pipes,
     clock: any Clock<Duration> = ContinuousClock()
 ) async throws -> BoundedProcessOutcome {
+    if stdio == .pseudoTerminal, stdin != nil {
+        throw BoundedProcessRunnerError.stdinUnsupportedOnPseudoTerminal
+    }
     // Single-resume guard shared by the watchdog fire path, the termination
     // handler, and the spawn-failure path. Whichever fires first wins; the
     // losers are no-ops.
@@ -304,10 +377,63 @@ func runBoundedProcess(
     return try await withTaskCancellationHandler(operation: {
     try await withCheckedThrowingContinuation { continuation in
         let process = Process()
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
         let stdoutAccumulator = PipeDataAccumulator()
         let stderrAccumulator = PipeDataAccumulator()
+
+        // Under `.pseudoTerminal` there is ONE descriptor: the parent reads the
+        // primary and the child holds the replica as all three standard
+        // streams, so `stderrHandle` stays nil and the reported stderr is
+        // always empty.
+        let stdoutHandle: FileHandle
+        let stderrHandle: FileHandle?
+        var replicaToClose: Int32 = -1
+
+        switch stdio {
+        case .pipes:
+            let stdoutPipe = Pipe()
+            let stderrPipe = Pipe()
+            stdoutHandle = stdoutPipe.fileHandleForReading
+            stderrHandle = stderrPipe.fileHandleForReading
+            process.standardOutput = stdoutPipe
+            process.standardError = stderrPipe
+        case .pseudoTerminal:
+            var primary: Int32 = -1
+            var replica: Int32 = -1
+            var term = termios()
+            // Raw: no echo, no canonical editing, no CR translation, so the
+            // bytes the parent reads are the bytes the child wrote.
+            cfmakeraw(&term)
+            // See `PseudoTerminalGeometry`: wide on purpose, because the child
+            // formats its output to whatever width it is told.
+            var size = winsize(
+                ws_row: PseudoTerminalGeometry.rows,
+                ws_col: PseudoTerminalGeometry.columns,
+                ws_xpixel: 0,
+                ws_ypixel: 0)
+            guard openpty(&primary, &replica, nil, &term, &size) == 0 else {
+                continuation.resume(throwing: POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO))
+                return
+            }
+            // Non-blocking primary. `readAvailableRaw` runs on a GCD worker and
+            // holds the accumulator lock across its `read(2)`, so a spurious
+            // readability wakeup on a BLOCKING descriptor would park that worker
+            // holding the lock — and `finish()`, which the watchdog thread calls
+            // on the deadline path, would then block behind it. That thread is
+            // the one this file promises never blocks. `EAGAIN` is already a
+            // "keep draining" return, and `finish()` sets this flag itself, so
+            // the pattern is unchanged, only earlier.
+            let flags = fcntl(primary, F_GETFL)
+            if flags >= 0 {
+                _ = fcntl(primary, F_SETFL, flags | O_NONBLOCK)
+            }
+            let replicaHandle = FileHandle(fileDescriptor: replica, closeOnDealloc: false)
+            stdoutHandle = FileHandle(fileDescriptor: primary, closeOnDealloc: false)
+            stderrHandle = nil
+            replicaToClose = replica
+            process.standardInput = replicaHandle
+            process.standardOutput = replicaHandle
+            process.standardError = replicaHandle
+        }
 
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
@@ -317,35 +443,41 @@ func runBoundedProcess(
         if let environment {
             process.environment = environment
         }
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
         // Only wire up a stdin pipe when the caller actually has bytes to
         // send — otherwise leave `standardInput` unset so the child inherits
         // the parent's stdin, exactly as it did before this parameter existed.
+        // Refused outright under `.pseudoTerminal` (guarded above).
         let stdinPipe = stdin.map { _ in Pipe() }
         if let stdinPipe {
             process.standardInput = stdinPipe
         }
 
-        // Drain both pipes incrementally as chunks arrive: no thread parks for
-        // the subprocess's lifetime, and a child emitting more than the 64KB
-        // pipe buffer never deadlocks against an undrained pipe.
-        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
-            if !stdoutAccumulator.readAvailable(from: handle) { handle.readabilityHandler = nil }
-        }
-        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
-            if !stderrAccumulator.readAvailable(from: handle) { handle.readabilityHandler = nil }
+        // Drain incrementally as chunks arrive: no thread parks for the
+        // subprocess's lifetime, and a child emitting more than the buffer
+        // never deadlocks against an undrained reader.
+        switch stdio {
+        case .pipes:
+            stdoutHandle.readabilityHandler = { handle in
+                if !stdoutAccumulator.readAvailable(from: handle) { handle.readabilityHandler = nil }
+            }
+            stderrHandle?.readabilityHandler = { handle in
+                if !stderrAccumulator.readAvailable(from: handle) { handle.readabilityHandler = nil }
+            }
+        case .pseudoTerminal:
+            stdoutHandle.readabilityHandler = { handle in
+                if !stdoutAccumulator.readAvailableRaw(from: handle) { handle.readabilityHandler = nil }
+            }
         }
 
-        // Detach the drain handlers and snapshot both pipes WITHOUT waiting for
-        // EOF — EOF is NOT guaranteed (grandchildren may still hold the write
-        // ends) — then close the parent read ends. Idempotent and thread-safe;
-        // shared by every resume path.
+        // Detach the drain handlers and snapshot WITHOUT waiting for EOF — EOF
+        // is NOT guaranteed (grandchildren may still hold the write ends, and a
+        // pty primary reports EIO rather than EOF) — then close the parent read
+        // ends. Idempotent and thread-safe; shared by every resume path.
         @Sendable func snapshot() -> (Data, Data) {
-            stdoutPipe.fileHandleForReading.readabilityHandler = nil
-            stderrPipe.fileHandleForReading.readabilityHandler = nil
-            let out = stdoutAccumulator.finish(handle: stdoutPipe.fileHandleForReading)
-            let err = stderrAccumulator.finish(handle: stderrPipe.fileHandleForReading)
+            stdoutHandle.readabilityHandler = nil
+            stderrHandle?.readabilityHandler = nil
+            let out = stdoutAccumulator.finish(handle: stdoutHandle)
+            let err = stderrHandle.map { stderrAccumulator.finish(handle: $0) } ?? Data()
             return (out, err)
         }
 
@@ -447,6 +579,13 @@ func runBoundedProcess(
 
         do {
             try process.run()
+            // The child now holds the replica; close the parent's copy so the
+            // primary sees EOF when the child exits. Same discipline as
+            // `TmuxControlConnection.start()`.
+            if replicaToClose >= 0 {
+                Darwin.close(replicaToClose)
+                replicaToClose = -1
+            }
             // KILL ON ARRIVAL. The deadline may have fired *during* the spawn,
             // when `processIdentifier` was still 0 and its own kill was skipped.
             // Whoever claimed the continuation, a child that is still running at
@@ -463,6 +602,10 @@ func runBoundedProcess(
                 }
             }
         } catch {
+            if replicaToClose >= 0 {
+                Darwin.close(replicaToClose)
+                replicaToClose = -1
+            }
             // Spawn failed: no child will ever write — detach the drain handlers
             // and close the read ends so nothing lingers. `run()` fails
             // synchronously and immediately, long before the (>=100ms) watchdog

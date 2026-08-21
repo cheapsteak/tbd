@@ -147,10 +147,19 @@ struct PaneSendTargetQueryTests {
     // MARK: - Identity resolution
 
     @Test("the quoted export form TBD actually plants is read back exactly")
-    func resolveQuotedExport() {
-        // The literal shape `newWindowCommand` produces from the `env` map.
-        let command = "/bin/zsh -ic \"export TBD_TERMINAL_ID='\(Self.plantedID)'; "
-            + "export TBD_WORKTREE_ID='11'; claude\""
+    func resolveQuotedExport() throws {
+        // Derived from the real builder so the fixture tracks it: the body is
+        // `newWindowCommand`'s final argv element, and tmux reports the argv
+        // in `#{pane_start_command}` with the separate shell flags
+        // (`-i -l -c`, see TmuxManager.shellFlags(forShell:)) and the body
+        // quoted as the final argument.
+        let args = TmuxManager.newWindowCommand(
+            server: "tbd-acme", session: "main", cwd: "/tmp",
+            shellCommand: "claude",
+            env: ["TBD_TERMINAL_ID": Self.plantedID, "TBD_WORKTREE_ID": "11"],
+            environment: ["SHELL": "/bin/zsh"])
+        let body = try #require(args.last)
+        let command = "/bin/zsh -i -l -c \"" + body + "\""
         #expect(TmuxManager.resolvePaneTerminalID(paneOption: "", startCommand: command)
             == Self.plantedID)
     }

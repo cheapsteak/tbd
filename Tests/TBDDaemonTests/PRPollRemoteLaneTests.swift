@@ -314,7 +314,7 @@ private actor RecordingGH {
 
     func run(args: [String], repoPath: String) -> GHCommandResult? {
         recordedPaths.append(repoPath)
-        if args.first == "repo" { return GHCommandResult(stdout: "acme/acme-prod\n") }
+        if args.first == "repo" { return GHCommandResult(stdout: #"{"nameWithOwner":"acme/acme-prod","url":"https://github.com/acme/acme-prod"}"#) }
         guard let query = args.first(where: { $0.hasPrefix("query=") }) else { return nil }
         if query.contains("pullRequests(headRefName:") {
             guard let branch = args.first(where: { $0.hasPrefix("branch=") })?

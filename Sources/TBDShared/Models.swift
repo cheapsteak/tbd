@@ -119,6 +119,14 @@ public enum NightwatchMode: String, Codable, Sendable, CaseIterable {
     case nightwatch
 }
 
+/// The compiled provider's reserved name. Reserved **unconditionally** and not
+/// behind the cloud flag: a name that became available when a feature was off
+/// and unavailable when it was turned on would change which providers load as a
+/// side effect of a toggle.
+public enum ClaudeCloudProvider {
+    public static let name = "claude-cloud"
+}
+
 /// Where a worktree's files live. `.local` means a git worktree on this
 /// machine at the worktree's path. `.remote` means an agent session on a
 /// machine TBD does not manage, reached through a registered provider; there is
@@ -163,6 +171,31 @@ public enum WorktreeLocation: Equatable, Sendable, Hashable {
 
     private static func pathEscaped(_ component: String) -> String {
         component.addingPercentEncoding(withAllowedCharacters: unreserved) ?? component
+    }
+}
+
+/// Which provider session a lane came from, independent of where its files are
+/// now. `WorktreeLocation` answers the second question; this answers the first,
+/// and a landed lane needs both — `.local` files with the cloud session it was
+/// reconstructed from. Kept a separate field rather than a payload on
+/// `.local` so every existing `switch` over `WorktreeLocation` across the
+/// daemon and the app compiles untouched.
+public struct WorktreeOrigin: Codable, Equatable, Hashable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public init(provider: String, sessionID: String) {
+        self.provider = provider
+        self.sessionID = sessionID
+    }
+}
+
+public extension WorktreeLocation {
+    /// The origin a `.remote` location implies, or nil for `.local`. Used to
+    /// default `Worktree.origin` so a `.remote` row satisfies the
+    /// "remote implies an origin" invariant by construction.
+    var originPair: WorktreeOrigin? {
+        guard case let .remote(provider, sessionID) = self else { return nil }
+        return WorktreeOrigin(provider: provider, sessionID: sessionID)
     }
 }
 
@@ -259,11 +292,18 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     /// `.local`, which is what they are.
     public var location: WorktreeLocation = .local
 
+    /// Which provider session this lane came from, past or present. Nil for a
+    /// lane that never had one. Rows written before this field decode their
+    /// origin from the same two wire keys `location` uses.
+    public var origin: WorktreeOrigin?
+
     /// The `(provider, sessionID)` pair identifying this row's provider
-    /// session, or nil when the worktree is local.
+    /// session, or nil when the row never had one. Reads `origin` rather than
+    /// `location`, so it keeps meaning "the provider session behind this row"
+    /// across a landing.
     public var providerBinding: (provider: String, sessionID: String)? {
-        guard case let .remote(provider, sessionID) = location else { return nil }
-        return (provider, sessionID)
+        guard let origin else { return nil }
+        return (origin.provider, origin.sessionID)
     }
     /// Text the operator composed at creation time and parked for the primary
     /// agent, `nil` when nothing is parked
@@ -275,13 +315,29 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     /// Not a queue: parking a second prompt replaces the first.
     public var pendingPrompt: String?
 
-    /// Whether delivering `pendingPrompt` ends with Enter. `nil` on rows
-    /// written before v74 and on rows that never parked anything; consumers
-    /// resolve it to `true`, the shipped behavior the modal's checkbox
-    /// expresses. Unlike `Config.queuedPromptEnabled` this is data rather than
-    /// a feature gate — there is no third state to preserve, so its column
-    /// carries an ordinary SQL default.
+    /// Whether delivering `pendingPrompt` ends with Enter, as recorded. `nil`
+    /// on any row saved without naming the bit — the initializer defaults it to
+    /// nil and `WorktreeRecord` writes that through as SQL NULL, which is what
+    /// an ordinarily created worktree row holds. It is never `nil` alongside a
+    /// prompt: `setPendingPrompt` is the only writer of either column and names
+    /// both. Nobody resolves this optional at a call site: read
+    /// `pendingPromptSubmitResolved` instead.
+    /// Unlike `Config.queuedPromptEnabled` this is data rather than a feature
+    /// gate — there is no third state to preserve, so its column carries an
+    /// ordinary SQL default.
     public var pendingPromptSubmit: Bool?
+
+    /// **The** resolution of `pendingPromptSubmit` — the one the delivery path
+    /// acts on and the one every display surface must state. A single property
+    /// so the two cannot answer differently about the same row: a read-back
+    /// promising Enter over a prompt the daemon will merely stage is precisely
+    /// the misreport the read-back exists to prevent.
+    ///
+    /// Absent resolves to `false`. Submitting is opt-in, and a row with nothing
+    /// recorded is a prompt nobody asked to send; the asymmetry settles it —
+    /// staging costs the operator one keypress, while an unasked-for turn
+    /// cannot be taken back.
+    public var pendingPromptSubmitResolved: Bool { pendingPromptSubmit ?? false }
 
     /// A scratch space is a repo-less worktree. Derived — no separate column.
     public var isScratch: Bool { repoID == nil }
@@ -317,6 +373,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
                 pinnedAt: Date? = nil,
                 pinSortOrder: Int? = nil,
                 location: WorktreeLocation = .local,
+                origin: WorktreeOrigin? = nil,
                 pendingPrompt: String? = nil,
                 pendingPromptSubmit: Bool? = nil,
                 prObservation: PRObservation? = nil) {
@@ -345,6 +402,10 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         self.pinnedAt = pinnedAt
         self.pinSortOrder = pinSortOrder
         self.location = location
+        // Defaulted from the location's own pair so all existing construction
+        // sites keep satisfying "a `.remote` row has an origin" without being
+        // revisited.
+        self.origin = origin ?? location.originPair
         self.pendingPrompt = pendingPrompt
         self.pendingPromptSubmit = pendingPromptSubmit
         self.prObservation = prObservation
@@ -393,16 +454,28 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         // NEWER daemon will send an older app. Both land on `.local`: a
         // pre-v70 row genuinely is local, and an unrecognized kind is safer
         // read as local than dropped, which would fail the whole decode.
+        //
+        // The two provider keys carry the ORIGIN, and the kind decides only
+        // whether the files are also over there. A landed row therefore
+        // arrives as `locationKind: "local"` with the pair set.
         let kind = try c.decodeIfPresent(String.self, forKey: .locationKind) ?? "local"
-        if kind == "remote",
-           let provider = try c.decodeIfPresent(String.self, forKey: .providerName),
-           let sessionID = try c.decodeIfPresent(String.self, forKey: .providerSessionID) {
-            location = .remote(provider: provider, sessionID: sessionID)
+        let provider = try c.decodeIfPresent(String.self, forKey: .providerName)
+        let providerSession = try c.decodeIfPresent(String.self, forKey: .providerSessionID)
+        if let provider, let providerSession {
+            origin = WorktreeOrigin(provider: provider, sessionID: providerSession)
+        } else {
+            origin = nil
+        }
+        if kind == "remote", let provider, let providerSession {
+            location = .remote(provider: provider, sessionID: providerSession)
         } else {
             location = .local
         }
-        // Absent in JSON written before v74 — nothing was ever parked, and
-        // `nil` submit resolves to the shipped `true`.
+        // The two keys are absent together, or not at all: a daemon old enough
+        // to omit the submit bit omits the prompt too, so an absent bit here
+        // never describes a prompt that is present. Nothing decides the
+        // optional at this site either way — every consumer reads
+        // `pendingPromptSubmitResolved`, which answers `false`.
         pendingPrompt = try c.decodeIfPresent(String.self, forKey: .pendingPrompt)
         pendingPromptSubmit = try c.decodeIfPresent(Bool.self, forKey: .pendingPromptSubmit)
         // Absent in JSON written before the PR-observation column: no attempt
@@ -442,13 +515,12 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         try c.encodeIfPresent(pinnedAt, forKey: .pinnedAt)
         try c.encodeIfPresent(pinSortOrder, forKey: .pinSortOrder)
         switch location {
-        case .local:
-            try c.encode("local", forKey: .locationKind)
-        case let .remote(provider, sessionID):
-            try c.encode("remote", forKey: .locationKind)
-            try c.encode(provider, forKey: .providerName)
-            try c.encode(sessionID, forKey: .providerSessionID)
+        case .local: try c.encode("local", forKey: .locationKind)
+        case .remote: try c.encode("remote", forKey: .locationKind)
         }
+        // The origin rides the same two keys, whatever the kind says.
+        try c.encodeIfPresent(origin?.provider, forKey: .providerName)
+        try c.encodeIfPresent(origin?.sessionID, forKey: .providerSessionID)
         try c.encodeIfPresent(pendingPrompt, forKey: .pendingPrompt)
         try c.encodeIfPresent(pendingPromptSubmit, forKey: .pendingPromptSubmit)
         try c.encodeIfPresent(prObservation, forKey: .prObservation)
@@ -526,8 +598,18 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     /// `/compact` rollovers (where Claude may pick a different
     /// `~/.claude/projects/` subdirectory than cwd would suggest).
     public var transcriptPath: String?
+    /// Ordering watermark for accepted SessionStart identity rollovers.
+    /// Independent from activity and prompt timestamps because either hook
+    /// can arrive late while describing the previous session.
+    public var sessionOrderObservedAt: Date?
     public var kind: TerminalKind?
     public var activityState: TerminalActivityState
+    /// Activity reconstructed for display from the current agent transcript.
+    /// This is response-derived and is never persisted as hook activity.
+    public var presentationActivityState: TerminalActivityState?
+    /// When the daemon completed the transcript observation that produced
+    /// `presentationActivityState`. Response-derived and never persisted.
+    public var presentationActivityObservedAt: Date?
     /// When set, the terminal is HIBERNATED: its `claude` process was
     /// gracefully terminated to reclaim memory, but the tmux window (and its
     /// shell) is kept alive. `claudeSessionID` still points at the session to
@@ -560,6 +642,11 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     /// When `activityState` was observed — the moment the machine fact was
     /// read, not the moment the row was written.
     public var activityStateObservedAt: Date?
+    /// Ordering watermark for activity events. Unlike
+    /// `activityStateObservedAt`, this advances for a newer observation that
+    /// confirms the same semantic state, so it must not be used as an
+    /// at-rest-since timestamp.
+    public var activityStateOrderObservedAt: Date?
     /// The structured reason this session is waiting, carried verbatim from
     /// Claude Code's `Notification` hook. Superseded by the next activity
     /// observation, so it describes the *current* wait or nothing at all.
@@ -609,8 +696,11 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
                 suspendedAt: Date? = nil, suspendedSnapshot: String? = nil,
                 profileID: UUID? = nil,
                 transcriptPath: String? = nil,
+                sessionOrderObservedAt: Date? = nil,
                 kind: TerminalKind? = nil,
                 activityState: TerminalActivityState = .unknown,
+                presentationActivityState: TerminalActivityState? = nil,
+                presentationActivityObservedAt: Date? = nil,
                 hibernatedAt: Date? = nil,
                 hibernateReason: HibernateReason? = nil,
                 keepWarm: Bool = false,
@@ -618,6 +708,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
                 watchDeskRole: WatchDeskRole? = nil,
                 activityStateSource: FactSource? = nil,
                 activityStateObservedAt: Date? = nil,
+                activityStateOrderObservedAt: Date? = nil,
                 awaitingInputReason: AwaitingInputReason? = nil,
                 awaitingInputObservedAt: Date? = nil) {
         self.id = id
@@ -632,8 +723,11 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         self.suspendedSnapshot = suspendedSnapshot
         self.profileID = profileID
         self.transcriptPath = transcriptPath
+        self.sessionOrderObservedAt = sessionOrderObservedAt
         self.kind = kind
         self.activityState = activityState
+        self.presentationActivityState = presentationActivityState
+        self.presentationActivityObservedAt = presentationActivityObservedAt
         self.hibernatedAt = hibernatedAt
         self.hibernateReason = hibernateReason
         self.keepWarm = keepWarm
@@ -641,16 +735,18 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         self.watchDeskRole = watchDeskRole
         self.activityStateSource = activityStateSource
         self.activityStateObservedAt = activityStateObservedAt
+        self.activityStateOrderObservedAt = activityStateOrderObservedAt
         self.awaitingInputReason = awaitingInputReason
         self.awaitingInputObservedAt = awaitingInputObservedAt
     }
 
     enum CodingKeys: String, CodingKey {
         case id, worktreeID, tmuxWindowID, tmuxPaneID, label, createdAt
-        case pinnedAt, claudeSessionID, suspendedAt, suspendedSnapshot, profileID, transcriptPath, kind
-        case activityState
+        case pinnedAt, claudeSessionID, suspendedAt, suspendedSnapshot, profileID, transcriptPath
+        case sessionOrderObservedAt, kind
+        case activityState, presentationActivityState, presentationActivityObservedAt
         case hibernatedAt, hibernateReason, keepWarm, pendingResumeAt, watchDeskRole
-        case activityStateSource, activityStateObservedAt
+        case activityStateSource, activityStateObservedAt, activityStateOrderObservedAt
         case awaitingInputReason, awaitingInputObservedAt
     }
 
@@ -668,8 +764,13 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         suspendedSnapshot = try c.decodeIfPresent(String.self, forKey: .suspendedSnapshot)
         profileID = try c.decodeIfPresent(UUID.self, forKey: .profileID)
         transcriptPath = try c.decodeIfPresent(String.self, forKey: .transcriptPath)
+        sessionOrderObservedAt = try c.decodeIfPresent(Date.self, forKey: .sessionOrderObservedAt)
         kind = try c.decodeIfPresent(TerminalKind.self, forKey: .kind)
         activityState = try c.decodeIfPresent(TerminalActivityState.self, forKey: .activityState) ?? .unknown
+        presentationActivityState = try c.decodeIfPresent(
+            TerminalActivityState.self, forKey: .presentationActivityState)
+        presentationActivityObservedAt = try c.decodeIfPresent(
+            Date.self, forKey: .presentationActivityObservedAt)
         hibernatedAt = try c.decodeIfPresent(Date.self, forKey: .hibernatedAt)
         hibernateReason = try c.decodeIfPresent(HibernateReason.self, forKey: .hibernateReason)
         keepWarm = try c.decodeIfPresent(Bool.self, forKey: .keepWarm) ?? false
@@ -680,6 +781,8 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         // `observedActivity` reports exactly that by returning nil.
         activityStateSource = try c.decodeIfPresent(FactSource.self, forKey: .activityStateSource)
         activityStateObservedAt = try c.decodeIfPresent(Date.self, forKey: .activityStateObservedAt)
+        activityStateOrderObservedAt = try c.decodeIfPresent(
+            Date.self, forKey: .activityStateOrderObservedAt)
         awaitingInputReason = try c.decodeIfPresent(AwaitingInputReason.self, forKey: .awaitingInputReason)
         awaitingInputObservedAt = try c.decodeIfPresent(Date.self, forKey: .awaitingInputObservedAt)
     }
@@ -1195,6 +1298,30 @@ public struct Config: Codable, Sendable, Equatable {
     /// means "never chose" and follows the shipped default wherever it goes;
     /// `0`/`1` is an explicit gesture and is honored forever.
     public var gcProfileDirsEnabled: Bool
+    /// The Claude cloud sessions gate
+    /// (`docs/specs/2026-08-15-cloud-sessions-slice-1-design.md` §7). A second
+    /// gate INSIDE `remoteBackendsEnabled`, never a bypass: cloud is reached
+    /// through the `remote.*` verbs, so it requires both.
+    ///
+    /// **Resolved, not stored**, like `queuedPromptEnabled`: the backing column
+    /// carries no SQL default and stays NULL until somebody touches the toggle,
+    /// so this property is
+    /// `claude_cloud_enabled ?? Config.claudeCloudEnabledDefault`.
+    public var claudeCloudEnabled: Bool
+    /// Gate for the orphan-GC phase that reclaims processes which outlived the
+    /// worktree they were rooted in
+    /// (`docs/specs/2026-08-18-orphan-process-gc-design.md`). Read on top of
+    /// `gcEnabled`: both must be on for the phase to run. It ships OFF because
+    /// this is the one GC phase that signals processes rather than moving
+    /// bytes, and a process it misjudges cannot be restored.
+    ///
+    /// **Resolved, not stored**, like `gcProfileDirsEnabled`: the backing
+    /// column carries no SQL default and stays NULL until somebody touches the
+    /// toggle, so this property is
+    /// `gc_orphan_processes_enabled ?? Config.gcOrphanProcessesEnabledDefault`.
+    /// NULL means "never chose" and follows the shipped default wherever it
+    /// goes; `0`/`1` is an explicit gesture and is honored forever.
+    public var gcOrphanProcessesEnabled: Bool
 
     /// Default idle-timeout for auto-hibernation, in minutes.
     public static let defaultHibernateIdleMinutes = 30
@@ -1225,6 +1352,15 @@ public struct Config: Codable, Sendable, Equatable {
     /// this constant — no forcing `UPDATE` migration, and an explicit opt-out
     /// is left alone.
     public static let gcProfileDirsEnabledDefault = false
+    /// The shipped default for `claudeCloudEnabled`, and the single place it
+    /// lives. Cloud ships off; graduating it is a change to this constant — no
+    /// forcing `UPDATE` migration, and an explicit opt-out is left alone.
+    public static let claudeCloudEnabledDefault = false
+    /// The shipped default for `gcOrphanProcessesEnabled`, and the single place
+    /// it lives. The orphaned-process collector ships off; graduating it is a
+    /// change to this constant — no forcing `UPDATE` migration, and an explicit
+    /// opt-out is left alone.
+    public static let gcOrphanProcessesEnabledDefault = false
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -1253,7 +1389,9 @@ public struct Config: Codable, Sendable, Equatable {
                 deliveryVerificationEnabled: Bool = false,
                 queuedPromptEnabled: Bool = Config.queuedPromptDefault,
                 supervisionEnabled: Bool = Config.supervisionEnabledDefault,
-                gcProfileDirsEnabled: Bool = Config.gcProfileDirsEnabledDefault) {
+                gcProfileDirsEnabled: Bool = Config.gcProfileDirsEnabledDefault,
+                claudeCloudEnabled: Bool = Config.claudeCloudEnabledDefault,
+                gcOrphanProcessesEnabled: Bool = Config.gcOrphanProcessesEnabledDefault) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
         self.envSettingOverrides = envSettingOverrides
@@ -1282,6 +1420,8 @@ public struct Config: Codable, Sendable, Equatable {
         self.queuedPromptEnabled = queuedPromptEnabled
         self.supervisionEnabled = supervisionEnabled
         self.gcProfileDirsEnabled = gcProfileDirsEnabled
+        self.claudeCloudEnabled = claudeCloudEnabled
+        self.gcOrphanProcessesEnabled = gcOrphanProcessesEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -1350,6 +1490,13 @@ public struct Config: Codable, Sendable, Equatable {
         // default rather than hardcoding `false`.
         gcProfileDirsEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .gcProfileDirsEnabled) ?? Config.gcProfileDirsEnabledDefault
+        claudeCloudEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .claudeCloudEnabled) ?? Config.claudeCloudEnabledDefault
+        // Same tri-state again: absent means the sender knew nothing about the
+        // flag, which is the NULL column's situation — follow the shipped
+        // default rather than hardcoding `false`.
+        gcOrphanProcessesEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .gcOrphanProcessesEnabled) ?? Config.gcOrphanProcessesEnabledDefault
     }
 }
 
@@ -1479,6 +1626,25 @@ public enum ReapKind: String, Codable, Sendable {
     /// is already gone, so renaming it back would just recreate an orphan for
     /// the next sweep.
     case profileDir
+    /// A process that outlived the worktree it was rooted in — reclaimed by
+    /// `OrphanProcessCollector`
+    /// (`docs/specs/2026-08-18-orphan-process-gc-design.md`).
+    ///
+    /// The record describes a **kill**, not a directory, so it reads the
+    /// `ReapRecord` fields differently from every other kind:
+    /// - `worktreePath` is the dead worktree the process was rooted in — the
+    ///   TBD-managed root its resolved cwd fell under, not a path this reap
+    ///   removed. Nothing on disk was touched.
+    /// - `processDescription` carries the pid and a truncated argv, so the
+    ///   record says *what* was killed and not merely where it lived.
+    /// - `branch`, `headSHA`, `snapshotRef` and `quarantinePath` are unused
+    ///   and always `nil`: they are path- and git-shaped, and a process has
+    ///   neither a git identity nor a quarantine.
+    ///
+    /// It is **not restorable** — `OrphanGC.restore` rejects it explicitly. A
+    /// killed process cannot be brought back, so the record is an audit trail
+    /// rather than an undo.
+    case orphanProcess
 }
 
 /// Record of a directory the daemon-owned orphan GC swept and (optionally)
@@ -1504,12 +1670,17 @@ public struct ReapRecord: Codable, Sendable, Identifiable, Equatable {
     /// `OrphanGC.restore` rejects `.profileDir` — but the path a user needs to
     /// retrieve anything by hand before the retention window expires.
     public var quarantinePath: String?
+    /// What was killed (`orphanProcess` only): the pid and a truncated argv.
+    /// `nil` for every directory-shaped kind, and for rows written before the
+    /// column existed.
+    public var processDescription: String?
     public var reapedAt: Date
     public var restoredAt: Date?
 
     public init(id: UUID = UUID(), kind: ReapKind, repoPath: String, worktreePath: String,
                 branch: String? = nil, headSHA: String? = nil, snapshotRef: String? = nil,
                 apparentBytes: Int64? = nil, quarantinePath: String? = nil,
+                processDescription: String? = nil,
                 reapedAt: Date = Date(), restoredAt: Date? = nil) {
         self.id = id
         self.kind = kind
@@ -1520,6 +1691,7 @@ public struct ReapRecord: Codable, Sendable, Identifiable, Equatable {
         self.snapshotRef = snapshotRef
         self.apparentBytes = apparentBytes
         self.quarantinePath = quarantinePath
+        self.processDescription = processDescription
         self.reapedAt = reapedAt
         self.restoredAt = restoredAt
     }

@@ -8,6 +8,13 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "reaper")
 public enum WorktreeLifecycleError: LocalizedError, CustomStringConvertible {
     case repoNotFound(UUID)
     case worktreeNotFound(UUID)
+    /// The worktree row carries no `repoID` at all, so an operation that needs
+    /// a repository cannot run against it. Distinct from `repoNotFound`, which
+    /// means the row named a repo that is missing: conflating the two produced
+    /// a "Repository not found: <worktree id>" message that named an object
+    /// nothing had looked up. Repo-less rows are scratch spaces, and the
+    /// router routes those to the `scratch.*` path before this can fire.
+    case worktreeHasNoRepo(UUID)
     case worktreeNotArchived(UUID)
     case worktreeAlreadyActive(UUID)
     case createFailed(String)
@@ -24,6 +31,8 @@ public enum WorktreeLifecycleError: LocalizedError, CustomStringConvertible {
             return "Repository not found: \(id)"
         case .worktreeNotFound(let id):
             return "Worktree not found: \(id)"
+        case .worktreeHasNoRepo(let id):
+            return "Worktree \(id) has no repository (it is a scratch space), and this operation requires one."
         case .worktreeNotArchived(let id):
             return "Worktree is not archived: \(id)"
         case .worktreeAlreadyActive(let id):

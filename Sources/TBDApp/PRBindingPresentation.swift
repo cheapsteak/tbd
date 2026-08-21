@@ -68,9 +68,15 @@ enum PRBindingPresentation {
         guard bindings.isEmpty else { return bindings }
         guard detachedCount == 0 else { return [] }
         guard let status = legacyStatus else { return [] }
+        // The status URL is the only forge coordinate a legacy status carries,
+        // so the host comes from it rather than from `PRBinding`'s github.com
+        // default — a GitLab status lifted with that default would describe
+        // itself as a GitHub PR.
+        let syntheticHost = URL(string: status.url)?.host ?? "github.com"
         return [PRBinding(
             id: worktreeID,
             worktreeID: worktreeID,
+            host: syntheticHost,
             owner: "",
             repo: "",
             number: status.number,
@@ -111,13 +117,21 @@ enum PRBindingPresentation {
     }
 
     /// Dropdown menu rows, in bind order — the same "don't move under the
-    /// cursor" reasoning as `statusBarChips`. Each row's title carries the PR
-    /// number, its human-readable reason (falling back to the state's default
-    /// when `PRStatus.reason` is nil), and the head branch, e.g.
-    /// `"#412  Checks failing  fix-login-timeout"`.
+    /// cursor" reasoning as `statusBarChips`. Each row's title carries the
+    /// request named in its own forge's vocabulary, its human-readable reason
+    /// (falling back to the state's default when `PRStatus.reason` is nil), and
+    /// the head branch, e.g. `"PR #412  Checks failing  fix-login-timeout"` or
+    /// `"MR !412  Checks failing  fix-login-timeout"`.
+    ///
+    /// A row describes ONE binding, so it takes the per-binding wording rule
+    /// rather than the neutral aggregate one: `refLabel` reads the forge from
+    /// that binding's own URL, exactly as the split button's help text does for
+    /// a lone binding. A bare `#412` would name a merge request in GitHub's
+    /// syntax — `#412` is an issue reference on GitLab, whose own syntax for
+    /// this row's subject is `!412`.
     static func menuRows(_ bindings: [PRBinding]) -> [MenuRow] {
         bindings.map { binding in
-            var parts = ["#\(binding.number)"]
+            var parts = [binding.refLabel]
             if let status = binding.status {
                 parts.append(status.reason ?? status.state.displayReason)
             }
@@ -142,6 +156,12 @@ enum PRBindingPresentation {
     /// therefore has to lead with the whole list and mention the overflow count
     /// second; "\(overflow) more pull requests" described a menu this one has
     /// never shown.
+    ///
+    /// "pull request" here is the **aggregate** wording and stays put: this
+    /// sentence counts a set, one worktree can hold bindings on both forges at
+    /// once, and no forge's own noun would be true of that set. Only text
+    /// naming ONE binding takes `refLabel` / `refNoun` — the rows this chip
+    /// opens do, and each of them speaks its own forge.
     static func overflowChipTooltip(total: Int, overflow: Int) -> String {
         "Show all \(total) pull request\(total == 1 ? "" : "s") (\(overflow) not shown here)"
     }

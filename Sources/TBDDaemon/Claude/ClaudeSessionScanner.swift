@@ -189,6 +189,35 @@ enum ClaudeSessionScanner {
 
     // MARK: Private
 
+    /// The user-authored prompt text of one JSONL line, whichever way Claude
+    /// Code recorded it: a `type:"user"` line when the prompt was typed at an
+    /// idle agent, or a `queued_command` attachment when it was queued
+    /// mid-turn (in which case no user line is ever written). Reading only the
+    /// former left the subtitle stale, or empty, for a session whose prompts
+    /// all arrived while it was busy.
+    ///
+    /// Returns nil for a queued row that classifies as a system envelope —
+    /// a background-task notification is not something the user said.
+    ///
+    /// Peer traffic is NOT filtered, and that is deliberate: an
+    /// `<agent-message>` or `<cross-session-message>` envelope matches no
+    /// system prefix, so it classifies as a real prompt and can become the
+    /// subtitle. It arrives only queued — no `type:"user"` line ever carries
+    /// one — so there is no typed twin to match, and the choice is between
+    /// showing it and showing a subtitle that predates it. It IS a message
+    /// this session received, so it is shown; deciding it deserves its own
+    /// kind would be a design change, not a parser fix.
+    private static func userPromptText(_ json: [String: Any]) -> String? {
+        if UserMessageClassifier.isRealUserMessage(json) {
+            return UserMessageClassifier.extractText(json)
+        }
+        if let queued = TranscriptParser.queuedCommandText(from: json),
+           UserMessageClassifier.classify(text: queued) == nil {
+            return queued
+        }
+        return nil
+    }
+
     private static func parseSummary(file: URL) -> SessionSummary? {
         let rv = try? file.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
         let modifiedAt = rv?.contentModificationDate ?? Date.distantPast
@@ -217,8 +246,7 @@ enum ClaudeSessionScanner {
                 cwd        = json["cwd"]        as? String
                 gitBranch  = json["gitBranch"]  as? String
             }
-            if UserMessageClassifier.isRealUserMessage(json),
-               let text = UserMessageClassifier.extractText(json) {
+            if let text = userPromptText(json) {
                 let truncated = String(text.prefix(300))
                 if firstUserMessage == nil { firstUserMessage = truncated }
                 lastUserMessage = truncated
@@ -264,6 +292,16 @@ enum ClaudeSessionScanner {
     /// If `transcriptFilePath` is provided and the file exists, it takes
     /// precedence over project directory resolution. This bypasses stale
     /// cache entries and mirrors the pattern used by `handleTerminalTranscript`.
+    ///
+    /// Queued prompts are deliberately NOT counted, unlike in `parseSummary`
+    /// above, and the asymmetry is safe rather than an oversight: a prompt can
+    /// only be QUEUED while the agent is mid-turn, so a file carrying one
+    /// always carries the user and assistant rows of the turn it interrupted.
+    /// A "blank" session holding nothing but a queued prompt is therefore not
+    /// a reachable state — measured 0 of 701 local session files. Teaching
+    /// this scan the attachment shape would cost a JSON decode of every
+    /// attachment row on a path whose whole point is to stop at the first
+    /// content-bearing line.
     static func isSessionBlank(
         sessionID: String,
         worktreePath: String,

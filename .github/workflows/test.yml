@@ -15,7 +15,13 @@ jobs:
     name: Lint
     runs-on: macos-26
     steps:
+      # `fetch-depth: 0` is load-bearing for the migration lint below: its
+      # history-is-frozen check needs `git merge-base origin/main HEAD`, and
+      # the default shallow checkout has neither the remote-tracking ref nor
+      # the history to find a merge base with.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install swiftlint
         run: brew install swiftlint
@@ -59,6 +65,21 @@ jobs:
 
       - name: SwiftLint (strict)
         run: swiftlint --strict
+
+      # The migration lint and its own harness. Both are pure Python/git/sqlite
+      # — no SwiftPM, no compiler — which is the whole point: a PR that adds a
+      # migration touches no Swift, and its author must not need a build to
+      # learn whether the SQL parses. See
+      # docs/specs/2026-08-19-migration-identifier-scheme-design.md.
+      - name: Lint SQL migrations
+        run: python3 scripts/lint-migrations.py
+
+      # `Migrations/` ships empty, so on this tree every guard but
+      # history-frozen has nothing real to act on. This harness is the only
+      # exercise they get: one fixture per guard that must fail, plus a
+      # mutation that disables the guard and proves its fixture then passes.
+      - name: Test the migration lint
+        run: bash scripts/lint-migrations.test.sh
 
       # The fence in `scripts/test.sh` is what stands between the suite and the
       # developer's real ~/tbd, ~/.claude and ~/.codex, and its guards were
@@ -125,6 +146,12 @@ jobs:
     # steps already `tee` to /tmp on these runners.
     env:
       TBD_RETRY_METRICS_PATH: /tmp/retry-metrics.jsonl
+      # The ~7 GB runner's OOM cap, pinned HERE rather than inherited from
+      # `scripts/swift-safe`'s default — see the "Two parallel swift-frontend
+      # processes" block below. Job-level so every step gets it: the three
+      # `scripts/test.sh` steps through the wrapper, and the bare build at the
+      # end of the job by spelling `-j "$TBD_SWIFT_JOBS"`. One cap, one place.
+      TBD_SWIFT_JOBS: "2"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -155,6 +182,12 @@ jobs:
 
       - name: Capture Swift toolchain version
         run: echo "SWIFT_VERSION=$(xcrun swift --version | head -1)" >> $GITHUB_ENV
+
+      # Swift's cooperative pool is one thread per core, so the runner's width
+      # is what decides how many blocked threads it takes to wedge the whole
+      # test process. It was inferred, not measured, the one time that mattered.
+      - name: Record runner CPU width
+        run: 'echo "runner cores: $(sysctl -n hw.ncpu)"'
 
       - name: Cache SwiftPM build artifacts and dependencies
         uses: actions/cache@v4
@@ -206,12 +239,24 @@ jobs:
             ls -la .build/*/debug/Modules/"$module".swiftmodule 2>/dev/null || echo "(absent)"
           done
 
-      # `-j 2` caps parallel swift-frontend processes on the ~7 GB runner.
+      # Two parallel swift-frontend processes is the cap on the ~7 GB runner.
       # Historically (Swift 6.2, all-per-file builds) default parallelism
       # OOMed late in the build with a bare `error: fatalError`. Under
       # Swift 6.3 the two big modules build WMO in debug (~1.35 GB peak
       # frontend RSS each, measured), so the cap is likely over-conservative
       # now — kept as safety margin; candidate for re-validation.
+      #
+      # The test steps below do NOT pass `-j` themselves: `scripts/swift-safe`,
+      # which `scripts/test.sh` runs SwiftPM through, supplies `--jobs` from
+      # TBD_SWIFT_JOBS and refuses a command line above it. That variable is
+      # pinned to 2 in this job's `env:` block, so the cap above is stated
+      # explicitly here instead of riding on the wrapper's default — raising
+      # that default would otherwise lift CI past the runner's memory ceiling
+      # silently. A developer box, which sets its own TBD_SWIFT_JOBS, is no
+      # longer failed or throttled by a hardcoded number. The bare build at the
+      # end of the job bypasses the wrapper, so it spells the same variable on
+      # its own command line rather than repeating the number — one cap, one
+      # place to change it.
       #
       # Three sequential steps, one job (docs/specs/2026-07-24-test-hardening-design.md
       # §4): the tier-3 live suites live in their own target so they can run
@@ -347,7 +392,7 @@ jobs:
         timeout-minutes: 30
         run: |
           set -o pipefail
-          scripts/test.sh --fingerprint --parallel -j 2 --filter '^TBDDaemonTests\.' 2>&1 | tee /tmp/fast-pass-daemon.log
+          scripts/test.sh --fingerprint --parallel --filter '^TBDDaemonTests\.' 2>&1 | tee /tmp/fast-pass-daemon.log
           # `|| true`: with `set -o pipefail` (and GitHub's `bash -e`), a log
           # with no summary line makes the first `grep` exit 1 and a failing
           # command substitution in an assignment kills the shell — so the
@@ -381,7 +426,7 @@ jobs:
         timeout-minutes: 30
         run: |
           set -o pipefail
-          scripts/test.sh --fingerprint --parallel -j 2 --skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.' 2>&1 | tee /tmp/fast-pass-app.log
+          scripts/test.sh --fingerprint --parallel --skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.' 2>&1 | tee /tmp/fast-pass-app.log
           # `|| true`: with `set -o pipefail` (and GitHub's `bash -e`), a log
           # with no summary line makes the first `grep` exit 1 and a failing
           # command substitution in an assignment kills the shell — so the
@@ -435,4 +480,4 @@ jobs:
           if-no-files-found: warn
 
       - name: Build (verify TBDCLI and TBDDaemon executable targets compile)
-        run: swift build -j 2
+        run: swift build -j "$TBD_SWIFT_JOBS"

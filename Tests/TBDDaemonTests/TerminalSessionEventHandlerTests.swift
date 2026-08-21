@@ -26,7 +26,27 @@ struct TerminalSessionEventHandlerTests {
         )
     }
 
-    private func makeTerminal(initialSession: String? = nil) async throws -> (Terminal, Worktree) {
+    private func makeRouter(now: @escaping @Sendable () -> Date) -> RPCRouter {
+        RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()
+            ),
+            tmux: TmuxManager(dryRun: true),
+            startTime: Date(),
+            now: now,
+            actuationLog: makeTestActuationLog()
+        )
+    }
+
+    private func makeTerminal(
+        initialSession: String? = nil,
+        label: String = "claude",
+        kind: TerminalKind? = nil
+    ) async throws -> (Terminal, Worktree) {
         let repo = try await db.repos.create(
             path: "/tmp/se-repo-\(UUID().uuidString)",
             displayName: "se-repo",
@@ -43,8 +63,9 @@ struct TerminalSessionEventHandlerTests {
             worktreeID: wt.id,
             tmuxWindowID: "@1",
             tmuxPaneID: "%1",
-            label: "claude",
-            claudeSessionID: initialSession
+            label: label,
+            claudeSessionID: initialSession,
+            kind: kind
         )
         return (terminal, wt)
     }
@@ -69,6 +90,13 @@ struct TerminalSessionEventHandlerTests {
     @Test("updates sessionID + transcriptPath in DB on a fresh SessionStart")
     func updatesSessionAndBroadcasts() async throws {
         let (terminal, _) = try await makeTerminal(initialSession: "old-id")
+        let observedAt = Date(timeIntervalSinceReferenceDate: 123)
+        let orderedRouter = makeRouter(now: { observedAt })
+        let captured = SessionDeltaCapture()
+        orderedRouter.subscriptions.addSubscriber { data in
+            captured.append(data)
+            return true
+        }
         let request = try RPCRequest(
             method: RPCMethod.terminalSessionEvent,
             params: TerminalSessionEventParams(
@@ -78,12 +106,20 @@ struct TerminalSessionEventHandlerTests {
                 source: "clear"
             )
         )
-        let response = await router.handle(request)
+        let response = await orderedRouter.handle(request)
         #expect(response.success)
 
         let updated = try await db.terminals.get(id: terminal.id)
         #expect(updated?.claudeSessionID == "new-id")
         #expect(updated?.transcriptPath == "/Users/me/.claude/projects/-x/new-id.jsonl")
+        let delta = try #require(captured.values.compactMap {
+            try? JSONDecoder().decode(StateDelta.self, from: $0)
+        }.first)
+        guard case let .terminalSessionUpdated(session) = delta else {
+            Issue.record("expected terminalSessionUpdated")
+            return
+        }
+        #expect(session.sessionOrderObservedAt == nil)
     }
 
     @Test("ignores non-absolute transcriptPath but still updates sessionID")
@@ -212,6 +248,222 @@ struct TerminalSessionEventHandlerTests {
         #expect(after.activityState == .idle)
         #expect(after.activityStateSource == .hookEvent("Stop"))
         #expect(after.activityStateObservedAt == idleAt)
+    }
+
+    @Test("Claude SessionStart retains legacy unordered identity and prompt semantics")
+    func claudeSessionStartRetainsLegacyUnorderedSemantics() async throws {
+        let (terminal, _) = try await makeTerminal(initialSession: "initial-session")
+        let olderSessionAt = Date(timeIntervalSince1970: 1_700_000_100)
+        let newerSessionAt = olderSessionAt.addingTimeInterval(1)
+        _ = try await db.terminals.applySessionStart(
+            id: terminal.id,
+            sessionID: "newer-session",
+            transcriptPath: "/tmp/newer-session.jsonl",
+            observedAt: newerSessionAt)
+        try await db.terminals.recordAwaitingInputReason(
+            id: terminal.id,
+            reason: AwaitingInputReason(
+                message: "Claude needs permission",
+                hookEventName: "Notification",
+                notificationType: "permission_prompt"),
+            observedAt: newerSessionAt)
+        let router = makeRouter(now: { olderSessionAt })
+        let request = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "last-arriving-session",
+                transcriptPath: "/tmp/last-arriving-session.jsonl",
+                source: "resume"))
+
+        #expect((await router.handle(request)).success)
+
+        let updated = try #require(await db.terminals.get(id: terminal.id))
+        #expect(updated.claudeSessionID == "last-arriving-session")
+        #expect(updated.transcriptPath == "/tmp/last-arriving-session.jsonl")
+        #expect(updated.sessionOrderObservedAt == nil)
+        #expect(updated.awaitingInputReason == nil)
+        #expect(updated.awaitingInputObservedAt == nil)
+    }
+
+    @Test("a later-completing Claude SessionStart retains legacy prompt retraction")
+    func laterCompletingClaudeSessionStartRetractsPrompt() async throws {
+        let (terminal, _) = try await makeTerminal(initialSession: "old-session")
+        let baseline = Date(timeIntervalSince1970: 1_700_000_000)
+        let sessionStartAt = baseline.addingTimeInterval(1)
+        let delayedPromptAt = baseline.addingTimeInterval(2)
+        try await db.terminals.setActivityState(
+            id: terminal.id,
+            activityState: .working,
+            source: .hookEvent("UserPromptSubmit"),
+            observedAt: baseline)
+
+        let dates = BlockingSessionDates(first: sessionStartAt, subsequent: delayedPromptAt)
+        let raceRouter = makeRouter(now: dates.provider)
+        let sessionStart = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "new-session",
+                transcriptPath: "/tmp/new-session.jsonl",
+                source: "resume"))
+        let delayedPrompt = try RPCRequest(
+            method: RPCMethod.terminalNotificationEvent,
+            params: TerminalNotificationEventParams(
+                terminalID: terminal.id,
+                notificationType: "permission_prompt",
+                message: "The old session needs permission"))
+
+        let sessionUpdate = gateHoldingTask { await raceRouter.handle(sessionStart) }
+        guard await waitUntil({ dates.firstCallIsBlocked }) else {
+            dates.releaseFirstCall()
+            _ = await sessionUpdate.value
+            Issue.record("SessionStart never reached the date seam")
+            return
+        }
+        #expect((await raceRouter.handle(delayedPrompt)).success)
+        dates.releaseFirstCall()
+        #expect((await sessionUpdate.value).success)
+
+        let updated = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(updated.claudeSessionID == "new-session")
+        #expect(updated.transcriptPath == "/tmp/new-session.jsonl")
+        #expect(updated.sessionOrderObservedAt == nil)
+        #expect(updated.awaitingInputReason == nil)
+        #expect(updated.awaitingInputObservedAt == nil)
+        #expect(updated.activityState == .working)
+        #expect(updated.activityStateSource == .hookEvent("UserPromptSubmit"))
+        #expect(updated.activityStateObservedAt == baseline)
+    }
+
+    @Test("an older SessionStart cannot roll back identity or erase a newer prompt")
+    func olderSessionStartPreservesNewerSessionAndPrompt() async throws {
+        let (terminal, worktree) = try await makeTerminal(
+            initialSession: "initial-session", label: "Codex", kind: .codex)
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-session-race-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let transcript = directory.appendingPathComponent("current.jsonl")
+        try (#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"current"}}"#
+            + "\n").write(to: transcript, atomically: true, encoding: .utf8)
+        try await db.terminals.updateSession(
+            id: terminal.id,
+            sessionID: "initial-session",
+            transcriptPath: transcript.path)
+
+        let baseline = Date(timeIntervalSince1970: 1_700_000_000)
+        let earlierSessionAt = baseline.addingTimeInterval(1)
+        let laterPromptAt = baseline.addingTimeInterval(2)
+        try await db.terminals.setActivityState(
+            id: terminal.id,
+            activityState: .working,
+            source: .hookEvent("UserPromptSubmit"),
+            observedAt: baseline)
+        let dates = BlockingSessionDates(first: earlierSessionAt, subsequent: laterPromptAt)
+        let raceRouter = makeRouter(now: dates.provider)
+        #expect(await raceRouter.codexActivityTracker.observe(
+            transcriptPath: transcript.path,
+            worktreeID: worktree.id) == .working)
+
+        let staleSession = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "stale-session",
+                transcriptPath: transcript.path,
+                source: "resume"))
+        let currentSession = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "current-session",
+                transcriptPath: transcript.path,
+                source: "resume"))
+        let prompt = try RPCRequest(
+            method: RPCMethod.terminalNotificationEvent,
+            params: TerminalNotificationEventParams(
+                terminalID: terminal.id,
+                notificationType: "permission_prompt",
+                message: "Codex needs permission"))
+
+        let earlier = gateHoldingTask { await raceRouter.handle(staleSession) }
+        guard await waitUntil({ dates.firstCallIsBlocked }) else {
+            dates.releaseFirstCall()
+            _ = await earlier.value
+            Issue.record("earlier SessionStart never reached the date seam")
+            return
+        }
+        #expect((await raceRouter.handle(currentSession)).success)
+        let handle = try FileHandle(forWritingTo: transcript)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(
+            (#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"current-after-boundary"}}"#
+                + "\n").utf8))
+        try handle.close()
+        #expect(await raceRouter.codexActivityTracker.observe(
+            transcriptPath: transcript.path,
+            worktreeID: worktree.id) == .working)
+        #expect((await raceRouter.handle(prompt)).success)
+        dates.releaseFirstCall()
+        #expect((await earlier.value).success)
+
+        let updated = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(updated.claudeSessionID == "current-session")
+        #expect(updated.transcriptPath == transcript.path)
+        #expect(updated.awaitingInputReason?.classification == .promptOnScreen)
+        #expect(updated.awaitingInputObservedAt == laterPromptAt)
+        #expect(SessionStateResolver(now: { laterPromptAt })
+            .resolve(SessionStateFacts(terminal: updated)).value
+            == .awaitingInput(reason: updated.awaitingInputReason))
+        // A rejected old SessionStart must not reset the current transcript's
+        // reducer; only an accepted lifecycle boundary may do that.
+        #expect(await raceRouter.codexActivityTracker.observe(
+            transcriptPath: transcript.path,
+            worktreeID: worktree.id) == .working)
+    }
+
+    @Test(
+        "SessionStart tie ordering is scoped to Codex",
+        arguments: [TerminalKind.codex, .claude]
+    )
+    func equalTimeDifferentSessionStartPreservesFirstIdentity(
+        kind: TerminalKind
+    ) async throws {
+        let label = kind == .codex ? TerminalLabel.codex : "Claude"
+        let (terminal, _) = try await makeTerminal(label: label, kind: kind)
+        let observedAt = Date(timeIntervalSince1970: 1_700_000_100)
+        let sameTimeRouter = makeRouter(now: { observedAt })
+        let first = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "first-session",
+                transcriptPath: "/tmp/first-session.jsonl",
+                source: "SessionStart"))
+        let second = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "second-session",
+                transcriptPath: "/tmp/second-session.jsonl",
+                source: "SessionStart"))
+
+        #expect((await sameTimeRouter.handle(first)).success)
+        #expect((await sameTimeRouter.handle(second)).success)
+
+        let updated = try #require(try await db.terminals.get(id: terminal.id))
+        if kind == .codex {
+            #expect(updated.claudeSessionID == "first-session")
+            #expect(updated.transcriptPath == "/tmp/first-session.jsonl")
+            #expect(updated.sessionOrderObservedAt == observedAt)
+            #expect(updated.activityStateOrderObservedAt == observedAt)
+        } else {
+            #expect(updated.claudeSessionID == "second-session")
+            #expect(updated.transcriptPath == "/tmp/second-session.jsonl")
+            #expect(updated.sessionOrderObservedAt == nil)
+            #expect(updated.activityStateOrderObservedAt == nil)
+        }
     }
 
     @Test("unknown terminalID is a soft no-op (success, no error)")
@@ -373,5 +625,58 @@ struct TerminalSessionEventHandlerTests {
         let result = try resp.decodeResult(TerminalTranscriptResult.self)
         #expect(result.sessionID == "logical-session-id")
         #expect(!result.messages.isEmpty)
+    }
+}
+
+private final class SessionDeltaCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [Data] = []
+
+    var values: [Data] { lock.withLock { storage } }
+
+    func append(_ data: Data) {
+        lock.withLock { storage.append(data) }
+    }
+}
+
+/// Holds the first `now()` call until the test releases it, so "the earlier
+/// request is mid-flight" is a deterministic state rather than a timing window.
+///
+/// The held request MUST be started with `gateHoldingTask`: this blocks the
+/// thread it runs on, and a blocked cooperative-pool thread starves every
+/// other test in the process. See `Tests/TestSupport/BoundedGateSupport.swift`.
+private final class BlockingSessionDates: @unchecked Sendable {
+    private let lock = NSLock()
+    private let first: Date
+    private let subsequent: Date
+    private let release = DispatchSemaphore(value: 0)
+    private var callCount = 0
+    private var firstBlocked = false
+
+    init(first: Date, subsequent: Date) {
+        self.first = first
+        self.subsequent = subsequent
+    }
+
+    var firstCallIsBlocked: Bool {
+        lock.withLock { firstBlocked }
+    }
+
+    var provider: @Sendable () -> Date {
+        { [self] in
+            let call = lock.withLock { () -> Int in
+                let call = callCount
+                callCount += 1
+                if call == 0 { firstBlocked = true }
+                return call
+            }
+            guard call == 0 else { return subsequent }
+            release.waitForGate("terminal.sessionEvent first date-provider call")
+            return first
+        }
+    }
+
+    func releaseFirstCall() {
+        release.signal()
     }
 }

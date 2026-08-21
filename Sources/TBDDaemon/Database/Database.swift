@@ -29,6 +29,7 @@ public final class TBDDatabase: Sendable {
     public let remoteSessions: RemoteSessionStore
     public let watchDeskLeases: WatchDeskLeaseStore
     public let prBindings: PRBindingStore
+    public let claudeCloudSessions: ClaudeCloudSessionStore
 
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "migrations")
 
@@ -70,8 +71,14 @@ public final class TBDDatabase: Sendable {
         self.remoteSessions = RemoteSessionStore(writer: pool)
         self.watchDeskLeases = WatchDeskLeaseStore(writer: pool)
         self.prBindings = PRBindingStore(writer: pool)
+        self.claudeCloudSessions = ClaudeCloudSessionStore(writer: pool)
 
         let migrator = Self.buildMigrator()
+        // Both refusal gates before touching the database: rethrow a
+        // resource-bundle locator failure, and log (never refuse) if
+        // `grdb_migrations` holds timestamp identifiers while the bundle
+        // yielded no `.sql` files at all.
+        try pool.read { db in try SQLMigrationLoader.verifyResourceIntegrity(db) }
         if fileExisted {
             let hasPending = try pool.read { db in
                 try !migrator.hasCompletedMigrations(db)
@@ -111,6 +118,13 @@ public final class TBDDatabase: Sendable {
         self.remoteSessions = RemoteSessionStore(writer: queue)
         self.watchDeskLeases = WatchDeskLeaseStore(writer: queue)
         self.prBindings = PRBindingStore(writer: queue)
+        self.claudeCloudSessions = ClaudeCloudSessionStore(writer: queue)
+        // The same gates `init(path:)` runs. `migrationsForRegistration()`
+        // cannot throw, so without this a resource bundle that failed to
+        // resolve under `scripts/test.sh` would surface as scattered "no such
+        // column" failures instead of one diagnostic naming every path
+        // searched.
+        try queue.read { db in try SQLMigrationLoader.verifyResourceIntegrity(db) }
         try Self.buildMigrator().migrate(queue)
     }
 
@@ -1337,12 +1351,21 @@ public final class TBDDatabase: Sendable {
         }
 
         // The parked prompt itself. `pending_prompt_submit` DOES carry a SQL
-        // default, and it is unreachable by construction: it is data rather
-        // than a feature gate, and `setPendingPrompt` — the only writer — always
-        // names both columns, so the default can only ever describe a row that
-        // has nothing parked and therefore no submit choice to remember.
-        // Delivery resolves an absent value to "do not press Enter", which is
-        // the shipped behavior; see `PendingPromptCoordinator`.
+        // default, because it is data rather than a feature gate: there is no
+        // third "nobody chose" state worth preserving. That default IS reached
+        // — `ADD COLUMN ... DEFAULT 1` backfills every row that already
+        // existed, which then reads a present `true` rather than NULL
+        // (`QueuedPromptSchemaTests.rowWrittenBeforeV71DecodesWithNothingParked`
+        // pins that). It is inert, not unreachable: the rows it lands on get a
+        // NULL `pending_prompt` in the same breath, so the bit describes a
+        // prompt that does not exist and nobody will ever deliver.
+        //
+        // Both columns are added here together and `setPendingPrompt` — their
+        // only writer — always names both, so a prompt with no recorded submit
+        // bit is a shape no writer produces. Where the bit is genuinely absent
+        // (a row saved from a `Worktree` that never named it),
+        // `Worktree.pendingPromptSubmitResolved` is the one place that decides
+        // what it means, for delivery and for the read-back alike.
         migrator.registerMigration("v74_worktree_pending_prompt") { db in
             try db.addColumnIfMissing(
                 table: "worktree", column: "pending_prompt", type: .text)
@@ -1429,6 +1452,148 @@ public final class TBDDatabase: Sendable {
         migrator.registerMigration("v79_reap_records_quarantine_path") { db in
             try db.addColumnIfMissing(
                 table: "reap_records", column: "quarantinePath", type: .text)
+        }
+
+        // Clear the PR attempt outcome recorded against scratch rows. A scratch
+        // row (`repoID IS NULL`) has no repo, no branch, and a path that is not a
+        // checkout, so the poll skips it. `pr.refresh` queried it anyway on
+        // select, failed in that directory, and wrote `.undetermined` to the row.
+        // Every PR surface renders that as "PR status unknown", so a scratch lane
+        // grew a `?` badge it can never resolve.
+        //
+        // `RPCRouter.isPollable` now gates both paths, so no row can acquire one
+        // again, but the recorded ones outlive the guard, and by two separate
+        // readers: the daemon re-hydrates them into `PRStatusManager` at every
+        // start, and the app seeds `prObservations` straight off the worktree row.
+        // Both read the column, so the column is where the fix has to land.
+        //
+        // Scoped to `prObservation`. A scratch row's `prStatus` is left alone
+        // because no path ever wrote one: the failing query kept the (absent)
+        // cached value rather than replacing it.
+        migrator.registerMigration("v80_clear_scratch_pr_observation") { db in
+            try db.execute(
+                sql: "UPDATE worktree SET prObservation = NULL WHERE repoID IS NULL")
+        }
+
+        // Claude cloud sessions (design 2026-08-15 §7): the second, inner gate
+        // for the compiled `claude-cloud` provider. Shipped OFF per the house
+        // default-off-flag rule — the behavior is autonomous background polling
+        // against a network service.
+        //
+        // Tri-state like `v73_config_queued_prompt` and
+        // `v77_config_supervision_enabled`: **no SQL default**, so a
+        // pre-migration row reads NULL ("never chose") rather than 0. NULL
+        // resolves through `Config.claudeCloudEnabledDefault` in
+        // `ConfigRecord.toModel()` — the single place graduation changes, which
+        // matters more here than for most flags because somebody who turned a
+        // scheduled network call off did so deliberately.
+        migrator.registerMigration("v81_config_claude_cloud") { db in
+            try db.addColumnIfMissing(
+                table: "config", column: "claude_cloud_enabled", type: .boolean)
+        }
+
+        // The cloud create ledger: what THIS machine started, as distinct
+        // from `remote_session`, which is what the manager last observed.
+        // Daemon-internal, so it has no wire model.
+        //
+        // `archived` carries a SQL default deliberately, and the house
+        // no-SQL-default rule does not apply: that rule is about `config`
+        // feature toggles, where "unset" must stay a third state so a shipped
+        // default can be flipped later. This is data with an explicit writer
+        // at every site, and there is no default to graduate.
+        migrator.registerMigration("v82_claude_cloud_session") { db in
+            try db.createTableIfNotExists("claude_cloud_session") { t in
+                t.primaryKey("id", .text).notNull()
+                t.column("idempotencyKey", .text).notNull()
+                t.column("state", .text).notNull()
+                t.column("sessionID", .text)
+                t.column("title", .text)
+                t.column("createdAt", .datetime).notNull()
+                t.column("resolvedAt", .datetime)
+                t.column("repoKey", .text).notNull()
+                t.column("repoPath", .text).notNull()
+                t.column("branch", .text)
+                t.column("environment", .text)
+                t.column("paramsJSON", .text).notNull()
+                t.column("archived", .boolean).notNull().defaults(to: false)
+            }
+            try db.addIndexIfMissing(
+                "idx_claude_cloud_session_key", on: "claude_cloud_session",
+                columns: ["idempotencyKey"], unique: true)
+            try db.addIndexIfMissing(
+                "idx_claude_cloud_session_session", on: "claude_cloud_session",
+                columns: ["sessionID"], where: "sessionID IS NOT NULL")
+        }
+
+        // Gate for `OrphanProcessCollector` — the reconciler for processes that
+        // outlived the worktree they were rooted in
+        // (docs/specs/2026-08-18-orphan-process-gc-design.md). Ships OFF: it is
+        // the first GC phase that signals processes rather than moving bytes,
+        // so it soaks behind its own switch. Tri-state like v73/v77/v78 — no
+        // SQL default, so a pre-migration row reads NULL ("never chose") rather
+        // than 0, and NULL resolves through
+        // `Config.gcOrphanProcessesEnabledDefault` in `ConfigRecord.toModel()`,
+        // the single place graduation changes.
+        migrator.registerMigration("v83_config_gc_orphan_processes") { db in
+            try db.addColumnIfMissing(
+                table: "config", column: "gc_orphan_processes_enabled", type: .boolean)
+        }
+
+        // What an `orphanProcess` reap killed: the pid and a truncated argv.
+        // Nullable and left NULL by every other kind, all of which describe a
+        // directory rather than a process. camelCase for the same reason
+        // v79 chose it — to match the columns this table already has
+        // (`repoPath`, `worktreePath`, `snapshotRef`, `quarantinePath`).
+        migrator.registerMigration("v84_reap_records_process_description") { db in
+            try db.addColumnIfMissing(
+                table: "reap_records", column: "processDescription", type: .text)
+        }
+
+        // Event ordering is not the same timestamp as the semantic activity
+        // transition: repeated same-state observations must advance the former
+        // without resetting hibernation's at-rest-since clock. Its explicit
+        // NULL default preserves the unknown third state, so old rows fall back
+        // to activityStateObservedAt without inventing a timestamp.
+        migrator.registerMigration("v85_terminal_activity_order") { db in
+            try db.addColumnIfMissing(
+                table: "terminal", column: "activityStateOrderObservedAt", type: .datetime,
+                defaults: DatabaseValue.null)
+        }
+
+        // Session identity has its own event order. Permission and activity
+        // hooks can arrive after a real SessionStart even though they describe
+        // the previous session, so neither timestamp can safely order the
+        // session ID/path pair. NULL preserves the unknown state for rows that
+        // predate this independently observed fact.
+        migrator.registerMigration("v86_terminal_session_order") { db in
+            try db.addColumnIfMissing(
+                table: "terminal", column: "sessionOrderObservedAt", type: .datetime,
+                defaults: DatabaseValue.null)
+        }
+
+        // A bound PR's title, so the status-bar chips can say what `#21156`
+        // actually is (docs/specs/2026-08-16-pr-chip-untrack-design.md).
+        //
+        // Nullable with NO default, for the same reason `headBranch` and
+        // `baseRef` next to it are: the refresh folds a nil in as "not observed
+        // this pass" and keeps whatever the row holds, so a backfilled "" would
+        // be a title nobody read, and a row written before the column existed
+        // must read as "never observed" rather than as an empty title.
+        migrator.registerMigration("v87_worktree_pull_request_title") { db in
+            try db.addColumnIfMissing(
+                table: "worktree_pull_request", column: "title", type: .text)
+        }
+
+        // Everything above is the frozen Swift block: those `vN` identifiers
+        // have run on user machines and never change, and the sequence is
+        // closed — a new migration is never appended here. Everything below is the
+        // timestamp scheme — one `.sql` file per migration under
+        // `Database/Migrations/`, shipped in `TBD_TBDDaemonLib.bundle`, merged
+        // with any inline Swift escape-hatch migrations and sorted by
+        // identifier so the two kinds interleave by authoring time.
+        // See docs/specs/2026-08-19-migration-identifier-scheme-design.md.
+        for migration in SQLMigrationLoader.migrationsForRegistration() {
+            migrator.registerMigration(migration.identifier, migrate: migration.body)
         }
 
         return migrator

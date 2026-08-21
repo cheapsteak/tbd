@@ -18,6 +18,12 @@ final class FakeProcessSignaller: ProcessSignaller, @unchecked Sendable {
     var stats: [Int32: String] = [:]
     private(set) var terminated: [Int32] = []
     private(set) var killed: [Int32] = []
+    /// Only the pid-exact variants, recorded separately so a caller that must
+    /// never widen its target to a process group can assert which door it went
+    /// through. Both still fall through to `terminated`/`killed`, so callers
+    /// that do not care keep asserting on those.
+    private(set) var terminatedProcessOnly: [Int32] = []
+    private(set) var killedProcessOnly: [Int32] = []
     private var terminatedSet: Set<Int32> = []
     private var killedSet: Set<Int32> = []
 
@@ -34,6 +40,16 @@ final class FakeProcessSignaller: ProcessSignaller, @unchecked Sendable {
     func children(ofServerPID serverPID: Int32) -> [Int32] { lock.withLock { childrenByServer[serverPID] ?? [] } }
     func commandLine(_ pid: Int32) -> String? { lock.withLock { cmdlines[pid] } }
     func stat(_ pid: Int32) -> String? { lock.withLock { stats[pid] } }
+
+    func terminateProcessOnly(_ pid: Int32) {
+        lock.withLock { terminatedProcessOnly.append(pid) }
+        terminate(pid)
+    }
+
+    func forceKillProcessOnly(_ pid: Int32) {
+        lock.withLock { killedProcessOnly.append(pid) }
+        forceKill(pid)
+    }
 }
 
 final class FakeTmuxQuerier: TmuxProcessQuerying, @unchecked Sendable {

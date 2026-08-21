@@ -168,6 +168,16 @@ final class AppState: ObservableObject {
         return index
     }
     @Published var terminals: [UUID: [Terminal]] = [:]
+    /// Ordering watermark for transcript presentation snapshots whose value
+    /// did not change. Kept outside `Terminal` so a two-second poll confirming
+    /// the same state does not publish a different row solely because its
+    /// response stamp advanced; still rejects an older overlapping response
+    /// that carries a different value.
+    var terminalPresentationOrderObservedAt: [UUID: Date] = [:]
+    /// Session identity ordering is independent of the published Terminal row
+    /// so a pushed SessionStart can fence an older list response even in the
+    /// brief interval before its activity delta arrives.
+    var terminalSessionOrderObservedAt: [UUID: Date] = [:]
     @Published var notes: [UUID: [Note]] = [:]
     @Published var focusedTabCloseContext: TabCloseContext?
     /// Unread notification summaries keyed by worktree ID. The cmd-K jump
@@ -772,6 +782,15 @@ final class AppState: ObservableObject {
     /// non-zero, which is precisely the signal that suppresses the
     /// legacy-status fallback below.
     @Published var prDetachedCounts: [UUID: Int] = [:]
+    /// Start order for `refreshPRBindings`: every call takes the next ticket
+    /// before it fetches, so the two counters below can be compared to tell an
+    /// older snapshot from a newer one.
+    private var prBindingsRefreshSeq = 0
+    /// The highest ticket that has actually PUBLISHED. Deliberately not the
+    /// same fact as the one above — a call that started later and then failed
+    /// put nothing on screen, so it must not silence an earlier call whose
+    /// fetch succeeded. Only a publish moves this.
+    private var prBindingsPublishedSeq = 0
     /// What every PR surface — toolbar split button, sidebar row indicator,
     /// status-bar chips — must read, so they cannot disagree about a worktree.
     /// Bindings when there are any; otherwise the legacy single `prStatuses`
@@ -1258,6 +1277,11 @@ final class AppState: ObservableObject {
     /// injectable for the same reason as `controlModeSetter`.
     lazy var queuedPromptFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setQueuedPrompt(enabled: enabled) }
+    /// How `setClaudeCloudEnabled` persists the Claude cloud gate — injectable
+    /// for the same reason as `controlModeSetter`, so the Settings toggle's
+    /// success and failure branches are testable without a real daemon.
+    lazy var claudeCloudFlagSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setClaudeCloud(enabled: enabled) }
     /// The worktree a queued prompt is being composed for, driving
     /// `ContentView`'s `.sheet(item:)`. Non-nil only while the modal is up, and
     /// only ever set when the daemon reports `queuedPromptEnabled`
@@ -1364,6 +1388,13 @@ final class AppState: ObservableObject {
     /// without a daemon.
     lazy var prBindingsFetcher: @MainActor () async throws -> PRBindingsAllResult =
         { [daemonClient] in try await daemonClient.listAllPRBindings() }
+    /// How `detachPR` untracks one PR — injectable for the same reason as
+    /// `prBindingsFetcher`, so the status bar's untrack gesture and each of its
+    /// outcomes can be driven without a daemon.
+    lazy var prDetacher: @MainActor (UUID, String?, Int) async throws -> PRDetachResult =
+        { [daemonClient] worktreeID, url, number in
+            try await daemonClient.detachPR(worktreeID: worktreeID, url: url, number: number)
+        }
     /// How `loadTabStates` fetches a worktree's persisted tab order / labels /
     /// active tab — injectable for the same reason as `daemonCapabilitiesFetcher`
     /// (`DaemonClient` is concrete, no protocol), so hydration tests can drive
@@ -2026,6 +2057,14 @@ final class AppState: ObservableObject {
             applyWorktreeArchivedDelta(d)
         case .worktreeRevived(let d):
             recentlyArchivedWorktreeIDs.removeValue(forKey: d.worktreeID)
+            // A revived row must leave the Scratch section's Archived tab, not
+            // just rejoin the sidebar. `refreshWorktrees` fetches with
+            // `excludeArchived: true` and never touches
+            // `archivedScratchWorktrees`, so without this a row revived from
+            // the CLI stays listed there while also showing as active, and
+            // that stale row's Delete button trashes the folder of a scratch
+            // space that is now live.
+            archivedScratchWorktrees.removeAll { $0.id == d.worktreeID }
             Task { [weak self] in await self?.refreshWorktrees() }
         case .controlModeInputHealthChanged(let d):
             applyControlModeInputHealthDelta(d)
@@ -2143,6 +2182,15 @@ final class AppState: ObservableObject {
 
         removeArchivedWorktreeFromState(id: delta.worktreeID)
 
+        // The mirror of the `.worktreeRevived` case: an archive that originated
+        // elsewhere (the CLI, a hook, a script) must ADD the row to the Scratch
+        // section's Archived tab, or an archived scratch space looks deleted:
+        // gone from the sidebar and absent from the only view that lists it.
+        // Cheap because the listing is small and unpaginated.
+        if worktree?.isScratch == true {
+            Task { [weak self] in await self?.refreshArchivedScratch() }
+        }
+
         // The daemon tells us whether creation actually failed; we never infer
         // it from `.creating` status. A deliberate archive of a still-creating
         // row — e.g. `tbd worktree archive <id>` to bail out of a stuck
@@ -2182,13 +2230,67 @@ final class AppState: ObservableObject {
         guard let idx = terminals[delta.worktreeID]?.firstIndex(where: { $0.id == delta.terminalID }) else {
             return
         }
-        terminals[delta.worktreeID]?[idx].claudeSessionID = delta.sessionID
+        guard terminals[delta.worktreeID]![idx].isCodexTerminal else {
+            // Preserve the pre-Codex-reconciliation contract for Claude and
+            // shell: the last arriving session delta wins, and nil path keeps
+            // the current path. Ordering/presentation watermarks are Codex-only.
+            let currentTerminal = terminals[delta.worktreeID]![idx]
+            var terminal = currentTerminal
+            terminal.claudeSessionID = delta.sessionID
+            if let transcriptPath = delta.transcriptPath {
+                terminal.transcriptPath = transcriptPath
+            }
+            terminal.sessionOrderObservedAt = nil
+            terminalPresentationOrderObservedAt.removeValue(forKey: delta.terminalID)
+            terminalSessionOrderObservedAt.removeValue(forKey: delta.terminalID)
+            if terminal != currentTerminal {
+                terminals[delta.worktreeID]?[idx] = terminal
+            }
+            return
+        }
+        let currentTerminal = terminals[delta.worktreeID]![idx]
+        var terminal = currentTerminal
+        if let incomingOrder = delta.sessionOrderObservedAt,
+           let currentOrder = terminalSessionOrderObservedAt[delta.terminalID],
+           incomingOrder <= currentOrder {
+            return
+        }
+        let effectiveTranscriptPath = delta.transcriptPath ?? terminal.transcriptPath
+        let identityChanged = terminal.claudeSessionID != delta.sessionID
+            || terminal.transcriptPath != effectiveTranscriptPath
+        terminal.claudeSessionID = delta.sessionID
         // Mirror TerminalStore.updateSession's preserve-on-nil: a delta with
         // nil transcriptPath means the SessionStart payload didn't carry a
         // path even though sessionID rolled. Keep the previous value so the
         // in-memory model doesn't drift from the DB.
         if let tp = delta.transcriptPath {
-            terminals[delta.worktreeID]?[idx].transcriptPath = tp
+            terminal.transcriptPath = tp
+        }
+        if let incomingOrder = delta.sessionOrderObservedAt {
+            terminal.sessionOrderObservedAt = incomingOrder
+        } else if identityChanged {
+            terminal.sessionOrderObservedAt = nil
+        }
+        // Presentation belongs to one session identity. An ordered delta is
+        // an accepted SessionStart boundary even when Codex reused the same
+        // session/path; an unordered legacy delta is a boundary only when the
+        // effective identity changed.
+        if identityChanged || delta.sessionOrderObservedAt != nil {
+            terminal.presentationActivityState = nil
+            terminal.presentationActivityObservedAt = nil
+            if let incomingOrder = delta.sessionOrderObservedAt {
+                terminalPresentationOrderObservedAt[delta.terminalID] = incomingOrder
+            } else {
+                terminalPresentationOrderObservedAt.removeValue(forKey: delta.terminalID)
+            }
+        }
+        if let incomingOrder = delta.sessionOrderObservedAt {
+            terminalSessionOrderObservedAt[delta.terminalID] = incomingOrder
+        } else if identityChanged {
+            terminalSessionOrderObservedAt.removeValue(forKey: delta.terminalID)
+        }
+        if terminal != currentTerminal {
+            terminals[delta.worktreeID]?[idx] = terminal
         }
     }
 
@@ -2196,7 +2298,25 @@ final class AppState: ObservableObject {
         guard let idx = terminals[delta.worktreeID]?.firstIndex(where: { $0.id == delta.terminalID }) else {
             return
         }
-        terminals[delta.worktreeID]?[idx].activityState = delta.activityState
+        guard terminals[delta.worktreeID]![idx].isCodexTerminal else {
+            // Claude and shell activity deltas remain raw last-arrival state;
+            // provenance ordering is part of the Codex presentation fix only.
+            terminals[delta.worktreeID]?[idx].activityState = delta.activityState
+            terminalPresentationOrderObservedAt.removeValue(forKey: delta.terminalID)
+            terminalSessionOrderObservedAt.removeValue(forKey: delta.terminalID)
+            return
+        }
+        var terminal = terminals[delta.worktreeID]![idx]
+        let presentationOrderObservedAt = terminal.applyActivityDelta(
+            delta,
+            presentationOrderObservedAt: terminalPresentationOrderObservedAt[delta.terminalID]
+                ?? terminal.presentationActivityObservedAt)
+        if let presentationOrderObservedAt {
+            terminalPresentationOrderObservedAt[delta.terminalID] = presentationOrderObservedAt
+        } else {
+            terminalPresentationOrderObservedAt.removeValue(forKey: delta.terminalID)
+        }
+        terminals[delta.worktreeID]?[idx] = terminal
     }
 
     /// Seamless in-place "Switch account": the terminal row is unchanged except
@@ -2930,7 +3050,18 @@ final class AppState: ObservableObject {
     /// - a worktree ABSENT from a SUCCESSFUL response loses its entry, so a
     ///   `tbd pr detach` is observed. `PRBindingRefresh.state(from:)` owns that,
     ///   which is how it can be asserted without a daemon.
-    func refreshPRBindings() async {
+    /// Returns **the state this call fetched**, or nil when the fetch failed.
+    ///
+    /// A caller that judges an outcome must read the returned value rather than
+    /// the published maps, for two reasons. On failure the maps still hold the
+    /// pre-call values, which look identical to "the write did nothing". And
+    /// these maps are whole-fleet: another refresh already in flight can resolve
+    /// after this one and publish its own snapshot over the top, so the maps
+    /// are not reliably what this call saw even on success.
+    @discardableResult
+    func refreshPRBindings() async -> PRBindingRefresh.State? {
+        prBindingsRefreshSeq += 1
+        let seq = prBindingsRefreshSeq
         let result: PRBindingsAllResult
         do {
             result = try await prBindingsFetcher()
@@ -2938,11 +3069,83 @@ final class AppState: ObservableObject {
             // Leave the previous values in place — a failed fetch is not
             // evidence that any worktree lost its PRs.
             logger.error("Failed to list PR bindings: \(String(describing: error), privacy: .public)")
-            return
+            return nil
         }
         let next = PRBindingRefresh.state(from: result)
+        // What is already on screen came from a refresh that started LATER than
+        // this one, so this response is stale — return it to our own caller, who
+        // asked for it, but do not put an older snapshot back on screen. Without
+        // this a poll issued a moment before an untrack can land after it and
+        // bring the chip back.
+        //
+        // The comparison is against what has been PUBLISHED, not against what
+        // has merely started: a later refresh that failed returned above without
+        // touching these maps, and withholding this call's good data on account
+        // of it would leave the fleet on a snapshot older than either. Both
+        // counters are read and written on the main actor with no await in
+        // between, so no second racy read is involved.
+        guard seq > prBindingsPublishedSeq else { return next }
+        prBindingsPublishedSeq = seq
         if next.bindings != prBindings { prBindings = next.bindings }
         if next.detachedCounts != prDetachedCounts { prDetachedCounts = next.detachedCounts }
+        return next
+    }
+
+    /// Untrack one PR from one worktree — the status bar chip's xmark.
+    ///
+    /// Tombstoning, not deleting, which is what `pr.detach` already does; the
+    /// app adds no durability story of its own. The bindings are refreshed on
+    /// the way out rather than waiting for the next poll, so the chip leaves
+    /// the bar as part of the gesture.
+    ///
+    /// Success is judged on the **outcome, not the returned flag**. A
+    /// `detached: false` usually means the PR was already tombstoned — the user
+    /// asked for it to be gone and it is — but the daemon also reports false
+    /// when it declines to record a tombstone for a PR outside the worktree's
+    /// repo, and that one leaves the chip where it was. Rather than teach the
+    /// app which false is which, this re-reads the bindings it just refreshed
+    /// and speaks up only if the chip the user clicked is still there. That
+    /// also covers the case no flag could describe: a concurrent bind putting
+    /// the PR straight back.
+    ///
+    /// A thrown error is the other failure, and it gets the same toast: the
+    /// chip would otherwise stay put with nothing said.
+    ///
+    /// `url` is optional and `number` is not: a chip lifted from a legacy
+    /// cached status can carry a url that will not parse, and the daemon
+    /// resolves a bare number against the worktree's own repo.
+    func detachPR(worktreeID: UUID, url: String?, number: Int) async {
+        do {
+            _ = try await prDetacher(worktreeID, url, number)
+        } catch {
+            logger.error("""
+                Failed to detach PR #\(number, privacy: .public) from worktree \
+                \(worktreeID, privacy: .public): \
+                \(String(describing: error), privacy: .public)
+                """)
+            showTransientToast("Could not stop tracking PR #\(number)", style: .error)
+            handleConnectionError(error)
+            return
+        }
+        // Judged on WHAT THIS CALL FETCHED, never on the published maps. A
+        // failed refresh leaves them holding their pre-call values, which read
+        // exactly like a detach that did nothing; and a whole-fleet refresh
+        // already in flight can land afterwards and publish its own snapshot
+        // over the top. Either would report a detach that succeeded as a
+        // failure, which is its own kind of lie.
+        guard let refreshed = await refreshPRBindings() else { return }
+        let stillTracked = PRBindingPresentation.effectiveBindings(
+            refreshed.bindings[worktreeID] ?? [],
+            legacyStatus: prStatuses[worktreeID],
+            worktreeID: worktreeID,
+            detachedCount: refreshed.detachedCounts[worktreeID] ?? 0
+        ).contains { $0.number == number }
+        guard stillTracked else { return }
+        logger.error("""
+            Detach of PR #\(number, privacy: .public) from worktree \
+            \(worktreeID, privacy: .public) left the binding in place
+            """)
+        showTransientToast("PR #\(number) is still tracked here", style: .error)
     }
 
     /// Trigger an immediate PR refresh for one worktree (on-select).

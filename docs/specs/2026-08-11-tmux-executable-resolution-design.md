@@ -172,11 +172,18 @@ could make subprocess behavior differ from the installation environment.
 
 ### Login shell or `path_helper`
 
-Starting a login shell or invoking `path_helper` would execute user-controlled startup
-configuration, add latency, and produce an environment that may differ from the one
-used to install TBD. It also makes binary selection depend on shell choice and startup
-file health. Installation-time `PATH` capture is deterministic and does not run shell
-initialization during app startup.
+Starting a login shell or invoking `path_helper` to discover executables would execute
+user-controlled startup configuration, add latency, and produce an environment that may
+differ from the one used to install TBD. It also makes binary selection depend on shell
+choice and startup file health. Installation-time `PATH` capture is deterministic and
+does not run shell initialization during app startup.
+
+This rejection is scoped to executable discovery inside the daemon and app. The
+interactive shells spawned in panes are a different concern: they run as login shells
+so the user's own profile builds the interactive environment (see
+[`2026-08-19-login-shell-panes-design.md`](2026-08-19-login-shell-panes-design.md)).
+That does not feed back into resolution here, which reads only the inherited `PATH`
+and the saved fallback.
 
 ### Persisting the whole environment
 

@@ -254,11 +254,67 @@ public struct TmuxManager: Sendable {
         return eFlags
     }
 
-    public static func newWindowCommand(server: String, session: String, cwd: String, shellCommand: String, env: [String: String] = [:], sensitiveEnv: [String: String] = [:], cols: Int? = nil, rows: Int? = nil) -> [String] {
-        // Use shell -ic so commands with arguments work (e.g. "claude --dangerously-skip-permissions")
-        // -i keeps it interactive (loads .zshrc), -c runs the command
+    /// Shell flags for spawning the user's shell with a command string,
+    /// chosen by the shell's lowercased basename (the same derivation as
+    /// `CLIInstaller.shellRCAndExport`, so "/bin/TCSH" and wrapper paths
+    /// behave consistently across both). Flags are separate argv elements
+    /// (`-i -l -c`, never clustered `-ilc`): some shells (e.g. nushell)
+    /// accept the individual flags but reject GNU-style clustering, and a
+    /// rejected spawn kills every pane silently. csh and tcsh cannot combine
+    /// -l with -c at all (tcsh accepts -l only as its sole argument), so
+    /// they keep the pre-login-shell `-i -c`; every other shell gets
+    /// `-i -l -c` (interactive login shell, see
+    /// docs/specs/2026-08-19-login-shell-panes-design.md).
+    ///
+    /// Measured on this macOS host (2026-08-19), separate flags behaving
+    /// identically to the clustered forms:
+    ///   zsh  -i -l -c 'echo ok' -> ok, exit 0 (same as -ilc)
+    ///   bash -i -l -c 'echo ok' -> ok, exit 0 (same as -ilc)
+    ///   dash -i -l -c 'echo ok' -> ok, exit 0 (same as -ilc)
+    ///   tcsh -i -c 'echo ok' -> ok, exit 0 (same as -ic);
+    ///        tcsh -i -l -c -> exit 1, "Unknown option: `-l'"
+    ///   csh  -i -c 'echo ok' -> ok, exit 0 (same as -ic);
+    ///        csh  -i -l -c -> exit 1, "Unknown option: `-l'"
+    ///   (fish not installed to measure)
+    static func shellFlags(forShell shellPath: String) -> [String] {
+        let basename = (shellPath as NSString).lastPathComponent.lowercased()
+        switch basename {
+        case "csh", "tcsh":
+            return ["-i", "-c"]
+        default:
+            return ["-i", "-l", "-c"]
+        }
+    }
+
+    /// The `[shell] + flags + [command]` argv tail appended by both spawn
+    /// builders. Shared for the same drift-hazard reason as
+    /// `envExportPrefixed`: `newWindowCommand` and `respawnWindowCommand`
+    /// must spawn through the identical shell invocation, and the per-shell
+    /// flag choice (`shellFlags(forShell:)`) must not fork between them.
+    /// The defaulted `environment` parameter is the test seam for the SHELL
+    /// read, matching the `TBDConstants.*(environment:)` idiom.
+    static func shellInvocation(
+        _ fullCommand: String,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> [String] {
+        let userShell = environment["SHELL"] ?? "/bin/zsh"
+        return [userShell] + shellFlags(forShell: userShell) + [fullCommand]
+    }
+
+    public static func newWindowCommand(server: String, session: String, cwd: String, shellCommand: String, env: [String: String] = [:], sensitiveEnv: [String: String] = [:], cols: Int? = nil, rows: Int? = nil, environment: [String: String] = ProcessInfo.processInfo.environment) -> [String] {
+        // Spawn `shell <flags> <cmd>` (via shellInvocation) so commands with
+        // arguments work (e.g. "claude --dangerously-skip-permissions").
+        // -i keeps it interactive, -l makes it a login shell, -c runs the
+        // command. zsh sources zshenv + zprofile + zshrc; bash login shells
+        // source profile files only, relying on the near-universal convention
+        // that .bash_profile sources .bashrc (same behavior as Terminal.app).
+        // /etc/zprofile's path_helper and ~/.zprofile supply the
+        // /usr/local/bin and Homebrew PATH entries; see
+        // docs/specs/2026-08-19-login-shell-panes-design.md. csh/tcsh cannot
+        // combine -l with -c and keep -i -c (see shellFlags(forShell:)).
+        // `environment` is the test seam for the SHELL read; production call
+        // sites take the default.
         // After the command exits, the pane closes (tmux default behavior)
-        let userShell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
         let fullCommand = envExportPrefixed(shellCommand, env: env)
         // `sensitiveEnv` carries values that must be in the spawned window's
         // PROCESS environment before the shell starts, via tmux's -e KEY=VALUE
@@ -269,9 +325,10 @@ public struct TmuxManager: Sendable {
         //     tmux invocation's own argv during fork/exec, but tmux re-execs
         //     and its server process does not retain the original argv
         //     visibly.)
-        //   - rc-affecting toggles (e.g. DISABLE_AUTO_UPDATE on hook panes):
-        //     the `env` export-prefix runs after `.zshrc` completes, so only
-        //     -e values are visible while rc files execute.
+        //   - startup-file-affecting toggles (e.g. DISABLE_AUTO_UPDATE on hook
+        //     panes): the `env` export-prefix runs after every startup file
+        //     (profile and rc) completes, so only -e values are visible while
+        //     profile and rc files execute.
         let eFlags = sensitiveEnvFlags(sensitiveEnv)
         // Note: size flags (-x/-y) are intentionally NOT emitted here. tmux's
         // `new-window` does not support those flags (only `new-session`,
@@ -284,17 +341,25 @@ public struct TmuxManager: Sendable {
         _ = rows
         return ["-L", server, "new-window", "-t", session, "-c", cwd]
             + eFlags
-            + ["-PF", "#{window_id} #{pane_id}", userShell, "-ic", fullCommand]
+            + ["-PF", "#{window_id} #{pane_id}"]
+            + shellInvocation(fullCommand, environment: environment)
     }
 
     /// Respawn (replace the running program of) an existing window's pane
     /// IN PLACE, keeping the same window id and pane id. Shares
     /// `newWindowCommand`'s env handling through `envExportPrefixed` and
     /// `sensitiveEnvFlags` — the `env` map is inlined as an
-    /// `export …; ` prefix on the shell command (runs AFTER rc files), while
-    /// `sensitiveEnv` is passed via tmux `-e KEY=VALUE` so it's in the process
-    /// environment before the shell starts (kept out of `ps aux`, and visible
-    /// during rc execution). `-k` kills the pane's current program first.
+    /// `export …; ` prefix on the shell command (runs AFTER all startup files,
+    /// profile and rc alike), while `sensitiveEnv` is passed via tmux
+    /// `-e KEY=VALUE` so it's in the process environment before the shell
+    /// starts (kept out of `ps aux`, and visible during profile and rc
+    /// execution). Spawns the same interactive login-shell invocation as
+    /// `newWindowCommand` via `shellInvocation` (zsh sources
+    /// zshenv + zprofile + zshrc; bash login shells source profile files
+    /// only, relying on .bash_profile sourcing .bashrc; csh/tcsh keep -i -c,
+    /// see `shellFlags(forShell:)`). `-k` kills the pane's current program
+    /// first. `environment` is the test seam for the SHELL read; production
+    /// call sites take the default.
     ///
     /// Used by the seamless in-place account switch: same tab, same terminal
     /// row, new profile's `claude --resume` command. See PR 5222a79 for why the
@@ -306,14 +371,14 @@ public struct TmuxManager: Sendable {
         cwd: String,
         shellCommand: String,
         env: [String: String] = [:],
-        sensitiveEnv: [String: String] = [:]
+        sensitiveEnv: [String: String] = [:],
+        environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> [String] {
-        let userShell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
         let fullCommand = envExportPrefixed(shellCommand, env: env)
         let eFlags = sensitiveEnvFlags(sensitiveEnv)
         return ["-L", server, "respawn-window", "-k", "-t", windowID, "-c", cwd]
             + eFlags
-            + [userShell, "-ic", fullCommand]
+            + shellInvocation(fullCommand, environment: environment)
     }
 
     /// Resize an existing tmux window to the given cell dimensions.

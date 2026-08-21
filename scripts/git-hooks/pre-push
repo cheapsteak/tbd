@@ -29,8 +29,20 @@ if ! command -v swiftlint &>/dev/null; then
   exit 1
 fi
 
-# Determine merge base; fall back to HEAD~1 if origin/main isn't fetched.
-base="$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD~1)"
+# Determine merge base; fall back to HEAD~1, then HEAD, if origin/main isn't
+# fetched — a shallow clone, or a fresh one that has never fetched main. BOTH
+# passes below share it, and neither may hard-fail over a ref the pusher cannot
+# conjure: a hook that blocks every push because origin/main is missing is a
+# hook that gets disabled, and it punishes work that touched neither Swift nor
+# SQL. Falling back narrows what each pass can see (HEAD~1 compares only the
+# last commit; HEAD compares nothing) and says so, rather than refusing.
+if base="$(git merge-base origin/main HEAD 2>/dev/null)"; then
+  :
+else
+  base="$(git rev-parse --verify --quiet 'HEAD~1' || git rev-parse --verify HEAD)"
+  echo "[pre-push] origin/main is unfetched or shallow — comparing against ${base} instead."
+  echo "[pre-push] Run 'git fetch origin main' for the full check; CI fetches and runs it either way."
+fi
 
 # macOS ships bash 3.2 (no `mapfile`) and the hook runs under `set -u`,
 # so we read the file list with a portable while-loop and seed the array
@@ -44,6 +56,16 @@ if [ ${#files[@]} -gt 0 ]; then
   echo "[pre-push] Linting ${#files[@]} changed Swift file(s) with SwiftLint --strict..."
   swiftlint --strict "${files[@]}"
 fi
+
+# The SQL migrations under Sources/TBDDaemon/Database/Migrations/. Costs a
+# fraction of a second — a directory listing, a `git diff` against the merge
+# base, and one in-memory SQLite replay — and it is NOT skipped by
+# TBD_SKIP_PREPUSH_TESTS below, which exists to dodge the multi-minute test
+# passes. Its history-is-frozen check is the one guard that has to run before
+# the push rather than after: a migration edited in place is already applied
+# under its old name on somebody's machine.
+echo "[pre-push] Linting SQL migrations..."
+python3 scripts/lint-migrations.py --base "$base"
 
 if [ "${TBD_SKIP_PREPUSH_TESTS:-}" = "1" ]; then
   echo "[pre-push] TBD_SKIP_PREPUSH_TESTS=1 — skipping the guarded test pass."
@@ -68,6 +90,14 @@ fi
 # collapsed target runs nothing and passes. The floors sit well below the real
 # counts (CI executes ~2194 + ~2342 fast, ~57 live) so ordinary test churn never
 # trips them; their job is to catch a collapse, not to track the population.
+#
+# Neither pass carries `-j`: the compile job count belongs to
+# `scripts/swift-safe`, which `scripts/test.sh` runs SwiftPM through. It
+# supplies the count itself (2 unless TBD_SWIFT_JOBS says otherwise) and
+# REFUSES a command line asking for more, so a hardcoded `-j 2` here would
+# abort every push on a box whose owner lowered that bound — and pin the build
+# at 2 on a box whose owner raised it. `--parallel` / `--no-parallel` and
+# `--filter` / `--skip` below are test-runner options, not build jobs, and stay.
 run_pass() {
   local label="$1" floor="$2" log; shift 2
   log="$(mktemp -t tbd-prepush-XXXXXXXX)"
@@ -97,7 +127,7 @@ run_pass() {
 }
 
 run_pass "fast parallel pass (scratch TBD_HOME fence)" 3700 \
-  --no-fingerprint --parallel -j 2 --skip '^TBDDaemonLiveTests\.'
+  --no-fingerprint --parallel --skip '^TBDDaemonLiveTests\.'
 
 run_pass "quiet pass (tier-3 live suites, serial)" 35 \
   --no-fingerprint --no-parallel --filter '^TBDDaemonLiveTests\.'

@@ -373,8 +373,18 @@ enum RowActionMenu {
                 .action(Action(kind: .rename, title: "Rename...")),
                 // `.destructive` for consistency with the repo-worktree Archive
                 // even though scratch archive is recoverable and leaves the
-                // folder on disk.
-                .action(Action(kind: .archiveScratch, title: "Archive", role: .destructive)),
+                // folder on disk. Gated on active children for the same reason
+                // and with the same copy as the repo-worktree Archive: a scratch
+                // space can be a parent (`tbd worktree new` run from inside one
+                // parents the new worktree on it), and the daemon refuses that
+                // archive, so the item must not look available.
+                .action(Action(
+                    kind: .archiveScratch,
+                    title: context.hasActiveChildren ? archiveHasChildrenLabel : "Archive",
+                    role: .destructive,
+                    isEnabled: !context.hasActiveChildren,
+                    disabledHelp: context.hasActiveChildren ? archiveNeedsChildrenGoneHelp : nil
+                )),
             ],
             pinActions(context: context).map(Item.action),
             hibernationActions(context: context).map(Item.action),

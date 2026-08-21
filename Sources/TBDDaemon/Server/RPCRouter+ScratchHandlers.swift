@@ -177,17 +177,88 @@ extension RPCRouter {
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
         let params = try decoder.decode(ScratchArchiveParams.self, from: paramsData)
-        guard let wt = try await db.worktrees.getLocal(id: params.worktreeID) else {
-            return RPCResponse(error: "Scratch space not found: \(params.worktreeID)")
+        return try await archiveScratchSpace(
+            worktreeID: params.worktreeID, surface: .scratchArchive, actor: actor)
+    }
+
+    /// The body of `scratch.archive`, shared with `worktree.archive`'s scratch
+    /// branch (`handleWorktreeArchive`). Extracted rather than duplicated so
+    /// the two RPC doors share one implementation: the repo-worktree archive
+    /// path must never run against a scratch space, because its phase 2
+    /// removes the directory. (`DeskSessionManager.closeDeskSession` still
+    /// carries a third, drifted copy of this teardown; folding it in is
+    /// tracked separately.)
+    ///
+    /// `surface` is the door the request came through, so the actuation row
+    /// records the method the caller actually called. Both surfaces carry the
+    /// same `kind` (`.dispose`), so this needs no `ActuationBranch`: the act is
+    /// identical and only the door differs.
+    func archiveScratchSpace(
+        worktreeID: UUID, surface: ActuationSurface, actor: ActuationActor?
+    ) async throws -> RPCResponse {
+        guard let wt = try await db.worktrees.getLocal(id: worktreeID) else {
+            return RPCResponse(error: "Scratch space not found: \(worktreeID)")
         }
         guard wt.isScratch else {
-            return RPCResponse(error: "Not a scratch space: \(params.worktreeID)")
+            return RPCResponse(error: "Not a scratch space: \(worktreeID)")
         }
+
+        // The Watch Desk is a scratch row (`isNightwatchDesk` is `isScratch`
+        // plus its display name), so the routing above reaches it. Its teardown
+        // is not this one: `DeskSessionManager.closeDeskSession` also clears the
+        // in-memory desk pointer and is paired with `releaseJudgeLease`, which
+        // drops the lease row and unlinks the lease credential file. Neither
+        // resource has a reconciler, so retiring the desk through the generic
+        // body would leak both with nothing to reclaim them. Refused rather
+        // than half-torn-down.
+        guard !wt.isNightwatchDesk else {
+            return RPCResponse(
+                error: "This is the Nightwatch Watch Desk; it is retired by the desk's own "
+                    + "teardown, not by archiving. Stop the desk instead.")
+        }
+
+        // Idempotent on an already-archived row, and deliberately not a
+        // re-archive: `WorktreeStore.archive` re-stamps `archivedAt`
+        // unconditionally, and that timestamp is the GC grace clock
+        // `OrphanProcessCollector` reaps from. A *sequential* retry (a hook
+        // firing twice, a sweep re-issuing the call, a user repeating it) would
+        // otherwise push the reap of a wedged agent out by another
+        // `gcGraceSeconds` each time, and re-broadcast an archive delta for a
+        // row every client has already filed away.
+        //
+        // This is a read in its own transaction, so it does not close the
+        // window where two calls overlap in flight; the durable fix is a status
+        // check inside `WorktreeStore.archive`'s write block beside the
+        // `.main`/`.creating` refusals, which would cover the repo path and the
+        // direct callers (reconcile, the Watch Desk) at the same time.
+        guard wt.status != .archived else {
+            scratchLogger.info(
+                "\(surface.method, privacy: .public): \(wt.id, privacy: .public) is already archived; no-op")
+            return .ok()
+        }
+
+        // The same refusal the repo path gives, and for the same reason: a
+        // scratch space CAN be a parent. `ParentResolver`'s `caller` arm
+        // rejects only `.main` and `.archived`, so `tbd worktree new` run from
+        // inside a scratch space mints a repo worktree whose
+        // `parentWorktreeID` is this row, and `worktree.move` permits the same
+        // by hand. Archiving the parent out from under a live child leaves the
+        // child rendering nowhere until reconcile nulls the pointer.
+        //
+        // Unconditional, and deliberately NOT gated on the caller's `force`:
+        // `handleWorktreeArchive` does not forward `force` to
+        // `beginArchiveWorktree` either, so this assertion always runs for a
+        // repo worktree arriving through the same door. `force` bypasses it
+        // only for the in-process cascade flows that call the lifecycle
+        // directly (`repo.remove`), and no cascade reaches a repo-less row.
+        // Honouring `force` here would have made one flag mean opposite things
+        // on the two branches of one RPC.
+        try await db.worktrees.assertArchivable(id: worktreeID)
 
         // Same teardown as `scratch.delete`, so the same row: one per call,
         // worktree-named, written before the first kill.
         let actuationID = try await beginActuation(
-            .scratchArchive, actor: actor,
+            surface, actor: actor,
             target: ActuationTarget(worktree: wt.id.uuidString))
         try await actuating(actuationID) { try await closeScratchTerminals(wt.worktree) }
         await finishActuation(actuationID, .dispatched)
@@ -197,7 +268,8 @@ extension RPCRouter {
         // client's perspective the row leaves the active section identically
         // whether archived or deleted.
         subscriptions.broadcast(delta: .worktreeArchived(WorktreeIDDelta(worktreeID: wt.id)))
-        scratchLogger.info("scratch.archive: \(wt.id, privacy: .public) at \(wt.path, privacy: .public)")
+        scratchLogger.info(
+            "\(surface.method, privacy: .public): \(wt.id, privacy: .public) at \(wt.path, privacy: .public)")
         return .ok()
     }
 
@@ -207,25 +279,90 @@ extension RPCRouter {
     /// repo-scoped revive.
     func handleScratchRevive(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(ScratchReviveParams.self, from: paramsData)
-        guard let wt = try await db.worktrees.getLocal(id: params.worktreeID) else {
-            return RPCResponse(error: "Scratch space not found: \(params.worktreeID)")
+        switch try await reviveScratchSpace(worktreeID: params.worktreeID) {
+        case .revived:
+            // `scratch.revive`'s result shape is unchanged: its GUI caller
+            // refreshes from the delta rather than reading a returned row.
+            return .ok()
+        case .refused(let message):
+            return RPCResponse(error: message)
+        }
+    }
+
+    /// Outcome of `reviveScratchSpace`. The two callers disagree on the
+    /// success payload: `scratch.revive` answers `.ok()`, while
+    /// `worktree.revive` must answer with the row, because both its CLI and
+    /// its app client decode a `Worktree` from the result. So the shared
+    /// helper hands back the row and lets each caller shape its response.
+    enum ScratchReviveOutcome {
+        case revived(Worktree)
+        case refused(String)
+    }
+
+    /// The body of `scratch.revive`, shared with `worktree.revive`'s scratch
+    /// branch (`handleWorktreeRevive`).
+    func reviveScratchSpace(
+        worktreeID: UUID, method: String = RPCMethod.scratchRevive
+    ) async throws -> ScratchReviveOutcome {
+        guard let wt = try await db.worktrees.getLocal(id: worktreeID) else {
+            return .refused("Scratch space not found: \(worktreeID)")
         }
         guard wt.isScratch else {
-            return RPCResponse(error: "Not a scratch space: \(params.worktreeID)")
+            return .refused("Not a scratch space: \(worktreeID)")
+        }
+        // The mirror of the archive guard, and the reason it has to exist
+        // separately: `DeskSessionManager.closeDeskSession` archives the desk's
+        // row through `db.worktrees.archive` directly, changing neither
+        // `repoID` nor the display name, so the archived row still satisfies
+        // `isNightwatchDesk` and passes every other guard below. Reviving it
+        // here would flip it `.active` and broadcast a revive while the desk
+        // actor's in-memory pointer, judge lease row, lease credential file and
+        // terminals stay gone: an active desk with nothing behind it.
+        //
+        // Refusing costs nothing, because nothing legitimately revives a desk
+        // row. `ensureDeskSession`'s recovery path excludes archived worktrees
+        // deliberately, so the desk mints a fresh session instead.
+        guard !wt.isNightwatchDesk else {
+            return .refused(
+                "This is the Nightwatch Watch Desk; it is not revived by hand. The desk opens a "
+                    + "fresh session itself when it next runs.")
         }
         guard wt.status == .archived else {
-            return RPCResponse(error: "Scratch space is already active: \(wt.id)")
+            return .refused("Scratch space is already active: \(wt.id)")
+        }
+        // A promoted row is retired, not archived-and-revivable: promotion sets
+        // `promotedToRepoID` and leaves `repoID` NULL, so `isScratch` and the
+        // status check both still pass and only the stale `wt.path` (whose
+        // folder promotion moved away) incidentally stops this today. Both
+        // sibling verbs guard on it explicitly (`scratch.promote` refuses a
+        // second promotion, `scratch.delete` skips the trash), so revive does
+        // too, rather than resting on a filesystem coincidence that anything
+        // recreating the old directory would undo.
+        guard wt.promotedToRepoID == nil else {
+            return .refused("Scratch space was promoted to a repo and cannot be revived: \(wt.id)")
         }
         guard FileManager.default.fileExists(atPath: wt.path) else {
-            return RPCResponse(error: "Scratch directory missing on disk: \(wt.path)")
+            return .refused("Scratch directory missing on disk: \(wt.path)")
         }
 
         try await db.worktrees.revive(id: wt.id)
 
+        // Re-read BEFORE broadcasting, and return the stored row rather than a
+        // mutated snapshot: the caller that answers with a row must answer with
+        // the post-revive `status`/`archivedAt`, and the store owns how those
+        // are cleared. Ordering it ahead of the broadcast keeps the one
+        // mutating failure honest: if a concurrent delete removed the row, no
+        // subscriber is told the revive happened before the caller is told it
+        // did not.
+        guard let revived = try await db.worktrees.get(id: wt.id) else {
+            return .refused("Scratch space vanished while reviving: \(wt.id)")
+        }
+
         subscriptions.broadcast(delta: .worktreeRevived(WorktreeDelta(
             worktreeID: wt.id, repoID: nil, name: wt.name, path: wt.path)))
-        scratchLogger.info("scratch.revive: \(wt.id, privacy: .public) at \(wt.path, privacy: .public)")
-        return .ok()
+        scratchLogger.info(
+            "\(method, privacy: .public): \(wt.id, privacy: .public) at \(wt.path, privacy: .public)")
+        return .revived(revived)
     }
 
     func handleScratchPromote(_ paramsData: Data) async throws -> RPCResponse {

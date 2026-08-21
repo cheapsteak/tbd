@@ -138,6 +138,21 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the Claude cloud sessions gate (design 2026-08-15 §7).
+    ///
+    /// The daemon builds its provider manager, and registers the built-in
+    /// provider into it, only at boot — so unlike the queued-prompt flag this
+    /// one does NOT take effect on the next gesture.
+    /// `DaemonCapabilitiesResult.claudeCloudLive` is what tells the user
+    /// whether a restart is still owed.
+    func handleConfigSetClaudeCloud(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConfigSetClaudeCloudParams.self, from: paramsData)
+        try await db.config.setClaudeCloud(params.enabled)
+        // Broadcast so the app reloads daemon capabilities.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the auto-close-setup-tab soak flag. Read fresh at spawn time,
     /// so it applies to the next worktree creation immediately — already-open
     /// setup tabs are unaffected.
@@ -180,6 +195,27 @@ extension RPCRouter {
     func handleConfigSetGCProfileDirsEnabled(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(ConfigSetGCProfileDirsEnabledParams.self, from: paramsData)
         try await db.config.setGCProfileDirsEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
+    /// Persist the orphaned-process collector gate — the default-off soak
+    /// switch for reclaiming processes that outlived the worktree they were
+    /// rooted in, read on top of the GC master switch.
+    ///
+    /// This is how the soak is turned on. Its sibling gates all have an RPC,
+    /// and this one is the phase that signals processes, so leaving it
+    /// reachable only by hand-editing `~/tbd/state.db` would have made the one
+    /// irreversible phase the one with no supported way to enable it — against
+    /// a database the project's own rules say not to go behind.
+    ///
+    /// Like the master switch, flipping it off does not cancel an in-progress
+    /// sweep: `OrphanGC.sweep` re-reads the flag on its next pass.
+    func handleConfigSetGCOrphanProcessesEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetGCOrphanProcessesEnabledParams.self, from: paramsData)
+        try await db.config.setGCOrphanProcessesEnabled(params.enabled)
         // Reuse the existing config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()

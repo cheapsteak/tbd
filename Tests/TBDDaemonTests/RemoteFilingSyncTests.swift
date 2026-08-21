@@ -566,7 +566,7 @@ struct RemoteFilingSyncTests {
         let fixed = Date(timeIntervalSince1970: 7_000)
         let supervisor = ProviderEventsSupervisor(
             config: RemoteProviderConfig(name: "fake", exec: "/nonexistent"), manager: m,
-            now: { fixed })
+            contractVersion: 1, now: { fixed })
 
         #expect(await supervisor.connectionOpenedAt == fixed)
     }
@@ -645,7 +645,8 @@ private final class MidCallFilingInvoker: RemoteProviderInvoking, @unchecked Sen
     }
 
     func run(
-        _ config: RemoteProviderConfig, verb: [String], stdin: Data?, timeout: TimeInterval
+        _ config: RemoteProviderConfig, verb: [String], stdin: Data?, timeout: TimeInterval,
+        contractVersion: Int
     ) async throws -> ProviderResult {
         if verb.first == "list", let onListCall {
             await onListCall()
