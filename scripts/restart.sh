@@ -158,8 +158,42 @@ MODULE_CACHE_FLAGS=(
 if [ "$skip_build" = false ]; then
     echo "Building..."
     t0=$SECONDS
-    (cd "$REPO_ROOT" && scripts/swift-safe build -c "$build_config" "${MODULE_CACHE_FLAGS[@]}") 2>&1 | tail -3
+    # Build the two PRODUCTS rather than the whole package.
+    #
+    # A whole-package build compiles the test targets too, and
+    # Tests/TestSupport does `@testable import TBDDaemonLib`, which needs
+    # testability enabled. Debug builds enable it by default; release builds
+    # do NOT, so `swift build -c release` always fails with
+    # ModuleNotTestable — after having already linked both products. That
+    # made --release look like it worked (correct binaries on disk) while
+    # reporting failure, and it is why the exit code below could not be
+    # checked before this change.
+    #
+    # SwiftPM honors only the LAST --product, so these are two invocations.
+    # Restarting needs exactly these two products; the test targets are
+    # scripts/test.sh's job, not the restart path's.
+    build_ok=true
+    for product in TBDDaemon TBDApp; do
+        # Capture the status, THEN print. Piping the build straight into
+        # `tail` would make the pipeline's status `tail`'s (always 0) — the
+        # very status-discarding bug this block exists to fix.
+        if ! build_out=$( (cd "$REPO_ROOT" && scripts/swift-safe build \
+                -c "$build_config" --product "$product" \
+                "${MODULE_CACHE_FLAGS[@]}") 2>&1 ); then
+            build_ok=false
+        fi
+        printf '%s\n' "$build_out" | tail -3
+    done
     echo "  Build: $((SECONDS - t0))s"
+
+    # Stop on a failed build. Previously the build was piped straight to
+    # `tail`, discarding its status, so a broken build fell through to the
+    # bundle assembly and daemon restart and silently relaunched the STALE
+    # binary — a failed build that looked like a successful restart.
+    if [ "$build_ok" = false ]; then
+        echo "ERROR: build failed — not restarting. The running daemon/app are unchanged." >&2
+        exit 1
+    fi
 fi
 
 # MARK: - Assemble TBD.app bundle
