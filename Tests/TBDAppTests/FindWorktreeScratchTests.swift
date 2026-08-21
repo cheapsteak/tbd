@@ -104,10 +104,10 @@ struct FindWorktreeScratchTests {
     }
 }
 
-/// Cmd+Shift+A routing: the route seam only decides refuse-vs-proceed —
+/// Cmd+Shift+A routing: the route seam only decides refuse-vs-proceed.
 /// `archiveWorktree(id:)` is scratch-aware and self-routes scratch rows to
-/// the `scratch.archive` RPC (the repo-worktree `worktree.archive` RPC would
-/// reject them with `repoNotFound`). `archiveShortcutRoute` takes the
+/// the `scratch.archive` RPC; the daemon routes them too, so either door
+/// reaches the same body. `archiveShortcutRoute` takes the
 /// caller-resolved selection (`selectedWorktreeIDs.first.flatMap(findWorktree)`),
 /// so a stale/unknown selected ID resolves to nil and routes nowhere.
 @MainActor
@@ -115,8 +115,10 @@ struct FindWorktreeScratchTests {
 struct ArchiveShortcutRouteTests {
 
     @Test func scratchSelectionProceeds() {
-        // Scratch rows always proceed: the daemon creates them `.active`,
-        // never `.main`/`.creating`, so the repo-worktree refusals can't apply.
+        // Scratch rows proceed through this seam: the daemon creates them
+        // `.active`, never `.main`/`.creating`. The one repo-worktree refusal
+        // that DOES apply to them, active children, is enforced daemon-side and
+        // pre-disabled in the row menu rather than here.
         let scratchID = UUID()
         let target = AppState.archiveShortcutRoute(
             selectedWorktree: makeWorktree(id: scratchID, repoID: nil)

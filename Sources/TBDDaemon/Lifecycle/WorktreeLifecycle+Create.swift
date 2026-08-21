@@ -232,9 +232,17 @@ extension WorktreeLifecycle {
         guard let worktree = try await db.worktrees.getLocal(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
-        guard let rid = worktree.repoID, let repo = try await db.repos.get(id: rid) else {
+        // Same split as archive/revive: name the condition that actually held.
+        // A scratch space never reaches the create lifecycle (scratch rows are
+        // minted by `handleScratchCreate`), so the repo-less arm here is an
+        // internal-inconsistency report, not a routing decision.
+        guard let rid = worktree.repoID else {
             try? await db.worktrees.delete(id: worktreeID)
-            throw WorktreeLifecycleError.repoNotFound(worktree.repoID ?? worktreeID)
+            throw WorktreeLifecycleError.worktreeHasNoRepo(worktreeID)
+        }
+        guard let repo = try await db.repos.get(id: rid) else {
+            try? await db.worktrees.delete(id: worktreeID)
+            throw WorktreeLifecycleError.repoNotFound(rid)
         }
 
         do {

@@ -217,9 +217,39 @@ extension RPCRouter {
         // handlers. A *missing* row is deliberately not handled here: that
         // stays `beginArchiveWorktree`'s throw, recorded as transport-failed,
         // unchanged.
-        if let existing = try await db.worktrees.get(id: params.worktreeID),
-           !existing.location.isLocal {
-            return try await archiveRemoteLane(existing, force: params.force, actor: actor)
+        //
+        // A repo-less scratch space is the second such row-shaped fact, read
+        // from the same DB row. Phase 1 needs a repo to sync the branch from
+        // `git worktree list`, and phase 2 needs one to run the archive hook
+        // and to remove the directory (a scratch space has no repo, and its
+        // folder must SURVIVE archiving), so it routes to the dedicated
+        // `scratch.archive` body instead. The GUI has been routing this
+        // client-side all along (`AppState.archiveWorktree`); doing it here
+        // means the CLI, hooks, scripts, and every future client get it
+        // without repeating the check.
+        //
+        // `params.force` is deliberately not forwarded: the repo branch below
+        // does not forward it to `beginArchiveWorktree` either, so on this door
+        // it governs only phase 2's hook skip, and the scratch body runs no
+        // phase 2. Passing it through would have made one flag bypass the
+        // active-children refusal for a scratch row while leaving it in force
+        // for a repo worktree through the same door.
+        //
+        // What the scratch body does not do, all pre-existing and all recorded
+        // in the design doc: it runs no archive hook (only the highest-priority
+        // hook leg is repo-scoped, so `<worktree>/.worktree-hooks/archive` and
+        // the global `~/tbd/hooks/default/archive` would otherwise apply), it
+        // captures no scrollback into Closed Terminals, it does not escalate to
+        // SIGKILL for a pane surviving SIGHUP, and it records no resumable
+        // Claude session ids.
+        if let existing = try await db.worktrees.get(id: params.worktreeID) {
+            if !existing.location.isLocal {
+                return try await archiveRemoteLane(existing, force: params.force, actor: actor)
+            }
+            if existing.isScratch {
+                return try await archiveScratchSpace(
+                    worktreeID: params.worktreeID, surface: .worktreeArchive, actor: actor)
+            }
         }
 
         // One row per call, naming the worktree and no terminal: the caller
@@ -480,9 +510,43 @@ extension RPCRouter {
         // `getLocal` and would throw for it. Pre-row validation, like
         // archive's branch above; a *missing* row still falls through to the
         // lifecycle's own throw.
-        if let existing = try await db.worktrees.get(id: params.worktreeID),
-           !existing.location.isLocal {
-            return try await reviveRemoteLane(existing, actor: actor)
+        //
+        // A repo-less scratch space likewise: revive's git-worktree recreation
+        // has nothing to recreate for it (the folder never left disk), so it
+        // routes to the `scratch.revive` body, which re-checks the folder is
+        // still there and flips the row back. Mirror of archive's branch above.
+        if let existing = try await db.worktrees.get(id: params.worktreeID) {
+            if !existing.location.isLocal {
+                return try await reviveRemoteLane(existing, actor: actor)
+            }
+            if existing.isScratch {
+                // No actuation row, and that asymmetry with the repo branch is
+                // the correct one rather than a gap. `ActuationSurface`'s
+                // boundary rule puts DB-only mutations OUT ("nothing there
+                // reaches a process, so nothing there is an actuation"), and
+                // this branch is exactly that: a status flip, a re-read and a
+                // delta. The repo branch records because it really does spawn
+                // the worktree's primary terminals, which is why
+                // `.worktreeRevive` carries `kind: .spawn`, a kind this branch
+                // would be lying about, and one a fleet reader querying
+                // "spawned but no session appeared" would flag forever.
+                //
+                // Consequence to know: `cols`, `rows` and `preferredSessionID`
+                // are accepted and unused here, because there is no terminal to
+                // size and no session to resume. Archive deleted every terminal
+                // row and this spawns none.
+                switch try await reviveScratchSpace(
+                    worktreeID: params.worktreeID, method: RPCMethod.worktreeRevive
+                ) {
+                case .revived(let revived):
+                    // The row, not `.ok()`: `worktree.revive`'s clients decode
+                    // a `Worktree` from the result. The delta is broadcast
+                    // inside the helper, so this returns without repeating it.
+                    return try RPCResponse(result: revived)
+                case .refused(let message):
+                    return RPCResponse(error: message)
+                }
+            }
         }
 
         // The row names the worktree, not a terminal: revive spawns its

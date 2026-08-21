@@ -2057,6 +2057,14 @@ final class AppState: ObservableObject {
             applyWorktreeArchivedDelta(d)
         case .worktreeRevived(let d):
             recentlyArchivedWorktreeIDs.removeValue(forKey: d.worktreeID)
+            // A revived row must leave the Scratch section's Archived tab, not
+            // just rejoin the sidebar. `refreshWorktrees` fetches with
+            // `excludeArchived: true` and never touches
+            // `archivedScratchWorktrees`, so without this a row revived from
+            // the CLI stays listed there while also showing as active, and
+            // that stale row's Delete button trashes the folder of a scratch
+            // space that is now live.
+            archivedScratchWorktrees.removeAll { $0.id == d.worktreeID }
             Task { [weak self] in await self?.refreshWorktrees() }
         case .controlModeInputHealthChanged(let d):
             applyControlModeInputHealthDelta(d)
@@ -2173,6 +2181,15 @@ final class AppState: ObservableObject {
         let failureMessage = Self.creationFailureMessage(worktree, creationFailed: delta.creationFailed)
 
         removeArchivedWorktreeFromState(id: delta.worktreeID)
+
+        // The mirror of the `.worktreeRevived` case: an archive that originated
+        // elsewhere (the CLI, a hook, a script) must ADD the row to the Scratch
+        // section's Archived tab, or an archived scratch space looks deleted:
+        // gone from the sidebar and absent from the only view that lists it.
+        // Cheap because the listing is small and unpaginated.
+        if worktree?.isScratch == true {
+            Task { [weak self] in await self?.refreshArchivedScratch() }
+        }
 
         // The daemon tells us whether creation actually failed; we never infer
         // it from `.creating` status. A deliberate archive of a still-creating

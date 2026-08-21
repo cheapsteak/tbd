@@ -606,9 +606,14 @@ extension AppState {
     }
 
     /// Archive a worktree. Scratch-aware by construction: repo-less scratch
-    /// spaces are delegated to `archiveScratch(id:)` — the repo-worktree
-    /// `worktree.archive` RPC rejects them with `repoNotFound` — so callers
-    /// don't have to route per collection.
+    /// spaces are delegated to `archiveScratch(id:)` so callers don't have to
+    /// route per collection.
+    ///
+    /// The daemon routes them too now (`worktree.archive` dispatches a scratch
+    /// row to the same `scratch.archive` body), so this branch is no longer
+    /// what keeps the call from failing. It stays because the two client-side
+    /// settlements differ: `archiveScratch` also refreshes the Scratch
+    /// section's Archived tab, which the repo-worktree leg has no reason to do.
     func archiveWorktree(id: UUID, force: Bool = false) async {
         let worktree = findWorktree(id: id)
         if worktree?.isScratch == true {
