@@ -45,6 +45,47 @@ struct CodexActivityReconciliationTests {
             actuationLog: makeTestActuationLog())
     }
 
+    private func makeCodexRecreateFixture(
+        tag: String,
+        tmux: TmuxManager,
+        now: @escaping @Sendable () -> Date = Date.init
+    ) async throws -> (router: RPCRouter, terminal: Terminal, directory: URL) {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-codex-recreate-\(tag)-\(UUID().uuidString)", isDirectory: true)
+        let codexHome = directory.appendingPathComponent("codex-home", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let repo = try await db.repos.create(
+            path: directory.path,
+            displayName: "recreate-\(tag)",
+            defaultBranch: "main")
+        let worktree = try await db.worktrees.create(
+            repoID: repo.id,
+            name: "wt",
+            branch: "main",
+            path: directory.path,
+            tmuxServer: "tbd-codex-recreate-\(tag)")
+        let terminal = try await db.terminals.create(
+            worktreeID: worktree.id,
+            tmuxWindowID: "@old",
+            tmuxPaneID: "%old",
+            label: "Codex Recovery",
+            kind: .codex)
+        try await db.terminals.updateSession(
+            id: terminal.id,
+            sessionID: "old-session",
+            transcriptPath: "/tmp/old-codex-rollout.jsonl")
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
+            tmux: tmux,
+            codexExecutableResolver: { "/bin/true" },
+            codexHomeEnsurer: { codexHome },
+            now: now,
+            actuationLog: makeTestActuationLog())
+        return (router, terminal, directory)
+    }
+
     @Test("terminal.list exposes transcript working without changing persisted hook activity")
     func terminalListExposesWorkingPresentationWithoutMutation() async throws {
         let repo = try await db.repos.create(
@@ -311,7 +352,8 @@ struct CodexActivityReconciliationTests {
             kind: .codex)
         let oldSessionAt = Date(timeIntervalSince1970: 1_790_000_100)
         let dates = TestDateSource(oldSessionAt)
-        let tmux = TmuxManager(dryRun: true)
+        let launchRecorder = BlockingCodexLaunchRecorder()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: launchRecorder.recorder)
         let recreateRouter = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
@@ -340,37 +382,28 @@ struct CodexActivityReconciliationTests {
             params: TerminalListParams(worktreeID: wt.id))
         #expect((await recreateRouter.handle(list)).success)
 
-        dates.advance(by: 10)
-        let recreate = try RPCRequest(
-            method: RPCMethod.terminalRecreateWindow,
-            params: TerminalRecreateWindowParams(terminalID: terminal.id))
-        let recreateResponse = await recreateRouter.handle(recreate)
-        #expect(recreateResponse.success, "recreate failed: \(recreateResponse.error ?? "nil")")
-
-        let recreated = try #require(try await db.terminals.get(id: terminal.id))
-        #expect(recreated.label == "Codex Recovery")
-        #expect(recreated.kind == .codex)
-        #expect(recreated.claudeSessionID == nil)
-        #expect(recreated.transcriptPath == nil)
-        #expect(recreated.sessionOrderObservedAt == nil)
-        #expect(recreated.activityState == .unknown)
-
-        // A delayed hook from the dead process must not mutate the fresh pane
-        // while it is waiting for its own SessionStart.
-        dates.advance(by: 1)
-        let staleActivity = try RPCRequest(
-            method: RPCMethod.terminalActivityEvent,
-            params: TerminalActivityEventParams(
-                terminalID: terminal.id,
-                activityState: .working,
-                sessionID: "old-session"))
-        #expect((await recreateRouter.handle(staleActivity)).success)
-        #expect(try await db.terminals.get(id: terminal.id)?.activityState == .unknown)
-
         let transcript = try makeTranscript(
             #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"new-turn"}}"#
                 + "\n")
         defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
+        dates.advance(by: 10)
+        let recreate = try RPCRequest(
+            method: RPCMethod.terminalRecreateWindow,
+            params: TerminalRecreateWindowParams(terminalID: terminal.id))
+        let recreateTask = gateHoldingTask { await recreateRouter.handle(recreate) }
+        guard await waitUntil(
+            { launchRecorder.codexLaunchIsBlocked },
+            timeout: Self.raceRendezvousTimeout
+        ) else {
+            launchRecorder.releaseCodexLaunch()
+            _ = await recreateTask.value
+            Issue.record("recreate never reached the Codex process launch")
+            return
+        }
+
+        // Exercise the real race: the new process can report SessionStart as
+        // soon as tmux launches it. The handler must already have durably
+        // cleared the dead process before this hook is accepted.
         dates.advance(by: 1)
         let sessionStart = try RPCRequest(
             method: RPCMethod.terminalSessionEvent,
@@ -380,6 +413,40 @@ struct CodexActivityReconciliationTests {
                 transcriptPath: transcript.path,
                 source: "startup"))
         #expect((await recreateRouter.handle(sessionStart)).success)
+        launchRecorder.releaseCodexLaunch()
+
+        let recreateResponse = await recreateTask.value
+        #expect(recreateResponse.success, "recreate failed: \(recreateResponse.error ?? "nil")")
+
+        let recreated = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(recreated.label == "Codex Recovery")
+        #expect(recreated.kind == .codex)
+        #expect(recreated.claudeSessionID == "new-session")
+        #expect(recreated.transcriptPath == transcript.path)
+        #expect(recreated.sessionOrderObservedAt == dates.now)
+        #expect(recreated.activityState == .idle)
+        let launchCommands = launchRecorder.snapshot()
+        let newWindowIndex = try #require(
+            launchCommands.firstIndex(where: { $0.contains("new-window") }))
+        let codexLaunchIndex = try #require(
+            launchCommands.firstIndex(where: { command in
+                command.contains("respawn-window")
+                    && command.last?.contains(" --profile") == true
+            }))
+        #expect(newWindowIndex < codexLaunchIndex)
+        #expect(launchCommands[newWindowIndex].last?.contains(" --profile") == false)
+
+        // A delayed hook from the dead process must not mutate the replacement
+        // process after its new identity is attached.
+        dates.advance(by: 1)
+        let staleActivity = try RPCRequest(
+            method: RPCMethod.terminalActivityEvent,
+            params: TerminalActivityEventParams(
+                terminalID: terminal.id,
+                activityState: .working,
+                sessionID: "old-session"))
+        #expect((await recreateRouter.handle(staleActivity)).success)
+        #expect(try await db.terminals.get(id: terminal.id)?.activityState == .idle)
 
         let working = await recreateRouter.handle(list)
         #expect(working.success)
@@ -395,6 +462,74 @@ struct CodexActivityReconciliationTests {
         #expect(idle.success)
         #expect(try idle.decodeResult([Terminal].self).first?
             .presentationActivityState == .idle)
+    }
+
+    @Test("failed Codex staging keeps the previous durable session")
+    func failedCodexStagingKeepsPreviousSession() async throws {
+        let recorder = LockedCommandRecorder()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: recorder.append,
+            dryRunCreateWindowError: { _ in
+                TmuxError.unexpectedOutput("staging failed")
+            })
+        let fixture = try await makeCodexRecreateFixture(tag: "stage-failure", tmux: tmux)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let request = try RPCRequest(
+            method: RPCMethod.terminalRecreateWindow,
+            params: TerminalRecreateWindowParams(terminalID: fixture.terminal.id))
+
+        let response = await fixture.router.handle(request)
+
+        #expect(!response.success)
+        let stored = try #require(try await db.terminals.get(id: fixture.terminal.id))
+        #expect(stored.tmuxWindowID == "@old")
+        #expect(stored.tmuxPaneID == "%old")
+        #expect(stored.claudeSessionID == "old-session")
+        #expect(stored.transcriptPath == "/tmp/old-codex-rollout.jsonl")
+        #expect(!recorder.snapshot().contains { command in
+            command.contains("respawn-window")
+        })
+    }
+
+    @Test("failed Codex launch leaves a cleared retryable row and removes its stage")
+    func failedCodexLaunchLeavesRetryableRow() async throws {
+        let recorder = LockedCommandRecorder()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: recorder.append,
+            dryRunRespawnWindowError: { windowID in
+                windowID == "@mock-0"
+                    ? TmuxError.unexpectedOutput("Codex launch failed")
+                    : nil
+            })
+        let resetAt = Date(timeIntervalSince1970: 1_790_000_200)
+        let fixture = try await makeCodexRecreateFixture(
+            tag: "launch-failure", tmux: tmux, now: { resetAt })
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let request = try RPCRequest(
+            method: RPCMethod.terminalRecreateWindow,
+            params: TerminalRecreateWindowParams(terminalID: fixture.terminal.id))
+
+        let response = await fixture.router.handle(request)
+
+        #expect(!response.success)
+        let stored = try #require(try await db.terminals.get(id: fixture.terminal.id))
+        #expect(stored.tmuxWindowID == "@mock-0")
+        #expect(stored.tmuxPaneID == "%mock-0")
+        #expect(stored.label == "Codex Recovery")
+        #expect(stored.kind == .codex)
+        #expect(stored.claudeSessionID == nil)
+        #expect(stored.transcriptPath == nil)
+        #expect(stored.sessionOrderObservedAt == nil)
+        #expect(stored.activityState == .unknown)
+        let commands = recorder.snapshot()
+        #expect(commands.contains { command in
+            command.contains("respawn-window") && command.contains("@mock-0")
+        })
+        #expect(commands.contains { command in
+            command.contains("kill-window") && command.contains("@mock-0")
+        })
     }
 
     @Test("sub-millisecond initial generation survives a database round trip")
@@ -1582,5 +1717,44 @@ private final class BlockingListDates: @unchecked Sendable {
 
     func releaseFirstCall() {
         release.signal()
+    }
+}
+
+/// Holds the exact tmux command that first launches Codex so the test can send
+/// SessionStart while `terminal.recreateWindow` is still inside that launch.
+/// The recreate request runs with `gateHoldingTask`, keeping this synchronous
+/// dry-run recorder off Swift's cooperative thread pool.
+private final class BlockingCodexLaunchRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private let release = DispatchSemaphore(value: 0)
+    private var commands: [[String]] = []
+    private var blocked = false
+
+    var codexLaunchIsBlocked: Bool {
+        lock.withLock { blocked }
+    }
+
+    var recorder: @Sendable ([String]) -> Void {
+        { [self] command in
+            let shouldBlock = lock.withLock { () -> Bool in
+                commands.append(command)
+                guard !blocked, command.last?.contains(" --profile") == true else {
+                    return false
+                }
+                blocked = true
+                return true
+            }
+            if shouldBlock {
+                release.waitForGate("recreated Codex process launch")
+            }
+        }
+    }
+
+    func releaseCodexLaunch() {
+        release.signal()
+    }
+
+    func snapshot() -> [[String]] {
+        lock.withLock { commands }
     }
 }

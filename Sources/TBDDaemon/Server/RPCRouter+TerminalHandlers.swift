@@ -1096,29 +1096,59 @@ extension RPCRouter {
                 profile: nil
             ).merging(["DISABLE_AUTO_UPDATE": "true"]) { _, forced in forced }
             let updatedTerminal = try await actuating(actuationID) {
+                // Stage an inert pane without Codex first. `createWindow`
+                // returns after launching its command, so starting Codex here
+                // would let SessionStart race the durable reset below.
                 let window = try await tmux.createWindow(
                     server: worktree.tmuxServer,
                     session: "main",
                     cwd: worktree.path,
-                    shellCommand: CodexSpawnCommandBuilder.command(
-                        executablePath: codexPreparation.executablePath),
+                    shellCommand: "exec /usr/bin/tail -f /dev/null",
                     env: codexEnv,
-                    sensitiveEnv: codexEnvOverrides,
                     cols: resolvedCols,
                     rows: resolvedRows
                 )
 
-                // The new Codex process has no known session yet. Reset the
-                // dead process's lifecycle history while preserving this tab's
-                // Codex label and kind, so its first SessionStart can adopt
-                // lifecycle records written before the hook reaches TBD.
-                try await db.terminals.replaceRecreatedCodexWindow(
-                    id: params.terminalID,
-                    windowID: window.windowID,
-                    paneID: window.paneID,
-                    // The router's date seam makes this compared activity fact
-                    // deterministic; the store must not mint its own timestamp.
-                    at: now())
+                do {
+                    // The new Codex process does not exist yet. Reset the dead
+                    // process's lifecycle while preserving this tab's Codex
+                    // label and kind, then launch Codex only after the write
+                    // commits. Its first SessionStart can therefore adopt
+                    // lifecycle records written before the hook reaches TBD.
+                    try await db.terminals.replaceRecreatedCodexWindow(
+                        id: params.terminalID,
+                        windowID: window.windowID,
+                        paneID: window.paneID,
+                        // The router's date seam makes this compared activity
+                        // fact deterministic; the store must not mint its own.
+                        at: now())
+                } catch {
+                    // The row still names its previous coordinates, so this
+                    // staging window would otherwise be unowned.
+                    try? await tmux.killWindow(
+                        server: worktree.tmuxServer, windowID: window.windowID)
+                    throw error
+                }
+
+                do {
+                    try await tmux.respawnWindow(
+                        server: worktree.tmuxServer,
+                        windowID: window.windowID,
+                        cwd: worktree.path,
+                        shellCommand: CodexSpawnCommandBuilder.command(
+                            executablePath: codexPreparation.executablePath),
+                        env: codexEnv,
+                        sensitiveEnv: codexEnvOverrides,
+                        cols: resolvedCols,
+                        rows: resolvedRows)
+                } catch {
+                    // The reset row owns these coordinates. Killing the inert
+                    // staging pane leaves a retryable missing-window row; if
+                    // the kill fails, the pane is still tracked, not orphaned.
+                    try? await tmux.killWindow(
+                        server: worktree.tmuxServer, windowID: window.windowID)
+                    throw error
+                }
                 return try await db.terminals.get(id: params.terminalID)
             }
 
