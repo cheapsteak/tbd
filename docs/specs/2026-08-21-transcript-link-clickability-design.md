@@ -55,12 +55,17 @@ absolute paths; otherwise a path relative to the worktree root. A trailing
 `:line` or `:line:col` is stripped before the existence check. The result must
 exist and must not be a directory.
 
-One implementation is the point. The terminal and the transcript agree on what a
-path is by construction rather than by two codebases happening to match, and a
-defect in the rules — the terminal currently fails to resolve an absolute path
-carrying a `:line:col` suffix, though the same suffix on a relative path works —
-becomes a single-site fix rather than a two-site one. That defect is filed
-separately and not addressed here.
+One implementation is the point: the terminal and the transcript agree on what a
+path is by construction, rather than by two codebases happening to match. The
+extraction is behavior-preserving — a verbatim port of rules that had no test
+coverage of their own, so `ClickedPathResolverTests` is also the first thing
+pinning them.
+
+Cmd+clicking an absolute path with a `:line:col` suffix was observed to fail in
+the terminal while the same suffix on a relative path worked. That defect is not
+in these rules — the suffix strip is uniform, and the terminal's token widener
+excludes `:` from its boundary set, so the resolver never sees a suffix at all.
+It lives somewhere in the grid-to-token path and is filed separately.
 
 ## Detection
 
@@ -81,9 +86,11 @@ A post-pass over each `.prose` `NSAttributedString` that
 Inline code spans and fenced code blocks both end up inside those prose strings,
 so a single pass covers both without touching the code-block renderer. The pass
 lands inside the existing composed-blocks cache in `TableTranscriptView`, keyed by
-`(id, contentVersion, width)`, so its `stat()` calls run once per row per content
-change rather than once per scroll — the distinction that matters on the
-transcript's measured-and-cached render path (#129).
+`(id, contentVersion)`, so its `stat()` calls run once per row per content change
+rather than once per scroll — the distinction that matters on the transcript's
+measured-and-cached render path (#129). Height measurement and rendering both
+draw from that one cache, so they share the identical marked string and cannot
+disagree about a row's height.
 
 ## Styling
 
@@ -134,10 +141,10 @@ establish that the terminal already handles all of them:
 - a bare URL, a CommonMark autolink, a bare `file://` URL
 - a path followed by a sentence period
 
-Beyond the scanner: the extracted resolver pins the terminal's existing behavior
-so the move is provably inert; a markdown `[text](url)` link is asserted not to be
-double-linked; and a link in a code context is asserted to carry an underline and
-no tint, while a prose link carries a tint.
+Beyond the scanner: the extracted resolver gets the first tests those rules have
+ever had; a markdown `[text](url)` link is asserted not to be double-linked; and a
+link in a code context is asserted to carry an underline and no tint, while a
+prose link carries a tint.
 
 ## Flag and reconciler
 
