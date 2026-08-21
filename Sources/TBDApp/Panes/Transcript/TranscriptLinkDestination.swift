@@ -45,6 +45,18 @@ enum TranscriptLinkDestination {
 
     /// The resolver a pane hands to the compose step: the shared path rules,
     /// bound to this pane's worktree root and memoized per pane.
+    ///
+    /// `worktreePath` is a VALUE snapshot, frozen for the life of the pane's
+    /// table: `TableTranscriptView.makeCoordinator` captures the whole
+    /// `TranscriptCardContext` once, and `updateNSView` never hands the
+    /// coordinator a fresher one. It is safe because the only pane that builds
+    /// this resolver, `PanePlaceholder`, is constructed with the worktree it
+    /// renders, so the row is already present on the first evaluation — an
+    /// empty root there means the worktree is remote, which is permanent
+    /// rather than transient. A root that started empty and filled in later
+    /// would NOT recover: every relative token would resolve to nil against
+    /// the empty root and the miss would be memoized in a cache nothing
+    /// invalidates, leaving relative paths plain text for the pane's life.
     @MainActor
     static func makeLinkResolver(
         worktreePath: String,

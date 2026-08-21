@@ -1,9 +1,10 @@
 import SwiftUI
 
 /// Shared `OpenURLAction` for markdown rendered inside the transcript
-/// overlay. Intercepts `tbd-file:` (linkifier output) and `file:` URLs
-/// by pushing a file frame onto the overlay coordinator; everything
-/// else falls through to the system handler.
+/// overlay. Intercepts `tbd-file:` (the scheme `TranscriptLinkPass` emits
+/// for an already-resolved absolute path) and `file:` URLs by pushing a
+/// file frame onto the overlay coordinator; everything else falls
+/// through to the system handler.
 ///
 /// Lives in one place so adding a new in-overlay scheme later
 /// (e.g. `tbd-item:` deep-links) only touches one site instead of
