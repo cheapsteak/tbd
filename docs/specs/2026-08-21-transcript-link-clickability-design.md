@@ -150,7 +150,14 @@ appearance for every link in the transcript is the intent.
 `textView(_:clickedOnLink:at:)`. Resolved paths are stored as `tbd-file:` URLs
 carrying the already-resolved absolute path, reusing the scheme
 `OverlayFileLinkAction` already defines. Resolution happens once, during the
-cached render pass; the click path does no filesystem work.
+cached render pass, so clicking one of those does no filesystem work.
+
+A `file://` URL is the exception, because markdown can carry one directly and no
+render pass has vetted it. The delegate applies the same rule to it at click
+time — it links only if it names a file that is there and is not a directory —
+so one existence rule governs every path the transcript treats as clickable. A
+`file://` URL that fails it is reported as unhandled and falls through to
+AppKit's default handling.
 
 The delegate calls closures threaded down from the pane, so the two render sites
 choose their own destination:

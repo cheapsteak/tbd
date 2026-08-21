@@ -55,14 +55,22 @@ enum ClickedPathResolver {
         return pathOnly
     }
 
-    /// Convenience overload querying the real filesystem. A directory is not a
-    /// readable file for this purpose — the viewer opens files.
+    /// Convenience overload querying the real filesystem.
     static func resolve(_ token: String, worktreePath: String) -> String? {
-        resolve(token, worktreePath: worktreePath) { path in
-            var isDir: ObjCBool = false
-            let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDir)
-            return exists && !isDir.boolValue
-        }
+        resolve(token, worktreePath: worktreePath, isReadableFile: isReadableFile)
+    }
+
+    /// Whether `path` names a file the viewer can open. A directory is not one
+    /// — the viewer opens files, and Finder-revealing a directory is not what a
+    /// link to it promised.
+    ///
+    /// The single definition of the rule, so the render pass's candidate check
+    /// and the click-time check on a markdown-authored `file://` URL cannot
+    /// answer differently.
+    static func isReadableFile(_ path: String) -> Bool {
+        var isDir: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDir)
+        return exists && !isDir.boolValue
     }
 
     /// Drops a trailing `:line` or `:line:col`. The viewer takes no line

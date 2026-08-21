@@ -326,9 +326,20 @@ enum TranscriptLinkTarget: Equatable {
     case file(String)
     case web(URL)
 
-    init?(url: URL) {
+    /// A `tbd-file:` URL carries a path the render pass already checked, so it
+    /// is taken as read and `isReadableFile` is never consulted for it. A
+    /// `file://` URL is different in kind: markdown the agent wrote can carry
+    /// one, and nothing has checked it, so it gets the same rule the scanner's
+    /// candidates get — a path links only if it names a file that is there.
+    /// Failing that check returns nil, which the delegate reports as unhandled
+    /// so AppKit's default handling takes the click.
+    init?(url: URL, isReadableFile: (String) -> Bool = ClickedPathResolver.isReadableFile) {
         if let path = TranscriptLinkPass.resolvedPath(from: url) { self = .file(path); return }
-        if url.isFileURL { self = .file(url.path); return }
+        if url.isFileURL {
+            guard isReadableFile(url.path) else { return nil }
+            self = .file(url.path)
+            return
+        }
         if url.scheme == "http" || url.scheme == "https" { self = .web(url); return }
         return nil
     }
