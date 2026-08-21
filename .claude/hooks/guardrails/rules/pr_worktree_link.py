@@ -304,13 +304,20 @@ def _file_has_link(path: str) -> bool:
     This hook runs in front of every Bash call and blocks it while it runs, so
     it must never read something that can hang (a fifo, `/dev/stdin`) or that is
     unbounded (`/dev/zero`).
+
+    The read is binary so the cap counts bytes: a text-mode read counts
+    characters, which lets multi-byte UTF-8 pull in several times the cap. A
+    byte cap can land mid-character, and `errors="replace"` turns the split
+    tail into a replacement character; the link markers are pure ASCII, so a
+    mangled trailing character can never fabricate a match.
     """
     try:
         expanded = os.path.expanduser(path)
         if not os.path.isfile(expanded):
             return False
-        with open(expanded, "r", encoding="utf-8", errors="replace") as handle:
-            return _text_has_link(handle.read(_MAX_BODY_BYTES))
+        with open(expanded, "rb") as handle:
+            head = handle.read(_MAX_BODY_BYTES)
+        return _text_has_link(head.decode("utf-8", errors="replace"))
     except Exception:
         return False
 

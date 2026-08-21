@@ -125,6 +125,21 @@ class PRWorktreeLinkTests(unittest.TestCase):
                 handle.write(f"\n[my-worktree]({_LINK})\n")
             _informs(self, f"gh pr create --body-file {path}")
 
+    def test_body_file_read_is_bounded_in_bytes_not_characters(self):
+        # The cap is a byte cap. This body's link sits past the cap in bytes but
+        # well inside it in characters, so a character-counting read would see
+        # the link and go silent; the byte-counting read must still nudge.
+        filler_characters = (_MAX_BODY_BYTES // 3) + 4096  # 3-byte characters
+        self.assertLess(filler_characters, _MAX_BODY_BYTES)
+        self.assertGreater(filler_characters * 3, _MAX_BODY_BYTES)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "multibyte.md")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("あ" * filler_characters)
+                handle.write(f"\n[my-worktree]({_LINK})\n")
+            self.assertGreater(os.path.getsize(path), _MAX_BODY_BYTES)
+            _informs(self, f"gh pr create --body-file {path}")
+
     def test_non_regular_body_file_is_never_opened(self):
         # Opening a fifo with no writer blocks forever; the hook must not hang.
         if not hasattr(os, "mkfifo"):
