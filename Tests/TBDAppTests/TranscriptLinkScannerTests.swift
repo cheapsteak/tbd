@@ -65,8 +65,11 @@ struct TranscriptLinkScannerTests {
         #expect(tokens("Sources/A.swift:17:let x = 1").first == "Sources/A.swift:17")
     }
 
-    @Test func colonFollowedByProse_endsTheToken() {
-        #expect(tokens("see docs/a.md: the spec") == ["docs/a.md"])
+    // The colon must be INTERIOR to discriminate: a trailing `docs/a.md: ` is
+    // already handled by the trailing-punctuation trim, so a spaced fixture
+    // passes with or without the colon-digit boundary rule.
+    @Test func interiorColonFollowedByProse_endsTheToken() {
+        #expect(tokens("see docs/a.md:the spec") == ["docs/a.md"])
     }
 
     @Test func httpsURL_isFoundAndFlaggedAsURL() {

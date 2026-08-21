@@ -49,11 +49,12 @@ enum TranscriptLinkDestination {
     /// `worktreePath` is a VALUE snapshot, frozen for the life of the pane's
     /// table: `TableTranscriptView.makeCoordinator` captures the whole
     /// `TranscriptCardContext` once, and `updateNSView` never hands the
-    /// coordinator a fresher one. It is safe because the only pane that builds
-    /// this resolver, `PanePlaceholder`, is constructed with the worktree it
-    /// renders, so the row is already present on the first evaluation — an
-    /// empty root there means the worktree is remote, which is permanent
-    /// rather than transient. A root that started empty and filled in later
+    /// coordinator a fresher one. It is safe because the two views that build
+    /// this resolver — `TableTranscriptPaneView` and `HistoryPaneView` — are
+    /// each constructed with the worktree they render, so the row is already
+    /// present on the first evaluation. An empty root means the worktree is
+    /// remote or archived, and both are permanent rather than transient.
+    /// A root that started empty and filled in later
     /// would NOT recover: every relative token would resolve to nil against
     /// the empty root and the miss would be memoized in a cache nothing
     /// invalidates, leaving relative paths plain text for the pane's life.

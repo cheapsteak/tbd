@@ -75,8 +75,17 @@ It lives somewhere in the grid-to-token path and is filed separately.
 ## Detection
 
 `TranscriptLinkScanner` is pure: a plain string in, candidate ranges out, no
-AppKit. It strips a trailing sentence period so `see docs/foo.md.` links the path
-and not the period, and skips any range that already carries a `.link` attribute.
+AppKit. It strips trailing sentence punctuation — `. , : ; > ! ? " '` — so
+`see docs/foo.md.` links the path and not the period, and skips any range that
+already carries a `.link` attribute. Dropping `!` and `?` from that set would be
+worse than cosmetic: both are legal hostname characters, so `see https://x.com!`
+would parse as a link to the host `x.com!` and open somewhere else without
+looking wrong.
+
+A path token also ends at a colon not followed by a digit. That is what makes
+grep and compiler output usable: `Sources/A.swift:17:let x = 1` yields
+`Sources/A.swift:17` rather than swallowing the matched line into the token,
+while `:17` and `:17:5` stay attached for the resolver to strip.
 
 The token-boundary character set lives beside the resolver and is *referenced* by
 both the terminal's widener and the scanner, not copied into each. Sharing the
@@ -171,7 +180,8 @@ establish that the terminal already handles all of them:
 - each of the above inside an inline code span
 - each inside a fenced code block
 - a bare URL, a CommonMark autolink, a bare `file://` URL
-- a path followed by a sentence period
+- a path followed by a sentence period, and a URL followed by `!` or `?`
+- a grep/compiler line `path:line:matched text`, which must yield `path:line`
 - a bare filename with no slash, and a bare directory, which must not link
 - tokens that must never become candidates: `Node.js`, `v1.2.3`, `e.g.`, `and/or`
 
