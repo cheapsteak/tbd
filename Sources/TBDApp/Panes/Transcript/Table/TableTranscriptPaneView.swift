@@ -14,6 +14,7 @@ struct TableTranscriptPaneView: View {
     let worktreeID: UUID
     @EnvironmentObject var appState: AppState
     @Environment(\.openTranscriptOverlay) private var openTranscriptOverlay
+    @Environment(\.openTranscriptLink) private var openTranscriptLink
 
     private let pollInterval: TimeInterval = 1.5
     private let errorThreshold = 3
@@ -55,6 +56,19 @@ struct TableTranscriptPaneView: View {
     /// process-wide `.shared` so the live pane and Session History cannot
     /// evict each other out of a size-1 cache.
     @State private var presentationMemo = TranscriptPresentationMemo()
+
+    /// One resolution memo per pane, so a streaming row's repeated re-composes
+    /// cost one `stat()` per distinct token rather than one per update. Same
+    /// `@State` reference-holder shape as `presentationMemo` above.
+    @State private var linkCache = TranscriptLinkResolverCache()
+
+    /// Absolute worktree root for resolving relative paths in transcript text.
+    /// Empty when the worktree row has not loaded — or when it is remote, which
+    /// `LocalWorktree` rejects — which makes relative paths simply not resolve.
+    /// Absolute ones still do.
+    private var worktreePath: String {
+        appState.findWorktree(id: worktreeID).flatMap(LocalWorktree.init)?.path ?? ""
+    }
 
     private static let log = Logger(subsystem: "com.tbd.app", category: "live-transcript")
 
@@ -197,8 +211,9 @@ struct TableTranscriptPaneView: View {
             openTranscriptOverlay: openTranscriptOverlay,
             toggleActivityGroup: setActivityGroup,
             appState: appState,
-            linkResolver: nil,
-            onLinkClicked: nil
+            linkResolver: TranscriptLinkDestination.makeLinkResolver(
+                worktreePath: worktreePath, cache: linkCache),
+            onLinkClicked: openTranscriptLink
         )
         SessionWorkbenchView(
             sections: presentation.indexSections,

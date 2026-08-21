@@ -383,6 +383,18 @@ struct SessionTranscriptView: View {
 
     @State private var isFreshBranchReviveInFlight = false
 
+    /// Worktree root for resolving relative paths in a historical transcript.
+    /// Empty for a remote row, a row that has not loaded, or an ARCHIVED one —
+    /// `findWorktree` does not consult `archivedWorktrees`, and an archived
+    /// worktree's files are gone anyway. Relative paths then simply do not
+    /// resolve; absolute ones still link.
+    private var historyWorktreePath: String {
+        appState.findWorktree(id: worktreeID).flatMap(LocalWorktree.init)?.path ?? ""
+    }
+
+    /// One resolution memo per pane. See `TableTranscriptPaneView.linkCache`.
+    @State private var historyLinkCache = TranscriptLinkResolverCache()
+
     private var messages: [TranscriptItem] {
         appState.sessionTranscripts[sessionId] ?? []
     }
@@ -471,8 +483,17 @@ struct SessionTranscriptView: View {
                             openTranscriptOverlay: openTranscriptItem,
                             toggleActivityGroup: setActivityGroup,
                             appState: appState,
-                            linkResolver: nil,
-                            onLinkClicked: nil
+                            linkResolver: TranscriptLinkDestination.makeLinkResolver(
+                                worktreePath: historyWorktreePath, cache: historyLinkCache),
+                            onLinkClicked: { target in
+                                switch TranscriptLinkDestination.history(target) {
+                                case .revealInFinder(let path):
+                                    NSWorkspace.shared.activateFileViewerSelecting(
+                                        [URL(fileURLWithPath: path)])
+                                case .openInBrowser(let url):
+                                    NSWorkspace.shared.open(url)
+                                }
+                            }
                         ),
                         atBottom: $atBottom,
                         scrollToBottomToken: scrollToBottomToken,
