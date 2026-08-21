@@ -388,7 +388,12 @@ struct SessionTranscriptView: View {
     /// `findWorktree` does not consult `archivedWorktrees`, and an archived
     /// worktree's files are gone anyway. Relative paths then simply do not
     /// resolve; absolute ones still link.
-    private var historyWorktreePath: String {
+    ///
+    /// `static` and taking its inputs explicitly for the same reason as
+    /// `TableTranscriptPaneView.worktreePath(in:worktreeID:)`: the link
+    /// resolver reads the root on every resolve, from a closure that must
+    /// capture the `AppState` reference rather than a copy of this view.
+    private static func historyWorktreePath(in appState: AppState, worktreeID: UUID) -> String {
         appState.findWorktree(id: worktreeID).flatMap(LocalWorktree.init)?.path ?? ""
     }
 
@@ -484,7 +489,11 @@ struct SessionTranscriptView: View {
                             toggleActivityGroup: setActivityGroup,
                             appState: appState,
                             linkResolver: TranscriptLinkDestination.makeLinkResolver(
-                                worktreePath: historyWorktreePath, cache: historyLinkCache),
+                                worktreeRoot: { [appState, worktreeID] in
+                                    Self.historyWorktreePath(
+                                        in: appState, worktreeID: worktreeID)
+                                },
+                                cache: historyLinkCache),
                             onLinkClicked: { target in
                                 switch TranscriptLinkDestination.history(target) {
                                 case .revealInFinder(let path):

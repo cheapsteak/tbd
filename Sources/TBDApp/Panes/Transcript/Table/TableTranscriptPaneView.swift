@@ -66,7 +66,12 @@ struct TableTranscriptPaneView: View {
     /// Empty when the worktree row has not loaded — or when it is remote, which
     /// `LocalWorktree` rejects — which makes relative paths simply not resolve.
     /// Absolute ones still do.
-    private var worktreePath: String {
+    ///
+    /// `static` and taking its inputs explicitly so the link resolver can call
+    /// it from a closure that captures the `AppState` reference and the id,
+    /// rather than a copy of this view: the resolver outlives the struct
+    /// evaluation that built it, and the root has to be read live.
+    private static func worktreePath(in appState: AppState, worktreeID: UUID) -> String {
         appState.findWorktree(id: worktreeID).flatMap(LocalWorktree.init)?.path ?? ""
     }
 
@@ -212,7 +217,10 @@ struct TableTranscriptPaneView: View {
             toggleActivityGroup: setActivityGroup,
             appState: appState,
             linkResolver: TranscriptLinkDestination.makeLinkResolver(
-                worktreePath: worktreePath, cache: linkCache),
+                worktreeRoot: { [appState, worktreeID] in
+                    Self.worktreePath(in: appState, worktreeID: worktreeID)
+                },
+                cache: linkCache),
             onLinkClicked: openTranscriptLink
         )
         SessionWorkbenchView(

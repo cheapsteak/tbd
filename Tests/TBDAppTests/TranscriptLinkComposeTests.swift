@@ -165,10 +165,10 @@ struct TranscriptLinkComposeTests {
             calls.append(token)
             return token == "docs/a.md" ? "/w/docs/a.md" : nil
         }
-        #expect(cache.resolve("docs/a.md", using: underlying) == "/w/docs/a.md")
-        #expect(cache.resolve("docs/a.md", using: underlying) == "/w/docs/a.md")
-        #expect(cache.resolve("nope.md", using: underlying) == nil)
-        #expect(cache.resolve("nope.md", using: underlying) == nil)
+        #expect(cache.resolve("docs/a.md", root: "/w", using: underlying) == "/w/docs/a.md")
+        #expect(cache.resolve("docs/a.md", root: "/w", using: underlying) == "/w/docs/a.md")
+        #expect(cache.resolve("nope.md", root: "/w", using: underlying) == nil)
+        #expect(cache.resolve("nope.md", root: "/w", using: underlying) == nil)
         // A miss is memoized too: "names nothing" is the common answer and the
         // one worth not re-asking.
         #expect(calls == ["docs/a.md", "nope.md"])
@@ -184,10 +184,28 @@ struct TranscriptLinkComposeTests {
             calls.append(token)
             return "/w/foo.py"
         }
-        #expect(cache.resolve("foo.py:10", using: underlying) == "/w/foo.py")
-        #expect(cache.resolve("foo.py:42", using: underlying) == "/w/foo.py")
-        #expect(cache.resolve("foo.py:42:8", using: underlying) == "/w/foo.py")
-        #expect(cache.resolve("foo.py", using: underlying) == "/w/foo.py")
+        #expect(cache.resolve("foo.py:10", root: "/w", using: underlying) == "/w/foo.py")
+        #expect(cache.resolve("foo.py:42", root: "/w", using: underlying) == "/w/foo.py")
+        #expect(cache.resolve("foo.py:42:8", root: "/w", using: underlying) == "/w/foo.py")
+        #expect(cache.resolve("foo.py", root: "/w", using: underlying) == "/w/foo.py")
         #expect(calls == ["foo.py"])
+    }
+
+    // The memo is keyed on the token alone, so an answer computed against one
+    // worktree root is wrong for another — and a root that fills in after the
+    // worktree row loads is exactly that case. Changing the root drops the
+    // memo, so the token is re-asked instead of returning the stale miss.
+    @Test func resolverCache_reAsksWhenTheRootChanges() {
+        let cache = TranscriptLinkResolverCache()
+        var calls: [String] = []
+        func underlying(_ root: String) -> (String) -> String? {
+            { token in
+                calls.append(token)
+                return root.isEmpty ? nil : root + "/" + token
+            }
+        }
+        #expect(cache.resolve("a.md", root: "", using: underlying("")) == nil)
+        #expect(cache.resolve("a.md", root: "/w", using: underlying("/w")) == "/w/a.md")
+        #expect(calls == ["a.md", "a.md"])
     }
 }

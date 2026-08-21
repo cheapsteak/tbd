@@ -92,10 +92,17 @@ struct TranscriptLinkPaneRoutingTests {
         try body(root.path)
     }
 
+    /// A mutable stand-in for the pane's live `AppState` lookup.
+    @MainActor
+    private final class RootBox {
+        var value: String
+        init(_ value: String) { self.value = value }
+    }
+
     @Test func linkResolver_resolvesARelativeTokenUnderTheWorktree() throws {
         try withTempWorktree { root in
             let resolve = TranscriptLinkDestination.makeLinkResolver(
-                worktreePath: root, cache: TranscriptLinkResolverCache())
+                worktreeRoot: { root }, cache: TranscriptLinkResolverCache())
             #expect(resolve("a.md") == root + "/a.md")
         }
     }
@@ -105,7 +112,7 @@ struct TranscriptLinkPaneRoutingTests {
     @Test func linkResolver_withNoWorktreePath_failsRelativeTokens() throws {
         try withTempWorktree { _ in
             let resolve = TranscriptLinkDestination.makeLinkResolver(
-                worktreePath: "", cache: TranscriptLinkResolverCache())
+                worktreeRoot: { "" }, cache: TranscriptLinkResolverCache())
             #expect(resolve("a.md") == nil)
         }
     }
@@ -113,8 +120,25 @@ struct TranscriptLinkPaneRoutingTests {
     @Test func linkResolver_withNoWorktreePath_stillResolvesAbsoluteTokens() throws {
         try withTempWorktree { root in
             let resolve = TranscriptLinkDestination.makeLinkResolver(
-                worktreePath: "", cache: TranscriptLinkResolverCache())
+                worktreeRoot: { "" }, cache: TranscriptLinkResolverCache())
             #expect(resolve(root + "/a.md") == root + "/a.md")
+        }
+    }
+
+    // The pane's Coordinator captures its `TranscriptCardContext` ONCE, so a
+    // resolver built from a snapshot of the root would keep whatever the root
+    // was at first evaluation. A restored panel layout evaluates before the
+    // worktree-list RPC lands, so that snapshot is "" and every relative token
+    // in the pane stays plain text for its whole life. Reading the root per
+    // resolve is what lets the late row recover.
+    @Test func linkResolver_recoversWhenTheWorktreeRootArrivesLate() throws {
+        try withTempWorktree { root in
+            let box = RootBox("")
+            let resolve = TranscriptLinkDestination.makeLinkResolver(
+                worktreeRoot: { box.value }, cache: TranscriptLinkResolverCache())
+            #expect(resolve("a.md") == nil)
+            box.value = root
+            #expect(resolve("a.md") == root + "/a.md")
         }
     }
 }

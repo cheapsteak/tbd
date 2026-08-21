@@ -46,25 +46,29 @@ enum TranscriptLinkDestination {
     /// The resolver a pane hands to the compose step: the shared path rules,
     /// bound to this pane's worktree root and memoized per pane.
     ///
-    /// `worktreePath` is a VALUE snapshot, frozen for the life of the pane's
-    /// table: `TableTranscriptView.makeCoordinator` captures the whole
-    /// `TranscriptCardContext` once, and `updateNSView` never hands the
-    /// coordinator a fresher one. It is safe because the two views that build
-    /// this resolver — `TableTranscriptPaneView` and `HistoryPaneView` — are
-    /// each constructed with the worktree they render, so the row is already
-    /// present on the first evaluation. An empty root means the worktree is
-    /// remote or archived, and both are permanent rather than transient.
-    /// A root that started empty and filled in later
-    /// would NOT recover: every relative token would resolve to nil against
-    /// the empty root and the miss would be memoized in a cache nothing
-    /// invalidates, leaving relative paths plain text for the pane's life.
+    /// `worktreeRoot` is read on EVERY resolve, not snapshotted. The pane's
+    /// `TranscriptCardContext` is captured once by
+    /// `TableTranscriptView.makeCoordinator` and never reassigned, so a
+    /// snapshot taken at first evaluation is the root for the pane's whole
+    /// life — and a pane restored with the panel layout evaluates before the
+    /// worktree-list RPC lands, where that root is "". Reading it live lets
+    /// the late row take effect; `TranscriptLinkResolverCache` drops its memo
+    /// when the root changes, so answers computed against the old root are not
+    /// handed out under the new one.
+    ///
+    /// An empty root is still an ordinary answer rather than an error: a
+    /// remote or archived worktree has no local path, and relative tokens
+    /// simply do not resolve there. Absolute ones do either way.
     @MainActor
     static func makeLinkResolver(
-        worktreePath: String,
+        worktreeRoot: @escaping @MainActor () -> String,
         cache: TranscriptLinkResolverCache
     ) -> TranscriptPathResolver {
         { token in
-            cache.resolve(token) { ClickedPathResolver.resolve($0, worktreePath: worktreePath) }
+            let root = worktreeRoot()
+            return cache.resolve(token, root: root) {
+                ClickedPathResolver.resolve($0, worktreePath: root)
+            }
         }
     }
 }
