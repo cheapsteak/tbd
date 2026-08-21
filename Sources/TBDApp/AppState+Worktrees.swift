@@ -233,6 +233,13 @@ extension AppState {
     /// on `worktree.create`: it may be sent long after creation finished, and
     /// creation must never wait for it. Blank text parks nothing — that is the
     /// same outcome as dismissing the sheet.
+    ///
+    /// **Nothing that fails here may swallow what the operator wrote.** The
+    /// modal is gone by the time any of these answers arrives, and there is no
+    /// draft store behind it — an alert alone would leave a message that exists
+    /// nowhere. So every path that ends without the text parked puts it on the
+    /// pasteboard first and says so, which is the same recovery the read-back's
+    /// Copy offers for text that was parked and cannot be delivered.
     func submitQueuedPrompt(_ target: QueuedPromptTarget, text: String, submit: Bool) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -243,19 +250,37 @@ extension AppState {
                 // the prompt silently; the text is still on screen behind the
                 // alert only if the sheet is up, so name what happened.
                 logger.error("Queued prompt not sent: worktree creation failed")
-                showAlert("Worktree creation failed — your first message was not sent.", isError: true)
+                keepUnqueuedFirstMessage(
+                    trimmed,
+                    "Worktree creation failed — your first message was not sent.")
             case .created(let worktreeID):
                 do {
                     let result = try await pendingPromptSetter(worktreeID, trimmed, submit)
                     if case .refused(let reason) = result {
-                        showAlert("First message was not queued: \(reason)", isError: true)
+                        keepUnqueuedFirstMessage(
+                            trimmed, "First message was not queued: \(reason)")
                     }
                 } catch {
                     logger.error("Failed to queue prompt: \(error, privacy: .public)")
-                    showAlert("Failed to queue your first message: \(error.localizedDescription)", isError: true)
+                    keepUnqueuedFirstMessage(
+                        trimmed,
+                        "Failed to queue your first message: \(error.localizedDescription)")
                 }
             }
         }
+    }
+
+    /// Hand a composed first message back to the operator after it failed to
+    /// park, and tell them where it went.
+    ///
+    /// The pasteboard because it is the one place text can be put that survives
+    /// the alert, needs no new surface, and is where they would paste from
+    /// anyway. `reason` is a sentence — the alert appends where the text is, so
+    /// the two facts arrive together and neither can be shown without the
+    /// other.
+    private func keepUnqueuedFirstMessage(_ text: String, _ reason: String) {
+        pasteboardWriter(text)
+        showAlert("\(reason) It has been copied to your clipboard.", isError: true)
     }
 
     /// Close whichever prompt sheet is on screen — the write half of the single

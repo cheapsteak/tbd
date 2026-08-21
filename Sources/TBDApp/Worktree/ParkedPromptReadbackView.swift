@@ -78,22 +78,22 @@ struct ParkedPromptReadback: Identifiable, Equatable {
     /// Whether this worktree's primary terminal is a plain shell — one of the
     /// spec's named undeliverable causes, and the one the app can see.
     ///
-    /// Mirrors the daemon's `PendingPromptCoordinator.primaryAgentTerminal`:
-    /// terminals list oldest-first and the primary is created before the setup
-    /// tab, so "no agent-kind terminal at all" is "the primary is a shell".
-    /// The distinction matters because `park` answers `.parkedForSpawn` in both
-    /// this case and the pre-spawn one, and only the pre-spawn one is a promise
-    /// that can be kept — here the spawn has already happened and no later one
-    /// is coming.
+    /// Both halves are `PrimaryTerminal`'s, which is also what the daemon's
+    /// `park` decides on: there is no agent-kind row, AND no spawn is still
+    /// coming that could produce one. Asking the second half is what keeps the
+    /// app from calling a message undeliverable while the daemon is holding it
+    /// for a spawn — the two would then be describing the same text in
+    /// opposite terms.
     ///
-    /// An EMPTY list is not a shell primary: nothing has spawned yet (or the
-    /// app has not loaded this worktree's terminals), which is exactly the case
-    /// where a parked prompt still rides the next spawn's argv. The ambiguity
-    /// resolves toward offering delivery, because being wrong that way costs a
-    /// re-park and being wrong the other way withholds a working action.
+    /// A worktree whose only row is the blocking `preSession` hook's tab, and
+    /// one with no rows at all, are therefore NOT a shell primary: both have
+    /// their primary agent still ahead of them, and a prompt parked now reaches
+    /// it. The residual ambiguity — terminals the app has not loaded — resolves
+    /// toward offering delivery, because being wrong that way costs a re-park
+    /// and being wrong the other way withholds a working action.
     static func primaryIsPlainShell(terminals: [Terminal]) -> Bool {
-        guard !terminals.isEmpty else { return false }
-        return !terminals.contains { ($0.kind ?? .shell) != .shell }
+        guard PrimaryTerminal.agent(in: terminals) == nil else { return false }
+        return !PrimaryTerminal.spawnIsStillComing(terminals: terminals)
     }
 }
 
@@ -145,6 +145,12 @@ enum ParkedPromptPhase: Equatable {
     /// cannot see reads as pending, which is both the truth most of the time
     /// and the failure mode worth having: a message described as still coming
     /// costs a glance, one described as failed costs trust.
+    ///
+    /// A worktree still waiting on its primary agent is pending — whether it
+    /// has no terminals yet or is sitting behind a blocking `preSession` hook,
+    /// which is the wait this feature exists for and the one where the pane
+    /// banner has the most to say. `.undeliverable(.noAgent)` belongs only to a
+    /// worktree whose spawn already produced a shell.
     static func resolve(isArchived: Bool, terminals: [Terminal]) -> ParkedPromptPhase {
         if isArchived { return .undeliverable(.archived) }
         if ParkedPromptReadback.primaryIsPlainShell(terminals: terminals) {

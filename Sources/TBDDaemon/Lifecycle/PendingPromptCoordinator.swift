@@ -224,13 +224,17 @@ actor PendingPromptCoordinator {
         }
 
         // "Not yet" and "not ever" look the same from here, and only the first
-        // may answer `.parkedForSpawn`. A worktree whose terminals already
-        // exist has had its primary spawn: whatever it produced is not an
-        // agent, so there is nothing to park for.
+        // may answer `.parkedForSpawn`. `PrimaryTerminal.spawnIsStillComing` is
+        // what tells them apart: a worktree with no rows at all, or with none
+        // but the blocking `preSession` hook's tab, still has its primary spawn
+        // ahead of it. A worktree holding any other terminal has had that spawn
+        // already, and whatever it produced is not an agent — so there is
+        // nothing to park for, and saying so now is better than a promise the
+        // daemon cannot keep.
         let primary = await primaryAgentTerminal(worktreeID: worktreeID)
         if primary == nil {
             let terminals = (try? await db.terminals.list(worktreeID: worktreeID)) ?? []
-            guard terminals.isEmpty else {
+            guard PrimaryTerminal.spawnIsStillComing(terminals: terminals) else {
                 return .refused(reason: """
                     this worktree's primary terminal is not an agent, so a prompt cannot be \
                     delivered to it — nothing was parked.
@@ -646,11 +650,10 @@ actor PendingPromptCoordinator {
     }
 
     /// The worktree's primary agent terminal, or `nil` when none has spawned.
-    /// Terminals list oldest-first and `spawnPrimaryTerminals` creates the
-    /// primary before the setup tab, so the first agent-kind row is it.
+    /// The rule itself is `PrimaryTerminal.agent(in:)`, shared with the app so
+    /// the two cannot end up describing different rows as the primary.
     private func primaryAgentTerminal(worktreeID: UUID) async -> Terminal? {
-        let terminals = (try? await db.terminals.list(worktreeID: worktreeID)) ?? []
-        return terminals.first { ($0.kind ?? .shell) != .shell }
+        PrimaryTerminal.agent(in: (try? await db.terminals.list(worktreeID: worktreeID)) ?? [])
     }
 
     /// Records a daemon notification and broadcasts it — the pattern
