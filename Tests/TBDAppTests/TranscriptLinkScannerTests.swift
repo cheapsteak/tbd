@@ -58,6 +58,17 @@ struct TranscriptLinkScannerTests {
         #expect(tokens("at /w/CLAUDE.md:3:1 here") == ["/w/CLAUDE.md:3:1"])
     }
 
+    // Grep and compiler output paste `path:line:text` into code blocks. Widening
+    // through that second colon would swallow the first word of the matched line
+    // and link nothing, so a colon only extends the token when a digit follows it.
+    @Test func grepShapedToken_stopsAfterTheLineNumber() {
+        #expect(tokens("Sources/A.swift:17:let x = 1").first == "Sources/A.swift:17")
+    }
+
+    @Test func colonFollowedByProse_endsTheToken() {
+        #expect(tokens("see docs/a.md: the spec") == ["docs/a.md"])
+    }
+
     @Test func httpsURL_isFoundAndFlaggedAsURL() {
         #expect(tokens("go to https://example.com/x now") == ["https://example.com/x"])
         #expect(urlFlags("go to https://example.com/x now") == [true])
@@ -71,6 +82,13 @@ struct TranscriptLinkScannerTests {
 
     @Test func urlTrailingPeriod_isExcluded() {
         #expect(tokens("see https://example.com/x.") == ["https://example.com/x"])
+    }
+
+    // `!` and `?` are legal in a hostname, so leaving them attached sends the
+    // click to a host that does not exist.
+    @Test func urlTrailingBangOrQuestionMark_isExcluded() {
+        #expect(tokens("see https://example.com!") == ["https://example.com"])
+        #expect(tokens("have you seen https://example.com?") == ["https://example.com"])
     }
 
     @Test func urlIsNotSplitIntoPathCandidates() {

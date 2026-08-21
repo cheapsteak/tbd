@@ -32,8 +32,18 @@ enum TranscriptLinkScanner {
     private static let urlTerminators = CharacterSet.whitespacesAndNewlines
         .union(CharacterSet(charactersIn: "<>\"'`"))
 
-    private static let urlSchemes = ["https://", "http://"]
-    private static let fileScheme = "file://"
+    /// Scheme prefixes pre-split into scalars.
+    ///
+    /// `scan` tests these prefixes once per token start, on the main thread,
+    /// inside the cached compose path. Splitting a string literal into scalars
+    /// at each of those tests allocated an array per call for a constant
+    /// answer, so the split happens once here instead.
+    private static let urlSchemeScalars: [[Unicode.Scalar]] = [
+        Array("https://".unicodeScalars), Array("http://".unicodeScalars)
+    ]
+    private static let fileSchemeScalars: [[Unicode.Scalar]] = [
+        Array("file://".unicodeScalars)
+    ]
 
     static func scan(_ text: String) -> [TranscriptLinkCandidate] {
         if text.isEmpty { return [] }
@@ -52,19 +62,27 @@ enum TranscriptLinkScanner {
         while i < scalars.count {
             guard isTokenStart(scalars, i) else { i += 1; continue }
 
-            if let end = matchScheme(scalars, at: i, schemes: urlSchemes) {
+            if let end = matchScheme(scalars, at: i, schemes: urlSchemeScalars) {
                 appendCandidate(&out, scalars, utf16Offsets, i, end, isURL: true)
                 i = end
                 continue
             }
-            if let end = matchScheme(scalars, at: i, schemes: [fileScheme]) {
+            if let end = matchScheme(scalars, at: i, schemes: fileSchemeScalars) {
                 appendCandidate(&out, scalars, utf16Offsets, i, end, isURL: false)
                 i = end
                 continue
             }
 
             var end = i
-            while end < scalars.count, pathChars.contains(scalars[end]) { end += 1 }
+            while end < scalars.count, pathChars.contains(scalars[end]) {
+                // A colon extends the token only when a digit follows it, which
+                // is what separates a `:line:col` suffix from grep and compiler
+                // output. `Sources/A.swift:17:let x = 1` would otherwise widen
+                // to `Sources/A.swift:17:let` and resolve to nothing — and that
+                // paste is the shape the feature exists for.
+                if scalars[end] == ":", !isASCIIDigit(scalars, end + 1) { break }
+                end += 1
+            }
             // Shape-test the TRIMMED extent, not the raw one. `see CLAUDE.md.`
             // at the end of a sentence widens to `CLAUDE.md.`, whose extension
             // is empty, so testing the raw token would reject a bare filename
@@ -101,22 +119,28 @@ enum TranscriptLinkScanner {
     }
 
     private static func matchScheme(
-        _ scalars: [Unicode.Scalar], at i: Int, schemes: [String]
+        _ scalars: [Unicode.Scalar], at i: Int, schemes: [[Unicode.Scalar]]
     ) -> Int? {
         for scheme in schemes where hasPrefix(scalars, i, scheme) {
-            var end = i + scheme.unicodeScalars.count
+            var end = i + scheme.count
             while end < scalars.count, !urlTerminators.contains(scalars[end]) { end += 1 }
-            guard end > i + scheme.unicodeScalars.count else { return nil }
+            guard end > i + scheme.count else { return nil }
             return end
         }
         return nil
     }
 
-    private static func hasPrefix(_ scalars: [Unicode.Scalar], _ i: Int, _ s: String) -> Bool {
-        let p = Array(s.unicodeScalars)
-        guard i + p.count <= scalars.count else { return false }
-        for k in 0..<p.count where scalars[i + k] != p[k] { return false }
+    private static func hasPrefix(
+        _ scalars: [Unicode.Scalar], _ i: Int, _ prefix: [Unicode.Scalar]
+    ) -> Bool {
+        guard i + prefix.count <= scalars.count else { return false }
+        for k in 0..<prefix.count where scalars[i + k] != prefix[k] { return false }
         return true
+    }
+
+    private static func isASCIIDigit(_ scalars: [Unicode.Scalar], _ i: Int) -> Bool {
+        guard i < scalars.count else { return false }
+        return scalars[i] >= "0" && scalars[i] <= "9"
     }
 
     /// A bare word is only worth a `stat()` if it contains a `/` or ends in an
@@ -173,7 +197,10 @@ enum TranscriptLinkScanner {
                 e -= 1
                 continue
             }
-            guard ".,:;>\"'".unicodeScalars.contains(last) else { break }
+            // `!` and `?` are legal in a hostname, so a URL that ends a
+            // sentence otherwise carries the punctuation into the host and
+            // opens somewhere else entirely.
+            guard ".,:;>!?\"'".unicodeScalars.contains(last) else { break }
             e -= 1
         }
         return e
