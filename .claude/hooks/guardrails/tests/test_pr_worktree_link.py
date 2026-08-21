@@ -42,7 +42,7 @@ def _check(command, cwd=_IN_WORKTREE, worktree_id=None, tbd_home=_TBD_HOME):
 
 def _informs(testcase, command, **kwargs):
     decision = _check(command, **kwargs)
-    testcase.assertIsNotNone(decision, command)
+    assert decision is not None, command
     testcase.assertEqual(decision.action, "info", command)
     return decision
 
