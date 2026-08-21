@@ -15,9 +15,10 @@ Decision.info, which dispatch.py emits as non-blocking `additionalContext` — t
 command always proceeds.
 
 It stays silent when a clickable deep-link is already in the body the command is
-about to send — inline `--body`/`--description` text, a `--body-file` target it
-can read, or a heredoc body the command composes — and when the session is not
-under TBD at all, so a contributor working outside TBD never sees it. A link
+about to send — inline body text, a body-file target it can read, or a heredoc
+body the command composes — and when the session is not under TBD at all, so a
+contributor working outside TBD never sees it. Which flags carry that body is
+decided per CLI, in the spelling the matched tool actually uses. A link
 anywhere else in the invocation is not a body: a chained
 `git log --grep '…tbd/open/?worktree=…'`, or a body-file path that happens to
 spell `tbd/open/`, leaves the nudge armed.
@@ -63,11 +64,22 @@ _VALUE_TAKING_FLAGS = frozenset({"-R", "--repo", "--hostname"})
 # verb must match its own CLI: `gh mr create` and `glab pr create` are rejected.
 _FORGE_CREATE_PATHS = {"gh": ("pr", "create"), "glab": ("mr", "create")}
 
-# The flags whose value *is* the body text — gh's `--body`/`-b` and glab's
-# `--description`/`-d` — and the flags whose value names a file holding it.
-# Each is matched space-separated and `=`-joined.
-_BODY_TEXT_FLAGS = ("--body", "-b", "--description", "-d")
-_BODY_FILE_FLAGS = ("--body-file", "-F")
+# The flags whose value *is* the body text, and the flags whose value names a
+# file holding it, keyed by the CLI that spells them that way. Each is matched
+# space-separated and `=`-joined.
+#
+# The two CLIs get separate tables because the spellings collide rather than
+# compose: `-d` is glab's `--description`, while gh's `-d` is `--draft` — a
+# boolean that takes no value at all. Flattening these into one list makes the
+# word after `gh pr create -d` read as body text, so a draft PR whose title or
+# branch happens to spell a deep-link silences the nudge for a body that has
+# none. Keep them apart.
+#
+# glab has no body-file entry: it is a real spelling gap only if verified, and
+# an invented one reads the wrong word out of the segment the same way a shared
+# `-d` does.
+_BODY_TEXT_FLAGS = {"gh": ("--body", "-b"), "glab": ("--description", "-d")}
+_BODY_FILE_FLAGS = {"gh": ("--body-file", "-F"), "glab": ()}
 
 # Cap on how much of a body file is scanned. The hook runs in front of every
 # Bash call, so it must not read an arbitrarily large file into memory.
@@ -273,23 +285,30 @@ def _command_segments(command: str) -> list:
     return segments
 
 
-def _is_forge_create_segment(words: list) -> bool:
-    """True when this segment invokes `gh pr create` or `glab mr create`.
+def _forge_create_tool(words: list):
+    """The forge CLI this segment runs a create on — `"gh"`, `"glab"`, or None.
 
     The command word may be a path (`/opt/homebrew/bin/gh`), and flags — plus
     the value of the flags that take one — are skipped while walking to the
-    subcommand path.
+    subcommand path. The verb must match its own CLI, so `gh mr create` and
+    `glab pr create` answer None.
+
+    Naming the tool rather than answering yes-or-no is what lets each segment's
+    body flags be read in its own CLI's spelling; the two spell them
+    incompatibly (see `_BODY_TEXT_FLAGS`).
     """
     if not words:
-        return False
+        return None
     command = words[0]
+    tool = None
     expected = None
-    for tool, path in _FORGE_CREATE_PATHS.items():
-        if command == tool or command.endswith("/" + tool):
+    for candidate, path in _FORGE_CREATE_PATHS.items():
+        if command == candidate or command.endswith("/" + candidate):
+            tool = candidate
             expected = path
             break
     if expected is None:
-        return False
+        return None
 
     subcommand: list = []
     index = 1
@@ -300,16 +319,21 @@ def _is_forge_create_segment(words: list) -> bool:
         else:
             subcommand.append(word)
             index += 1
-    return tuple(subcommand) == expected
+    return tool if tuple(subcommand) == expected else None
 
 
 def _forge_create_segments(command_text: str) -> list:
-    """Every segment of already-heredoc-stripped text that runs a forge create."""
-    return [
-        words
-        for words in _command_segments(command_text)
-        if _is_forge_create_segment(words)
-    ]
+    """Every forge create in already-heredoc-stripped text, as `(tool, words)`.
+
+    The tool travels with the words because the body flags to scan for depend
+    on which CLI the segment invokes.
+    """
+    pairs: list = []
+    for words in _command_segments(command_text):
+        tool = _forge_create_tool(words)
+        if tool is not None:
+            pairs.append((tool, words))
+    return pairs
 
 
 def _text_has_link(text: str) -> bool:
@@ -317,26 +341,33 @@ def _text_has_link(text: str) -> bool:
     return _LINK_PATTERN.search(text) is not None
 
 
-def _flag_values(words: list, flags: tuple) -> list:
-    """The values `flags` carry in one already-tokenized segment.
+def _last_flag_value(words: list, flags: tuple):
+    """The value the last occurrence of any of `flags` carries, or None.
+
+    Last wins because that is how `gh` and `glab` parse a flag given twice: the
+    final `--body` is the body they send and the earlier ones are discarded, so
+    reading any occurrence lets a link in a superseded body silence the nudge
+    for the body that actually ships. The spellings in one `flags` tuple are
+    aliases of a single flag, so it is the last occurrence across the tuple that
+    wins, not the last of each spelling.
 
     Tokenizing first is what makes `--body-file "/path with spaces.md"` and
     `--body-file="/path with spaces.md"` both resolve — a regex over the raw
     command truncates them at the first space. It is also what keeps the flag
     families apart: `--body-file=x` is not a `--body=` value.
     """
-    values: list = []
+    value = None
     for index, word in enumerate(words):
         if word in flags:
             if index + 1 < len(words):
-                values.append(words[index + 1])
+                value = words[index + 1]
             continue
         for flag in flags:
             prefix = flag + "="
             if word.startswith(prefix):
-                values.append(word[len(prefix):])
+                value = word[len(prefix):]
                 break
-    return values
+    return value
 
 
 def _file_has_link(path: str) -> bool:
@@ -379,23 +410,32 @@ def _file_has_link(path: str) -> bool:
 
 
 def _body_has_link(segments: list, heredoc_text: str) -> bool:
-    """True when the body these forge-create segments will send has the link.
+    """True when the body these `(tool, words)` segments will send has the link.
 
     Three places count, and only these three: the inline body text a segment
     carries, the contents of a body file it names, and the heredoc prose the
-    invocation composes. The last is not attributable to one segment — a body
-    heredoc'd into a file that does not exist yet is invisible both to the
-    tokenizer, which drops heredoc bodies, and to the file read, which finds
-    nothing on disk — so any heredoc body in the invocation counts as body
-    text. That is deliberately generous: this is an INFO nudge, and a swallowed
-    reminder beats one that fires at a body which already has the link.
+    invocation composes. The first two are read in the segment's own CLI's
+    spelling. The third is not attributable to one segment — a body heredoc'd
+    into a file that does not exist yet is invisible both to the tokenizer,
+    which drops heredoc bodies, and to the file read, which finds nothing on
+    disk — so any heredoc body in the invocation counts as body text. That is
+    deliberately generous: this is an INFO nudge, and a swallowed reminder beats
+    one that fires at a body which already has the link.
+
+    Each family contributes its last occurrence, matching how the CLIs resolve a
+    repeated flag. A segment naming both an inline body and a body file is not
+    disambiguated further: both CLIs reject that combination outright, so the
+    command opens nothing and there is no body for the nudge to be right or
+    wrong about.
     """
     if _text_has_link(heredoc_text):
         return True
-    for words in segments:
-        if any(_text_has_link(text) for text in _flag_values(words, _BODY_TEXT_FLAGS)):
+    for tool, words in segments:
+        text = _last_flag_value(words, _BODY_TEXT_FLAGS[tool])
+        if text is not None and _text_has_link(text):
             return True
-        if any(_file_has_link(path) for path in _flag_values(words, _BODY_FILE_FLAGS)):
+        path = _last_flag_value(words, _BODY_FILE_FLAGS[tool])
+        if path is not None and _file_has_link(path):
             return True
     return False
 

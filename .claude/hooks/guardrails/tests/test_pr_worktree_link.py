@@ -306,6 +306,59 @@ class PRWorktreeLinkTests(unittest.TestCase):
         _informs(self, "glab mr create --fill")
         _informs(self, "/opt/homebrew/bin/glab mr create --fill")
 
+    def test_informs_for_gh_draft_flag_carrying_a_link_shaped_word(self):
+        # `-d` is gh's `--draft`, a boolean that takes no value. The word after
+        # it is a separate argument, never the body — so a link there is not in
+        # the body gh will send, and the nudge must still fire.
+        _informs(self, f"gh pr create -d '{_LINK}'")
+        _informs(self, f"gh pr create --title x -d --body 'no link' {_LINK}")
+
+    def test_informs_when_gh_is_given_glabs_description_flag(self):
+        # `--description` is not a gh flag, so its value is not a gh body.
+        _informs(self, f"gh pr create --description '[wt]({_LINK})'")
+
+    def test_silent_for_glab_description_flags(self):
+        # glab spells the body `--description`/`-d`; both are body text there.
+        self.assertIsNone(_check(f"glab mr create --description '[wt]({_LINK})'"))
+        self.assertIsNone(_check(f"glab mr create -d '[wt]({_LINK})'"))
+        self.assertIsNone(_check(f"glab mr create --description='[wt]({_LINK})'"))
+
+    def test_informs_when_glab_is_given_ghs_body_flags(self):
+        # `--body`/`-b` are gh spellings; glab does not read a body from them.
+        _informs(self, f"glab mr create --body '[wt]({_LINK})'")
+        _informs(self, f"glab mr create -b '[wt]({_LINK})'")
+
+    def test_informs_when_glab_is_given_ghs_body_file_flags(self):
+        # No glab body-file spelling is claimed, so a gh-style file flag on glab
+        # names nothing the rule will read — even when the file has the link.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "body.md")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(f"[my-worktree]({_LINK})\n")
+            _informs(self, f"glab mr create --body-file {path}")
+            _informs(self, f"glab mr create -F {path}")
+
+    def test_repeated_body_text_flags_take_the_last(self):
+        # `gh`/`glab` send the final `--body`; an earlier one is discarded, so
+        # only the last occurrence can silence the nudge.
+        _informs(self, f"gh pr create --body '[wt]({_LINK})' --body 'no link here'")
+        self.assertIsNone(_check(f"gh pr create --body 'no link here' --body '[wt]({_LINK})'"))
+        # Spellings of one flag are aliases, so last-across-the-family wins.
+        _informs(self, f"gh pr create -b '[wt]({_LINK})' --body 'no link here'")
+        self.assertIsNone(_check(f"gh pr create --body 'no link here' -b '[wt]({_LINK})'"))
+        _informs(self, f"glab mr create -d '[wt]({_LINK})' --description 'no link here'")
+
+    def test_repeated_body_file_flags_take_the_last(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            linked = os.path.join(tmp, "linked.md")
+            with open(linked, "w", encoding="utf-8") as handle:
+                handle.write(f"[my-worktree]({_LINK})\n")
+            bare = os.path.join(tmp, "bare.md")
+            with open(bare, "w", encoding="utf-8") as handle:
+                handle.write("No link here.\n")
+            _informs(self, f"gh pr create --body-file {linked} --body-file {bare}")
+            self.assertIsNone(_check(f"gh pr create --body-file {bare} --body-file {linked}"))
+
     def test_silent_when_the_verb_belongs_to_the_other_cli(self):
         self.assertIsNone(_check("gh mr create"))
         self.assertIsNone(_check("glab pr create"))
@@ -324,6 +377,9 @@ class PRWorktreeLinkTests(unittest.TestCase):
             f"gh pr create --body 'has {_LINK}'",
             "gh pr create --body 'has tbd://open?worktree=abc'",
             "gh pr create --body-file /nonexistent/x.md",
+            f"gh pr create -d '{_LINK}'",
+            f"glab mr create -d '{_LINK}'",
+            f"gh pr create --body '{_LINK}' --body 'no link'",
             "/opt/homebrew/bin/gh pr create",
             "cat <<'EOF' > x.md\ngh pr create\nEOF",
             "gh pr list",
