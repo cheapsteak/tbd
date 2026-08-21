@@ -30,9 +30,33 @@ spell `tbd/open/`, leaves the nudge armed.
 for the PR-binding hook and carries the rationale for each defense. The Swift
 side cannot be called from a stdlib-only Python hook, so its tokenizer is
 mirrored here instead; keep the two in step when either changes. The mirror is
-close but not literal: this tokenizer collapses a backslash-newline line
-continuation (see `_command_segments`), which widens what it matches and never
-narrows it, so it recognizes every invocation the Swift side does.
+close but not literal, in two places: it collapses a backslash-newline line
+continuation, and it gives a `$(…)` command substitution its own quoting
+context. Neither costs it a real invocation. The first is pure widening: it
+recognizes every invocation the Swift side does, and some it splits across
+lines. The second changes only what counts as *text* — where a body ends and
+where a word ends — and the one detection it moves is in the correct direction:
+a `gh pr create` *mentioned* in a heredoc body composed as `"$(cat <<'EOF'` is
+stripped as the prose it is, where the Swift side still reads it as command
+lines.
+
+That second one is what carries `--body "$(cat <<'EOF'` — the repo's own
+recommended way of composing a PR body, and a shape where treating the
+substitution as ordinary double-quoted content is wrong twice over. The `<<`
+goes unseen, so the body is parsed as command lines rather than stripped as
+prose; and the first literal `"` inside the body reads as the close of the
+enclosing quote, so the next space flushes a truncated fragment as the value of
+`--body`. Both scanners therefore track `$(` nesting depth and start each
+substitution with fresh quote state: `_heredoc_openers` to find the opener,
+`_command_segments` to keep the substitution inside one word. A quoted phrase or
+an error message in a PR body is entirely ordinary, so this is not an exotic
+case.
+
+Depth tracking is as far as the fidelity goes. `$(` is still read as a
+substitution wherever single quotes do not cover it, backticks are not a
+substitution at all, and an unbalanced `$(` swallows the rest of the command
+into one word — the fail-closed direction, which costs at most a nudge that does
+not fire.
 
 Matching the phrase rather than tokenizing is wrong in both directions, which is
 what the tokenizer's length buys back. A `gh pr create` inside a heredoc body is
@@ -86,8 +110,11 @@ _FORGE_CREATE_PATHS = {"gh": ("pr", "create"), "glab": ("mr", "create")}
 _BODY_TEXT_FLAGS = {"gh": ("--body", "-b"), "glab": ("--description", "-d")}
 _BODY_FILE_FLAGS = {"gh": ("--body-file", "-F"), "glab": ()}
 
-# Cap on how much of a body file is scanned. The hook runs in front of every
-# Bash call, so it must not read an arbitrarily large file into memory.
+# Cap on each of the two windows `_file_has_link` reads out of a body file. It
+# is a bound and nothing more: the hook runs in front of every Bash call and
+# blocks it while it runs, so a `--body-file` naming something huge must not be
+# able to make it read the whole thing. Two windows are read, so the worst case
+# is twice this. No claim about any forge's own body-length limit is intended.
 _MAX_BODY_BYTES = 64 * 1024
 
 # What counts as the deep-link already being in the body: an http(s) URL whose
@@ -135,24 +162,42 @@ def _heredoc_openers(line: str) -> list:
     string opens nothing, and the delimiter word is unquoted the way the shell
     unquotes it — `<<'EOF'`, `<<"EOF"` and `<<EOF` all end at a line reading
     `EOF`. `<<<` is a here-string: one word of data on the same line, no body.
+
+    A `$(…)` command substitution is its own quoting context (see the module
+    docstring), which is what makes the repo's own recommended way of composing
+    a PR body work: on `--body "$(cat <<'EOF'` the `<<` sits inside the
+    enclosing double quotes, and reading it as quoted string content would leave
+    the opener unseen and the whole body parsed as command lines.
     """
     openers: list = []
     index = 0
     count = len(line)
     quote = None
+    suspended_quotes: list = []
 
     while index < count:
         character = line[index]
-        if quote is not None:
-            if character == "\\" and quote == '"':
-                index += 2
-                continue
-            if character == quote:
+        if quote == "'":  # a backslash is an ordinary character in single quotes
+            if character == "'":
                 quote = None
             index += 1
             continue
         if character == "\\":
             index += 2
+            continue
+        if character == "$" and line[index + 1 : index + 2] == "(":
+            suspended_quotes.append(quote)
+            quote = None
+            index += 2
+            continue
+        if character == ")" and quote is None and suspended_quotes:
+            quote = suspended_quotes.pop()
+            index += 1
+            continue
+        if quote is not None:
+            if character == quote:
+                quote = None
+            index += 1
             continue
         if character in ("'", '"'):
             quote = character
@@ -260,33 +305,69 @@ def _command_segments(command: str) -> list:
     collapses unquoted and inside double quotes, which is where the shell
     treats it as a continuation, and stays literal inside single quotes, where
     a backslash is an ordinary character.
+
+    A `$(…)` command substitution is its own quoting context (see the module
+    docstring), and everything between its parentheses stays part of the word
+    being built — a substitution is one syntactic unit, so neither the spaces
+    nor the separators inside it may break the word or the segment. The
+    alternative is worse in the direction that matters: reading a literal `"`
+    inside the substitution as the close of the enclosing double quote leaves
+    the next space flushing a truncated, link-less fragment as the body's value,
+    and the nudge fires at a body that already carries the link.
     """
     segments: list = []
     words: list = []
     word = ""
     word_started = False
     quote = None
-    escaped = False
+    suspended_quotes: list = []
+    index = 0
+    count = len(command)
 
-    for character in command:
-        if escaped:
-            if character != "\n":  # a backslash-newline pair is a continuation
-                word += character
+    while index < count:
+        character = command[index]
+        following = command[index + 1 : index + 2]
+
+        if character == "\\" and quote != "'":
+            if following == "\n":  # a backslash-newline pair is a continuation
+                index += 2
+                continue
+            if following:
+                word += following
                 word_started = True
-            escaped = False
-        elif quote is not None:
+                index += 2
+                continue
+            index += 1
+            continue
+
+        if character == "$" and following == "(" and quote != "'":
+            suspended_quotes.append(quote)
+            quote = None
+            word += "$("
+            word_started = True
+            index += 2
+            continue
+
+        if character == ")" and quote is None and suspended_quotes:
+            quote = suspended_quotes.pop()
+            word += ")"
+            word_started = True
+            index += 1
+            continue
+
+        index += 1
+        if quote is not None:
             if character == quote:
                 quote = None  # the word stays open
-            elif quote == '"' and character == "\\":
-                escaped = True
             else:
                 word += character
                 word_started = True
-        elif character == "\\":
-            escaped = True
         elif character in ("'", '"'):
             quote = character
             word_started = True  # `""` is an empty word
+        elif suspended_quotes:  # a substitution is one unit, spaces and all
+            word += character
+            word_started = True
         elif character in _SEGMENT_SEPARATORS:
             if word_started:
                 words.append(word)
@@ -403,34 +484,49 @@ def _file_has_link(path: str) -> bool:
     from shell expansion) returns False, so the nudge fires. Informational
     output is harmless when wrong; a swallowed reminder is the worse failure.
 
-    Only regular files are read, and only the first `_MAX_BODY_BYTES` of one.
+    Only regular files are read, and only two `_MAX_BODY_BYTES` windows of one.
     This hook runs in front of every Bash call and blocks it while it runs, so
     it must never read something that can hang (a fifo, `/dev/stdin`) or that is
     unbounded (`/dev/zero`). The kind is decided from the *descriptor*, after
     opening: a path inspected first and opened second describes two different
     objects if anything swaps the name in between, and `O_NONBLOCK` is what
     keeps that open from parking on a fifo that has no writer. The descriptor is
-    closed on every exit. One `read` of the cap is the whole scan: a regular
-    file hands back everything up to it in a single call, and a short one only
-    ever narrows the window, which costs a nudge that fires anyway.
+    closed on every exit. One `read` per window is the whole scan: a regular
+    file hands back everything up to the cap in a single call, and a short one
+    only ever narrows the window, which costs a nudge that fires anyway.
+
+    The two windows are the head and the tail, and the tail is the one the
+    convention needs: the recipe this rule teaches puts the deep-link on the
+    body's **last** line, so a head-only read calls every body longer than the
+    cap unlinked no matter how correctly it is linked. A file that fits inside
+    one window is covered by the head alone and the tail read is skipped.
+
+    A body over twice the cap has an unread middle, and a link that sits there —
+    or one straddling the boundary the tail read starts at — is not found. Both
+    fail toward the nudge, which is the harmless direction, and neither is where
+    the convention puts the link.
 
     The read is binary so the cap counts bytes: a text-mode read counts
     characters, which lets multi-byte UTF-8 pull in several times the cap. A
-    byte cap can land mid-character, and `errors="replace"` turns the split
-    tail into a replacement character; every literal the pattern anchors on
-    (`https://`, `tbd/open/`, `worktree=`) is pure ASCII, and a replacement
-    character spells none of them, so a mangled trailing character can never
-    fabricate a match.
+    byte cap can land mid-character — as can a tail window opening mid-character
+    — and `errors="replace"` turns the split fragment into a replacement
+    character; every literal the pattern anchors on (`https://`, `tbd/open/`,
+    `worktree=`) is pure ASCII, and a replacement character spells none of them,
+    so a mangled edge character can never fabricate a match.
     """
     try:
         descriptor = os.open(os.path.expanduser(path), os.O_RDONLY | os.O_NONBLOCK)
         try:
-            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            status = os.fstat(descriptor)
+            if not stat.S_ISREG(status.st_mode):
                 return False
-            head = os.read(descriptor, _MAX_BODY_BYTES)
+            windows = [os.read(descriptor, _MAX_BODY_BYTES)]
+            if status.st_size > len(windows[0]):
+                tail_offset = max(0, status.st_size - _MAX_BODY_BYTES)
+                windows.append(os.pread(descriptor, _MAX_BODY_BYTES, tail_offset))
         finally:
             os.close(descriptor)
-        return _text_has_link(head.decode("utf-8", errors="replace"))
+        return any(_text_has_link(w.decode("utf-8", errors="replace")) for w in windows)
     except Exception:
         return False
 

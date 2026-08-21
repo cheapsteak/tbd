@@ -128,6 +128,118 @@ class PRWorktreeLinkTests(unittest.TestCase):
         )
         _informs(self, command)
 
+    def test_silent_when_a_heredoc_body_quotes_a_phrase_before_the_link(self):
+        # A PR body that quotes an error message before its closing deep-link is
+        # entirely ordinary, and this heredoc shape is the repo's own recommended
+        # way of composing one. The embedded `"` must not read as the close of
+        # the `--body "` span, and the `<<` inside that span must still be seen.
+        command = (
+            "gh pr create --title x --body \"$(cat <<'EOF'\n"
+            'It failed with "no such file" here\n'
+            "\n"
+            f"[my-worktree]({_LINK})\n"
+            "EOF\n"
+            ')"'
+        )
+        self.assertIsNone(_check(command))
+
+    def test_informs_when_a_quoting_heredoc_body_carries_no_link(self):
+        # Discriminates the branch above: the same embedded `"` with no link in
+        # the body must still nudge, so the fix is not just going silent on
+        # everything that quotes something.
+        command = (
+            "gh pr create --title x --body \"$(cat <<'EOF'\n"
+            'It failed with "no such file" here\n'
+            "\n"
+            "Nothing to see.\n"
+            "EOF\n"
+            ')"'
+        )
+        _informs(self, command)
+
+    def test_silent_when_a_command_substitution_in_the_body_contains_quotes(self):
+        # Same defect one layer down, with no heredoc to strip: a literal `"`
+        # inside `$(…)` closed the enclosing span, and the next space flushed a
+        # truncated, link-less fragment as the value of `--body`.
+        self.assertIsNone(_check(f'gh pr create --body "$(echo "a b") [wt]({_LINK})"'))
+        self.assertIsNone(
+            _check(f'gh pr create --body "$(git log -1 --format="%s") [wt]({_LINK})"')
+        )
+
+    def test_informs_when_a_quoting_substitution_body_carries_no_link(self):
+        # Discriminates the branch above.
+        _informs(self, 'gh pr create --body "$(echo "a b") no link here"')
+
+    def test_a_substitution_stays_one_word_and_one_segment(self):
+        # Separators and spaces inside `$(…)` belong to the substitution, so
+        # they may neither split the body word nor manufacture a segment: the
+        # link after the substitution is still part of `--body`'s value.
+        self.assertIsNone(_check(f'gh pr create --body "$(a && b; c | d) [wt]({_LINK})"'))
+        # A `gh pr create` *inside* a substitution is not an invocation the rule
+        # judges — it is text this command builds.
+        self.assertIsNone(_check('echo "$(gh pr create --fill)"'))
+
+    def test_a_closed_substitution_releases_the_rest_of_the_command(self):
+        # The other half of "one unit": once `)` closes the substitution, the
+        # separators after it must cut segments again. A substitution that never
+        # closes swallows the create that follows it and the nudge never fires.
+        _informs(self, 'git commit -m "$(cat msg.txt)" && gh pr create --body "no link"')
+        self.assertIsNone(
+            _check(f'git commit -m "$(cat msg.txt)" && gh pr create --body "[wt]({_LINK})"')
+        )
+
+    def test_silent_when_an_unquoted_substitution_heredocs_the_link(self):
+        # The heredoc opener is found on a line where the enclosing quote is
+        # still open, so the body is stripped as prose. Left unstripped, this
+        # body's `(#1)` closes the substitution early and its newlines then cut
+        # the prose into segments, hiding the link from the body it belongs to.
+        command = (
+            "gh pr create --body $(cat <<'EOF'\n"
+            "Fixes (#1) done\n"
+            "\n"
+            f"[my-worktree]({_LINK})\n"
+            "EOF\n"
+            ")"
+        )
+        self.assertIsNone(_check(command))
+
+    def test_informs_when_an_unquoted_substitution_heredocs_no_link(self):
+        # Discriminates the branch above.
+        command = (
+            "gh pr create --body $(cat <<'EOF'\n"
+            "Fixes (#1) done\n"
+            "\n"
+            "Nothing to see.\n"
+            "EOF\n"
+            ")"
+        )
+        _informs(self, command)
+
+    def test_a_substitution_inside_single_quotes_is_literal(self):
+        # `$(` is not a substitution inside single quotes, so the `)` there must
+        # not be read as closing one — the body is the literal text.
+        self.assertIsNone(_check(f"gh pr create --body '$(echo hi) [wt]({_LINK})'"))
+        _informs(self, "gh pr create --body '$(echo hi) no link here'")
+        # An unclosed `$(` in single-quoted prose is literal text too.
+        self.assertIsNone(_check(f"gh pr create --body 'explains $( syntax [wt]({_LINK})'"))
+        _informs(self, "gh pr create --body 'explains $( syntax, no link'")
+
+    def test_a_quoted_mention_of_dollar_paren_swallows_nothing(self):
+        # A commit message or a PR body may talk *about* shell syntax. Read as a
+        # real substitution, this `$(` never closes, and everything after it —
+        # the `<<` beside it, the newline, the invocation on the next line —
+        # disappears into one word, taking the nudge with it.
+        bare = (
+            "git commit -m 'docs: explain $( and <<EOF quoting'\n"
+            "gh pr create --body 'no link'\n"
+        )
+        _informs(self, bare)
+        linked = (
+            "git commit -m 'docs: explain $( and <<EOF quoting'\n"
+            f"gh pr create --body '[wt]({_LINK})'\n"
+        )
+        self.assertIsNone(_check(linked))
+
     def test_informs_when_a_link_sits_outside_the_body(self):
         # A link elsewhere in the invocation is not the body: neither an
         # earlier segment's grep pattern nor a later segment's echo is text the
@@ -199,20 +311,51 @@ class PRWorktreeLinkTests(unittest.TestCase):
     def test_informs_when_body_file_is_unreadable(self):
         _informs(self, "gh pr create --body-file /nonexistent/definitely/not/here.md")
 
+    def test_silent_when_an_over_cap_body_file_carries_the_link_at_its_tail(self):
+        # The recipe this rule teaches puts the deep-link on the body's *last*
+        # line, so the tail window is the one the convention actually needs: a
+        # head-only read calls every body longer than the cap unlinked no matter
+        # how correctly it is linked.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "long-linked.md")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("x" * (_MAX_BODY_BYTES + 4096))
+                handle.write(f"\n\n[my-worktree]({_LINK})\n")
+            self.assertGreater(os.path.getsize(path), _MAX_BODY_BYTES)
+            self.assertIsNone(_check(f"gh pr create --body-file {path}"))
+
+    def test_informs_when_an_over_cap_body_file_carries_no_link(self):
+        # Discriminates the tail window: reading the tail must not make an
+        # over-cap body go silent on its own. The same file without the link
+        # must still nudge.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "long-bare.md")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("x" * (_MAX_BODY_BYTES + 4096))
+                handle.write("\n\nNo link anywhere in this body.\n")
+            self.assertGreater(os.path.getsize(path), _MAX_BODY_BYTES)
+            _informs(self, f"gh pr create --body-file {path}")
+
     def test_body_file_read_is_bounded(self):
-        # The hook blocks the Bash call while it runs, so it reads a capped
-        # prefix. A link past the cap is not seen, and the nudge still fires.
+        # The hook blocks the Bash call while it runs, so it reads two capped
+        # windows and never the whole file. This body is over twice the cap with
+        # its link in the middle, so it falls in the gap the two windows leave;
+        # the nudge still fires.
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "huge.md")
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write("x" * (_MAX_BODY_BYTES + 4096))
                 handle.write(f"\n[my-worktree]({_LINK})\n")
+                handle.write("y" * (_MAX_BODY_BYTES + 4096))
+            self.assertGreater(os.path.getsize(path), 2 * _MAX_BODY_BYTES)
             _informs(self, f"gh pr create --body-file {path}")
 
     def test_body_file_read_is_bounded_in_bytes_not_characters(self):
         # The cap is a byte cap. This body's link sits past the cap in bytes but
-        # well inside it in characters, so a character-counting read would see
-        # the link and go silent; the byte-counting read must still nudge.
+        # well inside it in characters, so a character-counting head read would
+        # see the link and go silent; the byte-counting read must still nudge.
+        # The trailing filler is over a full cap wide, so the tail window starts
+        # past the link and cannot rescue it either.
         filler_characters = (_MAX_BODY_BYTES // 3) + 4096  # 3-byte characters
         self.assertLess(filler_characters, _MAX_BODY_BYTES)
         self.assertGreater(filler_characters * 3, _MAX_BODY_BYTES)
@@ -221,6 +364,7 @@ class PRWorktreeLinkTests(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write("あ" * filler_characters)
                 handle.write(f"\n[my-worktree]({_LINK})\n")
+                handle.write("y" * (_MAX_BODY_BYTES + 4096))
             self.assertGreater(os.path.getsize(path), _MAX_BODY_BYTES)
             _informs(self, f"gh pr create --body-file {path}")
 
@@ -394,6 +538,47 @@ class PRWorktreeLinkTests(unittest.TestCase):
         )
         self.assertIsNone(_check(command))
 
+    def test_a_substituted_heredoc_body_reaches_the_invocation_wide_leg(self):
+        # The body composed by `--body "$(cat <<'EOF'` is heredoc prose, and it
+        # is judged as such: it reaches the heredoc leg, which is deliberately
+        # invocation-wide, so it covers the second create the same way a
+        # heredoc'd body file does. Read as quoted string content instead, this
+        # body would be attributed to its own segment alone.
+        linked = (
+            "gh pr create --body \"$(cat <<'EOF'\n"
+            f"[my-worktree]({_LINK})\n"
+            "EOF\n"
+            ")\" && gh pr create --body 'no link'"
+        )
+        self.assertIsNone(_check(linked))
+        bare = (
+            "gh pr create --body \"$(cat <<'EOF'\n"
+            "no link\n"
+            "EOF\n"
+            ")\" && gh pr create --body 'no link'"
+        )
+        _informs(self, bare)
+
+    def test_silent_when_an_opener_follows_a_closed_substitution(self):
+        # The quote a `$(…)` suspends has to come back when the substitution
+        # closes: the `"` ending this redirect target is a *closing* quote, and
+        # reading it as an opening one hides the `<<` that follows and spills
+        # the body into the command lines.
+        linked = (
+            "cat > \"$(dirname /tmp/x)/body.md\" <<'EOF'\n"
+            f"[my-worktree]({_LINK})\n"
+            "EOF\n"
+            "gh pr create --body-file /tmp/x/body.md\n"
+        )
+        self.assertIsNone(_check(linked))
+        bare = (
+            "cat > \"$(dirname /tmp/x)/body.md\" <<'EOF'\n"
+            "no link\n"
+            "EOF\n"
+            "gh pr create --body-file /tmp/x/body.md\n"
+        )
+        _informs(self, bare)
+
     def test_informs_for_a_path_qualified_gh(self):
         # Homebrew's `gh` is regularly invoked by absolute path in this repo.
         _informs(self, "/opt/homebrew/bin/gh pr create --fill")
@@ -478,6 +663,10 @@ class PRWorktreeLinkTests(unittest.TestCase):
             f"gh pr create --body '{_LINK}' --body 'no link'",
             "/opt/homebrew/bin/gh pr create",
             "cat <<'EOF' > x.md\ngh pr create\nEOF",
+            "gh pr create --body \"$(cat <<'EOF'\nsaid \"no\"\nEOF\n)\"",
+            f"gh pr create --body \"$(cat <<'EOF'\nsaid \"no\"\n[wt]({_LINK})\nEOF\n)\"",
+            f'gh pr create --body "$(echo "a b") [wt]({_LINK})"',
+            "gh pr create --body 'explains $( syntax'",
             "gh pr \\\ncreate --body 'no link'",
             f"gh pr create --body '{_LINK}' && gh pr create --body 'no link'",
             "gh pr list",
