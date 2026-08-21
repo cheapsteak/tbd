@@ -11,11 +11,21 @@ private let reaperLogger = Logger(subsystem: "com.tbd.app", category: "childReap
 /// `LocalProcessDelegate.processTerminated` callback; `wasObserved` gates the
 /// teardown reap, both on the main queue and again on the reaper thread.
 ///
-/// Serialization note. The *writer* side: `LocalProcess.init` defaults its
-/// `dispatchQueue` to `DispatchQueue.main`, neither TBD call site passes one,
-/// and the `DispatchSourceProcess` is created with `queue: dispatchQueue`, so
-/// the monitor handler and the delegate callback that calls `record()` run on
-/// the main queue. The *reader* side: both `cleanup()` implementations are
+/// Serialization note. The *writer* side runs on main for TWO independent
+/// reasons, and both must be kept in mind. First: `LocalProcess.init` defaults
+/// its `dispatchQueue` to `DispatchQueue.main`, neither TBD call site passes
+/// one, and the `DispatchSourceProcess` is created with `queue: dispatchQueue`.
+/// Second, since upstream `1c3f353`: `setEventHandler` is now armed BEFORE
+/// `activate()`, and upstream documents that `activate()` can invoke the
+/// handler SYNCHRONOUSLY for an already-exited child — on that path the handler
+/// runs on the activating thread rather than being dispatched to
+/// `dispatchQueue`. That is still main here, because both call sites start the
+/// process from main-isolated code — `TerminalPanelRepresentable.Coordinator`'s
+/// `startTmuxClient(terminalView:bridge:server:windowID:)` and
+/// `LocalPTYTerminalRepresentable.Coordinator.start(terminalView:argv:environment:)`,
+/// both `@MainActor` — so do not "simplify" either call site off the main
+/// actor without revisiting this. (Both `Coordinator`s are nested in the
+/// `NSViewRepresentable`, not in the `View`/file of the same name.) The *reader* side: both `cleanup()` implementations are
 /// `@MainActor`, so the compiler enforces it — this is a guarantee, not the
 /// `dismantleNSView` convention it used to rest on.
 ///

@@ -27,20 +27,35 @@ let package = Package(
         .package(url: "https://github.com/groue/GRDB.swift", from: "7.0.0"),
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
         .package(url: "https://github.com/apple/swift-nio", from: "2.65.0"),
-        // Pinned to a main-branch revision because the `fontSmoothing` public
-        // property (PR #531) hasn't shipped in a tagged release yet. Switch back
-        // to `from: "1.14.0"` (or whichever) once SwiftTerm cuts a release that
-        // includes commit dae32cc.
+        // Pinned to a main-branch revision for two reasons. The `fontSmoothing`
+        // public property (PR #531) still hasn't shipped in a tagged release.
+        // And the macOS CoreGraphics draw path needs `context.clear(dirtyRect)`
+        // (upstream d5ee56e / PR #582): SwiftTerm opts into PARTIAL backing-store
+        // updates (`disableFullRedrawOnAnyChanges` + `layer.contentsFormat =
+        // .RGBA8Uint`), so AppKit erases only on a full redraw and the draw path
+        // must erase the dirty region itself. Without that clear, any region the
+        // draw does not touch keeps the previous frame's glyphs — visible as
+        // stale text in default-background cells that a window resize wipes.
+        // Switch back to `from: "1.14.x"` only once a tagged release contains
+        // BOTH #531 and #582.
         //
-        // Re-verify `Sources/TBDApp/Terminal/ChildReaper.swift` on any bump:
-        // it exists because at this revision `LocalProcess` calls `waitpid`
-        // only from its `DispatchSourceProcess` (`.exit`) handler, and both
+        // RE-VERIFIED for 16c5286 (2026-08-18): ChildReaper STAYS, unchanged.
+        // Upstream main still calls `waitpid` from exactly one place — the
+        // `DispatchSourceProcess` handler (`LocalProcess.swift:368`) — and both
+        // `deinit` and `terminate()` are unchanged from dae32cc, so it does NOT
+        // reap its own children on the teardown paths TBD uses. `1c3f353` only
+        // fixes lost exit events for FAST-EXITING children, which is a different
+        // population from the 67 long-lived zombies of #611.
+        //
+        // Re-verify again on the next bump, because the reason ChildReaper
+        // exists is a property of the pinned revision: upstream reaps only
+        // from its `DispatchSourceProcess` (`.exit`) handler, and both
         // `deinit` and `terminate()` cancel that source before the child
         // actually exits — so TBD must reap the PTY child itself. If a later
         // revision reaps its own children, `ChildReaper` becomes a competing
         // waiter on a pid the OS may have recycled, which is worse than the
         // leak it fixes. Its doc comment names the exact lines to re-read.
-        .package(url: "https://github.com/migueldeicaza/SwiftTerm", revision: "dae32cc8f9bcda15713f4091bb2ea7e11f6dd57c"),
+        .package(url: "https://github.com/migueldeicaza/SwiftTerm", revision: "16c52867763121b121f3b29a4d439052e7e76034"),
         .package(url: "https://github.com/raspu/Highlightr", from: "2.2.1"),
         .package(url: "https://github.com/siteline/swiftui-introspect", from: "1.0.0"),
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.4.0"),
