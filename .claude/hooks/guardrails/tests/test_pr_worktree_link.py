@@ -59,9 +59,44 @@ class PRWorktreeLinkTests(unittest.TestCase):
     def test_silent_when_inline_body_already_has_link(self):
         self.assertIsNone(_check(f"gh pr create --body 'Summary\n\n[my-worktree]({_LINK})'"))
 
-    def test_silent_when_only_the_bare_scheme_is_in_the_body(self):
-        # `tbd link` prints the `tbd://` form; pasting that straight in counts.
-        self.assertIsNone(_check("gh pr create --body 'see tbd://open?worktree=abc'"))
+    def test_informs_when_only_the_bare_scheme_is_in_the_body(self):
+        # `tbd link` prints the `tbd://` form, and GitHub renders it as
+        # unclickable text — a body carrying only that has no link a reader can
+        # follow, which is precisely the case the nudge exists for. Pasting
+        # `tbd link`'s stdout straight in is the easiest way to get there.
+        _informs(self, "gh pr create --body 'see tbd://open?worktree=abc'")
+        _informs(self, "gh pr create --body 'see tbd://open?worktree=abc&terminal=def'")
+
+    def test_silent_when_the_body_carries_the_redirector_form(self):
+        # The https redirector is the clickable form, bare or with the
+        # `&terminal=<uuid>` anchor `tbd link --terminal` appends.
+        self.assertIsNone(_check(f"gh pr create --body 'Summary\n\n{_LINK}'"))
+        self.assertIsNone(_check(f"gh pr create --body 'Summary\n\n{_LINK}&terminal=def'"))
+
+    def test_silent_when_the_redirector_link_is_markdown_wrapped(self):
+        # The `)` that closes a markdown link must not break the match, and the
+        # `(` that opens it must not stop the URL from being found.
+        self.assertIsNone(_check(f"gh pr create --body 'see [my-worktree]({_LINK}) above'"))
+        self.assertIsNone(
+            _check(f"gh pr create --body 'see [my-worktree]({_LINK}&terminal=def) above'")
+        )
+
+    def test_silent_when_the_worktree_param_is_not_first(self):
+        # `worktree` is a query parameter wherever it sits in the query string,
+        # so a hand-ordered link with the terminal anchor first still counts.
+        link = "https://cheapsteak.github.io/tbd/open/?terminal=def&worktree=abc"
+        self.assertIsNone(_check(f"gh pr create --body '[my-worktree]({link})'"))
+
+    def test_silent_for_a_fork_hosted_redirector(self):
+        # The host is not part of the check, so a fork serving the redirector
+        # from its own Pages domain counts.
+        self.assertIsNone(
+            _check("gh pr create --body '[wt](https://someone.github.io/tbd/open/?worktree=abc)'")
+        )
+
+    def test_informs_when_the_worktree_param_is_missing(self):
+        # A redirector URL naming no worktree reopens nothing.
+        _informs(self, "gh pr create --body '[wt](https://cheapsteak.github.io/tbd/open/)'")
 
     def test_silent_when_link_is_inside_a_heredoc_body(self):
         command = (
@@ -85,13 +120,13 @@ class PRWorktreeLinkTests(unittest.TestCase):
         )
         _informs(self, command)
 
-    def test_informs_when_a_marker_sits_outside_the_body(self):
-        # A marker elsewhere in the invocation is not the body: neither an
+    def test_informs_when_a_link_sits_outside_the_body(self):
+        # A link elsewhere in the invocation is not the body: neither an
         # earlier segment's grep pattern nor a later segment's echo is text the
         # PR will carry.
         _informs(
             self,
-            'git log --oneline --grep "tbd://open?worktree=zzz" '
+            f'git log --oneline --grep "{_LINK}" '
             '&& gh pr create --title x --body "no link in this body at all"',
         )
         _informs(
@@ -100,8 +135,8 @@ class PRWorktreeLinkTests(unittest.TestCase):
             f'&& echo "opened from {_LINK}"',
         )
 
-    def test_informs_when_only_the_body_file_path_holds_a_marker(self):
-        # The marker must be in the file's contents, not in its name.
+    def test_informs_when_only_the_body_file_path_looks_like_the_redirector(self):
+        # The link must be in the file's contents, not in its name.
         with tempfile.TemporaryDirectory() as tmp:
             directory = os.path.join(tmp, "tbd", "open")
             os.makedirs(directory)
@@ -278,7 +313,8 @@ class PRWorktreeLinkTests(unittest.TestCase):
         commands = (
             "gh pr create",
             "glab mr create",
-            "gh pr create --body 'has ?worktree=abc'",
+            f"gh pr create --body 'has {_LINK}'",
+            "gh pr create --body 'has tbd://open?worktree=abc'",
             "gh pr create --body-file /nonexistent/x.md",
             "/opt/homebrew/bin/gh pr create",
             "cat <<'EOF' > x.md\ngh pr create\nEOF",

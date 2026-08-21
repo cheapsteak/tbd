@@ -2,21 +2,25 @@
 
 A PR opened from a TBD worktree — or a GitLab MR, which the rule treats the same
 way — should end its body with a link back to that worktree, so anyone reading it
-later can reopen the session that produced it. The recipe is not obvious: `tbd link` prints the `tbd://open?worktree=<uuid>`
-form, while a PR body needs the shareable https redirector
-(`Sources/TBDShared/DeepLinks.swift`), so the rule spells the whole thing out.
+later can reopen the session that produced it. The recipe is not obvious: `tbd
+link` prints the `tbd://open?worktree=<uuid>` form, while a PR body needs the
+shareable https redirector (`Sources/TBDShared/DeepLinks.swift`) — GitHub
+linkifies no scheme outside its http/https/mailto allowlist, so a raw `tbd://`
+URL lands in the page as unclickable text. The rule therefore spells the recipe
+out, and holds the body to the form a reader can actually click.
 
 This rule is INFORMATIONAL ONLY: it never denies. Blocking `gh pr create` over a
 missing courtesy link would be badly wrong. It only surfaces a reminder via
 Decision.info, which dispatch.py emits as non-blocking `additionalContext` — the
 command always proceeds.
 
-It stays silent when the link is already in the body the command is about to
-send — inline `--body`/`--description` text, a `--body-file` target it can read,
-or a heredoc body the command composes — and when the session is not under TBD
-at all, so a contributor working outside TBD never sees it. A marker anywhere
-else in the invocation is not a body: a chained `git log --grep '…?worktree=…'`,
-or a body-file path that happens to spell `tbd/open/`, leaves the nudge armed.
+It stays silent when a clickable deep-link is already in the body the command is
+about to send — inline `--body`/`--description` text, a `--body-file` target it
+can read, or a heredoc body the command composes — and when the session is not
+under TBD at all, so a contributor working outside TBD never sees it. A link
+anywhere else in the invocation is not a body: a chained
+`git log --grep '…tbd/open/?worktree=…'`, or a body-file path that happens to
+spell `tbd/open/`, leaves the nudge armed.
 
 **Detection is a port of `PRBindingExtractor.isPRCreateCommand`**
 (`Sources/TBDShared/PRBindingExtractor.swift`), which answers the same question
@@ -42,6 +46,7 @@ coverage.
 from __future__ import annotations
 
 import os
+import re
 import stat
 
 from guardrails.lib.rule import Decision, Rule
@@ -68,9 +73,26 @@ _BODY_FILE_FLAGS = ("--body-file", "-F")
 # Bash call, so it must not read an arbitrarily large file into memory.
 _MAX_BODY_BYTES = 64 * 1024
 
-# Any of these in the body text means the deep-link is already there: the raw
-# query fragment, the https redirector path, or the bare scheme.
-_LINK_MARKERS = ("?worktree=", "tbd/open/", "tbd://open")
+# What counts as the deep-link already being in the body: an http(s) URL whose
+# path reaches the redirector and whose query names a worktree. Each of the
+# three parts carries weight.
+#
+# - `https?://` is the only scheme GitHub will linkify. `tbd link` prints the
+#   `tbd://open?worktree=<uuid>` form, so pasting its stdout straight into a
+#   body is the easiest way to end up with a link nobody can click — the case
+#   the nudge exists for, and one it must not wave through.
+# - `tbd/open/` is the redirector path. The host is deliberately unmatched, so
+#   a fork serving the redirector from its own Pages domain counts too.
+# - `[?&]worktree=` is the parameter the redirector forwards. Requiring it as a
+#   query parameter of that URL, rather than as a bare substring of the text,
+#   is what keeps the `tbd://` form from qualifying — it spells `?worktree=`
+#   as well.
+#
+# `\S*` stays inside the URL's own whitespace-delimited word, and the match ends
+# at `worktree=`, so a markdown `[name](…)` wrapper neither extends it nor
+# breaks it, and the `&terminal=<uuid>` an anchored link appends is simply past
+# the end of the match.
+_LINK_PATTERN = re.compile(r"https?://\S*tbd/open/\S*[?&]worktree=")
 
 _MESSAGE = (
     "This PR (or MR) is being opened from a TBD worktree, so end its body with a "
@@ -79,6 +101,8 @@ _MESSAGE = (
     '`tbd link 2>/dev/null || tbd link "$(basename "$(git rev-parse --show-toplevel)")"`, '
     "take the `?worktree=<uuid>` portion, and make the final line of the body "
     "`[<worktree display name>](https://cheapsteak.github.io/tbd/open/?worktree=<uuid>)`. "
+    "The https redirector form is the one that matters: GitHub renders a raw "
+    "`tbd://…` URL as unclickable text, so `tbd link`'s own output is not enough. "
     "If `tbd link` fails, skip it silently. (This is informational — nothing is blocked.)"
 )
 
@@ -285,7 +309,8 @@ def _forge_create_segments(command_text: str) -> list:
 
 
 def _text_has_link(text: str) -> bool:
-    return any(marker in text for marker in _LINK_MARKERS)
+    """True when `text` carries a clickable worktree deep-link."""
+    return _LINK_PATTERN.search(text) is not None
 
 
 def _flag_values(words: list, flags: tuple) -> list:
@@ -331,8 +356,10 @@ def _file_has_link(path: str) -> bool:
     The read is binary so the cap counts bytes: a text-mode read counts
     characters, which lets multi-byte UTF-8 pull in several times the cap. A
     byte cap can land mid-character, and `errors="replace"` turns the split
-    tail into a replacement character; the link markers are pure ASCII, so a
-    mangled trailing character can never fabricate a match.
+    tail into a replacement character; every literal the pattern anchors on
+    (`https://`, `tbd/open/`, `worktree=`) is pure ASCII, and a replacement
+    character spells none of them, so a mangled trailing character can never
+    fabricate a match.
     """
     try:
         descriptor = os.open(os.path.expanduser(path), os.O_RDONLY | os.O_NONBLOCK)
