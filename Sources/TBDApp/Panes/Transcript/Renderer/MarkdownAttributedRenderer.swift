@@ -172,7 +172,8 @@ extension AttributedStringVisitor: @preconcurrency MarkupVisitor {
             string: c.code,
             attributes: [
                 .font: theme.inlineCodeFont,
-                .foregroundColor: theme.inlineCodeColor
+                .foregroundColor: theme.inlineCodeColor,
+                .tbdCodeContext: true
             ]
         )
     }
