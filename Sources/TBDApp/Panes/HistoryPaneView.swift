@@ -470,7 +470,8 @@ struct SessionTranscriptView: View {
                             terminalID: nil,
                             openTranscriptOverlay: openTranscriptItem,
                             toggleActivityGroup: setActivityGroup,
-                            appState: appState
+                            appState: appState,
+                            linkResolver: nil
                         ),
                         atBottom: $atBottom,
                         scrollToBottomToken: scrollToBottomToken,

@@ -9,16 +9,21 @@ struct TranscriptCardContext {
     let openTranscriptOverlay: (@MainActor (String) -> Void)?
     let toggleActivityGroup: (@MainActor (String, Bool) -> Void)?
     let appState: AppState?
+    /// Resolves a path token against the worktree root. Nil in contexts with no
+    /// worktree, where only web URLs become links.
+    let linkResolver: TranscriptPathResolver?
 
     init(
         terminalID: UUID?,
         openTranscriptOverlay: (@MainActor (String) -> Void)?,
         toggleActivityGroup: (@MainActor (String, Bool) -> Void)? = nil,
-        appState: AppState?
+        appState: AppState?,
+        linkResolver: TranscriptPathResolver?
     ) {
         self.terminalID = terminalID
         self.openTranscriptOverlay = openTranscriptOverlay
         self.toggleActivityGroup = toggleActivityGroup
         self.appState = appState
+        self.linkResolver = linkResolver
     }
 }

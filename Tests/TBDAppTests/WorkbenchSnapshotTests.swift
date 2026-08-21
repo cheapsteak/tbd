@@ -127,7 +127,8 @@ struct WorkbenchSnapshotTests {
             let context = TranscriptCardContext(
                 terminalID: nil,
                 openTranscriptOverlay: { _ in },
-                appState: appState
+                appState: appState,
+                linkResolver: nil
             )
             let tableCoordinator = self.buildTableCoordinator(
                 context: context,

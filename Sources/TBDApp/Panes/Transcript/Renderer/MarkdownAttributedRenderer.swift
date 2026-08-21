@@ -2,6 +2,17 @@ import AppKit
 import Markdown
 import SwiftUI
 
+/// Resolves a token from transcript text to an absolute file path, or nil when
+/// it names nothing. Supplied by the pane, which knows the worktree root.
+///
+/// `@MainActor` to match the closures `TranscriptCardContext` already carries
+/// (`openTranscriptOverlay`, `toggleActivityGroup`) and because the pane's
+/// implementation reads a main-actor memo. Declaring it here rather than
+/// letting inference decide pre-empts the Swift 6 diagnostic you would
+/// otherwise hit when a main-actor closure is passed to a non-isolated
+/// parameter.
+typealias TranscriptPathResolver = @MainActor (String) -> String?
+
 /// Converts a message's Markdown into attributed text for the transcript
 /// bubbles. Pure: same input → same output, no view/layout state.
 ///
@@ -53,14 +64,18 @@ enum MarkdownAttributedRenderer {
     /// prose out on TextKit 1 (fast, exact `usedRect`) and host the table as its
     /// own view. Code blocks, lists, blockquotes, paragraphs, and headings all
     /// stay inside prose with unchanged inline rendering. (#129)
-    static func renderBlocks(_ markdown: String, theme: TranscriptTextTheme = .chatBubble) -> [MessageBlock] {
+    static func renderBlocks(
+        _ markdown: String,
+        theme: TranscriptTextTheme = .chatBubble,
+        linkResolver: TranscriptPathResolver?
+    ) -> [MessageBlock] {
         var visitor = AttributedStringVisitor(theme: theme)
         var blocks: [MessageBlock] = []
         var proseRun = NSMutableAttributedString()
 
         func flushProse() {
             guard proseRun.length > 0 else { return }
-            blocks.append(.prose(finalizedProse(proseRun, theme: theme)))
+            blocks.append(.prose(finalizedProse(proseRun, theme: theme, linkResolver: linkResolver)))
             proseRun = NSMutableAttributedString()
         }
 
@@ -93,7 +108,11 @@ enum MarkdownAttributedRenderer {
     /// Back-fills body font/color onto runs that didn't set their own — the same
     /// finalization `render` applies, factored out so `renderBlocks` produces
     /// identically-styled prose. Returns an immutable copy.
-    private static func finalizedProse(_ run: NSMutableAttributedString, theme: TranscriptTextTheme) -> NSAttributedString {
+    private static func finalizedProse(
+        _ run: NSMutableAttributedString,
+        theme: TranscriptTextTheme,
+        linkResolver: TranscriptPathResolver?
+    ) -> NSAttributedString {
         let full = NSRange(location: 0, length: run.length)
         run.enumerateAttribute(.font, in: full, options: []) { value, range, _ in
             if value == nil { run.addAttribute(.font, value: theme.bodyFont, range: range) }
@@ -101,6 +120,17 @@ enum MarkdownAttributedRenderer {
         run.enumerateAttribute(.foregroundColor, in: full, options: []) { value, range, _ in
             if value == nil { run.addAttribute(.foregroundColor, value: theme.bodyColor, range: range) }
         }
+        // Link marking runs BEFORE the trailing-newline trim, and that is safe:
+        // `trimTrailingNewlines` deletes only trailing whitespace and newline
+        // characters, no scanner token can contain whitespace (a newline
+        // terminates a URL and is outside the path character set), so no
+        // deleted character can carry a `.link`. `deleteCharacters(in:)`
+        // preserves the attributes on every surviving character.
+        //
+        // Order against the two back-fills above does not matter either way:
+        // both are guarded by `value == nil`, so neither could overwrite a tint
+        // this pass applied.
+        TranscriptLinkPass.apply(to: run, resolve: { token in linkResolver?(token) })
         // Block visitors append a trailing "\n" (paragraph terminator), so the
         // prose ends with a hard line break that `usedRect` counts as an extra
         // empty line fragment — ~one line of dead space at the bottom of every

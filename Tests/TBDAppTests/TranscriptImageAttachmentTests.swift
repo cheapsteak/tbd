@@ -127,7 +127,7 @@ struct TranscriptImageAttachmentTests {
 
     @Test func renderBlocksEmitsImageBlocksBetweenProse() {
         let blocks = MarkdownAttributedRenderer.renderBlocks(
-            "before \(marker("/tmp/a/1.png")) after")
+            "before \(marker("/tmp/a/1.png")) after", linkResolver: nil)
         #expect(blocks.count == 3)
         guard case .prose(let lead) = blocks[0],
               case .image(let attachment) = blocks[1],
@@ -476,7 +476,8 @@ struct TranscriptImageAttachmentTests {
         let columnWidth: CGFloat = 800
         let bodyWidth = TranscriptBubbleGeometry.bodyWidth(columnWidth: columnWidth, role: .user)
 
-        let blocks = TranscriptBubbleGeometry.composedBlocks(for: item, badgeUsage: nil)
+        let blocks = TranscriptBubbleGeometry.composedBlocks(
+            for: item, badgeUsage: nil, linkResolver: nil)
         #expect(blocks.count == 1)
         guard case .image = blocks[0] else {
             Issue.record("expected a single image block, got \(blocks)")
@@ -511,7 +512,8 @@ struct TranscriptImageAttachmentTests {
         let columnWidth: CGFloat = 800
         let bodyWidth = TranscriptBubbleGeometry.bodyWidth(columnWidth: columnWidth, role: .user)
 
-        let blocks = TranscriptBubbleGeometry.composedBlocks(for: item, badgeUsage: nil)
+        let blocks = TranscriptBubbleGeometry.composedBlocks(
+            for: item, badgeUsage: nil, linkResolver: nil)
         let heights = MessageBlockMeasurer().blockHeights(blocks, bodyWidth: bodyWidth)
         let rowHeight = TranscriptBubbleGeometry.rowHeight(
             blocksHeight: MessageBlockMeasurer().blocksHeight(fromBlockHeights: heights))

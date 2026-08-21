@@ -282,7 +282,8 @@ struct TranscriptEstimatorAccuracyTests {
                     let estimate = TableTranscriptView.Coordinator.estimate(for: node, width: width)
                     let measured = TranscriptBubbleGeometry.rowHeight(
                         blocksHeight: MessageBlockMeasurer().blocksHeight(
-                            MarkdownAttributedRenderer.renderBlocks(text, theme: .chatBubble),
+                            MarkdownAttributedRenderer.renderBlocks(
+                                text, theme: .chatBubble, linkResolver: nil),
                             bodyWidth: bodyWidth))
                     let delta = estimate - measured
                     signedLineError += Int((delta / Self.renderedLineHeight).rounded())
@@ -399,7 +400,8 @@ struct TranscriptEstimatorAccuracyTests {
                         let estimate = TableTranscriptView.Coordinator.estimate(for: node, width: width)
                         let measured = TranscriptBubbleGeometry.rowHeight(
                             blocksHeight: MessageBlockMeasurer().blocksHeight(
-                                TranscriptBubbleGeometry.composedBlocks(for: item, badgeUsage: usage),
+                                TranscriptBubbleGeometry.composedBlocks(
+                                    for: item, badgeUsage: usage, linkResolver: nil),
                                 bodyWidth: TranscriptBubbleGeometry.bodyWidth(
                                     columnWidth: width, role: role)))
                         total += 1
@@ -686,7 +688,9 @@ struct TranscriptEstimatorAccuracyTests {
 
     private static func proseHeight(_ markdown: String, bodyWidth: CGFloat) -> CGFloat {
         MessageBlockMeasurer().blocksHeight(
-            MarkdownAttributedRenderer.renderBlocks(markdown, theme: .chatBubble), bodyWidth: bodyWidth)
+            MarkdownAttributedRenderer.renderBlocks(
+                markdown, theme: .chatBubble, linkResolver: nil),
+            bodyWidth: bodyWidth)
     }
 
     // MARK: - Fixtures
@@ -1208,7 +1212,8 @@ struct TranscriptEstimatorAccuracyTests {
         let context = TranscriptCardContext(
             terminalID: nil,
             openTranscriptOverlay: { _ in },
-            appState: appState
+            appState: appState,
+            linkResolver: nil
         )
         let coordinator = TableTranscriptView.Coordinator(context: context)
 

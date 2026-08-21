@@ -404,7 +404,8 @@ struct TableTranscriptHarness {
         // separately in `bubbleCells`.) Every other kind keeps the width-honouring
         // SwiftUI hosting oracle.
         if case .chatBubble(let item) = node.kind {
-            let blocks = TranscriptBubbleGeometry.composedBlocks(for: item, badgeUsage: node.badgeUsage)
+            let blocks = TranscriptBubbleGeometry.composedBlocks(
+                for: item, badgeUsage: node.badgeUsage, linkResolver: nil)
             let bodyWidth = TranscriptBubbleGeometry.bodyWidth(
                 columnWidth: Self.width, role: TranscriptBubbleGeometry.role(for: item))
             let blocksHeight = MessageBlockMeasurer().blocksHeight(blocks, bodyWidth: bodyWidth)
@@ -555,7 +556,8 @@ struct TableTranscriptHarness {
         let context = TranscriptCardContext(
             terminalID: nil,
             openTranscriptOverlay: { _ in },
-            appState: appState
+            appState: appState,
+            linkResolver: nil
         )
         let coordinator = InstrumentedCoordinator(context: context, useFixedSize: fixedSize)
 

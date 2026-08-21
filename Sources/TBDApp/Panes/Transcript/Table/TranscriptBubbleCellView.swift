@@ -107,8 +107,13 @@ enum TranscriptBubbleGeometry {
     /// the message ends in a table (or has no prose), a trailing prose block
     /// carrying just the badge. Matches `ContextUsageBadge` styling (font size 9,
     /// secondaryLabelColor). (#129)
-    static func composedBlocks(for item: TranscriptItem, badgeUsage: TokenUsage?) -> [MessageBlock] {
-        var blocks = MarkdownAttributedRenderer.renderBlocks(text(for: item), theme: .chatBubble)
+    static func composedBlocks(
+        for item: TranscriptItem,
+        badgeUsage: TokenUsage?,
+        linkResolver: TranscriptPathResolver?
+    ) -> [MessageBlock] {
+        var blocks = MarkdownAttributedRenderer.renderBlocks(
+            text(for: item), theme: .chatBubble, linkResolver: linkResolver)
         guard let usage = badgeUsage else { return blocks }
 
         let badge = NSAttributedString(
