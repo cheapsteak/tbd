@@ -298,6 +298,102 @@ class PRWorktreeLinkTests(unittest.TestCase):
         # `-R` takes a value, so its argument must not be read as the subcommand.
         _informs(self, "gh -R owner/name pr create --fill")
 
+    def test_informs_when_a_continuation_splits_the_subcommand_path(self):
+        # A backslash-newline pair is a line continuation: `gh pr \` + newline +
+        # `create` is one command. Retaining the pair both cuts the segment in
+        # two and reads the newline as the subcommand word, so the path never
+        # spells `pr create` and the nudge silently never fires.
+        _informs(self, "gh pr \\\ncreate --body 'no link here'")
+        _informs(self, "gh \\\npr \\\ncreate --body 'no link here'")
+        _informs(self, "gh pr \\\n  create --title x")
+        _informs(self, "glab mr \\\ncreate --description 'no link here'")
+
+    def test_silent_when_a_continued_invocation_carries_the_link(self):
+        # Same shapes, with the link in the body: the continuation must not
+        # manufacture a nudge either.
+        self.assertIsNone(_check(f"gh pr \\\ncreate --body '[wt]({_LINK})'"))
+        self.assertIsNone(_check(f"gh pr create \\\n  --body '[wt]({_LINK})'"))
+        self.assertIsNone(_check(f"glab mr \\\ncreate --description '[wt]({_LINK})'"))
+
+    def test_a_continuation_inside_single_quotes_is_literal(self):
+        # A backslash is an ordinary character inside single quotes, so a
+        # backslash-newline pair there really does split the URL. Collapsing it
+        # would rejoin halves into a link the body does not carry.
+        broken = _LINK.replace("worktree=", "workt\\\nree=")
+        _informs(self, f"gh pr create --body '{broken}'")
+
+    def test_a_continuation_inside_double_quotes_rejoins_the_word(self):
+        # Backslash-newline is still a line continuation inside double quotes,
+        # so a URL wrapped across lines that way is the link the body sends.
+        broken = _LINK.replace("worktree=", "workt\\\nree=")
+        self.assertIsNone(_check(f'gh pr create --body "{broken}"'))
+
+    def test_informs_when_a_continuation_precedes_a_heredoc_body(self):
+        # Heredoc splitting runs over physical lines and the tokenizer collapses
+        # continuations afterwards; the two compose, so a continued invocation
+        # whose heredoc body has no link still nudges.
+        command = (
+            "gh pr \\\n"
+            "create --title x --body \"$(cat <<'EOF'\n"
+            "No link here.\n"
+            "EOF\n"
+            ')"'
+        )
+        _informs(self, command)
+
+    def test_silent_when_a_continued_invocation_heredocs_the_link(self):
+        command = (
+            "gh pr \\\n"
+            "create --title x --body \"$(cat <<'EOF'\n"
+            f"[my-worktree]({_LINK})\n"
+            "EOF\n"
+            ')"'
+        )
+        self.assertIsNone(_check(command))
+
+    def test_informs_when_any_create_in_the_invocation_lacks_the_link(self):
+        # Each segment opens its own PR, so the decision is scoped per segment:
+        # one segment's link must not excuse another's missing one, in either
+        # order or across CLIs.
+        _informs(self, f"gh pr create --body '[wt]({_LINK})' && gh pr create --body 'no link'")
+        _informs(self, f"gh pr create --body 'no link' && gh pr create --body '[wt]({_LINK})'")
+        _informs(self, f"gh pr create --body '[wt]({_LINK})' && glab mr create -d 'no link'")
+        _informs(self, f"gh pr create --body '[wt]({_LINK})'; gh pr create --title x")
+
+    def test_silent_when_every_create_in_the_invocation_has_the_link(self):
+        self.assertIsNone(
+            _check(
+                f"gh pr create --body '[wt]({_LINK})' && gh pr create --body '[wt]({_LINK})'"
+            )
+        )
+        self.assertIsNone(
+            _check(f"gh pr create --body '[wt]({_LINK})' && glab mr create -d '[wt]({_LINK})'")
+        )
+
+    def test_informs_when_only_one_creates_body_file_carries_the_link(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            linked = os.path.join(tmp, "linked.md")
+            with open(linked, "w", encoding="utf-8") as handle:
+                handle.write(f"[my-worktree]({_LINK})\n")
+            bare = os.path.join(tmp, "bare.md")
+            with open(bare, "w", encoding="utf-8") as handle:
+                handle.write("No link here.\n")
+            _informs(self, f"gh pr create -F {linked} && gh pr create -F {bare}")
+            self.assertIsNone(_check(f"gh pr create -F {linked} && gh pr create -F {linked}"))
+
+    def test_silent_when_a_heredoc_link_covers_every_create(self):
+        # The heredoc leg is deliberately invocation-wide: a body heredoc'd into
+        # a file that does not exist yet cannot be attributed to one segment, so
+        # it counts for all of them.
+        command = (
+            "cat <<'EOF' > /nonexistent/pr-worktree-link-body.md\n"
+            f"[my-worktree]({_LINK})\n"
+            "EOF\n"
+            "gh pr create --body-file /nonexistent/pr-worktree-link-body.md "
+            "&& gh pr create --body-file /nonexistent/pr-worktree-link-body.md\n"
+        )
+        self.assertIsNone(_check(command))
+
     def test_informs_for_a_path_qualified_gh(self):
         # Homebrew's `gh` is regularly invoked by absolute path in this repo.
         _informs(self, "/opt/homebrew/bin/gh pr create --fill")
@@ -382,6 +478,8 @@ class PRWorktreeLinkTests(unittest.TestCase):
             f"gh pr create --body '{_LINK}' --body 'no link'",
             "/opt/homebrew/bin/gh pr create",
             "cat <<'EOF' > x.md\ngh pr create\nEOF",
+            "gh pr \\\ncreate --body 'no link'",
+            f"gh pr create --body '{_LINK}' && gh pr create --body 'no link'",
             "gh pr list",
         )
         for command in commands:

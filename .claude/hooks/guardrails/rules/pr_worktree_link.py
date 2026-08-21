@@ -18,7 +18,9 @@ It stays silent when a clickable deep-link is already in the body the command is
 about to send — inline body text, a body-file target it can read, or a heredoc
 body the command composes — and when the session is not under TBD at all, so a
 contributor working outside TBD never sees it. Which flags carry that body is
-decided per CLI, in the spelling the matched tool actually uses. A link
+decided per CLI, in the spelling the matched tool actually uses. One Bash call
+may open several PRs, and each one's body is judged on its own: any create
+segment missing the link arms the nudge (see `_every_body_has_link`). A link
 anywhere else in the invocation is not a body: a chained
 `git log --grep '…tbd/open/?worktree=…'`, or a body-file path that happens to
 spell `tbd/open/`, leaves the nudge armed.
@@ -27,7 +29,10 @@ spell `tbd/open/`, leaves the nudge armed.
 (`Sources/TBDShared/PRBindingExtractor.swift`), which answers the same question
 for the PR-binding hook and carries the rationale for each defense. The Swift
 side cannot be called from a stdlib-only Python hook, so its tokenizer is
-mirrored here instead; keep the two in step when either changes.
+mirrored here instead; keep the two in step when either changes. The mirror is
+close but not literal: this tokenizer collapses a backslash-newline line
+continuation (see `_command_segments`), which widens what it matches and never
+narrows it, so it recognizes every invocation the Swift side does.
 
 Matching the phrase rather than tokenizing is wrong in both directions, which is
 what the tokenizer's length buys back. A `gh pr create` inside a heredoc body is
@@ -206,6 +211,16 @@ def _split_heredoc_bodies(command: str) -> tuple:
     swallows the rest of the command, and a `<<` that is not a heredoc at all is
     read as one.
 
+    This runs over *physical* lines, before the tokenizer collapses any
+    backslash-newline continuation, which keeps the two passes independent: a
+    continuation inside a command is invisible here, and a heredoc body is gone
+    before the tokenizer can join anything across it. The one construction that
+    straddles both — a heredoc opener on a line that also ends in a
+    continuation — resolves in the fail-closed direction: the body is taken from
+    the next physical line rather than after the full logical line, and the
+    surviving command lines join into a single segment whose first word is the
+    redirecting command, so no create is found.
+
     Returns `(command_text, heredoc_text)`. Both halves matter: the first is
     what gets tokenized into commands, and the second is prose the invocation
     composes — which is exactly where a PR body written by heredoc lives,
@@ -230,11 +245,21 @@ def _split_heredoc_bodies(command: str) -> tuple:
 
 
 def _command_segments(command: str) -> list:
-    """Split into per-command word lists, honoring quotes.
+    """Split into per-command word lists, honoring quotes and continuations.
 
     Neither a separator nor a space inside a quoted string breaks anything
     apart, which is what keeps a quoted `'gh pr create'` phrase from ever
     looking like a command.
+
+    A backslash-newline pair vanishes the way the shell collapses a line
+    continuation, so a multi-line invocation is one command rather than several.
+    That matters most when the continuation lands *inside* the command-and-
+    subcommand path — `gh pr \\` then `create …` — because a retained newline
+    both cuts the segment in two and reads as the subcommand word, so the path
+    never spells `pr create` and the rule silently never fires. The pair
+    collapses unquoted and inside double quotes, which is where the shell
+    treats it as a continuation, and stays literal inside single quotes, where
+    a backslash is an ordinary character.
     """
     segments: list = []
     words: list = []
@@ -245,8 +270,9 @@ def _command_segments(command: str) -> list:
 
     for character in command:
         if escaped:
-            word += character
-            word_started = True
+            if character != "\n":  # a backslash-newline pair is a continuation
+                word += character
+                word_started = True
             escaped = False
         elif quote is not None:
             if character == quote:
@@ -409,35 +435,48 @@ def _file_has_link(path: str) -> bool:
         return False
 
 
-def _body_has_link(segments: list, heredoc_text: str) -> bool:
-    """True when the body these `(tool, words)` segments will send has the link.
+def _segment_body_has_link(tool: str, words: list) -> bool:
+    """True when this one segment's own body already carries the link.
 
-    Three places count, and only these three: the inline body text a segment
-    carries, the contents of a body file it names, and the heredoc prose the
-    invocation composes. The first two are read in the segment's own CLI's
-    spelling. The third is not attributable to one segment — a body heredoc'd
-    into a file that does not exist yet is invisible both to the tokenizer,
-    which drops heredoc bodies, and to the file read, which finds nothing on
-    disk — so any heredoc body in the invocation counts as body text. That is
-    deliberately generous: this is an INFO nudge, and a swallowed reminder beats
-    one that fires at a body which already has the link.
+    Two places are the segment's own body: the inline body text it carries, and
+    the contents of a body file it names — each read in the segment's own CLI's
+    spelling, and each contributing its last occurrence, matching how the CLIs
+    resolve a repeated flag.
 
-    Each family contributes its last occurrence, matching how the CLIs resolve a
-    repeated flag. A segment naming both an inline body and a body file is not
-    disambiguated further: both CLIs reject that combination outright, so the
-    command opens nothing and there is no body for the nudge to be right or
-    wrong about.
+    A segment naming both an inline body and a body file is not disambiguated
+    further: both CLIs reject that combination outright, so the command opens
+    nothing and there is no body for the nudge to be right or wrong about.
     """
-    if _text_has_link(heredoc_text):
+    text = _last_flag_value(words, _BODY_TEXT_FLAGS[tool])
+    if text is not None and _text_has_link(text):
         return True
-    for tool, words in segments:
-        text = _last_flag_value(words, _BODY_TEXT_FLAGS[tool])
-        if text is not None and _text_has_link(text):
-            return True
-        path = _last_flag_value(words, _BODY_FILE_FLAGS[tool])
-        if path is not None and _file_has_link(path):
-            return True
-    return False
+    path = _last_flag_value(words, _BODY_FILE_FLAGS[tool])
+    return path is not None and _file_has_link(path)
+
+
+def _every_body_has_link(segments: list, heredoc_text: str) -> bool:
+    """True when *every* `(tool, words)` create segment sends a body with the link.
+
+    The decision is scoped per segment, because each segment opens its own PR:
+    `gh pr create --body '<link>' && gh pr create --body '<no link>'` must
+    nudge, and ORing the two bodies together would let the first PR's link
+    excuse the second's missing one. So a single segment lacking the link arms
+    the nudge for the whole Bash call.
+
+    The heredoc leg is the one deliberate exception, and it is invocation-wide
+    rather than per-segment: a body heredoc'd into a file that does not exist
+    yet is invisible both to the tokenizer, which drops heredoc bodies, and to
+    the file read, which finds nothing on disk, so it cannot be attributed to
+    the segment that will send it. Any heredoc body in the invocation therefore
+    counts as body text for every segment. That is deliberately generous: this
+    is an INFO nudge, and a swallowed reminder beats one that fires at a body
+    which already has the link.
+
+    Each segment's check is therefore: its own body-text or body-file value, OR
+    the invocation-wide heredoc text.
+    """
+    heredoc_link = _text_has_link(heredoc_text)
+    return all(heredoc_link or _segment_body_has_link(tool, words) for tool, words in segments)
 
 
 class PRWorktreeLinkRule(Rule):
@@ -453,7 +492,7 @@ class PRWorktreeLinkRule(Rule):
             return None
         if not self._under_tbd(ctx):
             return None
-        if _body_has_link(segments, heredoc_text):
+        if _every_body_has_link(segments, heredoc_text):
             return None
         return Decision.info(_MESSAGE)
 
