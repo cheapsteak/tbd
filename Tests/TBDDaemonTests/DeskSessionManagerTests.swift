@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import GRDB
 import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -33,15 +34,33 @@ private final class DeskTmuxRecorder: @unchecked Sendable {
 private final class DeadWindows: @unchecked Sendable {
     private let lock = NSLock()
     private var dead: Set<String> = []
+    private var unverifiable: Set<String> = []
 
     func markDead(_ windowID: String) {
         lock.lock(); defer { lock.unlock() }
         dead.insert(windowID)
     }
 
+    /// Make the window consultation itself fail — a tmux that could not be
+    /// asked, as distinct from a tmux that looked and found nothing. Only the
+    /// tri-state `dryRunWindowExistence` seam can express this; the older
+    /// Bool hook collapses it into "dead", which is the bug.
+    func markUnverifiable(_ windowID: String) {
+        lock.lock(); defer { lock.unlock() }
+        unverifiable.insert(windowID)
+    }
+
     func isDead(_ windowID: String) -> Bool {
         lock.lock(); defer { lock.unlock() }
         return dead.contains(windowID)
+    }
+
+    func existence(_ windowID: String) -> TmuxTargetExistence {
+        lock.lock(); defer { lock.unlock() }
+        if unverifiable.contains(windowID) {
+            return .unverifiable(error: "tmux list-panes exited 1: error connecting to socket")
+        }
+        return dead.contains(windowID) ? .gone : .exists
     }
 }
 
@@ -97,6 +116,26 @@ private final class PaneIdentities: @unchecked Sendable {
             throw TmuxError.timedOut(command: "list-panes", timeout: .seconds(15))
         }
         return answers[paneID] ?? .live(terminalID: nil)
+    }
+}
+
+/// Fires exactly once, so a dry-run tmux hook can stand in for a concurrent
+/// event at a deterministic point inside one spawn instead of racing it.
+private final class OneShotLatch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var armed = false
+
+    func arm() {
+        lock.lock(); defer { lock.unlock() }
+        armed = true
+    }
+
+    /// True once, for the first caller after `arm()`.
+    func consume() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard armed else { return false }
+        armed = false
+        return true
     }
 }
 
@@ -910,6 +949,7 @@ extension TBDHomeSerialized {
                     dryRun: true,
                     dryRunRecorder: { recorder.record($0) },
                     dryRunWindowIsDead: { dead.isDead($0) },
+                    dryRunWindowExistence: { _, windowID in dead.existence(windowID) },
                     dryRunPaneCurrentCommand: { _, paneID in commands.command(for: paneID) },
                     dryRunPaneSendTarget: { _, paneID in try identities.answer(for: paneID) }
                 ),
@@ -1350,6 +1390,756 @@ extension TBDHomeSerialized {
             let recovered = try #require(try await f.db.watchDeskLeases.status(worktreeID: desk.id))
             #expect(recovered.terminalID == successor.id)
             #expect(recovered.generation == first.generation + 1)
+        }
+
+        // MARK: - Spawn rate-limiting (bug fix: duplicate spawn on unverifiable terminal)
+
+        /// The regression: `paneSendTarget` returns `.missing` when the query fails
+        /// (correct for "don't paste into a pane I can't verify"), but the spawn
+        /// logic reused this to mean "desk is unstaffed" and spawned every tick.
+        /// This test drives the exact failure mode: a live pane that the identity
+        /// consultation cannot reach (wedged tmux, timeout, etc). The staffing check
+        /// must treat "cannot tell" as "staffed for now" and skip the spawn.
+        /// Multiple ticks are simulated by advancing `now` between calls.
+        @Test("unverifiable terminal does not trigger spawn — staffing check treats 'cannot tell' as staffed")
+        func testUnavailableIdentityConsultationIsNotSpawned() async throws {
+            let f = try makeDeskFixture(tag: "staff-unverifiable")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let clock = TestDateSource(Date(timeIntervalSince1970: 1_000_000))
+            let manager = DeskSessionManager(
+                db: f.db,
+                lifecycle: WorktreeLifecycle(
+                    db: f.db,
+                    git: GitManager(),
+                    tmux: TmuxManager(dryRun: true),
+                    hooks: HookResolver()
+                ),
+                tmux: TmuxManager(
+                    dryRun: true,
+                    dryRunRecorder: { f.recorder.record($0) },
+                    dryRunWindowIsDead: { f.dead.isDead($0) },
+                    dryRunPaneCurrentCommand: { _, paneID in f.commands.command(for: paneID) },
+                    dryRunPaneSendTarget: { _, paneID in try f.identities.answer(for: paneID) }
+                ),
+                skillDir: f.home.appendingPathComponent("skills/nightwatch").path,
+                now: clock.provider,
+                actuationLog: makeTestActuationLog()
+            )
+
+            let desk = try await manager.ensureDeskSession(mode: .daywatch)
+            let seeded = try await f.db.terminals.list(worktreeID: desk.id)
+            let original = try #require(seeded.first(where: { $0.label == TerminalLabel.claudeCode }))
+
+            // The pane exists and is running Claude, but the identity check fails
+            // (tmux wedged, query timeout, etc).
+            f.identities.markUnreachable(original.tmuxPaneID)
+
+            // Multiple iterations simulating ticks passing. Without the fix, each
+            // tick would spawn a new terminal. With the fix, the staffing check
+            // says "cannot tell if it's alive or not, assume staffed" and skips spawn.
+            let terminalCountsBefore = try await f.db.terminals.list(worktreeID: desk.id).count
+            for iteration in 0..<3 {
+                // Advance the clock between ticks. Nothing here is gated on a
+                // clock — the desk's gating is evidence-based, which is this
+                // PR's whole point — so this only makes each iteration a
+                // distinct tick rather than a repeated instant.
+                clock.advance(by: 2 * 60 + 1)
+
+                // Call ensure, which checks staffing and may spawn if genuinely unstaffed.
+                // Because the pane is unverifiable (not unresponsive), staffing check
+                // returns true and no spawn happens.
+                _ = try await manager.ensureDeskSession(mode: .daywatch)
+
+                let terminalCountsAfter = try await f.db.terminals.list(worktreeID: desk.id).count
+                #expect(
+                    terminalCountsAfter == terminalCountsBefore,
+                    "iteration \(iteration): unverifiable pane must not trigger spawn"
+                )
+            }
+        }
+
+        /// Cross-kind incumbent reuse: `ensureDeskSession` must treat a live agent of
+        /// EITHER supported kind as the desk's agent, not only the configured preferred
+        /// kind. An intentional handoff to Codex while Claude is preferred must not spawn
+        /// a Claude replacement.
+        @Test("live Codex terminal is reused even when Claude is preferred agent")
+        func testLiveCodexTerminalReusedWhenClaudePreferred() async throws {
+            let f = try makeDeskFixture(tag: "staff-cross-kind")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            // Prefer Claude (the default), but a Codex session exists.
+            try await f.db.config.setPrimaryAgentPreference(.claude)
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            let seeded = try await f.db.terminals.list(worktreeID: desk.id)
+
+            // Replace the Claude terminal with a Codex one (simulating handoff).
+            let claude = try #require(seeded.first(where: { $0.label == TerminalLabel.claudeCode }))
+            f.dead.markDead(claude.tmuxWindowID)
+            let codex = try await f.db.terminals.create(
+                worktreeID: desk.id, tmuxWindowID: "@codex", tmuxPaneID: "%codex",
+                label: TerminalLabel.codex, kind: .codex)
+            f.commands.set("codex", for: codex.tmuxPaneID)
+
+            // Second ensure: prefer Claude, but a live Codex exists. Must reuse Codex
+            // without spawning Claude.
+            let terminalsBefore = try await f.db.terminals.list(worktreeID: desk.id).count
+            let desk2 = try await f.manager.ensureDeskSession(mode: .daywatch)
+
+            #expect(desk2.id == desk.id, "same desk should be reused")
+            let terminalsAfter = try await f.db.terminals.list(worktreeID: desk.id).count
+            #expect(
+                terminalsAfter == terminalsBefore,
+                "live Codex should prevent Claude spawn even when Claude is preferred"
+            )
+        }
+
+        /// A pane running a Claude version string (e.g. "2.1.229") is live and should
+        /// be reused. The `agentCommand` check must recognize it.
+        @Test("live agent running version string pane_current_command is reused")
+        func testLiveVersionStringCommandIsReused() async throws {
+            let f = try makeDeskFixture(tag: "staff-version-string")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            let seeded = try await f.db.terminals.list(worktreeID: desk.id)
+            let claude = try #require(seeded.first(where: { $0.label == TerminalLabel.claudeCode }))
+
+            // Set the pane's command to a version string, which `agentCommand` should
+            // recognize as a Claude process.
+            f.commands.set("2.1.229", for: claude.tmuxPaneID)
+
+            // Ensure again: the version-string command should be recognized, and
+            // no spawn should happen.
+            let terminalsBefore = try await f.db.terminals.list(worktreeID: desk.id).count
+            _ = try await f.manager.ensureDeskSession(mode: .daywatch)
+
+            let terminalsAfter = try await f.db.terminals.list(worktreeID: desk.id).count
+            #expect(
+                terminalsAfter == terminalsBefore,
+                "live agent with version-string command must not trigger spawn"
+            )
+        }
+
+        /// Genuine recovery still works, and is bounded by evidence rather than by a
+        /// clock. A desk whose agent is really gone gets exactly one replacement; the
+        /// next tick, with that replacement alive, gets none; once the replacement is
+        /// itself proven dead, the desk is allowed to try again.
+        ///
+        /// Before the fix the bound was the absence of any bound: every tick that found
+        /// no live candidate spawned another agent.
+        @Test("a dead desk is restaffed once per death, not once per tick")
+        func testDeadDeskRestaffsOncePerDeath() async throws {
+            let f = try makeDeskFixture(tag: "staff-recovery")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            let original = try #require(
+                try await f.db.terminals.list(worktreeID: desk.id)
+                    .first(where: { $0.label == TerminalLabel.claudeCode }))
+
+            // Proven dead: tmux answers that the pane is gone.
+            f.identities.set(.missing, for: original.tmuxPaneID)
+            f.dead.markDead(original.tmuxWindowID)
+
+            let beforeRecovery = try await f.db.terminals.list(worktreeID: desk.id).count
+            _ = try await f.manager.ensureDeskSession(mode: .daywatch)
+            let afterRecovery = try await f.db.terminals.list(worktreeID: desk.id)
+            #expect(
+                afterRecovery.count == beforeRecovery + 1,
+                "a proven-dead desk must be restaffed exactly once")
+
+            // The replacement is alive, so further ticks must add nothing.
+            for tick in 0..<3 {
+                _ = try await f.manager.ensureDeskSession(mode: .daywatch)
+                let count = try await f.db.terminals.list(worktreeID: desk.id).count
+                #expect(count == afterRecovery.count, "tick \(tick) must not add another agent")
+            }
+
+            // Now the replacement dies too. One death, one replacement.
+            let replacement = try #require(
+                afterRecovery.max(by: { ($0.createdAt, $0.id.uuidString) < ($1.createdAt, $1.id.uuidString) }))
+            f.identities.set(.missing, for: replacement.tmuxPaneID)
+            f.dead.markDead(replacement.tmuxWindowID)
+            _ = try await f.manager.ensureDeskSession(mode: .daywatch)
+            let afterSecondDeath = try await f.db.terminals.list(worktreeID: desk.id).count
+            #expect(
+                afterSecondDeath == afterRecovery.count + 1,
+                "a replacement that dies must itself be replaced")
+        }
+
+        /// Kill every terminal the desk currently has — proven gone, both the way
+        /// `windowExists` sees it and the way the identity consultation does — then
+        /// drive one tick. Returns how many terminal rows exist afterwards, which is
+        /// the only externally visible evidence of whether a replacement was spawned.
+        private func killAllAndTick(
+            _ f: (db: TBDDatabase, manager: DeskSessionManager, recorder: DeskTmuxRecorder,
+                  dead: DeadWindows, commands: PaneCommands, identities: PaneIdentities,
+                  spawnFailures: SpawnFailureSwitch, home: URL, priorTBDHome: String?),
+            desk: UUID
+        ) async throws -> Int {
+            for terminal in try await f.db.terminals.list(worktreeID: desk) {
+                f.identities.set(.missing, for: terminal.tmuxPaneID)
+                f.dead.markDead(terminal.tmuxWindowID)
+            }
+            _ = try await f.manager.ensureDeskSession(mode: .daywatch)
+            return try await f.db.terminals.list(worktreeID: desk).count
+        }
+
+        /// The backstop has to actually count, and it did not.
+        ///
+        /// `spawnDeskTerminal` cleared the recovery budget itself, and
+        /// `spawnRecoveryTerminalIfWarranted` calls that very function to make its
+        /// attempt — so on every attempt the clear ran first and the increment second,
+        /// pinning `consecutiveRecoverySpawnsWithoutNudge` at 1 forever. The cap was
+        /// unreachable, the give-up notification could never fire, and a desk whose
+        /// launches all died went back to spawning one abandoned agent per tick: the
+        /// precise unbounded behaviour this rail exists to end.
+        ///
+        /// Nothing about that is visible from a single attempt, which is why this
+        /// walks four. Each tick kills every terminal on the desk before running, so no
+        /// nudge ever lands and nothing legitimately clears the budget. Three
+        /// replacements must happen, the third must be the last, and the desk must say
+        /// so out loud — a Watch Desk that has quietly given up looks exactly like one
+        /// that is fine.
+        @Test("the recovery budget accumulates, stops at the third spawn, and notifies")
+        func testRecoveryBudgetAccumulatesAndCapsAtThree() async throws {
+            let f = try makeDeskFixture(tag: "staff-budget")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            var count = try await f.db.terminals.list(worktreeID: desk.id).count
+
+            // maxConsecutiveRecoverySpawnsWithoutNudge attempts, each licensed by a
+            // fresh death. Before the fix the counter never left 1, so this loop passed
+            // and the one below it did not.
+            for attempt in 1...3 {
+                let after = try await killAllAndTick(f, desk: desk.id)
+                #expect(
+                    after == count + 1,
+                    "attempt \(attempt) of 3 must still spawn a replacement")
+                count = after
+            }
+
+            #expect(
+                try await f.db.notifications.unread(worktreeID: desk.id)
+                    .filter({ $0.type == .error }).isEmpty,
+                "the desk must not give up while attempts remain")
+
+            // The budget is spent. Further deaths buy nothing, however many arrive.
+            for tick in 0..<2 {
+                let after = try await killAllAndTick(f, desk: desk.id)
+                #expect(
+                    after == count,
+                    "tick \(tick) past the cap must not spawn a fourth agent")
+            }
+
+            let errors = try await f.db.notifications.unread(worktreeID: desk.id)
+                .filter { $0.type == .error }
+            #expect(
+                errors.count == 1,
+                "exhaustion must be announced exactly once per incident, not per tick")
+            #expect(
+                errors.first?.message?.contains("could not start an agent") == true,
+                "the notification must name what stopped: \(errors.first?.message ?? "nil")")
+        }
+
+        /// Gate 2 tracks the terminal this rail spawned, so it has to know which
+        /// one that is. Diffing the terminal table around the spawn does not:
+        /// the desk is an ordinary sidebar-visible scratch worktree and the
+        /// actor's gate serializes only its own methods, so a terminal the user
+        /// opens *while the spawn is in flight* falls inside the before/after
+        /// window and gets adopted as the tracked replacement.
+        ///
+        /// The consequence is the failure mode this whole PR is about, reached
+        /// by a different road: a shell adopted that way can never be proven
+        /// absent by an agent-kind consultation, so gate 2 stays shut and the
+        /// desk quietly stops restaffing itself.
+        ///
+        /// The interleave is deterministic rather than raced — the dry-run tmux
+        /// recorder fires inside `spawnPrimaryTerminals`, so the intruder row is
+        /// written from there, landing strictly between the two snapshots the
+        /// old code compared. A test that raced a real task here would be timing
+        /// dependent and would pass on the broken code most of the time.
+        @Test("a terminal opened during the spawn is not mistaken for the replacement")
+        func testConcurrentTerminalIsNotAdoptedAsTheReplacement() async throws {
+            let f = try makeDeskFixture(tag: "staff-spawn-identity")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            let original = try #require(
+                try await f.db.terminals.list(worktreeID: desk.id)
+                    .first(where: { $0.label == TerminalLabel.claudeCode }))
+
+            // Second manager over the same database, whose tmux writes the
+            // intruder row mid-spawn. Fires once, on the recovery spawn only.
+            let intruderID = UUID()
+            let armed = OneShotLatch()
+            let writer = f.db.writerForTests
+            // The window is opened by `spawnPrimaryTerminals`, which runs on the
+            // LIFECYCLE's tmux — not the manager's. Hanging this recorder only on
+            // the manager's would never fire, the intruder row would never land,
+            // and the test would pass against the very code it is meant to pin.
+            let openIntruderMidSpawn: (@Sendable ([String]) -> Void) = { args in
+                guard args.contains("new-window") || args.contains("new-session"),
+                      armed.consume() else { return }
+                // A user opening a shell in the desk, right now.
+                try? writer.write { conn in
+                    try conn.execute(
+                        sql: """
+                            INSERT INTO terminal
+                            (id, worktreeID, tmuxWindowID, tmuxPaneID, label, createdAt, kind)
+                            VALUES (?, ?, '@99', '%99', 'shell', ?, 'shell')
+                            """,
+                        arguments: [
+                            intruderID.uuidString, desk.id.uuidString,
+                            Date().addingTimeInterval(60),
+                        ])
+                }
+            }
+            let manager = DeskSessionManager(
+                db: f.db,
+                lifecycle: WorktreeLifecycle(
+                    db: f.db, git: GitManager(),
+                    tmux: TmuxManager(dryRun: true, dryRunRecorder: openIntruderMidSpawn),
+                    hooks: HookResolver()),
+                tmux: TmuxManager(
+                    dryRun: true,
+                    dryRunRecorder: openIntruderMidSpawn,
+                    dryRunWindowIsDead: { f.dead.isDead($0) },
+                    dryRunWindowExistence: { _, windowID in f.dead.existence(windowID) },
+                    dryRunPaneCurrentCommand: { _, paneID in f.commands.command(for: paneID) },
+                    dryRunPaneSendTarget: { _, paneID in try f.identities.answer(for: paneID) }
+                ),
+                skillDir: f.home.appendingPathComponent("skills/nightwatch").path,
+                actuationLog: makeTestActuationLog()
+            )
+
+            f.identities.set(.missing, for: original.tmuxPaneID)
+            f.dead.markDead(original.tmuxWindowID)
+            armed.arm()
+            _ = try await manager.ensureDeskSession(mode: .daywatch)
+
+            #expect(
+                try await f.db.terminals.get(id: intruderID) != nil,
+                "fixture check: the intruder must have landed mid-spawn")
+
+            // Kill the agents only; the user's shell stays open, as it would.
+            for terminal in try await f.db.terminals.list(worktreeID: desk.id)
+            where terminal.id != intruderID {
+                f.identities.set(.missing, for: terminal.tmuxPaneID)
+                f.dead.markDead(terminal.tmuxWindowID)
+            }
+
+            // The replacement is dead. If the shell had been adopted as the
+            // tracked replacement, gate 2 could never clear — a shell is not an
+            // agent candidate, so no consultation can ever prove it absent — and
+            // this death would buy nothing.
+            let before = try await f.db.terminals.list(worktreeID: desk.id).count
+            _ = try await manager.ensureDeskSession(mode: .daywatch)
+            let after = try await f.db.terminals.list(worktreeID: desk.id).count
+            #expect(
+                after == before + 1,
+                "a terminal opened during the spawn must not wedge gate 2 shut")
+            #expect(
+                try await f.db.terminals.get(id: intruderID) != nil,
+                "the user's terminal is not this rail's to touch")
+        }
+
+        /// The give-up notification is the only user-visible sign that the desk
+        /// has stopped staffing itself — a desk that has quietly given up looks
+        /// exactly like one that is fine. So the dedup flag may not be set until
+        /// the write actually lands: setting it first means one failed write
+        /// silences the incident for good, and the notification's whole reason
+        /// for existing is gone precisely when it is needed.
+        ///
+        /// The table is dropped to make the write fail the way a real one would,
+        /// then restored, and the next tick must try again.
+        @Test("a give-up notification that fails to write is retried, not swallowed")
+        func testExhaustionNotificationRetriesAfterWriteFailure() async throws {
+            let f = try makeDeskFixture(tag: "staff-notify-retry")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            for _ in 1...3 { _ = try await killAllAndTick(f, desk: desk.id) }
+
+            // Spend the last attempt with the notifications table missing, so the
+            // give-up write throws exactly as an unwritable database would.
+            let schema = try await f.db.writerForTests.read { conn in
+                try String.fetchOne(
+                    conn, sql: "SELECT sql FROM sqlite_master WHERE name = 'notification'")
+            }
+            let createSQL = try #require(schema, "fixture must find the notification table")
+            try await f.db.writerForTests.write { conn in
+                try conn.execute(sql: "DROP TABLE notification")
+            }
+            _ = try await killAllAndTick(f, desk: desk.id)
+
+            try await f.db.writerForTests.write { conn in
+                try conn.execute(sql: createSQL)
+            }
+            #expect(
+                try await f.db.notifications.unread(worktreeID: desk.id)
+                    .filter({ $0.type == .error }).isEmpty,
+                "fixture check: the failed write must have recorded nothing")
+
+            // The database is healthy again; the very next tick must say so.
+            _ = try await killAllAndTick(f, desk: desk.id)
+            let errors = try await f.db.notifications.unread(worktreeID: desk.id)
+                .filter { $0.type == .error }
+            #expect(
+                errors.count == 1,
+                "a give-up notification lost to a failed write must be retried, not dropped")
+
+            // And it is still deduplicated once it has landed.
+            _ = try await killAllAndTick(f, desk: desk.id)
+            #expect(
+                try await f.db.notifications.unread(worktreeID: desk.id)
+                    .filter({ $0.type == .error }).count == 1,
+                "the retry must not turn into one notification per tick")
+        }
+
+        /// `resetRecoveryBudget` has three callers, and a delivered nudge is only
+        /// one of them. The other two are worth pinning because the tempting
+        /// place to put a reset — inside the spawn — is exactly where it must not
+        /// go, and these two sit close enough to that mistake to be mistaken for
+        /// it.
+        ///
+        /// Closing the desk and building a new one is one path through both
+        /// remaining resets — `closeDeskSession` clears the budget and the
+        /// fresh-create site clears it again — and the two cannot be told apart
+        /// from outside, because a closed desk is archived and the next `ensure`
+        /// always builds a new one. So this pins what is actually observable and
+        /// what actually matters: a budget spent by one desk's abandoned
+        /// replacements is not charged to its successor.
+        @Test("a desk built after a close starts with a full recovery budget")
+        func testFreshDeskStartsWithFullRecoveryBudget() async throws {
+            let f = try makeDeskFixture(tag: "staff-budget-fresh")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            for _ in 1...3 { _ = try await killAllAndTick(f, desk: desk.id) }
+            let capped = try await killAllAndTick(f, desk: desk.id)
+            #expect(
+                capped == (try await f.db.terminals.list(worktreeID: desk.id).count),
+                "the first desk must be at its cap for this test to mean anything")
+
+            await f.manager.closeDeskSession()
+            let fresh = try await f.manager.ensureDeskSession(mode: .daywatch)
+            #expect(fresh.id != desk.id)
+
+            // Three full attempts again, on the new desk.
+            var count = try await f.db.terminals.list(worktreeID: fresh.id).count
+            for attempt in 1...3 {
+                let after = try await killAllAndTick(f, desk: fresh.id)
+                #expect(
+                    after == count + 1,
+                    "attempt \(attempt) on a fresh desk must not be charged to the old one")
+                count = after
+            }
+        }
+
+        /// The desk asks tmux three read-only questions, and until now only one of
+        /// them could say "I could not look". `windowExists` answered a plain
+        /// `Bool` and swallowed every error into `false`, so a wedged or
+        /// unreachable server — the exact production fault — was indistinguishable
+        /// from a window tmux had looked for and not found. `verdict` then read
+        /// that `false` as `.absent`, which is the verdict that licenses both
+        /// spawning a replacement and revoking a running judge's lease.
+        ///
+        /// So this reproduces the incident through the window consultation
+        /// instead of the identity one, and holds the same invariants: no spawn,
+        /// no demotion, no paste into a pane nobody could look at.
+        @Test("an unanswerable window consultation spawns nothing and revokes nothing")
+        func testUnverifiableWindowNeitherSpawnsNorRevokes() async throws {
+            let f = try makeDeskFixture(tag: "staff-window-unverifiable")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            let incumbent = try #require(
+                try await f.db.terminals.list(worktreeID: desk.id)
+                    .first(where: { $0.label == TerminalLabel.claudeCode }))
+            var lease = try await f.db.watchDeskLeases.acquire(
+                worktreeID: desk.id, terminalID: incumbent.id, now: Date())
+
+            // The pane answers for itself and runs an agent; it is the WINDOW
+            // query that cannot be run.
+            f.dead.markUnverifiable(incumbent.tmuxWindowID)
+
+            let terminalsBefore = try await f.db.terminals.list(worktreeID: desk.id).count
+            let pastesBefore = f.recorder.pastedPanes.count
+            for tick in 0..<3 {
+                lease = try await f.db.watchDeskLeases.renew(
+                    worktreeID: desk.id, terminalID: lease.terminalID,
+                    token: lease.token, generation: lease.generation, now: Date())
+
+                _ = try await f.manager.ensureDeskSession(mode: .daywatch)
+                await f.manager.maintainJudgeLease(worktreeID: desk.id)
+                await f.manager.nudgeDeskSession(worktreeID: desk.id, act: false)
+
+                #expect(
+                    try await f.db.terminals.list(worktreeID: desk.id).count == terminalsBefore,
+                    "tick \(tick): a window nobody could consult must not license a spawn")
+
+                let current = try #require(try await f.db.watchDeskLeases.status(worktreeID: desk.id))
+                #expect(current.terminalID == lease.terminalID, "tick \(tick): owner changed")
+                #expect(current.generation == lease.generation, "tick \(tick): generation changed")
+                #expect(
+                    current.isValid(at: Date()),
+                    "tick \(tick): a lease was revoked on a consultation nobody could run")
+            }
+
+            #expect(
+                f.recorder.pastedPanes.count == pastesBefore,
+                "a pane whose window could not be consulted must not be pasted into")
+        }
+
+        /// The other half of the same rule, so refusing to act on absence of
+        /// evidence did not become refusing to act on evidence: when tmux
+        /// positively answers that the window is gone, the desk still restaffs.
+        @Test("a window tmux proves is gone still licenses a replacement")
+        func testProvenGoneWindowStillSpawns() async throws {
+            let f = try makeDeskFixture(tag: "staff-window-gone")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            let original = try #require(
+                try await f.db.terminals.list(worktreeID: desk.id)
+                    .first(where: { $0.label == TerminalLabel.claudeCode }))
+
+            f.identities.set(.missing, for: original.tmuxPaneID)
+            f.dead.markDead(original.tmuxWindowID)
+
+            let before = try await f.db.terminals.list(worktreeID: desk.id).count
+            _ = try await f.manager.ensureDeskSession(mode: .daywatch)
+            #expect(
+                try await f.db.terminals.list(worktreeID: desk.id).count == before + 1,
+                "a proven-gone window must still be restaffed")
+        }
+
+        /// The other side of the counter: it is a budget for one incident, not a
+        /// lifetime quota. A nudge that reaches a pane is the proof the desk is staffed
+        /// by something that took it, and it must hand the attempts back — otherwise a
+        /// desk that had a bad hour in the evening would refuse to restaff itself for
+        /// the rest of the night.
+        @Test("a delivered nudge hands the recovery budget back")
+        func testDeliveredNudgeClearsRecoveryBudget() async throws {
+            let f = try makeDeskFixture(tag: "staff-budget-reset")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+
+            // Spend the whole budget, leaving the third replacement alive.
+            var count = try await f.db.terminals.list(worktreeID: desk.id).count
+            for _ in 1...3 {
+                count = try await killAllAndTick(f, desk: desk.id)
+            }
+
+            let pastesBefore = f.recorder.pastedPanes.count
+            await f.manager.nudgeDeskSession(worktreeID: desk.id, act: false)
+            #expect(
+                f.recorder.pastedPanes.count == pastesBefore + 1,
+                "the live replacement must have taken a nudge for this test to mean anything")
+
+            // Same fourth death as the test above, which there bought nothing.
+            let after = try await killAllAndTick(f, desk: desk.id)
+            #expect(
+                after == count + 1,
+                "a delivered nudge must restore the desk's ability to restaff itself")
+        }
+
+        /// The incident, end to end, in the order it was observed in the field: one tick
+        /// spawns a replacement desk AND invalidates the live incumbent, ~30 seconds
+        /// apart, while that incumbent's lease is renewing on its own timer and has never
+        /// missed a renewal. Both halves come from the same tick, through two different
+        /// actuators, on the same wrong verdict.
+        ///
+        /// So this drives the whole tick — `ensureDeskSession` (which spawns),
+        /// `maintainJudgeLease` (the ownership heartbeat) and `nudgeDeskSession` (which
+        /// revoked) — with the judge renewing between ticks the way a running judge does,
+        /// and holds all four invariants across every one of them: no new terminal, the
+        /// terminal's persisted role stays `judge`, and the lease keeps its owner, its
+        /// generation and its validity.
+        ///
+        /// Before the fix each tick read an unanswerable tmux consultation as "the
+        /// owner's pane is gone", demoted the incumbent in place — same terminal, same
+        /// generation, `expiresAt` zeroed, so its next renew came back fenced — and
+        /// spawned another agent beside the judge it had just stripped of authority.
+        @Test("a live incumbent with a renewing lease survives repeated ticks untouched")
+        func testLiveIncumbentSurvivesRepeatedTicks() async throws {
+            let f = try makeDeskFixture(tag: "staff-incumbent")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            let incumbent = try #require(
+                try await f.db.terminals.list(worktreeID: desk.id)
+                    .first(where: { $0.label == TerminalLabel.claudeCode }))
+
+            // The incumbent holds the judge lease, as a running judge does.
+            var lease = try await f.db.watchDeskLeases.acquire(
+                worktreeID: desk.id, terminalID: incumbent.id, now: Date())
+
+            // Its pane is alive and running an agent, but the identity consultation
+            // cannot be run — the production fault.
+            f.identities.markUnreachable(incumbent.tmuxPaneID)
+
+            let terminalsBefore = try await f.db.terminals.list(worktreeID: desk.id).count
+            for tick in 0..<5 {
+                // The judge's own renew loop, which never missed a beat in the field.
+                lease = try await f.db.watchDeskLeases.renew(
+                    worktreeID: desk.id, terminalID: lease.terminalID,
+                    token: lease.token, generation: lease.generation, now: Date())
+
+                // One whole tick, in the order the runner drives it.
+                _ = try await f.manager.ensureDeskSession(mode: .daywatch)
+                await f.manager.maintainJudgeLease(worktreeID: desk.id)
+                await f.manager.nudgeDeskSession(worktreeID: desk.id, act: false)
+
+                let terminals = try await f.db.terminals.list(worktreeID: desk.id)
+                #expect(
+                    terminals.count == terminalsBefore,
+                    "tick \(tick): no agent may be spawned beside a live incumbent")
+
+                let row = try #require(terminals.first { $0.id == incumbent.id })
+                #expect(
+                    row.watchDeskRole == .judge,
+                    "tick \(tick): the incumbent was demoted in place")
+
+                let current = try #require(try await f.db.watchDeskLeases.status(worktreeID: desk.id))
+                #expect(current.terminalID == lease.terminalID, "tick \(tick): owner changed")
+                #expect(current.generation == lease.generation, "tick \(tick): generation changed")
+                #expect(
+                    current.isValid(at: Date()),
+                    "tick \(tick): a lease was revoked on a consultation nobody could run")
+            }
+        }
+
+        /// The other half of the same rule: when tmux positively answers that the
+        /// owner's pane is gone, the lease IS revoked, exactly as before. Refusing to
+        /// act on absence of evidence must not become refusing to act on evidence.
+        @Test("a lease whose owner is proven gone is still revoked")
+        func testProvenGoneOwnerLoosesLease() async throws {
+            let f = try makeDeskFixture(tag: "staff-revoke")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            let incumbent = try #require(
+                try await f.db.terminals.list(worktreeID: desk.id)
+                    .first(where: { $0.label == TerminalLabel.claudeCode }))
+            let lease = try await f.db.watchDeskLeases.acquire(
+                worktreeID: desk.id, terminalID: incumbent.id, now: Date())
+            #expect(lease.isValid(at: Date()))
+
+            f.identities.set(.missing, for: incumbent.tmuxPaneID)
+            f.dead.markDead(incumbent.tmuxWindowID)
+
+            await f.manager.nudgeDeskSession(worktreeID: desk.id, act: false)
+
+            // Either the lease is now invalid, or a live successor holds a newer
+            // one — what must not survive is the gone terminal still holding
+            // valid authority.
+            let after = try #require(try await f.db.watchDeskLeases.status(worktreeID: desk.id))
+            #expect(
+                !(after.terminalID == incumbent.id && after.isValid(at: Date())),
+                "a proven-gone owner must lose the lease")
+        }
+
+        /// Mode switches must reuse the existing desk and terminal without respawning.
+        /// This is preserved by the cross-kind check: both modes use the same desk and
+        /// terminal, so mode doesn't affect reuse.
+        @Test("mode switch daywatch↔nightwatch reuses desk without respawning")
+        func testModeFlipReusesDesk() async throws {
+            let f = try makeDeskFixture(tag: "mode-reuse")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk1 = try await f.manager.ensureDeskSession(mode: .daywatch)
+            let terminalsAfterFirst = try await f.db.terminals.list(worktreeID: desk1.id)
+
+            // Mode switch: nightwatch on the same desk.
+            let desk2 = try await f.manager.ensureDeskSession(mode: .nightwatch)
+
+            #expect(desk2.id == desk1.id, "mode switch must reuse the same desk")
+
+            let terminalsAfterSecond = try await f.db.terminals.list(worktreeID: desk1.id)
+            #expect(
+                terminalsAfterSecond.count == terminalsAfterFirst.count,
+                "mode switch must not respawn the terminal"
+            )
+        }
+
+        // MARK: - Observability: distinguishing "cannot tell" from "genuinely gone"
+
+        /// Failed consultation (unverifiable) is not the same as a genuine
+        /// "pane is gone" answer. When the identity consultation fails (tmux
+        /// returns non-zero exit or throws), it returns `.unverifiable(error:)`.
+        /// This must not license a spawn — "cannot tell" is not "empty".
+        @Test("unverifiable identity consultation is not pasted into (differs from send failure)")
+        func testUnverifiableIdentityIsNotPastedInto() async throws {
+            let f = try makeDeskFixture(tag: "obs-unverifiable")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
+            let seeded = try await f.db.terminals.list(worktreeID: desk.id)
+            let claude = try #require(seeded.first(where: { $0.label == TerminalLabel.claudeCode }))
+
+            // The pane exists and is running Claude, but the identity check fails
+            // (tmux query returns non-zero exit).
+            f.identities.markUnreachable(claude.tmuxPaneID)
+
+            let before = f.recorder.pastedPanes.count
+            await f.manager.nudgeDeskSession(worktreeID: desk.id, act: false)
+
+            let targets = Array(f.recorder.pastedPanes.dropFirst(before))
+            #expect(targets.isEmpty, "unverifiable pane must not be pasted into")
+        }
+
+        /// Genuine death is still diagnosable: when a pane is truly gone
+        /// (window killed, pane dead, no agent process), spawning is triggered.
+        /// The `.missing` answer from `paneSendTarget` is the expected failure
+        /// mode that should license recovery spawn.
+        @Test("genuinely missing pane triggers recovery spawn (verified distinct from unverifiable)")
+        func testGenuinelyMissingPaneSpawns() async throws {
+            let f = try makeDeskFixture(tag: "obs-missing")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let clock = TestDateSource(Date(timeIntervalSince1970: 3_000_000))
+            let manager = DeskSessionManager(
+                db: f.db,
+                lifecycle: WorktreeLifecycle(
+                    db: f.db,
+                    git: GitManager(),
+                    tmux: TmuxManager(dryRun: true),
+                    hooks: HookResolver()
+                ),
+                tmux: TmuxManager(
+                    dryRun: true,
+                    dryRunRecorder: { f.recorder.record($0) },
+                    dryRunWindowIsDead: { f.dead.isDead($0) },
+                    dryRunPaneCurrentCommand: { _, paneID in f.commands.command(for: paneID) }
+                ),
+                skillDir: f.home.appendingPathComponent("skills/nightwatch").path,
+                now: clock.provider,
+                actuationLog: makeTestActuationLog()
+            )
+
+            let desk = try await manager.ensureDeskSession(mode: .daywatch)
+            let seeded = try await f.db.terminals.list(worktreeID: desk.id)
+            let original = try #require(seeded.first(where: { $0.label == TerminalLabel.claudeCode }))
+
+            // Mark the pane as genuinely gone (window killed).
+            f.dead.markDead(original.tmuxWindowID)
+            try await f.db.terminals.deleteForWorktree(worktreeID: desk.id)
+
+            // Ensure after the genuinely-gone pane: should spawn recovery.
+            let terminalsBefore = try await f.db.terminals.list(worktreeID: desk.id).count
+            _ = try await manager.ensureDeskSession(mode: .daywatch)
+            let terminalsAfter = try await f.db.terminals.list(worktreeID: desk.id).count
+
+            #expect(
+                terminalsAfter == terminalsBefore + 1,
+                "genuinely-missing pane must trigger recovery spawn (distinct from unverifiable)"
+            )
         }
     }
 }

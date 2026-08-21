@@ -181,14 +181,22 @@ extension WorktreeLifecycle {
         // on. Rewriting such a row would orphan those live windows: the next
         // pass below probes the (empty) canonical server, concludes every
         // window is dead, and parks/deletes terminals that are actually alive.
-        // So: canonicalize ONLY when the stored server has no live window for
-        // this worktree's terminals — the genuinely-stale case the self-heal
-        // was built for.
+        // So: canonicalize ONLY on PROOF that the stored server has no live
+        // window for this worktree's terminals — the genuinely-stale case the
+        // self-heal was built for. A probe that could not be run is not that
+        // proof, and this rewrite is destructive enough that absence of evidence
+        // must not license it.
         let mainWorktrees = try await db.worktrees.listLocal(repoID: repoID, status: .main)
         for wt in (dbWorktrees + mainWorktrees) where wt.tmuxServer != correctTmuxServer {
-            if await hasLiveWindow(server: wt.tmuxServer, worktreeID: wt.id) {
+            switch await liveWindowProbe(server: wt.tmuxServer, worktreeID: wt.id) {
+            case .live:
                 logger.info("reconcile: keeping non-canonical tmux server \(wt.tmuxServer, privacy: .public) for worktree \(wt.id, privacy: .public) — it has live windows (promoted-scratch inheritance)")
                 continue
+            case .unverifiable(let reason):
+                logger.notice("reconcile: keeping non-canonical tmux server \(wt.tmuxServer, privacy: .public) for worktree \(wt.id, privacy: .public) — could not prove it has no live windows: \(reason, privacy: .public)")
+                continue
+            case .noneLive:
+                break
             }
             do {
                 try await db.worktrees.updateTmuxServer(id: wt.id, tmuxServer: correctTmuxServer)
@@ -320,15 +328,28 @@ extension WorktreeLifecycle {
         // live on the inherited scratch server, and probing the canonical
         // (empty) server would declare every live window dead. Cached per
         // server name — rows overwhelmingly share one server.
-        var serverAliveByName: [String: Bool] = [:]
+        //
+        // Tri-state, not a Bool, for the same reason the canonicalization pass
+        // above needs one: parking a row and deleting a row are mutations, and a
+        // tmux that could not be reached is not a tmux that answered "gone". A
+        // server whose probe fails takes every one of its worktrees' terminals
+        // out of this pass rather than through it.
+        var serverExistenceByName: [String: TmuxTargetExistence] = [:]
         for wt in allLiveWorktrees {
-            let serverAlive: Bool
-            if let cached = serverAliveByName[wt.tmuxServer] {
-                serverAlive = cached
+            let serverExistence: TmuxTargetExistence
+            if let cached = serverExistenceByName[wt.tmuxServer] {
+                serverExistence = cached
             } else {
-                serverAlive = await tmux.serverExists(server: wt.tmuxServer)
-                serverAliveByName[wt.tmuxServer] = serverAlive
+                serverExistence = await tmux.serverExistence(server: wt.tmuxServer)
+                serverExistenceByName[wt.tmuxServer] = serverExistence
             }
+            if case .unverifiable(let error) = serverExistence {
+                logger.notice("reconcile: leaving worktree \(wt.id, privacy: .public) terminals alone — server \(wt.tmuxServer, privacy: .public) could not be consulted: \(error, privacy: .public)")
+                continue
+            }
+            // `.gone` is the reboot case and is genuine proof every window died
+            // with it; `.exists` means each window still has to answer for itself.
+            let serverAlive = serverExistence == .exists
             let terminals = try await db.terminals.list(worktreeID: wt.id)
             // Parked rows (`hibernatedAt` OR legacy `suspendedAt` — see
             // `isParked`) are skipped: a parked terminal's window being gone
@@ -339,11 +360,20 @@ extension WorktreeLifecycle {
                 // After a reboot the server is gone, so every window is dead;
                 // otherwise probe the specific window. (Split across statements
                 // because `&&` builds an autoclosure that can't contain `await`.)
-                var windowAlive = false
                 if serverAlive {
-                    windowAlive = await tmux.windowExists(server: wt.tmuxServer, windowID: terminal.tmuxWindowID)
+                    switch await tmux.windowExistence(
+                        server: wt.tmuxServer, windowID: terminal.tmuxWindowID) {
+                    case .exists:
+                        continue
+                    case .unverifiable(let error):
+                        // Absence of evidence. Skipping costs one deferred park;
+                        // acting costs a live session's row.
+                        logger.notice("reconcile: leaving terminal \(terminal.id, privacy: .public) alone — window \(terminal.tmuxWindowID, privacy: .public) could not be consulted: \(error, privacy: .public)")
+                        continue
+                    case .gone:
+                        break
+                    }
                 }
-                guard !windowAlive else { continue }
 
                 // Extra safety: If this is a Claude-resumable terminal, double-check
                 // that the process is truly gone before parking. If Claude is still
@@ -532,19 +562,60 @@ extension WorktreeLifecycle {
         }
     }
 
-    /// True when `server` is up AND hosts a live tmux window for at least one
-    /// of `worktreeID`'s terminal rows. Used by the stale-server self-heal to
-    /// distinguish a genuinely dead/renamed server (safe to canonicalize)
+    /// What the stale-server self-heal was able to prove about `server`.
+    ///
+    /// Three answers, not two, because this probe's negative drives a
+    /// destructive mutation: rewriting a worktree's stored server orphans any
+    /// live windows on the old one, and the very next pass then reads those
+    /// orphans as dead and parks or deletes rows whose sessions are running. A
+    /// tmux that could not be reached must not be able to trigger that.
+    enum LiveWindowProbe: Equatable {
+        /// At least one window is confirmed alive on this server.
+        case live
+        /// PROOF there is nothing to orphan: the server is gone, or every one of
+        /// this worktree's windows was positively reported missing.
+        case noneLive
+        /// The probe could not be run. Proof of nothing.
+        case unverifiable(reason: String)
+    }
+
+    /// Probe whether `server` is up AND hosts a live tmux window for at least
+    /// one of `worktreeID`'s terminal rows. Used by the stale-server self-heal
+    /// to distinguish a genuinely dead/renamed server (safe to canonicalize)
     /// from a deliberately inherited one whose sessions are still running
     /// (promoted scratch space). Early-exits on the first live window.
-    private func hasLiveWindow(server: String, worktreeID: UUID) async -> Bool {
-        guard await tmux.serverExists(server: server) else { return false }
-        let terminals = (try? await db.terminals.list(worktreeID: worktreeID)) ?? []
+    func liveWindowProbe(server: String, worktreeID: UUID) async -> LiveWindowProbe {
+        switch await tmux.serverExistence(server: server) {
+        case .gone:
+            return .noneLive
+        case .unverifiable(let error):
+            return .unverifiable(reason: "server \(server) could not be reached: \(error)")
+        case .exists:
+            break
+        }
+        let terminals: [Terminal]
+        do {
+            terminals = try await db.terminals.list(worktreeID: worktreeID)
+        } catch {
+            // An unreadable terminal table is not an empty one, and `try?` here
+            // would let a database error license the rewrite.
+            return .unverifiable(reason: "terminal rows unreadable: \(error.localizedDescription)")
+        }
+        var unverifiable: String?
         for terminal in terminals {
-            if await tmux.windowExists(server: server, windowID: terminal.tmuxWindowID) {
-                return true
+            switch await tmux.windowExistence(server: server, windowID: terminal.tmuxWindowID) {
+            case .exists:
+                return .live
+            case .gone:
+                continue
+            case .unverifiable(let error):
+                // Keep looking: a later window may still prove the server live,
+                // which is a stronger answer than "could not tell". Only if no
+                // window is confirmed alive does this become the verdict.
+                unverifiable = unverifiable ?? "window \(terminal.tmuxWindowID): \(error)"
             }
         }
-        return false
+        if let unverifiable { return .unverifiable(reason: unverifiable) }
+        return .noneLive
     }
 }

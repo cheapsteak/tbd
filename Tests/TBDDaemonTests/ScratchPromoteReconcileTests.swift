@@ -115,6 +115,101 @@ struct ScratchPromoteReconcileTests {
         #expect(claudeAfter.suspendedAt == nil)
     }
 
+    /// The self-heal's negative branch is destructive — it rewrites the stored
+    /// server, which orphans any live window on the old one, and the very next
+    /// pass then reads those orphans as dead and parks or deletes rows whose
+    /// sessions are running. The comment above the loop has always said so.
+    ///
+    /// The probe behind it could not say "I could not check": `serverExists` and
+    /// `windowExists` both folded every tmux failure into `false`, the same
+    /// signal as a genuinely dead server. So a transient tmux fault coinciding
+    /// with an inherited server name was enough to trigger the cascade the
+    /// comment warns about, with no fault of the stored data.
+    ///
+    /// Here the windows are alive and the identity of the server is fine — only
+    /// the consultation fails. Nothing may be rewritten on that.
+    @Test func reconcileKeepsInheritedServerWhenTmuxCannotBeConsulted() async throws {
+        let (home, cleanup) = isolate(); defer { cleanup() }
+        let db = try TBDDatabase(inMemory: true)
+        let router = makeRouter(db, home: home)
+        let promoted = try await promoteScratchWithTerminals(db: db, router: router, home: home)
+
+        let canonical = TmuxManager.serverName(forRepoPath: promoted.dest)
+        #expect(promoted.mainWorktree.tmuxServer != canonical, "fixture proves nothing otherwise")
+
+        // Every window consultation fails to run — not an answer about any window.
+        let lifecycle = WorktreeLifecycle(
+            db: db,
+            git: GitManager(),
+            tmux: TmuxManager(
+                dryRun: true,
+                dryRunWindowExistence: { _, _ in
+                    .unverifiable(error: "tmux list-panes exited 1: error connecting to socket")
+                }
+            ),
+            hooks: HookResolver())
+        try await lifecycle.reconcile(repoID: promoted.repoID, actuationLog: makeTestActuationLog())
+
+        let mainAfter = try #require(try await db.worktrees.get(id: promoted.mainWorktree.id))
+        #expect(
+            mainAfter.tmuxServer == promoted.scratch.tmuxServer,
+            "a tmux nobody could consult must not license rewriting the stored server")
+
+        let terminals = try await db.terminals.list(worktreeID: promoted.mainWorktree.id)
+        #expect(Set(terminals.map(\.id)) == [promoted.claude.id, promoted.shell.id])
+    }
+
+    /// An unreachable *server* is the other half of the same probe, and it fails
+    /// the same way: `serverExists` returned `false` for "no server running" and
+    /// for "I could not reach tmux" alike.
+    @Test func reconcileKeepsInheritedServerWhenServerCannotBeReached() async throws {
+        let (home, cleanup) = isolate(); defer { cleanup() }
+        let db = try TBDDatabase(inMemory: true)
+        let router = makeRouter(db, home: home)
+        let promoted = try await promoteScratchWithTerminals(db: db, router: router, home: home)
+
+        let lifecycle = WorktreeLifecycle(
+            db: db,
+            git: GitManager(),
+            tmux: TmuxManager(
+                dryRun: true,
+                dryRunServerExistence: { _ in
+                    .unverifiable(error: "protocol version mismatch (client 8, server 7)")
+                }
+            ),
+            hooks: HookResolver())
+        try await lifecycle.reconcile(repoID: promoted.repoID, actuationLog: makeTestActuationLog())
+
+        let mainAfter = try #require(try await db.worktrees.get(id: promoted.mainWorktree.id))
+        #expect(
+            mainAfter.tmuxServer == promoted.scratch.tmuxServer,
+            "an unreachable tmux server is not a dead one")
+    }
+
+    /// The other direction, so refusing to act on absence of evidence did not
+    /// become refusing to act on evidence: when tmux positively reports the
+    /// windows gone, the stale name is still canonicalized. This is the case the
+    /// self-heal exists for.
+    @Test func reconcileStillCanonicalizesWhenWindowsAreProvenGone() async throws {
+        let (home, cleanup) = isolate(); defer { cleanup() }
+        let db = try TBDDatabase(inMemory: true)
+        let router = makeRouter(db, home: home)
+        let promoted = try await promoteScratchWithTerminals(db: db, router: router, home: home)
+
+        let canonical = TmuxManager.serverName(forRepoPath: promoted.dest)
+        let lifecycle = WorktreeLifecycle(
+            db: db,
+            git: GitManager(),
+            tmux: TmuxManager(dryRun: true, dryRunWindowIsDead: { _ in true }),
+            hooks: HookResolver())
+        try await lifecycle.reconcile(repoID: promoted.repoID, actuationLog: makeTestActuationLog())
+
+        let mainAfter = try #require(try await db.worktrees.get(id: promoted.mainWorktree.id))
+        #expect(
+            mainAfter.tmuxServer == canonical,
+            "a genuinely stale server must still be canonicalized")
+    }
+
     /// Register a plain git repo through the real `repo.add` RPC, giving the
     /// harness a surviving repo whose reconcile can janitor shared servers
     /// after the promoted repo itself is removed.
