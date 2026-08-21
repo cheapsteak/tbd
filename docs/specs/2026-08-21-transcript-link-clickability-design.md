@@ -37,7 +37,12 @@ inline code spans, and fenced code blocks alike.
   at click time.
 - **Existing `[text](url)` links keep working**, and are never double-linked.
 - **Clicks route by kind.** A file path goes to `routeFileClick`; a URL goes to
-  `NSWorkspace`.
+  the browser.
+- **A bare filename links too.** `CLAUDE.md` with no slash resolves against the
+  worktree root, because agents write filenames that way constantly. The cost is
+  accepted knowingly: an agent discussing another repo's `settings.json` gets a
+  link to this worktree's file. A wrong file opening in a viewer is a cheap
+  error, and requiring a slash would miss the common case.
 
 `:line:col` suffixes are stripped for resolution and then discarded — the code
 viewer takes no line argument, so a click opens the file at the top. This matches
@@ -70,10 +75,23 @@ It lives somewhere in the grid-to-token path and is filed separately.
 ## Detection
 
 `TranscriptLinkScanner` is pure: a plain string in, candidate ranges out, no
-AppKit. It reuses the terminal's token-boundary character set so the two agree on
-where a path ends, strips a trailing sentence period so `see docs/foo.md.` links
-the path and not the period, and skips any range that already carries a `.link`
-attribute.
+AppKit. It strips a trailing sentence period so `see docs/foo.md.` links the path
+and not the period, and skips any range that already carries a `.link` attribute.
+
+The token-boundary character set lives beside the resolver and is *referenced* by
+both the terminal's widener and the scanner, not copied into each. Sharing the
+resolver while duplicating the tokenizer would leave the two surfaces free to
+disagree about where a path begins and ends — which is the same drift the shared
+resolver exists to prevent, one layer down.
+
+A closing bracket is stripped from a URL only when it is unbalanced within the
+token, so `…/Foo_(bar)` survives.
+
+Two things the pass cannot reach, both deliberate. Text inside a GFM table cell
+renders as a `.table` block rather than prose, so links there are out of scope.
+And a token with no slash and no extension — `Makefile`, `LICENSE` — is not a
+candidate, which is what keeps every ordinary English word out of the
+filesystem.
 
 Keeping it free of AppKit is what makes the interesting cases testable without a
 view: each case in the probe matrix below is an assertion against a string.
@@ -124,9 +142,13 @@ choose their own destination:
   file. That is the accepted behavior: the pane count stays at two, and the
   toolbar toggle brings the transcript back. The cost is the transcript's scroll
   position.
-- **The History pane** wires both file and URL clicks to `NSWorkspace`. History
-  transcripts are not panes in a layout, so there is no slot to route into. Links
-  look identical in both places while the destination differs.
+- **The History pane** reveals a file in Finder and opens a URL in the browser.
+  History transcripts are not panes in a layout, so there is no slot to route
+  into. Revealing rather than opening is a safety decision as much as a
+  navigational one: transcript text is agent-authored, and handing an arbitrary
+  resolved path to `NSWorkspace.open` would *execute* it when it happens to be a
+  shell script. Links look identical in both places while the destination
+  differs.
 
 ## Testing
 
@@ -140,11 +162,21 @@ establish that the terminal already handles all of them:
 - each inside a fenced code block
 - a bare URL, a CommonMark autolink, a bare `file://` URL
 - a path followed by a sentence period
+- a bare filename with no slash, and a bare directory, which must not link
+- tokens that must never become candidates: `Node.js`, `v1.2.3`, `e.g.`, `and/or`
 
 Beyond the scanner: the extracted resolver gets the first tests those rules have
-ever had; a markdown `[text](url)` link is asserted not to be double-linked; and a
-link in a code context is asserted to carry an underline and no tint, while a
-prose link carries a tint.
+ever had, including the directory rule, which is reachable only through the
+real-filesystem overload; a markdown `[text](url)` link whose *visible text is
+itself a path* is asserted not to be double-linked, since a link whose text
+contains no candidate would pass whether or not the guard exists.
+
+The styling split is asserted end-to-end rather than on a hand-built string. A
+test that marks the code attribute itself proves only that the styling branch
+works — it would stay green if the renderer never set the attribute at all,
+leaving every code link tinted and then silently erased by the highlight pass.
+So the inline-span and fenced-block cases assert, through `renderBlocks`, that
+the link carries an underline and has kept the code foreground color.
 
 ## Flag and reconciler
 
