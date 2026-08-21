@@ -94,6 +94,14 @@ class PRWorktreeLinkTests(unittest.TestCase):
             _check("gh pr create --body '[wt](https://someone.github.io/tbd/open/?worktree=abc)'")
         )
 
+    def test_informs_when_the_path_only_ends_in_the_redirector_segment(self):
+        # `/tbd/open/` is a whole path segment, so a longer segment ending in
+        # those characters is a different URL and reopens nothing.
+        _informs(
+            self,
+            "gh pr create --body '[x](https://example.com/nottbd/open/?worktree=abc)'",
+        )
+
     def test_informs_when_the_worktree_param_is_missing(self):
         # A redirector URL naming no worktree reopens nothing.
         _informs(self, "gh pr create --body '[wt](https://cheapsteak.github.io/tbd/open/)'")

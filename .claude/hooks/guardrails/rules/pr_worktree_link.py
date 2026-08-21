@@ -92,7 +92,11 @@ _MAX_BODY_BYTES = 64 * 1024
 # at `worktree=`, so a markdown `[name](…)` wrapper neither extends it nor
 # breaks it, and the `&terminal=<uuid>` an anchored link appends is simply past
 # the end of the match.
-_LINK_PATTERN = re.compile(r"https?://\S*tbd/open/\S*[?&]worktree=")
+#
+# The leading `/` on `/tbd/open/` makes it a whole path segment. Without it the
+# segment matches inside a longer one, so an unrelated host's `/nottbd/open/`
+# would read as the redirector and suppress the nudge.
+_LINK_PATTERN = re.compile(r"https?://\S*/tbd/open/\S*[?&]worktree=")
 
 _MESSAGE = (
     "This PR (or MR) is being opened from a TBD worktree, so end its body with a "
