@@ -557,7 +557,8 @@ struct TableTranscriptHarness {
             terminalID: nil,
             openTranscriptOverlay: { _ in },
             appState: appState,
-            linkResolver: nil
+            linkResolver: nil,
+            onLinkClicked: nil
         )
         let coordinator = InstrumentedCoordinator(context: context, useFixedSize: fixedSize)
 

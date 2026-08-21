@@ -658,7 +658,8 @@ struct TableTranscriptView: NSViewRepresentable {
                 accessibilityAttribution: TranscriptBubbleGeometry.accessibilityAttribution(for: item),
                 bodyWidth: TranscriptBubbleGeometry.bodyWidth(columnWidth: width, role: role),
                 columnWidth: width,
-                cachedHeight: height
+                cachedHeight: height,
+                onLinkClicked: context.onLinkClicked
             )
             return cell
         }

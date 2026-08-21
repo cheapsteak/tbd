@@ -471,7 +471,8 @@ struct SessionTranscriptView: View {
                             openTranscriptOverlay: openTranscriptItem,
                             toggleActivityGroup: setActivityGroup,
                             appState: appState,
-                            linkResolver: nil
+                            linkResolver: nil,
+                            onLinkClicked: nil
                         ),
                         atBottom: $atBottom,
                         scrollToBottomToken: scrollToBottomToken,

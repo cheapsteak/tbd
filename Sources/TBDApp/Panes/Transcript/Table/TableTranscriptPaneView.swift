@@ -197,7 +197,8 @@ struct TableTranscriptPaneView: View {
             openTranscriptOverlay: openTranscriptOverlay,
             toggleActivityGroup: setActivityGroup,
             appState: appState,
-            linkResolver: nil
+            linkResolver: nil,
+            onLinkClicked: nil
         )
         SessionWorkbenchView(
             sections: presentation.indexSections,

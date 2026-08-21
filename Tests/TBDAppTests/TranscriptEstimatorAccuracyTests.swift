@@ -1213,7 +1213,8 @@ struct TranscriptEstimatorAccuracyTests {
             terminalID: nil,
             openTranscriptOverlay: { _ in },
             appState: appState,
-            linkResolver: nil
+            linkResolver: nil,
+            onLinkClicked: nil
         )
         let coordinator = TableTranscriptView.Coordinator(context: context)
 

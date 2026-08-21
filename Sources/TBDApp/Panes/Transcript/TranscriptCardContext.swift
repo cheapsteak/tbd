@@ -12,18 +12,22 @@ struct TranscriptCardContext {
     /// Resolves a path token against the worktree root. Nil in contexts with no
     /// worktree, where only web URLs become links.
     let linkResolver: TranscriptPathResolver?
+    /// Routes a clicked transcript link. Nil leaves links inert.
+    let onLinkClicked: ((TranscriptLinkTarget) -> Void)?
 
     init(
         terminalID: UUID?,
         openTranscriptOverlay: (@MainActor (String) -> Void)?,
         toggleActivityGroup: (@MainActor (String, Bool) -> Void)? = nil,
         appState: AppState?,
-        linkResolver: TranscriptPathResolver?
+        linkResolver: TranscriptPathResolver?,
+        onLinkClicked: ((TranscriptLinkTarget) -> Void)?
     ) {
         self.terminalID = terminalID
         self.openTranscriptOverlay = openTranscriptOverlay
         self.toggleActivityGroup = toggleActivityGroup
         self.appState = appState
         self.linkResolver = linkResolver
+        self.onLinkClicked = onLinkClicked
     }
 }

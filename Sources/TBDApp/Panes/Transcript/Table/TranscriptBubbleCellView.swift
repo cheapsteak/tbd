@@ -320,13 +320,50 @@ private final class RoundedBoxView: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
+/// Where a clicked transcript link should go.
+enum TranscriptLinkTarget: Equatable {
+    /// An absolute path, already resolved during the render pass.
+    case file(String)
+    case web(URL)
+
+    init?(url: URL) {
+        if let path = TranscriptLinkPass.resolvedPath(from: url) { self = .file(path); return }
+        if url.isFileURL { self = .file(url.path); return }
+        if url.scheme == "http" || url.scheme == "https" { self = .web(url); return }
+        return nil
+    }
+}
+
 /// The chat bubble's selectable prose text view (TextKit 1). A DISTINCT subclass
 /// so the table's `validateProposedFirstResponder(_:for:)` can recognise it
 /// precisely and let it take the mouse immediately — otherwise NSTableView delays
 /// first responder and the first click selects the row instead of starting a text
 /// drag. A bubble may contain SEVERAL of these (one per prose block).
+///
+/// It is also its own delegate, and so owns link-click routing: AppKit follows a
+/// `.link` on a plain click and still starts a selection on a drag, so the view
+/// only has to say where the link goes.
 @MainActor
-final class TranscriptBubbleTextView: NSTextView {}
+final class TranscriptBubbleTextView: NSTextView {
+    /// Set by the cell on every configure. Nil means links are inert.
+    var onLinkClicked: ((TranscriptLinkTarget) -> Void)?
+}
+
+extension TranscriptBubbleTextView: NSTextViewDelegate {
+    func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+        let url: URL?
+        switch link {
+        case let value as URL: url = value
+        case let value as String: url = URL(string: value)
+        default: url = nil
+        }
+        guard let url, let target = TranscriptLinkTarget(url: url) else { return false }
+        onLinkClicked?(target)
+        // Handled here — returning false would let AppKit hand a `tbd-file:`
+        // URL to NSWorkspace, which has no handler for it.
+        return true
+    }
+}
 
 /// `NSTableCellView` that renders a chat message as a vertical stack of typed
 /// block views inside ONE rounded bubble. There is no role/timestamp header —
@@ -346,6 +383,10 @@ final class TranscriptBubbleCellView: NSTableCellView {
 
     /// Source text of the whole message, for ⌘C / "Copy message".
     private var messageSourceText: String = ""
+
+    /// Routes a link click out of the cell. Reset on every `configure` so a
+    /// scroll-reused cell never fires the previous row's closure.
+    private var onLinkClicked: ((TranscriptLinkTarget) -> Void)?
 
     /// Monotonic token bumped on every (re)build of the block stack. Async syntax-
     /// highlight completions capture the value current when they were dispatched
@@ -425,10 +466,14 @@ final class TranscriptBubbleCellView: NSTableCellView {
         accessibilityAttribution: String,
         bodyWidth: CGFloat,
         columnWidth: CGFloat,
-        cachedHeight: CGFloat
+        cachedHeight: CGFloat,
+        onLinkClicked: ((TranscriptLinkTarget) -> Void)?
     ) {
         let g = TranscriptBubbleGeometry.self
         messageSourceText = sourceText
+        // Set before `rebuildBlockStack`, which re-enters `makeProseView` and
+        // reads it: `configure` never reuses a prose view across rows.
+        self.onLinkClicked = onLinkClicked
 
         // Pin the cell box.
         let w = max(columnWidth, 1)
@@ -519,6 +564,12 @@ final class TranscriptBubbleCellView: NSTableCellView {
         let textView = TranscriptBubbleTextView(frame: .zero)
         textView.isEditable = false
         textView.isSelectable = true
+        textView.delegate = textView
+        // AppKit's own link treatment (blue + underline) would stack on top of
+        // the attributes the link pass already put in the storage. Empty means
+        // "draw exactly what the storage says".
+        textView.linkTextAttributes = [:]
+        textView.onLinkClicked = onLinkClicked
         textView.drawsBackground = false
         textView.backgroundColor = .clear
         textView.textContainerInset = .zero

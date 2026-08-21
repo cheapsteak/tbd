@@ -128,7 +128,8 @@ struct WorkbenchSnapshotTests {
                 terminalID: nil,
                 openTranscriptOverlay: { _ in },
                 appState: appState,
-                linkResolver: nil
+                linkResolver: nil,
+                onLinkClicked: nil
             )
             let tableCoordinator = self.buildTableCoordinator(
                 context: context,
