@@ -9,6 +9,18 @@ private let decodeLogger = Logger(subsystem: "com.tbd.daemon", category: "databa
 struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     static let databaseTableName = "terminal"
 
+    static func databaseDateEncodingStrategy(
+        for column: String
+    ) -> DatabaseDateEncodingStrategy {
+        if column == "sessionOrderObservedAt" {
+            // Numeric epoch storage preserves distinct starts within one
+            // millisecond. GRDB's default decoder accepts both this numeric
+            // representation and legacy datetime text rows.
+            return .timeIntervalSince1970
+        }
+        return .deferredToDate
+    }
+
     var id: String
     var worktreeID: String
     var tmuxWindowID: String
@@ -142,6 +154,7 @@ struct AppliedTerminalSessionStart: Sendable {
     let sessionID: String
     let transcriptPath: String?
     let orderObservedAt: Date?
+    let isInitialAttachment: Bool
     let activityObservation: AppliedTerminalActivityObservation?
 }
 
@@ -406,7 +419,9 @@ public struct TerminalStore: Sendable {
     /// their own conservative ordering: a same/newer prompt survives, and an
     /// older SessionStart cannot regress newer activity. Codex SessionStart is
     /// first-wins at an equal session watermark; an exact retry is an
-    /// idempotent no-op and therefore cannot move a transcript boundary.
+    /// idempotent no-op and therefore cannot move a transcript boundary. The
+    /// same transaction classifies an initial attachment from the complete
+    /// prior session history so callers never decide from a stale row snapshot.
     func applySessionStart(
         id: UUID,
         sessionID: String,
@@ -436,8 +451,12 @@ public struct TerminalStore: Sendable {
                     sessionID: sessionID,
                     transcriptPath: record.transcriptPath,
                     orderObservedAt: nil,
+                    isInitialAttachment: false,
                     activityObservation: nil)
             }
+            let isInitialAttachment = record.claudeSessionID == nil
+                && record.transcriptPath == nil
+                && record.sessionOrderObservedAt == nil
             if let storedSessionOrder = record.sessionOrderObservedAt,
                storedSessionOrder >= observedAt {
                 return nil
@@ -461,10 +480,18 @@ public struct TerminalStore: Sendable {
             // transition still retracts only a prompt known to be older.
             clearAwaitingInputIfNotNewer(record: &record, than: observedAt)
             try record.update(db)
+            guard let persistedRecord = try TerminalRecord.fetchOne(
+                db, key: id.uuidString
+            ) else {
+                throw DatabaseError(message: "Terminal disappeared after SessionStart")
+            }
             return AppliedTerminalSessionStart(
                 sessionID: sessionID,
-                transcriptPath: record.transcriptPath,
-                orderObservedAt: observedAt,
+                transcriptPath: persistedRecord.transcriptPath,
+                // The tracker must use the exact durable generation a later
+                // terminal-list read will reload.
+                orderObservedAt: persistedRecord.sessionOrderObservedAt,
+                isInitialAttachment: isInitialAttachment,
                 activityObservation: activityObservation)
         }
     }
@@ -489,6 +516,39 @@ public struct TerminalStore: Sendable {
             record.hibernateReason = nil
             record.label = TerminalLabel.shell
             record.kind = TerminalKind.shell.rawValue
+            record.activityState = TerminalActivityState.unknown.rawValue
+            record.activityStateSource = FactColumnJSON.encode(FactSource.derived)
+            record.activityStateObservedAt = date
+            record.activityStateOrderObservedAt = date
+            record.awaitingInputReason = nil
+            record.awaitingInputObservedAt = nil
+            try record.update(db)
+        }
+    }
+
+    /// Replace a dead Codex window with a fresh process while keeping the tab's
+    /// Codex identity. The replacement process has not announced a session yet,
+    /// so prior session and activity facts must not make its first SessionStart
+    /// look like a resume of the dead process.
+    func replaceRecreatedCodexWindow(
+        id: UUID,
+        windowID: String,
+        paneID: String,
+        at date: Date
+    ) async throws {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            record.tmuxWindowID = windowID
+            record.tmuxPaneID = paneID
+            record.claudeSessionID = nil
+            record.transcriptPath = nil
+            record.sessionOrderObservedAt = nil
+            record.suspendedAt = nil
+            record.suspendedSnapshot = nil
+            record.hibernatedAt = nil
+            record.hibernateReason = nil
             record.activityState = TerminalActivityState.unknown.rawValue
             record.activityStateSource = FactColumnJSON.encode(FactSource.derived)
             record.activityStateObservedAt = date

@@ -514,7 +514,6 @@ extension RPCRouter {
         let params = try decoder.decode(TerminalListParams.self, from: paramsData)
         var terminals = try await db.terminals.list(worktreeID: params.worktreeID)
         var codexTargets: [CodexTranscriptActivityTracker.Target] = []
-        var durableBoundaryTargets: [CodexTranscriptActivityTracker.Target] = []
         let observedIdentities = Dictionary(uniqueKeysWithValues: terminals
             .filter(\.isCodexTerminal)
             .map {
@@ -529,20 +528,18 @@ extension RPCRouter {
                   !transcriptPath.isEmpty else { continue }
             let target = CodexTranscriptActivityTracker.Target(
                 transcriptPath: transcriptPath,
-                worktreeID: terminals[index].worktreeID)
+                worktreeID: terminals[index].worktreeID,
+                terminalID: terminals[index].id,
+                sessionGeneration: terminals[index].sessionOrderObservedAt)
             codexTargets.append(target)
-            if terminals[index].sessionOrderObservedAt != nil {
-                durableBoundaryTargets.append(target)
-            }
         }
 
         // SessionStart's persisted session generation is the restart-safe boundary
         // cue. On a fresh tracker, start at the path's current EOF rather than
-        // replaying an orphan task_started from before that lifecycle event.
-        // Existing baselines are never moved, so later appended turns remain
-        // visible after ordinary hooks replace the raw activity fact.
-        await codexActivityTracker.establishSessionBoundariesIfAbsent(
-            transcripts: durableBoundaryTargets)
+        // replaying an orphan task_started from before that lifecycle event. The
+        // tracker prepares or retries that boundary in the same actor turn as
+        // observation, so a temporarily missing file cannot bootstrap between
+        // the two operations.
         let codexObservation = await codexActivityTracker.observeStamped(
             transcripts: codexTargets,
             now: now)
@@ -1099,36 +1096,59 @@ extension RPCRouter {
                 profile: nil
             ).merging(["DISABLE_AUTO_UPDATE": "true"]) { _, forced in forced }
             let updatedTerminal = try await actuating(actuationID) {
+                // Stage an inert pane without Codex first. `createWindow`
+                // returns after launching its command, so starting Codex here
+                // would let SessionStart race the durable reset below.
                 let window = try await tmux.createWindow(
                     server: worktree.tmuxServer,
                     session: "main",
                     cwd: worktree.path,
-                    shellCommand: CodexSpawnCommandBuilder.command(
-                        executablePath: codexPreparation.executablePath),
+                    shellCommand: "exec /usr/bin/tail -f /dev/null",
                     env: codexEnv,
-                    sensitiveEnv: codexEnvOverrides,
                     cols: resolvedCols,
                     rows: resolvedRows
                 )
 
-                // Update tmux IDs but DO NOT call clearRecreated — that nukes the label and kind
-                try await db.terminals.updateTmuxIDs(
-                    id: params.terminalID,
-                    windowID: window.windowID,
-                    paneID: window.paneID
-                )
-                // TBD just recreated the window, so nothing has yet been
-                // observed about what runs in it: `.derived` from our own act.
-                //
-                // `observedAt` from the router's date seam, never the store's
-                // default `Date()`. This stamp is *compared*, not just stored:
-                // `SessionStateResolver`'s rung 4 orders it against the
-                // awaiting-input stamp to decide which observation is newer, so
-                // a stamp minted inside the store is one a test cannot pin and
-                // therefore a decision a test cannot pin either.
-                try await db.terminals.setActivityState(
-                    id: params.terminalID, activityState: .unknown, source: .derived,
-                    observedAt: now())
+                do {
+                    // The new Codex process does not exist yet. Reset the dead
+                    // process's lifecycle while preserving this tab's Codex
+                    // label and kind, then launch Codex only after the write
+                    // commits. Its first SessionStart can therefore adopt
+                    // lifecycle records written before the hook reaches TBD.
+                    try await db.terminals.replaceRecreatedCodexWindow(
+                        id: params.terminalID,
+                        windowID: window.windowID,
+                        paneID: window.paneID,
+                        // The router's date seam makes this compared activity
+                        // fact deterministic; the store must not mint its own.
+                        at: now())
+                } catch {
+                    // The row still names its previous coordinates, so this
+                    // staging window would otherwise be unowned.
+                    try? await tmux.killWindow(
+                        server: worktree.tmuxServer, windowID: window.windowID)
+                    throw error
+                }
+
+                do {
+                    try await tmux.respawnWindow(
+                        server: worktree.tmuxServer,
+                        windowID: window.windowID,
+                        cwd: worktree.path,
+                        shellCommand: CodexSpawnCommandBuilder.command(
+                            executablePath: codexPreparation.executablePath),
+                        env: codexEnv,
+                        sensitiveEnv: codexEnvOverrides,
+                        cols: resolvedCols,
+                        rows: resolvedRows)
+                } catch {
+                    // The reset row owns these coordinates. Killing the inert
+                    // staging pane leaves a retryable missing-window row; if
+                    // the kill fails, the pane is still tracked, not orphaned.
+                    try? await tmux.killWindow(
+                        server: worktree.tmuxServer, windowID: window.windowID)
+                    throw error
+                }
                 return try await db.terminals.get(id: params.terminalID)
             }
 
@@ -2893,16 +2913,28 @@ extension RPCRouter {
             observedAt: observedAt
         ) else { return .ok() }
 
-        // The accepted SessionStart is also a lifecycle boundary in the Codex
-        // transcript reducer. Capture the current EOF even when the path is
+        // The first accepted Codex session has no prior lifecycle to fence, and
+        // its rollout can write task_started before this hook reaches TBD.
+        // Later accepted starts capture the current EOF even when the path is
         // unchanged, so an unmatched task_started from the interrupted session
         // cannot be re-published as working; later appended turns still win.
         if terminal.isCodexTerminal,
            let transcriptPath = sessionApplication.transcriptPath,
-           !transcriptPath.isEmpty {
-            await codexActivityTracker.establishSessionBoundary(
-                transcriptPath: transcriptPath,
-                worktreeID: terminal.worktreeID)
+           !transcriptPath.isEmpty,
+           let sessionGeneration = sessionApplication.orderObservedAt {
+            if sessionApplication.isInitialAttachment {
+                await codexActivityTracker.adoptInitialSession(
+                    transcriptPath: transcriptPath,
+                    worktreeID: terminal.worktreeID,
+                    terminalID: terminal.id,
+                    generation: sessionGeneration)
+            } else {
+                await codexActivityTracker.establishSessionBoundary(
+                    transcriptPath: transcriptPath,
+                    worktreeID: terminal.worktreeID,
+                    terminalID: terminal.id,
+                    generation: sessionGeneration)
+            }
         }
 
         // Invalidate cached transcript parse for the OLD session file (if any)

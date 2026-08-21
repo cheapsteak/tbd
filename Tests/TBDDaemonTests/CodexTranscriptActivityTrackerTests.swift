@@ -856,6 +856,23 @@ struct CodexTranscriptActivityTrackerTests {
         #expect(await tracker.hasBaseline(transcriptPath: keptThere.path))
     }
 
+    @Test func pendingSessionBoundaryPreventsNextObservationBootstrap() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        let tracker = CodexTranscriptActivityTracker()
+        let target = CodexTranscriptActivityTracker.Target(
+            transcriptPath: fixture.path,
+            worktreeID: UUID(),
+            terminalID: UUID(),
+            sessionGeneration: Date(timeIntervalSince1970: 1_700_000_000))
+
+        await tracker.establishSessionBoundariesIfAbsent(transcripts: [target])
+        try fixture.write(event(type: "task_started", turnID: "historical"))
+        let states = await tracker.observe(transcripts: [target])
+
+        #expect(states[target.transcriptPath] == nil)
+    }
+
     private func event(
         type: String,
         turnID: String?,

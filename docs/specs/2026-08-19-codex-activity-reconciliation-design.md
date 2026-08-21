@@ -76,7 +76,17 @@ Already-running installations may still send activity events without a session i
 
 An accepted `SessionStart` establishes the current session identity and transcript path. Session identity has its own persisted observation order, separate from activity and attention timestamps. This prevents a delayed event from one rail from incorrectly ordering another rail.
 
-For Codex, an accepted start also establishes a lifecycle boundary at the transcript's current end. Events before that boundary do not become current work after a same-path resume or daemon restart. The persisted SessionStart fact lets a new tracker reconstruct the boundary conservatively at the current end when actor memory is unavailable.
+The first accepted Codex start attaches the terminal to its initial rollout; there is no earlier terminal session to fence. The database classifies that attachment inside the same transaction that accepts the start. It is initial only when the stored row has no session identity, transcript path, or session-order watermark. A partial legacy or damaged row with any of those history fields is a later attachment and fences conservatively.
+
+A recreated Codex window is a deliberate fresh-process boundary, not a partial-history row. TBD first creates an inert replacement pane, then atomically stores its new tmux coordinates, clears the dead process's session identity, transcript path, session-order watermark, attention, and activity facts, and retains the tab's Codex label and kind. Only after that write commits does TBD respawn the pane with Codex, so the replacement process cannot send SessionStart against the dead process's history. Its first SessionStart is an initial attachment and may adopt lifecycle records it wrote before its hook arrived. Until that start arrives, session-bound activity hooks from the dead process mismatch the cleared identity and change nothing.
+
+Failure before the durable reset leaves the old row unchanged and removes any inert replacement pane on a best-effort basis; the normal worktree and tmux reconciler reclaims the unmatched pane if cleanup fails. Failure while launching Codex after the reset leaves the row cleared and retryable and also removes the inert pane on a best-effort basis. If that cleanup fails, the row still names the replacement window, so the same reconciler continues to own it rather than leaving an untracked resource.
+
+Codex can write `session_meta` and `task_started` before the first SessionStart hook reaches TBD, so the tracker retains an existing baseline or performs its ordinary bounded tail bootstrap. Those already-written lifecycle records are eligible to present the initial prompt as working, and a later matching close advances that baseline to idle. If the rollout is temporarily unavailable, the tracker remembers that the live generation is initial and a later poll bootstraps when the file appears.
+
+Every later accepted Codex start establishes a lifecycle boundary at the transcript's current end, including a same-path resume. Events before that boundary do not become current work in the new session. Session-order watermarks use numeric epoch storage so distinct starts within one millisecond remain distinct; the decoder also accepts legacy datetime text rows. Tracker session operations carry the watermark read back from the updated database row, so the live handler and later terminal-list reload use the same durable generation. A later generation defeats an older delayed tracker operation. Within the same generation, live initial-attachment knowledge defeats a conservative boundary reconstructed by a terminal-list call that raced ahead after database persistence.
+
+The persisted SessionStart fact lets a tracker with no in-memory generation state, such as after daemon restart, reconstruct the boundary conservatively at the current end. Boundary preparation or retry and stamped transcript observation happen in one tracker actor operation. If the file is unavailable, that reconstructed boundary remains pending and makes the transcript ineligible for ordinary bootstrap until a later poll captures its EOF. In-memory generation state is transient, terminal-keyed, and pruned with transcript baselines during worktree- or fleet-scoped retention.
 
 Rejected or stale SessionStart events do not change identity, transcript path, attention state, activity, or tracker boundaries. Equal-time competing starts are first-wins so completion order cannot roll identity backward. A permission fact observed at the same time as, or after, SessionStart survives it; only a strictly older permission fact is retracted.
 
@@ -159,6 +169,9 @@ Field measurements found lifecycle lines near 3 KiB at the 99th percentile and a
 - **Truncation or replacement** — rebuild from the bounded tail and do not reuse incompatible reducer evidence.
 - **Backlog beyond the request budget** — preserve incremental progress and publish unknown until caught up.
 - **Transcript identity changes during a scan** — discard the old-path result and publish an ordered unknown for the current identity.
+- **Initial task precedes SessionStart** — bootstrap or retain the first session's bounded baseline so already-written lifecycle evidence remains eligible.
+- **Terminal list races initial tracker attachment** — order both operations by the persisted session generation; same-generation initial knowledge replaces the speculative restart boundary.
+- **Initial rollout is temporarily unavailable** — retain the initial-generation mode without positive evidence, then use the ordinary bounded bootstrap when the file appears.
 - **Daemon restart after SessionStart** — reconstruct the boundary conservatively at the current end so an orphaned historical start cannot restore working.
 - **Delayed old-session hook with identity** — reject it before any mutation.
 - **Legacy hook without identity** — accept it for upgrade compatibility; subsequent session-bound hooks restore full protection.
@@ -205,7 +218,9 @@ Tracker tests cover:
 - unreadable-file recovery;
 - per-request byte and step limits;
 - fleet fairness, scoped polling, path removal, and reordering;
-- SessionStart boundaries, daemon reconstruction, and same-path invalidation;
+- atomic first-attachment classification, including partial-history rows, concurrent starts, sub-millisecond ordering, and legacy datetime rows;
+- same-generation list/adoption races, pending-boundary observation, unavailable initial rollouts, later-generation precedence, and generation-state retention;
+- later SessionStart boundaries, daemon reconstruction, and same-path invalidation;
 - transcript identity rollover during concurrent list calls.
 
 Daemon and wire tests cover:
