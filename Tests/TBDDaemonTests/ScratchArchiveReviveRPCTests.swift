@@ -537,6 +537,46 @@ struct WorktreeArchiveScratchRoutingRPCTests {
         })
     }
 
+    /// The one refusal that can follow a committed write. Forced deterministically
+    /// with a trigger rather than raced: the in-memory store is a single-connection
+    /// `DatabaseQueue`, so an AFTER UPDATE trigger that deletes the row as the
+    /// status flips reproduces exactly what a concurrent `scratch.delete` would do
+    /// between `revive()` and the re-read.
+    ///
+    /// The property under test is the ORDERING: the re-read sits ahead of the
+    /// broadcast, so this failure must not have told every subscriber the revive
+    /// happened while telling the caller it did not.
+    @Test func reviveRefusesAndBroadcastsNothingIfTheRowVanishesMidWrite() async throws {
+        let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
+        let db = try TBDDatabase(inMemory: true)
+        let (router, deltas) = makeRouter(db: db)
+        let wt = try await makeScratch(router, name: "wt-vanish-mid-revive")
+        #expect(await router.handle(try RPCRequest(
+            method: RPCMethod.worktreeArchive,
+            params: WorktreeArchiveParams(worktreeID: wt.id))).success)
+
+        try await db.writerForTests.write { conn in
+            try conn.execute(sql: """
+                CREATE TRIGGER vanish_on_revive AFTER UPDATE ON worktree
+                WHEN new.status = '\(WorktreeStatus.active.rawValue)'
+                BEGIN
+                    DELETE FROM worktree WHERE id = new.id;
+                END;
+                """)
+        }
+
+        let revive = await router.handle(try RPCRequest(
+            method: RPCMethod.worktreeRevive,
+            params: WorktreeReviveParams(worktreeID: wt.id)))
+        #expect(!revive.success)
+        #expect(revive.error?.contains("vanished while reviving") == true)
+        #expect(try await db.worktrees.get(id: wt.id) == nil)
+        #expect(!deltas.snapshot().contains {
+            if case .worktreeRevived(let d) = $0 { return d.worktreeID == wt.id }
+            return false
+        })
+    }
+
     /// A promoted scratch row is retired, not archived-and-revivable. Promotion
     /// leaves `repoID` NULL, so `isScratch` still holds and only the moved
     /// folder incidentally blocked this before the explicit guard.
