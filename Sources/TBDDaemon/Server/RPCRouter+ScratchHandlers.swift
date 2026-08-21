@@ -310,6 +310,23 @@ extension RPCRouter {
         guard wt.isScratch else {
             return .refused("Not a scratch space: \(worktreeID)")
         }
+        // The mirror of the archive guard, and the reason it has to exist
+        // separately: `DeskSessionManager.closeDeskSession` archives the desk's
+        // row through `db.worktrees.archive` directly, changing neither
+        // `repoID` nor the display name, so the archived row still satisfies
+        // `isNightwatchDesk` and passes every other guard below. Reviving it
+        // here would flip it `.active` and broadcast a revive while the desk
+        // actor's in-memory pointer, judge lease row, lease credential file and
+        // terminals stay gone: an active desk with nothing behind it.
+        //
+        // Refusing costs nothing, because nothing legitimately revives a desk
+        // row. `ensureDeskSession`'s recovery path excludes archived worktrees
+        // deliberately, so the desk mints a fresh session instead.
+        guard !wt.isNightwatchDesk else {
+            return .refused(
+                "This is the Nightwatch Watch Desk; it is not revived by hand. The desk opens a "
+                    + "fresh session itself when it next runs.")
+        }
         guard wt.status == .archived else {
             return .refused("Scratch space is already active: \(wt.id)")
         }

@@ -52,9 +52,9 @@ implementation inside the daemon, before any repo resolution is attempted. The
 routing sits in `handleWorktreeArchive` / `handleWorktreeRevive`, immediately
 alongside the remote-lane branch those handlers already carry, and reuses the
 exact code path `scratch.archive` / `scratch.revive` run. The bodies of those
-two handlers move into `archiveScratchSpace(worktreeID:surface:force:actor:)`
-and `reviveScratchSpace(worktreeID:)`, called from both entry points, so the two
-RPC doors share one implementation.
+two handlers move into `archiveScratchSpace(worktreeID:surface:actor:)` and
+`reviveScratchSpace(worktreeID:method:)`, called from both entry points, so the
+two RPC doors share one implementation.
 
 Separately, the guard stops lying. `WorktreeLifecycleError` gains a case for the
 condition that actually held:
@@ -231,6 +231,16 @@ the desk through the generic body would leak both with nothing to reclaim them.
 Both doors refuse it and say so, which is the honest answer to the reconciler
 question this new destruction path would otherwise have to answer.
 
+Revive refuses it as well, and needs its own guard rather than inheriting
+archive's. `closeDeskSession` archives the desk row through
+`db.worktrees.archive` directly and changes neither `repoID` nor the display
+name, so the archived row still reads as the desk and satisfies every other
+revive guard. Bringing it back by hand would flip the row `.active` and
+broadcast a revive while the desk actor's pointer, lease row, lease credential
+file and terminals stay gone. Nothing legitimately revives a desk row:
+`ensureDeskSession`'s recovery path excludes archived worktrees deliberately, so
+the desk opens a fresh session instead.
+
 The app keeps its own listings honest on daemon-originated transitions: the
 `.worktreeRevived` handler drops the row from `archivedScratchWorktrees`, and the
 archived handler refreshes that listing for a scratch row. Without the first
@@ -336,7 +346,7 @@ properties that distinguish archive from both the old failure and from delete:
   disk work, in particular before archive's detached phase 2, whose
   deletion-queue rename would outlive the test's `TBD_HOME` isolation.
 - The three kept refusals: a scratch space with an active child is refused and
-  `--force` still bypasses it; a second archive re-stamps no `archivedAt` and
+  `--force` does not bypass it, through either door; a second archive re-stamps no `archivedAt` and
   broadcasts no second delta; a promoted row is refused even with a directory
   recreated at its stale path, so the guard and not the filesystem is what
   refuses it.

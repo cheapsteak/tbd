@@ -494,6 +494,49 @@ struct WorktreeArchiveScratchRoutingRPCTests {
         #expect(archived.count == 1)
     }
 
+    /// The desk needs its own revive guard, not archive's: `closeDeskSession`
+    /// archives the desk row through the store directly and changes neither
+    /// `repoID` nor the display name, so the archived row still reads as the
+    /// desk and would otherwise pass every guard revive has. Reviving it would
+    /// report an active desk with no lease, no credential file and no terminals
+    /// behind it. Reachable from any client only because of this PR's routing.
+    @Test func reviveRefusesAnArchivedNightwatchWatchDesk() async throws {
+        let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
+        let db = try TBDDatabase(inMemory: true)
+        let (router, deltas) = makeRouter(db: db)
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("desk-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let desk = try await db.worktrees.createScratch(
+            name: "watch-desk", displayName: NightwatchDeskPrompts.deskDisplayName,
+            path: dir.path, tmuxServer: "tbd-x")
+        // Exactly what `closeDeskSession` does: archive the row through the
+        // store, touching neither `repoID` nor the display name.
+        try await db.worktrees.archive(id: desk.id)
+        let archived = try await db.worktrees.get(id: desk.id)
+        #expect(archived?.isNightwatchDesk == true)
+        // The folder is present, so the fileExists guard is not what refuses.
+        #expect(FileManager.default.fileExists(atPath: dir.path))
+
+        for method in [RPCMethod.worktreeRevive, RPCMethod.scratchRevive] {
+            let revive = await router.handle(
+                method == RPCMethod.worktreeRevive
+                    ? try RPCRequest(method: method,
+                                     params: WorktreeReviveParams(worktreeID: desk.id))
+                    : try RPCRequest(method: method,
+                                     params: ScratchReviveParams(worktreeID: desk.id)))
+            #expect(!revive.success)
+            #expect(revive.error?.contains("Watch Desk") == true)
+            #expect(try await db.worktrees.get(id: desk.id)?.status == .archived)
+        }
+        // And no revive delta told any client the desk came back.
+        #expect(!deltas.snapshot().contains {
+            if case .worktreeRevived(let d) = $0 { return d.worktreeID == desk.id }
+            return false
+        })
+    }
+
     /// A promoted scratch row is retired, not archived-and-revivable. Promotion
     /// leaves `repoID` NULL, so `isScratch` still holds and only the moved
     /// folder incidentally blocked this before the explicit guard.
