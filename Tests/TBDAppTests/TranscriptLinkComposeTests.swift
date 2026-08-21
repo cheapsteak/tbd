@@ -173,4 +173,21 @@ struct TranscriptLinkComposeTests {
         // one worth not re-asking.
         #expect(calls == ["docs/a.md", "nope.md"])
     }
+
+    // Grep output cites one file at many lines. Keying on the raw token would
+    // make `foo.py:10` and `foo.py:42` two entries and two `stat()` calls for
+    // one file, so the line suffix comes off before the lookup.
+    @Test func resolverCache_ignoresTheLineSuffixWhenKeying() {
+        let cache = TranscriptLinkResolverCache()
+        var calls: [String] = []
+        let underlying: (String) -> String? = { token in
+            calls.append(token)
+            return "/w/foo.py"
+        }
+        #expect(cache.resolve("foo.py:10", using: underlying) == "/w/foo.py")
+        #expect(cache.resolve("foo.py:42", using: underlying) == "/w/foo.py")
+        #expect(cache.resolve("foo.py:42:8", using: underlying) == "/w/foo.py")
+        #expect(cache.resolve("foo.py", using: underlying) == "/w/foo.py")
+        #expect(calls == ["foo.py"])
+    }
 }

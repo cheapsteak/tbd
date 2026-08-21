@@ -566,9 +566,13 @@ final class TranscriptBubbleCellView: NSTableCellView {
         textView.isSelectable = true
         textView.delegate = textView
         // AppKit's own link treatment (blue + underline) would stack on top of
-        // the attributes the link pass already put in the storage. Empty means
-        // "draw exactly what the storage says".
-        textView.linkTextAttributes = [:]
+        // the attributes the link pass already put in the storage — but the same
+        // dictionary is also where the pointing-hand cursor comes from, so
+        // emptying it wholesale would cost every link its hover affordance. The
+        // cursor is therefore re-supplied on its own. `.cursor` is a non-layout
+        // temporary attribute, so it cannot move a glyph and the composed
+        // cache's measure == render invariant is untouched.
+        textView.linkTextAttributes = [.cursor: NSCursor.pointingHand]
         textView.onLinkClicked = onLinkClicked
         textView.drawsBackground = false
         textView.backgroundColor = .clear

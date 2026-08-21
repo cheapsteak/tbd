@@ -87,11 +87,13 @@ resolver exists to prevent, one layer down.
 A closing bracket is stripped from a URL only when it is unbalanced within the
 token, so `…/Foo_(bar)` survives.
 
-Two things the pass cannot reach, both deliberate. Text inside a GFM table cell
+Three things the pass cannot reach, all deliberate. Text inside a GFM table cell
 renders as a `.table` block rather than prose, so links there are out of scope.
 And a token with no slash and no extension — `Makefile`, `LICENSE` — is not a
 candidate, which is what keeps every ordinary English word out of the
-filesystem.
+filesystem. A path containing a space — `/Users/x/My Documents/a.md` — is out of
+reach for the same reason the terminal's cmd+click widener cannot reach it: the
+shared token character set holds no whitespace, so the token ends at the space.
 
 Keeping it free of AppKit is what makes the interesting cases testable without a
 view: each case in the probe matrix below is an assertion against a string.
@@ -120,10 +122,18 @@ re-applies `.foregroundColor` over code ranges asynchronously, after the row is 
 screen; a link tint inside a code block would be silently overwritten a moment
 after it appeared. Underline survives, because highlighting sets colors only.
 
-The text view sets `linkTextAttributes = [:]` so AppKit does not stack its own
-blue-and-underline treatment on top of the attributes already in the storage.
-`NSTextView` still shows a pointing-hand cursor over link ranges, which supplies
-hover feedback at no cost.
+The text view sets `linkTextAttributes = [.cursor: NSCursor.pointingHand]`.
+That dictionary is AppKit's whole link treatment — blue, underline, and the
+pointing-hand cursor together — and letting it stand would stack a second
+styling on top of the attributes already in the storage. Emptying it, though,
+takes the cursor with it, and the cursor is the hover affordance that tells a
+reader a range is clickable before they click it. So the dictionary carries the
+cursor alone. `.cursor` is a non-layout temporary attribute: it cannot move a
+glyph, so the composed cache's measure == render invariant is unaffected.
+
+The consequence is that a markdown link renders exactly like a path link — tint
+only, no underline — rather than carrying AppKit's default underline. One
+appearance for every link in the transcript is the intent.
 
 ## Click plumbing
 

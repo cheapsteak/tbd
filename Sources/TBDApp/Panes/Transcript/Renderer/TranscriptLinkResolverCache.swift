@@ -16,12 +16,18 @@ import Foundation
 final class TranscriptLinkResolverCache {
     private var memo: [String: String?] = [:]
 
+    /// The key drops any trailing `:line` or `:line:col`, because the answer
+    /// does not depend on it — `ClickedPathResolver` strips the same suffix
+    /// before its existence check and the viewer takes no line argument. Keying
+    /// on the raw token would give grep output, which cites one file at many
+    /// lines, one entry and one `stat()` per line.
     func resolve(_ token: String, using resolve: (String) -> String?) -> String? {
+        let key = ClickedPathResolver.strippingLineSuffix(token)
         // Double optional: the outer level is "have we asked", the inner is the
-        // answer. `memo[token] != nil` is the hit test, including a cached nil.
-        if let cached = memo[token] { return cached }
-        let result = resolve(token)
-        memo[token] = result
+        // answer. `memo[key] != nil` is the hit test, including a cached nil.
+        if let cached = memo[key] { return cached }
+        let result = resolve(key)
+        memo[key] = result
         return result
     }
 }
