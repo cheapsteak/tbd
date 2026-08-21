@@ -298,8 +298,8 @@ body, testable on its own, and none is a refusal the routing removes:
   since only the GUI could archive one.
 
 The `?? worktreeID` shape appears once more, in `completeCreateWorktree`. That
-path is unreachable for a scratch space (scratch rows are minted by
-`handleScratchCreate`, never by the create lifecycle), but it is the same
+path is unreachable for a scratch space (repo-less rows are minted through
+`WorktreeStore.createScratch`, never by the create lifecycle), but it is the same
 defect, so it moves to the new error case too rather than being left as a
 second copy of a message the reader has just learned not to trust.
 
@@ -310,8 +310,14 @@ second copy of a message the reader has just learned not to trust.
 were nil would be routed to a path that leaves its directory and git
 registration in place, an under-cleanup rather than a data-loss failure, and
 would then be reported as archived. `repoID` is non-null for every row the
-create lifecycle writes, and `handleScratchCreate` is the only writer of a null
-one, so this requires the DB to already be inconsistent.
+create lifecycle writes, and the only two writers of a null one both go through
+`WorktreeStore.createScratch`: `handleScratchCreate`, whose rows are the
+intended target of this routing, and the Watch Desk's session creation, whose
+row is refused explicitly by the `isNightwatchDesk` guard in both shared bodies.
+So a row reaching the scratch teardown by way of a nil `repoID` it should not
+have had requires the DB to already be inconsistent. That premise is worth
+re-checking rather than inheriting: a third `createScratch` caller would widen
+this routing silently, and its rows would need their own answer here.
 
 **A scratch row misclassified as a repo worktree.** The inverse is the dangerous
 direction, since it reaches the phase-2 deletion path, and it is exactly what
