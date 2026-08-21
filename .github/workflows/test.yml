@@ -15,7 +15,13 @@ jobs:
     name: Lint
     runs-on: macos-26
     steps:
+      # `fetch-depth: 0` is load-bearing for the migration lint below: its
+      # history-is-frozen check needs `git merge-base origin/main HEAD`, and
+      # the default shallow checkout has neither the remote-tracking ref nor
+      # the history to find a merge base with.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install swiftlint
         run: brew install swiftlint
@@ -59,6 +65,21 @@ jobs:
 
       - name: SwiftLint (strict)
         run: swiftlint --strict
+
+      # The migration lint and its own harness. Both are pure Python/git/sqlite
+      # — no SwiftPM, no compiler — which is the whole point: a PR that adds a
+      # migration touches no Swift, and its author must not need a build to
+      # learn whether the SQL parses. See
+      # docs/specs/2026-08-19-migration-identifier-scheme-design.md.
+      - name: Lint SQL migrations
+        run: python3 scripts/lint-migrations.py
+
+      # `Migrations/` ships empty, so on this tree every guard but
+      # history-frozen has nothing real to act on. This harness is the only
+      # exercise they get: one fixture per guard that must fail, plus a
+      # mutation that disables the guard and proves its fixture then passes.
+      - name: Test the migration lint
+        run: bash scripts/lint-migrations.test.sh
 
       # The fence in `scripts/test.sh` is what stands between the suite and the
       # developer's real ~/tbd, ~/.claude and ~/.codex, and its guards were

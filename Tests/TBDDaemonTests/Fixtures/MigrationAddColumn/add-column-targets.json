@@ -1,0 +1,112 @@
+[
+  {
+    "name": "typed_with_semicolon",
+    "sql": "ALTER TABLE t ADD COLUMN foo TEXT;",
+    "target": [
+      "t",
+      "foo"
+    ]
+  },
+  {
+    "name": "typed_without_semicolon",
+    "sql": "ALTER TABLE t ADD COLUMN foo TEXT",
+    "target": [
+      "t",
+      "foo"
+    ]
+  },
+  {
+    "name": "untyped_with_semicolon",
+    "sql": "ALTER TABLE t ADD COLUMN foo;",
+    "target": [
+      "t",
+      "foo"
+    ]
+  },
+  {
+    "name": "untyped_without_semicolon",
+    "sql": "ALTER TABLE t ADD COLUMN foo",
+    "target": [
+      "t",
+      "foo"
+    ]
+  },
+  {
+    "name": "untyped_without_the_column_keyword",
+    "sql": "ALTER TABLE t ADD foo;",
+    "target": [
+      "t",
+      "foo"
+    ]
+  },
+  {
+    "name": "quoted_identifiers_untyped",
+    "sql": "ALTER TABLE \"con fig\" ADD COLUMN \"b ar\";",
+    "target": [
+      "con fig",
+      "b ar"
+    ]
+  },
+  {
+    "name": "line_comment_after_the_identifier",
+    "sql": "ALTER TABLE t ADD COLUMN foo-- why\n",
+    "target": [
+      "t",
+      "foo"
+    ]
+  },
+  {
+    "name": "block_comment_after_the_identifier",
+    "sql": "ALTER TABLE t ADD COLUMN foo/* why */ TEXT;",
+    "target": [
+      "t",
+      "foo"
+    ]
+  },
+  {
+    "name": "lowercase_keywords_untyped",
+    "sql": "alter table t add column foo;",
+    "target": [
+      "t",
+      "foo"
+    ]
+  },
+  {
+    "name": "quoted_identifier_butted_against_its_type_is_declined",
+    "sql": "ALTER TABLE t ADD COLUMN \"foo\"TEXT;",
+    "target": null
+  },
+  {
+    "name": "add_constraint_is_declined",
+    "sql": "ALTER TABLE t ADD CONSTRAINT fk FOREIGN KEY (a) REFERENCES u (b);",
+    "target": null
+  },
+  {
+    "name": "bare_column_keyword_capture_is_declined",
+    "sql": "ALTER TABLE t ADD COLUMN column;",
+    "target": null
+  },
+  {
+    "name": "untyped_column_named_column_is_declined",
+    "sql": "ALTER TABLE t ADD column;",
+    "target": null
+  },
+  {
+    "name": "quoted_column_named_column_is_kept",
+    "sql": "ALTER TABLE t ADD COLUMN \"column\";",
+    "target": [
+      "t",
+      "column"
+    ]
+  },
+  {
+    "name": "rename_is_declined",
+    "sql": "ALTER TABLE t RENAME TO u;",
+    "target": null
+  },
+  {
+    "name": "drop_column_is_declined",
+    "sql": "ALTER TABLE t DROP COLUMN a;",
+    "target": null
+  }
+]

@@ -1,0 +1,4 @@
+[
+  "-- crlf_line_endings: every newline in this file is CRLF.\r\nCREATE TABLE IF NOT EXISTS crlf_demo (id INTEGER PRIMARY KEY);",
+  "-- A comment attached to a statement that has no trailing semicolon.\r\nALTER TABLE crlf_demo ADD COLUMN note TEXT"
+]
