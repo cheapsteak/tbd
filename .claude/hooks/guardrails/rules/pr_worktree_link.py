@@ -11,9 +11,12 @@ missing courtesy link would be badly wrong. It only surfaces a reminder via
 Decision.info, which dispatch.py emits as non-blocking `additionalContext` — the
 command always proceeds.
 
-It stays silent when the link is already in the body (inline `--body` text or a
-`--body-file` target), and when the session is not under TBD at all, so a
-contributor working outside TBD never sees it.
+It stays silent when the link is already in the body the command is about to
+send — inline `--body`/`--description` text, a `--body-file` target it can read,
+or a heredoc body the command composes — and when the session is not under TBD
+at all, so a contributor working outside TBD never sees it. A marker anywhere
+else in the invocation is not a body: a chained `git log --grep '…?worktree=…'`,
+or a body-file path that happens to spell `tbd/open/`, leaves the nudge armed.
 
 **Detection is a port of `PRBindingExtractor.isPRCreateCommand`**
 (`Sources/TBDShared/PRBindingExtractor.swift`), which answers the same question
@@ -39,6 +42,7 @@ coverage.
 from __future__ import annotations
 
 import os
+import stat
 
 from guardrails.lib.rule import Decision, Rule
 
@@ -54,7 +58,10 @@ _VALUE_TAKING_FLAGS = frozenset({"-R", "--repo", "--hostname"})
 # verb must match its own CLI: `gh mr create` and `glab pr create` are rejected.
 _FORGE_CREATE_PATHS = {"gh": ("pr", "create"), "glab": ("mr", "create")}
 
-# `--body-file <path>` / `-F <path>` and their `=`-joined forms.
+# The flags whose value *is* the body text — gh's `--body`/`-b` and glab's
+# `--description`/`-d` — and the flags whose value names a file holding it.
+# Each is matched space-separated and `=`-joined.
+_BODY_TEXT_FLAGS = ("--body", "-b", "--description", "-d")
 _BODY_FILE_FLAGS = ("--body-file", "-F")
 
 # Cap on how much of a body file is scanned. The hook runs in front of every
@@ -149,8 +156,8 @@ def _heredoc_openers(line: str) -> list:
     return openers
 
 
-def _without_heredoc_bodies(command: str) -> str:
-    """Drop every heredoc *body*, keeping the lines that really are commands.
+def _split_heredoc_bodies(command: str) -> tuple:
+    """Separate the lines that are commands from the heredoc bodies they write.
 
     Segments are cut at newlines, so without this a documentation line inside a
     heredoc reads as a command: `cat <<'EOF' > CONTRIBUTING.md` whose body
@@ -158,8 +165,15 @@ def _without_heredoc_bodies(command: str) -> str:
     opens no PR. Fails closed wherever it is unsure — an unterminated heredoc
     swallows the rest of the command, and a `<<` that is not a heredoc at all is
     read as one.
+
+    Returns `(command_text, heredoc_text)`. Both halves matter: the first is
+    what gets tokenized into commands, and the second is prose the invocation
+    composes — which is exactly where a PR body written by heredoc lives,
+    whether it is substituted inline or redirected to a `--body-file` target
+    that does not exist yet.
     """
     lines: list = []
+    bodies: list = []
     pending: list = []
     for line in command.split("\n"):
         if pending:
@@ -167,10 +181,12 @@ def _without_heredoc_bodies(command: str) -> str:
             candidate = line.lstrip("\t") if strip_tabs else line
             if candidate == delimiter:  # the terminator is body too, never a command
                 pending.pop(0)
+            else:
+                bodies.append(candidate)
             continue
         lines.append(line)
         pending.extend(_heredoc_openers(line))
-    return "\n".join(lines)
+    return "\n".join(lines), "\n".join(bodies)
 
 
 def _command_segments(command: str) -> list:
@@ -259,11 +275,11 @@ def _is_forge_create_segment(words: list) -> bool:
     return tuple(subcommand) == expected
 
 
-def _forge_create_segments(command: str) -> list:
-    """Every segment of `command` that actually runs a forge create."""
+def _forge_create_segments(command_text: str) -> list:
+    """Every segment of already-heredoc-stripped text that runs a forge create."""
     return [
         words
-        for words in _command_segments(_without_heredoc_bodies(command))
+        for words in _command_segments(command_text)
         if _is_forge_create_segment(words)
     ]
 
@@ -272,25 +288,26 @@ def _text_has_link(text: str) -> bool:
     return any(marker in text for marker in _LINK_MARKERS)
 
 
-def _body_file_paths(words: list) -> list:
-    """The `--body-file` / `-F` targets in one already-tokenized segment.
+def _flag_values(words: list, flags: tuple) -> list:
+    """The values `flags` carry in one already-tokenized segment.
 
     Tokenizing first is what makes `--body-file "/path with spaces.md"` and
     `--body-file="/path with spaces.md"` both resolve — a regex over the raw
-    command truncates them at the first space.
+    command truncates them at the first space. It is also what keeps the flag
+    families apart: `--body-file=x` is not a `--body=` value.
     """
-    paths: list = []
+    values: list = []
     for index, word in enumerate(words):
-        if word in _BODY_FILE_FLAGS:
+        if word in flags:
             if index + 1 < len(words):
-                paths.append(words[index + 1])
+                values.append(words[index + 1])
             continue
-        for flag in _BODY_FILE_FLAGS:
+        for flag in flags:
             prefix = flag + "="
             if word.startswith(prefix):
-                paths.append(word[len(prefix):])
+                values.append(word[len(prefix):])
                 break
-    return paths
+    return values
 
 
 def _file_has_link(path: str) -> bool:
@@ -300,10 +317,16 @@ def _file_has_link(path: str) -> bool:
     from shell expansion) returns False, so the nudge fires. Informational
     output is harmless when wrong; a swallowed reminder is the worse failure.
 
-    Only regular files are opened, and only the first `_MAX_BODY_BYTES` of one.
+    Only regular files are read, and only the first `_MAX_BODY_BYTES` of one.
     This hook runs in front of every Bash call and blocks it while it runs, so
     it must never read something that can hang (a fifo, `/dev/stdin`) or that is
-    unbounded (`/dev/zero`).
+    unbounded (`/dev/zero`). The kind is decided from the *descriptor*, after
+    opening: a path inspected first and opened second describes two different
+    objects if anything swaps the name in between, and `O_NONBLOCK` is what
+    keeps that open from parking on a fifo that has no writer. The descriptor is
+    closed on every exit. One `read` of the cap is the whole scan: a regular
+    file hands back everything up to it in a single call, and a short one only
+    ever narrows the window, which costs a nudge that fires anyway.
 
     The read is binary so the cap counts bytes: a text-mode read counts
     characters, which lets multi-byte UTF-8 pull in several times the cap. A
@@ -312,20 +335,38 @@ def _file_has_link(path: str) -> bool:
     mangled trailing character can never fabricate a match.
     """
     try:
-        expanded = os.path.expanduser(path)
-        if not os.path.isfile(expanded):
-            return False
-        with open(expanded, "rb") as handle:
-            head = handle.read(_MAX_BODY_BYTES)
+        descriptor = os.open(os.path.expanduser(path), os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                return False
+            head = os.read(descriptor, _MAX_BODY_BYTES)
+        finally:
+            os.close(descriptor)
         return _text_has_link(head.decode("utf-8", errors="replace"))
     except Exception:
         return False
 
 
-def _body_file_has_link(segments: list) -> bool:
-    return any(
-        _file_has_link(path) for words in segments for path in _body_file_paths(words)
-    )
+def _body_has_link(segments: list, heredoc_text: str) -> bool:
+    """True when the body these forge-create segments will send has the link.
+
+    Three places count, and only these three: the inline body text a segment
+    carries, the contents of a body file it names, and the heredoc prose the
+    invocation composes. The last is not attributable to one segment — a body
+    heredoc'd into a file that does not exist yet is invisible both to the
+    tokenizer, which drops heredoc bodies, and to the file read, which finds
+    nothing on disk — so any heredoc body in the invocation counts as body
+    text. That is deliberately generous: this is an INFO nudge, and a swallowed
+    reminder beats one that fires at a body which already has the link.
+    """
+    if _text_has_link(heredoc_text):
+        return True
+    for words in segments:
+        if any(_text_has_link(text) for text in _flag_values(words, _BODY_TEXT_FLAGS)):
+            return True
+        if any(_file_has_link(path) for path in _flag_values(words, _BODY_FILE_FLAGS)):
+            return True
+    return False
 
 
 class PRWorktreeLinkRule(Rule):
@@ -335,17 +376,13 @@ class PRWorktreeLinkRule(Rule):
 
     def check(self, tool_input: dict, ctx: dict) -> "Decision | None":
         command = tool_input.get("command", "") or ""
-        segments = _forge_create_segments(command)
+        command_text, heredoc_text = _split_heredoc_bodies(command)
+        segments = _forge_create_segments(command_text)
         if not segments:
             return None
         if not self._under_tbd(ctx):
             return None
-        # Inline `--body`/`-b` text lives in the command string itself, so
-        # scanning the raw command covers it — raw, not heredoc-stripped, since
-        # a `--body "$(cat <<'EOF' … EOF)"` body is exactly where the link goes.
-        if _text_has_link(command):
-            return None
-        if _body_file_has_link(segments):
+        if _body_has_link(segments, heredoc_text):
             return None
         return Decision.info(_MESSAGE)
 

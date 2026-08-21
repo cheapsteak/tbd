@@ -73,10 +73,51 @@ class PRWorktreeLinkTests(unittest.TestCase):
         )
         self.assertIsNone(_check(command))
 
+    def test_informs_when_the_heredoc_body_carries_no_link(self):
+        # Discriminates the heredoc branch: heredoc prose counts as body text,
+        # so a heredoc body *without* the link must still nudge.
+        command = (
+            "gh pr create --title x --body \"$(cat <<'EOF'\n"
+            "Summary\n\n"
+            "No link here.\n"
+            "EOF\n"
+            ')"'
+        )
+        _informs(self, command)
+
+    def test_informs_when_a_marker_sits_outside_the_body(self):
+        # A marker elsewhere in the invocation is not the body: neither an
+        # earlier segment's grep pattern nor a later segment's echo is text the
+        # PR will carry.
+        _informs(
+            self,
+            'git log --oneline --grep "tbd://open?worktree=zzz" '
+            '&& gh pr create --title x --body "no link in this body at all"',
+        )
+        _informs(
+            self,
+            'gh pr create --title x --body "no link" '
+            f'&& echo "opened from {_LINK}"',
+        )
+
+    def test_informs_when_only_the_body_file_path_holds_a_marker(self):
+        # The marker must be in the file's contents, not in its name.
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = os.path.join(tmp, "tbd", "open")
+            os.makedirs(directory)
+            path = os.path.join(directory, "body.md")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("Summary\n\nNo link here.\n")
+            self.assertIn("tbd/open/", path)
+            _informs(self, f"gh pr create --body-file {path}")
+            # `--body-file=…` is a file target, never inline `--body` text.
+            _informs(self, f'gh pr create --body-file="{path}"')
+
     def test_silent_when_link_only_appears_in_a_written_heredoc_body(self):
-        # The link check scans the RAW command, not the heredoc-stripped text:
-        # here the body file is written by the heredoc in the same command, so
-        # the only copy of the link lives in a body the stripper drops.
+        # The body file is written by the heredoc in the same command, so the
+        # only copy of the link lives in a heredoc body — invisible both to the
+        # tokenizer, which drops heredoc bodies, and to the file read, which
+        # finds nothing at that path.
         command = (
             "cat <<'EOF' > /nonexistent/pr-worktree-link-body.md\n"
             f"[my-worktree]({_LINK})\n"
@@ -154,6 +195,23 @@ class PRWorktreeLinkTests(unittest.TestCase):
             worker.join(5)
             self.assertFalse(worker.is_alive(), "reading a fifo hung the guardrail")
             self.assertEqual(result, [False])
+
+    def test_fifo_contents_are_never_read(self):
+        # Holding the fifo open read-write buffers the link with no risk of
+        # blocking, so the only thing keeping it unread is the regular-file
+        # check on the descriptor.
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("no mkfifo on this platform")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "body.fifo")
+            os.mkfifo(path)
+            holder = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+            try:
+                os.write(holder, f"[my-worktree]({_LINK})\n".encode("utf-8"))
+                self.assertFalse(_file_has_link(path))
+                _informs(self, f"gh pr create --body-file {path}")
+            finally:
+                os.close(holder)
 
     def test_silent_for_non_gh_pr_create_command(self):
         self.assertIsNone(_check("gh pr list"))
