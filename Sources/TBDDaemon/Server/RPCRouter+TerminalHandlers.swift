@@ -1108,24 +1108,17 @@ extension RPCRouter {
                     rows: resolvedRows
                 )
 
-                // Update tmux IDs but DO NOT call clearRecreated — that nukes the label and kind
-                try await db.terminals.updateTmuxIDs(
+                // The new Codex process has no known session yet. Reset the
+                // dead process's lifecycle history while preserving this tab's
+                // Codex label and kind, so its first SessionStart can adopt
+                // lifecycle records written before the hook reaches TBD.
+                try await db.terminals.replaceRecreatedCodexWindow(
                     id: params.terminalID,
                     windowID: window.windowID,
-                    paneID: window.paneID
-                )
-                // TBD just recreated the window, so nothing has yet been
-                // observed about what runs in it: `.derived` from our own act.
-                //
-                // `observedAt` from the router's date seam, never the store's
-                // default `Date()`. This stamp is *compared*, not just stored:
-                // `SessionStateResolver`'s rung 4 orders it against the
-                // awaiting-input stamp to decide which observation is newer, so
-                // a stamp minted inside the store is one a test cannot pin and
-                // therefore a decision a test cannot pin either.
-                try await db.terminals.setActivityState(
-                    id: params.terminalID, activityState: .unknown, source: .derived,
-                    observedAt: now())
+                    paneID: window.paneID,
+                    // The router's date seam makes this compared activity fact
+                    // deterministic; the store must not mint its own timestamp.
+                    at: now())
                 return try await db.terminals.get(id: params.terminalID)
             }
 

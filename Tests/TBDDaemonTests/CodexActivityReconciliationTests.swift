@@ -284,6 +284,119 @@ struct CodexActivityReconciliationTests {
             .presentationActivityState == .idle)
     }
 
+    @Test("recreated Codex window adopts its new process's initial task")
+    func recreatedCodexWindowAdoptsInitialTask() async throws {
+        let worktreeDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-codex-recreate-\(UUID().uuidString)", isDirectory: true)
+        let codexHome = worktreeDirectory.appendingPathComponent("codex-home", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: worktreeDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: worktreeDirectory) }
+
+        let repo = try await db.repos.create(
+            path: worktreeDirectory.path,
+            displayName: "recreate-repo",
+            defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id,
+            name: "wt",
+            branch: "main",
+            path: worktreeDirectory.path,
+            tmuxServer: "tbd-codex-recreate")
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id,
+            tmuxWindowID: "@old",
+            tmuxPaneID: "%old",
+            label: "Codex Recovery",
+            kind: .codex)
+        let oldSessionAt = Date(timeIntervalSince1970: 1_790_000_100)
+        let dates = TestDateSource(oldSessionAt)
+        let tmux = TmuxManager(dryRun: true)
+        let recreateRouter = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
+            tmux: tmux,
+            codexExecutableResolver: { "/bin/true" },
+            codexHomeEnsurer: { codexHome },
+            now: dates.provider,
+            actuationLog: makeTestActuationLog())
+        let oldTranscript = try makeTranscript(
+            #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"old-turn"}}"#
+                + "\n")
+        defer {
+            try? FileManager.default.removeItem(at: oldTranscript.deletingLastPathComponent())
+        }
+        let oldSessionStart = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "old-session",
+                transcriptPath: oldTranscript.path,
+                source: "startup"))
+        #expect((await recreateRouter.handle(oldSessionStart)).success)
+        let list = try RPCRequest(
+            method: RPCMethod.terminalList,
+            params: TerminalListParams(worktreeID: wt.id))
+        #expect((await recreateRouter.handle(list)).success)
+
+        dates.advance(by: 10)
+        let recreate = try RPCRequest(
+            method: RPCMethod.terminalRecreateWindow,
+            params: TerminalRecreateWindowParams(terminalID: terminal.id))
+        let recreateResponse = await recreateRouter.handle(recreate)
+        #expect(recreateResponse.success, "recreate failed: \(recreateResponse.error ?? "nil")")
+
+        let recreated = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(recreated.label == "Codex Recovery")
+        #expect(recreated.kind == .codex)
+        #expect(recreated.claudeSessionID == nil)
+        #expect(recreated.transcriptPath == nil)
+        #expect(recreated.sessionOrderObservedAt == nil)
+        #expect(recreated.activityState == .unknown)
+
+        // A delayed hook from the dead process must not mutate the fresh pane
+        // while it is waiting for its own SessionStart.
+        dates.advance(by: 1)
+        let staleActivity = try RPCRequest(
+            method: RPCMethod.terminalActivityEvent,
+            params: TerminalActivityEventParams(
+                terminalID: terminal.id,
+                activityState: .working,
+                sessionID: "old-session"))
+        #expect((await recreateRouter.handle(staleActivity)).success)
+        #expect(try await db.terminals.get(id: terminal.id)?.activityState == .unknown)
+
+        let transcript = try makeTranscript(
+            #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"new-turn"}}"#
+                + "\n")
+        defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
+        dates.advance(by: 1)
+        let sessionStart = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "new-session",
+                transcriptPath: transcript.path,
+                source: "startup"))
+        #expect((await recreateRouter.handle(sessionStart)).success)
+
+        let working = await recreateRouter.handle(list)
+        #expect(working.success)
+        #expect(try working.decodeResult([Terminal].self).first?
+            .presentationActivityState == .working)
+
+        try append(
+            Data((
+                #"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"new-turn"}}"#
+                    + "\n").utf8),
+            to: transcript)
+        let idle = await recreateRouter.handle(list)
+        #expect(idle.success)
+        #expect(try idle.decodeResult([Terminal].self).first?
+            .presentationActivityState == .idle)
+    }
+
     @Test("sub-millisecond initial generation survives a database round trip")
     func submillisecondInitialGenerationRemainsWorkingAfterList() async throws {
         let repo = try await db.repos.create(

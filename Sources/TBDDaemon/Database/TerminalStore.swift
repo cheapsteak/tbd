@@ -526,6 +526,39 @@ public struct TerminalStore: Sendable {
         }
     }
 
+    /// Replace a dead Codex window with a fresh process while keeping the tab's
+    /// Codex identity. The replacement process has not announced a session yet,
+    /// so prior session and activity facts must not make its first SessionStart
+    /// look like a resume of the dead process.
+    func replaceRecreatedCodexWindow(
+        id: UUID,
+        windowID: String,
+        paneID: String,
+        at date: Date
+    ) async throws {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            record.tmuxWindowID = windowID
+            record.tmuxPaneID = paneID
+            record.claudeSessionID = nil
+            record.transcriptPath = nil
+            record.sessionOrderObservedAt = nil
+            record.suspendedAt = nil
+            record.suspendedSnapshot = nil
+            record.hibernatedAt = nil
+            record.hibernateReason = nil
+            record.activityState = TerminalActivityState.unknown.rawValue
+            record.activityStateSource = FactColumnJSON.encode(FactSource.derived)
+            record.activityStateObservedAt = date
+            record.activityStateOrderObservedAt = date
+            record.awaitingInputReason = nil
+            record.awaitingInputObservedAt = nil
+            try record.update(db)
+        }
+    }
+
     /// Set or clear the model profile ID for a terminal.
     public func setProfileID(id: UUID, profileID: UUID?) async throws {
         try await writer.write { db in
