@@ -35,10 +35,14 @@ import Testing
     }
 
     /// Rows written before the column survive, and the backfill decides what
-    /// they say: a remote row that already has a parent got it from adoption
-    /// (nothing else mints those rows), so it is marked; a parentless remote row
-    /// is left healable; a local row is never adoption's business at all.
-    @Test func forwardMigrationMarksOnlyNestedRemoteRows() throws {
+    /// they say: every remote row is marked, parented or not, because a build
+    /// that predates the column recorded nothing when `move()` un-nested a
+    /// lane — so a top-level legacy row cannot be told from one the user
+    /// deliberately placed there, and only marking is safe (see the migration
+    /// file for why). A local row is never adoption's business at all and stays
+    /// unmarked. The behavioural consequence — no legacy lane is re-nested by
+    /// the first poll after the upgrade — is in `RemoteSessionAdoptionTests`.
+    @Test func forwardMigrationMarksEveryPreExistingRemoteRow() throws {
         let queue = try DatabaseQueue()
         let migrator = TBDDatabase.buildMigratorForTests()
         try migrator.migrate(queue, upTo: SchemaBaselineDriftTests.frozenBlockLastIdentifier)
@@ -86,7 +90,7 @@ import Testing
             }
             return out
         }
-        #expect(markers == [true, false, false])
+        #expect(markers == [true, true, false])
     }
 
     // MARK: - The three writes that set it

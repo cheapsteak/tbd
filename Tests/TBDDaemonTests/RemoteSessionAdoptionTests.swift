@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import Testing
 
 @testable import TBDDaemonLib
@@ -777,6 +778,73 @@ struct RemoteSessionAdoptionTests {
         try await m.apply(snapshot: [stamped], provider: "fake")
 
         #expect(try await remoteRows().first?.parentWorktreeID == nil)
+    }
+
+    /// The same finality for a lane the user un-nested BEFORE the marker
+    /// existed — the case the forward migration has to decide on everyone's
+    /// behalf, since no legacy row can be asked.
+    ///
+    /// A build that predates the column wrote nothing when `move()` took a
+    /// parent away, so a legacy remote row sitting at top level reads
+    /// identically whether nobody could ever name a parent for it or the user
+    /// deliberately took the one it had. The provider's stamp is static and
+    /// arrives again on every poll, so leaving those rows unmarked would
+    /// re-nest the second kind within one poll interval of the upgrade. The
+    /// backfill therefore marks EVERY pre-existing remote row: nothing that
+    /// predates the migration is eligible for late assignment, and only rows
+    /// minted afterwards — whose parentlessness is a fact the daemon actually
+    /// recorded — stay healable.
+    @Test func aLegacyTopLevelLaneIsNotNestedByTheFirstPollAfterUpgrade() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("legacy-remote-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appendingPathComponent("state.db").path
+
+        let repoID = UUID()
+        let parentID = UUID()
+        let laneID = UUID()
+        let epoch = Date(timeIntervalSince1970: 1_770_000_000)
+
+        // The database as a build that predates the marker column left it.
+        // Raw SQL because there is no production path that can write a row
+        // into a schema the column has not reached yet.
+        let legacy = try DatabaseQueue(path: path)
+        try TBDDatabase.buildMigratorForTests()
+            .migrate(legacy, upTo: SchemaBaselineDriftTests.frozenBlockLastIdentifier)
+        try await legacy.write { db in
+            try db.execute(sql: """
+                INSERT INTO repo (id, path, remoteURL, displayName, defaultBranch, createdAt)
+                VALUES (?, ?, 'https://github.com/acme/api', 'api', 'main', ?)
+                """, arguments: [repoID.uuidString, "/tmp/legacy-\(repoID.uuidString)", epoch])
+            try db.execute(sql: """
+                INSERT INTO worktree (id, repoID, name, displayName, branch, path, status,
+                                      createdAt, tmuxServer)
+                VALUES (?, ?, 'lane', 'lane', 'lane', ?, 'active', ?, 't')
+                """, arguments: [parentID.uuidString, repoID.uuidString,
+                                 "/tmp/legacy-lane-\(parentID.uuidString)", epoch])
+            try db.execute(sql: """
+                INSERT INTO worktree (id, repoID, name, displayName, branch, path, status,
+                                      createdAt, tmuxServer, location, providerName,
+                                      providerSessionID)
+                VALUES (?, ?, 's-1', 's-1', 'b', '', 'active', ?, '', 'remote', 'fake', 's-1')
+                """, arguments: [laneID.uuidString, repoID.uuidString, epoch])
+        }
+        try legacy.close()
+
+        // Opening it through the production initializer runs the backfill.
+        let upgraded = try TBDDatabase(path: path)
+        #expect(try await upgraded.worktrees.get(id: laneID)?.remoteParentAssigned == true)
+
+        let m = RemoteProviderManager(
+            db: upgraded, subscriptions: subs,
+            runner: FakeProviderInvoker(script: []), registryURL: registryURL)
+        try await m.apply(
+            snapshot: [session("s-1", meta: ["repo": "acme/api",
+                                             "tbd_parent_worktree_id": parentID.uuidString])],
+            provider: "fake")
+
+        #expect(try await upgraded.worktrees.get(id: laneID)?.parentWorktreeID == nil)
     }
 
     /// The other side of the same coin, and the reason the marker exists rather
