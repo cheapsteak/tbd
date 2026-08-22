@@ -9,7 +9,9 @@ contract addition the feature needs.
 
 The subject is the **creation** path. Where a lane is filed once it exists, and
 who may reparent it afterwards, belongs to the adoption rules in
-[`docs/remote-provider-contract.md`](../remote-provider-contract.md).
+[`docs/remote-provider-contract.md`](../remote-provider-contract.md) and to
+[`2026-08-22-remote-lane-parent-healing-design.md`](2026-08-22-remote-lane-parent-healing-design.md),
+which records why a lane adopted without a parent may take one exactly once.
 
 ## One-click creation
 
