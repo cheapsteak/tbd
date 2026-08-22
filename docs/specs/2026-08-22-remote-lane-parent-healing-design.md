@@ -192,8 +192,12 @@ that are about its bounds rather than its convenience:
 - **The user always wins afterwards.** Any placement gesture spends the
   assignment permanently.
 
-There is therefore no soak state a flag would protect: the behavior it would
-gate has no failure mode worse than "the lane stays where it is".
+The rule's trigger is met literally — this acts on a poll, with no gesture
+behind it — so what stands in for the flag is the written justification the rule
+allows in its place, which is the list above. The distinction matters: the claim
+is not that the rule fails to apply, but that a soak would observe nothing. A
+flag protects a behavior whose failure mode is unknown until it runs at scale,
+and this one's worst outcome is bounded at "the lane stays where it is".
 
 ## Rejected alternatives
 
