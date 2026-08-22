@@ -247,16 +247,41 @@ struct RemoteCreateDefaultsEditor: View {
         scope: Scope,
         inheritedDefaults: [String: String]
     ) -> String {
-        let base = scope == .repo ? "Auto (use global)" : "Auto (provider default)"
+        let base = autoBase(fieldName: field.name, scope: scope)
         let resolved = RemoteCreateFormLogic.resolveString(
             field: field, repoPrefill: nil, repoDefaults: [:],
             globalDefaults: inheritedDefaults, generatedSlug: nil)
         return resolved.isEmpty ? base : "\(base) — \(resolved)"
     }
 
+    /// What a level says it defers TO. Every field defers down the same
+    /// spine, except the one this level answers last: at a repo, `repo` is
+    /// settled by the repo the session is started in and by nothing beneath
+    /// (`RemoteCreateFormLogic.resolveString`), so naming the global map here
+    /// would promise a fall-through that refuses to happen. The well-known
+    /// field is known about here rather than at the call site, for the same
+    /// reason `isEditable` knows about it.
+    ///
+    /// There is no `.global` arm for it: that level renders `repo` as an
+    /// explanation, not a control, so it never asks for an unset label.
+    nonisolated static func autoBase(fieldName: String, scope: Scope) -> String {
+        switch scope {
+        case .repo:
+            return fieldName == RemoteCreateFormLogic.repoFieldName
+                ? "Auto (use this repository)"
+                : "Auto (use global)"
+        case .global:
+            return "Auto (provider default)"
+        }
+    }
+
     nonisolated static func caption(scope: Scope) -> String {
         switch scope {
         case .repo:
+            // Left general on purpose. `repo` is the one field that does not
+            // fall through to the global map, and its own row already says so
+            // (`autoBase`) — a caveat here would state the same rule a second
+            // time, in the place the reader is least likely to need it.
             return "Applied when starting a remote session in this repo. "
                 + "Anything left on Auto falls through to the global defaults, then to the provider's own."
         case .global:
