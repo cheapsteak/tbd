@@ -62,6 +62,25 @@ struct RemoteCreateDefaultsEditorTests {
         #expect(label == "Auto (use global) — default")
     }
 
+    /// `repo` does not fall through to the global map — `resolveString`
+    /// refuses to read it from there — so its label must not promise one. What
+    /// answers it when the repo has stored nothing is the repo the session is
+    /// started in.
+    @Test func aRepoSAutoEntryForRepoDoesNotClaimTheGlobalFallThrough() {
+        let field = ProviderCreateParamField(name: "repo", type: "string")
+        let label = RemoteCreateDefaultsEditor.autoLabel(
+            field: field, scope: .repo, inheritedDefaults: ["repo": "acme/unrelated"])
+        #expect(label == "Auto (use this repository)")
+    }
+
+    /// And the exception stays one field wide: everything else at a repo still
+    /// says it defers to the global map, because it does.
+    @Test func anyOtherFieldAtRepoScopeStillDefersToGlobal() {
+        let field = ProviderCreateParamField(name: "slug", type: "string")
+        #expect(RemoteCreateDefaultsEditor.autoLabel(
+            field: field, scope: .repo, inheritedDefaults: [:]) == "Auto (use global)")
+    }
+
     @Test func theGlobalAutoEntrySaysItDefersToTheProvider() {
         let label = RemoteCreateDefaultsEditor.autoLabel(
             field: permissionMode, scope: .global, inheritedDefaults: [:])
