@@ -395,13 +395,17 @@ produce artifacts someone is waiting for, and their callers do not understand 76
   Losing this race costs a wasted macOS slot and one local fallback, not a wrong
   answer: a run whose checkout fails produces no results, and a run with no
   results is no verdict.
-- **A dispatched run whose requester dies** — deliberately not reclaimed. It is
-  free and self-terminating: GitHub ends it at its own timeout, and the observed
-  worst case is 32 minutes, which makes it categorically different from a lock
-  holder that blocks others without limit. Cancelling on abandonment is
+- **A dispatched run whose requester dies** — deliberately not reclaimed, because
+  it is self-terminating. Every job in `test.yml` carries a job-level
+  `timeout-minutes`, so the run ends on the workflow's own bound rather than
+  GitHub's six-hour default: the `test` job stops at 90 minutes at the latest,
+  against an observed worst case of 32. That bound is what makes an abandoned run
+  categorically different from a lock holder that blocks others without limit,
+  and it is load-bearing here rather than incidental — the slot it occupies is
+  one of the five this design is rationing. Cancelling on abandonment is
   best-effort at exactly the moment the requester is gone, and it buys back a slot
-  that would have freed itself. The ticket the abandoned lane was holding is
-  reclaimed rather than waiting on the run: the driver notices its requester is
+  that frees itself. The ticket the abandoned lane was holding is reclaimed
+  rather than waiting on the run: the driver notices its requester is
   gone and exits, releasing the flock, so the pool recovers even while the run it
   started plays out.
 

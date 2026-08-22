@@ -26,10 +26,30 @@ concurrency:
   group: test-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
+# Every job below carries a job-level `timeout-minutes`. GitHub's default is 360
+# minutes, so an untimed job that wedges holds its runner for six hours. On the
+# two `macos-26` jobs that is expensive rather than merely untidy: GitHub allows
+# five concurrent macOS jobs account-wide, a normal run of this workflow spends
+# two of them, and the remote verification valve
+# (docs/specs/2026-08-16-remote-verification-valve-design.md) dispatches THIS
+# workflow so a lane that has queued too long for the machine-global build slot
+# can borrow one of those five. `remote_verify.py` bounds only the local dispatch
+# ticket (45 minutes) and cancels nothing, so releasing that ticket does not stop
+# the GitHub-side job — an abandoned run outlives the lane that asked for it.
+# Unbounded, it goes on consuming the scarce resource the valve exists to share:
+# the starvation the valve was built to fix, inflicted on every other lane.
+#
+# Each number below is sized to its own job and none of them is a performance
+# budget — a job that legitimately grows past its bound wants the bound raised,
+# not the work trimmed.
 jobs:
   lint:
     name: Lint
     runs-on: macos-26
+    # 20: brew, swiftlint, and harnesses that are pure Python/git/bash — no
+    # SwiftPM build at all. Recent runs sit at 0.6 min median, 0.9 min worst, so
+    # this is over an order of magnitude of headroom on a macOS slot.
+    timeout-minutes: 20
     steps:
       # `fetch-depth: 0` is load-bearing for the migration lint below: its
       # history-is-frozen check needs `git merge-base origin/main HEAD`, and
@@ -110,6 +130,11 @@ jobs:
   plans-guard:
     name: No committed implementation plans
     runs-on: ubuntu-latest
+    # 10: a shell guard plus harnesses that build fixture repos in temp dirs and
+    # touch no network — 0.2 min median, 0.6 min worst. Linux runners are not
+    # rationed against the macOS cap, but an unbounded wedge still occupies one
+    # for six hours and leaves this check unreported for the whole of it.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -138,6 +163,10 @@ jobs:
   review-scripts-tests:
     name: Review scripts tests
     runs-on: ubuntu-latest
+    # 10: a pip install and a pytest suite that finishes in seconds — 0.4 min
+    # median, 0.6 min worst. Nearly all of the bound is there to absorb a slow
+    # package index rather than the tests themselves.
+    timeout-minutes: 10
     # Unit tests for the claude-review-v2 bookend scripts (prepare.py /
     # validate.py / render_comment.py) plus the workflow's own post/enforce
     # shell, which a test extracts by step name and runs against a stub `gh`
@@ -163,6 +192,18 @@ jobs:
 
   test:
     runs-on: macos-26
+    # 90, deliberately NOT sized to this job's 15.3-minute observed worst case
+    # (10.7 median). The three test steps below carry `timeout-minutes` of 30, 30
+    # and 15 — a 75-minute step budget — and they exist so that a wedged suite
+    # dies on a step that names which pass hung, with the per-test limits given
+    # room to fire first and attribute the hang to a named test. A job bound at
+    # or below 75 would pre-empt all three and kill the run with the
+    # uninformative message those step bounds were written to avoid. 90 clears
+    # the step budget with room for checkout, `brew install tmux`, the cache
+    # restore and the final build — none of which is individually timed — while
+    # cutting worst-case occupancy of one of the five macOS slots from six hours
+    # to an hour and a half.
+    timeout-minutes: 90
     # All three test steps below append their `.flaky(issue:)` retry records
     # here (docs/specs/2026-07-24-test-hardening-design.md §7), so one run
     # produces one artifact covering both fast passes and the quiet pass
