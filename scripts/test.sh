@@ -204,6 +204,14 @@
 #      it deliberately excluded. The narrowed suite is re-run locally instead and
 #      the LOCAL verdict is reported.
 #
+# A LISTING RUN IS THE ONE THING THAT DOES NOT ROUTE, and it is not an exception
+# to the asymmetry so much as a different question. `--list-tests`, and the bare
+# `list` subcommand that spells the same thing, ask for OUTPUT — the test names —
+# and a verdict is not output. Green would exit 0 having printed nothing the
+# caller asked for; red would report failures for a run that was never going to
+# run a test. So the valve is left DISARMED for those invocations rather than
+# armed and then interpreted; see `asks_for_a_listing` below.
+#
 # WHY NOT JUST REFUSE TO ROUTE A NARROWED RUN, which would need no interpretation
 # at all: because it turns the valve off for every real caller. `pre-push`
 # narrows both of its passes, the nightly stress harness forwards a filter, and
@@ -376,14 +384,19 @@ valid_yield_bound() {
 #                               available. The binary names it itself: "found
 #                               multiple test products: …; use --test-product to
 #                               select one".
-#   --list-tests                the extreme case — it runs NOTHING and only
-#                               prints method names. A whole-suite verdict is not
-#                               an answer to that question in either direction.
+#   --list-tests                DEFENCE IN DEPTH, NOT THE MECHANISM. A listing
+#                               invocation never routes at all — the valve is
+#                               left disarmed for it by `asks_for_a_listing`
+#                               below, because a whole-suite verdict answers a
+#                               listing question in neither direction. It stays
+#                               on this list so that were that gate ever
+#                               bypassed, a red whole-suite verdict still would
+#                               not be adopted as a listing run's result.
 #   list                        `swift test list` is the same thing as a
 #                               subcommand. It is a bare word rather than a
 #                               flag, so it matches a `--filter list` value too;
-#                               that is a false positive, and false positives
-#                               are the cheap direction.
+#                               a false positive there now costs the run only
+#                               the valve, which is still the cheap direction.
 SUITE_NARROWING_ARGS=(
   --filter --skip
   --specifier -s
@@ -397,6 +410,36 @@ narrows_the_suite() {
   for arg in "$@"; do
     for known in "${SUITE_NARROWING_ARGS[@]}"; do
       # Both spellings: `--filter X` and `--filter=X`.
+      case "$arg" in
+        "$known"|"$known"=*) return 0 ;;
+      esac
+    done
+  done
+  return 1
+}
+
+# THE ARGUMENTS THAT ASK FOR OUTPUT RATHER THAN A VERDICT — the one question
+# that decides whether to route AT ALL. `swift test --list-tests`, and `swift test
+# list` which is the same thing spelled as a subcommand, run nothing: they
+# print method names, and those names are the answer. The remote path computes
+# a verdict, and no verdict answers that question in either direction — green
+# names no test, and red names none either.
+#
+# SO A LISTING INVOCATION MUST NEVER ARM THE VALVE, rather than route and then
+# be salvaged when the answer comes back. Salvaging it would spend a whole CI
+# dispatch on a question CI cannot answer and then run locally anyway; not
+# arming costs one lane an optimisation it could never have used.
+#
+# The matching is `narrows_the_suite`'s, for the same reasons: both the
+# `--flag value` and `--flag=value` spellings, wherever in the argument list
+# they appear, and a VALUE that merely looks like one of these names — a filter
+# regex, say — does not match.
+SUITE_LISTING_ARGS=(--list-tests list)
+
+asks_for_a_listing() {
+  local arg known
+  for arg in "$@"; do
+    for known in "${SUITE_LISTING_ARGS[@]}"; do
       case "$arg" in
         "$known"|"$known"=*) return 0 ;;
       esac
@@ -461,7 +504,6 @@ caller_narrowed=0
 # yield"), which is the pre-valve behavior "unset" is supposed to mean.
 fenced_env=(TBD_SWIFT_QUEUE_YIELD_SECONDS=)
 if [ "${TBD_REMOTE_VERIFY:-}" = "1" ]; then
-  remote_verify_enabled=1
   # `:-`, SO AN EMPTY VALUE MEANS "NOT SET" RATHER THAN FAILING THE RUN. The
   # alternative — a bare `-`, which substitutes only for an UNSET variable — sends
   # the empty string to the validator, which refuses it and exits 64. That is the
@@ -492,15 +534,42 @@ if [ "${TBD_REMOTE_VERIFY:-}" = "1" ]; then
     echo "         indistinguishable from a failing test suite." >&2
     exit 64
   fi
-  # ASKED ONCE, HERE, WHILE THE ARGUMENTS ARE IN FRONT OF US, and consulted
-  # later when the remote answer arrives. It gates nothing: a narrowed run
-  # forwards the bound and routes exactly like any other, because a green
-  # whole-suite verdict is sound for it. What this decides is how a RED answer is
-  # read — see the `case` on `$remote_status` below.
-  if narrows_the_suite ${swift_test_args[@]+"${swift_test_args[@]}"}; then
-    caller_narrowed=1
+  # THE BOUND IS VALIDATED ABOVE THIS GATE, NOT BELOW IT, AND THAT ORDER IS
+  # DELIBERATE. A malformed `TBD_REMOTE_VERIFY_YIELD_SECONDS` is a property of
+  # the caller's environment rather than of this invocation's arguments: it
+  # will strand the next run just as badly, and it is cheapest to hear about
+  # while the person who exported it is still looking. So it is refused for a
+  # listing run exactly as for any other, and only the ARMING below is gated.
+  #
+  # NOT ARMING MEANS THE PRE-VALVE STATE EXACTLY — `remote_verify_enabled` left
+  # at 0 AND the yield bound CLEARED, which this branch achieves by leaving
+  # `fenced_env` at the explicit empty assignment it was initialised with
+  # above. Merely declining to SET the bound would not do: an inherited
+  # `TBD_SWIFT_QUEUE_YIELD_SECONDS` passes straight through `env`, `swift-safe`
+  # gates the yield on the subcommand alone and knows nothing about
+  # `TBD_REMOTE_VERIFY`, so the run would yield 76 with no routing armed — the
+  # wrapper exiting 76 having tested nothing and having printed no test names
+  # either. See "THE BOUND IS CLEARED, NOT LEFT ALONE" above.
+  #
+  # THE LINE GOES TO STDERR BECAUSE STDOUT CARRIES THE LISTING, and it is worth
+  # saying at all: a developer who turned the valve on and is now watching a
+  # queue is owed the reason the run is waiting.
+  if asks_for_a_listing ${swift_test_args[@]+"${swift_test_args[@]}"}; then
+    echo "test.sh: this run asks for a test LISTING, which the remote path" >&2
+    echo "         cannot answer — it returns a verdict, and no verdict names" >&2
+    echo "         a test. Queueing locally, with the valve left disarmed." >&2
+  else
+    remote_verify_enabled=1
+    # ASKED ONCE, HERE, WHILE THE ARGUMENTS ARE IN FRONT OF US, and consulted
+    # later when the remote answer arrives. It gates nothing: a narrowed run
+    # forwards the bound and routes exactly like any other, because a green
+    # whole-suite verdict is sound for it. What this decides is how a RED
+    # answer is read — see the `case` on `$remote_status` below.
+    if narrows_the_suite ${swift_test_args[@]+"${swift_test_args[@]}"}; then
+      caller_narrowed=1
+    fi
+    fenced_env=(TBD_SWIFT_QUEUE_YIELD_SECONDS="$yield_seconds")
   fi
-  fenced_env=(TBD_SWIFT_QUEUE_YIELD_SECONDS="$yield_seconds")
 fi
 
 # Resolved HERE, while `$HOME` and `$TBD_HOME` still hold the caller's real
