@@ -11,6 +11,11 @@ import Foundation
 /// legitimately be paired with makes the skew visible. Visibility only — the
 /// app never kills or restarts a mismatched daemon.
 enum DaemonBuildSkew {
+    /// SwiftPM build configurations `scripts/restart.sh` can launch a daemon
+    /// from. A release-built daemon from this app's own worktree is a
+    /// deliberate `--release` restart, not cross-build skew.
+    static let buildConfigurations = ["debug", "release"]
+
     /// Human-readable warning when the daemon binary doesn't belong to this
     /// app's build; nil when it matches or when identity can't be established
     /// (older daemon without the field, unbundled app with no source path).
@@ -18,9 +23,11 @@ enum DaemonBuildSkew {
     /// Acceptable daemon locations for this app:
     /// - `appSiblingDaemonPath`: TBDDaemon next to the app executable — the
     ///   binary `startDaemonAndConnect()` itself would spawn.
-    /// - `<sourceWorktreePath>/.build/debug/TBDDaemon`: the binary
-    ///   `scripts/restart.sh` of the worktree that built this app launches
-    ///   (the app itself runs from /Applications, not from that worktree).
+    /// - `<sourceWorktreePath>/.build/<config>/TBDDaemon` for each build
+    ///   configuration `scripts/restart.sh` can launch — `debug` by default,
+    ///   `release` under its `--release` flag. Both belong to the worktree
+    ///   that built this app (the app itself runs from /Applications, not
+    ///   from that worktree), so neither is skew.
     ///
     /// `resolvePath` is an injection seam so tests can exercise both branches
     /// with fabricated paths; production uses `defaultResolvePath`.
@@ -39,7 +46,9 @@ enum DaemonBuildSkew {
             candidates.append(sibling)
         }
         if let worktree = sourceWorktreePath, !worktree.isEmpty {
-            candidates.append(worktree + "/.build/debug/TBDDaemon")
+            for config in buildConfigurations {
+                candidates.append(worktree + "/.build/\(config)/TBDDaemon")
+            }
         }
         guard !candidates.isEmpty else { return nil }
         let resolvedDaemon = resolvePath(daemonPath)

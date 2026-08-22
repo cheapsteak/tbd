@@ -102,7 +102,10 @@ warn_wip_build() {
     local installed_path
     installed_path=$(get_installed_worktree_path)
 
-    cat >&2 << 'EOF'
+    # Unquoted heredoc so ${build_config} expands: restart.sh sets it before
+    # calling, and this banner must name the configuration the app WILL
+    # launch from. The body has no other $ or backticks, so nothing else expands.
+    cat >&2 << EOF
 
 ===============================================================================
 WARNING: NOT INSTALL-READY — WIP WORKTREE GUARD ACTIVE
@@ -111,7 +114,7 @@ WARNING: NOT INSTALL-READY — WIP WORKTREE GUARD ACTIVE
 This worktree is on a feature branch or has uncommitted/untracked changes. To
 prevent accidental takeover of the shared daemon and /Applications/TBD.app, the
 full install is SKIPPED. Instead, the app will build and launch from this
-worktree's own .build/debug/TBD.app.
+worktree's own .build/${build_config:-debug}/TBD.app.
 
 CONSEQUENCES:
   • Deep links (tbd://) will NOT route to this app (they'll route to the
