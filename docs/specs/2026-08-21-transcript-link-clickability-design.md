@@ -121,6 +121,29 @@ measured-and-cached render path (#129). Height measurement and rendering both
 draw from that one cache, so they share the identical marked string and cannot
 disagree about a row's height.
 
+### The worktree root is an input the cache key does not carry
+
+Resolution depends on the pane's worktree root, and that root is not constant
+for the pane's life: a pane restored with the panel layout renders its history
+before the worktree-list RPC lands, and resolves against an empty root until it
+does. So two things follow, and the second is the one that is easy to miss.
+
+The resolver reads the root on every resolve rather than snapshotting it — the
+`TranscriptCardContext` a Coordinator captures is built once, so a snapshot
+would be the pane's root forever. `TranscriptLinkResolverCache` drops its memo
+whenever the root it was computed against changes, so an answer computed under
+the old root is never handed out under the new one.
+
+That alone still leaves every already-composed row plain text, because the
+composed-blocks cache is keyed by `(id, contentVersion)` and the resolver runs
+only on a miss. The pane therefore passes its current root to
+`TableTranscriptView` as an ordinary value, and the Coordinator compares it
+against the root its cached rows were composed against; a transition drops the
+composed blocks and reloads, so the visible rows recompose against the new root.
+Measured heights are deliberately kept: linking adds `.foregroundColor` and
+`.underlineStyle`, neither of which moves a glyph, so every height cache still
+describes the row it was measured for.
+
 ## Styling
 
 Prose links take `NSColor.linkColor`. Links inside code keep the code

@@ -131,7 +131,13 @@ struct TranscriptLinkPaneRoutingTests {
     // worktree-list RPC lands, so that snapshot is "" and every relative token
     // in the pane stays plain text for its whole life. Reading the root per
     // resolve is what lets the late row recover.
-    @Test func linkResolver_recoversWhenTheWorktreeRootArrivesLate() throws {
+    //
+    // SCOPE: the closure only. Reading the root live is necessary but not
+    // sufficient — the Coordinator caches fully-composed rows, link ranges and
+    // all, and only consults this closure on a cache MISS. That the pane
+    // actually recomposes is asserted by
+    // `TableTranscriptHarness.lateWorktreeRootRelinksComposedRows`.
+    @Test func linkResolverClosureAlone_readsTheRootLiveWhenItArrivesLate() throws {
         try withTempWorktree { root in
             let box = RootBox("")
             let resolve = TranscriptLinkDestination.makeLinkResolver(

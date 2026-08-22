@@ -211,6 +211,10 @@ struct TableTranscriptPaneView: View {
             expansionOverrides: activityGroupExpansion,
             memo: presentationMemo
         )
+        // Read once per body evaluation, from the same helper the resolver
+        // closure calls, so the value handed to the table and the value the
+        // resolver reads cannot disagree.
+        let linkRoot = Self.worktreePath(in: appState, worktreeID: worktreeID)
         let cardContext = TranscriptCardContext(
             terminalID: terminalID,
             openTranscriptOverlay: openTranscriptOverlay,
@@ -232,6 +236,7 @@ struct TableTranscriptPaneView: View {
                 atBottom: $atBottom,
                 scrollToBottomToken: scrollToBottomToken,
                 activityToggleToken: activityToggleToken,
+                linkRoot: linkRoot,
                 nodesProvider: { timedRenderNodes(presentation.nodes) }
             )
             // Compose the terminal with its current Claude session so a session

@@ -551,13 +551,14 @@ struct TableTranscriptHarness {
         items: [TranscriptItem],
         appState: AppState,
         fixedSize: Bool,
-        nodes overrideNodes: [TranscriptRenderNode]? = nil
+        nodes overrideNodes: [TranscriptRenderNode]? = nil,
+        linkResolver: TranscriptPathResolver? = nil
     ) -> Scene {
         let context = TranscriptCardContext(
             terminalID: nil,
             openTranscriptOverlay: { _ in },
             appState: appState,
-            linkResolver: nil,
+            linkResolver: linkResolver,
             onLinkClicked: nil
         )
         let coordinator = InstrumentedCoordinator(context: context, useFixedSize: fixedSize)
@@ -1089,10 +1090,13 @@ struct TableTranscriptHarness {
     /// So: settle the width FIRST, and only then take a "before" snapshot. Returns
     /// the settled column width; fails the test if it never settles.
     @discardableResult
-    private func primeScene(_ scene: Scene, nodes: [TranscriptRenderNode]) -> CGFloat {
+    private func primeScene(
+        _ scene: Scene, nodes: [TranscriptRenderNode], linkRoot: String = ""
+    ) -> CGFloat {
         for _ in 0..<4 {
             let widthAtUpdate = scene.tableView.bounds.width
-            scene.coordinator.update(nodes: nodes, atBottom: .constant(true), activityToggleToken: 0)
+            scene.coordinator.update(
+                nodes: nodes, atBottom: .constant(true), activityToggleToken: 0, linkRoot: linkRoot)
             settle(scene.tableView)
             if scene.tableView.bounds.width == widthAtUpdate { return widthAtUpdate }
         }
@@ -1230,7 +1234,8 @@ struct TableTranscriptHarness {
 
         // The click: a new node array carrying the expanded group, with the toggle
         // token bumped exactly as `setActivityGroup` does.
-        scene.coordinator.update(nodes: expanded, atBottom: .constant(true), activityToggleToken: 1)
+        scene.coordinator.update(
+            nodes: expanded, atBottom: .constant(true), activityToggleToken: 1, linkRoot: "")
         scene.tableView.layoutSubtreeIfNeeded()
         // The toggle must have gone through the `.rebuild` branch. If the column
         // width moved, `update` took the width-change branch instead — a legitimate
@@ -1276,6 +1281,96 @@ struct TableTranscriptHarness {
     /// had already scrolled past stay EXACT across the rebuild rather than falling
     /// back to the arithmetic estimate (whose realize-time correction is what
     /// shifted rows underneath it).
+    /// A mutable stand-in for the pane's live `AppState` worktree lookup: the
+    /// root the resolver reads is a value that CHANGES under a pane that has
+    /// already rendered.
+    @MainActor
+    private final class RootBox {
+        var value: String
+        init(_ value: String) { self.value = value }
+    }
+
+    /// The first `.link` URL over any prose block, or nil when the composed row
+    /// carries no link at all.
+    private static func firstLink(in blocks: [MessageBlock]) -> URL? {
+        for block in blocks {
+            guard case .prose(let string) = block else { continue }
+            var found: URL?
+            string.enumerateAttribute(
+                .link, in: NSRange(location: 0, length: string.length), options: []
+            ) { value, _, stop in
+                if let url = value as? URL { found = url; stop.pointee = true }
+            }
+            if let found { return found }
+        }
+        return nil
+    }
+
+    /// REGRESSION GUARD, at the layer that actually decides: a worktree root
+    /// arriving AFTER the pane composed its rows must relink those rows.
+    ///
+    /// Reading the root live inside the resolver closure is necessary but not
+    /// sufficient — `composedBubbleBlocks` caches the fully-composed blocks,
+    /// link ranges and all, keyed by `(id, contentVersion)`. The root is not
+    /// part of that key, so on a cache HIT the resolver is never consulted and
+    /// a row composed against the empty root of a restored panel stays plain
+    /// text for the pane's whole life. Asserting the resolver closure alone
+    /// (see `TranscriptLinkPaneRoutingTests`) cannot see that: it never reaches
+    /// this cache.
+    @Test("a worktree root arriving late relinks rows composed against the empty root")
+    func lateWorktreeRootRelinksComposedRows() throws {
+        let suiteName = "table-harness-linkroot-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("table-harness-linkroot-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent("docs"), withIntermediateDirectories: true)
+        try Data("x".utf8).write(to: root.appendingPathComponent("docs/a.md"))
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // The pane's real resolver, over the pane's real memo, reading a root
+        // that starts empty exactly as a restored panel's does.
+        let box = RootBox("")
+        let items: [TranscriptItem] = [
+            .assistantText(id: "link-row", text: "see docs/a.md now", timestamp: nil, usage: nil)
+        ]
+        let scene = makeScene(
+            items: items,
+            appState: appState,
+            fixedSize: true,
+            linkResolver: TranscriptLinkDestination.makeLinkResolver(
+                worktreeRoot: { box.value },
+                cache: TranscriptLinkResolverCache()
+            )
+        )
+        defer { withExtendedLifetime(scene.coordinator) {} }
+
+        let nodes = scene.coordinator.nodes
+        primeScene(scene, nodes: nodes, linkRoot: box.value)
+        realizeAllRows(scene, count: nodes.count)
+
+        let node = try #require(nodes.first { if case .chatBubble = $0.kind { return true } else { return false } })
+        guard case .chatBubble(let item) = node.kind else {
+            Issue.record("fixture must project a chat-bubble row"); return
+        }
+
+        // Composed against the empty root: the relative token is plain text.
+        #expect(Self.firstLink(in: scene.coordinator.composedBubbleBlocks(for: node, item: item)) == nil,
+                "a relative token must not link while the worktree root is empty")
+
+        // The worktree row lands, and the pane's next update carries the new root.
+        box.value = root.path
+        scene.coordinator.update(
+            nodes: nodes, atBottom: .constant(true), activityToggleToken: 0, linkRoot: box.value)
+
+        let linked = Self.firstLink(in: scene.coordinator.composedBubbleBlocks(for: node, item: item))
+        #expect(linked?.path == root.path + "/docs/a.md",
+                Comment(rawValue: "the row must recompose against the late root; got \(String(describing: linked))"))
+    }
+
     @Test("a rebuild keeps exact heights for rows whose content did not change")
     func rebuildKeepsContentAddressedHeights() throws {
         let suiteName = "table-harness-cachekeep-\(UUID().uuidString)"
@@ -1305,7 +1400,8 @@ struct TableTranscriptHarness {
                     + uncachedBefore.prefix(5).joined(separator: ", ")))
 
         let expanded = Self.groupNodes(items, expanded: true)
-        scene.coordinator.update(nodes: expanded, atBottom: .constant(true), activityToggleToken: 1)
+        scene.coordinator.update(
+            nodes: expanded, atBottom: .constant(true), activityToggleToken: 1, linkRoot: "")
 
         // Every unchanged row keeps its exact height. The summary node itself is
         // legitimately gone: `isExpanded` is part of its content, so the expanded
@@ -1348,7 +1444,8 @@ struct TableTranscriptHarness {
         for cycle in 0..<12 {
             let nodes = cycle.isMultiple(of: 2) ? expanded : collapsed
             token += 1
-            scene.coordinator.update(nodes: nodes, atBottom: .constant(true), activityToggleToken: token)
+            scene.coordinator.update(
+                nodes: nodes, atBottom: .constant(true), activityToggleToken: token, linkRoot: "")
             // Realize every row so the caches are filled to their maximum each cycle.
             for row in 0..<nodes.count {
                 _ = scene.coordinator.tableView(scene.tableView, viewFor: nil, row: row)
@@ -1391,7 +1488,8 @@ struct TableTranscriptHarness {
         let appended = Self.groupNodes(grown, expanded: false)
         #expect(appended.count == collapsed.count + 1)
 
-        scene.coordinator.update(nodes: appended, atBottom: .constant(true), activityToggleToken: 0)
+        scene.coordinator.update(
+            nodes: appended, atBottom: .constant(true), activityToggleToken: 0, linkRoot: "")
         // The tail-follow is deferred to the next run-loop turn, by which point a
         // live app has laid the inserted row out; do that layout here so the
         // queued `scrollToEnd` sees the grown document rather than the old bottom.

@@ -478,6 +478,10 @@ struct SessionTranscriptView: View {
                     expansionOverrides: activityGroupExpansion,
                     memo: presentationMemo
                 )
+                // Read once per body evaluation, from the same helper the
+                // resolver closure calls, so the value handed to the table and
+                // the value the resolver reads cannot disagree.
+                let linkRoot = Self.historyWorktreePath(in: appState, worktreeID: worktreeID)
                 SessionWorkbenchView(
                     sections: presentation.indexSections,
                     onOpen: openTranscriptItem
@@ -507,6 +511,7 @@ struct SessionTranscriptView: View {
                         atBottom: $atBottom,
                         scrollToBottomToken: scrollToBottomToken,
                         activityToggleToken: activityToggleToken,
+                        linkRoot: linkRoot,
                         nodesProvider: { presentation.nodes }
                     )
                     .overlay(alignment: .bottomTrailing) {
