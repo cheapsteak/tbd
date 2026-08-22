@@ -5,15 +5,51 @@ on:
     branches: [main]
   push:
     branches: [main]
+  # On-demand runs. The remote verification valve
+  # (docs/specs/2026-08-16-remote-verification-valve-design.md) asks for a run
+  # on a ref that fires nothing else, so a lane that has queued too long for
+  # the machine-global build slot can get its verdict from CI instead.
+  #
+  # `scope` has one option today and is kept anyway: it pins the input's name
+  # and type now, so adding a narrower scope later needs no change at the
+  # dispatch site.
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: 'Which suites to run'
+        required: false
+        default: full
+        type: choice
+        options: [full]
 
 concurrency:
   group: test-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
+# Every job below carries a job-level `timeout-minutes`. GitHub's default is 360
+# minutes, so an untimed job that wedges holds its runner for six hours. On the
+# two `macos-26` jobs that is expensive rather than merely untidy: GitHub allows
+# five concurrent macOS jobs account-wide, a normal run of this workflow spends
+# two of them, and the remote verification valve
+# (docs/specs/2026-08-16-remote-verification-valve-design.md) dispatches THIS
+# workflow so a lane that has queued too long for the machine-global build slot
+# can borrow one of those five. `remote_verify.py` bounds only the local dispatch
+# ticket (45 minutes) and cancels nothing, so releasing that ticket does not stop
+# the GitHub-side job — an abandoned run outlives the lane that asked for it.
+# Unbounded, it goes on consuming the scarce resource the valve exists to share:
+# the starvation the valve was built to fix, inflicted on every other lane.
+#
+# Each number below is sized to its own job and none of them is a performance
+# budget — a job that legitimately grows past its bound wants the bound raised,
+# not the work trimmed.
 jobs:
   lint:
     name: Lint
     runs-on: macos-26
+    # 20: brew, swiftlint, and harnesses that are pure Python/git/bash — no
+    # SwiftPM build at all. Recent runs sit at 0.6 min median, 0.9 min worst, so
+    # this is over an order of magnitude of headroom on a macOS slot.
+    timeout-minutes: 20
     steps:
       # `fetch-depth: 0` is load-bearing for the migration lint below: its
       # history-is-frozen check needs `git merge-base origin/main HEAD`, and
@@ -94,20 +130,43 @@ jobs:
   plans-guard:
     name: No committed implementation plans
     runs-on: ubuntu-latest
+    # 10: a shell guard plus harnesses that build fixture repos in temp dirs and
+    # touch no network — 0.2 min median, 0.6 min worst. Linux runners are not
+    # rationed against the macOS cap, but an unbounded wedge still occupies one
+    # for six hours and leaves this check unreported for the whole of it.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
       - name: Check for committed implementation plans
         run: scripts/check-no-committed-plans.sh
 
-      - name: Test agent guardrails and Swift admission wrapper
+      # Every script harness that needs nothing but bash, git and python lives
+      # here — a test file no workflow runs is worth nothing, and three of
+      # these shipped that way before this step collected them. They are on
+      # `ubuntu-latest` because none of them reads a BSD-only tool; the fence
+      # harness (`scripts/test.test.sh`) is the exception and stays in the
+      # macOS `lint` job because its guards read BSD `stat -f`.
+      #
+      # Nothing here touches the network, a real remote, `~/tbd`, or a real
+      # `gh`: each harness builds a fixture repo in a temp dir and puts a stub
+      # `gh` first on PATH.
+      - name: Test agent guardrails and the script harnesses
         run: |
           python3 .claude/hooks/guardrails/dispatch.py --self-test
           python3 scripts/test-swift-safe.py
+          python3 scripts/test-remote-verify.py
+          bash scripts/remote-verify.test.sh
+          bash scripts/sweep-preflight-refs.test.sh
+          bash scripts/nightly-flake-stress.test.sh
 
   review-scripts-tests:
     name: Review scripts tests
     runs-on: ubuntu-latest
+    # 10: a pip install and a pytest suite that finishes in seconds — 0.4 min
+    # median, 0.6 min worst. Nearly all of the bound is there to absorb a slow
+    # package index rather than the tests themselves.
+    timeout-minutes: 10
     # Unit tests for the claude-review-v2 bookend scripts (prepare.py /
     # validate.py / render_comment.py) plus the workflow's own post/enforce
     # shell, which a test extracts by step name and runs against a stub `gh`
@@ -133,6 +192,18 @@ jobs:
 
   test:
     runs-on: macos-26
+    # 90, deliberately NOT sized to this job's 15.3-minute observed worst case
+    # (10.7 median). The three test steps below carry `timeout-minutes` of 30, 30
+    # and 15 — a 75-minute step budget — and they exist so that a wedged suite
+    # dies on a step that names which pass hung, with the per-test limits given
+    # room to fire first and attribute the hang to a named test. A job bound at
+    # or below 75 would pre-empt all three and kill the run with the
+    # uninformative message those step bounds were written to avoid. 90 clears
+    # the step budget with room for checkout, `brew install tmux`, the cache
+    # restore and the final build — none of which is individually timed — while
+    # cutting worst-case occupancy of one of the five macOS slots from six hours
+    # to an hour and a half.
+    timeout-minutes: 90
     # All three test steps below append their `.flaky(issue:)` retry records
     # here (docs/specs/2026-07-24-test-hardening-design.md §7), so one run
     # produces one artifact covering both fast passes and the quiet pass
@@ -375,6 +446,23 @@ jobs:
       # A CI runner has no `~/tbd` to pollute, so the guard reads as a no-op
       # there. It is not: an empty `~/tbd` makes it MORE sensitive, because the
       # fingerprint goes from "absent" to a listing on the first stray write.
+      #
+      # ---------------------------------------------------------------------
+      # Why every pass also writes xUnit XML
+      #
+      # A remote run has to tell whoever asked for it WHAT failed, and the job
+      # log cannot carry that: a single failed run of this workflow produces
+      # 5.3 MB across 32,228 lines, in which every line is prefixed with
+      # job/step/timestamp and ANSI codes, several parallel passes interleave,
+      # and compiler diagnostics print source context that looks exactly like
+      # test output. Two extraction passes over a real failed log both produced
+      # wrong answers — one surfaced a deliberate known-issue self-test, the
+      # other matched 22 `#require is redundant` warnings displaying source
+      # context. An extractor that silently reports the wrong failure is worse
+      # than no extractor, so the structured file is the interface:
+      # `--xunit-output` writes it and `--experimental-xunit-message-failure`
+      # puts the failure messages inside it. `scripts/test.sh` forwards
+      # unrecognised arguments straight through to `swift test`.
       # ---------------------------------------------------------------------
       - name: Test (fast parallel pass 1/2 — TBDDaemonTests)
         # A tier-1 test can still hang indefinitely: an over-long TestClock
@@ -392,7 +480,9 @@ jobs:
         timeout-minutes: 30
         run: |
           set -o pipefail
-          scripts/test.sh --fingerprint --parallel --filter '^TBDDaemonTests\.' 2>&1 | tee /tmp/fast-pass-daemon.log
+          scripts/test.sh --fingerprint --parallel --filter '^TBDDaemonTests\.' \
+            --xunit-output /tmp/xunit-daemon.xml --experimental-xunit-message-failure \
+            2>&1 | tee /tmp/fast-pass-daemon.log
           # `|| true`: with `set -o pipefail` (and GitHub's `bash -e`), a log
           # with no summary line makes the first `grep` exit 1 and a failing
           # command substitution in an assignment kills the shell — so the
@@ -426,7 +516,9 @@ jobs:
         timeout-minutes: 30
         run: |
           set -o pipefail
-          scripts/test.sh --fingerprint --parallel --skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.' 2>&1 | tee /tmp/fast-pass-app.log
+          scripts/test.sh --fingerprint --parallel --skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.' \
+            --xunit-output /tmp/xunit-app.xml --experimental-xunit-message-failure \
+            2>&1 | tee /tmp/fast-pass-app.log
           # `|| true`: with `set -o pipefail` (and GitHub's `bash -e`), a log
           # with no summary line makes the first `grep` exit 1 and a failing
           # command substitution in an assignment kills the shell — so the
@@ -456,7 +548,9 @@ jobs:
         timeout-minutes: 15
         run: |
           set -o pipefail
-          scripts/test.sh --fingerprint --filter '^TBDDaemonLiveTests\.' --no-parallel 2>&1 | tee /tmp/quiet-pass.log
+          scripts/test.sh --fingerprint --filter '^TBDDaemonLiveTests\.' --no-parallel \
+            --xunit-output /tmp/xunit-quiet.xml --experimental-xunit-message-failure \
+            2>&1 | tee /tmp/quiet-pass.log
           # `|| true`: with `set -o pipefail` (and GitHub's `bash -e`), a log
           # with no summary line makes the first `grep` exit 1 and a failing
           # command substitution in an assignment kills the shell — so the
@@ -478,6 +572,22 @@ jobs:
           name: retry-metrics
           path: /tmp/retry-metrics.jsonl
           if-no-files-found: warn
+
+      # `if: always()` is the whole point, and both outcomes need the XML. A
+      # failing run's is the only machine-readable account of what failed. A
+      # passing run's carries the test populations the valve sums to print
+      # `Test run with N tests`, which six floor checks require before they will
+      # believe a run happened at all — without it a green remote verdict reads
+      # as a truncated suite. `warn` on absence, matching the metrics upload
+      # above: a missing file means the wiring broke and that must be visible.
+      - name: Upload xUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xunit-results
+          path: /tmp/xunit-*.xml
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Build (verify TBDCLI and TBDDaemon executable targets compile)
         run: swift build -j "$TBD_SWIFT_JOBS"

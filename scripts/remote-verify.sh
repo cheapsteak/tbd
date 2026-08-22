@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+# scripts/remote-verify.sh — get this commit's test verdict from CI instead of
+# waiting any longer for the machine-global build slot.
+#
+# THE OVERFLOW PATH OF THE REMOTE VERIFICATION VALVE
+# (docs/specs/2026-08-16-remote-verification-valve-design.md). A lane that has
+# queued for `scripts/swift-safe`'s single build slot past a threshold has
+# compiled nothing, so nothing is wasted by leaving that queue and asking
+# GitHub for the same verdict. `scripts/test.sh` calls this; nothing else does.
+#
+# THE EXIT CONTRACT, which the caller depends on:
+#   0   the remote run passed
+#   1   the remote run failed, and its failing tests are already printed
+#   78   refused — the caller must return to the local queue
+#
+# USAGE: scripts/remote-verify.sh [--narrowed]
+#
+# `--narrowed` says the caller selected a subset of the suite with `--filter` or
+# `--skip`, so it will re-run locally rather than adopt a failing whole-suite
+# verdict. It changes nothing about routing; it suppresses the `Test run with N
+# tests` line on a failure, because six consumers grep that line and take the
+# first match — a whole-suite count printed ahead of the local re-run's own would
+# clear the very floor that exists to catch a filter matching nothing.
+#
+# 78 is what keeps this an optimisation rather than a gate. Every refusal names
+# its condition on stderr: NO SILENT FALLBACK. A quiet fall-back to a local run
+# reintroduces the long stall at exactly the moment it is least visible.
+#
+# THE SPLIT WITH `remote_verify.py`. This front-end answers "should we, and
+# against which ref"; the python driver does the run, because the dispatch
+# ticket is an flock that must be held by the process that waits out the whole
+# remote round trip, and macOS ships no `flock(1)` for a bash 3.2 shell to use.
+# It is `exec`ed for the same reason — a subshell would return early and drop
+# the ticket while its run was still burning GitHub's two-run allowance.
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The remote itself is named once, in the driver: this front-end never pushes.
+REMOTE="origin"
+INERT_NAMESPACE="preflight/"
+# Used only when the remote's own HEAD cannot be read, and it names one trunk
+# rather than recognising any; see `default_branch` for what that does not cover.
+FALLBACK_DEFAULT_BRANCH="main"
+EXIT_REFUSED=78
+
+log() { printf '%s\n' "$*" >&2; }
+
+# THE DIRTY-TREE STOP IS SEMANTIC, NOT COSMETIC. `scripts/test.sh` runs against
+# the working tree, uncommitted edits and untracked files included; GitHub can
+# only test what was pushed. A green remote result on a dirty tree is a false
+# statement about the code in hand — and an untracked file is the worst case,
+# because a brand-new test that never left this disk would be reported as
+# passing. Squash merge absorbs the cost of committing more often.
+#
+# THE FREE LOCAL CHECKS COME FIRST, and the dirty tree is checked before `gh` is
+# even looked for. `gh auth status` is a network round-trip, and a dirty tree is
+# the most common refusal by far — the lane most likely to be starving is the one
+# with uncommitted work — so answering it locally spends nothing and keeps the
+# refusal instant. The order is a property of the whole function rather than any
+# one line, which is why a case asserts that a dirty tree asks GitHub nothing.
+check_preconditions() {
+  if [ -n "$(git status --porcelain)" ]; then
+    log "remote-verify: the tree has uncommitted changes; a remote run would test a different commit"
+    return $EXIT_REFUSED
+  fi
+  if ! command -v gh >/dev/null 2>&1; then
+    log "remote-verify: gh is not installed, so no run can be dispatched"
+    return $EXIT_REFUSED
+  fi
+  if ! gh auth status >/dev/null 2>&1; then
+    log "remote-verify: gh is not authenticated, so no run can be dispatched"
+    return $EXIT_REFUSED
+  fi
+  return 0
+}
+
+# dispatch_ref_for BRANCH -> the ref to push and dispatch. Always inert, never
+# the branch, and deliberately answerable without asking GitHub anything.
+#
+# THE BRANCH ITSELF IS NEVER PUSHED, for three independent reasons:
+#
+#   - A PUSH IS WHAT THE PRE-PUSH HOOK IS GATING. `scripts/git-hooks/pre-push`
+#     runs the suite before the commits are published; a verification path that
+#     publishes them to the branch to get its verdict has bypassed the gate it
+#     was running inside.
+#   - THE DEFAULT BRANCH NEVER HAS AN OPEN PR. A ref choice keyed on "is there a
+#     PR?" therefore fast-forwards `origin/main`, and nothing refuses it: the
+#     protection on `main` was read at the time of writing and enforces against
+#     neither admins nor pushers. The result is main's CI and the Pages deploy
+#     firing on unreviewed commits.
+#   - AN INERT REF HAS A NAMED RECONCILER AND A BRANCH DOES NOT.
+#     `scripts/sweep-preflight-refs.sh` matches `refs/heads/preflight/` and
+#     nothing else, so a branch pushed from here would be a durable resource
+#     nobody reclaims.
+#
+# A push to a branch with an open PR would also fire `pull_request_target:
+# synchronize` and run the claude-review fan-out on every iteration; GitHub
+# minutes are free but Claude quota is not, and it is the only metered resource
+# left in this loop. One namespace covers every one of those cases, so the CHOICE
+# of ref asks GitHub nothing and cannot be wrong about it. Whether the ref that
+# choice lands on is already somebody's branch is a different question, asked
+# separately in `ref_is_unowned`.
+dispatch_ref_for() {
+  printf '%s%s\n' "$INERT_NAMESPACE" "$1"
+}
+
+# ref_is_unowned REF -> 0 when REF is free to force-push, $EXIT_REFUSED otherwise.
+#
+# THE NAMESPACE IS A CONVENTION, NOT A RESERVATION. Every ref the valve moves is
+# force-pushed, because a `preflight/*` ref is a throwaway that any lane may
+# repoint after an amend — but nothing stops a human from working on a branch
+# actually named `preflight/flaky-repro`, and a lane on `flaky-repro` computes
+# exactly that ref. Force-pushing it destroys their commits, and if it carries an
+# open PR the push also fires `pull_request_target: synchronize` and spends the
+# claude-review fan-out, the one metered resource the inert-ref design exists to
+# protect. `scripts/sweep-preflight-refs.sh` already refuses this same collision
+# on the delete side, in the same words; this is that defence on the push side.
+#
+# AN OPEN PR IS THE SIGNAL, because it is the one that can be read without
+# guessing. A `preflight/*` ref existing on the remote proves nothing — every
+# previous run of this valve left one — so ref existence cannot separate a
+# throwaway from somebody's work, while a pull request is a human gesture that
+# only a branch somebody is using ever receives.
+#
+# A QUERY THAT FAILED IS NOT A "NO". Reading a rate limit or a token that lost
+# its scope as "nobody owns this ref" would turn the guard off exactly when
+# GitHub is unhealthy, so an unanswerable question refuses. Same reasoning, and
+# the same fail-closed direction, as the sweep's `has_open_pr`. Only stdout
+# decides: `gh`'s own stderr flows to ours, where an operator reads it verbatim,
+# and folding it into the value would make any deprecation notice read as a PR.
+ref_is_unowned() {
+  local ref="$1" numbers status=0
+  numbers="$(gh pr list --head "$ref" --state open --json number --jq '.[].number')" || status=$?
+  if [ $status -ne 0 ]; then
+    log "remote-verify: could not ask whether a pull request is open for $ref (gh exit $status); refusing rather than force-pushing a ref somebody may own"
+    return $EXIT_REFUSED
+  fi
+  if [ -n "${numbers//[[:space:]]/}" ]; then
+    log "remote-verify: $ref has an open pull request (#${numbers//[[:space:]]/ }), so it is somebody's branch rather than an inert ref; refusing rather than force-pushing over it"
+    return $EXIT_REFUSED
+  fi
+  return 0
+}
+
+# default_branch -> the branch this repository treats as its trunk.
+#
+# Read from the remote's own HEAD, which is what `git remote set-head` records.
+# A repository whose `origin/HEAD` was never fetched — the common case on a
+# fresh clone — falls back to the literal name `main`, and that fallback covers
+# exactly one trunk: a repository whose trunk is called anything else gets a
+# comparison that never matches, so a lane standing on trunk is not stopped
+# here. The honest fix would be `git ls-remote --symref origin HEAD`, and it is
+# not worth a network round trip on every invocation for a stop that is already
+# redundant: `dispatch_ref_for` answers `preflight/<branch>` for every branch
+# and `push_ref` refuses any ref outside that namespace, so trunk is protected
+# by construction whatever this function returns. What this guard buys is a
+# second, independent stop if that construction ever regresses — on this
+# repository, whose trunk is `main`. It does not buy a general one.
+default_branch() {
+  local head=""
+  head="$(git symbolic-ref --quiet --short "refs/remotes/$REMOTE/HEAD" 2>/dev/null)" || head=""
+  if [ -n "$head" ]; then
+    printf '%s\n' "${head#"$REMOTE/"}"
+    return 0
+  fi
+  printf '%s\n' "$FALLBACK_DEFAULT_BRANCH"
+}
+
+main() {
+  local repo_dir branch sha ref status=0
+  # AN UNRECOGNISED ARGUMENT REFUSES RATHER THAN BEING IGNORED. The caller passes
+  # `--narrowed` to change how its verdict may be read, so a flag this front-end
+  # silently dropped — a rename, a typo — would hand back a verdict the caller
+  # then reads under the wrong rule. 78 is free; a misread verdict is not.
+  local -a narrowing=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --narrowed) narrowing=(--narrowed) ;;
+      *)
+        log "remote-verify: unknown argument '$1'; refusing rather than guessing"
+        return $EXIT_REFUSED
+        ;;
+    esac
+    shift
+  done
+
+  repo_dir="$(git rev-parse --show-toplevel 2>/dev/null)" || status=$?
+  if [ $status -ne 0 ] || [ -z "$repo_dir" ]; then
+    log "remote-verify: not inside a git repository"
+    return $EXIT_REFUSED
+  fi
+
+  branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" || branch=""
+  if [ -z "$branch" ] || [ "$branch" = "HEAD" ]; then
+    log "remote-verify: HEAD is detached, so there is no branch to push"
+    return $EXIT_REFUSED
+  fi
+
+  # DEFENCE IN DEPTH, and the only guard here that is deliberately redundant.
+  # `dispatch_ref_for` already answers `preflight/<branch>` for every branch, so
+  # trunk is safe by construction — but the cost of that construction ever
+  # regressing is a push to `origin/main` that fires main's CI and the Pages
+  # deploy, which is worth a second, independent stop.
+  local trunk; trunk="$(default_branch)"
+  if [ "$branch" = "$trunk" ]; then
+    log "remote-verify: refusing to verify $branch, the default branch; commit to a lane branch instead"
+    return $EXIT_REFUSED
+  fi
+
+  check_preconditions || return $?
+
+  status=0
+  ref="$(dispatch_ref_for "$branch")" || status=$?
+  if [ $status -ne 0 ] || [ -z "$ref" ]; then
+    return $EXIT_REFUSED
+  fi
+
+  # Asked before anything is pushed, and it is the only `gh` call this front-end
+  # makes about the ref: the driver force-pushes whatever it is handed, so the
+  # question of whether the ref is somebody's branch has to be answered here.
+  ref_is_unowned "$ref" || return $?
+
+  sha="$(git rev-parse HEAD)"
+
+  # `exec`: the driver holds the dispatch ticket for the whole remote run, and
+  # its exit status is this script's contract verbatim.
+  exec python3 "$HERE/remote_verify.py" drive \
+    --repo-dir "$repo_dir" --ref "$ref" --sha "$sha" \
+    ${narrowing[@]+"${narrowing[@]}"}
+}
+
+# --- entrypoint (strict mode only when executed, not when sourced) -----------
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  set -euo pipefail
+  main "$@"
+fi

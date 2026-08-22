@@ -53,6 +53,41 @@ class FakeClock:
         self.now += seconds
 
 
+# A stub `swift` that holds the build slot until it is signalled.
+#
+# `exec`, AND THE WHOLE POINT OF THIS CONSTANT. `swift-safe` execs the tool, so
+# the process the fixture signals is this shell — and a plain `sleep 30` on the
+# last line makes the sleep a CHILD of it, which no signal to the shell reaches.
+# The shell died, the sleep was reparented, and two of them outlived the run on
+# a CI runner, which reaped them itself and said so. `exec` collapses the two
+# into one process, so the pid the fixture recorded at spawn IS the long-lived
+# one and killing it leaves nothing behind.
+HOLDING_SWIFT = "#!/bin/sh\nprintf 'ready\\n'\nexec sleep 30\n"
+
+
+def _descendants_of(pid: int) -> list[int]:
+    """Every live process below `pid`, from `ps` — BSD and GNU alike.
+
+    Both accept `ps -eo pid=,ppid=`; neither `--ppid` (GNU) nor `-o ppid= -p`
+    (which answers about one pid, not its children) is portable enough here.
+    """
+    listing = subprocess.run(
+        ["ps", "-eo", "pid=,ppid="], capture_output=True, text=True, check=False
+    ).stdout
+    children: dict[int, list[int]] = {}
+    for line in listing.splitlines():
+        fields = line.split()
+        if len(fields) == 2 and fields[0].isdigit() and fields[1].isdigit():
+            children.setdefault(int(fields[1]), []).append(int(fields[0]))
+    found: list[int] = []
+    pending = [pid]
+    while pending:
+        for child in children.get(pending.pop(), ()):
+            found.append(child)
+            pending.append(child)
+    return found
+
+
 @contextlib.contextmanager
 def _lock_holder(env: dict[str, str], cwd: str | None = None):
     """Run a real swift-safe that takes the lock and keeps it until exit.
@@ -60,6 +95,8 @@ def _lock_holder(env: dict[str, str], cwd: str | None = None):
     Yields once the stub `swift` has printed, which happens only after the
     lock was taken and the holder record written — so a waiter started inside
     the block genuinely contends with a genuinely identified holder.
+
+    Teardown is unconditional and signals only the pid recorded at spawn.
     """
     process = subprocess.Popen(
         [str(RUNNER), "build"],
@@ -75,10 +112,16 @@ def _lock_holder(env: dict[str, str], cwd: str | None = None):
         assert stdout.readline().strip() == "ready"
         yield process
     finally:
-        process.terminate()
-        process.wait(timeout=5)
-        stdout.close()
-        stderr.close()
+        try:
+            process.terminate()
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            # A holder that ignored SIGTERM still may not outlive its test.
+            process.kill()
+            process.wait(timeout=5)
+        finally:
+            stdout.close()
+            stderr.close()
 
 
 def _dead_pid() -> int:
@@ -265,16 +308,43 @@ class SwiftSafeTests(unittest.TestCase):
         self.assertIn("usage:", result.stderr)
 
     def test_execed_swift_keeps_the_lock(self):
-        self.fake_swift.write_text(
-            "#!/bin/sh\nprintf 'ready\\n'\nsleep 30\n",
-            encoding="utf-8",
-        )
+        self.fake_swift.write_text(HOLDING_SWIFT, encoding="utf-8")
         with _lock_holder(self.runner_env()):
             result = self.run_runner(
                 "test", TBD_SWIFT_LOCK_TIMEOUT_SECONDS="0.05"
             )
             self.assertEqual(result.returncode, 75)
             self.assertIn("timed out", result.stderr)
+
+    def test_the_lock_holder_fixture_strands_no_process(self):
+        """Nothing this fixture starts may outlive its block.
+
+        Two `sleep`s from it outlived a CI run and the runner reaped them and
+        said so: the stub `swift` forked its sleeper, so the SIGTERM that ended
+        the shell never reached the child, which was reparented and kept
+        running.  Recording every descendant while the block is open and
+        asserting each is gone once it closes states that invariant whatever
+        shape the stub takes.  Only pids observed here are ever looked at, and
+        none of them is signalled.
+        """
+        self.fake_swift.write_text(HOLDING_SWIFT, encoding="utf-8")
+        with _lock_holder(self.runner_env()) as holder:
+            started = [holder.pid]
+            # A forked sleeper appears a moment after "ready", so poll for one
+            # rather than racing it.  The whole window is spent only when the
+            # stub is well-behaved and there is nothing to find.
+            deadline = time.monotonic() + 0.5
+            while time.monotonic() < deadline:
+                descendants = _descendants_of(holder.pid)
+                if descendants:
+                    started.extend(descendants)
+                    break
+                time.sleep(0.02)
+        for pid in started:
+            self.assertFalse(
+                swift_safe._process_is_alive(pid),
+                f"pid {pid} outlived the lock-holder fixture",
+            )
 
     def test_contended_lock_times_out_without_spawning_swift(self):
         lock_path = self.tbd_home / "runtime" / "swift-build.lock"
@@ -322,10 +392,7 @@ class SwiftSafeTests(unittest.TestCase):
         """End to end: a real waiter behind a real holder, compressed cadence."""
         holder_directory = Path(self.temp.name) / "acme-worktree"
         holder_directory.mkdir()
-        self.fake_swift.write_text(
-            "#!/bin/sh\nprintf 'ready\\n'\nsleep 30\n",
-            encoding="utf-8",
-        )
+        self.fake_swift.write_text(HOLDING_SWIFT, encoding="utf-8")
         with _lock_holder(self.runner_env(), cwd=str(holder_directory)) as holder:
             result = self.run_runner(
                 "test",
@@ -351,6 +418,62 @@ class SwiftSafeTests(unittest.TestCase):
         result = self.run_runner("build")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("until the program exits", result.stderr)
+
+    def _contended(self, *arguments, **extra_env):
+        """Run the wrapper with the shared slot already held by this process."""
+        lock_path = self.tbd_home / "runtime" / "swift-build.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return self.run_runner(*arguments, **extra_env)
+
+    def test_yielding_exits_with_its_own_code(self):
+        """76 is distinct from 75 so a caller can route the run elsewhere."""
+        result = self._contended(
+            "test",
+            TBD_SWIFT_QUEUE_YIELD_SECONDS="0.05",
+            TBD_SWIFT_LOCK_TIMEOUT_SECONDS="30",
+        )
+        self.assertEqual(result.returncode, 76)
+        self.assertIn("yield", result.stderr.lower())
+        self.assertEqual(result.stdout, "")
+
+    def test_a_build_ignores_the_queue_yield_knob(self):
+        """ONLY `test` MAY YIELD, because only its caller understands 76.
+
+        `scripts/restart.sh` never checks this wrapper's status, so a developer
+        who exported this knob in a shell profile would get a build that stops
+        after the bound and a bundle assembled around whatever stale binaries
+        were already on disk — the documented "a stale daemon reverts the fleet"
+        failure. A build queues as usual and says once that the knob is not for
+        it, because a knob ignored in silence looks like a knob that is broken.
+        """
+        result = self._contended(
+            "build",
+            TBD_SWIFT_QUEUE_YIELD_SECONDS="0.05",
+            TBD_SWIFT_LOCK_TIMEOUT_SECONDS="0.5",
+        )
+        self.assertNotEqual(result.returncode, 76, "a build yielded its place")
+        self.assertEqual(result.returncode, 75)
+        self.assertIn("timed out", result.stderr)
+        self.assertIn("only `test`", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_a_bad_yield_value_does_not_fail_a_build(self):
+        # The validation is gated with the behaviour: a typo in a knob this
+        # subcommand ignores must not turn an unrelated rebuild into a hard exit.
+        result = self.run_runner("build", TBD_SWIFT_QUEUE_YIELD_SECONDS="soon")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "build --jobs 2")
+        self.assertIn("only `test`", result.stderr)
+
+    def test_a_bad_yield_value_still_fails_a_test_run(self):
+        # Where the knob IS honoured, an unreadable value is refused by name
+        # rather than silently meaning "never yield".
+        result = self.run_runner("test", TBD_SWIFT_QUEUE_YIELD_SECONDS="soon")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("TBD_SWIFT_QUEUE_YIELD_SECONDS", result.stderr)
+        self.assertEqual(result.stdout, "")
 
 
 class WaitReportingTests(unittest.TestCase):
@@ -675,6 +798,56 @@ class AbandonedWaitTests(unittest.TestCase):
         self.assertGreaterEqual(elapsed, 125.0)
 
 
+class QueueYieldTests(unittest.TestCase):
+    """Yielding is a caller-requested giveup, distinct from abandonment."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.lock_path = Path(self.temp.name) / "swift-build.lock"
+        self.holder = self.lock_path.open("a+", encoding="utf-8")
+        fcntl.flock(self.holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.env = mock.patch.dict(os.environ, {}, clear=False)
+        self.env.start()
+        os.environ.pop("TBD_SWIFT_ALLOW_ORPHAN", None)
+
+    def tearDown(self):
+        self.env.stop()
+        self.holder.close()
+        self.temp.cleanup()
+
+    def wait(self, yield_seconds, timeout=600.0):
+        clock = FakeClock()
+        start = clock.monotonic()
+        with self.lock_path.open("a+", encoding="utf-8") as waiter:
+            outcome = None
+            try:
+                swift_safe._acquire(
+                    waiter, self.lock_path, timeout, 60.0,
+                    requester=os.getppid(), ancestors=(),
+                    yield_after_seconds=yield_seconds,
+                    monotonic=clock.monotonic, sleep=clock.sleep,
+                    report=lambda *_: None, getppid=lambda: os.getppid(),
+                )
+            except BaseException as error:      # noqa: BLE001 - asserting the type
+                outcome = error
+            self.assertIsNotNone(outcome, "the wait acquired the build slot")
+        return type(outcome), clock.monotonic() - start
+
+    def test_the_wait_yields_once_the_threshold_passes(self):
+        outcome, elapsed = self.wait(60.0)
+        self.assertIs(outcome, swift_safe.Yielded)
+        self.assertGreaterEqual(elapsed, 60.0)
+        self.assertLess(elapsed, 61.0)
+
+    def test_an_unset_threshold_never_yields(self):
+        outcome, _ = self.wait(None, timeout=120.0)
+        self.assertIs(outcome, TimeoutError)
+
+    def test_a_threshold_beyond_the_timeout_never_yields(self):
+        outcome, _ = self.wait(500.0, timeout=120.0)
+        self.assertIs(outcome, TimeoutError)
+
+
 class AncestorChainTests(unittest.TestCase):
     """The startup walk that records who a build is being run for."""
 
@@ -758,12 +931,15 @@ class OrphanedWrapperTests(unittest.TestCase):
         self.wrapper_pid_file = root / "wrapper.pid"
         self.intermediate_pid_file = root / "intermediate.pid"
         self.fake_swift = root / "swift"
+        # No case here expects this to run — each asserts the marker stays
+        # absent — but if one ever regresses, `exec` keeps the long-lived
+        # process the same pid this test recorded, so teardown can end it.
         self.fake_swift.write_text(
             textwrap.dedent(
                 f"""\
                 #!/bin/sh
                 printf '%s\\n' "$*" > {shlex.quote(str(self.compiled_marker))}
-                sleep 30
+                exec sleep 30
                 """
             ),
             encoding="utf-8",

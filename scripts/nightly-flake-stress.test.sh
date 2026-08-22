@@ -25,13 +25,23 @@ mktmpd()          { mktemp -d "${TMPDIR:-/tmp}/stress-test.XXXXXX"; }
 
 mk_log() { local f="$1"; shift; printf '%s\n' "$@" > "$f"; }
 
+# A copy of the script with one guard deliberately weakened. Echoes its path.
+MUTANT_DIR="$(mktmpd)"
+MUTANT_SEQ=0
+trap 'rm -rf "$MUTANT_DIR"' EXIT
+mutant_of() {
+  local sed_expr="$1" out
+  MUTANT_SEQ=$((MUTANT_SEQ + 1))
+  out="$MUTANT_DIR/mutant.$MUTANT_SEQ.sh"
+  sed -E "$sed_expr" "$SCRIPT" > "$out"
+  echo "$out"
+}
+
 # Run judge_iteration inside a MUTATED copy of the script, to prove a given
 # verdict is actually produced by the guard it is attributed to.
 judge_mutated() {
   local sed_expr="$1" rc="$2" log="$3" floor="$4"
-  local mutant; mutant="$(mktmpd)/mutant.sh"
-  sed -E "$sed_expr" "$SCRIPT" > "$mutant"
-  bash -c "source '$mutant'; judge_iteration '$rc' '$log' '$floor'"
+  bash -c "source '$(mutant_of "$sed_expr")'; judge_iteration '$rc' '$log' '$floor'"
 }
 
 # ---------------------------------------------------------------------------
@@ -79,7 +89,13 @@ test_a_deadline_kill_is_reported_as_wedged() {
   mk_log "$d/wedged.log" "Test run started."
   local verdict; verdict="$(judge_iteration 124 "$d/wedged.log" 10)"
   assert_contains "rc=124 -> wedged" "$verdict" "FAIL wedged"
-  assert_contains "and says it was the harness deadline" "$verdict" "killed by the harness deadline"
+  # It has to say WHICH deadline, because the answer decides where a reader
+  # goes next: the governed outer bound covers the lock wait as well as the
+  # execution budget, so "it wedged" and "it never got admitted" are different
+  # diagnoses wearing the same rc.
+  assert_contains "and says it was the governed outer deadline" "$verdict" \
+    "no completion within the governed outer deadline"
+  assert_contains "and names both phases it covers" "$verdict" "lock wait"
   rm -rf "$d"
 }
 
@@ -190,30 +206,152 @@ test_run_with_deadline_passes_through_a_fast_commands_status() {
   rm -rf "$d"
 }
 
+# STUB WRAPPERS, AND `SCRIPT_DIR` IS THE ONLY SEAM THAT REACHES THEM. The script
+# resolves both wrappers as `$SCRIPT_DIR/<name>`, so a case that overrode anything
+# else — `REPO_ROOT`, a `cd`, a PATH entry — would leave `run_governed_swift` and
+# `run_governed_fenced` invoking the REAL `scripts/swift-safe` and `scripts/test.sh`
+# from this worktree. That is not a stub that quietly did nothing: it starts a real
+# compile, takes the machine-global build slot, and contradicts this file's own
+# "ZERO BUILDS" claim while every assertion reads an args file nothing wrote.
+#
+# Each stub records the environment it was handed. `${VAR-<unset>}` rather than
+# `${VAR:-<unset>}` on purpose: the valve cases below turn on the difference
+# between a variable that was CLEARED and one that was never set.
+mk_stub_wrapper() {
+  local dir="$1" name="$2"
+  mkdir -p "$dir"
+  cat > "$dir/$name" <<'EOF'
+#!/usr/bin/env bash
+{
+  printf 'lock_timeout=%s\n' "${TBD_SWIFT_LOCK_TIMEOUT_SECONDS-<unset>}"
+  printf 'TBD_REMOTE_VERIFY=%s\n' "${TBD_REMOTE_VERIFY-<unset>}"
+  printf 'TBD_SWIFT_QUEUE_YIELD_SECONDS=%s\n' "${TBD_SWIFT_QUEUE_YIELD_SECONDS-<unset>}"
+  printf 'argv=%s\n' "$*"
+} > "$STUB_RECORD"
+EOF
+  chmod +x "$dir/$name"
+}
+
+# One recorded line's value, so an assertion can distinguish `VAR=` from `VAR=5`
+# — which `assert_contains` on the name alone cannot.
+recorded() { sed -n "s/^$2=//p" "$1"; }
+
 test_governed_swift_deadline_covers_lock_wait_and_command() {
   local d; d="$(mktmpd)"
-  local fake_repo="$d/repo" args_file="$d/args"
-  mkdir -p "$fake_repo/scripts"
-  cat > "$fake_repo/scripts/swift-safe" <<'EOF'
-#!/usr/bin/env bash
-printf '%s\n' "$TBD_SWIFT_LOCK_TIMEOUT_SECONDS|$*" > "$ARGS_FILE"
-EOF
-  chmod +x "$fake_repo/scripts/swift-safe"
+  local record="$d/record"
+  mk_stub_wrapper "$d/scripts" swift-safe
 
-  local old_repo_root="${REPO_ROOT:-}" old_lock="$SWIFT_LOCK_TIMEOUT_S"
-  REPO_ROOT="$fake_repo"
+  local old_script_dir="$SCRIPT_DIR" old_lock="$SWIFT_LOCK_TIMEOUT_S"
+  SCRIPT_DIR="$d/scripts"
   SWIFT_LOCK_TIMEOUT_S=7
   assert_eq "outer deadline includes lock wait, command budget, and grace" \
     "48" "$(governed_outer_deadline 11)"
-  ARGS_FILE="$args_file" run_governed_swift 11 "$d/out.log" test --filter Foo
+  STUB_RECORD="$record" run_governed_swift 11 "$d/out.log" test --filter Foo
 
   assert_eq "governed command receives the explicit lock timeout" \
-    "7|test --filter Foo" "$(cat "$args_file")"
+    "7" "$(recorded "$record" lock_timeout)"
+  assert_eq "and the arguments it was given" \
+    "test --filter Foo" "$(recorded "$record" argv)"
   assert_eq "governed command completes without consuming its outer deadline" \
     "" "$(cat "$d/out.log")"
-  REPO_ROOT="$old_repo_root"
+  SCRIPT_DIR="$old_script_dir"
   SWIFT_LOCK_TIMEOUT_S="$old_lock"
   rm -rf "$d"
+}
+
+# ---------------------------------------------------------------------------
+# The remote verification valve is OFF for everything this harness governs
+#
+# `scripts/test.sh` opts into the valve on `TBD_REMOTE_VERIFY=1`, and this harness
+# invokes `test.sh`. Routing an iteration to CI would not merely stretch a
+# deadline — it would measure the wrong thing entirely: this program exists to
+# reproduce LOCAL flakiness under induced contention, and a verdict computed on a
+# quiet runner answers a question nobody asked. So the harness turns the valve off
+# itself rather than trusting the shell it was started from.
+# ---------------------------------------------------------------------------
+
+test_an_iteration_never_routes_even_when_the_caller_enabled_the_valve() {
+  local d; d="$(mktmpd)"
+  local record="$d/record"
+  mk_stub_wrapper "$d/scripts" test.sh
+
+  local old_script_dir="$SCRIPT_DIR"
+  SCRIPT_DIR="$d/scripts"
+  # The caller's environment has the valve on and a bound of its own — the shape
+  # of a night started from a shell that exported them for the soak.
+  export TBD_REMOTE_VERIFY=1 TBD_SWIFT_QUEUE_YIELD_SECONDS=5
+  STUB_RECORD="$record" run_governed_fenced 5 "$d/out.log" --no-fingerprint --filter Foo
+  unset TBD_REMOTE_VERIFY TBD_SWIFT_QUEUE_YIELD_SECONDS
+  SCRIPT_DIR="$old_script_dir"
+
+  assert_eq "the iteration runs with the valve explicitly off" "0" \
+    "$(recorded "$record" TBD_REMOTE_VERIFY)"
+  # CLEARED, not merely unassigned: `env VAR=` wins over an inherited value, and
+  # an inherited bound would make the test leg yield 76 with the valve off — a
+  # status `test.sh` propagates and `judge_iteration` reads as a truncated log.
+  assert_eq "and the inherited yield bound cleared rather than passed through" "" \
+    "$(recorded "$record" TBD_SWIFT_QUEUE_YIELD_SECONDS)"
+  assert_eq "the iteration's own arguments are untouched" \
+    "--no-fingerprint --filter Foo" "$(recorded "$record" argv)"
+  rm -rf "$d"
+}
+
+# The build leg goes straight to `swift-safe`, which ignores a yield bound for any
+# subcommand but `test` — but it warns about one, into `build.log`, and the
+# harness should not depend on that leniency to stay correct.
+test_the_build_leg_also_runs_with_the_valve_off() {
+  local d; d="$(mktmpd)"
+  local record="$d/record"
+  mk_stub_wrapper "$d/scripts" swift-safe
+
+  local old_script_dir="$SCRIPT_DIR"
+  SCRIPT_DIR="$d/scripts"
+  export TBD_REMOTE_VERIFY=1 TBD_SWIFT_QUEUE_YIELD_SECONDS=5
+  STUB_RECORD="$record" run_governed_swift 5 "$d/out.log" build --build-tests -j 2
+  unset TBD_REMOTE_VERIFY TBD_SWIFT_QUEUE_YIELD_SECONDS
+  SCRIPT_DIR="$old_script_dir"
+
+  assert_eq "the build runs with the valve off too" "0" \
+    "$(recorded "$record" TBD_REMOTE_VERIFY)"
+  assert_eq "and with no inherited bound to warn about" "" \
+    "$(recorded "$record" TBD_SWIFT_QUEUE_YIELD_SECONDS)"
+  rm -rf "$d"
+}
+
+# MUTATION. Empty the clearing out of `NO_VALVE_ENV` — leaving a harmless
+# placeholder so the array stays non-empty, since bash 3.2 errors on an empty
+# `"${a[@]}"` under `set -u` and would fail for the wrong reason — and the caller's
+# `TBD_REMOTE_VERIFY=1` rides into the iteration. That iteration then routes to
+# GitHub, and this harness reports a verdict from a quiet runner as a measurement
+# of local contention.
+test_disabling_the_valve_is_load_bearing() {
+  local d; d="$(mktmpd)"
+  local record="$d/record" mutant
+  mk_stub_wrapper "$d/scripts" test.sh
+  mutant="$(mutant_of 's/^NO_VALVE_ENV=\(TBD_REMOTE_VERIFY=0 TBD_SWIFT_QUEUE_YIELD_SECONDS=\)$/NO_VALVE_ENV=(TBD_STRESS_MUTANT=1)/')"
+
+  STUB_RECORD="$record" TBD_REMOTE_VERIFY=1 TBD_SWIFT_QUEUE_YIELD_SECONDS=5 \
+    bash -c "source '$mutant'; SCRIPT_DIR='$d/scripts'; \
+             run_governed_fenced 5 '$d/out.log' --no-fingerprint --filter Foo"
+
+  assert_eq "without the clearing the caller's valve flag reaches the iteration" \
+    "1" "$(recorded "$record" TBD_REMOTE_VERIFY)"
+  assert_eq "and so does the caller's yield bound" "5" \
+    "$(recorded "$record" TBD_SWIFT_QUEUE_YIELD_SECONDS)"
+  rm -rf "$d"
+}
+
+# The harness's own account of WHY it disables the valve, pinned so a future edit
+# cannot quietly turn "measure local flakiness" into "widen the deadline". The
+# rejected fix is named because it is the one a reader reaches for first.
+test_the_no_valve_decision_is_documented_in_the_script() {
+  local body; body="$(cat "$SCRIPT")"
+  assert_contains "the script says the valve is off for its runs" "$body" \
+    "TBD_REMOTE_VERIFY=0"
+  assert_contains "and says this harness measures LOCAL flakiness" "$body" \
+    "MEASURES LOCAL FLAKINESS UNDER CONTENTION"
+  assert_contains "and records that widening the deadline was the wrong fix" "$body" \
+    'NOT "WIDEN THE DEADLINE"'
 }
 
 # ---------------------------------------------------------------------------

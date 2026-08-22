@@ -1,0 +1,144 @@
+name: Preflight ref cleanup
+
+# THE NAMED RECONCILER FOR INERT `preflight/*` REFS.
+#
+# The remote verification valve
+# (docs/specs/2026-08-16-remote-verification-valve-design.md) pushes
+# `preflight/<branch>` when a lane needs a CI verdict on a branch that already
+# has an open PR — pushing the PR branch itself would fire
+# `pull_request_target: synchronize` and spend Claude quota on a review nobody
+# asked for. Those refs are a genuine new durable resource, and CLAUDE.md's
+# reconciler doctrine says who reclaims them must be named rather than left to
+# a best-effort cleanup on the happy path: every unbounded leak this repo has
+# found in the wild sat on a resource no sweep covered, including 2,804 leaked
+# git branches.
+#
+# Two legs, and the second is the one that carries the guarantee:
+#
+#   - CLOSE PATH — a PR closing reclaims its own preflight ref immediately, so
+#     the common case needs no weekly wait. It runs the SAME sweep, narrowed to
+#     that one ref, rather than deleting it itself: the sweep asks whether a
+#     workflow run is still using the ref and spares anything under an hour old,
+#     precisely so a reclaim cannot take a ref out from under a run that is about
+#     to check it out, and in a forty-worktree fleet "another agent merges this PR
+#     while a lane verifies against it" is ordinary. A ref spared here is inert
+#     soon after and the weekly pass takes it.
+#   - SWEEP — a weekly pass over every `preflight/*` ref on the remote, keeping
+#     only those whose branch still has an open PR. This is what makes the
+#     close path best-effort rather than load-bearing: a cancelled run, a
+#     force-pushed rename, or a ref pushed for a branch that never opened a PR
+#     all land here.
+
+# `pull_request_target`, NOT `pull_request`, AND THE REASON IS THE TOKEN. This is
+# the repo's only close-triggered workflow that wants `contents: write`. Under
+# `pull_request` a same-repo PR runs the workflow file AND the scripts it invokes
+# as they exist on the PR's HEAD, so a branch author could edit the sweep or this
+# step body, open a PR, close it, and have unreviewed code execute with a
+# write-scoped token — outside the review gate entirely. `pull_request_target`
+# runs the BASE branch's copy of both, which is the principled trigger for a
+# write-scoped close handler and the pattern this repo already documents for
+# `claude-code-review.yml`.
+#
+# It grants no privilege the actor lacks — pushing a branch already needs push
+# access — so this is defence in depth rather than a closed hole. What it buys is
+# that the code holding the token is code that went through review.
+#
+# THE FORK GATE BELOW IS STILL LOAD-BEARING, AND MORE SO NOW. `pull_request_target`
+# hands a fork PR a token with the `permissions` block's full scope rather than a
+# read-only one, so the gate is what keeps a fork's close event from reaching a
+# write-scoped step at all. Nothing in the step body interpolates PR-controlled
+# text either — the head branch name arrives through `env:`.
+on:
+  pull_request_target:
+    types: [closed]
+  schedule:
+    # 12:00 UTC Sunday. Nothing here is urgent — the refs cost only namespace —
+    # and a weekly cadence keeps the sweep's own noise near zero.
+    - cron: '0 12 * * 0'
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: 'Actually delete the refs (unchecked = dry run)'
+        type: boolean
+        required: false
+        default: false
+
+# Declaring this block sets every scope NOT listed to `none`, so all three
+# entries are load-bearing:
+#
+#   contents: write     to delete refs.
+#   pull-requests: read for the `gh pr list` that asks whether a PR still names a
+#                       ref.
+#   actions: read       for the `gh run list` that asks whether a workflow run is
+#                       still USING one. That question is what covers the window
+#                       the commit-date age guard cannot see, and without this
+#                       scope every query 403s.
+#
+# Each missing scope fails the same safe way: the sweep treats a failed query as
+# "unknown" and keeps the ref, rather than as "nothing is using it", which would
+# empty the namespace.
+permissions:
+  contents: write
+  pull-requests: read
+  actions: read
+
+concurrency:
+  group: preflight-cleanup
+  # NOT cancel-in-progress: two legs deleting disjoint refs do not conflict,
+  # and a cancelled sweep is a week with no reconciliation.
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: Reclaim preflight refs
+    runs-on: ubuntu-latest
+    steps:
+      # NO `ref:`, DELIBERATELY. Under `pull_request_target` the default checkout
+      # is the BASE branch's commit, which is the whole point of the trigger: the
+      # sweep this job runs is the reviewed one on `main`, not whatever the PR's
+      # head has. Adding `ref: ${{ github.event.pull_request.head.sha }}` here
+      # would hand the head's code the write-scoped token again and undo it.
+      - uses: actions/checkout@v4
+
+      # Skipped for forks: the valve pushes preflight refs to this repo only, so
+      # a fork PR has none — and under `pull_request_target` a fork's close event
+      # would otherwise reach this step with the full `permissions` scope above,
+      # not the read-only token `pull_request` hands a fork. So this gate carries
+      # more weight than it did, and it is what keeps the trigger change from
+      # widening anything.
+      - name: Delete this PR's preflight ref
+        if: >-
+          github.event_name == 'pull_request_target' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          # `gh pr list` decides what is still in use, so this leg needs a token
+          # as much as the sweep leg does.
+          GH_TOKEN: ${{ github.token }}
+          # Via the environment, never interpolated into the script body: a
+          # branch name is attacker-controlled text that may legally contain
+          # `$`, backticks and `;`, so `${{ … }}` inside `run:` would be a
+          # shell injection.
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        # ONE REF, THROUGH THE SWEEP, so the two guards that decide whether a
+        # preflight ref may be deleted — an open PR still naming it, and an age
+        # under the grace period — are written once and apply to both legs. A
+        # bare `git push --delete` here would honour neither, and the age one is
+        # load-bearing: it is what stops this leg deleting a ref seconds after a
+        # lane pushed it and before the run it dispatched has checked it out.
+        run: |
+          set -euo pipefail
+          bash scripts/sweep-preflight-refs.sh --apply --branch "$HEAD_REF"
+
+      - name: Sweep preflight refs with no open PR
+        if: github.event_name != 'pull_request_target'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # A scheduled pass reclaims; a manual dispatch previews unless asked.
+          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
+        run: |
+          set -euo pipefail
+          if [ "$APPLY" = "true" ]; then
+            bash scripts/sweep-preflight-refs.sh --apply
+          else
+            bash scripts/sweep-preflight-refs.sh
+          fi

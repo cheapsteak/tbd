@@ -147,6 +147,84 @@
 #   scripts/test.sh --no-fingerprint --parallel
 #   scripts/test.sh --fingerprint            # deliberate local leak hunt
 #
+# THE REMOTE VERIFICATION VALVE — OFF UNLESS `TBD_REMOTE_VERIFY=1`.
+# (docs/specs/2026-08-16-remote-verification-valve-design.md.) This wrapper is
+# the only caller that opts in, because it is the one whose entire output is a
+# verdict: nothing it produces has to exist on this disk, so the same bit can be
+# computed on GitHub. `scripts/restart.sh` and every other artifact build stay
+# local permanently and are untouched by any of this.
+#
+# Enabled, the run bounds its queueing: `TBD_SWIFT_QUEUE_YIELD_SECONDS` tells
+# `scripts/swift-safe` to give up its place in the queue after
+# `TBD_REMOTE_VERIFY_YIELD_SECONDS` (default 300) and answer 76. The threshold
+# measures QUEUE time, never run time, so a yield discards nothing — a wait that
+# never acquired the slot has compiled nothing. 300 is sized against remote
+# capacity rather than impatience: two hours of sampled contention put T=60 at
+# ~28 trips an hour against a remote that sustains ~12 runs an hour, while T=300
+# fires four or five times, on the tail this valve exists for.
+#
+# OFF, THE BOUND IS CLEARED RATHER THAN LEFT ALONE, and that is what makes
+# "off" mean the pre-valve behavior exactly. `TBD_SWIFT_QUEUE_YIELD_SECONDS` is
+# a knob `swift-safe` documents and honours on any `test` run, whether or not
+# this valve is enabled — so a caller who exported it would otherwise yield 76
+# with the valve off, down a path that does not route, and this wrapper would
+# exit 76 having tested nothing.
+#
+# THREE EXIT CODES DECIDE WHAT HAPPENS NEXT, AND CONFLATING ANY TWO IS A SILENT
+# WRONG ANSWER:
+#
+#   76 from `swift-safe` — it yielded the queue at our request. Verify remotely.
+#   75 from `swift-safe` — the wait TIMED OUT, or was ABANDONED because nobody
+#      is left to read the result. Neither is a request to verify elsewhere, so
+#      75 is propagated untouched; dispatching one spends a scarce remote slot
+#      on a verdict nobody wants.
+#   78 from `remote-verify.sh` — a precondition refused (dirty tree, no `gh`,
+#      no pushable ref). The run falls back to the local queue. THE VALVE IS AN
+#      OPTIMISATION, NEVER A GATE: a refusal must never fail a run.
+#
+# `remote-verify.sh` answers 0 for a green remote run and 1 for a red one whose
+# failing tests it has already printed. THOSE TWO, AND ONLY THOSE TWO, ARE
+# VERDICTS. Everything else it can produce — 127 for a mangled interpreter line,
+# 130 for a Ctrl-C, 2 for a syntax error in it — says nothing about the tests,
+# and adopting one would report a suite that never ran as a failing suite. Any
+# status outside `{0, 1, 78}` is therefore treated exactly as 78 is, with the
+# status named on the way past.
+#
+# A NARROWED RUN ROUTES, BUT ITS VERDICT IS READ DIFFERENTLY — AND THE
+# ASYMMETRY IS THE WHOLE MECHANISM. This wrapper forwards `--filter` and friends
+# to `swift test`, and the dispatch has no way to carry them, so a remote run is
+# always the WHOLE suite. The two outcomes are not equally transferable:
+#
+#   GREEN whole-suite IS sound for a narrowed caller. If every test passed, then
+#      every subset of them passed, whatever the caller selected. It is adopted,
+#      with one line saying the run was the whole suite so nobody reads its test
+#      count as their subset's.
+#   RED whole-suite IS NOT. The failures may lie entirely outside what the
+#      caller selected, and reporting them as this run's result would name tests
+#      it deliberately excluded. The narrowed suite is re-run locally instead and
+#      the LOCAL verdict is reported.
+#
+# WHY NOT JUST REFUSE TO ROUTE A NARROWED RUN, which would need no interpretation
+# at all: because it turns the valve off for every real caller. `pre-push`
+# narrows both of its passes, the nightly stress harness forwards a filter, and
+# four of five live queued test lanes were `--filter` runs. Interpreting the
+# verdict keeps all of them eligible, and costs a local re-run only on red — the
+# case that was going to run locally anyway.
+#
+# ONE CONSEQUENCE WORTH KNOWING, because it is a real loss and not a wash.
+# `pre-push` gives each pass a test-count floor, and a floor is a minimum, so a
+# whole-suite count clears a narrowed pass's floor for free — including the
+# tier-3 pass whose floor of 35 exists to catch `--filter` matching nothing. A
+# renamed live-suite type slips past that pass whenever its verdict came from a
+# green whole-suite remote run. The floors still catch a collapse; they stop
+# catching a vacuous filter. The follow-up below is what fixes it properly.
+#
+# THE COUNT MUST DESCRIBE THE RUN BEING REPORTED, and on the narrowed-red path
+# that is the LOCAL re-run rather than the remote suite. Those consumers take
+# the FIRST count in the log, so a remote count printed on the way past would
+# answer for a verdict nobody adopted — see the `--narrowed` handoff at the
+# dispatch below, which is what keeps it out of the log.
+#
 # TESTED BY `scripts/test.test.sh`, which drives the guards below against
 # fixture directories with a stub `swift` — no build, no real `~/tbd`. Every
 # guard there is mutation-checked: the assertion is shown going red against a
@@ -231,6 +309,102 @@ resolve_swift_lock_path() {
   fi
 }
 
+# THE YIELD BOUND IS VALIDATED HERE BECAUSE A BAD ONE IS INVISIBLE DOWNSTREAM.
+# `scripts/swift-safe` refuses a non-positive, `nan`, `inf` or non-numeric
+# `TBD_SWIFT_QUEUE_YIELD_SECONDS` with a `SystemExit`, and a `SystemExit` carrying
+# a message exits **1** — which is exactly what a failing test suite returns. So
+# a forwarded typo does not look like a misconfiguration, it looks like a red
+# run, and the fix people would reach for is to go hunting through tests that
+# never ran. `TBD_REMOTE_VERIFY_YIELD_SECONDS=0` is the plausible way somebody
+# spells "always go remote", and it lands precisely there.
+#
+# The accepted grammar is deliberately narrower than `float()`: decimal digits
+# with at most one point, and not zero in any spelling. That refuses `1e3` and
+# `+1`, which `swift-safe` would have taken — loudly, at the call site, with the
+# variable named — rather than widening a validator whose whole job is to be
+# obviously right.
+valid_yield_bound() {
+  local value="$1"
+  case "$value" in
+    ''|*[!0-9.]*) return 1 ;;   # empty, or anything but digits and points
+    *.*.*)        return 1 ;;   # more than one point
+    .)            return 1 ;;   # a lone point
+  esac
+  # Zero in every spelling — `0`, `00`, `0.0`, `.0` — is what is left once the
+  # zeros and the point come out.
+  case "${value//0/}" in
+    ''|.) return 1 ;;
+  esac
+  return 0
+}
+
+# THE ARGUMENTS THAT REDUCE THE SUITE. This does not decide WHETHER to route —
+# a narrowed run routes like any other — it decides how the answer is read. A
+# routed run is always the whole suite, and only its GREEN answer transfers to a
+# caller who asked for less (whole suite passed ⟹ every subset passed). Its red
+# answer does not, so a narrowed caller re-runs locally to attribute it. See
+# "A NARROWED RUN ROUTES" above.
+#
+# FOLLOW-UP: pass the caller's narrowing arguments to the dispatch, so a narrowed
+# run gets a narrowed remote verdict and there is nothing left to interpret. That
+# input is attacker-adjacent text — a filter is a regex that may legally contain
+# `$`, backticks and `;` — so it must be ALLOWLISTED against these same names and
+# handed to the workflow through `env:`, never interpolated into a `run:` body.
+# `.github/workflows/preflight-cleanup.yml` already does exactly that with a
+# branch name, and the comment there says why.
+#
+# The list is deliberately allowed to be over-broad, and the new reading makes
+# that cheaper than it was. A false positive now costs one local re-run, and only
+# on a red remote verdict — the case that was going to run locally anyway. A
+# false negative adopts a whole-suite failure as a narrowed run's result, naming
+# tests the caller excluded. So anything that plausibly reduces what runs belongs
+# here.
+#
+# THE ENTRIES, AND WHY EACH ONE IS ON THE LIST. Read out of this toolchain's own
+# `swift-test` binary rather than remembered, because a name that does not exist
+# costs nothing and a name that does and is missing is the expensive direction:
+#
+#   --filter / --skip           select and deselect test cases by regex.
+#   --specifier / -s            the deprecated spelling of `--filter` (the
+#                               binary still carries `'--specifier' option is
+#                               deprecated; use '--filter' instead`), so a
+#                               caller using it narrows exactly as much.
+#   --disable-xctest            drops a whole testing library's cases.
+#   --disable-swift-testing
+#   --test-product              restricts the run to ONE test product, which on
+#                               a multi-product package is the largest reduction
+#                               available. The binary names it itself: "found
+#                               multiple test products: …; use --test-product to
+#                               select one".
+#   --list-tests                the extreme case — it runs NOTHING and only
+#                               prints method names. A whole-suite verdict is not
+#                               an answer to that question in either direction.
+#   list                        `swift test list` is the same thing as a
+#                               subcommand. It is a bare word rather than a
+#                               flag, so it matches a `--filter list` value too;
+#                               that is a false positive, and false positives
+#                               are the cheap direction.
+SUITE_NARROWING_ARGS=(
+  --filter --skip
+  --specifier -s
+  --disable-xctest --disable-swift-testing
+  --test-product
+  --list-tests list
+)
+
+narrows_the_suite() {
+  local arg known
+  for arg in "$@"; do
+    for known in "${SUITE_NARROWING_ARGS[@]}"; do
+      # Both spellings: `--filter X` and `--filter=X`.
+      case "$arg" in
+        "$known"|"$known"=*) return 0 ;;
+      esac
+    done
+  done
+  return 1
+}
+
 # Sourced rather than executed: `scripts/test.test.sh` wants the helpers above
 # without the run below. The siblings in this directory express the same thing
 # as `main "$@"` under the inverse condition; this script stays straight-line
@@ -257,6 +431,77 @@ for arg in "$@"; do
     *) swift_test_args+=("$arg") ;;
   esac
 done
+
+# THE VALVE, CONFIGURED BEFORE ANYTHING ELSE HAPPENS. See "THE REMOTE
+# VERIFICATION VALVE" above. Deciding it here means a bad bound is refused
+# before a scratch home is minted, a lock file is touched or a fingerprint is
+# taken — there is nothing to unwind, and the caller finds out immediately
+# rather than half an hour into a wait.
+#
+# `TBD_REMOTE_VERIFY` unset leaves `remote_verify_enabled` at 0 and the bound
+# CLEARED, so every path below is what it was before the valve existed: the
+# run queues without limit, and 76 can only be the suite's own exit status.
+DEFAULT_REMOTE_VERIFY_YIELD_SECONDS=300
+YIELDED_THE_QUEUE=76
+REMOTE_VERIFY_REFUSED=78
+
+remote_verify_enabled=0
+caller_narrowed=0
+# THE BOUND IS CLEARED, NOT LEFT ALONE — the same distinction the fallback
+# below turns on, and the valve-off path needs it just as badly. An empty
+# array only stops this script from ADDING the assignment; an inherited
+# `TBD_SWIFT_QUEUE_YIELD_SECONDS` passes straight through `env`, and
+# `swift-safe` gates the yield on the subcommand alone and knows nothing about
+# `TBD_REMOTE_VERIFY` — so the run would yield 76 with the valve off, the
+# routing below would not fire, and the wrapper would exit 76 having tested
+# nothing. `scripts/git-hooks/pre-push` runs this script with no scrubbing and
+# BLOCKS THE PUSH on that status, and `swift-safe`'s own docstring presents the
+# knob as supported, so the developer who exported it is doing nothing odd.
+# An explicit empty value wins in `env` and is falsy in `swift-safe` ("never
+# yield"), which is the pre-valve behavior "unset" is supposed to mean.
+fenced_env=(TBD_SWIFT_QUEUE_YIELD_SECONDS=)
+if [ "${TBD_REMOTE_VERIFY:-}" = "1" ]; then
+  remote_verify_enabled=1
+  # `:-`, SO AN EMPTY VALUE MEANS "NOT SET" RATHER THAN FAILING THE RUN. The
+  # alternative — a bare `-`, which substitutes only for an UNSET variable — sends
+  # the empty string to the validator, which refuses it and exits 64. That is the
+  # wrong trade in three directions:
+  #
+  #   - Empty conventionally means unset in shell. `TBD_REMOTE_VERIFY_YIELD_SECONDS=`
+  #     is how a script clears an inherited value, and how `env VAR=` and an
+  #     unquoted `"$maybe_unset"` both arrive. Refusing it makes clearing a knob
+  #     an error.
+  #   - Nothing needs empty to be an error, because empty is not how the valve is
+  #     turned off — that is `TBD_REMOTE_VERIFY` unset, which never reaches this
+  #     block at all. So a refusal here cannot be protecting a caller who meant
+  #     "do not go remote"; it can only be answering a caller who meant "use the
+  #     default".
+  #   - The cost of refusing is not confined to this script. `scripts/git-hooks/
+  #     pre-push` runs the suite to decide whether a push may proceed, and an exit
+  #     of 64 there BLOCKS THE PUSH — over an empty knob that asked for nothing.
+  #
+  # The validator still refuses empty, and that is deliberate: it is the guard for
+  # a value somebody actually typed. `0`, `nan` and `later` are typos with an
+  # intent behind them and must be named; empty is the absence of a value, and the
+  # two do not want the same answer.
+  yield_seconds="${TBD_REMOTE_VERIFY_YIELD_SECONDS:-$DEFAULT_REMOTE_VERIFY_YIELD_SECONDS}"
+  if ! valid_yield_bound "$yield_seconds"; then
+    echo "test.sh: TBD_REMOTE_VERIFY_YIELD_SECONDS must be a positive number" >&2
+    echo "         (decimal digits, at most one point), got: '$yield_seconds'" >&2
+    echo "         Forwarding it would make swift-safe exit 1, which is" >&2
+    echo "         indistinguishable from a failing test suite." >&2
+    exit 64
+  fi
+  # ASKED ONCE, HERE, WHILE THE ARGUMENTS ARE IN FRONT OF US, and consulted
+  # later when the remote answer arrives. It gates nothing: a narrowed run
+  # forwards the bound and routes exactly like any other, because a green
+  # whole-suite verdict is sound for it. What this decides is how a RED answer is
+  # read — see the `case` on `$remote_status` below.
+  if narrows_the_suite ${swift_test_args[@]+"${swift_test_args[@]}"}; then
+    caller_narrowed=1
+  fi
+  fenced_env=(TBD_SWIFT_QUEUE_YIELD_SECONDS="$yield_seconds")
+fi
 
 # Resolved HERE, while `$HOME` and `$TBD_HOME` still hold the caller's real
 # values — the `env` prefix at the bottom rewrites both, and `swift-safe`
@@ -441,21 +686,166 @@ for decoy in "${decoys[@]}"; do
   chmod 000 "$fake_home/$decoy"
 done
 
+# THE FENCED INVOCATION LIVES IN ONE PLACE, AND THAT IS THE POINT. The valve's
+# fallback below runs it a second time, and a second copy of this `env` prefix
+# is a fence that can drift: the two copies would have to be kept in step by
+# hand forever, and the failure mode of missing one is a run that silently
+# writes into the developer's real `~/tbd`. There is exactly one prefix, so
+# there is nothing to keep in step.
+#
+# `fenced_env` carries per-call environment and comes FIRST, so a fence
+# variable can never be overridden by it — `env` takes the last assignment of a
+# name, and the fence must always be the last word.
+#
 # `${a[@]+"${a[@]}"}` — macOS ships bash 3.2, where a bare `"${a[@]}"` on an
 # EMPTY array is an unbound-variable error under `set -u`.
+run_fenced_suite() {
+  env \
+    ${fenced_env[@]+"${fenced_env[@]}"} \
+    TBD_HOME="$sanctioned_home" \
+    TBD_SOCKET_PATH="$sanctioned_home/sock" \
+    TBD_CLAUDE_HOST_HOME="$sanctioned_home/claude-host" \
+    TBD_TEST_CODEX_HOME="$sanctioned_home/codex-host" \
+    TMUX_TMPDIR="$tmux_tmpdir" \
+    TBD_SWIFT_LOCK_PATH="$swift_lock_path" \
+    HOME="$fake_home" \
+    CFFIXED_USER_HOME="$fake_home" \
+    scripts/swift-safe test ${swift_test_args[@]+"${swift_test_args[@]}"}
+}
+
+# RETURNING TO THE LOCAL QUEUE, WHICH IS WHAT EVERY NON-VERDICT ENDS IN. The
+# re-run must queue without limit: yielding a second time would strand the run
+# at 76 with nothing tested and nothing said, because the valve block has
+# already been passed.
+#
+# THE BOUND IS CLEARED, NOT DROPPED, AND THE DIFFERENCE IS THE WHOLE BUG.
+# `fenced_env=()` stops this script from *adding* the assignment; it does not
+# unset the variable, and `env` passes an inherited one straight through.
+# `scripts/swift-safe` documents `TBD_SWIFT_QUEUE_YIELD_SECONDS` as a supported
+# knob, so a caller exporting it alongside `TBD_REMOTE_VERIFY=1` is expected
+# rather than perverse — and that caller's value would survive into this re-run,
+# yield 76 again, and exit the wrapper at 76 having tested nothing. An explicit
+# empty value wins in `env` and is falsy in `swift-safe` ("never yield"), which
+# is exactly the pre-valve behavior this fallback is supposed to restore.
+fall_back_to_the_local_queue() {
+  fenced_env=(TBD_SWIFT_QUEUE_YIELD_SECONDS=)
+  set +e
+  run_fenced_suite
+  test_status=$?
+  set -e
+}
+
 set +e
-env \
-  TBD_HOME="$sanctioned_home" \
-  TBD_SOCKET_PATH="$sanctioned_home/sock" \
-  TBD_CLAUDE_HOST_HOME="$sanctioned_home/claude-host" \
-  TBD_TEST_CODEX_HOME="$sanctioned_home/codex-host" \
-  TMUX_TMPDIR="$tmux_tmpdir" \
-  TBD_SWIFT_LOCK_PATH="$swift_lock_path" \
-  HOME="$fake_home" \
-  CFFIXED_USER_HOME="$fake_home" \
-  scripts/swift-safe test ${swift_test_args[@]+"${swift_test_args[@]}"}
+run_fenced_suite
 test_status=$?
 set -e
+
+# THE OVERFLOW PATH. 76 is `swift-safe` reporting that it gave up its place in
+# the queue at our request, having compiled nothing — so there is no work to
+# discard and no build to kill, and the same verdict can be fetched from CI.
+#
+# The flag is re-checked rather than inferred from the status. A bound is only
+# ever forwarded when the valve is on, so 76 cannot arise here otherwise — but
+# inferring it would mean a suite that exits 76 for reasons of its own silently
+# changed what this wrapper does, and "the flag is off" must mean the pre-valve
+# behavior exactly.
+if [ "$remote_verify_enabled" -eq 1 ] && [ "$test_status" -eq "$YIELDED_THE_QUEUE" ]; then
+  # A MISSING REMOTE PATH IS A REFUSAL, NOT A VERDICT. Without this the shell
+  # answers 127 for "command not found", which would be adopted below as the
+  # run's exit status — a broken checkout reported as a failing test suite, with
+  # nothing said about why. Everything else here exists to keep a misrouted exit
+  # code from masquerading as a test result; so does this.
+  if [ ! -x scripts/remote-verify.sh ]; then
+    echo "test.sh: scripts/remote-verify.sh is missing or not executable;" >&2
+    echo "         staying in the local queue instead of verifying remotely." >&2
+    remote_status=$REMOTE_VERIFY_REFUSED
+  else
+    # THE NARROWING IS DECLARED TO THE REMOTE PATH, AND IT IS THE COUNT LINE
+    # THAT MAKES IT NECESSARY. Six consumers read a run's population out of the
+    # first `Test run with N tests` in the log — `scripts/git-hooks/pre-push`
+    # pipes BOTH streams into its own — and a failing whole-suite report is
+    # printed BEFORE the local re-run below prints its own count. So without
+    # this the remote suite's number is the one `head -1` finds, standing in for
+    # a run whose verdict is not even being reported: a tier-3 pass whose
+    # `--filter` names a renamed type selects nothing, exits 0 saying `Test run
+    # with 0 tests`, and clears its floor of 35 on the remote's four thousand.
+    # The vacuous filter the floor exists to catch would go undetected.
+    #
+    # `--narrowed` tells the driver to omit the count from a FAILING report, so
+    # the only count in the log is the local re-run's. A PASSING report keeps
+    # its count: there the remote verdict is the one adopted and reported, and a
+    # whole-suite count clears a narrowed floor legitimately, a minimum against
+    # a superset. See "A NARROWED RUN ROUTES" above.
+    remote_verify_args=()
+    if [ "$caller_narrowed" -eq 1 ]; then
+      remote_verify_args=(--narrowed)
+    fi
+    # Deliberately NOT fenced: the remote path needs the caller's real `$HOME`
+    # to find `gh`'s credentials and the real repository to push from. It
+    # touches no TBD-owned path.
+    set +e
+    scripts/remote-verify.sh ${remote_verify_args[@]+"${remote_verify_args[@]}"}
+    remote_status=$?
+    set -e
+  fi
+
+  # ONLY THE CONTRACT'S OWN STATUSES DECIDE ANYTHING; THE REST FALL BACK. The
+  # branches are listed as a whitelist rather than "78 means refuse, everything
+  # else is the answer", because the set of things that can come out of running
+  # a script is open-ended and every one of them outside the contract is a
+  # non-answer: 127 for an interpreter that is not there, 126 for a lost
+  # executable bit, 130 for a Ctrl-C, 2 for a syntax error. Adopting any of them
+  # reports a suite that never ran as a suite that failed.
+  case "$remote_status" in
+    0)
+      # GREEN TRANSFERS TO EVERY SUBSET. The whole suite passed, so whatever the
+      # caller selected passed with it — the one direction the asymmetry runs in.
+      # The count is the only thing that does not transfer, hence the note.
+      if [ "$caller_narrowed" -eq 1 ]; then
+        echo "test.sh: verified remotely, and the remote run was the WHOLE suite." >&2
+        echo "         Its test count is not this run's narrowed subset — a green" >&2
+        echo "         whole suite implies the subset passed, which is why the" >&2
+        echo "         result is adopted." >&2
+      fi
+      test_status=0
+      ;;
+    1)
+      # RED DOES NOT TRANSFER. For an unnarrowed caller this is simply the
+      # verdict, with its failing tests already printed. For a narrowed one the
+      # failures may lie entirely outside what was selected, so adopting them
+      # would name tests this run excluded; the narrowed suite is re-run locally
+      # to get a verdict that describes what was asked for.
+      if [ "$caller_narrowed" -eq 1 ]; then
+        echo "test.sh: the remote WHOLE-SUITE run failed, and its failures cannot" >&2
+        echo "         be attributed to this narrowed run — they may lie entirely" >&2
+        echo "         outside it. Re-running the narrowed suite locally, and" >&2
+        echo "         reporting THAT verdict." >&2
+        fall_back_to_the_local_queue
+      else
+        test_status=1
+      fi
+      ;;
+    "$REMOTE_VERIFY_REFUSED")
+      # A REFUSAL IS NOT A FAILURE. The remote path named its condition on
+      # stderr and declined; this lane returns to the local queue and waits it
+      # out, as it would have done before the valve existed. Anything else would
+      # make the valve a gate — a run that cannot go remote must still be able
+      # to test.
+      fall_back_to_the_local_queue
+      ;;
+    *)
+      # OUTSIDE THE CONTRACT ENTIRELY, so it is treated as a refusal and named.
+      # A refusal explains itself on stderr; this one cannot, so the wrapper
+      # says what it saw. Silence here would leave a broken remote path looking
+      # like an ordinary local run forever.
+      echo "test.sh: scripts/remote-verify.sh exited $remote_status, which is" >&2
+      echo "         outside its {0, 1, 78} contract and says nothing about the" >&2
+      echo "         tests; treating it as a refusal and staying in the local" >&2
+      echo "         queue." >&2
+      fall_back_to_the_local_queue
+      ;;
+  esac
+fi
 
 # THE TRIPWIRE HAS TO BE RE-CHECKED, not just armed. The code inside the run
 # owns these directories, so it can chmod them back — and a decoy that comes
