@@ -64,4 +64,54 @@ import Foundation
             + "Created cloud session: Probe reply OK then stop"
         #expect(ANSIEscape.strip(raw) == "^D\u{08}\u{08}Created cloud session: Probe reply OK then stop")
     }
+
+    // MARK: - Malformed/truncated runs (finding 2) and the accepted stray-ESC consequence (finding 3)
+
+    /// A CSI run truncated before any valid final byte (parameter bytes then
+    /// end-of-string) must survive intact. Before the final-byte class
+    /// excluded `[`/`]`, the generic fallback alternative matched just the
+    /// two-byte `ESC [` lead-in here, leaving the truncated parameter bytes
+    /// behind as literal text — worse than leaving the whole run untouched.
+    /// Ends at end-of-string rather than trailing more text: a letter right
+    /// after the parameter bytes would itself be a legal ECMA-48 CSI final
+    /// byte (0x40-0x7E includes lowercase letters), so alternative 1 would
+    /// legitimately consume it as the sequence's real terminator — that
+    /// would not be a truncated run at all, just a CSI ending in a letter.
+    @Test func leavesTruncatedCSIIntact() {
+        let raw = "before" + "\u{1B}[" + "1;2"
+        #expect(ANSIEscape.strip(raw) == raw)
+    }
+
+    /// Same failure mode for OSC: a run with no BEL/ST terminator must
+    /// survive whole rather than being partially eaten down to `ESC ]`.
+    @Test func leavesTruncatedOSCIntact() {
+        let raw = "before" + "\u{1B}]" + "0;untitled" + "after"
+        #expect(ANSIEscape.strip(raw) == raw)
+    }
+
+    /// The bracket-less generic fallback must still catch its intended
+    /// forms after `[`/`]` are excluded from the final-byte class — the
+    /// exclusion should cost these nothing since none of them end in `[`
+    /// or `]`.
+    @Test func stripsBracketlessFormsAfterFinalByteExclusion() {
+        let raw = "\u{1B}7" + "\u{1B}8" + "\u{1B}(B" + "kept"
+        #expect(ANSIEscape.strip(raw) == "kept")
+    }
+
+    /// A well-formed CSI immediately following a malformed/truncated one
+    /// is still stripped — the fallback alternative must not swallow past
+    /// the boundary between the two runs.
+    @Test func stripsWellFormedCSIFollowingTruncatedRun() {
+        let raw = "\u{1B}[" + "1;2" + "\u{1B}[0m" + "after"
+        #expect(ANSIEscape.strip(raw) == "\u{1B}[1;2after")
+    }
+
+    /// Pins the accepted finding-3 consequence: a stray `ESC` not part of
+    /// any real sequence consumes the single character after it, because
+    /// `ESC` + letter is indistinguishable from a genuine two-byte escape.
+    /// Recorded here as intended behavior, not a bug to be rediscovered.
+    @Test func strayEscapeConsumesFollowingCharacter() {
+        let raw = "before" + "\u{1B}" + "Xafter"
+        #expect(ANSIEscape.strip(raw) == "beforeafter")
+    }
 }
