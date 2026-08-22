@@ -1761,6 +1761,177 @@ test_a_narrowed_run_falls_back_on_a_refusal_like_any_other() {
 }
 
 # ---------------------------------------------------------------------------
+# 7d. A listing invocation never arms the valve at all
+#
+# `--list-tests`, and the bare `list` subcommand that spells the same thing, ask
+# for OUTPUT rather than a verdict: they run nothing and print method names, and
+# those names are the whole answer. The remote path produces a verdict, and a
+# verdict answers that question in NEITHER direction — green would exit 0 having
+# printed no name the caller asked for, red would report failures for a run that
+# was never going to run a test.
+#
+# SO THE GATE IS AT THE ARMING, NOT AT THE VERDICT. Routing a listing run and
+# salvaging it on the way back would spend a whole CI dispatch on a question CI
+# cannot answer and then run locally anyway. Not arming has to leave the run in
+# the PRE-VALVE state exactly — no routing AND the yield bound cleared — which is
+# what the inherited-bound case below is for: `env` passes an inherited
+# `TBD_SWIFT_QUEUE_YIELD_SECONDS` straight through, so merely declining to set it
+# would strand a listing run at 76 with nothing printed and nothing routed.
+#
+# The bound is still VALIDATED for a listing run, because a malformed one is a
+# property of the caller's environment rather than of these arguments.
+# ---------------------------------------------------------------------------
+
+# The line the wrapper prints when it declines to arm. On stderr, because stdout
+# is where the listing itself goes.
+LISTING_NOTICE="asks for a test LISTING"
+
+test_a_list_tests_run_never_arms_the_valve() {
+  local fix; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_REMOTE_VERIFY_RC=0
+           FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
+  run_with_valve "$fix" "$SCRIPT" --list-tests
+  RUN_ENV=()
+  assert_ok "a listing run is green" "$RUN_RC"
+  assert_eq "and nothing is dispatched, whatever the remote would have said" \
+    "0" "$(remote_verify_dispatches "$fix")"
+  assert_eq "the listing really ran locally" "1" "$(swift_invocations "$fix")"
+  assert_contains "with the request intact" "$(dump_of "$fix")" "argv: test --list-tests"
+  assert_contains "and no yield bound to give the queue up with" "$(dump_of "$fix")" \
+    "TBD_SWIFT_QUEUE_YIELD_SECONDS=<unset>"
+  assert_contains "the reason is stated" "$RUN_OUT" "$LISTING_NOTICE"
+  rmfix "$fix"
+}
+
+# THE SUBCOMMAND SPELLING IS THE SAME REQUEST, and it is a bare word rather than
+# a flag, so nothing about the matching can be flag-shaped.
+test_the_bare_list_subcommand_never_arms_the_valve() {
+  local fix; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_REMOTE_VERIFY_RC=0
+           FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
+  run_with_valve "$fix" "$SCRIPT" list
+  RUN_ENV=()
+  assert_ok "a bare-subcommand listing run is green" "$RUN_RC"
+  assert_eq "and nothing is dispatched" "0" "$(remote_verify_dispatches "$fix")"
+  assert_eq "the listing really ran locally" "1" "$(swift_invocations "$fix")"
+  assert_contains "with the subcommand intact" "$(dump_of "$fix")" "argv: test list"
+  assert_contains "and no yield bound" "$(dump_of "$fix")" \
+    "TBD_SWIFT_QUEUE_YIELD_SECONDS=<unset>"
+  assert_contains "the reason is stated" "$RUN_OUT" "$LISTING_NOTICE"
+  rmfix "$fix"
+}
+
+# CLEARED, NOT MERELY UNSET — the distinction the whole gate turns on. `env` ADDS
+# assignments rather than clearing inherited ones, so a gate that only declined
+# to SET the bound would let a caller's exported `TBD_SWIFT_QUEUE_YIELD_SECONDS`
+# ride into a listing run: `swift-safe` gates the yield on the subcommand alone,
+# would yield 76 with no routing armed, and the wrapper would exit 76 having
+# printed no test names at all. The assignment below reaches the run because
+# `env` applies assignments after its options, past `run_script`'s `-u` list.
+test_an_inherited_yield_bound_does_not_bound_a_listing_run() {
+  local fix; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 TBD_SWIFT_QUEUE_YIELD_SECONDS=10
+           FAKE_REMOTE_VERIFY_RC=0 FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
+  run_with_valve "$fix" "$SCRIPT" --list-tests
+  RUN_ENV=()
+  assert_ok "the listing run is green" "$RUN_RC"
+  assert_contains "the inherited bound is cleared, not passed through" \
+    "$(dump_of "$fix")" "TBD_SWIFT_QUEUE_YIELD_SECONDS=<unset>"
+  assert_eq "and nothing is dispatched" "0" "$(remote_verify_dispatches "$fix")"
+  assert_eq "the listing ran" "1" "$(swift_invocations "$fix")"
+  rmfix "$fix"
+}
+
+# A MALFORMED BOUND IS STILL REFUSED, LISTING OR NOT. It is a misconfiguration in
+# the environment rather than a property of these arguments — it will strand the
+# next run just as badly — and `swift-safe` would answer it with a bare 1, which
+# reads as a failing suite. The gate skips the ARMING, never the validation.
+test_a_bad_bound_still_fails_a_listing_run_loudly() {
+  local fix; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 TBD_REMOTE_VERIFY_YIELD_SECONDS=0
+           FAKE_REMOTE_VERIFY_RC=0 FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
+  run_with_valve "$fix" "$SCRIPT" --list-tests
+  RUN_ENV=()
+  assert_eq "a listing run with a bad bound exits 64, not 1" "64" "$RUN_RC"
+  assert_contains "and names the variable" "$RUN_OUT" "TBD_REMOTE_VERIFY_YIELD_SECONDS"
+  assert_contains "and says what it must be" "$RUN_OUT" "must be a positive number"
+  assert_eq "with no listing started" "0" "$(swift_invocations "$fix")"
+  assert_eq "and nothing dispatched" "0" "$(remote_verify_dispatches "$fix")"
+  rmfix "$fix"
+}
+
+# The classifier on its own, sourced. It matches exactly as `narrows_the_suite`
+# does — both spellings, wherever the argument appears — and, crucially, it must
+# not fire on a run that merely selects a subset: those still route.
+test_asks_for_a_listing_recognises_both_spellings() {
+  local arg
+  for arg in --list-tests list; do
+    asks_for_a_listing "$arg"
+    assert_ok "[$arg] asks for a listing" "$?"
+    asks_for_a_listing "$arg=Foo"
+    assert_ok "[$arg=Foo] asks for a listing" "$?"
+    asks_for_a_listing --parallel -j 2 "$arg"
+    assert_ok "[$arg] is recognised wherever it appears" "$?"
+  done
+  for arg in --filter --skip --specifier -s --test-product --disable-xctest \
+             --disable-swift-testing --parallel --no-parallel -j --verbose; do
+    asks_for_a_listing "$arg"
+    assert_nonzero "[$arg] does not ask for a listing" "$?"
+  done
+  asks_for_a_listing
+  assert_nonzero "no arguments at all does not ask for a listing" "$?"
+  # A regex that merely mentions the flag's name is a VALUE, not the flag.
+  asks_for_a_listing --filter '^--list-testsTests\.'
+  assert_nonzero "a regex mentioning the flag name does not ask for a listing" "$?"
+  # And every listing name is on the narrowing list too, as defence in depth: if
+  # this gate were ever bypassed, a red whole-suite verdict still must not be
+  # adopted as a listing run's result.
+  for arg in --list-tests list; do
+    narrows_the_suite "$arg"
+    assert_ok "[$arg] is on the narrowing list as well" "$?"
+  done
+}
+
+# MUTATION, AND THE ONE THIS SECTION EXISTS FOR. Disable the gate and the bug
+# comes straight back: a `--list-tests` run bounds its queueing, yields 76,
+# dispatches a whole-suite CI run, and adopts its GREEN verdict — exiting 0
+# having never listed a single test name. The caller asked for output and got a
+# verdict instead.
+test_the_listing_gate_is_load_bearing() {
+  local fix mutant; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  mutant="$(mutant_of "$SCRIPT" 's/if asks_for_a_listing .*; then/if false; then/')"
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC=76 FAKE_REMOTE_VERIFY_RC=0
+           FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
+  run_with_valve "$fix" "$mutant" --list-tests
+  RUN_ENV=()
+  assert_eq "without the gate a listing run dispatches" "1" \
+    "$(remote_verify_dispatches "$fix")"
+  assert_ok "and adopts the green whole-suite verdict" "$RUN_RC"
+  assert_eq "having yielded before listing anything" "1" "$(swift_invocations "$fix")"
+  assert_contains "because the bound was armed after all" "$(dump_of "$fix")" \
+    "TBD_SWIFT_QUEUE_YIELD_SECONDS=$DEFAULT_YIELD_SECONDS"
+  assert_missing "and nothing was said about listings" "$RUN_OUT" "$LISTING_NOTICE"
+  rmfix "$fix"
+}
+
+# THE OTHER DIRECTION: the gate must not be over-broad. A run that merely selects
+# a subset still routes, still forwards the bound, and still adopts a green
+# whole-suite verdict — see section 7b, whose reading depends on it.
+test_the_listing_gate_does_not_catch_a_filtered_run() {
+  local fix; fix="$(mkfix)"; mk_repo_fixture "$fix" >/dev/null
+  RUN_ENV=(TBD_REMOTE_VERIFY=1 FAKE_SWIFT_RC=76 FAKE_REMOTE_VERIFY_RC=0
+           FAKE_REMOTE_VERIFY_LOG="$fix/remote-verify-log")
+  run_with_valve "$fix" "$SCRIPT" --filter '^FooTests\.'
+  RUN_ENV=()
+  assert_ok "a filtered run still adopts a green remote verdict" "$RUN_RC"
+  assert_eq "and it really was dispatched" "1" "$(remote_verify_dispatches "$fix")"
+  assert_contains "with the bound armed" "$(dump_of "$fix")" \
+    "TBD_SWIFT_QUEUE_YIELD_SECONDS=$DEFAULT_YIELD_SECONDS"
+  assert_missing "and no listing notice" "$RUN_OUT" "$LISTING_NOTICE"
+  rmfix "$fix"
+}
+
+# ---------------------------------------------------------------------------
 # 7c. The count in the log has to describe the run being reported
 #
 # Six consumers decide whether a run is trustworthy by grepping its log for

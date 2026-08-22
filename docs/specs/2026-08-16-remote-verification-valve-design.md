@@ -215,11 +215,27 @@ directions cost differently. A false positive costs one lane an optimisation. A
 false negative adopts a whole-suite failure as a narrowed run's result, naming
 tests the caller excluded — so anything that might select a subset is treated as
 if it does: `--filter` and `--skip`, the deprecated `--specifier` and its `-s`
-spelling, `--disable-xctest` and `--disable-swift-testing`, `--test-product`, and
-`--list-tests` and the bare `list` subcommand, which run no tests at all. Both the
-`--flag value` and `--flag=value` spellings are recognised. Options that widen or
-merely configure a run — `--enable-xctest`, `--num-workers`, `--xunit-output` —
-are deliberately absent.
+spelling, `--disable-xctest` and `--disable-swift-testing`, and `--test-product`.
+Both the `--flag value` and `--flag=value` spellings are recognised. Options that
+widen or merely configure a run — `--enable-xctest`, `--num-workers`,
+`--xunit-output` — are deliberately absent.
+
+**A listing invocation is its own category, and it never routes at all.**
+`--list-tests`, and the bare `list` subcommand that spells the same thing, ask for
+output rather than a verdict: they run nothing and print method names, and those
+names are the answer. The remote path returns a verdict, and no verdict answers
+that question in either direction — green would exit 0 having printed nothing the
+caller asked for, and red would report failures for a run that was never going to
+run a test. So the valve is left disarmed for such an invocation: no routing is
+armed, the yield bound is cleared exactly as it is on the valve-off path, and the
+run queues locally with one line on stderr saying why. Gating the arming rather
+than the verdict is what keeps a whole dispatch from being spent on a question CI
+cannot answer and then run locally anyway. Both names stay on the narrowing list
+as well, as defence in depth: were the gate ever bypassed, a red whole-suite
+verdict still would not be adopted as a listing run's result. A malformed
+`TBD_REMOTE_VERIFY_YIELD_SECONDS` is still refused for a listing run — it is a
+property of the caller's environment rather than of this invocation's arguments,
+and it will strand the next run just as badly.
 
 Passing the caller's narrowing arguments through to the dispatch would remove the
 mismatch and make a red verdict directly usable. That input must be allowlisted
