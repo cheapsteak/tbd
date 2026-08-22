@@ -4,9 +4,10 @@ import Testing
 import TBDShared
 
 /// Tier 1. The pure half of `RemoteCreateDefaultsEditor` — how a control's
-/// value becomes a map entry, and how the unset choice reads. The rendering
-/// itself is not unit-testable in this codebase (no SwiftUI view harness), so
-/// these cover the two behaviors a reviewer could not otherwise check.
+/// value becomes a map entry, how the unset choice reads, and which fields a
+/// level is allowed to answer at all. The rendering itself is not
+/// unit-testable in this codebase (no SwiftUI view harness), so these cover
+/// the behaviors a reviewer could not otherwise check.
 @Suite("Remote create-defaults editor — pure")
 struct RemoteCreateDefaultsEditorTests {
 
@@ -84,10 +85,57 @@ struct RemoteCreateDefaultsEditorTests {
         #expect(label == "Auto (use global)")
     }
 
+    // MARK: - Which fields a level may answer
+
+    /// The machine-wide map is not in `repo`'s candidate chain
+    /// (`RemoteCreateFormLogic.resolveString`), so an editable control there
+    /// would persist a value no create path ever reads.
+    @Test func theGlobalLevelMayNotAnswerRepo() {
+        #expect(!RemoteCreateDefaultsEditor.isEditable(
+            fieldName: RemoteCreateFormLogic.repoFieldName, scope: .global))
+    }
+
+    /// A repo's own map IS the level `repo` is answered at, so the control
+    /// stays exactly as it was there.
+    @Test func aRepoSOwnLevelStillAnswersRepo() {
+        #expect(RemoteCreateDefaultsEditor.isEditable(
+            fieldName: RemoteCreateFormLogic.repoFieldName, scope: .repo))
+    }
+
+    /// The exception is `repo` and nothing else — every other field, well-known
+    /// or provider-invented, is editable at both levels.
+    @Test func everyOtherFieldIsEditableAtBothLevels() {
+        for field in ["permission_mode", "slug", "branch", "cmd", "some_future_field"] {
+            #expect(RemoteCreateDefaultsEditor.isEditable(fieldName: field, scope: .global))
+            #expect(RemoteCreateDefaultsEditor.isEditable(fieldName: field, scope: .repo))
+        }
+    }
+
+    /// A `repo` stored machine-wide before the control was withdrawn is read by
+    /// nothing; saving must not carry it forward either.
+    @Test func savingGloballyDoesNotCarryAStoredRepoForward() {
+        let next = RemoteCreateDefaultsEditor.sanitized(
+            ["repo": "acme/api", "cmd": "claude"], scope: .global)
+        #expect(next == ["cmd": "claude"])
+    }
+
+    @Test func aRepoSOwnStoredRepoValueSurvives() {
+        let next = RemoteCreateDefaultsEditor.sanitized(
+            ["repo": "acme/api", "cmd": "claude"], scope: .repo)
+        #expect(next == ["repo": "acme/api", "cmd": "claude"])
+    }
+
     // MARK: - Captions
 
     @Test func eachScopeSCaptionNamesItsOwnFallThrough() {
         #expect(RemoteCreateDefaultsEditor.caption(scope: .repo).contains("global"))
         #expect(RemoteCreateDefaultsEditor.caption(scope: .global).contains("provider"))
+    }
+
+    /// The rule about `repo` is stated once, on the row it belongs to. The
+    /// caption must not repeat it — two copies drift apart.
+    @Test func theRepoRuleIsStatedOnTheRowAndNotAlsoInTheCaption() {
+        #expect(RemoteCreateDefaultsEditor.fixedFieldNote.contains("repository"))
+        #expect(!RemoteCreateDefaultsEditor.caption(scope: .global).contains("repository"))
     }
 }
