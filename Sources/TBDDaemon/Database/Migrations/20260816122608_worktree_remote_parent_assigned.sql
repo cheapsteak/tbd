@@ -1,0 +1,33 @@
+-- Has adoption already given this row a parent?
+--
+-- `parentWorktreeID IS NULL` has two provenances a remote lane cannot tell
+-- apart: nobody could name a parent when the row was minted, or the user took
+-- the one it had away (`tbd worktree move <lane> --root`). Adoption must heal
+-- the first and never touch the second, and the provider's
+-- `tbd_parent_worktree_id` stamp cannot arbitrate — it is static from create
+-- time, so it is present on every later poll and would re-nest the lane within
+-- one poll interval. This column is the missing fact: adoption sets it the
+-- moment it ASSIGNS a parent, and never offers one again.
+--
+-- Data, not a feature gate, so it carries an ordinary SQL default (the
+-- three-state rule in CLAUDE.md is about flags whose default may need flipping
+-- later; there is no third state here).
+--
+-- The backfill marks EVERY pre-existing remote row, parented or not, so that
+-- nothing written before this migration is eligible for late assignment. A
+-- parented row plainly had a parent assigned — nothing but adoption mints
+-- these rows. A top-level one is the ambiguous case and cannot be resolved
+-- after the fact: the build that wrote it recorded nothing when `move()` took
+-- a parent away, so the lane the user deliberately un-nested and the lane
+-- nobody could ever place are the same row. Leaving those unmarked would
+-- re-nest the first kind on the first poll after the upgrade, from a stamp
+-- that arrives again every poll — exactly the regression this column exists to
+-- prevent. Marking them costs at most a heal nobody was promised, since the
+-- marker can only ever WITHHOLD a parent adoption would otherwise impose.
+--
+-- Rows minted after this migration are unaffected: the insert path writes the
+-- column explicitly, so their `0` is a recorded fact rather than a default,
+-- and they stay healable.
+ALTER TABLE worktree ADD COLUMN remote_parent_assigned BOOLEAN DEFAULT 0;
+
+UPDATE worktree SET remote_parent_assigned = 1 WHERE location = 'remote';

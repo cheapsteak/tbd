@@ -334,15 +334,26 @@ public actor RemoteProviderManager {
                 await recordPollFailure(provider: provider.name, class: failure, result: result)
                 return
             }
-            let envelope = try result.decoded(RemoteSessionListEnvelope.self)
+            let envelope = try result.decoded(
+                RemoteSessionListEnvelope.self, provider: provider.name)
             let snapshotAt = Date()
             try await apply(
                 snapshot: envelope.sessions, provider: provider.name,
                 complete: envelope.complete, now: snapshotAt,
                 requestStartedAt: requestStartedAt)
         } catch {
-            remoteLogger.debug(
-                "poll \(provider.name, privacy: .public) failed: \(String(describing: error), privacy: .public)"
+            // `.error`, not `.debug`: this is not a trace of one session going
+            // quiet, it is the whole provider's inventory freezing at whatever
+            // it last said. The sidebar does say so — `setHealth(.stale)` below
+            // reaches the provider header's issue caption — but `.debug` is
+            // silent unless someone turned it on first, which left the outage
+            // unreadable to anyone diagnosing from logs rather than from the
+            // screen. The mirror's own counters cannot cover for it either:
+            // `missingCount` and `gone` advance only inside `applySnapshot`,
+            // which a poll that failed here never reaches, so every staleness
+            // counter reads clean for the whole outage.
+            remoteLogger.error(
+                "poll \(provider.name, privacy: .public) failed; its whole session inventory is now stale: \(String(describing: error), privacy: .public)"
             )
             await recoverLastSuccessfulSnapshotAtIfNeeded(provider: provider.name)
             setHealth(provider: provider.name, to: (.stale, String(describing: error), nil))
@@ -418,7 +429,8 @@ public actor RemoteProviderManager {
         }
     }
 
-    /// Single-session upsert from an events `session` line. No absence
+    /// Single-session upsert from an events `session` line, or from the
+    /// response to a create/stop/rename this daemon issued. No absence
     /// bookkeeping happens here — only `apply(snapshot:)` drives the
     /// two-absence rule, since only a full snapshot can tell what's missing.
     ///
@@ -432,8 +444,14 @@ public actor RemoteProviderManager {
     /// through the date seam rather than a bare `Date()`
     /// (`Tests/CLAUDE.md`, "Clock and date seams": `Duration` is behavior,
     /// `Date` is data). Defaulted, so no call site changes.
+    ///
+    /// `parentWorktreeID` is set only by `remote.create`, and only when the
+    /// user started the lane from a worktree's nested `+`: it is the parent
+    /// they asked for, handed to adoption as an override of whatever the
+    /// provider stamped. See `RemoteSessionAdopter.adopt(session:provider:parentOverride:)`.
     func applyUpsert(
-        _ session: RemoteSessionPayload, provider: String, date: Date = Date()
+        _ session: RemoteSessionPayload, provider: String, parentWorktreeID: UUID? = nil,
+        date: Date = Date()
     ) async {
         let arrivedAt = date
         let outcome: SnapshotOutcome
@@ -449,9 +467,9 @@ public actor RemoteProviderManager {
         // Same ordering rule as the snapshot path: the mirror pins, then
         // adoption reads the pin. A session first sighted on the events stream
         // must not have to wait for the next full poll to get its row.
-        if let created = await adopter.adopt(session: session, provider: provider) {
-            broadcastAdoptions([created])
-        }
+        broadcastAdoptions(
+            await adopter.adopt(
+                session: session, provider: provider, parentOverride: parentWorktreeID))
         await syncFilingDecisions(
             sessions: [session], provider: provider,
             requestStartedAt: arrivedAt, now: arrivedAt)
@@ -468,17 +486,27 @@ public actor RemoteProviderManager {
         }
     }
 
-    /// Tell subscribers about rows adoption just minted. Same delta a
-    /// user-driven create broadcasts, so the sidebar needs no adoption-shaped
-    /// case of its own.
-    private func broadcastAdoptions(_ created: [Worktree]) {
-        for worktree in created {
+    /// Tell subscribers what adoption changed. Both halves reuse the delta a
+    /// user-driven equivalent broadcasts, so the sidebar needs no
+    /// adoption-shaped case of its own: a minted row is a create, and a row
+    /// that took its first parent is a move — which is what a viewer sees.
+    /// Announcing the second as a create would put a lane the user already has
+    /// through the new-worktree path.
+    private func broadcastAdoptions(_ outcome: RemoteSessionAdopter.Outcome) {
+        for worktree in outcome.created {
             subscriptions.broadcast(
                 delta: .worktreeCreated(
                     WorktreeDelta(
                         worktreeID: worktree.id, repoID: worktree.repoID,
                         name: worktree.name, path: worktree.localPath,
                         status: worktree.status)))
+        }
+        for nesting in outcome.nested {
+            subscriptions.broadcast(
+                delta: .worktreeMoved(
+                    WorktreeMovedDelta(
+                        worktreeID: nesting.worktreeID, newParentID: nesting.parentID,
+                        newSortOrder: nesting.sortOrder)))
         }
     }
 

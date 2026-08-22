@@ -478,21 +478,54 @@ import Testing
         #expect(message.contains("/nowhere/Migrations"))
     }
 
-    // MARK: - The inert cutover
+    // MARK: - What actually ships
 
-    /// The mechanism ships with an EMPTY `Migrations/` directory, so
-    /// `buildMigrator()` is byte-for-byte today's migrator. When the first real
-    /// `.sql` migration lands this expectation changes with it — deliberately.
-    @Test func theShippedMigrationsDirectoryIsEmptyAndTheMigratorIsUnchanged() throws {
+    /// Every `.sql` file committed under `Sources/TBDDaemon/Database/Migrations/`
+    /// reaches the running process through the resource bundle, and nothing
+    /// else does.
+    ///
+    /// This is the tripwire for the bundle silently vanishing or going stale:
+    /// the source tree is the authority on which migrations exist, and a
+    /// build that shipped a different set — none at all, or a set copied from
+    /// some other tree — shows up here as a mismatch rather than as scattered
+    /// "no such column" failures at runtime. It replaced an assertion that the
+    /// directory was EMPTY, which is what the cutover deliberately shipped and
+    /// what the first real migration was always going to change.
+    @Test func theShippedMigrationsAreExactlyTheCommittedOnes() throws {
+        let committed = try FileManager.default
+            .contentsOfDirectory(atPath: Self.repositoryMigrationsDirectory.path)
+            .filter { $0.hasSuffix(".sql") }
+            .map { String($0.dropLast(".sql".count)) }
+            .sorted()
         let found = try SQLMigrationLoader.bundled.get()
-        #expect(found.files.isEmpty, "expected an inert Migrations/ directory, found \(found.files.map(\.identifier))")
-        #expect(SQLMigrationLoader.inlineTimestampMigrations.isEmpty)
-        #expect(SQLMigrationLoader.migrationsForRegistration().isEmpty)
+        #expect(found.files.map(\.identifier) == committed, """
+            The shipped Migrations/ bundle does not match the committed directory. \
+            Bundle: \(found.files.map(\.identifier)). Committed: \(committed).
+            """)
+        #expect(found.files.allSatisfy { SQLMigrationLoader.isTimestampIdentifier($0.identifier) })
+    }
 
+    /// The frozen Swift block is closed: it still starts at `v1`, still ends at
+    /// the identifier `SchemaBaselineDriftTests` names, and every timestamp
+    /// migration lands after it. A `vN` appended to the block by a rebase would
+    /// move that tail; a timestamp migration must never be able to.
+    @Test func theFrozenBlockStillEndsWhereItDid() throws {
         let identifiers = TBDDatabase.buildMigratorForTests().migrations
         #expect(identifiers.first == "v1")
-        #expect(identifiers.last == SchemaBaselineDriftTests.frozenBlockLastIdentifier)
-        #expect(!identifiers.contains(where: SQLMigrationLoader.isTimestampIdentifier))
+        let frozen = identifiers.prefix { !SQLMigrationLoader.isTimestampIdentifier($0) }
+        #expect(frozen.last == SchemaBaselineDriftTests.frozenBlockLastIdentifier)
+        #expect(SQLMigrationLoader.inlineTimestampMigrations.isEmpty)
+    }
+
+    /// The committed migrations directory in the checkout, resolved from this
+    /// source file rather than from any TBD-owned path, so `scripts/test.sh`'s
+    /// fenced `TBD_HOME` cannot redirect it.
+    private static var repositoryMigrationsDirectory: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()  // TBDDaemonTests
+            .deletingLastPathComponent()  // Tests
+            .deletingLastPathComponent()  // repository root
+            .appendingPathComponent("Sources/TBDDaemon/Database/Migrations")
     }
 
     /// Whatever the directory holds, the registered timestamp migrations are

@@ -26,6 +26,9 @@ struct WorktreeRowView: View {
     @State private var isRowHovered: Bool = false
     @State private var isPRIconHovered: Bool = false
     @State private var isNameTruncated = false
+    // Same shape as `RepoSectionView`: `.sheet(item:)` over the provider
+    // itself, so a nil provider structurally cannot present an empty sheet.
+    @State private var remoteCreateSheetProvider: RemoteProviderStatus?
     @StateObject private var newChildMenu = HoverMenuModel()
 
     private var isPending: Bool {
@@ -130,7 +133,11 @@ struct WorktreeRowView: View {
                     repoID: repoID,
                     parentWorktreeID: worktree.id,
                     highlightDefaultProfile: newChildMenu.isTriggerHovered,
-                    onClose: { newChildMenu.closeNow() }
+                    onClose: { newChildMenu.closeNow() },
+                    // The picker closes itself first (see its
+                    // `startRemoteSession`), so this only has to create or
+                    // present the sheet — same division as `RepoSectionView`.
+                    onStartRemoteSession: { startRemoteSession(with: $0) }
                 )
                 .environmentObject(appState)
                 .background(.ultraThickMaterial)
@@ -139,6 +146,63 @@ struct WorktreeRowView: View {
             )
         )
         .padding(.trailing, 4)
+    }
+
+    /// The nested `+`'s create sheet: the same sheet the repo header opens,
+    /// plus the parent this row stands for.
+    ///
+    /// The repo prefill is the same value `RepoSectionView` computes — derived
+    /// from the owning repo's `remoteURL`, which this row reaches through
+    /// `appState.repos` rather than being handed a `Repo`. Keeping it identical
+    /// is what makes a lane started here round-trip back into this repo's
+    /// section instead of landing unmatched.
+    ///
+    /// Extracted out of the `.sheet(item:)` body for the same reason
+    /// `RepoSectionView.remoteCreateSheetContent(for:)` is: a multi-argument
+    /// init with a nested call inline in a trailing closure costs `body`
+    /// type-check time.
+    @ViewBuilder
+    private func remoteCreateSheetContent(for provider: RemoteProviderStatus) -> some View {
+        RemoteCreateSheet(
+            provider: provider.config,
+            describe: provider.describe,
+            repoPrefill: RemoteCreateFormLogic.repoPrefill(remoteURL: owningRepo?.remoteURL),
+            repoDefaults: owningRepo?.remoteCreateDefaults ?? [:],
+            parentWorktreeID: worktree.id,
+            // The optimistic lane row nests under THIS row, in this row's own
+            // repo section — the nested `+` promises exactly that placement.
+            repoID: worktree.repoID
+        )
+    }
+
+    /// The repo this row's worktree belongs to — reached through `appState`
+    /// because a row is handed a `Worktree`, not a `Repo`.
+    private var owningRepo: Repo? {
+        appState.repos.first(where: { $0.id == worktree.repoID })
+    }
+
+    /// The nested `+`'s remote-lane row: same one-click-or-form decision as
+    /// the repo header's (`RepoSectionView.startRemoteSession(with:)`), plus
+    /// the parent this row stands for. Both `+` buttons must behave
+    /// identically here — the only difference is where the lane nests.
+    private func startRemoteSession(with provider: RemoteProviderStatus) {
+        let repo = owningRepo
+        let launch = RemoteCreateFormLogic.launch(
+            describe: provider.describe,
+            repoPrefill: RemoteCreateFormLogic.repoPrefill(remoteURL: repo?.remoteURL),
+            repoDefaults: repo?.remoteCreateDefaults ?? [:],
+            globalDefaults: appState.globalRemoteCreateDefaults,
+            generatedSlug: NameGenerator.generate())
+        switch launch {
+        case .createNow(let paramsJSON):
+            Task {
+                await appState.createRemoteSession(
+                    provider: provider.config.name, paramsJSON: paramsJSON,
+                    parentWorktreeID: worktree.id, repoID: worktree.repoID)
+            }
+        case .openForm:
+            remoteCreateSheetProvider = provider
+        }
     }
 
     /// Hover-only pin toggle in the gutter left of the row's content — the fast
@@ -491,6 +555,13 @@ struct WorktreeRowView: View {
             }
         }
         .onHover { isRowHovered = $0 }
+        // On the ROW, never on `nestedPlusButton`: that button is rendered
+        // only while the row is hovered or its menu is open, so a sheet
+        // attached there would lose its host the moment the pointer leaves.
+        // `RepoSectionView` puts its copy on `headerRow` for the same reason.
+        .sheet(item: $remoteCreateSheetProvider) { provider in
+            remoteCreateSheetContent(for: provider)
+        }
         .contextMenu {
             SidebarContextMenu(worktree: worktree, onRename: startRename)
         }

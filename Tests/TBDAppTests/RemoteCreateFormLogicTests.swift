@@ -79,6 +79,145 @@ struct RemoteCreateFormLogicTests {
         #expect(values["repo"] == nil)
     }
 
+    // MARK: - prefillStrings: an enum field's prefill is projected onto its allowed values
+
+    /// The shape a real provider ships: `repo` is an enum whose only allowed
+    /// value is the SHORT repo name, while `repoPrefill` is the
+    /// owner-qualified `displayKey` (that qualified form is what matches
+    /// `meta.repo` when a session is resolved back to a repo, so it can't
+    /// simply be shortened at the source). Writing the qualified value into
+    /// the enum left the Picker with a selection matching no `.tag(...)` —
+    /// rendering blank — and `create` rejected it provider-side.
+    @Test func prefillStringsProjectsAnOwnerQualifiedPrefillOntoTheEnumsShortValue() {
+        let fields = [ProviderCreateParamField(
+            name: "repo", type: "enum", required: true,
+            defaultValue: "acme-app", values: ["acme-app"])]
+        let values = RemoteCreateFormLogic.prefillStrings(fields: fields, repoPrefill: "acme-org/acme-app")
+        #expect(values["repo"] == "acme-app")
+    }
+
+    /// The mirror direction: the provider declares the owner-qualified form
+    /// and the prefill is bare. Comparing the last `/`-separated component on
+    /// BOTH sides bridges it either way.
+    @Test func prefillStringsProjectsABarePrefillOntoAnOwnerQualifiedAllowedValue() {
+        let fields = [ProviderCreateParamField(
+            name: "repo", type: "enum", required: true, values: ["acme-org/acme-app"])]
+        let values = RemoteCreateFormLogic.prefillStrings(fields: fields, repoPrefill: "acme-app")
+        #expect(values["repo"] == "acme-org/acme-app")
+    }
+
+    @Test func prefillStringsKeepsAnExactlyMatchingEnumPrefill() {
+        let fields = [ProviderCreateParamField(
+            name: "repo", type: "enum", required: true, values: ["acme-org/acme-app", "acme-org/other"])]
+        let values = RemoteCreateFormLogic.prefillStrings(fields: fields, repoPrefill: "acme-org/acme-app")
+        #expect(values["repo"] == "acme-org/acme-app")
+    }
+
+    /// Matching is case-insensitive, and the ALLOWED value's casing wins —
+    /// the provider validates against exactly what it declared.
+    @Test func prefillStringsMatchesAnEnumValueCaseInsensitivelyAndAdoptsItsCasing() {
+        let fields = [ProviderCreateParamField(
+            name: "repo", type: "enum", required: true, values: ["Acme-App"])]
+        let values = RemoteCreateFormLogic.prefillStrings(fields: fields, repoPrefill: "acme-app")
+        #expect(values["repo"] == "Acme-App")
+    }
+
+    @Test func prefillStringsMatchesAnOwnerQualifiedPrefillCaseInsensitivelyByLastComponent() {
+        let fields = [ProviderCreateParamField(
+            name: "repo", type: "enum", required: true, values: ["Acme-App"])]
+        let values = RemoteCreateFormLogic.prefillStrings(fields: fields, repoPrefill: "Acme-Org/acme-app")
+        #expect(values["repo"] == "Acme-App")
+    }
+
+    /// The provider's declared `default` must NOT rescue an unmatched `repo`.
+    /// A provider whose only permitted value is another repository would
+    /// otherwise turn the `+` on THIS repo into a session on THAT one — which
+    /// is exactly what happened in the field before this rule existed.
+    @Test func prefillStringsRefusesTheEnumsDefaultForAnUnmatchedRepoPrefill() {
+        let fields = [ProviderCreateParamField(
+            name: "repo", type: "enum", required: true,
+            defaultValue: "other-app", values: ["other-app"])]
+        let values = RemoteCreateFormLogic.prefillStrings(fields: fields, repoPrefill: "acme-org/acme-app")
+        #expect(values["repo"] == "")
+    }
+
+    /// The same refusal for the machine-wide map: it cannot know which repo's
+    /// `+` was clicked, so it may not answer `repo` either.
+    @Test func prefillStringsRefusesAGlobalStoredValueForRepo() {
+        let fields = [ProviderCreateParamField(name: "repo", type: "string", required: true)]
+        let values = RemoteCreateFormLogic.prefillStrings(
+            fields: fields, repoPrefill: nil, globalDefaults: ["repo": "acme-org/other-app"])
+        #expect(values["repo"] == "")
+    }
+
+    /// Negative control for the narrowness of that rule: every other field
+    /// still walks the full chain down to the provider's declared default.
+    @Test func prefillStringsStillTakesTheProviderDefaultForANonRepoField() {
+        let fields = [ProviderCreateParamField(
+            name: "permission_mode", type: "enum", required: true,
+            defaultValue: "plan", values: ["plan", "default"])]
+        let values = RemoteCreateFormLogic.prefillStrings(
+            fields: fields, repoPrefill: "acme-org/acme-app")
+        #expect(values["permission_mode"] == "plan")
+    }
+
+    /// And for the machine-wide map, which still answers every non-`repo`
+    /// field.
+    @Test func prefillStringsStillTakesAGlobalStoredValueForANonRepoField() {
+        let fields = [ProviderCreateParamField(name: "cmd", type: "string")]
+        let values = RemoteCreateFormLogic.prefillStrings(
+            fields: fields, repoPrefill: nil, globalDefaults: ["cmd": "claude --resume"])
+        #expect(values["cmd"] == "claude --resume")
+    }
+
+    /// The repo's OWN stored default is repo-scoped evidence — the user set it
+    /// against this very repo — so it still answers `repo`, and still outranks
+    /// the ambient prefill.
+    @Test func prefillStringsStillTakesTheRepoScopedStoredValueForRepo() {
+        let fields = [ProviderCreateParamField(name: "repo", type: "string", required: true)]
+        let values = RemoteCreateFormLogic.prefillStrings(
+            fields: fields, repoPrefill: "acme-org/acme-app",
+            repoDefaults: ["repo": "acme-org/acme-app-fork"])
+        #expect(values["repo"] == "acme-org/acme-app-fork")
+    }
+
+    /// No match AND no declared default: the field must land exactly where a
+    /// prefill-less field would (blank), never on an invented selection.
+    @Test func prefillStringsLeavesAnUnmatchedEnumBlankWhenItDeclaresNoDefault() {
+        let fields = [ProviderCreateParamField(
+            name: "repo", type: "enum", required: true, values: ["other-app"])]
+        let values = RemoteCreateFormLogic.prefillStrings(fields: fields, repoPrefill: "acme-org/acme-app")
+        #expect(values["repo"] == "")
+    }
+
+    /// Two allowed values sharing a last component make the loose stage
+    /// ambiguous — picking either could silently create the session in the
+    /// wrong repo — and for `repo` there is no declared default to fall back
+    /// to either, so the field lands blank and the user chooses.
+    @Test func prefillStringsRefusesAnAmbiguousLastComponentMatch() {
+        let fields = [ProviderCreateParamField(
+            name: "repo", type: "enum", required: true, defaultValue: "acme-org/acme-app",
+            values: ["acme-org/acme-app", "other-org/acme-app"])]
+        let values = RemoteCreateFormLogic.prefillStrings(fields: fields, repoPrefill: "acme-app")
+        #expect(values["repo"] == "")
+    }
+
+    /// Only enums carry a closed value set — a `string`/`text`/`int` repo
+    /// field still takes the prefill verbatim, owner qualifier and all.
+    @Test func prefillStringsGivesANonEnumRepoFieldThePrefillVerbatim() {
+        let fields = [ProviderCreateParamField(name: "repo", type: "string", required: true)]
+        let values = RemoteCreateFormLogic.prefillStrings(fields: fields, repoPrefill: "acme-org/acme-app")
+        #expect(values["repo"] == "acme-org/acme-app")
+    }
+
+    @Test func prefillStringsSeedsAnEnumWithNoPrefillFromItsOwnDefault() {
+        let fields = [ProviderCreateParamField(
+            name: "permission_mode", type: "enum", required: true,
+            defaultValue: "plan", values: ["plan", "default"])]
+        let values = RemoteCreateFormLogic.prefillStrings(fields: fields, repoPrefill: "acme-org/acme-app")
+        #expect(values["permission_mode"] == "plan")
+    }
+
     // MARK: - prefillBools
 
     @Test func prefillBoolsDefaultsToFalseWithNoDefaultValue() {
@@ -91,6 +230,28 @@ struct RemoteCreateFormLogicTests {
         let fields = [ProviderCreateParamField(name: "verbose", type: "bool", defaultValue: "true")]
         let values = RemoteCreateFormLogic.prefillBools(fields: fields)
         #expect(values["verbose"] == true)
+    }
+
+    // MARK: - rendersCaptionLabel (which types need a caption above the control)
+
+    /// A `TextField`'s title argument is only a PLACEHOLDER and macOS hides
+    /// it once the field has content, so every text-shaped control needs a
+    /// real caption above it — otherwise a form whose slug, branch and
+    /// command are all prefilled renders as three unlabeled boxes. `text`
+    /// already had one; `string`, `int` and any unrecognized future type
+    /// (which the sheet renders as a `TextField`) need the same.
+    @Test func rendersCaptionLabelForEveryTextShapedType() {
+        #expect(RemoteCreateFormLogic.rendersCaptionLabel(forType: "string"))
+        #expect(RemoteCreateFormLogic.rendersCaptionLabel(forType: "int"))
+        #expect(RemoteCreateFormLogic.rendersCaptionLabel(forType: "text"))
+        #expect(RemoteCreateFormLogic.rendersCaptionLabel(forType: "some-future-type"))
+    }
+
+    /// `Toggle` and `Picker` display the label they're handed, so a caption
+    /// would render the label twice.
+    @Test func rendersNoCaptionLabelForControlsThatCarryTheirOwn() {
+        #expect(!RemoteCreateFormLogic.rendersCaptionLabel(forType: "bool"))
+        #expect(!RemoteCreateFormLogic.rendersCaptionLabel(forType: "enum"))
     }
 
     // MARK: - buildParamsJSON: required-field gate (branch per field kind)
