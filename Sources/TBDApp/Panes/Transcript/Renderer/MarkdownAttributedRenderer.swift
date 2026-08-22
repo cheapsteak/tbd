@@ -208,10 +208,19 @@ extension AttributedStringVisitor: @preconcurrency MarkupVisitor {
         )
     }
 
+    /// Markdown cannot mint TBD's internal scheme. `tbd-file:` is emitted only by
+    /// `TranscriptLinkPass` for a path it resolved against the filesystem, and
+    /// transcript text can be adversarial, so a link the message authored with
+    /// that destination gets no `.link`: it would otherwise be a clickable,
+    /// freely-labelled route into the file viewer that no resolution pass had
+    /// ever seen. The label still renders as ordinary prose — the message's
+    /// words are never dropped, only its claim on the scheme.
     mutating func visitLink(_ link: Markdown.Link) -> NSAttributedString {
         let inner = NSMutableAttributedString()
         for child in link.children { inner.append(visit(child)) }
-        if let dest = link.destination, let url = URL(string: dest) {
+        if let dest = link.destination,
+           let url = URL(string: dest),
+           url.scheme != TranscriptLinkPass.fileScheme {
             let range = NSRange(location: 0, length: inner.length)
             inner.addAttribute(.link, value: url, range: range)
             inner.addAttribute(.foregroundColor, value: NSColor.linkColor, range: range)

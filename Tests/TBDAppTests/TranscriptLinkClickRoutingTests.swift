@@ -6,14 +6,20 @@ import Testing
 /// The bubble text view's link-click routing: URL in, typed destination out.
 @MainActor
 struct TranscriptLinkClickRoutingTests {
-    @Test func tbdFileURL_routesToAFileTarget() {
-        let url = TranscriptLinkPass.fileURL(forResolvedPath: "/w/docs/a.md")!
-        #expect(TranscriptLinkTarget(url: url) == .file("/w/docs/a.md"))
+    @Test func tbdFileURL_routesToAFileTarget() throws {
+        try withTempTree { root in
+            let path = root + "/sub/f.md"
+            let url = TranscriptLinkPass.fileURL(forResolvedPath: path)!
+            #expect(TranscriptLinkTarget(url: url) == .file(path))
+        }
     }
 
-    @Test func pathWithSpaces_survivesTheRoundTrip() {
-        let url = TranscriptLinkPass.fileURL(forResolvedPath: "/w/My Docs/a.md")!
-        #expect(TranscriptLinkTarget(url: url) == .file("/w/My Docs/a.md"))
+    @Test func pathWithSpaces_survivesTheRoundTrip() throws {
+        try withTempTree { root in
+            let path = root + "/My Docs/a.md"
+            let url = TranscriptLinkPass.fileURL(forResolvedPath: path)!
+            #expect(TranscriptLinkTarget(url: url) == .file(path))
+        }
     }
 
     @Test func httpsURL_routesToAWebTarget() {
@@ -21,10 +27,13 @@ struct TranscriptLinkClickRoutingTests {
         #expect(TranscriptLinkTarget(url: url) == .web(url))
     }
 
-    // A `file://` URL reaches the delegate straight from markdown the agent
-    // wrote — nothing resolved it during the render pass — so it earns the
-    // same existence check a scanner-derived candidate gets. The three cases
-    // below are that check.
+    // Every URL that reaches the delegate earns the same existence check, no
+    // matter which scheme it wears or how it got there. `tbd-file:` is TBD's
+    // own scheme, minted by the render pass for a path it resolved — but the
+    // click path cannot see provenance, only a URL, so it checks. A `file://`
+    // URL is the plain case: markdown the agent wrote can carry one and nothing
+    // resolved it. Failing the check returns nil, which the delegate reports as
+    // unhandled so AppKit's default handling takes the click.
     @Test func fileURL_toAnExistingFile_routesToAFileTarget() throws {
         try withTempTree { root in
             let url = URL(fileURLWithPath: root + "/sub/f.md")
@@ -46,19 +55,22 @@ struct TranscriptLinkClickRoutingTests {
         }
     }
 
-    // The `tbd-file:` branch carries a path the render pass ALREADY checked
-    // against the filesystem. Re-checking it would put a `stat()` on every
-    // click for an answer that is already known, so the predicate must not be
-    // consulted at all.
-    @Test func tbdFileURL_isNotRestatted() {
-        let url = TranscriptLinkPass.fileURL(forResolvedPath: "/w/docs/a.md")!
-        var asked: [String] = []
-        let target = TranscriptLinkTarget(url: url, isReadableFile: { path in
-            asked.append(path)
-            return false
-        })
-        #expect(target == .file("/w/docs/a.md"))
-        #expect(asked.isEmpty)
+    // A `tbd-file:` URL the render pass did NOT mint — hand-authored in
+    // transcript markdown, which can be adversarial — names whatever its author
+    // typed. The boundary check is what makes "a path links only if it names a
+    // file that is there" true regardless of the URL's origin.
+    @Test func tbdFileURL_toANonexistentPath_isNotRouted() throws {
+        try withTempTree { root in
+            let url = TranscriptLinkPass.fileURL(forResolvedPath: root + "/nope.md")!
+            #expect(TranscriptLinkTarget(url: url) == nil)
+        }
+    }
+
+    @Test func tbdFileURL_toADirectory_isNotRouted() throws {
+        try withTempTree { root in
+            let url = TranscriptLinkPass.fileURL(forResolvedPath: root + "/sub")!
+            #expect(TranscriptLinkTarget(url: url) == nil)
+        }
     }
 
     @Test func mailtoURL_isNotRouted() {
@@ -67,24 +79,29 @@ struct TranscriptLinkClickRoutingTests {
 
     // MARK: - The delegate's two branches
 
-    @Test func clickedLink_handsTheTargetToTheClosure() {
-        let view = TranscriptBubbleTextView(frame: .zero)
-        var received: [TranscriptLinkTarget] = []
-        view.onLinkClicked = { received.append($0) }
-        let url = TranscriptLinkPass.fileURL(forResolvedPath: "/w/docs/a.md")!
-        #expect(view.textView(view, clickedOnLink: url, at: 0) == true)
-        #expect(received == [.file("/w/docs/a.md")])
+    @Test func clickedLink_handsTheTargetToTheClosure() throws {
+        try withTempTree { root in
+            let view = TranscriptBubbleTextView(frame: .zero)
+            var received: [TranscriptLinkTarget] = []
+            view.onLinkClicked = { received.append($0) }
+            let path = root + "/sub/f.md"
+            let url = TranscriptLinkPass.fileURL(forResolvedPath: path)!
+            #expect(view.textView(view, clickedOnLink: url, at: 0) == true)
+            #expect(received == [.file(path)])
+        }
     }
 
     // The gated branch: with no closure the link is inert, and the click is
     // still SWALLOWED. Returning false here would hand `tbd-file:` to
     // NSWorkspace, which has no handler for the scheme — inert must mean
     // nothing happens, not "something else happens".
-    @Test func clickedLink_withNoHandler_isInertAndStillSwallowed() {
-        let view = TranscriptBubbleTextView(frame: .zero)
-        view.onLinkClicked = nil
-        let url = TranscriptLinkPass.fileURL(forResolvedPath: "/w/docs/a.md")!
-        #expect(view.textView(view, clickedOnLink: url, at: 0) == true)
+    @Test func clickedLink_withNoHandler_isInertAndStillSwallowed() throws {
+        try withTempTree { root in
+            let view = TranscriptBubbleTextView(frame: .zero)
+            view.onLinkClicked = nil
+            let url = TranscriptLinkPass.fileURL(forResolvedPath: root + "/sub/f.md")!
+            #expect(view.textView(view, clickedOnLink: url, at: 0) == true)
+        }
     }
 
     // The `return false` branch is the ONLY thing that lets a scheme the
@@ -101,13 +118,16 @@ struct TranscriptLinkClickRoutingTests {
 
     // AppKit passes whatever the `.link` attribute holds, and a string is a
     // legal value for it, so the delegate parses that shape too.
-    @Test func clickedLink_asAString_isParsedAndRouted() {
-        let view = TranscriptBubbleTextView(frame: .zero)
-        var received: [TranscriptLinkTarget] = []
-        view.onLinkClicked = { received.append($0) }
-        let link = TranscriptLinkPass.fileURL(forResolvedPath: "/w/docs/a.md")!.absoluteString
-        #expect(view.textView(view, clickedOnLink: link, at: 0) == true)
-        #expect(received == [.file("/w/docs/a.md")])
+    @Test func clickedLink_asAString_isParsedAndRouted() throws {
+        try withTempTree { root in
+            let view = TranscriptBubbleTextView(frame: .zero)
+            var received: [TranscriptLinkTarget] = []
+            view.onLinkClicked = { received.append($0) }
+            let path = root + "/sub/f.md"
+            let link = TranscriptLinkPass.fileURL(forResolvedPath: path)!.absoluteString
+            #expect(view.textView(view, clickedOnLink: link, at: 0) == true)
+            #expect(received == [.file(path)])
+        }
     }
 
     @Test func clickedLink_asAnUnparseableValue_fallsThroughToAppKit() {
@@ -128,15 +148,30 @@ struct TranscriptLinkClickRoutingTests {
         }
     }
 
+    // The same fall-through for a hand-authored internal-scheme link: a
+    // deceptively-labelled `tbd-file:` destination that names nothing must not
+    // be routed into the viewer or revealed in Finder.
+    @Test func clickedTbdFileURL_thatNamesNothing_fallsThroughToAppKit() throws {
+        try withTempTree { root in
+            let view = TranscriptBubbleTextView(frame: .zero)
+            view.onLinkClicked = { _ in Issue.record("must not route") }
+            let url = TranscriptLinkPass.fileURL(forResolvedPath: root + "/nope.md")!
+            #expect(view.textView(view, clickedOnLink: url, at: 0) == false)
+        }
+    }
+
     // MARK: -
 
-    /// Builds `<tmp>/sub/` with `<tmp>/sub/f.md` inside it, then removes it.
+    /// Builds `<tmp>/sub/f.md` and `<tmp>/My Docs/a.md`, then removes the tree.
     private func withTempTree(_ body: (String) throws -> Void) throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("TranscriptLinkClickRouting-\(UUID().uuidString)")
         let sub = root.appendingPathComponent("sub")
+        let spaced = root.appendingPathComponent("My Docs")
         try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: spaced, withIntermediateDirectories: true)
         try Data("x".utf8).write(to: sub.appendingPathComponent("f.md"))
+        try Data("x".utf8).write(to: spaced.appendingPathComponent("a.md"))
         defer { try? FileManager.default.removeItem(at: root) }
         try body(root.path)
     }

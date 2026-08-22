@@ -35,6 +35,47 @@ struct MarkdownAttributedRendererTests {
         #expect((link as? URL)?.absoluteString == "https://e.com" || (link as? String) == "https://e.com")
     }
 
+    // `tbd-file:` is TBD's own control scheme: the render pass emits it only for
+    // a path it already resolved against the filesystem. Transcript text can be
+    // adversarial, so markdown must not be able to MINT one — a link whose
+    // destination carries the internal scheme renders as ordinary prose. The
+    // label survives (dropping it would eat the message's words); only the link
+    // does not.
+    @Test("a markdown link to the internal scheme renders as plain prose")
+    func internalSchemeLinkIsNeverMinted() {
+        let blocks = MarkdownAttributedRenderer.renderBlocks(
+            "[see the fix](tbd-file:/etc/passwd)",
+            linkResolver: nil
+        )
+        guard case .prose(let s) = blocks.first else {
+            Issue.record("expected a prose block")
+            return
+        }
+        #expect(s.string.contains("see the fix"))
+        let r = (s.string as NSString).range(of: "see the fix")
+        var linked = false
+        s.enumerateAttribute(.link, in: r, options: []) { value, _, _ in
+            if value != nil { linked = true }
+        }
+        #expect(!linked)
+    }
+
+    // The counterpart: an ordinary external link is untouched by that rule.
+    @Test("an ordinary markdown link still carries its .link through renderBlocks")
+    func ordinaryLinkSurvivesRenderBlocks() {
+        let blocks = MarkdownAttributedRenderer.renderBlocks(
+            "[label](https://example.com)",
+            linkResolver: nil
+        )
+        guard case .prose(let s) = blocks.first else {
+            Issue.record("expected a prose block")
+            return
+        }
+        let r = (s.string as NSString).range(of: "label")
+        let link = s.attribute(.link, at: r.location, effectiveRange: nil)
+        #expect((link as? URL)?.absoluteString == "https://example.com")
+    }
+
     @Test("inline code nested in bold keeps monospace AND gains the bold trait")
     func nestedCodeInBold() {
         let s = MarkdownAttributedRenderer.render("**a `c` b**")

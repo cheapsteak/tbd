@@ -175,12 +175,25 @@ carrying the already-resolved absolute path, reusing the scheme
 `OverlayFileLinkAction` already defines. Resolution happens once, during the
 cached render pass, so clicking one of those does no filesystem work.
 
-A `file://` URL is the exception, because markdown can carry one directly and no
-render pass has vetted it. The delegate applies the same rule to it at click
-time — it links only if it names a file that is there and is not a directory —
-so one existence rule governs every path the transcript treats as clickable. A
-`file://` URL that fails it is reported as unhandled and falls through to
-AppKit's default handling.
+`tbd-file:` is TBD's own control scheme, and transcript markdown cannot mint one:
+the inline link visitor drops the `.link` attribute when a markdown link's
+destination carries that scheme, rendering the label as ordinary prose. Without
+that rule any message could author `[see the fix](tbd-file:/etc/passwd)` — a
+clickable, freely-labelled route into the viewer that no resolution pass had ever
+seen — because the scanner's "a path links only if it resolves" pipeline skips
+ranges markdown already linked. Transcript text is agent-authored and can be
+adversarial or prompt-injected, so the scheme's only producer is the render pass.
+The label survives the rule; only the link does.
+
+The click boundary then re-checks, because a click sees a URL and not its
+provenance. Every path-bearing URL — `tbd-file:` and `file://` alike — links only
+if it names a file that is there and is not a directory, so one existence rule
+governs every path the transcript treats as clickable regardless of how the URL
+came to exist. One `stat()` per click is negligible next to the guarantee. A URL
+that fails the check is reported as unhandled and falls through to AppKit's
+default handling. `file://` is the case that most obviously needs it — markdown
+can carry one directly and no render pass has vetted it — but the rule is not
+conditioned on the scheme.
 
 The delegate calls closures threaded down from the pane, so the two render sites
 choose their own destination:
@@ -227,6 +240,14 @@ works — it would stay green if the renderer never set the attribute at all,
 leaving every code link tinted and then silently erased by the highlight pass.
 So the inline-span and fenced-block cases assert, through `renderBlocks`, that
 the link carries an underline and has kept the code foreground color.
+
+The two scheme rules are pinned at both layers. Through `renderBlocks`,
+`[see the fix](tbd-file:/etc/passwd)` renders text that still reads "see the fix"
+and carries no `.link`, while `[label](https://example.com)` keeps its own — the
+rule must cost ordinary links nothing. At the click boundary, a hand-authored
+`tbd-file:` URL naming a nonexistent path or a directory is not routed and the
+delegate reports it unhandled, while one naming a real file still routes, so the
+render pass's own output keeps working end to end.
 
 ## Flag and reconciler
 
