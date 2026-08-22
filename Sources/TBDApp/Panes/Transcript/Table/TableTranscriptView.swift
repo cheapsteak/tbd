@@ -29,6 +29,14 @@ struct TableTranscriptView: NSViewRepresentable {
     /// disclosure gesture, not of streaming, so the coordinator anchors the
     /// clicked row instead of following the tail (see `update`).
     let activityToggleToken: Int
+    /// The pane's CURRENT worktree root — the same value the context's link
+    /// resolver reads on every resolve. Passed as a plain value rather than
+    /// captured, because a pane restored with the panel layout renders its
+    /// history before the worktree-list RPC lands and the root then changes
+    /// underneath a Coordinator that already exists. It is the change SIGNAL:
+    /// the resolver still reads the root itself, and a transition here is what
+    /// tells the Coordinator its composed rows were built against a stale one.
+    let linkRoot: String
     let nodesProvider: @MainActor () -> [TranscriptRenderNode]
 
     private static let log = Logger(subsystem: "com.tbd.app", category: "table-transcript")
@@ -92,6 +100,9 @@ struct TableTranscriptView: NSViewRepresentable {
         coordinator.scrollView = scrollView
         coordinator.lastScrollToken = scrollToBottomToken
         coordinator.lastActivityToggleToken = activityToggleToken
+        // Seed the root the first composition below happens against, so the
+        // first `updateNSView` does not read as a transition.
+        coordinator.lastLinkRoot = linkRoot
         coordinator.atBottomBinding = $atBottom
         // Track the live scroll position so the jump-to-bottom button hides the
         // moment the viewport reaches the bottom — by the button OR a manual
@@ -160,7 +171,8 @@ struct TableTranscriptView: NSViewRepresentable {
         coordinator.update(
             nodes: nodesProvider(),
             atBottom: $atBottom,
-            activityToggleToken: activityToggleToken
+            activityToggleToken: activityToggleToken,
+            linkRoot: linkRoot
         )
     }
 
@@ -186,6 +198,14 @@ struct TableTranscriptView: NSViewRepresentable {
         /// group, which must keep the clicked row where it is rather than
         /// re-pinning the tail.
         var lastActivityToggleToken = 0
+
+        /// The worktree root the entries in `composedCache` were composed
+        /// against. Optional so "never set" is distinguishable from the empty
+        /// root a pane whose worktree row has not loaded legitimately composes
+        /// against — a Coordinator built directly (tests) must see its first
+        /// real root as a transition, while `makeNSView` seeds this to the root
+        /// its own first composition used.
+        var lastLinkRoot: String?
 
         /// Live binding driving the floating jump-to-bottom button. Held so the
         /// clip-bounds observer can keep it in sync with the ACTUAL scroll
@@ -292,7 +312,8 @@ struct TableTranscriptView: NSViewRepresentable {
         func composedBubbleBlocks(for node: TranscriptRenderNode, item: TranscriptItem) -> [MessageBlock] {
             let key = ComposedKey(id: node.id, version: node.contentVersion)
             if let cached = composedCache[key] { return cached }
-            let composed = TranscriptBubbleGeometry.composedBlocks(for: item, badgeUsage: node.badgeUsage)
+            let composed = TranscriptBubbleGeometry.composedBlocks(
+                for: item, badgeUsage: node.badgeUsage, linkResolver: context.linkResolver)
             composedCache[key] = composed
             return composed
         }
@@ -657,7 +678,8 @@ struct TableTranscriptView: NSViewRepresentable {
                 accessibilityAttribution: TranscriptBubbleGeometry.accessibilityAttribution(for: item),
                 bodyWidth: TranscriptBubbleGeometry.bodyWidth(columnWidth: width, role: role),
                 columnWidth: width,
-                cachedHeight: height
+                cachedHeight: height,
+                onLinkClicked: context.onLinkClicked
             )
             return cell
         }
@@ -1686,7 +1708,8 @@ struct TableTranscriptView: NSViewRepresentable {
         func update(
             nodes newNodes: [TranscriptRenderNode],
             atBottom: Binding<Bool>,
-            activityToggleToken: Int
+            activityToggleToken: Int,
+            linkRoot: String
         ) {
             // Keep the observer's binding fresh (SwiftUI hands us a new binding
             // each update).
@@ -1701,6 +1724,22 @@ struct TableTranscriptView: NSViewRepresentable {
             // read it via the stored property); bind it only to gate on presence.
             guard let tableView, scrollView != nil else { return }
             let step = TranscriptStreamPlan.step(previous: previousNodes, next: newNodes)
+
+            // Worktree-root change: the composed blocks carry the `.link` ranges
+            // the link pass baked in, and `composedCache` is keyed by
+            // `(id, contentVersion)` alone — so a row composed against the empty
+            // root of a not-yet-loaded worktree keeps its plain text forever, on
+            // every cache hit, however live the resolver itself reads the root.
+            // Drop the composed blocks so the rows recompose against the new
+            // root. Measured HEIGHTS survive deliberately: linking adds only
+            // `.foregroundColor` and `.underlineStyle`, neither of which changes
+            // layout, so `heightCache`/`estimateCache`/`blockHeightCache` still
+            // describe the rows they were measured for.
+            let rootChanged = lastLinkRoot != linkRoot
+            if rootChanged {
+                lastLinkRoot = linkRoot
+                composedCache.removeAll(keepingCapacity: true)
+            }
 
             // Width change: heights re-flow, so drop the cache, recompute every
             // height at the new width, then reload (a true rebuild, paired with a
@@ -1723,6 +1762,9 @@ struct TableTranscriptView: NSViewRepresentable {
             guard step != .noop else {
                 previousNodes = newNodes
                 nodes = newNodes
+                // Nothing about the content moved, but a root change means every
+                // realized cell holds prose composed against the old root.
+                if rootChanged { tableView.reloadData() }
                 return
             }
 
@@ -1784,6 +1826,11 @@ struct TableTranscriptView: NSViewRepresentable {
                     }
                 }
             }
+
+            // A root change must re-fetch every realized cell. `.rebuild` already
+            // reloaded; `.append` and `.updateLast` leave the rows above the tail
+            // showing their previously composed (unlinked) prose.
+            if rootChanged, step != .rebuild { tableView.reloadData() }
 
             // Follow the tail only for content the SESSION produced. A user-driven
             // disclosure toggle keeps the viewport exactly where it is, so the row

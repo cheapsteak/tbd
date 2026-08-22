@@ -383,6 +383,23 @@ struct SessionTranscriptView: View {
 
     @State private var isFreshBranchReviveInFlight = false
 
+    /// Worktree root for resolving relative paths in a historical transcript.
+    /// Empty for a remote row, a row that has not loaded, or an ARCHIVED one —
+    /// `findWorktree` does not consult `archivedWorktrees`, and an archived
+    /// worktree's files are gone anyway. Relative paths then simply do not
+    /// resolve; absolute ones still link.
+    ///
+    /// `static` and taking its inputs explicitly for the same reason as
+    /// `TableTranscriptPaneView.worktreePath(in:worktreeID:)`: the link
+    /// resolver reads the root on every resolve, from a closure that must
+    /// capture the `AppState` reference rather than a copy of this view.
+    private static func historyWorktreePath(in appState: AppState, worktreeID: UUID) -> String {
+        appState.findWorktree(id: worktreeID).flatMap(LocalWorktree.init)?.path ?? ""
+    }
+
+    /// One resolution memo per pane. See `TableTranscriptPaneView.linkCache`.
+    @State private var historyLinkCache = TranscriptLinkResolverCache()
+
     private var messages: [TranscriptItem] {
         appState.sessionTranscripts[sessionId] ?? []
     }
@@ -461,6 +478,10 @@ struct SessionTranscriptView: View {
                     expansionOverrides: activityGroupExpansion,
                     memo: presentationMemo
                 )
+                // Read once per body evaluation, from the same helper the
+                // resolver closure calls, so the value handed to the table and
+                // the value the resolver reads cannot disagree.
+                let linkRoot = Self.historyWorktreePath(in: appState, worktreeID: worktreeID)
                 SessionWorkbenchView(
                     sections: presentation.indexSections,
                     onOpen: openTranscriptItem
@@ -470,11 +491,27 @@ struct SessionTranscriptView: View {
                             terminalID: nil,
                             openTranscriptOverlay: openTranscriptItem,
                             toggleActivityGroup: setActivityGroup,
-                            appState: appState
+                            appState: appState,
+                            linkResolver: TranscriptLinkDestination.makeLinkResolver(
+                                worktreeRoot: { [appState, worktreeID] in
+                                    Self.historyWorktreePath(
+                                        in: appState, worktreeID: worktreeID)
+                                },
+                                cache: historyLinkCache),
+                            onLinkClicked: { target in
+                                switch TranscriptLinkDestination.history(target) {
+                                case .revealInFinder(let path):
+                                    NSWorkspace.shared.activateFileViewerSelecting(
+                                        [URL(fileURLWithPath: path)])
+                                case .openInBrowser(let url):
+                                    NSWorkspace.shared.open(url)
+                                }
+                            }
                         ),
                         atBottom: $atBottom,
                         scrollToBottomToken: scrollToBottomToken,
                         activityToggleToken: activityToggleToken,
+                        linkRoot: linkRoot,
                         nodesProvider: { presentation.nodes }
                     )
                     .overlay(alignment: .bottomTrailing) {

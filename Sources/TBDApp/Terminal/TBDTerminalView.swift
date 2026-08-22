@@ -489,7 +489,7 @@ class TBDTerminalView: TerminalView {
         guard col < lineText.count else { return nil }
 
         // Find word boundaries around click position using path-valid characters
-        let pathChars = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "/._-~"))
+        let pathChars = ClickedPathResolver.pathTokenCharacters
         let chars = Array(lineText.unicodeScalars)
         var start = col
         var end = col
@@ -539,36 +539,12 @@ class TBDTerminalView: TerminalView {
         return resolvedPath
     }
 
-    /// Resolves a string as a file path — handles absolute paths, file:// URLs, and relative paths.
-    /// Returns the resolved path if the file exists, nil otherwise.
+    /// Resolves a clicked terminal token to an absolute file path.
+    ///
+    /// Shares `ClickedPathResolver` with the transcript's link pass so the two
+    /// click surfaces cannot disagree about what names a file.
     func resolveAsFilePath(_ link: String) -> String? {
-        let candidate: String
-        if link.hasPrefix("file://~") {
-            // URL parsing treats ~ as the host, dropping it from .path. Strip the scheme manually
-            // and expand the tilde directly to recover the home-relative segment.
-            candidate = NSString(string: String(link.dropFirst("file://".count))).expandingTildeInPath
-        } else if link.hasPrefix("file://") {
-            guard let path = URL(string: link)?.path, !path.isEmpty else { return nil }
-            candidate = path
-        } else if link.hasPrefix("~") {
-            candidate = NSString(string: link).expandingTildeInPath
-        } else if link.hasPrefix("/") {
-            candidate = link
-        } else if !link.contains("://"), !worktreePath.isEmpty {
-            candidate = URL(fileURLWithPath: worktreePath).appendingPathComponent(link).path
-        } else {
-            return nil
-        }
-        // Strip trailing :line:col suffix for existence check
-        let pathOnly: String
-        if let range = candidate.range(of: ":\\d+(:\\d+)?$", options: .regularExpression) {
-            pathOnly = String(candidate[..<range.lowerBound])
-        } else {
-            pathOnly = candidate
-        }
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: pathOnly, isDirectory: &isDir), !isDir.boolValue else { return nil }
-        return pathOnly
+        ClickedPathResolver.resolve(link, worktreePath: worktreePath)
     }
 
     /// Extracts a clickable URL from the terminal buffer at the given window-coordinate point.

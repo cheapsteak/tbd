@@ -14,6 +14,7 @@ struct TableTranscriptPaneView: View {
     let worktreeID: UUID
     @EnvironmentObject var appState: AppState
     @Environment(\.openTranscriptOverlay) private var openTranscriptOverlay
+    @Environment(\.openTranscriptLink) private var openTranscriptLink
 
     private let pollInterval: TimeInterval = 1.5
     private let errorThreshold = 3
@@ -55,6 +56,24 @@ struct TableTranscriptPaneView: View {
     /// process-wide `.shared` so the live pane and Session History cannot
     /// evict each other out of a size-1 cache.
     @State private var presentationMemo = TranscriptPresentationMemo()
+
+    /// One resolution memo per pane, so a streaming row's repeated re-composes
+    /// cost one `stat()` per distinct token rather than one per update. Same
+    /// `@State` reference-holder shape as `presentationMemo` above.
+    @State private var linkCache = TranscriptLinkResolverCache()
+
+    /// Absolute worktree root for resolving relative paths in transcript text.
+    /// Empty when the worktree row has not loaded — or when it is remote, which
+    /// `LocalWorktree` rejects — which makes relative paths simply not resolve.
+    /// Absolute ones still do.
+    ///
+    /// `static` and taking its inputs explicitly so the link resolver can call
+    /// it from a closure that captures the `AppState` reference and the id,
+    /// rather than a copy of this view: the resolver outlives the struct
+    /// evaluation that built it, and the root has to be read live.
+    private static func worktreePath(in appState: AppState, worktreeID: UUID) -> String {
+        appState.findWorktree(id: worktreeID).flatMap(LocalWorktree.init)?.path ?? ""
+    }
 
     private static let log = Logger(subsystem: "com.tbd.app", category: "live-transcript")
 
@@ -192,11 +211,21 @@ struct TableTranscriptPaneView: View {
             expansionOverrides: activityGroupExpansion,
             memo: presentationMemo
         )
+        // Read once per body evaluation, from the same helper the resolver
+        // closure calls, so the value handed to the table and the value the
+        // resolver reads cannot disagree.
+        let linkRoot = Self.worktreePath(in: appState, worktreeID: worktreeID)
         let cardContext = TranscriptCardContext(
             terminalID: terminalID,
             openTranscriptOverlay: openTranscriptOverlay,
             toggleActivityGroup: setActivityGroup,
-            appState: appState
+            appState: appState,
+            linkResolver: TranscriptLinkDestination.makeLinkResolver(
+                worktreeRoot: { [appState, worktreeID] in
+                    Self.worktreePath(in: appState, worktreeID: worktreeID)
+                },
+                cache: linkCache),
+            onLinkClicked: openTranscriptLink
         )
         SessionWorkbenchView(
             sections: presentation.indexSections,
@@ -207,6 +236,7 @@ struct TableTranscriptPaneView: View {
                 atBottom: $atBottom,
                 scrollToBottomToken: scrollToBottomToken,
                 activityToggleToken: activityToggleToken,
+                linkRoot: linkRoot,
                 nodesProvider: { timedRenderNodes(presentation.nodes) }
             )
             // Compose the terminal with its current Claude session so a session

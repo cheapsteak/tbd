@@ -35,6 +35,47 @@ struct MarkdownAttributedRendererTests {
         #expect((link as? URL)?.absoluteString == "https://e.com" || (link as? String) == "https://e.com")
     }
 
+    // `tbd-file:` is TBD's own control scheme: the render pass emits it only for
+    // a path it already resolved against the filesystem. Transcript text can be
+    // adversarial, so markdown must not be able to MINT one — a link whose
+    // destination carries the internal scheme renders as ordinary prose. The
+    // label survives (dropping it would eat the message's words); only the link
+    // does not.
+    @Test("a markdown link to the internal scheme renders as plain prose")
+    func internalSchemeLinkIsNeverMinted() {
+        let blocks = MarkdownAttributedRenderer.renderBlocks(
+            "[see the fix](tbd-file:/etc/passwd)",
+            linkResolver: nil
+        )
+        guard case .prose(let s) = blocks.first else {
+            Issue.record("expected a prose block")
+            return
+        }
+        #expect(s.string.contains("see the fix"))
+        let r = (s.string as NSString).range(of: "see the fix")
+        var linked = false
+        s.enumerateAttribute(.link, in: r, options: []) { value, _, _ in
+            if value != nil { linked = true }
+        }
+        #expect(!linked)
+    }
+
+    // The counterpart: an ordinary external link is untouched by that rule.
+    @Test("an ordinary markdown link still carries its .link through renderBlocks")
+    func ordinaryLinkSurvivesRenderBlocks() {
+        let blocks = MarkdownAttributedRenderer.renderBlocks(
+            "[label](https://example.com)",
+            linkResolver: nil
+        )
+        guard case .prose(let s) = blocks.first else {
+            Issue.record("expected a prose block")
+            return
+        }
+        let r = (s.string as NSString).range(of: "label")
+        let link = s.attribute(.link, at: r.location, effectiveRange: nil)
+        #expect((link as? URL)?.absoluteString == "https://example.com")
+    }
+
     @Test("inline code nested in bold keeps monospace AND gains the bold trait")
     func nestedCodeInBold() {
         let s = MarkdownAttributedRenderer.render("**a `c` b**")
@@ -215,7 +256,7 @@ struct MarkdownAttributedRendererTests {
         // swift-markdown parses a lone newline within a paragraph as a SoftBreak
         // leaf node; without visitSoftBreak it fell through to defaultVisit and
         // vanished entirely ("line one\nline two" -> "line oneline two"). (#129)
-        let joined = MarkdownAttributedRenderer.renderBlocks("line one\nline two")
+        let joined = MarkdownAttributedRenderer.renderBlocks("line one\nline two", linkResolver: nil)
             .compactMap { block -> String? in
                 if case .prose(let s) = block { return s.string }
                 return nil
@@ -228,7 +269,7 @@ struct MarkdownAttributedRendererTests {
     func hardLineBreakRendersNewline() {
         // Two trailing spaces before the newline make a Markdown hard break
         // (LineBreak leaf node). It must also emit "\n".
-        let joined = MarkdownAttributedRenderer.renderBlocks("line one  \nline two")
+        let joined = MarkdownAttributedRenderer.renderBlocks("line one  \nline two", linkResolver: nil)
             .compactMap { block -> String? in
                 if case .prose(let s) = block { return s.string }
                 return nil
@@ -242,7 +283,7 @@ struct MarkdownAttributedRendererTests {
         // Regression guard: adding SoftBreak/LineBreak handling must not disturb
         // the existing paragraph-terminator behavior. A blank line still yields two
         // paragraphs, present and separated by a newline.
-        let joined = MarkdownAttributedRenderer.renderBlocks("para one\n\npara two")
+        let joined = MarkdownAttributedRenderer.renderBlocks("para one\n\npara two", linkResolver: nil)
             .compactMap { block -> String? in
                 if case .prose(let s) = block { return s.string }
                 return nil
@@ -257,7 +298,7 @@ struct MarkdownAttributedRendererTests {
 
     @Test("renderBlocks: prose-only markdown is one prose block, no table block")
     func blocksProseOnly() {
-        let blocks = MarkdownAttributedRenderer.renderBlocks("# Title\n\nSome **prose** text.")
+        let blocks = MarkdownAttributedRenderer.renderBlocks("# Title\n\nSome **prose** text.", linkResolver: nil)
         #expect(blocks.count == 1)
         guard case .prose(let s) = blocks[0] else {
             Issue.record("expected a single prose block")
@@ -269,7 +310,7 @@ struct MarkdownAttributedRendererTests {
 
     @Test("renderBlocks: a single-paragraph prose block has no trailing newline (no dead bottom space)")
     func blocksProseTrimsTrailingNewline() {
-        let blocks = MarkdownAttributedRenderer.renderBlocks("Some prose text.")
+        let blocks = MarkdownAttributedRenderer.renderBlocks("Some prose text.", linkResolver: nil)
         #expect(blocks.count == 1)
         guard case .prose(let s) = blocks[0] else {
             Issue.record("expected a single prose block")
@@ -296,7 +337,7 @@ struct MarkdownAttributedRendererTests {
 
     @Test("renderBlocks: a blockquote is separated from the next paragraph by a single newline, not a blank line")
     func blocksBlockquoteSingleTrailingNewline() {
-        let blocks = MarkdownAttributedRenderer.renderBlocks("> quoted line\n\nNext paragraph.")
+        let blocks = MarkdownAttributedRenderer.renderBlocks("> quoted line\n\nNext paragraph.", linkResolver: nil)
         #expect(blocks.count == 1)
         guard case .prose(let s) = blocks[0] else {
             Issue.record("expected a single prose block")
@@ -320,7 +361,7 @@ struct MarkdownAttributedRendererTests {
 
         Trailing paragraph.
         """
-        let blocks = MarkdownAttributedRenderer.renderBlocks(md)
+        let blocks = MarkdownAttributedRenderer.renderBlocks(md, linkResolver: nil)
         #expect(blocks.count == 3)
         guard case .prose(let lead) = blocks[0] else { Issue.record("block 0 not prose"); return }
         guard case .table(let data) = blocks[1] else { Issue.record("block 1 not table"); return }
@@ -341,7 +382,7 @@ struct MarkdownAttributedRendererTests {
         - one
         - two
         """
-        let blocks = MarkdownAttributedRenderer.renderBlocks(md)
+        let blocks = MarkdownAttributedRenderer.renderBlocks(md, linkResolver: nil)
         // No table → all prose, grouped into one block.
         #expect(blocks.count == 1)
         guard case .prose(let s) = blocks[0] else { Issue.record("expected prose"); return }
@@ -366,7 +407,7 @@ struct MarkdownAttributedRendererTests {
         |---|---|
         | 3 | 4 |
         """
-        let blocks = MarkdownAttributedRenderer.renderBlocks(md)
+        let blocks = MarkdownAttributedRenderer.renderBlocks(md, linkResolver: nil)
         let tableCount = blocks.reduce(0) { if case .table = $1 { return $0 + 1 } else { return $0 } }
         #expect(tableCount == 2)
     }

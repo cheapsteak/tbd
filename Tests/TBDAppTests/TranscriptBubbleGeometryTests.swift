@@ -88,7 +88,8 @@ struct TranscriptBubbleGeometryTests {
         let attribution = TranscriptBubbleGeometry.accessibilityAttribution(for: item)
         #expect(attribution.hasPrefix("Claude · "))
 
-        let blocks = TranscriptBubbleGeometry.composedBlocks(for: item, badgeUsage: nil)
+        let blocks = TranscriptBubbleGeometry.composedBlocks(
+            for: item, badgeUsage: nil, linkResolver: nil)
         let bodyWidth = TranscriptBubbleGeometry.bodyWidth(columnWidth: columnWidth, role: .assistant)
         let measurer = MessageBlockMeasurer()
         let heights = measurer.blockHeights(blocks, bodyWidth: bodyWidth)
@@ -99,7 +100,8 @@ struct TranscriptBubbleGeometryTests {
         cell.configure(
             blocks: blocks, blockHeights: heights, sourceText: "hello",
             role: .assistant, accessibilityAttribution: attribution,
-            bodyWidth: bodyWidth, columnWidth: columnWidth, cachedHeight: rowHeight)
+            bodyWidth: bodyWidth, columnWidth: columnWidth, cachedHeight: rowHeight,
+            onLinkClicked: nil)
         cell.layoutSubtreeIfNeeded()
 
         // Spoken, not drawn.
@@ -130,7 +132,8 @@ struct TranscriptBubbleGeometryTests {
         // environment (same posture as TranscriptRowLayoutTests).
         guard swiftHeight > 0 else { return }
 
-        let blocks = TranscriptBubbleGeometry.composedBlocks(for: item, badgeUsage: nil)
+        let blocks = TranscriptBubbleGeometry.composedBlocks(
+            for: item, badgeUsage: nil, linkResolver: nil)
         let bodyWidth = TranscriptBubbleGeometry.bodyWidth(columnWidth: columnWidth, role: .assistant)
         let nativeHeight = TranscriptBubbleGeometry.rowHeight(
             blocksHeight: MessageBlockMeasurer().blocksHeight(blocks, bodyWidth: bodyWidth))

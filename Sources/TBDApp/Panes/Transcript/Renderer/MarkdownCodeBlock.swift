@@ -6,6 +6,12 @@ extension NSAttributedString.Key {
     /// language `String`. Present only when the block declared a language; a
     /// language-less block stays plain forever and carries no marker. (#129)
     static let tbdCodeHighlight = NSAttributedString.Key("tbdCodeHighlight")
+
+    /// Marks a run rendered as code — an inline code span or a fenced block,
+    /// with or without a language. `TranscriptLinkPass` reads it to decide how
+    /// a link inside that run is styled: a tint would be overwritten by the
+    /// async highlight pass, so code links underline instead.
+    static let tbdCodeContext = NSAttributedString.Key("tbdCodeContext")
 }
 
 /// Renders a fenced code block as a PLAIN monospaced `NSAttributedString`.
@@ -37,6 +43,11 @@ enum MarkdownCodeBlock {
 
         // Apply code background across the entire block.
         base.addAttribute(.backgroundColor, value: theme.codeBackground, range: full)
+
+        // Marks the block as code for the link pass. Unlike `.tbdCodeHighlight`
+        // this is set even without a language — a path in a language-less block
+        // is still code, and still needs underline-not-tint.
+        base.addAttribute(.tbdCodeContext, value: true, range: full)
 
         // Mark the code range for async syntax highlighting — only when a language
         // is present (matches the old "highlight only when language present"
