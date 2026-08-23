@@ -31,11 +31,11 @@ help:
   may; the two-base loop exists for exactly this.
 - **`nameCollision`** — the branch name, the path, or the checkout is taken.
   Base-independent, so further bases are pointless and only a fresh name helps.
-- **`repoLevel`** — a stale lock, a corrupt repo, no disk. A fresh name cannot
-  help, so that leg is skipped. The *other base* is still tried: the two are not
-  interchangeable, because `origin/<default>` is a remote-tracking ref whose
-  `-b` triggers an upstream-config write while a plain local ref writes none.
-  With a jammed config lock, the remote base fails and the local base succeeds.
+- **`repoLevel`** — a corrupt repo, no disk, or an ambiguous base ref. A fresh
+  name cannot help, so that leg is skipped. The *other base* is still tried
+  because the refs resolve independently. For example, a local branch literally
+  named `origin/<default>` can make the remote spelling ambiguous while the
+  plain local `<default>` ref still resolves.
 - **`gitUnusable`** — a timeout or spawn failure, i.e. not a `GitError` at all.
   Fails immediately. This is the one cause where a further attempt has a real
   cost — another full `GitManager.commandTimeout` — rather than a real chance.

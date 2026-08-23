@@ -134,6 +134,11 @@ import Testing
     #expect(listed.contains { entry in
         entry.branch == "remote-feature" && entry.path.hasSuffix("/remote-feature")
     })
+    let upstream = await GitManager().upstreamBranchName(
+        worktreePath: wt.localPath,
+        branch: wt.branch
+    )
+    #expect(upstream == "remote-feature")
 }
 
 @Test func testCreateWorktreeForExistingBranchDeDupesAgainstArchivedRowPath() async throws {

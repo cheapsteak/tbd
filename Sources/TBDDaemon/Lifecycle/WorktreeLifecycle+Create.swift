@@ -826,10 +826,11 @@ extension WorktreeLifecycle {
             }
         }
 
-        // Mirrors the first loop: `.repoLevel` is worth the other base, whose
-        // plain local ref skips the upstream-config write the remote base
-        // performs, but is never worth a further name. "Spent" here means this
-        // loop's bases — the first loop already spent its own.
+        // Mirrors the first loop: `.repoLevel` is worth the other base because
+        // the remote and local refs resolve independently — a local branch named
+        // `origin/main`, for example, can make the remote spelling ambiguous
+        // while local `main` still resolves. It is never worth a further name.
+        // "Spent" here means this loop's bases — the first loop spent its own.
         if lastKind == .repoLevel, let lastError {
             throw WorktreeLifecycleError.createFailed(
                 "git worktree add failed\(repoLevelHint(lastError))\(formatErrorForMessage(lastError))"
