@@ -292,11 +292,11 @@ extension WorktreeLifecycle {
                 // `--track -b <localName> <path> origin/<name>` to create a
                 // local tracking branch.
                 //
-                // Two of the three legs below CREATE a local branch before the
-                // step that can fail, and git fails *after* creating it in the
-                // ordinary case — a stale `.git/config.lock` makes the upstream
-                // config write fail while the branch stands (verified against
-                // git 2.50). Those two record what they made here so the `catch`
+                // Two of the three legs below CREATE a local branch before a
+                // later step can fail. A stale `.git/config.lock` can fail the
+                // remote-tracking leg's config write after its branch exists;
+                // the fork-PR leg creates its branch in the fetch before the
+                // checkout. Those two record what they made here so the `catch`
                 // can hand it to the same `cleanUpFailedWorktreeAdd` the
                 // fresh-create path uses, with the same gates.
                 //
@@ -719,16 +719,11 @@ extension WorktreeLifecycle {
 
         // A repo-level cause that survived both bases. `.repoLevel` deliberately
         // does NOT break out of the loop above, because the two bases are not
-        // interchangeable: base 1 is a remote-tracking ref, so `-b` writes
-        // upstream configuration, while base 2 is a plain local ref and writes
-        // none. Verified against git 2.50, the local base recovers from causes
-        // the remote base cannot survive — a stale `.git/config.lock` fails only
-        // the config write (and the cleanup above clears the branch it left, so
-        // the second attempt starts clean), and a local branch literally named
-        // `origin/main` makes base 1 fatal on `ambiguous object name` while base
-        // 2 resolves. A *fresh name* still cannot help, though, so this throws
-        // rather than falling through to the rename retry. Surface git's own
-        // words instead of guessing.
+        // interchangeable: a local branch literally named `origin/main` makes
+        // base 1 fatal on `ambiguous object name` while base 2 resolves. A
+        // *fresh name* still cannot help, though, so this throws rather than
+        // falling through to the rename retry. Surface git's own words instead
+        // of guessing.
         if lastKind == .repoLevel, let lastError {
             throw WorktreeLifecycleError.createFailed(
                 "git worktree add failed\(repoLevelHint(lastError))\(formatErrorForMessage(lastError))"
@@ -862,12 +857,11 @@ extension WorktreeLifecycle {
         /// The branch name, the folder path, or the checkout is already taken.
         /// Every base fails identically; only a *fresh name* can help.
         case nameCollision
-        /// Anything else git reported: a stale `.git/config.lock`, a corrupt
-        /// repo, a full disk, a local branch shadowing `origin/<default>`.
-        /// No *name* changes the outcome, but the *other base* still can —
-        /// the two are not interchangeable, since only the remote-tracking one
-        /// makes `-b` write upstream configuration. So the loop continues and
-        /// this only becomes fatal once both bases are spent.
+        /// Anything else git reported: a corrupt repo, a full disk, or a local
+        /// branch shadowing `origin/<default>`. No *name* changes the outcome,
+        /// but the *other base* still can because the refs resolve independently.
+        /// So the loop continues and this only becomes fatal once both bases are
+        /// spent.
         case repoLevel
         /// git returned no verdict at all — the subprocess timed out or could
         /// not be spawned. Nothing was learned about the base or the name, and
@@ -1020,10 +1014,9 @@ extension WorktreeLifecycle {
     /// Cleans up whatever a single failed `worktreeAdd` attempt left behind:
     /// the partially-written directory always, and — only when this attempt is
     /// the one that can have created it — the branch `-b` made. Git can fail
-    /// *after* creating the branch (a stale `.git/config.lock` makes the
-    /// upstream-config write fail while the branch stands), which is how a
-    /// failed create used to leak a `tbd/<name>` branch and then mask the real
-    /// cause behind "a branch named … already exists" on the next attempt.
+    /// *after* creating the branch. For example, the explicit remote-tracking
+    /// path can hit a stale `.git/config.lock` while recording its upstream,
+    /// leaving the branch standing.
     ///
     /// **Four independent gates stand between a failure and `branch -D`, and
     /// deleting a branch the user owns is the worst outcome this path has.
