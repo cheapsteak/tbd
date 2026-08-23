@@ -147,8 +147,13 @@ struct QueuedPromptModal: View {
     @AppStorage(QueuedPromptComposer.sendImmediatelyKey)
     private var sendImmediately = QueuedPromptComposer.sendImmediatelyDefault
 
-    private var isBlank: Bool {
-        draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    /// Blankness of a specific string. Taken as an argument rather than read
+    /// off `draft`, because the Return path must be judged on the text the
+    /// editor just handed over: `draft` follows the view by one SwiftUI pass,
+    /// and a Return pressed straight after the first keystroke would otherwise
+    /// be refused as blank while the box plainly holds text.
+    private func isBlank(_ text: String) -> Bool {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var body: some View {
@@ -160,8 +165,9 @@ struct QueuedPromptModal: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             SubmittingTextEditor(
-                text: $draft,
-                onSubmit: { submit() },
+                initialText: draft,
+                onTextChange: { draft = $0 },
+                onSubmit: { submit($0) },
                 onCancel: { dismiss() }
             )
             .frame(minHeight: 140)
@@ -178,19 +184,23 @@ struct QueuedPromptModal: View {
                 Spacer()
                 Button("Cancel") { dismiss() }
                     .keyboardShortcut(.cancelAction)
-                Button(sendImmediately ? "Send" : "Queue") { submit() }
+                // `draft`, not the editor's own string, and safe for the same
+                // reason the disabled state is: this closure is rebuilt on
+                // every body evaluation, so by the time the button can be
+                // clicked `draft` already carries the edit that enabled it.
+                Button(sendImmediately ? "Send" : "Queue") { submit(draft) }
                     .keyboardShortcut(.return, modifiers: [.command])
                     .buttonStyle(.borderedProminent)
-                    .disabled(isBlank)
+                    .disabled(isBlank(draft))
             }
         }
         .padding(20)
         .frame(width: 480)
     }
 
-    private func submit() {
-        guard !isBlank else { return }
-        appState.submitQueuedPrompt(target, text: draft, submit: sendImmediately)
+    private func submit(_ text: String) {
+        guard !isBlank(text) else { return }
+        appState.submitQueuedPrompt(target, text: text, submit: sendImmediately)
         dismiss()
     }
 }

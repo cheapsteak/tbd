@@ -219,8 +219,8 @@ struct ParkedPromptReadbackView: View {
         _sendImmediately = State(initialValue: readback.submit)
     }
 
-    private var isBlank: Bool {
-        draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    private func isBlank(_ text: String) -> Bool {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var isEdited: Bool { draft != readback.text }
@@ -234,8 +234,9 @@ struct ParkedPromptReadbackView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             SubmittingTextEditor(
-                text: $draft,
-                onSubmit: { submitIfAllowed() },
+                initialText: readback.text,
+                onTextChange: { draft = $0 },
+                onSubmit: { submitIfAllowed($0) },
                 onCancel: { dismiss() }
             )
             .frame(minHeight: 140, maxHeight: 300)
@@ -262,7 +263,7 @@ struct ParkedPromptReadbackView: View {
                 Spacer()
                 Button("Close") { dismiss() }
                     .keyboardShortcut(.cancelAction)
-                Button(isEdited ? "Deliver Edited" : "Deliver Now") { submitIfAllowed() }
+                Button(isEdited ? "Deliver Edited" : "Deliver Now") { submitIfAllowed(draft) }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.return, modifiers: [.command])
                 // Disabled rather than offered-and-refused where nothing can be
@@ -270,7 +271,11 @@ struct ParkedPromptReadbackView: View {
                 // button, and Copy is the action that works here. Blank is
                 // disabled too — empty text is the UNPARK signal, and Discard
                 // is the deliberate way to ask for that.
-                .disabled(!canSubmit)
+                // `draft` here, the editor's own string on the Return path —
+                // safe because this closure and this modifier are rebuilt on
+                // every body evaluation, so `draft` already carries the edit
+                // that enabled the button by the time it can be clicked.
+                .disabled(!canSubmit(draft))
                 .help(undeliverable?.help ?? "")
             }
         }
@@ -279,16 +284,20 @@ struct ParkedPromptReadbackView: View {
     }
 
     /// The one enablement rule, read by both the button and the Return key —
-    /// a keystroke must never do what the disabled button cannot.
-    private var canSubmit: Bool {
-        undeliverable == nil && !isBlank && !appState.parkedPromptDeliveryInFlight
+    /// a keystroke must never do what the disabled button cannot. Every reason
+    /// but blankness is the app's own state, and blankness is judged on the
+    /// text passed in: the Return path passes what the editor holds, which
+    /// `draft` follows by one SwiftUI pass, so reading `draft` there would
+    /// refuse a Return pressed straight after the first keystroke.
+    private func canSubmit(_ text: String) -> Bool {
+        undeliverable == nil && !isBlank(text) && !appState.parkedPromptDeliveryInFlight
     }
 
-    private func submitIfAllowed() {
-        guard canSubmit else { return }
+    private func submitIfAllowed(_ text: String) {
+        guard canSubmit(text) else { return }
         Task {
             await appState.deliverParkedPromptNow(
-                readback, text: draft, submit: sendImmediately)
+                readback, text: text, submit: sendImmediately)
         }
     }
 

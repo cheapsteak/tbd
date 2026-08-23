@@ -48,6 +48,37 @@ enum ComposerReturnKey {
 /// A scrolling multi-line text editor with chat-box Return semantics: Return
 /// sends, Shift+Return and Option+Return insert a line break.
 ///
+/// **The text flows one way only.** `initialText` seeds the view once, when it
+/// is made; from then on the `NSTextView` owns what it holds and SwiftUI is
+/// merely told about it, through `onTextChange` and through the string handed
+/// to `onSubmit`. Nothing writes the editor's contents from outside, and
+/// `updateNSView` touches neither the text nor the selection.
+///
+/// That is what makes the caret safe, structurally rather than by policing. A
+/// SwiftUI update pass is not ordered against the operator's typing: the parent
+/// republishes for its own reasons — a poll tick, a subscription event — and
+/// such a pass can be evaluated with a text snapshot taken BEFORE the keystroke
+/// the text view has already applied. Writing that snapshot back shows the
+/// operator a character they just typed disappearing, and, because assigning
+/// `NSTextView.string` slams the insertion point to the end of the document, it
+/// strands the caret at the end even after the following pass restores the
+/// text — worst of all when they had moved back to edit an earlier sentence.
+/// A view that never accepts text cannot be told anything stale.
+///
+/// The same reasoning decides where a submit reads its text: `onSubmit` is
+/// handed the TEXT VIEW's current string, not anything held on this struct. The
+/// coordinator's `parent` is itself refreshed by an update pass and can be one
+/// behind; the text view cannot.
+///
+/// The tradeoff, stated plainly: there is no way to set the text from outside
+/// after the view exists. Restoring a draft, filling in a template, or clearing
+/// the box would need an explicit imperative path — a coordinator method driven
+/// by an identity token, say — and that path does not exist. It is deliberately
+/// absent rather than provisionally missing: no call site needs it, and adding
+/// a write-back door reopens the ambiguity the one-way flow removes. Add it
+/// when something genuinely needs it, as an explicit command rather than as
+/// state SwiftUI can resend at a moment of its own choosing.
+///
 /// An `NSTextView` rather than SwiftUI's `TextEditor` (which never submits) or
 /// `TextField(axis: .vertical)` (which does, for free, but grows with its
 /// content instead of scrolling). A first message is a task brief — the whole
@@ -59,10 +90,17 @@ enum ComposerReturnKey {
 /// agent verbatim, and silently turning `"` into `"` corrupts a prompt that
 /// quotes code.
 struct SubmittingTextEditor: NSViewRepresentable {
-    @Binding var text: String
-    /// Return, when the text is submittable. The caller applies its own
-    /// enablement rules — a Return must not do what a disabled button cannot.
-    var onSubmit: () -> Void
+    /// What the box starts with. Read once, in `makeNSView`; later changes to
+    /// it are ignored by design.
+    var initialText: String = ""
+    /// Every edit, as the text view now holds it. The caller's own state
+    /// follows the view rather than driving it.
+    var onTextChange: (String) -> Void
+    /// Return, when the text is submittable, carrying the text view's current
+    /// string. The caller applies its own enablement rules — a Return must not
+    /// do what a disabled button cannot — and judges blankness on the string it
+    /// is given, which is the one value guaranteed not to lag.
+    var onSubmit: (String) -> Void
     /// Escape. Forwarded explicitly because an `NSTextView` answers
     /// `cancelOperation:` itself, and a sheet's Cancel button would otherwise
     /// never see the key.
@@ -77,7 +115,7 @@ struct SubmittingTextEditor: NSViewRepresentable {
 
         guard let textView = scrollView.documentView as? NSTextView else { return scrollView }
         textView.delegate = context.coordinator
-        textView.string = text
+        textView.string = initialText
         textView.isRichText = false
         textView.allowsUndo = true
         textView.drawsBackground = false
@@ -97,14 +135,14 @@ struct SubmittingTextEditor: NSViewRepresentable {
         return scrollView
     }
 
+    /// Refreshing the coordinator's parent is the whole job — and it is
+    /// load-bearing, not vestigial: `self` is a fresh struct each pass, so this
+    /// is what keeps `onTextChange`, `onSubmit` and `onCancel` pointing at the
+    /// current body's closures rather than at the ones captured when the view
+    /// was made. Deliberately nothing else: this pass must not touch the text
+    /// view's contents or its selection, which is the entire contract above.
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         context.coordinator.parent = self
-        guard let textView = scrollView.documentView as? NSTextView else { return }
-        // Only when they differ: assigning `string` collapses the selection, so
-        // an unconditional write would fight the cursor on every keystroke.
-        if textView.string != text {
-            textView.string = text
-        }
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -118,7 +156,7 @@ struct SubmittingTextEditor: NSViewRepresentable {
 
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
-            parent.text = textView.string
+            parent.onTextChange(textView.string)
         }
 
         func textView(
@@ -136,7 +174,8 @@ struct SubmittingTextEditor: NSViewRepresentable {
             )
             switch action {
             case .submit:
-                parent.onSubmit()
+                // The text view, never `parent` — see the type's doc comment.
+                parent.onSubmit(textView.string)
                 return true
             case .newline:
                 textView.insertNewlineIgnoringFieldEditor(nil)
