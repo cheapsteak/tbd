@@ -102,6 +102,7 @@ import Testing
 
     // Clone into the test repo (mirrors what a user would do).
     try await shell("git clone '\(remoteDir.path)' '\(cloneRepoDir.path)'", at: cloneTempDir)
+    try await shell("git config branch.autoSetupMerge false", at: cloneRepoDir)
 
     let db = try TBDDatabase(inMemory: true)
     let lifecycle = WorktreeLifecycle(
@@ -139,6 +140,15 @@ import Testing
         branch: wt.branch
     )
     #expect(upstream == "remote-feature")
+    let worktreeDir = URL(fileURLWithPath: wt.localPath)
+    try await shell(
+        "test \"$(git config --get 'branch.remote-feature.remote')\" = origin",
+        at: worktreeDir
+    )
+    try await shell(
+        "test \"$(git config --get 'branch.remote-feature.merge')\" = refs/heads/remote-feature",
+        at: worktreeDir
+    )
 }
 
 @Test func testCreateWorktreeForExistingBranchDeDupesAgainstArchivedRowPath() async throws {

@@ -55,6 +55,7 @@ struct GitManagerTests {
         let base = try await addBareRemoteAndPushDefault()
         let wtPath = tempDir.appendingPathComponent("wt-remote-default").path
         let branch = "tbd/no-upstream"
+        try await GitManagerTests.shell("git config branch.autoSetupMerge true", at: repoDir)
 
         try await git.worktreeAdd(
             repoPath: repoDir.path,
@@ -65,6 +66,15 @@ struct GitManagerTests {
 
         let upstream = await git.upstreamBranchName(worktreePath: wtPath, branch: branch)
         #expect(upstream == nil)
+        let wtDir = URL(fileURLWithPath: wtPath)
+        try await GitManagerTests.shell(
+            "git config --get 'branch.\(branch).remote' >/dev/null; test $? -eq 1",
+            at: wtDir
+        )
+        try await GitManagerTests.shell(
+            "git config --get 'branch.\(branch).merge' >/dev/null; test $? -eq 1",
+            at: wtDir
+        )
         cleanup()
     }
 
