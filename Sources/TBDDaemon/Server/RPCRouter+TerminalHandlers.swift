@@ -2705,6 +2705,14 @@ extension RPCRouter {
             }
         }
 
+        // Scratch spaces have no repo row, so this must stay outside the repo
+        // loop: cleanup is also the explicit retry path on zero-repo installs.
+        do {
+            try await lifecycle.reconcileScratchTerminals(actuationLog: actuationLog)
+        } catch {
+            errors.append("Scratch terminal reconcile failed: \(error)")
+        }
+
         let result = CleanupResult(
             reposProcessed: repos.count,
             worktreesReconciled: worktreesReconciled,

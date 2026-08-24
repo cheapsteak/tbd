@@ -68,8 +68,9 @@ public final class Daemon: Sendable {
     public nonisolated(unsafe) var gitStatusTask: Task<Void, Never>?
     public nonisolated(unsafe) var reaperTask: Task<Void, Never>?
     public nonisolated(unsafe) var hibernationSweepTask: Task<Void, Never>?
-    /// Orphan-GC hourly sweep task (agent worktrees + scratchpads). `nil` in
-    /// mock mode. See `orphanGC` for the actor it drives.
+    /// Hourly orphan-maintenance task (orphan GC + scratch terminal
+    /// reconciliation). `nil` in mock mode. See `orphanGC` for the actor it
+    /// drives.
     public nonisolated(unsafe) var gcTask: Task<Void, Never>?
     /// Orphan-GC actor. Owned here so `gc.*` RPC handlers (Task 9) can reach
     /// it the same way they reach `rpcRouter.hibernationCoordinator`. `nil`
@@ -251,6 +252,22 @@ public final class Daemon: Sendable {
         // [missing] tags as soon as the daemon is up.
         let healthValidator = RepoHealthValidator(git: git)
         await healthValidator.validateAll(db: database)
+    }
+
+    /// Run one pass of the hourly orphan-maintenance cadence. Scratch terminal
+    /// reconciliation shares this pass so tmux coordinate reuse is repaired
+    /// while the daemon remains alive, not only at startup.
+    static func performOrphanMaintenance(
+        orphanGC: OrphanGC,
+        lifecycle: WorktreeLifecycle,
+        actuationLog: ActuationLog
+    ) async {
+        _ = await orphanGC.sweep()
+        do {
+            try await lifecycle.reconcileScratchTerminals(actuationLog: actuationLog)
+        } catch {
+            reconcileLogger.warning("Failed to reconcile scratch terminals during orphan maintenance: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Wire the delivery verifier and perform the startup replay, gated on
@@ -836,21 +853,29 @@ public final class Daemon: Sendable {
                 }
             }
 
-            // 11a-gc. Orphan-GC: reap abandoned agent worktrees + scratchpads
+            // 11a-gc. Orphan maintenance: reap abandoned agent worktrees + scratchpads
+            // and reconcile scratch terminals against their shared tmux server
             // (event-driven cleanup already runs via `lifecycle.onWorktreeRemoved`
             // above; this periodic sweep catches everything else — worktrees
             // orphaned outside a TBD-initiated remove, e.g. manual `rm -rf`).
             // Constructed above (guarded the same `mockMode == nil` check), so
             // `orphanGC` is always non-nil here.
             if let orphanGC {
-                self.gcTask = Task {
+                let maintenanceLifecycle = lifecycle
+                self.gcTask = Task { [orphanGC, maintenanceLifecycle, actuationLog] in
                     // Sweep once immediately (cold recovery), then every hour.
-                    _ = await orphanGC.sweep()
+                    await Self.performOrphanMaintenance(
+                        orphanGC: orphanGC,
+                        lifecycle: maintenanceLifecycle,
+                        actuationLog: actuationLog)
                     while !Task.isCancelled {
                         // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                         try? await Task.sleep(for: .seconds(3600))
                         guard !Task.isCancelled else { break }
-                        _ = await orphanGC.sweep()
+                        await Self.performOrphanMaintenance(
+                            orphanGC: orphanGC,
+                            lifecycle: maintenanceLifecycle,
+                            actuationLog: actuationLog)
                     }
                 }
             }
