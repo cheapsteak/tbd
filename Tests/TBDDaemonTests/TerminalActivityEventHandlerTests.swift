@@ -304,6 +304,58 @@ struct TerminalActivityEventHandlerTests {
         #expect(await router.claudeDelegationTracker.isMarked(terminalID: terminal.id))
     }
 
+    /// The interrupt leg of the delegation rail, driven through the handler
+    /// rather than by hand-setting a fact the Claude path never produces.
+    ///
+    /// An interrupted Claude turn frequently writes no `turn_duration` at all,
+    /// so the newest record in the tail still reports the PRE-interrupt count.
+    /// Treating the interrupt's `idle` as an ordinary turn boundary therefore
+    /// re-reads that record on the next `terminal.list` and relights the
+    /// indicator with nothing running — the false-thinking direction this rail
+    /// is never allowed to fail toward. The interrupt must CLEAR the claim.
+    @Test("a user interrupt clears a standing Claude delegation claim")
+    func aUserInterruptClearsAStandingClaudeDelegationClaim() async throws {
+        let terminal = try await makeTerminal(kind: .claude, label: "Claude")
+        // The transcript is handed to the tracker as a sampling target rather
+        // than stored on the row, which keeps the unrelated Stop-hook
+        // project-dir sync out of this test.
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-delegation-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let transcript = dir.appendingPathComponent("session.jsonl")
+        try Data((ClaudeDelegationSampleTests.pending + "\n").utf8)
+            .write(to: transcript)
+        let target = ClaudeDelegationTarget(
+            terminalID: terminal.id, transcriptPath: transcript.path)
+
+        // A turn ends with one background agent still live: the handler marks,
+        // and the next sample turns that mark into a standing claim.
+        #expect((await router.handle(try RPCRequest(
+            method: RPCMethod.terminalActivityEvent,
+            params: TerminalActivityEventParams(
+                terminalID: terminal.id,
+                activityState: .idle)))).success)
+        #expect(await router.claudeDelegationTracker.sample(
+            targets: [target]) == [terminal.id: 1])
+
+        // The user then presses Esc.
+        #expect((await router.handle(try RPCRequest(
+            method: RPCMethod.terminalActivityEvent,
+            params: TerminalActivityEventParams(
+                terminalID: terminal.id,
+                activityState: .idle,
+                origin: .userInterrupt)))).success)
+
+        // No mark is owed, and the standing claim is gone. Mark the interrupt
+        // instead of clearing it and this sample re-reads the same unchanged
+        // transcript and republishes the pre-interrupt count.
+        #expect(await router.claudeDelegationTracker.isMarked(
+            terminalID: terminal.id) == false)
+        #expect(await router.claudeDelegationTracker.sample(targets: [target]).isEmpty)
+    }
+
     @Test("unknown terminalID is a soft no-op")
     func unknownTerminalSoftSuccess() async throws {
         let request = try RPCRequest(

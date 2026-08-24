@@ -31,7 +31,10 @@ enum ClaudeDelegationSample {
             guard line.count <= recordByteLimit else { continue }
             guard let object = try? JSONSerialization.jsonObject(with: Data(line)),
                   let record = object as? [String: Any],
-                  record["subtype"] as? String == "turn_duration" else { continue }
+                  record["subtype"] as? String == "turn_duration",
+                  // A subagent's own sidechain turn must never speak for the
+                  // main loop's count.
+                  record["isSidechain"] as? Bool != true else { continue }
             // Present-and-positive is the only shape that claims. An omitted
             // field is how Claude Code spells zero, and it retracts a claim an
             // older record made.

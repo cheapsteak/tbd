@@ -126,17 +126,6 @@ struct WorktreeRowActivityTests {
         #expect(!WorktreeRowView.isForegroundWorking(claude))
     }
 
-    @Test func anInterruptDefeatsADelegationClaim() {
-        var claude = terminal(
-            kind: .claude,
-            activityState: .idle,
-            presentationActivityState: .working
-        )
-        claude.activityStateSource = .terminalInterrupt
-
-        #expect(!WorktreeRowView.isForegroundWorking(claude))
-    }
-
     @Test func waitingForUserDefeatsADelegationClaim() {
         let claude = terminal(
             kind: .claude,

@@ -483,10 +483,21 @@ extension AppState {
 
         Task {
             do {
+                // The origin travels for EVERY agent kind, not just Codex. The
+                // local optimistic assignments above stay Codex-only because
+                // they carry Codex's ordering semantics, but the daemon needs
+                // the interrupt fact for Claude too: an interrupted Claude turn
+                // often writes no `turn_duration`, so without this the
+                // delegation rail would re-read the pre-interrupt record on the
+                // next poll and relight the spinner with no agents running.
+                // The handler's other origin-conditional branches — the
+                // hook-event counter and the Stop-hook transcript sync — already
+                // read a present origin as "a user action, not an agent hook",
+                // which is what an Esc on a Claude session is.
                 try await daemonClient.setTerminalActivity(
                     terminalID: terminalID,
                     activityState: .idle,
-                    origin: isCodex ? .userInterrupt : nil
+                    origin: .userInterrupt
                 )
             } catch {
                 logger.debug("Failed to publish terminal interrupt state: \(error.localizedDescription, privacy: .public)")

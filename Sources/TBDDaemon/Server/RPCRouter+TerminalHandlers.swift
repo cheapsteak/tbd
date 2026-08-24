@@ -629,6 +629,12 @@ extension RPCRouter {
         let delegationClaims = await claudeDelegationTracker.sample(
             targets: delegationTargets)
         for index in terminals.indices where !terminals[index].isCodexTerminal {
+            // A parked session runs nothing, so its last count speaks for work
+            // that is already gone. The row's indicator ranks working above
+            // hibernated, so publishing here would replace the moon with
+            // animated dots that nothing can ever retract.
+            guard terminals[index].hibernatedAt == nil,
+                  terminals[index].suspendedAt == nil else { continue }
             // Only a live claim writes. Absence must leave the field alone
             // rather than publish nil, which is a statement of its own.
             guard let count = delegationClaims[terminals[index].id] else { continue }
@@ -3332,7 +3338,15 @@ extension RPCRouter {
             // `terminal.list`: Claude Code writes the turn's `turn_duration`
             // record a couple of milliseconds AFTER these hooks return, so a
             // read here would observe the previous turn.
-            if params.activityState == .idle {
+            //
+            // An explicit interrupt CLEARS instead of marking. An interrupted
+            // turn frequently writes no `turn_duration`, so sampling after one
+            // would re-read the PRE-interrupt record and relight the indicator
+            // with nothing running — the false-thinking direction this rail is
+            // never allowed to fail toward.
+            if params.origin == .userInterrupt {
+                await claudeDelegationTracker.clear(terminalID: terminal.id)
+            } else if params.activityState == .idle {
                 await claudeDelegationTracker.mark(terminalID: terminal.id)
             }
             guard terminal.activityState != params.activityState else {
