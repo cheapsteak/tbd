@@ -49,6 +49,11 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// default, so `nil` here means "never chose" rather than "off". Resolve it
     /// through `Config.queuedPromptDefault`, never through `?? false`.
     var queued_prompt_enabled: Bool?
+    /// Whether ordinary new worktrees start with an empty Notes tab.
+    /// **Genuinely tri-state**: the backing migration carries no SQL default,
+    /// so `nil` means "never chose" and resolves through
+    /// `Config.autoCreateNotesDefault`.
+    var auto_create_notes_enabled: Bool?
     /// The fleet supervision brake (design 2026-07-26 §3, §7). **Genuinely
     /// tri-state**, same shape as `queued_prompt_enabled`: the
     /// `v75_config_supervision_enabled` column carries no SQL default, so
@@ -80,6 +85,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   `queued_prompt_enabled` resolves to. Defaulted to the real constant;
     ///   the parameter exists so tests can prove that NULL *follows* a changed
     ///   default while an explicit `false` does not.
+    /// - Parameter autoCreateNotesDefault: same shape, for
+    ///   `auto_create_notes_enabled` — the parameter proves that an untouched
+    ///   preference follows the shipped default while explicit choices stick.
     /// - Parameter supervisionEnabledDefault: same shape, for
     ///   `supervision_enabled` — the parameter exists so tests can prove the
     ///   same NULL-follows/explicit-sticks property for the fleet brake
@@ -95,6 +103,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   gate.
     func toModel(
         queuedPromptDefault: Bool = Config.queuedPromptDefault,
+        autoCreateNotesDefault: Bool = Config.autoCreateNotesDefault,
         supervisionEnabledDefault: Bool = Config.supervisionEnabledDefault,
         gcProfileDirsDefault: Bool = Config.gcProfileDirsEnabledDefault,
         claudeCloudEnabledDefault: Bool = Config.claudeCloudEnabledDefault,
@@ -142,6 +151,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             // means "never chose" and must resolve to the shipped default —
             // that is the whole point of v70_config_queued_prompt.
             queuedPromptEnabled: queued_prompt_enabled ?? queuedPromptDefault,
+            autoCreateNotesEnabled: auto_create_notes_enabled ?? autoCreateNotesDefault,
             // Same reasoning, for the fleet supervision brake — NOT `?? false`.
             supervisionEnabled: supervision_enabled ?? supervisionEnabledDefault,
             // Same reasoning again, for the profile-dir collector's gate —
@@ -395,6 +405,17 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET queued_prompt_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist whether ordinary new worktrees start with an empty Notes tab.
+    /// Writing either value records an explicit choice, distinct from NULL.
+    public func setAutoCreateNotes(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET auto_create_notes_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }
