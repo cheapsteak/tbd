@@ -573,9 +573,7 @@ extension WorktreeLifecycle {
                     }
                     logger.info("reconcile: parked terminal \(terminal.id, privacy: .public) — window \(terminal.tmuxWindowID, privacy: .public) gone or reassigned, session \(sessionID, privacy: .public) preserved, wakeable via the unified resume path")
                 } else {
-                    if (try? await db.terminals.delete(id: terminal.id)) != nil {
-                        try? await db.tabs.delete(tabID: terminal.id)
-                    }
+                    try? await db.deleteTerminalAndTab(id: terminal.id)
                     logger.info("reconcile: deleted terminal \(terminal.id, privacy: .public) — window \(terminal.tmuxWindowID, privacy: .public) gone or reassigned, no session to preserve")
                 }
                 await pendingQuestions.clear(terminalID: terminal.id)
