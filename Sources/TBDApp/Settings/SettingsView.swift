@@ -163,6 +163,12 @@ struct GeneralSettingsTab: View {
                 Toggle("Send first messages immediately", isOn: $sendFirstMessageImmediately)
                     .help("Default for first messages you write while a new worktree is coming up. On: TBD presses Return, and the agent starts working the moment the message is in. Off: the text waits in the composer for you to read and send. The \"Send immediately\" checkbox in that creation sheet changes this too; the identical-looking checkbox on an already-parked message edits only that message.")
 
+                Toggle("Create a Notes tab for new worktrees", isOn: Binding(
+                    get: { appState.autoCreateNotesEnabled },
+                    set: { newValue in Task { await appState.setAutoCreateNotesEnabled(newValue) } }
+                ))
+                .help("Turn this off to skip empty Notes tabs in ordinary new worktrees. Restored or revived conversations still receive their populated note.")
+
                 Toggle("Automatically clean up orphaned agent worktrees", isOn: Binding(
                     get: { appState.gcEnabled },
                     set: { newValue in Task { await appState.setGCEnabled(newValue) } }

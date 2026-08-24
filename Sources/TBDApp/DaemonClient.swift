@@ -981,6 +981,14 @@ actor DaemonClient {
         )
     }
 
+    /// Set whether ordinary new worktrees start with an empty Notes tab.
+    func setAutoCreateNotes(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetAutoCreateNotes,
+            params: ConfigSetAutoCreateNotesParams(enabled: enabled)
+        )
+    }
+
     /// Persist supervision's fleet-wide authority switch (design 2026-07-26
     /// §3, §7). `enabled: true` releases the fleet brake; `false` engages it.
     /// Shipped OFF (braked); for now inert, since the rest of the supervision

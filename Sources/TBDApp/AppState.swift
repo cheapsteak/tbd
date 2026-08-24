@@ -829,6 +829,9 @@ final class AppState: ObservableObject {
     /// `Config.gcEnabled`). Loaded from the daemon alongside
     /// `autoArchiveOnMergeDefault` via `loadModelProfiles()`.
     @Published var gcEnabled: Bool = true
+    /// Whether ordinary new worktrees start with an empty Notes tab. Loaded
+    /// from the daemon alongside the other config-backed worktree defaults.
+    @Published var autoCreateNotesEnabled: Bool = Config.autoCreateNotesDefault
     @Published var nightwatchMode: NightwatchMode = .off
     /// Auto-hibernate master switch. Loaded from the daemon `Config` via
     /// `loadHibernationConfig()`.
@@ -1238,6 +1241,11 @@ final class AppState: ObservableObject {
     /// Published so the Settings control-mode toggle re-renders after
     /// `setControlModeEnabled` refreshes it.
     @Published var daemonCapabilities: DaemonCapabilitiesResult?
+    /// How `loadModelProfiles()` fetches its config-bearing response.
+    /// Injectable because `DaemonClient` is concrete, matching the other
+    /// settings seams below.
+    lazy var modelProfilesFetcher: @MainActor () async throws -> ModelProfileListResult =
+        { [daemonClient] in try await daemonClient.listModelProfiles() }
     /// How `refreshDaemonCapabilities()` fetches — injectable because
     /// `DaemonClient` is concrete (no protocol), so state-level tests stub the
     /// RPC here. Production default asks the daemon; nil result = fetch failed.
@@ -1273,6 +1281,10 @@ final class AppState: ObservableObject {
     /// same reason as `controlModeSetter`.
     lazy var autoTrustWorktreesSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setAutoTrustWorktrees(enabled: enabled) }
+    /// How the automatic Notes preference is persisted — injectable for the
+    /// same reason as `controlModeSetter`.
+    lazy var autoCreateNotesSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setAutoCreateNotes(enabled: enabled) }
     /// How `setQueuedPromptEnabled` persists the queued-prompt soak flag —
     /// injectable for the same reason as `controlModeSetter`.
     lazy var queuedPromptFlagSetter: @MainActor (Bool) async throws -> Void =

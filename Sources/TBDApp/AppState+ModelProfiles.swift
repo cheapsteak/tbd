@@ -16,7 +16,7 @@ extension AppState {
     /// Refresh the full model profile list and global default ID from the daemon.
     func loadModelProfiles() async {
         do {
-            let result = try await daemonClient.listModelProfiles()
+            let result = try await modelProfilesFetcher()
             if result.profiles != modelProfiles {
                 modelProfiles = result.profiles
             }
@@ -37,6 +37,9 @@ extension AppState {
             }
             if result.gcEnabled != gcEnabled {
                 gcEnabled = result.gcEnabled
+            }
+            if result.autoCreateNotesEnabled != autoCreateNotesEnabled {
+                autoCreateNotesEnabled = result.autoCreateNotesEnabled
             }
             if result.nightwatchMode != nightwatchMode {
                 nightwatchMode = result.nightwatchMode
@@ -202,6 +205,17 @@ extension AppState {
         } catch {
             logger.error("Failed to set gcEnabled: \(error, privacy: .public)")
             showAlert("Failed to update GC setting: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Set whether ordinary new worktrees start with an empty Notes tab.
+    func setAutoCreateNotesEnabled(_ enabled: Bool) async {
+        do {
+            try await autoCreateNotesSetter(enabled)
+            autoCreateNotesEnabled = enabled
+        } catch {
+            logger.error("Failed to set automatic Notes creation: \(error, privacy: .public)")
+            showAlert("Failed to update Notes setting: \(error.localizedDescription)", isError: true)
         }
     }
 
