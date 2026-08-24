@@ -777,16 +777,6 @@ extension RPCRouter {
             target: .local(worktree: worktree.id, terminal: plannedTerminalID),
             agent: (entry.kind ?? .shell).rawValue)
 
-        do {
-            _ = try await tmux.ensureServer(
-                server: worktree.tmuxServer, session: "main", cwd: worktree.path,
-                cols: resolvedCols, rows: resolvedRows)
-        } catch {
-            await finishActuation(actuationID, .transportFailed, error: "\(error)")
-            throw error
-        }
-        await controlMode?.enableIfGated(serverName: worktree.tmuxServer)
-
         // Claude-kind with a live session id → resume it. Mirrors the
         // archived-session restore spawn in WorktreeLifecycle+Create.
         if entry.kind == .claude, let sessionID = entry.claudeSessionID {

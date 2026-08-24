@@ -344,6 +344,9 @@ import Testing
         #expect(command.contains("/bin/cat"))
         #expect(command.contains(capturePath))
         #expect(command.contains("exec "))
+        #expect(
+            recorder.snapshot().filter { $0.contains("new-session") }.count == 1,
+            "history revive must bootstrap tmux only inside the server-resource lock")
 
         // History row survives revive.
         let entries = try await fx.db.terminalHistory.list(worktreeID: fx.worktree.id)
