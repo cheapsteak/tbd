@@ -220,15 +220,22 @@ public struct WorktreeLifecycle: Sendable {
 
     /// Kill a tmux window, then confirm the pane process actually died and
     /// escalate (SIGTERM→SIGKILL) if it survived the SIGHUP (wedged agent).
-    func killWindowAndReap(server: String, windowID: String, paneID: String) async {
+    /// Returns the kill error description after still attempting escalation.
+    @discardableResult
+    func killWindowAndReap(
+        server: String, windowID: String, paneID: String
+    ) async -> String? {
         let panePID = Int32((try? await tmux.panePID(server: server, paneID: paneID)) ?? "")
+        var killFailure: String?
         do {
             try await tmux.killWindow(server: server, windowID: windowID)
         } catch {
+            killFailure = "\(error)"
             logger.warning("killWindow failed on \(server, privacy: .public) window \(windowID, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
         // Escalate even if killWindow threw — the pane process may still be alive.
         if let panePID { await reaper.escalateAfterHangup(panePID) }
+        return killFailure
     }
 
     /// Capture a live terminal's scrollback into Closed Terminals history

@@ -60,7 +60,10 @@ extension RPCRouter {
         let tmuxServer = TmuxManager.serverName(forRepoPath: repo.path)
         _ = try await db.worktrees.createMain(repoID: repo.id, name: defaultBranch,
                                               branch: defaultBranch, path: path, tmuxServer: tmuxServer)
-        try? await lifecycle.reconcile(repoID: repo.id, actuationLog: actuationLog)
+        try? await lifecycle.reconcile(
+            repoID: repo.id,
+            actuationLog: actuationLog,
+            reapSharedScratchTmuxResources: false)
         subscriptions.broadcast(delta: .repoAdded(RepoDelta(
             repoID: repo.id, path: repo.path, displayName: repo.displayName)))
         return repo

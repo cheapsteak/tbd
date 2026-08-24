@@ -62,10 +62,25 @@ struct PaneSendTargetQueryTests {
             == .live(terminalID: nil))
     }
 
-    @Test("pane_dead=1 is dead regardless of what else the pane answers")
+    @Test("pane_dead=1 retains the pane ownership identity")
     func parseDead() {
         #expect(TmuxManager.parsePaneSendTarget(
-            "%7\t1\tF1A2\t/bin/zsh -ic \"claude\"\n", paneID: "%7") == .dead)
+            "%7\t1\tF1A2\t/bin/zsh -ic \"claude\"\n", paneID: "%7")
+            == .dead(terminalID: "F1A2"))
+    }
+
+    @Test("an unstamped dead pane retains identity from its start command")
+    func parseDeadFallsBackToStartCommand() {
+        let line = "%7\t1\t\t/bin/zsh -ic \"export TBD_TERMINAL_ID='\(Self.plantedID)'; claude\"\n"
+        #expect(TmuxManager.parsePaneSendTarget(line, paneID: "%7")
+            == .dead(terminalID: Self.plantedID))
+    }
+
+    @Test("a legacy dead pane with no planted id has no identity")
+    func parseDeadUnknown() {
+        #expect(TmuxManager.parsePaneSendTarget(
+            "%7\t1\t\t/bin/zsh -ic \"claude\"\n", paneID: "%7")
+            == .dead(terminalID: nil))
     }
 
     @Test("the stamped pane option wins over the start command")
@@ -114,7 +129,8 @@ struct PaneSendTargetQueryTests {
     func parseSelectsLivenessOfNamedPane() {
         let output = "%1\t1\t\tsh\n%2\t0\tMINE\tclaude\n"
         #expect(TmuxManager.parsePaneSendTarget(output, paneID: "%2") == .live(terminalID: "MINE"))
-        #expect(TmuxManager.parsePaneSendTarget(output, paneID: "%1") == .dead)
+        #expect(TmuxManager.parsePaneSendTarget(output, paneID: "%1")
+            == .dead(terminalID: nil))
     }
 
     /// A prefix match is not a match: `%1` must not answer for `%12`.

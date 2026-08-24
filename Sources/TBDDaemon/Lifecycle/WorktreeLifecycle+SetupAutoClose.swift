@@ -52,7 +52,7 @@ extension WorktreeLifecycle {
     /// timeout/killed pane needs no daemon action.
     func finishAutoCloseSetup(worktree: Worktree, setup: PreSessionSpawn) async {
         let outcome = await waitForPreSessionCompletion(
-            preSession: setup, tmuxServer: worktree.tmuxServer
+            preSession: setup, tmuxServer: setup.tmuxServer
         )
         // The marker must never outlive the wait, whatever the outcome.
         try? FileManager.default.removeItem(atPath: setup.markerPath)
@@ -62,6 +62,7 @@ extension WorktreeLifecycle {
             logger.info("setup hook completed cleanly for worktree \(worktree.id, privacy: .public) — closing its tab")
             await closeHookTerminal(
                 worktree: worktree,
+                tmuxServer: setup.tmuxServer,
                 terminalID: setup.terminalID,
                 windowID: setup.windowID
             )

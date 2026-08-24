@@ -198,7 +198,8 @@ struct ActuationTarget: Codable, Sendable, Equatable {
     /// live row references it any more, and an orphaned window is swept
     /// precisely because no terminal row claims it — so neither has a worktree
     /// or terminal to name, and the coordinates that DO identify them are the
-    /// server name, the window id, and the repo whose sweep found them.
+    /// server name and the window id. Repo-initiated sweeps also name the repo
+    /// that found them; scratch-only sweeps have no repo to record.
     var server: String?
     var window: String?
     var repo: String?
@@ -211,10 +212,10 @@ struct ActuationTarget: Codable, Sendable, Equatable {
         ActuationTarget(provider: provider, session: session)
     }
 
-    /// A whole tmux server, or one untracked window on it, found by the
-    /// reconcile sweep of `repo`.
-    static func tmux(server: String, window: String? = nil, repo: UUID) -> ActuationTarget {
-        ActuationTarget(server: server, window: window, repo: repo.uuidString)
+    /// A whole tmux server, or one untracked window on it, found by a reconcile
+    /// sweep. `repo` is absent when the scratch-only startup sweep found it.
+    static func tmux(server: String, window: String? = nil, repo: UUID?) -> ActuationTarget {
+        ActuationTarget(server: server, window: window, repo: repo?.uuidString)
     }
 }
 

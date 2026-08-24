@@ -143,7 +143,11 @@ extension WorktreeLifecycle {
     /// which is exactly the "helper ignores its caller's injected seam" shape.
     /// Fail-closed here means skipping the individual act — the daemon still
     /// boots, and the orphan waits for a writable log and the next sweep.
-    public func reconcile(repoID: UUID, actuationLog: ActuationLog) async throws {
+    public func reconcile(
+        repoID: UUID,
+        actuationLog: ActuationLog,
+        reapSharedScratchTmuxResources: Bool
+    ) async throws {
         // Null out parent pointers whose target is missing OR archived. Either
         // case would leave the child unreachable in the sidebar — missing rows
         // can't render, and archived parents are filtered out of the subtree
@@ -186,14 +190,21 @@ extension WorktreeLifecycle {
         // was built for.
         let mainWorktrees = try await db.worktrees.listLocal(repoID: repoID, status: .main)
         for wt in (dbWorktrees + mainWorktrees) where wt.tmuxServer != correctTmuxServer {
-            if await hasLiveWindow(server: wt.tmuxServer, worktreeID: wt.id) {
-                logger.info("reconcile: keeping non-canonical tmux server \(wt.tmuxServer, privacy: .public) for worktree \(wt.id, privacy: .public) — it has live windows (promoted-scratch inheritance)")
-                continue
-            }
-            do {
-                try await db.worktrees.updateTmuxServer(id: wt.id, tmuxServer: correctTmuxServer)
-            } catch {
-                logger.warning("reconcile: failed to update tmux server for worktree \(wt.id, privacy: .public): \(error, privacy: .public)")
+            try await tmux.withServerResourceLock(server: wt.tmuxServer) {
+                // A concurrent reconciliation may have already moved this row
+                // while we waited. Only judge the server whose lock we hold.
+                guard let current = try await db.worktrees.getLocal(id: wt.id),
+                      current.tmuxServer == wt.tmuxServer else { return }
+                if await hasLiveWindow(server: current.tmuxServer, worktreeID: current.id) {
+                    logger.info("reconcile: keeping non-canonical tmux server \(current.tmuxServer, privacy: .public) for worktree \(current.id, privacy: .public) — it has live windows (promoted-scratch inheritance)")
+                    return
+                }
+                do {
+                    try await db.worktrees.updateTmuxServer(
+                        id: current.id, tmuxServer: correctTmuxServer)
+                } catch {
+                    logger.warning("reconcile: failed to update tmux server for worktree \(current.id, privacy: .public): \(error, privacy: .public)")
+                }
             }
         }
         // Re-fetch with corrected names
@@ -235,36 +246,39 @@ extension WorktreeLifecycle {
         // is best-effort (a dead window/pane just logs and skips). The archived
         // row and its history rows survive, so the output stays readable.
         for wt in dbWorktrees where !gitPaths.contains(wt.path) {
-            let terminals = try await db.terminals.list(worktreeID: wt.id)
-            var recordedEveryKill = true
-            for terminal in terminals {
-                var row = ActuationRow(
-                    actor: .daemon(rail: ActuationRail.reconcile), kind: .dispose)
-                row.target = .local(worktree: wt.id, terminal: terminal.id)
-                guard let actuationID = try? await actuationLog.appendRequest(row) else {
-                    recordedEveryKill = false
-                    continue
+            try await tmux.withWorktreeServerLock(
+                db: db, worktreeID: wt.id, allowedStatuses: [wt.status]
+            ) { current in
+                let terminals = try await db.terminals.list(worktreeID: current.id)
+                var recordedEveryKill = true
+                for terminal in terminals {
+                    var row = ActuationRow(
+                        actor: .daemon(rail: ActuationRail.reconcile), kind: .dispose)
+                    row.target = .local(worktree: current.id, terminal: terminal.id)
+                    guard let actuationID = try? await actuationLog.appendRequest(row) else {
+                        recordedEveryKill = false
+                        continue
+                    }
+                    await captureThenKillWindow(
+                        terminal: terminal, server: current.tmuxServer)
+                    await actuationLog.appendOutcome(
+                        confirms: actuationID, result: .dispatched)
                 }
-                await captureThenKillWindow(terminal: terminal, server: wt.tmuxServer)
-                await actuationLog.appendOutcome(confirms: actuationID, result: .dispatched)
+                // A kill that could not be recorded did not happen, so the
+                // rows still pointing at those windows must survive too.
+                guard recordedEveryKill else {
+                    logger.warning("reconcile: leaving \(current.id, privacy: .public) for the next sweep — the actuation record is unwritable, so its windows were not killed")
+                    return
+                }
+                try await db.terminals.deleteForWorktree(worktreeID: current.id)
+                try await db.tabs.deleteForWorktree(worktreeID: current.id)
+                for terminal in terminals {
+                    await pendingQuestions.clear(terminalID: terminal.id)
+                    ClaudeHookOverlay.removePerSessionOverlay(
+                        sessionKey: terminal.id.uuidString)
+                }
+                try await db.worktrees.archive(id: current.id)
             }
-            // A kill that could not be recorded did not happen, so the rows that
-            // still point at those windows must not be torn down either — that
-            // would archive the worktree and leave its live windows unreachable.
-            // Leave the whole worktree for the next sweep instead.
-            guard recordedEveryKill else {
-                logger.warning("reconcile: leaving \(wt.id, privacy: .public) for the next sweep — the actuation record is unwritable, so its windows were not killed")
-                continue
-            }
-            try await db.terminals.deleteForWorktree(worktreeID: wt.id)
-            try await db.tabs.deleteForWorktree(worktreeID: wt.id)
-            for terminal in terminals {
-                await pendingQuestions.clear(terminalID: terminal.id)
-                // Reclaim any per-session fallbackModel overlay (keyed by terminal
-                // id), mirroring handleTerminalDelete. No-op when none was written.
-                ClaudeHookOverlay.removePerSessionOverlay(sessionKey: terminal.id.uuidString)
-            }
-            try await db.worktrees.archive(id: wt.id)
         }
 
         // Add unknown worktrees (skip the main repo worktree).
@@ -302,97 +316,9 @@ extension WorktreeLifecycle {
             )
         }
 
-        // Reconcile terminals whose tmux window is gone. A window can vanish two
-        // ways: its specific window died while the server is still up, or the
-        // whole server is gone after a reboot/long sleep. BOTH are handled the
-        // same way — park resumable Claude sessions and let the user bring them
-        // back on demand via wake (HibernationCoordinator.wake, the single
-        // unified resume path; see #285 for the dead-server bootstrap history).
-        //
-        // We deliberately do NOT eagerly recreate terminals on reboot: on a
-        // machine with many worktrees that spawned N simultaneous `claude
-        // --resume` processes (~0.5-1.5 GB each) and OOM'd the machine (#284).
-        // Lazy recreate-on-demand keeps idle worktrees as cheap suspended rows.
         let allLiveWorktrees = try await db.worktrees.listLocal(repoID: repoID, status: .active)
             + (try await db.worktrees.listLocal(repoID: repoID, status: .main))
-        // Probe the server each worktree row actually STORES, not the
-        // canonical name: after a scratch promote the main worktree's windows
-        // live on the inherited scratch server, and probing the canonical
-        // (empty) server would declare every live window dead. Cached per
-        // server name — rows overwhelmingly share one server.
-        var serverAliveByName: [String: Bool] = [:]
-        for wt in allLiveWorktrees {
-            let serverAlive: Bool
-            if let cached = serverAliveByName[wt.tmuxServer] {
-                serverAlive = cached
-            } else {
-                serverAlive = await tmux.serverExists(server: wt.tmuxServer)
-                serverAliveByName[wt.tmuxServer] = serverAlive
-            }
-            let terminals = try await db.terminals.list(worktreeID: wt.id)
-            // Parked rows (`hibernatedAt` OR legacy `suspendedAt` — see
-            // `isParked`) are skipped: a parked terminal's window being gone
-            // is expected (post-reboot), the row is already exactly what this
-            // pass would produce, and re-evaluating it would refresh the park
-            // timestamp or, worse, DELETE a parked non-Claude-resumable row.
-            for terminal in terminals where !terminal.isParked {
-                // After a reboot the server is gone, so every window is dead;
-                // otherwise probe the specific window. (Split across statements
-                // because `&&` builds an autoclosure that can't contain `await`.)
-                var windowAlive = false
-                if serverAlive {
-                    windowAlive = await tmux.windowExists(server: wt.tmuxServer, windowID: terminal.tmuxWindowID)
-                }
-                guard !windowAlive else { continue }
-
-                // Extra safety: If this is a Claude-resumable terminal, double-check
-                // that the process is truly gone before parking. If Claude is still
-                // running, leave the terminal active — the next reconcile can reassess.
-                if terminal.isClaudeResumable {
-                    if let cmd = try? await tmux.paneCurrentCommand(server: wt.tmuxServer, paneID: terminal.tmuxPaneID),
-                       ClaudeStateDetector.isClaudeProcess(cmd) {
-                        // Claude is still running in this pane despite windowExists returning false.
-                        // This shouldn't happen, but don't park if it's true.
-                        logger.warning("reconcile: terminal \(terminal.id, privacy: .public) window marked dead but claude process still running — skipping park")
-                        continue
-                    }
-                }
-
-                if terminal.isClaudeResumable, let sessionID = terminal.claudeSessionID {
-                    // Resumable Claude session: park it. The unified park/wake
-                    // machinery rebuilds a window from the session ID on demand.
-                    // Deleting here would orphan the transcript and the session
-                    // would vanish from TBD. Write the authoritative `hibernatedAt`
-                    // column so `wake()` (which un-parks any parked row) can resume it.
-                    //
-                    // This park bypasses `HibernationCoordinator` entirely, so it
-                    // is this sweep's own act and carries this sweep's own row.
-                    // Fail-closed: an unrecordable park is skipped and the row
-                    // stays as it is for the next sweep.
-                    var row = ActuationRow(
-                        actor: .daemon(rail: ActuationRail.reconcile), kind: .hibernate)
-                    row.target = .local(worktree: wt.id, terminal: terminal.id)
-                    guard let actuationID = try? await actuationLog.appendRequest(row) else {
-                        logger.warning("reconcile: skipped parking terminal \(terminal.id, privacy: .public) — the actuation record is unwritable")
-                        continue
-                    }
-                    do {
-                        try await db.terminals.setHibernated(id: terminal.id, sessionID: sessionID, reason: .recovery)
-                        await actuationLog.appendOutcome(
-                            confirms: actuationID, result: .dispatched)
-                    } catch {
-                        await actuationLog.appendOutcome(
-                            confirms: actuationID, result: .transportFailed, error: "\(error)")
-                    }
-                    logger.info("reconcile: parked terminal \(terminal.id, privacy: .public) — window \(terminal.tmuxWindowID, privacy: .public) gone, session \(sessionID, privacy: .public) preserved, wakeable via the unified resume path")
-                } else {
-                    // Plain shell / Codex: nothing resumable to preserve, delete.
-                    try? await db.terminals.delete(id: terminal.id)
-                    logger.info("reconcile: deleted terminal \(terminal.id, privacy: .public) — window \(terminal.tmuxWindowID, privacy: .public) gone, no session to preserve")
-                }
-                await pendingQuestions.clear(terminalID: terminal.id)
-            }
-        }
+        try await reconcileTerminals(in: allLiveWorktrees, actuationLog: actuationLog)
 
         // Clean up orphaned tmux windows and dead servers. This must cover
         // every server actually referenced by the repo's worktree rows, not
@@ -432,88 +358,36 @@ extension WorktreeLifecycle {
         let repoRows = try await db.worktrees.listLocal(repoID: repoID)
         var referencedServers = Set(repoRows.map(\.tmuxServer))
         referencedServers.insert(correctTmuxServer)
-        // Also visit every server referenced by scratch rows (repoID nil,
-        // archived included — the retired promoted-scratch row is often the
-        // LAST pointer). Scratch spaces belong to no repo, so no per-repo
-        // visit set would otherwise ever include their shared server once the
-        // repo-side pointer is gone: `repo.remove` on a promoted repo
+        // Full recovery also visits every server referenced by scratch rows
+        // (repoID nil, archived included — the retired promoted-scratch row is
+        // often the LAST pointer). Scratch spaces belong to no repo, so no
+        // per-repo visit set would otherwise ever include their shared server
+        // once the repo-side pointer is gone: `repo.remove` on a promoted repo
         // hard-deletes its main worktree row (deleteForRepo) — the only repo
-        // row referencing the inherited scratch server — leaving that
-        // server, and the removed repo's still-running windows on it,
-        // reachable by no reconcile at all (#325-class leak). Folding scratch
-        // servers into every repo's reconcile makes whichever repo reconciles
-        // next sweep those orphans; the live-row checks below already span
-        // all repos + scratch spaces, so live scratch windows stay safe.
+        // row referencing the inherited scratch server — leaving that server,
+        // and the removed repo's still-running windows on it, reachable by no
+        // repo reconcile at all (#325-class leak). Callers that are not a full
+        // recovery pass can exclude those shared servers explicitly.
         let scratchRows = try await db.worktrees.listLocal(scratchOnly: true)
-        referencedServers.formUnion(scratchRows.map(\.tmuxServer))
-        let globalLiveRows = try await db.worktrees.listLocal(excludeArchived: true)
-
-        for server in referencedServers.sorted() {
-            let liveRowsOnServer = globalLiveRows.filter { $0.tmuxServer == server }
-            if liveRowsOnServer.isEmpty {
-                // Nothing references this server anymore. Skip silently when
-                // it isn't running (nothing to reap or kill — and archived
-                // rows keep pointing here forever, so this is the steady
-                // state on every later reconcile).
-                guard await tmux.serverExists(server: server) else { continue }
-                // Nothing left names this server — that is why it is being
-                // killed — so the row is identified by what IS known: the
-                // server, and the repo whose sweep found it. The child reap is
-                // part of this one disposal, not a second act.
-                var row = ActuationRow(
-                    actor: .daemon(rail: ActuationRail.reconcile), kind: .dispose)
-                row.target = .tmux(server: server, repo: repoID)
-                guard let actuationID = try? await actuationLog.appendRequest(row) else {
-                    logger.warning("reconcile: skipped killing tmux server \(server, privacy: .public) — the actuation record is unwritable")
-                    continue
-                }
-                await reaper.reapServerChildren(server: server)
-                do {
-                    try await tmux.killServer(server: server)
-                    await actuationLog.appendOutcome(confirms: actuationID, result: .dispatched)
-                } catch {
-                    await actuationLog.appendOutcome(
-                        confirms: actuationID, result: .transportFailed, error: "\(error)")
-                    logger.warning("reconcile: failed to kill tmux server \(server, privacy: .public): \(error, privacy: .public)")
-                }
-            } else {
-                // Collect window IDs tracked by ANY live worktree row on this
-                // server (all repos + scratch), then kill the untracked rest.
-                var trackedWindowIDs: Set<String> = []
-                for wt in liveRowsOnServer {
-                    let terminals = try await db.terminals.list(worktreeID: wt.id)
-                    for t in terminals {
-                        trackedWindowIDs.insert(t.tmuxWindowID)
-                    }
-                }
-
-                do {
-                    let tmuxWindows = try await tmux.listWindows(server: server, session: "main")
-                    for window in tmuxWindows where !trackedWindowIDs.contains(window.windowID) {
-                        // No terminal row claims this window — that is what
-                        // makes it an orphan — so the row names the server, the
-                        // window and the sweeping repo.
-                        var row = ActuationRow(
-                            actor: .daemon(rail: ActuationRail.reconcile), kind: .dispose)
-                        row.target = .tmux(
-                            server: server, window: window.windowID, repo: repoID)
-                        guard let actuationID = try? await actuationLog.appendRequest(row) else {
-                            logger.warning("reconcile: skipped sweeping orphan window \(window.windowID, privacy: .public) on \(server, privacy: .public) — the actuation record is unwritable")
-                            continue
-                        }
-                        await killWindowAndReap(
-                            server: server,
-                            windowID: window.windowID,
-                            paneID: window.paneID
-                        )
-                        await actuationLog.appendOutcome(
-                            confirms: actuationID, result: .dispatched)
-                    }
-                } catch {
-                    logger.warning("reconcile: failed to list tmux windows for server \(server, privacy: .public): \(error, privacy: .public)")
-                }
-            }
+        let scratchServers = Set(scratchRows.map(\.tmuxServer))
+        if reapSharedScratchTmuxResources {
+            referencedServers.formUnion(scratchServers)
+        } else {
+            // Protect current scratch pointers, the deterministic scratch
+            // server, and inherited noncanonical repo servers whose retired
+            // scratch source row may already be gone. Reinsert the repo's
+            // canonical server last so its ordinary orphan cleanup still runs.
+            let canonicalScratchServer = TmuxManager.serverName(
+                forRepoPath: TBDConstants.scratchDir.path)
+            let inheritedServers = Set(
+                repoRows.map(\.tmuxServer).filter { $0 != correctTmuxServer })
+            referencedServers.subtract(scratchServers)
+            referencedServers.remove(canonicalScratchServer)
+            referencedServers.subtract(inheritedServers)
+            referencedServers.insert(correctTmuxServer)
         }
+        try await reconcileTmuxResources(
+            servers: referencedServers, sweepingRepoID: repoID, actuationLog: actuationLog)
 
         // Recompute health so the next call sees the right status. A repo that
         // just transitioned ok→missing here would otherwise stay ok in memory
@@ -529,6 +403,257 @@ extension WorktreeLifecycle {
             subscriptions?.broadcast(delta: .repoAdded(RepoDelta(
                 repoID: repo.id, path: repo.path, displayName: repo.displayName
             )))
+        }
+    }
+
+    /// Reconcile active scratch-space terminals independently of registered
+    /// repositories. Scratch spaces deliberately share a tmux server, so tmux
+    /// may recycle one pane coordinate after an older scratch row survives.
+    public func reconcileScratchTerminals(
+        actuationLog: ActuationLog,
+        reapOrphanTmuxResources: Bool
+    ) async throws {
+        let scratchWorktrees = try await db.worktrees.listLocal(
+            status: .active, scratchOnly: true)
+        try await reconcileTerminals(in: scratchWorktrees, actuationLog: actuationLog)
+
+        // Hourly maintenance requests ownership repair only. Startup and
+        // explicit cleanup also request external-resource recovery; that
+        // destructive pass serializes with terminal creation per server.
+        guard reapOrphanTmuxResources else { return }
+
+        // Scratch rows have no repo, so the per-repo pass cannot be relied on
+        // to visit their servers — particularly on installations with zero
+        // registered repos. Prune stale terminal owners first, then let the
+        // shared global-row sweep reclaim only windows nobody still owns.
+        let allScratchWorktrees = try await db.worktrees.listLocal(scratchOnly: true)
+        try await reconcileTmuxResources(
+            servers: Set(allScratchWorktrees.map(\.tmuxServer)),
+            sweepingRepoID: nil,
+            actuationLog: actuationLog
+        )
+    }
+
+    /// Reclaim tmux resources on the requested servers using ownership from
+    /// every live local worktree row. A repo-initiated sweep records that repo;
+    /// a scratch-only sweep has no repo to name and leaves it absent.
+    private func reconcileTmuxResources(
+        servers: Set<String>, sweepingRepoID: UUID?, actuationLog: ActuationLog
+    ) async throws {
+        for server in servers.sorted() {
+            try await tmux.withServerResourceLock(server: server) {
+                // Ownership must be read only after acquiring the same lock a
+                // creator holds through its terminal-row commit.
+                let globalLiveRows = try await db.worktrees.listLocal(excludeArchived: true)
+                let liveRowsOnServer = globalLiveRows.filter { $0.tmuxServer == server }
+                if liveRowsOnServer.isEmpty {
+                    // Nothing references this server anymore. Skip silently
+                    // when it isn't running (nothing to reap or kill — and
+                    // archived rows keep pointing here forever, so this is
+                    // the steady state on every later reconcile).
+                    guard await tmux.serverExists(server: server) else { return }
+                    // Nothing left names this server — that is why it is being
+                    // killed — so the row is identified by what IS known: the
+                    // server, and the repo whose sweep found it when there is
+                    // one. The child reap is part of this disposal, not a
+                    // second act.
+                    var row = ActuationRow(
+                        actor: .daemon(rail: ActuationRail.reconcile), kind: .dispose)
+                    row.target = .tmux(server: server, repo: sweepingRepoID)
+                    guard let actuationID = try? await actuationLog.appendRequest(row) else {
+                        logger.warning("reconcile: skipped killing tmux server \(server, privacy: .public) — the actuation record is unwritable")
+                        return
+                    }
+                    await reaper.reapServerChildren(server: server)
+                    do {
+                        try await tmux.killServer(server: server)
+                        await actuationLog.appendOutcome(
+                            confirms: actuationID, result: .dispatched)
+                    } catch {
+                        await actuationLog.appendOutcome(
+                            confirms: actuationID,
+                            result: .transportFailed,
+                            error: "\(error)")
+                        logger.warning("reconcile: failed to kill tmux server \(server, privacy: .public): \(error, privacy: .public)")
+                    }
+                } else {
+                    // Collect window IDs tracked by ANY live worktree row on
+                    // this server (all repos + scratch), then kill the
+                    // untracked rest.
+                    var trackedWindowIDs: Set<String> = []
+                    for wt in liveRowsOnServer {
+                        let terminals = try await db.terminals.list(worktreeID: wt.id)
+                        for terminal in terminals {
+                            trackedWindowIDs.insert(terminal.tmuxWindowID)
+                        }
+                    }
+
+                    do {
+                        let tmuxWindows = try await tmux.listWindows(
+                            server: server, session: "main")
+                        for window in tmuxWindows
+                        where !trackedWindowIDs.contains(window.windowID) {
+                            // No terminal row claims this window — that is what
+                            // makes it an orphan — so the row names the server,
+                            // window, and sweeping repo when there is one.
+                            var row = ActuationRow(
+                                actor: .daemon(rail: ActuationRail.reconcile), kind: .dispose)
+                            row.target = .tmux(
+                                server: server,
+                                window: window.windowID,
+                                repo: sweepingRepoID)
+                            guard let actuationID = try? await actuationLog.appendRequest(row) else {
+                                logger.warning("reconcile: skipped sweeping orphan window \(window.windowID, privacy: .public) on \(server, privacy: .public) — the actuation record is unwritable")
+                                continue
+                            }
+                            let killFailure = await killWindowAndReap(
+                                server: server,
+                                windowID: window.windowID,
+                                paneID: window.paneID
+                            )
+                            if let killFailure {
+                                await actuationLog.appendOutcome(
+                                    confirms: actuationID,
+                                    result: .transportFailed,
+                                    error: killFailure)
+                            } else {
+                                await actuationLog.appendOutcome(
+                                    confirms: actuationID, result: .dispatched)
+                            }
+                        }
+                    } catch {
+                        logger.warning("reconcile: failed to list tmux windows for server \(server, privacy: .public): \(error, privacy: .public)")
+                    }
+                }
+            }
+        }
+    }
+
+    /// Reconcile terminals whose tmux window is gone or no longer belongs to
+    /// their database row. Both cases use the same established outcomes: park
+    /// resumable Claude sessions and delete non-resumable Codex/shell rows.
+    ///
+    /// We deliberately do NOT eagerly recreate terminals on reboot: on a
+    /// machine with many worktrees that spawned N simultaneous `claude
+    /// --resume` processes (~0.5-1.5 GB each) and OOM'd the machine (#284).
+    /// Lazy recreate-on-demand keeps idle worktrees as cheap suspended rows.
+    private func reconcileTerminals(
+        in worktrees: [LocalWorktree], actuationLog: ActuationLog
+    ) async throws {
+        let grouped = Dictionary(grouping: worktrees, by: \.tmuxServer)
+        for server in grouped.keys.sorted() {
+            let candidates = grouped[server] ?? []
+            try await tmux.withServerResourceLock(server: server) {
+                var currentWorktrees: [LocalWorktree] = []
+                for candidate in candidates {
+                    guard let current = try await db.worktrees.getLocal(id: candidate.id),
+                          current.tmuxServer == server else { continue }
+                    currentWorktrees.append(current)
+                }
+                try await reconcileTerminalsWhileLocked(
+                    in: currentWorktrees, actuationLog: actuationLog)
+            }
+        }
+    }
+
+    /// Ownership probing while the caller holds the server resource lock.
+    private func reconcileTerminalsWhileLocked(
+        in worktrees: [LocalWorktree], actuationLog: ActuationLog
+    ) async throws {
+        // Probe the server each worktree row actually stores, not a canonical
+        // name. Promoted scratch worktrees keep their inherited scratch server.
+        // Cached per server name — rows overwhelmingly share one server.
+        var serverAliveByName: [String: Bool] = [:]
+        for wt in worktrees {
+            let serverAlive: Bool
+            if let cached = serverAliveByName[wt.tmuxServer] {
+                serverAlive = cached
+            } else {
+                serverAlive = await tmux.serverExists(server: wt.tmuxServer)
+                serverAliveByName[wt.tmuxServer] = serverAlive
+            }
+            let terminals = try await db.terminals.list(worktreeID: wt.id)
+            // Parked rows (`hibernatedAt` OR legacy `suspendedAt` — see
+            // `isParked`) are skipped: a parked terminal's window being gone
+            // is expected, and the row is already exactly what this pass would
+            // produce.
+            for terminal in terminals where !terminal.isParked {
+                var windowAlive = false
+                if serverAlive {
+                    windowAlive = await tmux.windowExists(
+                        server: wt.tmuxServer, windowID: terminal.tmuxWindowID)
+                }
+
+                if windowAlive {
+                    do {
+                        switch try await tmux.paneSendTarget(
+                            server: wt.tmuxServer, paneID: terminal.tmuxPaneID)
+                        {
+                        case .live(let paneTerminalID), .dead(let paneTerminalID):
+                            if let paneTerminalID {
+                                let paneBelongsToDifferentTerminal =
+                                    paneTerminalID.caseInsensitiveCompare(
+                                        terminal.id.uuidString) != .orderedSame
+                                if !paneBelongsToDifferentTerminal { continue }
+                            } else {
+                                // Panes predating the identity stamp remain
+                                // attributed for backward compatibility.
+                                continue
+                            }
+                        case .missing:
+                            break
+                        }
+                    } catch {
+                        // An unreadable identity is not evidence of staleness.
+                        // Keep the row and let a later sweep retry the probe.
+                        logger.warning("reconcile: failed to inspect pane ownership for terminal \(terminal.id, privacy: .public): \(error, privacy: .public)")
+                        continue
+                    }
+                }
+
+                // Preserve the existing extra safety when the window probe
+                // itself says a Claude window is gone: if Claude is still
+                // running, retain the row. A pane that answered `.missing` or
+                // with another terminal's identity is already definitive, so
+                // never inspect its current command. An owned dead pane
+                // continued above because remain-on-exit makes it an intended
+                // readable gravestone.
+                if terminal.isClaudeResumable && !windowAlive {
+                    if let cmd = try? await tmux.paneCurrentCommand(
+                        server: wt.tmuxServer, paneID: terminal.tmuxPaneID),
+                       ClaudeStateDetector.isClaudeProcess(cmd) {
+                        logger.warning("reconcile: terminal \(terminal.id, privacy: .public) window marked dead but claude process still running — skipping park")
+                        continue
+                    }
+                }
+
+                if terminal.isClaudeResumable, let sessionID = terminal.claudeSessionID {
+                    // This park bypasses `HibernationCoordinator`, so the
+                    // reconcile rail records its own independent actuation.
+                    // Fail closed if that authoritative record cannot be made.
+                    var row = ActuationRow(
+                        actor: .daemon(rail: ActuationRail.reconcile), kind: .hibernate)
+                    row.target = .local(worktree: wt.id, terminal: terminal.id)
+                    guard let actuationID = try? await actuationLog.appendRequest(row) else {
+                        logger.warning("reconcile: skipped parking terminal \(terminal.id, privacy: .public) — the actuation record is unwritable")
+                        continue
+                    }
+                    do {
+                        try await db.terminals.setHibernated(
+                            id: terminal.id, sessionID: sessionID, reason: .recovery)
+                        await actuationLog.appendOutcome(
+                            confirms: actuationID, result: .dispatched)
+                    } catch {
+                        await actuationLog.appendOutcome(
+                            confirms: actuationID, result: .transportFailed, error: "\(error)")
+                    }
+                    logger.info("reconcile: parked terminal \(terminal.id, privacy: .public) — window \(terminal.tmuxWindowID, privacy: .public) gone or reassigned, session \(sessionID, privacy: .public) preserved, wakeable via the unified resume path")
+                } else {
+                    try? await db.deleteTerminalAndTab(id: terminal.id)
+                    logger.info("reconcile: deleted terminal \(terminal.id, privacy: .public) — window \(terminal.tmuxWindowID, privacy: .public) gone or reassigned, no session to preserve")
+                }
+                await pendingQuestions.clear(terminalID: terminal.id)
+            }
         }
     }
 

@@ -67,7 +67,7 @@ struct WorktreeReconcileOverlayCleanupTests {
         #expect(overlayPath != ClaudeHookOverlay.overlayPath)
         #expect(FileManager.default.fileExists(atPath: overlayPath))
 
-        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
 
         // Worktree archived AND its per-session overlay reclaimed.
         let reloaded = try await db.worktrees.get(id: wt.id)

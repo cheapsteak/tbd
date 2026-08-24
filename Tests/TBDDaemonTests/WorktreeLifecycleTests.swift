@@ -746,7 +746,7 @@ import Testing
 
     let windowIDsBefore = Set(terminalsBefore.map { $0.tmuxWindowID })
 
-    try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
+    try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
 
     let terminalsAfter = try await db.terminals.list(worktreeID: wt.id)
     #expect(terminalsAfter.count == 2, "Alive terminals must not be deleted during reconcile")
@@ -759,6 +759,55 @@ import Testing
     // Since serverExists → true and windowExists → true, the alive-window branch
     // is taken and IDs are NOT touched (the terminal is left running as-is).
     #expect(windowIDsAfter == windowIDsBefore, "Window IDs must be unchanged when server and windows are alive")
+}
+
+@Test func testReconcileOwnedDeadRepoTerminalRemainsTrackedThroughResourceSweep() async throws {
+    let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let terminalID = UUID()
+    let server = TmuxManager.serverName(forRepoPath: repoDir.path)
+    let recorded = LockedCommandRecorder()
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: GitManager(),
+        tmux: TmuxManager(
+            dryRun: true,
+            dryRunRecorder: recorded.append,
+            dryRunListWindows: { probed, _ in
+                probed == server ? [(windowID: "@1", paneID: "%1")] : []
+            },
+            dryRunPaneSendTarget: { _, _ in
+                .dead(terminalID: terminalID.uuidString.lowercased())
+            }),
+        hooks: HookResolver())
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+    let main = try await db.worktrees.createMain(
+        repoID: repo.id,
+        name: "main",
+        branch: "main",
+        path: repoDir.path,
+        tmuxServer: server)
+    let terminal = try await db.terminals.create(
+        id: terminalID,
+        worktreeID: main.id,
+        tmuxWindowID: "@1",
+        tmuxPaneID: "%1",
+        label: "Shell",
+        kind: .shell)
+    try await db.tabs.setLabel(
+        tabID: terminal.id, worktreeID: main.id, label: "Finished output")
+
+    try await lifecycle.reconcile(
+        repoID: repo.id,
+        actuationLog: makeTestActuationLog(),
+        reapSharedScratchTmuxResources: true)
+
+    #expect(try await db.terminals.get(id: terminal.id) != nil)
+    #expect(try await db.tabs.listForWorktree(worktreeID: main.id)
+            .first(where: { $0.id == terminal.id })?.label == "Finished output")
+    #expect(!recorded.snapshot().contains { $0.contains("kill-window") })
 }
 
 /// Suspended terminals must not be touched during reconcile, regardless of server/window state.
@@ -791,7 +840,7 @@ import Testing
     let suspendedBefore = try await db.terminals.get(id: suspended.id)
     #expect(suspendedBefore?.suspendedAt != nil, "Terminal should have suspendedAt set")
 
-    try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
+    try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
 
     // All terminals must still exist after reconcile.
     terminals = try await db.terminals.list(worktreeID: wt.id)
@@ -846,7 +895,7 @@ import Testing
     )
     try await db.terminals.setHibernated(id: codex.id, sessionID: "sess-codex")
 
-    try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
+    try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
 
     let claudeAfter = try await db.terminals.get(id: claude.id)
     #expect(claudeAfter != nil, "hibernated claude terminal must survive reconcile")
@@ -890,7 +939,7 @@ import Testing
     // In dryRun mode, serverExists → true (not the reboot path).
     // windowExists → true for any ID, so the stale window is treated as alive.
     // Result: the terminal record must NOT be deleted (no dead-window deletion).
-    try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
+    try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
 
     let terminalsAfter = try await db.terminals.list(worktreeID: wt.id)
     #expect(terminalsAfter.count == 2, "Terminal with stale window ID must survive when server is alive (dryRun)")

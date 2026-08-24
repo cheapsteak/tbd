@@ -147,21 +147,6 @@ extension RPCRouter {
             prompt: params.prompt,
             agent: (params.type ?? .shell).rawValue)
 
-        // Ensure tmux server exists before creating window
-        do {
-            _ = try await tmux.ensureServer(
-                server: worktree.tmuxServer,
-                session: "main",
-                cwd: worktree.path,
-                cols: resolvedCols,
-                rows: resolvedRows
-            )
-        } catch {
-            await finishActuation(actuationID, .transportFailed, error: "\(error)")
-            throw error
-        }
-        await controlMode?.enableIfGated(serverName: worktree.tmuxServer)
-
         // Look up repo once for system prompt env vars and Claude session setup
         let repo: Repo?
         if let rid = worktree.repoID {
@@ -232,30 +217,51 @@ extension RPCRouter {
                 repo: repo?.envOverrides,
                 profile: nil
             ).merging(["DISABLE_AUTO_UPDATE": "true"]) { _, forced in forced }
+            let codexSpawnEnv = codexEnv
             let terminal = try await actuating(actuationID) {
-                let window = try await tmux.createWindow(
-                    server: worktree.tmuxServer,
-                    session: "main",
-                    cwd: worktree.path,
-                    shellCommand: CodexSpawnCommandBuilder.build(
-                        initialPrompt: params.prompt,
-                        executablePath: codexPreparation.executablePath),
-                    env: codexEnv,
-                    sensitiveEnv: codexEnvOverrides,
-                    cols: resolvedCols,
-                    rows: resolvedRows
-                )
+                try await tmux.withWorktreeServerLock(
+                    db: db, worktreeID: params.worktreeID,
+                    allowedStatuses: [worktree.status]
+                ) { currentWorktree in
+                    _ = try await tmux.ensureServer(
+                        server: currentWorktree.tmuxServer,
+                        session: "main",
+                        cwd: currentWorktree.path,
+                        cols: resolvedCols,
+                        rows: resolvedRows)
+                    await self.controlMode?.enableIfGated(
+                        serverName: currentWorktree.tmuxServer)
+                    let window = try await tmux.createWindow(
+                        server: currentWorktree.tmuxServer,
+                        session: "main",
+                        cwd: currentWorktree.path,
+                        shellCommand: CodexSpawnCommandBuilder.build(
+                            initialPrompt: params.prompt,
+                            executablePath: codexPreparation.executablePath),
+                        env: codexSpawnEnv,
+                        sensitiveEnv: codexEnvOverrides,
+                        cols: resolvedCols,
+                        rows: resolvedRows
+                    )
 
-                return try await db.terminals.create(
-                    id: plannedTerminalID,
-                    worktreeID: params.worktreeID,
-                    tmuxWindowID: window.windowID,
-                    tmuxPaneID: window.paneID,
-                    label: TerminalLabel.codex,
-                    claudeSessionID: nil,
-                    profileID: nil,
-                    kind: .codex
-                )
+                    do {
+                        return try await db.terminals.create(
+                            id: plannedTerminalID,
+                            worktreeID: params.worktreeID,
+                            tmuxWindowID: window.windowID,
+                            tmuxPaneID: window.paneID,
+                            label: TerminalLabel.codex,
+                            claudeSessionID: nil,
+                            profileID: nil,
+                            kind: .codex
+                        )
+                    } catch {
+                        try? await tmux.killWindow(
+                            server: currentWorktree.tmuxServer,
+                            windowID: window.windowID)
+                        throw error
+                    }
+                }
             }
 
             subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
@@ -431,29 +437,52 @@ extension RPCRouter {
             primarySensitiveEnv = spawn.sensitiveEnv
         }
         let terminalKind: TerminalKind? = isClaudeType ? .claude : .shell
-        let (window, terminal) = try await actuating(actuationID) {
-            let window = try await tmux.createWindow(
-                server: worktree.tmuxServer,
-                session: "main",
-                cwd: worktree.path,
-                shellCommand: spawn.command,
-                env: env,
-                sensitiveEnv: primarySensitiveEnv,
-                cols: resolvedCols,
-                rows: resolvedRows
-            )
+        let spawnEnv = env
+        let spawnProfileID = resolvedProfile?.profileID
+        let (window, terminal, currentServer) = try await actuating(actuationID) {
+            try await tmux.withWorktreeServerLock(
+                db: db, worktreeID: params.worktreeID,
+                allowedStatuses: [worktree.status]
+            ) { currentWorktree in
+                _ = try await tmux.ensureServer(
+                    server: currentWorktree.tmuxServer,
+                    session: "main",
+                    cwd: currentWorktree.path,
+                    cols: resolvedCols,
+                    rows: resolvedRows)
+                await self.controlMode?.enableIfGated(
+                    serverName: currentWorktree.tmuxServer)
+                let window = try await tmux.createWindow(
+                    server: currentWorktree.tmuxServer,
+                    session: "main",
+                    cwd: currentWorktree.path,
+                    shellCommand: spawn.command,
+                    env: spawnEnv,
+                    sensitiveEnv: primarySensitiveEnv,
+                    cols: resolvedCols,
+                    rows: resolvedRows
+                )
 
-            let terminal = try await db.terminals.create(
-                id: plannedTerminalID,
-                worktreeID: params.worktreeID,
-                tmuxWindowID: window.windowID,
-                tmuxPaneID: window.paneID,
-                label: label,
-                claudeSessionID: claudeSessionID,
-                profileID: resolvedProfile?.profileID,
-                kind: terminalKind
-            )
-            return (window, terminal)
+                let terminal: Terminal
+                do {
+                    terminal = try await db.terminals.create(
+                        id: plannedTerminalID,
+                        worktreeID: params.worktreeID,
+                        tmuxWindowID: window.windowID,
+                        tmuxPaneID: window.paneID,
+                        label: label,
+                        claudeSessionID: claudeSessionID,
+                        profileID: spawnProfileID,
+                        kind: terminalKind
+                    )
+                } catch {
+                    try? await tmux.killWindow(
+                        server: currentWorktree.tmuxServer,
+                        windowID: window.windowID)
+                    throw error
+                }
+                return (window, terminal, currentWorktree.tmuxServer)
+            }
         }
 
         subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
@@ -464,7 +493,7 @@ extension RPCRouter {
             await armLoginSession(
                 terminalID: terminal.id,
                 paneID: window.paneID,
-                server: worktree.tmuxServer,
+                server: currentServer,
                 profile: profile
             )
         }
@@ -748,16 +777,6 @@ extension RPCRouter {
             target: .local(worktree: worktree.id, terminal: plannedTerminalID),
             agent: (entry.kind ?? .shell).rawValue)
 
-        do {
-            _ = try await tmux.ensureServer(
-                server: worktree.tmuxServer, session: "main", cwd: worktree.path,
-                cols: resolvedCols, rows: resolvedRows)
-        } catch {
-            await finishActuation(actuationID, .transportFailed, error: "\(error)")
-            throw error
-        }
-        await controlMode?.enableIfGated(serverName: worktree.tmuxServer)
-
         // Claude-kind with a live session id → resume it. Mirrors the
         // archived-session restore spawn in WorktreeLifecycle+Create.
         if entry.kind == .claude, let sessionID = entry.claudeSessionID {
@@ -896,26 +915,45 @@ extension RPCRouter {
         cols: Int,
         rows: Int
     ) async throws -> Terminal {
-        let window = try await tmux.createWindow(
-            server: worktree.tmuxServer,
-            session: "main",
-            cwd: worktree.localPath,
-            shellCommand: spawnCommand,
-            env: env,
-            sensitiveEnv: sensitiveEnv,
-            cols: cols,
-            rows: rows
-        )
-        let terminal = try await db.terminals.create(
-            id: plannedTerminalID,
-            worktreeID: worktree.id,
-            tmuxWindowID: window.windowID,
-            tmuxPaneID: window.paneID,
-            label: label,
-            claudeSessionID: claudeSessionID,
-            profileID: profileID,
-            kind: kind
-        )
+        let terminal = try await tmux.withWorktreeServerLock(
+            db: db, worktreeID: worktree.id, allowedStatuses: [worktree.status]
+        ) { currentWorktree in
+            _ = try await tmux.ensureServer(
+                server: currentWorktree.tmuxServer,
+                session: "main",
+                cwd: currentWorktree.path,
+                cols: cols,
+                rows: rows)
+            await self.controlMode?.enableIfGated(
+                serverName: currentWorktree.tmuxServer)
+            let window = try await tmux.createWindow(
+                server: currentWorktree.tmuxServer,
+                session: "main",
+                cwd: currentWorktree.path,
+                shellCommand: spawnCommand,
+                env: env,
+                sensitiveEnv: sensitiveEnv,
+                cols: cols,
+                rows: rows
+            )
+            do {
+                return try await db.terminals.create(
+                    id: plannedTerminalID,
+                    worktreeID: currentWorktree.id,
+                    tmuxWindowID: window.windowID,
+                    tmuxPaneID: window.paneID,
+                    label: label,
+                    claudeSessionID: claudeSessionID,
+                    profileID: profileID,
+                    kind: kind
+                )
+            } catch {
+                try? await tmux.killWindow(
+                    server: currentWorktree.tmuxServer,
+                    windowID: window.windowID)
+                throw error
+            }
+        }
         var order = try await db.worktrees.getTabOrder(worktreeID: worktree.id)
         if !order.contains(terminal.id) { order.append(terminal.id) }
         try await db.worktrees.setTabOrder(worktreeID: worktree.id, tabIDs: order)
@@ -1049,23 +1087,8 @@ extension RPCRouter {
             target: .local(worktree: worktree.id, terminal: terminal.id),
             agent: (terminal.kind ?? .shell).rawValue)
 
-        // Kill the old window if it still exists (avoids orphans)
-        try? await tmux.killWindow(server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
-
         let resolvedCols = params.cols ?? TmuxManager.defaultCols
         let resolvedRows = params.rows ?? TmuxManager.defaultRows
-
-        // Ensure tmux server exists
-        try await actuating(actuationID) {
-            _ = try await tmux.ensureServer(
-                server: worktree.tmuxServer,
-                session: "main",
-                cwd: worktree.path,
-                cols: resolvedCols,
-                rows: resolvedRows
-            )
-        }
-        await controlMode?.enableIfGated(serverName: worktree.tmuxServer)
 
         // Branch on terminal kind: codex stays codex; shell/claude become shell
         if terminal.kind == .codex || terminal.label == TerminalLabel.codex {
@@ -1101,61 +1124,72 @@ extension RPCRouter {
                 repo: recreateRepo?.envOverrides,
                 profile: nil
             ).merging(["DISABLE_AUTO_UPDATE": "true"]) { _, forced in forced }
+            let codexRecreateEnv = codexEnv
             let updatedTerminal = try await actuating(actuationID) {
-                // Stage an inert pane without Codex first. `createWindow`
-                // returns after launching its command, so starting Codex here
-                // would let SessionStart race the durable reset below.
-                let window = try await tmux.createWindow(
-                    server: worktree.tmuxServer,
-                    session: "main",
-                    cwd: worktree.path,
-                    shellCommand: "exec /usr/bin/tail -f /dev/null",
-                    env: codexEnv,
-                    cols: resolvedCols,
-                    rows: resolvedRows
-                )
-
-                do {
-                    // The new Codex process does not exist yet. Reset the dead
-                    // process's lifecycle while preserving this tab's Codex
-                    // label and kind, then launch Codex only after the write
-                    // commits. Its first SessionStart can therefore adopt
-                    // lifecycle records written before the hook reaches TBD.
-                    try await db.terminals.replaceRecreatedCodexWindow(
-                        id: params.terminalID,
-                        windowID: window.windowID,
-                        paneID: window.paneID,
-                        // The router's date seam makes this compared activity
-                        // fact deterministic; the store must not mint its own.
-                        at: now())
-                } catch {
-                    // The row still names its previous coordinates, so this
-                    // staging window would otherwise be unowned.
+                try await tmux.withWorktreeServerLock(
+                    db: db, worktreeID: worktree.id,
+                    allowedStatuses: [worktree.status]
+                ) { currentWorktree in
+                    // Kill the old window and rebuild the server while holding
+                    // the same lock reconciliation uses for ownership reads.
                     try? await tmux.killWindow(
-                        server: worktree.tmuxServer, windowID: window.windowID)
-                    throw error
-                }
-
-                do {
-                    try await tmux.respawnWindow(
-                        server: worktree.tmuxServer,
-                        windowID: window.windowID,
-                        cwd: worktree.path,
-                        shellCommand: CodexSpawnCommandBuilder.command(
-                            executablePath: codexPreparation.executablePath),
-                        env: codexEnv,
-                        sensitiveEnv: codexEnvOverrides,
+                        server: currentWorktree.tmuxServer,
+                        windowID: terminal.tmuxWindowID)
+                    _ = try await tmux.ensureServer(
+                        server: currentWorktree.tmuxServer,
+                        session: "main",
+                        cwd: currentWorktree.path,
                         cols: resolvedCols,
                         rows: resolvedRows)
-                } catch {
-                    // The reset row owns these coordinates. Killing the inert
-                    // staging pane leaves a retryable missing-window row; if
-                    // the kill fails, the pane is still tracked, not orphaned.
-                    try? await tmux.killWindow(
-                        server: worktree.tmuxServer, windowID: window.windowID)
-                    throw error
+                    await self.controlMode?.enableIfGated(
+                        serverName: currentWorktree.tmuxServer)
+                    // Stage an inert pane without Codex first. `createWindow`
+                    // returns after launching its command, so starting Codex
+                    // here would let SessionStart race the durable reset below.
+                    let window = try await tmux.createWindow(
+                        server: currentWorktree.tmuxServer,
+                        session: "main",
+                        cwd: currentWorktree.path,
+                        shellCommand: "exec /usr/bin/tail -f /dev/null",
+                        env: codexRecreateEnv,
+                        cols: resolvedCols,
+                        rows: resolvedRows
+                    )
+
+                    do {
+                        // The new Codex process does not exist yet. Reset the
+                        // dead process lifecycle before launching Codex.
+                        try await db.terminals.replaceRecreatedCodexWindow(
+                            id: params.terminalID,
+                            windowID: window.windowID,
+                            paneID: window.paneID,
+                            at: now())
+                    } catch {
+                        try? await tmux.killWindow(
+                            server: currentWorktree.tmuxServer,
+                            windowID: window.windowID)
+                        throw error
+                    }
+
+                    do {
+                        try await tmux.respawnWindow(
+                            server: currentWorktree.tmuxServer,
+                            windowID: window.windowID,
+                            cwd: currentWorktree.path,
+                            shellCommand: CodexSpawnCommandBuilder.command(
+                                executablePath: codexPreparation.executablePath),
+                            env: codexRecreateEnv,
+                            sensitiveEnv: codexEnvOverrides,
+                            cols: resolvedCols,
+                            rows: resolvedRows)
+                    } catch {
+                        try? await tmux.killWindow(
+                            server: currentWorktree.tmuxServer,
+                            windowID: window.windowID)
+                        throw error
+                    }
+                    return try await db.terminals.get(id: params.terminalID)
                 }
-                return try await db.terminals.get(id: params.terminalID)
             }
 
             // Return updated terminal
@@ -1189,25 +1223,48 @@ extension RPCRouter {
                 "TBD_TERMINAL_ID": terminal.id.uuidString,
             ]
             let updatedTerminal = try await actuating(actuationID) {
-                let window = try await tmux.createWindow(
-                    server: worktree.tmuxServer,
-                    session: "main",
-                    cwd: worktree.path,
-                    shellCommand: shell,
-                    env: env,
-                    cols: resolvedCols,
-                    rows: resolvedRows
-                )
+                try await tmux.withWorktreeServerLock(
+                    db: db, worktreeID: worktree.id,
+                    allowedStatuses: [worktree.status]
+                ) { currentWorktree in
+                    try? await tmux.killWindow(
+                        server: currentWorktree.tmuxServer,
+                        windowID: terminal.tmuxWindowID)
+                    _ = try await tmux.ensureServer(
+                        server: currentWorktree.tmuxServer,
+                        session: "main",
+                        cwd: currentWorktree.path,
+                        cols: resolvedCols,
+                        rows: resolvedRows)
+                    await self.controlMode?.enableIfGated(
+                        serverName: currentWorktree.tmuxServer)
+                    let window = try await tmux.createWindow(
+                        server: currentWorktree.tmuxServer,
+                        session: "main",
+                        cwd: currentWorktree.path,
+                        shellCommand: shell,
+                        env: env,
+                        cols: resolvedCols,
+                        rows: resolvedRows
+                    )
 
-                // Update the terminal record with new window/pane IDs and clear stale
-                // Claude metadata — the recreated window runs a plain shell, not Claude.
-                try await db.terminals.updateTmuxIDs(
-                    id: params.terminalID,
-                    windowID: window.windowID,
-                    paneID: window.paneID
-                )
-                try await db.terminals.clearRecreated(id: params.terminalID)
-                return try await db.terminals.get(id: params.terminalID)
+                    do {
+                        // Update the row while the window cannot be mistaken
+                        // for an orphan by reconciliation.
+                        try await db.terminals.updateTmuxIDs(
+                            id: params.terminalID,
+                            windowID: window.windowID,
+                            paneID: window.paneID
+                        )
+                        try await db.terminals.clearRecreated(id: params.terminalID)
+                        return try await db.terminals.get(id: params.terminalID)
+                    } catch {
+                        try? await tmux.killWindow(
+                            server: currentWorktree.tmuxServer,
+                            windowID: window.windowID)
+                        throw error
+                    }
+                }
             }
 
             // Return updated terminal
@@ -1823,27 +1880,48 @@ extension RPCRouter {
         cols: Int,
         rows: Int
     ) async throws -> RPCResponse {
-        let window = try await tmux.createWindow(
-            server: worktree.tmuxServer,
-            session: "main",
-            cwd: worktree.localPath,
-            shellCommand: spawnCommand,
-            env: env,
-            sensitiveEnv: sensitiveEnv,
-            cols: cols,
-            rows: rows
-        )
+        let (newTerminal, window, currentServer) = try await tmux.withWorktreeServerLock(
+            db: db, worktreeID: worktree.id, allowedStatuses: [worktree.status]
+        ) { currentWorktree in
+            _ = try await tmux.ensureServer(
+                server: currentWorktree.tmuxServer,
+                session: "main",
+                cwd: currentWorktree.path,
+                cols: cols,
+                rows: rows)
+            await self.controlMode?.enableIfGated(
+                serverName: currentWorktree.tmuxServer)
+            let window = try await tmux.createWindow(
+                server: currentWorktree.tmuxServer,
+                session: "main",
+                cwd: currentWorktree.path,
+                shellCommand: spawnCommand,
+                env: env,
+                sensitiveEnv: sensitiveEnv,
+                cols: cols,
+                rows: rows
+            )
 
-        let newTerminal = try await db.terminals.create(
-            id: plannedTerminalID,
-            worktreeID: worktree.id,
-            tmuxWindowID: window.windowID,
-            tmuxPaneID: window.paneID,
-            label: "claude",
-            claudeSessionID: storedSessionID,
-            profileID: profileID,
-            kind: .claude
-        )
+            let terminal: Terminal
+            do {
+                terminal = try await db.terminals.create(
+                    id: plannedTerminalID,
+                    worktreeID: currentWorktree.id,
+                    tmuxWindowID: window.windowID,
+                    tmuxPaneID: window.paneID,
+                    label: "claude",
+                    claudeSessionID: storedSessionID,
+                    profileID: profileID,
+                    kind: .claude
+                )
+            } catch {
+                try? await tmux.killWindow(
+                    server: currentWorktree.tmuxServer,
+                    windowID: window.windowID)
+                throw error
+            }
+            return (terminal, window, currentWorktree.tmuxServer)
+        }
 
         subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
             terminalID: newTerminal.id, worktreeID: newTerminal.worktreeID, label: newTerminal.label
@@ -1851,7 +1929,7 @@ extension RPCRouter {
 
         if scheduleRecapture {
             scheduleSessionRecapture(
-                terminalID: newTerminal.id, paneID: window.paneID, server: worktree.tmuxServer
+                terminalID: newTerminal.id, paneID: window.paneID, server: currentServer
             )
         }
 
@@ -2696,13 +2774,26 @@ extension RPCRouter {
             // Reconcile DB against actual git worktree list
             do {
                 let beforeCount = try await db.worktrees.listLocal(repoID: repo.id, status: .active).count
-                try await lifecycle.reconcile(repoID: repo.id, actuationLog: actuationLog)
+                try await lifecycle.reconcile(
+                    repoID: repo.id,
+                    actuationLog: actuationLog,
+                    reapSharedScratchTmuxResources: true)
                 let afterCount = try await db.worktrees.listLocal(repoID: repo.id, status: .active).count
                 let delta = abs(beforeCount - afterCount)
                 worktreesReconciled += delta
             } catch {
                 errors.append("Reconcile failed for \(repo.displayName): \(error)")
             }
+        }
+
+        // Scratch spaces have no repo row, so this must stay outside the repo
+        // loop: cleanup is also the explicit retry path on zero-repo installs.
+        do {
+            try await lifecycle.reconcileScratchTerminals(
+                actuationLog: actuationLog,
+                reapOrphanTmuxResources: true)
+        } catch {
+            errors.append("Scratch terminal reconcile failed: \(error)")
         }
 
         let result = CleanupResult(

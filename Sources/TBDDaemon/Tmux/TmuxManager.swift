@@ -11,11 +11,51 @@ public enum PaneSendTarget: Sendable, Equatable {
     case missing
     /// The pane object exists (`remain-on-exit` kept it) but its process has
     /// exited. `send-keys` into it still exits 0 and the keys go nowhere.
-    case dead
+    /// `terminalID` carries the same ownership stamp as a live pane so
+    /// lifecycle reconciliation can preserve an owned gravestone while still
+    /// repairing a recycled coordinate that belongs to another terminal.
+    case dead(terminalID: String?)
     /// The pane is alive. `terminalID` is the TBD terminal UUID the pane itself
     /// answered with, or `nil` when the pane carries no identity to compare —
     /// a pane spawned before TBD stamped one, or by something outside TBD.
     case live(terminalID: String?)
+}
+
+/// Serializes tmux resource ownership transitions per server.
+///
+/// A tmux window becomes externally visible before the database row that owns
+/// it can commit. Reconciliation has the inverse multi-system transaction: it
+/// snapshots database ownership before killing an untracked tmux resource.
+/// Both operations use this coordinator so neither can observe the other's
+/// half-finished state. Different servers remain independent.
+actor TmuxServerResourceCoordinator {
+    private var lockedServers: Set<String> = []
+    private var waiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+
+    func withLock<Result: Sendable>(
+        server: String,
+        operation: @Sendable () async throws -> Result
+    ) async rethrows -> Result {
+        if lockedServers.contains(server) {
+            await withCheckedContinuation { continuation in
+                waiters[server, default: []].append(continuation)
+            }
+        } else {
+            lockedServers.insert(server)
+        }
+        defer { release(server: server) }
+        return try await operation()
+    }
+
+    private func release(server: String) {
+        if var queued = waiters[server], !queued.isEmpty {
+            let next = queued.removeFirst()
+            waiters[server] = queued.isEmpty ? nil : queued
+            next.resume()
+        } else {
+            lockedServers.remove(server)
+        }
+    }
 }
 
 public struct TmuxManager: Sendable {
@@ -36,6 +76,9 @@ public struct TmuxManager: Sendable {
     /// SIGTERM-then-SIGKILL path against a real slow command without waiting 15s.
     let subprocessTimeout: Duration
     private let counter: Counter
+    /// Shared by every value-copy of this manager (lifecycle, router, and
+    /// hibernation coordinator) so all daemon paths use one lock domain.
+    private let resourceCoordinator: TmuxServerResourceCoordinator
     /// Optional test hook that records every dryRun command invocation. When set,
     /// dry-run paths still no-op, but the recorder receives the argv that would
     /// have been passed to tmux. Used by spawn / swap integration tests to assert
@@ -133,6 +176,7 @@ public struct TmuxManager: Sendable {
         self.dryRun = dryRun
         self.subprocessTimeout = subprocessTimeout
         self.counter = Counter()
+        self.resourceCoordinator = TmuxServerResourceCoordinator()
         self.dryRunRecorder = dryRunRecorder
         self.dryRunWindowIsDead = dryRunWindowIsDead
         self.dryRunListWindows = dryRunListWindows
@@ -145,6 +189,47 @@ public struct TmuxManager: Sendable {
         self.dryRunPasteBytes = dryRunPasteBytes
         self.realModeWindowExistsOverride = realModeWindowExistsOverride
         self.realModePaneCurrentCommandOverride = realModePaneCurrentCommandOverride
+    }
+
+    /// Runs one ownership transition while exclusively holding `server`.
+    /// Release is structural, including thrown and cancelled operations.
+    func withServerResourceLock<Result: Sendable>(
+        server: String,
+        operation: @Sendable () async throws -> Result
+    ) async rethrows -> Result {
+        try await resourceCoordinator.withLock(server: server, operation: operation)
+    }
+
+    /// Locks the worktree's current tmux server and revalidates the row after
+    /// waiting. Promotion and reconcile can change `tmuxServer` while a caller
+    /// is queued; retrying prevents a window from being created on the stale
+    /// server after the lock protecting it has already been released.
+    func withWorktreeServerLock<Result: Sendable>(
+        db: TBDDatabase,
+        worktreeID: UUID,
+        allowedStatuses: Set<WorktreeStatus>,
+        operation: @Sendable (LocalWorktree) async throws -> Result
+    ) async throws -> Result {
+        while true {
+            guard let candidate = try await db.worktrees.getLocal(id: worktreeID) else {
+                throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
+            }
+            guard allowedStatuses.contains(candidate.status) else {
+                throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
+            }
+            let candidateServer = candidate.tmuxServer
+            let result: Result? = try await withServerResourceLock(server: candidateServer) {
+                guard let current = try await db.worktrees.getLocal(id: worktreeID) else {
+                    throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
+                }
+                guard allowedStatuses.contains(current.status) else {
+                    throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
+                }
+                guard current.tmuxServer == candidateServer else { return nil }
+                return try await operation(current)
+            }
+            if let result { return result }
+        }
     }
 
     // MARK: - Static Command Builders
@@ -533,9 +618,12 @@ public struct TmuxManager: Sendable {
                 separator: paneSendTargetSeparator, maxSplits: 3, omittingEmptySubsequences: false)
             guard fields.count == 4 else { continue }
             guard fields[0].trimmingCharacters(in: .whitespaces) == paneID else { continue }
-            if fields[1].trimmingCharacters(in: .whitespaces) == "1" { return .dead }
-            return .live(terminalID: resolvePaneTerminalID(
-                paneOption: String(fields[2]), startCommand: String(fields[3])))
+            let terminalID = resolvePaneTerminalID(
+                paneOption: String(fields[2]), startCommand: String(fields[3]))
+            if fields[1].trimmingCharacters(in: .whitespaces) == "1" {
+                return .dead(terminalID: terminalID)
+            }
+            return .live(terminalID: terminalID)
         }
         // rc 0 but no line for this pane (including no output at all): nothing
         // answered for the coordinate the send named.

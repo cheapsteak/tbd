@@ -128,6 +128,16 @@ public final class TBDDatabase: Sendable {
         try Self.buildMigrator().migrate(queue)
     }
 
+    /// Delete a terminal and its sparse tab metadata in one transaction. The
+    /// tab table has no foreign key, so callers must not commit one deletion
+    /// without the other and leave an undiscoverable metadata row behind.
+    func deleteTerminalAndTab(id: UUID) async throws {
+        try await writer.write { db in
+            _ = try TerminalRecord.deleteOne(db, key: id.uuidString)
+            _ = try TabRecord.deleteOne(db, key: id.uuidString)
+        }
+    }
+
     /// Best-effort pre-migration snapshot. Failures are logged, not thrown —
     /// the migration must still be allowed to proceed even if e.g. the disk
     /// is full or the parent directory isn't writable.

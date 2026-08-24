@@ -418,6 +418,7 @@ struct PreSessionHookTests {
         let spawn = try #require(try await lifecycle.spawnPreSessionTerminal(
             worktree: worktree, repo: repo, worktreePath: worktree.localPath
         ))
+        #expect(spawn.tmuxServer == worktree.tmuxServer)
         // tmux is dry-run, so the hook never really runs. Stand in for its
         // clean exit. Must come AFTER the spawn, which deletes any stale
         // marker for this worktree ID.
@@ -612,7 +613,8 @@ struct PreSessionHookTests {
             return true
         })
         let spawn = PreSessionSpawn(
-            terminalID: UUID(), windowID: "@mock-0", paneID: "%mock-0",
+            terminalID: UUID(), tmuxServer: "test-server",
+            windowID: "@mock-0", paneID: "%mock-0",
             markerPath: markerPath, hookPath: "/dev/null"
         )
         let outcome = await lifecycle.waitForPreSessionCompletion(
@@ -636,7 +638,8 @@ struct PreSessionHookTests {
         let markerPath = WorktreeLifecycle.preSessionMarkerPath(worktreeID: worktreeID)
         let lifecycle = makeLifecycle(db: db, timeout: 0)
         let spawn = PreSessionSpawn(
-            terminalID: UUID(), windowID: "@mock-0", paneID: "%mock-0",
+            terminalID: UUID(), tmuxServer: "test-server",
+            windowID: "@mock-0", paneID: "%mock-0",
             markerPath: markerPath, hookPath: "/dev/null"
         )
         let outcome = await lifecycle.waitForPreSessionCompletion(
@@ -656,7 +659,8 @@ struct PreSessionHookTests {
         let markerPath = WorktreeLifecycle.preSessionMarkerPath(worktreeID: worktreeID)
         let lifecycle = makeLifecycle(db: db, windowIsDead: { _ in true })
         let spawn = PreSessionSpawn(
-            terminalID: UUID(), windowID: "@mock-0", paneID: "%mock-0",
+            terminalID: UUID(), tmuxServer: "test-server",
+            windowID: "@mock-0", paneID: "%mock-0",
             markerPath: markerPath, hookPath: "/dev/null"
         )
         let outcome = await lifecycle.waitForPreSessionCompletion(
@@ -1124,7 +1128,7 @@ struct PreSessionHookTests {
             label: "pre-session", kind: .shell
         )
 
-        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
 
         let kills = recorder.snapshot().filter { $0.contains("kill-window") }
         #expect(!kills.contains { $0.contains("@mock-pre") },
@@ -1166,7 +1170,7 @@ struct PreSessionHookTests {
             label: "pre-session", kind: .shell
         )
 
-        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
 
         #expect(!recorder.snapshot().contains { $0.contains("kill-server") },
                 "a repo whose only live worktree is .creating must keep its tmux server")
@@ -1206,7 +1210,7 @@ struct PreSessionHookTests {
         // exactly what Daemon.start() runs.
         let resumed = await lifecycle.recoverCreatingWorktrees()
         #expect(resumed.count == 1)
-        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
 
         #expect(!recorder.snapshot().contains { $0.contains("kill-window") && $0.contains("@mock-pre") },
                 "the just-resumed pre-session window must survive the startup reconcile")

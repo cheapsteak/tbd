@@ -217,6 +217,35 @@ struct DatabaseTests {
         #expect(terminals.isEmpty)
     }
 
+    @Test func deleteTerminalAndTabRollsBackWhenTabDeleteFails() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(
+            path: "/tmp/atomic-terminal-delete", displayName: "test", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "test-wt", branch: "tbd/test-wt",
+            path: "/tmp/atomic-terminal-delete/wt", tmuxServer: "tbd-test"
+        )
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1")
+        try await db.tabs.setLabel(
+            tabID: terminal.id, worktreeID: wt.id, label: "Custom label")
+        try await db.writerForTests.write { conn in
+            try conn.execute(sql: """
+                CREATE TRIGGER reject_tab_delete BEFORE DELETE ON tab
+                BEGIN
+                    SELECT RAISE(ABORT, 'tab delete rejected');
+                END;
+                """)
+        }
+
+        await #expect(throws: (any Error).self) {
+            try await db.deleteTerminalAndTab(id: terminal.id)
+        }
+
+        #expect(try await db.terminals.get(id: terminal.id) != nil)
+        #expect(try await db.tabs.listForWorktree(worktreeID: wt.id).map(\.id) == [terminal.id])
+    }
+
     @Test func deleteTerminalsForWorktree() async throws {
         let db = try TBDDatabase(inMemory: true)
         let repo = try await db.repos.create(path: "/tmp/test", displayName: "test", defaultBranch: "main")

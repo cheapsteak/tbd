@@ -81,7 +81,7 @@ struct ActuationLogSweepWiringTests {
             terminalIDs.insert(terminal.id.uuidString)
         }
 
-        try await lifecycle.reconcile(repoID: repo.id, actuationLog: ActuationLog(path: logPath))
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: ActuationLog(path: logPath), reapSharedScratchTmuxResources: true)
 
         // The same sweep also reaps the servers those rows leave behind; this is
         // about the per-terminal kills.
@@ -122,7 +122,9 @@ struct ActuationLogSweepWiringTests {
 
         // The sweep still completes — the daemon boots either way.
         try await lifecycle.reconcile(
-            repoID: repo.id, actuationLog: ActuationLog(path: try makeUnwritablePath()))
+            repoID: repo.id,
+            actuationLog: ActuationLog(path: try makeUnwritablePath()),
+            reapSharedScratchTmuxResources: true)
 
         // But the act did not happen: the row is still active and still owns its
         // terminal, so the next sweep (with a writable log) retries it.
@@ -152,7 +154,7 @@ struct ActuationLogSweepWiringTests {
             worktreeID: main.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
             label: TerminalLabel.claudeCode, claudeSessionID: "sess-1", kind: .claude)
 
-        try await lifecycle.reconcile(repoID: repo.id, actuationLog: ActuationLog(path: logPath))
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: ActuationLog(path: logPath), reapSharedScratchTmuxResources: true)
 
         let parks = try requests(at: logPath).filter { $0["kind"] as? String == "hibernate" }
         #expect(parks.count == 1)
@@ -189,7 +191,9 @@ struct ActuationLogSweepWiringTests {
             label: TerminalLabel.claudeCode, claudeSessionID: "sess-1", kind: .claude)
 
         try await lifecycle.reconcile(
-            repoID: repo.id, actuationLog: ActuationLog(path: try makeUnwritablePath()))
+            repoID: repo.id,
+            actuationLog: ActuationLog(path: try makeUnwritablePath()),
+            reapSharedScratchTmuxResources: true)
 
         #expect(try await db.terminals.get(id: terminal.id)?.hibernatedAt == nil)
     }
@@ -213,7 +217,7 @@ struct ActuationLogSweepWiringTests {
             path: tempDir.appendingPathComponent("retired").path, tmuxServer: "tbd-orphan-server")
         try await db.worktrees.archive(id: retired.id)
 
-        try await lifecycle.reconcile(repoID: repo.id, actuationLog: ActuationLog(path: logPath))
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: ActuationLog(path: logPath), reapSharedScratchTmuxResources: true)
 
         let serverRows = try requests(at: logPath).filter {
             ($0["target"] as? [String: Any])?["server"] as? String == "tbd-orphan-server"
@@ -257,7 +261,7 @@ struct ActuationLogSweepWiringTests {
             repoID: repo.id, name: "main", branch: "main", path: repoDir.path,
             tmuxServer: server)
 
-        try await lifecycle.reconcile(repoID: repo.id, actuationLog: ActuationLog(path: logPath))
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: ActuationLog(path: logPath), reapSharedScratchTmuxResources: true)
 
         let orphanRows = try requests(at: logPath).filter {
             ($0["target"] as? [String: Any])?["window"] as? String == "@99"
@@ -273,6 +277,46 @@ struct ActuationLogSweepWiringTests {
             $0["confirms"] as? String == request["id"] as? String
                 && $0["result"] as? String == "dispatched"
         })
+    }
+
+    @Test("a failed scratch-only orphan-window sweep records transport failure without a repo")
+    func scratchOrphanWindowKillFailureWritesTransportFailed() async throws {
+        struct TmuxWentAway: Error, CustomStringConvertible {
+            var description: String { "scratch tmux server went away" }
+        }
+
+        let logPath = try makeLogPath()
+        let db = try TBDDatabase(inMemory: true)
+        let server = "scratch-shared"
+        let lifecycle = makeLifecycle(
+            db: db,
+            tmux: TmuxManager(
+                dryRun: true,
+                dryRunListWindows: { probed, _ in
+                    probed == server ? [(windowID: "@77", paneID: "%77")] : []
+                },
+                dryRunKillWindowError: { _, _ in TmuxWentAway() }))
+        _ = try await db.worktrees.createScratch(
+            name: "scratch-only", displayName: "Scratch Only",
+            path: "/tmp/scratch-only", tmuxServer: server)
+        #expect(try await db.repos.list().isEmpty)
+
+        try await lifecycle.reconcileScratchTerminals(
+            actuationLog: ActuationLog(path: logPath),
+            reapOrphanTmuxResources: true)
+
+        let requests = try requests(at: logPath).filter {
+            ($0["target"] as? [String: Any])?["window"] as? String == "@77"
+        }
+        #expect(requests.count == 1)
+        let request = try #require(requests.first)
+        let target = try #require(request["target"] as? [String: Any])
+        #expect(target["server"] as? String == server)
+        #expect(target["repo"] == nil)
+        let outcome = try #require(
+            try outcomes(at: logPath).first { $0["confirms"] as? String == request["id"] as? String })
+        #expect(outcome["result"] as? String == "transport-failed")
+        #expect(outcome["error"] as? String == "\(TmuxWentAway())")
     }
 
     // MARK: - The auto-archive-on-merge rail

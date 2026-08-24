@@ -141,6 +141,7 @@ import Testing
 
         await lifecycle.closeHookTerminal(
             worktree: fx.worktree,
+            tmuxServer: fx.worktree.tmuxServer,
             terminalID: fx.terminal.id,
             windowID: fx.terminal.tmuxWindowID)
 
@@ -209,7 +210,7 @@ import Testing
             worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%0",
             label: "Claude Code", claudeSessionID: UUID().uuidString, kind: .claude)
 
-        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
 
         // Worktree archived, terminal torn down, scrollback captured.
         #expect(try await db.worktrees.get(id: wt.id)?.status == .archived)
@@ -343,6 +344,9 @@ import Testing
         #expect(command.contains("/bin/cat"))
         #expect(command.contains(capturePath))
         #expect(command.contains("exec "))
+        #expect(
+            recorder.snapshot().filter { $0.contains("new-session") }.count == 1,
+            "history revive must bootstrap tmux only inside the server-resource lock")
 
         // History row survives revive.
         let entries = try await fx.db.terminalHistory.list(worktreeID: fx.worktree.id)

@@ -68,8 +68,9 @@ public final class Daemon: Sendable {
     public nonisolated(unsafe) var gitStatusTask: Task<Void, Never>?
     public nonisolated(unsafe) var reaperTask: Task<Void, Never>?
     public nonisolated(unsafe) var hibernationSweepTask: Task<Void, Never>?
-    /// Orphan-GC hourly sweep task (agent worktrees + scratchpads). `nil` in
-    /// mock mode. See `orphanGC` for the actor it drives.
+    /// Hourly orphan-maintenance task (orphan GC + scratch terminal
+    /// reconciliation). `nil` in mock mode. See `orphanGC` for the actor it
+    /// drives.
     public nonisolated(unsafe) var gcTask: Task<Void, Never>?
     /// Orphan-GC actor. Owned here so `gc.*` RPC handlers (Task 9) can reach
     /// it the same way they reach `rpcRouter.hibernationCoordinator`. `nil`
@@ -225,13 +226,26 @@ public final class Daemon: Sendable {
             let repos = try await database.repos.list()
             for repo in repos {
                 do {
-                    try await lifecycle.reconcile(repoID: repo.id, actuationLog: actuationLog)
+                    try await lifecycle.reconcile(
+                        repoID: repo.id,
+                        actuationLog: actuationLog,
+                        reapSharedScratchTmuxResources: true)
                 } catch {
                     reconcileLogger.warning("Failed to reconcile repo \(repo.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 }
             }
         } catch {
             reconcileLogger.warning("Failed to list repos for reconciliation: \(error.localizedDescription, privacy: .public)")
+        }
+        // Scratch spaces have no repo row and deliberately share one tmux
+        // server. Reconcile them independently so this still runs when there
+        // are zero registered repos and catches recycled pane coordinates.
+        do {
+            try await lifecycle.reconcileScratchTerminals(
+                actuationLog: actuationLog,
+                reapOrphanTmuxResources: true)
+        } catch {
+            reconcileLogger.warning("Failed to reconcile scratch terminals: \(error.localizedDescription, privacy: .public)")
         }
         // Backfill archived worktrees whose branch is missing — repairs
         // rows whose branch was renamed before archive captured the new name.
@@ -243,6 +257,30 @@ public final class Daemon: Sendable {
         // [missing] tags as soon as the daemon is up.
         let healthValidator = RepoHealthValidator(git: git)
         await healthValidator.validateAll(db: database)
+    }
+
+    /// Run one pass of the hourly orphan-maintenance cadence. Scratch terminal
+    /// reconciliation shares this pass so tmux coordinate reuse is repaired
+    /// while the daemon remains alive, not only at startup.
+    static func performOrphanMaintenance(
+        orphanGC: OrphanGC,
+        lifecycle: WorktreeLifecycle,
+        configStore: ConfigStore,
+        actuationLog: ActuationLog
+    ) async {
+        // This entire hourly cadence answers to the GC master switch. Read it
+        // before either action so disabling GC also disables the scratch
+        // ownership mutation that shares its timer. OrphanGC keeps its own
+        // gate as defense in depth for direct/manual callers.
+        guard (try? await configStore.get())?.gcEnabled == true else { return }
+        _ = await orphanGC.sweep()
+        do {
+            try await lifecycle.reconcileScratchTerminals(
+                actuationLog: actuationLog,
+                reapOrphanTmuxResources: false)
+        } catch {
+            reconcileLogger.warning("Failed to reconcile scratch terminals during orphan maintenance: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Wire the delivery verifier and perform the startup replay, gated on
@@ -387,7 +425,7 @@ public final class Daemon: Sendable {
     }
 
     /// Start the daemon: create config directory, clean up stale state,
-    /// initialize database and all managers, start servers, reconcile worktrees.
+    /// initialize database and all managers, reconcile worktrees, then start servers.
     public func start() async throws {
         // 0. Raise the file-descriptor limit before any tmux server is spawned.
         Self.raiseFileDescriptorLimit()
@@ -757,6 +795,18 @@ public final class Daemon: Sendable {
         // migration or marker is needed. Best-effort, never blocks startup.
         await database.notes.exportContentColumnToFiles()
 
+        // 8d. Reconcile parked state and durable tmux ownership before any
+        // listener accepts an RPC. Full startup recovery may destructively
+        // reap shared scratch servers; once serving begins, a terminal-create
+        // RPC can have created and stamped a window whose DB row has not yet
+        // landed, so that full sweep is no longer safe.
+        if mockMode == nil {
+            await rpcRouter.hibernationCoordinator.reconcileOnStartup()
+        }
+        await performStartupReconciliation(
+            mockMode: mockMode, database: database, git: git, lifecycle: lifecycle,
+            actuationLog: actuationLog)
+
         // 9. Start socket server
         let sock = SocketServer(router: rpcRouter)
         self.socketServer = sock
@@ -793,17 +843,6 @@ public final class Daemon: Sendable {
         self.httpServer = http
         try await http.start()
 
-        if mockMode == nil {
-            // 11. Reconcile parked (hibernated / legacy-suspended) state: clear a
-            // stale parked timestamp for any terminal whose Claude is still alive.
-            await rpcRouter.hibernationCoordinator.reconcileOnStartup()
-        }
-
-        // 11. Perform DB-mutating reconciliation (skipped in mock mode so fixtures render as authored)
-        await performStartupReconciliation(
-            mockMode: mockMode, database: database, git: git, lifecycle: lifecycle,
-            actuationLog: actuationLog)
-
         // 11b. Delivery acknowledgement (design §12): wire the verifier and
         // replay the observations the last daemon's timers died owing.
         await Daemon.wireDeliveryVerification(
@@ -828,21 +867,31 @@ public final class Daemon: Sendable {
                 }
             }
 
-            // 11a-gc. Orphan-GC: reap abandoned agent worktrees + scratchpads
+            // 11a-gc. Orphan maintenance: reap abandoned agent worktrees + scratchpads
+            // and reconcile scratch terminals against their shared tmux server
             // (event-driven cleanup already runs via `lifecycle.onWorktreeRemoved`
             // above; this periodic sweep catches everything else — worktrees
             // orphaned outside a TBD-initiated remove, e.g. manual `rm -rf`).
             // Constructed above (guarded the same `mockMode == nil` check), so
             // `orphanGC` is always non-nil here.
             if let orphanGC {
-                self.gcTask = Task {
+                let maintenanceLifecycle = lifecycle
+                self.gcTask = Task { [orphanGC, maintenanceLifecycle, actuationLog] in
                     // Sweep once immediately (cold recovery), then every hour.
-                    _ = await orphanGC.sweep()
+                    await Self.performOrphanMaintenance(
+                        orphanGC: orphanGC,
+                        lifecycle: maintenanceLifecycle,
+                        configStore: database.config,
+                        actuationLog: actuationLog)
                     while !Task.isCancelled {
                         // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                         try? await Task.sleep(for: .seconds(3600))
                         guard !Task.isCancelled else { break }
-                        _ = await orphanGC.sweep()
+                        await Self.performOrphanMaintenance(
+                            orphanGC: orphanGC,
+                            lifecycle: maintenanceLifecycle,
+                            configStore: database.config,
+                            actuationLog: actuationLog)
                     }
                 }
             }
