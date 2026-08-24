@@ -51,6 +51,33 @@ struct GitManagerTests {
         cleanup()
     }
 
+    @Test func worktreeAddFromRemoteDefaultDoesNotConfigureUpstream() async throws {
+        let base = try await addBareRemoteAndPushDefault()
+        let wtPath = tempDir.appendingPathComponent("wt-remote-default").path
+        let branch = "tbd/no-upstream"
+        try await GitManagerTests.shell("git config branch.autoSetupMerge true", at: repoDir)
+
+        try await git.worktreeAdd(
+            repoPath: repoDir.path,
+            worktreePath: wtPath,
+            branch: branch,
+            baseBranch: "origin/\(base)"
+        )
+
+        let upstream = await git.upstreamBranchName(worktreePath: wtPath, branch: branch)
+        #expect(upstream == nil)
+        let wtDir = URL(fileURLWithPath: wtPath)
+        try await GitManagerTests.shell(
+            "git config --get 'branch.\(branch).remote' >/dev/null; test $? -eq 1",
+            at: wtDir
+        )
+        try await GitManagerTests.shell(
+            "git config --get 'branch.\(branch).merge' >/dev/null; test $? -eq 1",
+            at: wtDir
+        )
+        cleanup()
+    }
+
     @Test func worktreeRemove() async throws {
         let wtPath = tempDir.appendingPathComponent("wt1").path
         let branch = try await git.detectDefaultBranch(repoPath: repoDir.path)
@@ -92,10 +119,10 @@ struct GitManagerTests {
     }
 
     @Test func pushBranchNameReportsNoDestinationForABranchTrackingItsBase() async throws {
-        // The shape every worktree branch cut from the base branch has: it
-        // TRACKS the base, and git refuses to derive a push destination from
-        // that. This is the discriminator the PR matcher relies on — the
-        // tracking config alone cannot tell a head ref from a base ref.
+        // A legacy or externally configured branch may track its base. Git
+        // refuses to derive a push destination from that shape, which is the
+        // discriminator the PR matcher relies on — tracking config alone cannot
+        // tell a head ref from a base ref.
         let base = try await addBareRemoteAndPushDefault()
         try await GitManagerTests.shell("git checkout -b tbd/my-branch", at: repoDir)
         try await GitManagerTests.shell("git config branch.tbd/my-branch.remote origin", at: repoDir)

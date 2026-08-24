@@ -392,10 +392,11 @@ public struct GitManager: Sendable {
         }
     }
 
-    /// Creates a new worktree at `worktreePath` on a new branch based on `baseBranch`.
+    /// Creates a new worktree at `worktreePath` on a new branch based on `baseBranch`
+    /// without configuring that base as the new branch's upstream.
     /// Enables parallel checkout for faster working-tree setup.
     public func worktreeAdd(repoPath: String, worktreePath: String, branch: String, baseBranch: String) async throws {
-        _ = try await run(arguments: ["-c", "checkout.workers=0", "worktree", "add", worktreePath, "-b", branch, baseBranch], at: repoPath)
+        _ = try await run(arguments: ["-c", "checkout.workers=0", "worktree", "add", "--no-track", worktreePath, "-b", branch, baseBranch], at: repoPath)
     }
 
     /// Adds a worktree at `worktreePath` using an existing branch (no -b flag).
