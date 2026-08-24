@@ -108,7 +108,23 @@ enum RowStatusIndicator {
     /// notification. Bold tracks "you should look here" — a completed response
     /// or an attention request. Shared by the sidebar row and the jump menu so
     /// they stay consistent.
-    static func shouldBoldName(_ notification: NotificationType?) -> Bool {
+    ///
+    /// `hasPromptOnScreen` bolds on the same input that gives the suffix slot
+    /// its attention glyph, and for the same reason: the notification saying
+    /// the same thing is marked read the moment its worktree is selected, so
+    /// without it the row this fix targets would show the raised hand beside a
+    /// regular-weight name — half-escalated, a state the notification-only
+    /// design could never produce.
+    ///
+    /// It does not outrank `.error`, because `suffix` does not either: an error
+    /// takes the slot over a prompt, and `.error` deliberately does not bold.
+    /// Bolding here regardless would put a bold name beside an error glyph —
+    /// two severities at once, the same half-escalation in the other direction.
+    static func shouldBoldName(
+        _ notification: NotificationType?,
+        hasPromptOnScreen: Bool = false
+    ) -> Bool {
+        if hasPromptOnScreen, notification != .error { return true }
         switch notification {
         case .responseComplete, .attentionNeeded, .focusRequest, .limitReached:
             return true
@@ -122,15 +138,36 @@ enum RowStatusIndicator {
     /// `responseComplete` is surfaced as a bold name in the view, not as a
     /// suffix. Hibernated is lowest — it's the calmest, safest state, so any
     /// louder signal wins the slot.
+    ///
+    /// `hasPromptOnScreen` shares the `.attention` rank with the notification
+    /// that reports the same thing, and is the input that survives a glance.
+    /// The two carriers are not interchangeable: a notification is unread mail
+    /// and is marked read the moment its worktree is selected, so the selected
+    /// (or pinned) row — the one the user is actually looking at — fell through
+    /// to `isWorking` and animated the thinking dots at a session that was
+    /// sitting on a permission prompt. This flag comes from the terminal's own
+    /// `awaitingInputReason` and is independent of read state and of selection.
+    ///
+    /// It ranks above `isWorking` deliberately, and `activityState` is left
+    /// alone: Claude Code raises a prompt in the middle of a turn, so the
+    /// session genuinely IS working — that fact gates hibernation and must not
+    /// be rewritten. The slot shows the louder of the two, which is the prompt.
+    ///
+    /// Only `.promptOnScreen` reaches this parameter. `.doneWaiting`,
+    /// `.informational` and `.unrecognized` are no signal here — see
+    /// `AwaitingInputClass`, where an unknown class is never guessed into a
+    /// neighbouring one.
     static func suffix(
         notification: NotificationType?,
         isWorking: Bool,
         isSuspended: Bool,
-        isHibernated: Bool = false
+        isHibernated: Bool = false,
+        hasPromptOnScreen: Bool = false
     ) -> SuffixRowIndicator? {
         if notification == .error {
             return .error
-        } else if notification == .attentionNeeded || notification == .focusRequest {
+        } else if notification == .attentionNeeded || notification == .focusRequest
+                    || hasPromptOnScreen {
             return .attention
         } else if isWorking {
             return .working

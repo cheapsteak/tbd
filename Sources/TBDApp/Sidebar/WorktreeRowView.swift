@@ -52,7 +52,7 @@ struct WorktreeRowView: View {
     }
 
     private var hasBoldNotification: Bool {
-        RowStatusIndicator.shouldBoldName(notification)
+        RowStatusIndicator.shouldBoldName(notification, hasPromptOnScreen: hasPromptOnScreenTerminal)
     }
 
     private var prObservation: PRObservation? {
@@ -93,6 +93,24 @@ struct WorktreeRowView: View {
     private var hasWorkingTerminal: Bool {
         let terminals = appState.terminals[worktree.id] ?? []
         return Self.hasForegroundWork(in: terminals)
+    }
+
+    /// One of the row's terminals has a prompt on screen right now.
+    ///
+    /// Read from the terminal's own `awaitingInputReason`, not from the
+    /// `.attentionNeeded` notification the daemon raises alongside it: that
+    /// notification is auto-marked-read for every visible worktree, so the
+    /// selected or pinned row — the one being looked at — lost it and animated
+    /// the thinking dots at a session waiting on a permission prompt.
+    private var hasPromptOnScreenTerminal: Bool {
+        let terminals = appState.terminals[worktree.id] ?? []
+        return Self.hasPromptOnScreen(in: terminals)
+    }
+
+    /// The collection form of `Terminal.hasPromptOnScreen`, used by the row,
+    /// by the jump menu, and by pure presentation tests.
+    nonisolated static func hasPromptOnScreen(in terminals: [Terminal]) -> Bool {
+        terminals.contains { $0.hasPromptOnScreen }
     }
 
     /// Whether one terminal has trustworthy foreground work to animate in the
@@ -317,7 +335,8 @@ struct WorktreeRowView: View {
             isWorking: hasWorkingTerminal,
             // Suspend retired: every parked session funnels to the moon.
             isSuspended: false,
-            isHibernated: hasParkedTerminal
+            isHibernated: hasParkedTerminal,
+            hasPromptOnScreen: hasPromptOnScreenTerminal
         ) {
         case .working:
             TypingDotsView(color: SuffixRowIndicator.working.color)

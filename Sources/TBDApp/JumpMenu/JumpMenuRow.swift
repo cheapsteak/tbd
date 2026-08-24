@@ -15,6 +15,28 @@ struct JumpMenuRow: Identifiable, Equatable {
     let repoName: String
     let severity: NotificationType?   // nil for recent / match-without-unread
     let section: Section
+    /// One of the worktree's terminals has a prompt on screen. Independent of
+    /// `severity`: the `.attentionNeeded` notification reporting the same thing
+    /// is marked read the moment the worktree is selected, and the switcher's
+    /// whole job is finding the worktree that needs you — including the one you
+    /// last looked at.
+    let hasPromptOnScreen: Bool
+
+    init(
+        id: UUID,
+        displayName: String,
+        repoName: String,
+        severity: NotificationType?,
+        section: Section,
+        hasPromptOnScreen: Bool = false
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.repoName = repoName
+        self.severity = severity
+        self.section = section
+        self.hasPromptOnScreen = hasPromptOnScreen
+    }
 }
 
 struct JumpMenuRowView: View {
@@ -22,14 +44,19 @@ struct JumpMenuRowView: View {
     let isSelected: Bool
 
     private var suffix: SuffixRowIndicator? {
-        RowStatusIndicator.suffix(notification: row.severity, isWorking: false, isSuspended: false)
+        RowStatusIndicator.suffix(
+            notification: row.severity,
+            isWorking: false,
+            isSuspended: false,
+            hasPromptOnScreen: row.hasPromptOnScreen)
     }
 
     var body: some View {
         HStack(spacing: 8) {
             Text(row.displayName)
                 .font(.system(size: 13))
-                .fontWeight(RowStatusIndicator.shouldBoldName(row.severity) ? .bold : .regular)
+                .fontWeight(RowStatusIndicator.shouldBoldName(
+                    row.severity, hasPromptOnScreen: row.hasPromptOnScreen) ? .bold : .regular)
                 .lineLimit(1)
                 .truncationMode(.tail)
             Text(row.repoName)

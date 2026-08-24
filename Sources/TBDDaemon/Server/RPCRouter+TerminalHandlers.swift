@@ -1990,6 +1990,7 @@ extension RPCRouter {
         // hooks to arrive — they may be seconds away, or lost to a stale `tbd`
         // on the pane's PATH.
         try await db.terminals.clearAwaitingInputReason(id: oldTerminal.id)
+        broadcastAwaitingInputRetraction(terminal: oldTerminal)
 
         // 3. Respawn IN PLACE — same window id / pane id → the tab and terminal
         //    row survive.
@@ -3065,6 +3066,11 @@ extension RPCRouter {
                 activityStateOrderObservedAt: application.orderObservedAt
             )))
         }
+        // A `/clear`, a resume, or a hand relaunch replaces the process the
+        // prompt was raised on, and the store retracts the reason with it.
+        if sessionApplication.clearedAwaitingInput {
+            broadcastAwaitingInputRetraction(terminal: terminal)
+        }
         return .ok()
     }
 
@@ -3080,13 +3086,21 @@ extension RPCRouter {
     ///
     /// The handler records the reason columns, and for a prompt-on-screen
     /// classification additionally raises an `.attentionNeeded` notification
-    /// so the sidebar swaps the thinking dots for the attention indicator and
-    /// bolds the name (the app's `RowStatusIndicator` already ranks attention
-    /// above working). There is still no delta carrying the wait reason
-    /// itself: the notification row is the fact the app renders, and focusing
-    /// the worktree clears it through `notifications.markRead`.
+    /// so the macOS banner fires and the name bolds.
+    ///
+    /// The recorded reason is ALSO pushed as `.terminalAwaitingInputChanged`,
+    /// and that — not the notification — is what the sidebar's suffix slot
+    /// reads. The notification is unread mail: selecting the worktree marks it
+    /// read, so the row the user is looking at would lose the indicator while
+    /// the prompt was still on screen.
     func handleTerminalNotificationEvent(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalNotificationEventParams.self, from: paramsData)
+        // Timestamp receipt before any actor or database suspension, exactly as
+        // `handleTerminalActivityEvent` and `handleTerminalSessionEvent` do.
+        // The stamp is one end of an ordering comparison the activity rail makes
+        // when it retracts this reason, so a busy daemon must not be able to
+        // date a prompt later than the answer to it.
+        let observedAt = now()
 
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
             // Soft success — the caller is a fire-and-forget hook, and the
@@ -3096,7 +3110,7 @@ extension RPCRouter {
             logger.debug("notificationEvent: unknown terminalID=\(params.terminalID.uuidString, privacy: .public) — ignoring")
             return .ok()
         }
-        await sessionCounters.recordHookEvent(terminalID: terminal.id, at: now())
+        await sessionCounters.recordHookEvent(terminalID: terminal.id, at: observedAt)
 
         if let cwd = params.cwd, !cwd.isEmpty {
             guard try await hookCWDBelongsToTerminal(cwd, terminal: terminal, event: "notificationEvent")
@@ -3124,8 +3138,31 @@ extension RPCRouter {
         // `observedAt` comes from the router's date seam, never a bare `Date()`
         // at the write site: a persisted observed-at is data, so it is the date
         // seam rather than a `Clock`.
-        try await db.terminals.recordAwaitingInputReason(
-            id: terminal.id, reason: reason, observedAt: now())
+        let write = try await db.terminals.recordAwaitingInputReason(
+            id: terminal.id, reason: reason, observedAt: observedAt)
+
+        // The reason columns are what the sidebar reads for "a prompt is on
+        // screen right now", so the app has to learn about them by push. A
+        // notification row would not do: notifications model unread mail and
+        // are marked read the moment the worktree is selected, which is
+        // exactly the worktree whose prompt the user most needs to see.
+        //
+        // Only writes that change whether a prompt is on screen are pushed.
+        // This hook carries no matcher, so it also fires for every
+        // `agent_completed` a parallel subagent produces and every 60-second
+        // `idle_prompt` across the fleet; announcing those would republish the
+        // app's whole terminal collection for a sidebar that cannot change by
+        // a pixel. A write that DISPLACES a standing prompt still goes out —
+        // that one takes the indicator down.
+        if case .written(let displacedPromptOnScreen) = write,
+           reason.classification == .promptOnScreen || displacedPromptOnScreen {
+            subscriptions.broadcast(delta: .terminalAwaitingInputChanged(
+                TerminalAwaitingInputDelta(
+                    terminalID: terminal.id,
+                    worktreeID: terminal.worktreeID,
+                    reason: reason,
+                    observedAt: observedAt)))
+        }
 
         // A prompt on screen is the one class a human has to act on now, so
         // it, and only it, raises the attention notification the sidebar
@@ -3241,8 +3278,36 @@ extension RPCRouter {
                     await limitResumeScheduler?.wake()
                 }
             }
-            guard terminal.activityState != params.activityState else { return .ok() }
-            try await db.terminals.setActivityState(
+            guard terminal.activityState != params.activityState else {
+                // Previously a pure no-op. A same-state observation still
+                // supersedes a not-newer wait reason: this is the only rail
+                // that speaks when an activity value repeats, and the reason
+                // column moves independently of the activity stamp.
+                //
+                // Deliberately NOT gated on `terminal`'s reason columns. That
+                // row was read before an unbounded stretch of async work (a
+                // counter actor hop, a worktree read, and on an idle event a
+                // transcript file copy), and `handleTerminalNotificationEvent`
+                // runs concurrently on its own connection — a prompt recorded
+                // inside that window is invisible here, and skipping the call
+                // would leave the database holding a reason older than the
+                // newest activity observation, which is the one state the
+                // ordering rule exists to prevent. The store re-reads inside
+                // its own transaction and returns false without writing when
+                // there is nothing to retract, and a repeated activity value
+                // is a rare event on this rail (a queued prompt mid-turn, a
+                // second Stop), so the saved write was worth little anyway.
+                if try await db.terminals.clearAwaitingInputReasonIfNotNewer(
+                    id: terminal.id, observedAt: observedAt) {
+                    broadcastAwaitingInputRetraction(terminal: terminal)
+                }
+                return .ok()
+            }
+            // `setActivityState` nils the reason columns unconditionally — it
+            // IS the superseding rail — and reports whether a standing reason
+            // went with them, so the retraction is announced from what the
+            // write actually did rather than from the row read before it.
+            let retracted = try await db.terminals.setActivityState(
                 id: terminal.id,
                 activityState: params.activityState,
                 source: .hookEvent(RPCMethod.terminalActivityEvent),
@@ -3252,6 +3317,7 @@ extension RPCRouter {
                 worktreeID: terminal.worktreeID,
                 activityState: params.activityState
             )))
+            if retracted { broadcastAwaitingInputRetraction(terminal: terminal) }
             return .ok()
         }
         let source: FactSource = params.origin == .userInterrupt
@@ -3283,7 +3349,25 @@ extension RPCRouter {
             activityStateObservedAt: activityApplication.observedAt,
             activityStateOrderObservedAt: activityApplication.orderObservedAt
         )))
+        if activityApplication.clearedAwaitingInput {
+            broadcastAwaitingInputRetraction(terminal: terminal)
+        }
         return .ok()
+    }
+
+    /// Announce that a terminal's recorded wait reason is gone.
+    ///
+    /// Every daemon site that nils those columns owes the app one of these:
+    /// the app mirrors the record rather than deriving it, so a column cleared
+    /// without a retraction leaves a "needs your attention" indicator standing
+    /// on a session that is no longer waiting, until the next `terminal.list`.
+    func broadcastAwaitingInputRetraction(terminal: Terminal) {
+        subscriptions.broadcast(delta: .terminalAwaitingInputChanged(
+            TerminalAwaitingInputDelta(
+                terminalID: terminal.id,
+                worktreeID: terminal.worktreeID,
+                reason: nil,
+                observedAt: nil)))
     }
     func handleTerminalTranscript(_ paramsData: Data) async throws -> RPCResponse {
         perfTranscriptLog.debug("rpc.handle.start method=terminalTranscript")

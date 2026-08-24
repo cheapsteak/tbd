@@ -22,17 +22,23 @@ final class JumpMenuViewModel: ObservableObject {
     private let allWorktrees: [JumpMenuWorktreeSnapshot]
     private let unread: [UUID: UnreadSummary]
     private let recentIDs: [UUID]
+    /// Worktrees with a prompt on screen, snapshotted at open time like the
+    /// rest. Defaulted empty so a caller that has no terminal state (tests,
+    /// and any future surface) keeps the notification-only behavior.
+    private let promptOnScreenIDs: Set<UUID>
 
     static let rowCap = 20
 
     init(
         worktrees: [JumpMenuWorktreeSnapshot],
         unread: [UUID: UnreadSummary],
-        recentIDs: [UUID]
+        recentIDs: [UUID],
+        promptOnScreenIDs: Set<UUID> = []
     ) {
         self.allWorktrees = worktrees
         self.unread = unread
         self.recentIDs = recentIDs
+        self.promptOnScreenIDs = promptOnScreenIDs
     }
 
     /// Currently-displayed rows, recomputed when `query` changes.
@@ -90,7 +96,8 @@ final class JumpMenuViewModel: ObservableObject {
                     displayName: snap.displayName,
                     repoName: snap.repoName,
                     severity: summary.type,
-                    section: .unread
+                    section: .unread,
+                    hasPromptOnScreen: promptOnScreenIDs.contains(id)
                 )
             }
 
@@ -110,7 +117,8 @@ final class JumpMenuViewModel: ObservableObject {
                     displayName: pair.1.displayName,
                     repoName: pair.1.repoName,
                     severity: nil,
-                    section: .recent
+                    section: .recent,
+                    hasPromptOnScreen: promptOnScreenIDs.contains(pair.0)
                 )
             }
 
@@ -139,7 +147,8 @@ final class JumpMenuViewModel: ObservableObject {
                     displayName: snap.displayName,
                     repoName: snap.repoName,
                     severity: unread[snap.id]?.type,
-                    section: .match
+                    section: .match,
+                    hasPromptOnScreen: promptOnScreenIDs.contains(snap.id)
                 )
             }
             // Order: unread rows first (severity desc), then recency

@@ -81,6 +81,61 @@ struct SuffixRowIndicatorTests {
             notification: .attentionNeeded, isWorking: false, isSuspended: false, isHibernated: true) == .attention)
     }
 
+    // MARK: - Prompt on screen
+
+    @Test func promptOnScreenOutranksWorking() {
+        // The reported bug: the session IS working (a permission prompt is
+        // raised mid-turn), the notification has been auto-marked-read because
+        // the worktree is selected, and the row animated the thinking dots.
+        #expect(RowStatusIndicator.suffix(
+            notification: nil,
+            isWorking: true,
+            isSuspended: false,
+            hasPromptOnScreen: true) == .attention)
+    }
+
+    @Test func workingWithoutPromptStillAnimates() {
+        #expect(RowStatusIndicator.suffix(
+            notification: nil,
+            isWorking: true,
+            isSuspended: false,
+            hasPromptOnScreen: false) == .working)
+    }
+
+    @Test func promptOnScreenWithoutWorking() {
+        #expect(RowStatusIndicator.suffix(
+            notification: nil,
+            isWorking: false,
+            isSuspended: false,
+            hasPromptOnScreen: true) == .attention)
+    }
+
+    @Test func errorStillOutranksPromptOnScreen() {
+        #expect(RowStatusIndicator.suffix(
+            notification: .error,
+            isWorking: true,
+            isSuspended: false,
+            hasPromptOnScreen: true) == .error)
+    }
+
+    @Test func promptOnScreenOutranksParked() {
+        #expect(RowStatusIndicator.suffix(
+            notification: nil,
+            isWorking: false,
+            isSuspended: false,
+            isHibernated: true,
+            hasPromptOnScreen: true) == .attention)
+    }
+
+    @Test func attentionNotificationStillWorksWithoutPrompt() {
+        // The non-selected worktree keeps the pre-existing notification path.
+        #expect(RowStatusIndicator.suffix(
+            notification: .attentionNeeded,
+            isWorking: true,
+            isSuspended: false,
+            hasPromptOnScreen: false) == .attention)
+    }
+
     @Test func glyphMapping() {
         #expect(SuffixRowIndicator.error.systemImage == "exclamationmark.octagon.fill")
         #expect(SuffixRowIndicator.attention.systemImage == "hand.raised.fill")
@@ -104,5 +159,29 @@ struct ShouldBoldNameTests {
 
     @Test func doesNotBoldForNoNotification() {
         #expect(RowStatusIndicator.shouldBoldName(nil) == false)
+    }
+
+    /// The row this fix targets has no unread notification left — it was
+    /// auto-marked-read on selection — so without this the raised hand would
+    /// sit beside a regular-weight name.
+    @Test func boldsForAPromptOnScreenWithNoNotification() {
+        #expect(RowStatusIndicator.shouldBoldName(nil, hasPromptOnScreen: true) == true)
+    }
+
+    @Test func aPromptOnScreenBoldsEvenOverANonBoldingNotification() {
+        #expect(RowStatusIndicator.shouldBoldName(.taskComplete, hasPromptOnScreen: true) == true)
+    }
+
+    @Test func doesNotBoldWhenThereIsNoPromptAndNoNotification() {
+        #expect(RowStatusIndicator.shouldBoldName(nil, hasPromptOnScreen: false) == false)
+    }
+
+    /// `suffix` ranks `.error` above a prompt on screen, so the name must not
+    /// bold: a bold name beside an error octagon shows two severities at once.
+    @Test func aPromptOnScreenDoesNotBoldOverAnError() {
+        #expect(RowStatusIndicator.suffix(
+            notification: .error, isWorking: true, isSuspended: false,
+            hasPromptOnScreen: true) == .error)
+        #expect(RowStatusIndicator.shouldBoldName(.error, hasPromptOnScreen: true) == false)
     }
 }

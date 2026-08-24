@@ -106,8 +106,10 @@ struct SessionStateFacts: Sendable, Equatable {
 /// `handleTerminalNotificationEvent` records a reason without touching
 /// `activityState` (deliberately — `activityState` gates hibernation), and
 /// `handleTerminalActivityEvent` returns early when the state is unchanged, so
-/// a repeated same-state event does **not** rewrite the activity stamp and does
-/// **not** supersede a recorded reason.
+/// a repeated same-state event does **not** rewrite the activity stamp. It does
+/// retract a not-newer reason, on the same ordering rule a changed state
+/// follows — but the retraction and the activity stamp move independently, and
+/// only the reason column is touched.
 ///
 /// So neither fact may be given a standing rank, and observed-at decides
 /// between them. A reason older than the newest activity observation is a
@@ -125,7 +127,22 @@ struct SessionStateFacts: Sendable, Equatable {
 /// provenance. So a `permission_prompt` recorded a second *after* the turn's
 /// `working` stamp keeps outranking it for the rest of the turn — ten minutes
 /// of reporting `.awaitingInput` for a prompt answered seconds after it
-/// appeared. Nothing on the hook rail ever retracts the reason.
+/// appeared.
+///
+/// A same-state event does now retract a not-newer reason, which is what the
+/// rail could not do before. It does not close this window, and it is worth
+/// being exact about how narrow it is. An `AskUserQuestion` prompt was never in
+/// the window: its pre-hook writes `waiting_for_user` and its post-hook writes
+/// `working`, a *changed* state that has always retracted. And **no hook fires
+/// at all when a human approves a Bash or an Edit** — the overlay's only
+/// `PostToolUse` entries are matched to `AskUserQuestion` and to
+/// `Bash`-for-PR-binding — so between that approval and the turn's `Stop` there
+/// is nothing to retract on. What the same-state retraction reaches is a
+/// repeated value: a queued `UserPromptSubmit` mid-turn, a second `Stop`, or a
+/// post-hook whose paired pre-hook was lost to a stale `tbd` on `PATH`.
+///
+/// So the transcript check below is still the only thing that speaks during a
+/// turn, and it is still what this doctrine rests on.
 ///
 /// The transcript is the only other interface that speaks during a turn, and it
 /// **cannot settle this either — so growth is evidence of ambiguity, not of an

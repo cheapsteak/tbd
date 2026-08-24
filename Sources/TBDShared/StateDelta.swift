@@ -23,6 +23,12 @@ public enum StateDelta: Codable, Sendable {
     case modelProfilesChanged
     case terminalSessionUpdated(TerminalSessionDelta)
     case terminalActivityUpdated(TerminalActivityDelta)
+    /// A terminal's recorded awaiting-input reason was written or retracted.
+    /// Separate from `.terminalActivityUpdated` on purpose: a `Notification`
+    /// hook records that a prompt was raised without asserting what the
+    /// session is doing, and an activity event that repeats the state it
+    /// already had retracts a reason while broadcasting no activity change.
+    case terminalAwaitingInputChanged(TerminalAwaitingInputDelta)
     case terminalProfileChanged(TerminalProfileDelta)
     /// Explicit Watch Desk Judge/Read-only role markers changed. The app
     /// refetches that worktree's terminal rows; lease credentials stay daemon-side.
@@ -200,6 +206,42 @@ public struct TerminalActivityDelta: Codable, Sendable {
         self.activityStateSource = activityStateSource
         self.activityStateObservedAt = activityStateObservedAt
         self.activityStateOrderObservedAt = activityStateOrderObservedAt
+    }
+}
+
+/// Delta payload for a terminal's awaiting-input reason.
+///
+/// Carries the reason the daemon just persisted, or `nil` when a standing one
+/// was retracted — the app mirrors the columns rather than deriving them, so
+/// there is exactly one place that decides what the record says.
+///
+/// **What it promises is narrower than "every write":** a reason is pushed when
+/// it installs a prompt-on-screen or displaces one, and every retraction is
+/// pushed. The `Notification` hook carries no matcher, so it also records
+/// classes that cannot change whether a prompt is up — an `agent_completed`
+/// per finished subagent, an `idle_prompt` per idle minute — and pushing those
+/// would republish every subscriber's terminal collection for no visible
+/// change. A consumer that needs the other classes must read `terminal.list`.
+///
+/// This is a *recorded reason*, not a claim about activity: nothing here
+/// asserts `activityState`, and the app must not write one from it.
+public struct TerminalAwaitingInputDelta: Codable, Sendable {
+    public let terminalID: UUID
+    public let worktreeID: UUID
+    /// The persisted reason, or nil when it was retracted.
+    public let reason: AwaitingInputReason?
+    /// When the reason was observed. Nil whenever `reason` is nil.
+    public let observedAt: Date?
+    public init(
+        terminalID: UUID,
+        worktreeID: UUID,
+        reason: AwaitingInputReason?,
+        observedAt: Date?
+    ) {
+        self.terminalID = terminalID
+        self.worktreeID = worktreeID
+        self.reason = reason
+        self.observedAt = observedAt
     }
 }
 
