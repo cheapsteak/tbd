@@ -195,6 +195,12 @@ struct RepoSectionView: View {
     /// `newWorktreePlusButton`) so the two hover affordances appear and vanish
     /// together. The hidden branch keeps the 18pt square so the "missing" badge
     /// doesn't slide sideways as the chevron comes and goes.
+    ///
+    /// Hover-gating a disclosure control is deliberate, not incidental: it
+    /// trades the at-a-glance expanded/collapsed read for a quieter sidebar,
+    /// and it is the choice the `+` on this same row already made. The
+    /// always-available path to the same action is the header's context-menu
+    /// Collapse/Expand item, which is not gated on hover.
     @ViewBuilder
     private var chevronButton: some View {
         Group {
@@ -212,6 +218,9 @@ struct RepoSectionView: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(HoverPressButtonStyle())
+                // The glyph carries no text, so VoiceOver has nothing to
+                // announce without this — parity with the `+`'s label.
+                .accessibilityLabel(repo.expanded ? "Collapse \(repo.displayName)" : "Expand \(repo.displayName)")
                 .onHover { isChevronHovered = $0 }
                 .help(repo.expanded ? "Collapse" : "Expand")
             } else {
