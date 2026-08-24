@@ -3078,10 +3078,13 @@ extension RPCRouter {
     /// policy decision TBD could not depend on, while a fork here is compiled
     /// and testable.
     ///
-    /// The handler records a fact and changes nothing else. There is no
-    /// broadcast: no delta shape carries a wait reason, and inventing one to
-    /// carry a fact no surface renders yet would ship app behavior this slice
-    /// deliberately does not have.
+    /// The handler records the reason columns, and for a prompt-on-screen
+    /// classification additionally raises an `.attentionNeeded` notification
+    /// so the sidebar swaps the thinking dots for the attention indicator and
+    /// bolds the name (the app's `RowStatusIndicator` already ranks attention
+    /// above working). There is still no delta carrying the wait reason
+    /// itself: the notification row is the fact the app renders, and focusing
+    /// the worktree clears it through `notifications.markRead`.
     func handleTerminalNotificationEvent(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalNotificationEventParams.self, from: paramsData)
 
@@ -3123,6 +3126,30 @@ extension RPCRouter {
         // seam rather than a `Clock`.
         try await db.terminals.recordAwaitingInputReason(
             id: terminal.id, reason: reason, observedAt: now())
+
+        // A prompt on screen is the one class a human has to act on now, so
+        // it, and only it, raises the attention notification the sidebar
+        // renders (same pattern as the AskUserQuestion pending path). A
+        // failed insert must not fail a fire-and-forget hook.
+        if reason.classification == .promptOnScreen {
+            let bannerMessage = params.message.isEmpty
+                ? "Claude needs your input" : params.message
+            do {
+                let notification = try await db.notifications.create(
+                    worktreeID: terminal.worktreeID,
+                    type: .attentionNeeded,
+                    message: bannerMessage
+                )
+                subscriptions.broadcast(delta: .notificationReceived(NotificationDelta(
+                    notificationID: notification.id,
+                    worktreeID: notification.worktreeID,
+                    type: notification.type,
+                    message: notification.message
+                )))
+            } catch {
+                logger.debug("notificationEvent: failed to create attentionNeeded notification: \(String(describing: error), privacy: .public)")
+            }
+        }
 
         // `message` may quote repo content, so it is `.private`; the type and
         // the class are TBD's own closed vocabulary and stay public.

@@ -4,8 +4,9 @@ import Testing
 @testable import TBDShared
 import TestSupport
 
-/// Tier 1. `terminal.notificationEvent` records one fact and changes nothing
-/// else. Two properties carry most of the weight here:
+/// Tier 1. `terminal.notificationEvent` records one fact, and for a
+/// prompt-on-screen classification raises the attention notification the
+/// sidebar renders. Two properties carry most of the weight here:
 ///
 /// 1. Every classification branch records the message verbatim beside the label
 ///    TBD put on it, and an unrecognized type stays unrecognized.
@@ -20,6 +21,10 @@ import TestSupport
     let terminalID: UUID
     let worktreeID: UUID
     let worktreePath: String
+    /// Every delta the handler broadcasts, captured through a real subscriber
+    /// on the router's own `StateSubscriptionManager` (`broadcast` fans out
+    /// synchronously, so the capture is complete once the handler returns).
+    fileprivate let broadcasts: BroadcastDeltas
 
     /// Pinned through the router's date seam, so the stored observed-at is an
     /// exact assertion rather than a freshness window.
@@ -28,6 +33,15 @@ import TestSupport
     init() async throws {
         let db = try TBDDatabase(inMemory: true)
         self.db = db
+        let broadcasts = BroadcastDeltas()
+        self.broadcasts = broadcasts
+        let subscriptions = StateSubscriptionManager()
+        subscriptions.addSubscriber { data in
+            if let delta = try? JSONDecoder().decode(StateDelta.self, from: data) {
+                broadcasts.append(delta)
+            }
+            return true
+        }
         self.router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
@@ -35,6 +49,7 @@ import TestSupport
                 tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
+            subscriptions: subscriptions,
             now: { Self.observedAt },
             actuationLog: makeTestActuationLog())
         let repo = try await db.repos.create(
@@ -166,6 +181,62 @@ import TestSupport
         #expect(parkDecision(after) == parkDecision(before))
         #expect(parkDecision(after) == .eligible)
         #expect(HibernationGate.blockingRail(terminal: after) == nil)
+
+        // A prompt on screen is the one class a human has to act on now, so
+        // it, and only it, raises the attention notification the sidebar
+        // renders in place of the thinking dots. Every other class leaves the
+        // notification ledger and the delta stream untouched.
+        let unread = try await db.notifications.unread(worktreeID: worktreeID)
+        let received = broadcasts.snapshot().filter {
+            if case .notificationReceived = $0 { return true }
+            return false
+        }
+        if branch.expected == .promptOnScreen {
+            #expect(unread.count == 1)
+            #expect(unread.first?.type == .attentionNeeded)
+            #expect(received.count == 1)
+        } else {
+            #expect(unread.isEmpty)
+            #expect(received.isEmpty)
+        }
+    }
+
+    /// The delta the app renders from: it must carry the created row's own
+    /// identity and message, so the sidebar's unread state and the row agree.
+    @Test func aPromptOnScreenBroadcastsTheNotificationItCreated() async throws {
+        let message = "Claude needs your permission to use Bash"
+        #expect(await notify(type: "permission_prompt", message: message).success)
+
+        let unread = try await db.notifications.unread(worktreeID: worktreeID)
+        let row = try #require(unread.first)
+        #expect(unread.count == 1)
+        #expect(row.type == .attentionNeeded)
+        #expect(row.worktreeID == worktreeID)
+        #expect(row.message == message)
+
+        let delta = try #require(broadcasts.snapshot().compactMap { delta -> NotificationDelta? in
+            if case .notificationReceived(let d) = delta { return d }
+            return nil
+        }.first)
+        #expect(delta.notificationID == row.id)
+        #expect(delta.worktreeID == worktreeID)
+        #expect(delta.type == .attentionNeeded)
+        #expect(delta.message == message)
+    }
+
+    /// A notification hook can arrive with an empty message; the banner still
+    /// has to say something a human can act on.
+    @Test func anEmptyMessageFallsBackToTheGenericBanner() async throws {
+        #expect(await notify(type: "permission_prompt", message: "").success)
+
+        let row = try #require(try await db.notifications.unread(worktreeID: worktreeID).first)
+        #expect(row.message == "Claude needs your input")
+
+        let delta = try #require(broadcasts.snapshot().compactMap { delta -> NotificationDelta? in
+            if case .notificationReceived(let d) = delta { return d }
+            return nil
+        }.first)
+        #expect(delta.message == "Claude needs your input")
     }
 
     /// A near-miss spelling of a known type is the case a "helpful" matcher
@@ -348,5 +419,22 @@ import TestSupport
         let after = try await terminal()
         #expect(after.activityStateObservedAt == Self.observedAt)
         #expect(after.observedActivity?.observedAt == Self.observedAt)
+    }
+}
+
+/// Thread-safe collector for broadcast StateDeltas (same shape as the one in
+/// `RPCRouterWorktreeCreateBroadcastTests`).
+private final class BroadcastDeltas: @unchecked Sendable {
+    private let lock = NSLock()
+    private var deltas: [StateDelta] = []
+
+    func append(_ delta: StateDelta) {
+        lock.lock(); defer { lock.unlock() }
+        deltas.append(delta)
+    }
+
+    func snapshot() -> [StateDelta] {
+        lock.lock(); defer { lock.unlock() }
+        return deltas
     }
 }
