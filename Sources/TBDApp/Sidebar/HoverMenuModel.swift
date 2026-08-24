@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Drives the hover-to-open worktree menu shared by the repo `+`
@@ -30,9 +31,52 @@ final class HoverMenuModel: ObservableObject {
     private let openDelay: Duration
     private let closeGrace: Duration
 
-    init(openDelay: Duration = .milliseconds(400), closeGrace: Duration = .milliseconds(100)) {
+    // NotificationCenter is Sendable and this is an immutable `let`, so deinit
+    // (which is nonisolated under Swift 6) can read it without hopping.
+    private let notificationCenter: NotificationCenter
+    // nonisolated(unsafe): only ever written from the main thread (init and
+    // deinit, the latter running synchronously after the last main-thread
+    // release), matching the precedent in `ThemeDirectoryWatcher`.
+    nonisolated(unsafe) private var deactivationObserver: (any NSObjectProtocol)?
+
+    /// The notification center is injected so tests can post
+    /// `NSApplication.didResignActiveNotification` without disturbing
+    /// `.default` (and every other observer in the test process). Defaulted, so
+    /// no call site changes.
+    init(
+        openDelay: Duration = .milliseconds(400),
+        closeGrace: Duration = .milliseconds(100),
+        notificationCenter: NotificationCenter = .default
+    ) {
         self.openDelay = openDelay
         self.closeGrace = closeGrace
+        self.notificationCenter = notificationCenter
+
+        // WHY the menu must close on app deactivation, rather than relying on
+        // hover alone: `.onHover` is an active-app tracking-area concept. Cmd-Tab
+        // (or any other app taking over) moves no pointer, so AppKit delivers no
+        // exit event and both hover flags keep whatever value they had. If the
+        // pointer happened to be parked over the menu, `overMenu` stays true
+        // forever, `reconcile()` never even schedules a close, and the panel —
+        // a faux menu at `.popUpMenu` level, i.e. above every other app's
+        // windows — keeps painting over the app the user switched to until they
+        // come back and scrub the pointer across it. Hover therefore cannot be
+        // the only dismissal source; app deactivation is the second one.
+        deactivationObserver = notificationCenter.addObserver(
+            forName: NSApplication.didResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.closeNow()
+            }
+        }
+    }
+
+    deinit {
+        if let deactivationObserver {
+            notificationCenter.removeObserver(deactivationObserver)
+        }
     }
 
     private var pointerInside: Bool { isTriggerHovered || overMenu }

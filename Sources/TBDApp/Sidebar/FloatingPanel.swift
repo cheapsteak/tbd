@@ -24,6 +24,22 @@ class FloatingPanel: NSPanel {
         isMovableByWindowBackground = false
         animationBehavior = .none
 
+        // Deactivation backstop. `level = .popUpMenu` (101) is a windowserver-
+        // global level, so this panel floats above every *other* application's
+        // windows too — and lowering the level cannot fix that, because any
+        // level above 0 floats over other apps. The only cure is ordering the
+        // window out when TBD stops being the active app. NSPanel defaults
+        // `hidesOnDeactivate` to true only for *titled* panels; a
+        // `.borderless`/`.nonactivatingPanel` panel opts out of that default, so
+        // it has to be set explicitly. This is a backstop: the presenting model
+        // is expected to close on deactivation too (see `HoverMenuModel`), but
+        // if it ever holds stale state the panel still cannot paint over
+        // another app.
+        hidesOnDeactivate = true
+        // A menu-shaped panel should not be captured by Mission Control or
+        // stranded on another Space when the user switches desktops.
+        collectionBehavior = [.transient, .ignoresCycle]
+
         let hosting = NSHostingView(rootView: AnyView(content))
         contentView = hosting
         hostingView = hosting
