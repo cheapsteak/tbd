@@ -34,9 +34,14 @@ final class HoverMenuModel: ObservableObject {
     // NotificationCenter is Sendable and this is an immutable `let`, so deinit
     // (which is nonisolated under Swift 6) can read it without hopping.
     private let notificationCenter: NotificationCenter
-    // nonisolated(unsafe): only ever written from the main thread (init and
-    // deinit, the latter running synchronously after the last main-thread
-    // release), matching the precedent in `ThemeDirectoryWatcher`.
+    // nonisolated(unsafe): written in `init` on the main actor and read in
+    // `deinit`, which is nonisolated and runs wherever ARC drops the last
+    // strong reference. What keeps that single-threaded is an ownership
+    // invariant, not a language guarantee: every owner holds the model via
+    // `@StateObject` (`RepoSectionView`, `WorktreeRowView`), and SwiftUI
+    // releases those on the main actor. Releasing a `HoverMenuModel` reference
+    // off the main actor would break it. Same precedent, and same caveat, as
+    // `ThemeDirectoryWatcher`.
     nonisolated(unsafe) private var deactivationObserver: (any NSObjectProtocol)?
 
     /// The notification center is injected so tests can post
