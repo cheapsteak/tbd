@@ -1124,7 +1124,7 @@ struct PreSessionHookTests {
             label: "pre-session", kind: .shell
         )
 
-        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
 
         let kills = recorder.snapshot().filter { $0.contains("kill-window") }
         #expect(!kills.contains { $0.contains("@mock-pre") },
@@ -1166,7 +1166,7 @@ struct PreSessionHookTests {
             label: "pre-session", kind: .shell
         )
 
-        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
 
         #expect(!recorder.snapshot().contains { $0.contains("kill-server") },
                 "a repo whose only live worktree is .creating must keep its tmux server")
@@ -1206,7 +1206,7 @@ struct PreSessionHookTests {
         // exactly what Daemon.start() runs.
         let resumed = await lifecycle.recoverCreatingWorktrees()
         #expect(resumed.count == 1)
-        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
 
         #expect(!recorder.snapshot().contains { $0.contains("kill-window") && $0.contains("@mock-pre") },
                 "the just-resumed pre-session window must survive the startup reconcile")

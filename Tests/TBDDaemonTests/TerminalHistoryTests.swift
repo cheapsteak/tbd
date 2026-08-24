@@ -209,7 +209,7 @@ import Testing
             worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%0",
             label: "Claude Code", claudeSessionID: UUID().uuidString, kind: .claude)
 
-        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
 
         // Worktree archived, terminal torn down, scrollback captured.
         #expect(try await db.worktrees.get(id: wt.id)?.status == .archived)

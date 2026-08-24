@@ -72,7 +72,7 @@ import Testing
     #expect(!aliveAfterKill, "precondition: server must be gone to model a reboot")
 
     do {
-        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
     } catch {
         try? await realTmux.killServer(server: serverName)
         throw error
@@ -137,7 +137,7 @@ import Testing
     )
 
     do {
-        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
     } catch {
         try? await realTmux.killServer(server: serverName)
         throw error
@@ -180,7 +180,7 @@ import Testing
     )
 
     do {
-        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
     } catch {
         try? await realTmux.killServer(server: serverName)
         throw error
@@ -219,7 +219,7 @@ import Testing
     )
 
     do {
-        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
     } catch {
         try? await realTmux.killServer(server: serverName)
         throw error
@@ -282,7 +282,7 @@ func testReconcileDeadWindowLiveClaudeNotParked() async throws {
     )
 
     do {
-        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
     } catch {
         try? await tmux.killServer(server: serverName)
         throw error

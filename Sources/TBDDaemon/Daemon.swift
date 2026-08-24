@@ -419,7 +419,7 @@ public final class Daemon: Sendable {
     }
 
     /// Start the daemon: create config directory, clean up stale state,
-    /// initialize database and all managers, start servers, reconcile worktrees.
+    /// initialize database and all managers, reconcile worktrees, then start servers.
     public func start() async throws {
         // 0. Raise the file-descriptor limit before any tmux server is spawned.
         Self.raiseFileDescriptorLimit()
@@ -789,6 +789,18 @@ public final class Daemon: Sendable {
         // migration or marker is needed. Best-effort, never blocks startup.
         await database.notes.exportContentColumnToFiles()
 
+        // 8d. Reconcile parked state and durable tmux ownership before any
+        // listener accepts an RPC. Full startup recovery may destructively
+        // reap shared scratch servers; once serving begins, a terminal-create
+        // RPC can have created and stamped a window whose DB row has not yet
+        // landed, so that full sweep is no longer safe.
+        if mockMode == nil {
+            await rpcRouter.hibernationCoordinator.reconcileOnStartup()
+        }
+        await performStartupReconciliation(
+            mockMode: mockMode, database: database, git: git, lifecycle: lifecycle,
+            actuationLog: actuationLog)
+
         // 9. Start socket server
         let sock = SocketServer(router: rpcRouter)
         self.socketServer = sock
@@ -824,17 +836,6 @@ public final class Daemon: Sendable {
         let http = HTTPServer(router: rpcRouter)
         self.httpServer = http
         try await http.start()
-
-        if mockMode == nil {
-            // 11. Reconcile parked (hibernated / legacy-suspended) state: clear a
-            // stale parked timestamp for any terminal whose Claude is still alive.
-            await rpcRouter.hibernationCoordinator.reconcileOnStartup()
-        }
-
-        // 11. Perform DB-mutating reconciliation (skipped in mock mode so fixtures render as authored)
-        await performStartupReconciliation(
-            mockMode: mockMode, database: database, git: git, lifecycle: lifecycle,
-            actuationLog: actuationLog)
 
         // 11b. Delivery acknowledgement (design §12): wire the verifier and
         // replay the observations the last daemon's timers died owing.

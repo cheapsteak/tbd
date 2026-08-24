@@ -146,7 +146,7 @@ extension WorktreeLifecycle {
     public func reconcile(
         repoID: UUID,
         actuationLog: ActuationLog,
-        reapSharedScratchTmuxResources: Bool = true
+        reapSharedScratchTmuxResources: Bool
     ) async throws {
         // Null out parent pointers whose target is missing OR archived. Either
         // case would leave the child unreachable in the sidebar — missing rows
@@ -365,10 +365,19 @@ extension WorktreeLifecycle {
             referencedServers.formUnion(scratchServers)
         } else {
             // A live cleanup can overlap scratch terminal creation after its
-            // tmux window exists but before its terminal row lands. Exclude
-            // every scratch-referenced server, even when a promoted repo row
-            // also points there, so that gap cannot look like an orphan.
+            // tmux window exists but before its terminal row lands. Protect
+            // both current scratch pointers and the deterministic scratch
+            // server, plus inherited noncanonical repo servers whose retired
+            // scratch source row may already be gone. Reinsert the repo's
+            // canonical server last so its ordinary orphan cleanup still runs.
+            let canonicalScratchServer = TmuxManager.serverName(
+                forRepoPath: TBDConstants.scratchDir.path)
+            let inheritedServers = Set(
+                repoRows.map(\.tmuxServer).filter { $0 != correctTmuxServer })
             referencedServers.subtract(scratchServers)
+            referencedServers.remove(canonicalScratchServer)
+            referencedServers.subtract(inheritedServers)
+            referencedServers.insert(correctTmuxServer)
         }
         try await reconcileTmuxResources(
             servers: referencedServers, sweepingRepoID: repoID, actuationLog: actuationLog)
