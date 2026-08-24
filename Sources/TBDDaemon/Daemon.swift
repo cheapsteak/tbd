@@ -226,7 +226,10 @@ public final class Daemon: Sendable {
             let repos = try await database.repos.list()
             for repo in repos {
                 do {
-                    try await lifecycle.reconcile(repoID: repo.id, actuationLog: actuationLog)
+                    try await lifecycle.reconcile(
+                        repoID: repo.id,
+                        actuationLog: actuationLog,
+                        reapSharedScratchTmuxResources: true)
                 } catch {
                     reconcileLogger.warning("Failed to reconcile repo \(repo.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 }

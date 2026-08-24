@@ -143,7 +143,11 @@ extension WorktreeLifecycle {
     /// which is exactly the "helper ignores its caller's injected seam" shape.
     /// Fail-closed here means skipping the individual act — the daemon still
     /// boots, and the orphan waits for a writable log and the next sweep.
-    public func reconcile(repoID: UUID, actuationLog: ActuationLog) async throws {
+    public func reconcile(
+        repoID: UUID,
+        actuationLog: ActuationLog,
+        reapSharedScratchTmuxResources: Bool = true
+    ) async throws {
         // Null out parent pointers whose target is missing OR archived. Either
         // case would leave the child unreachable in the sidebar — missing rows
         // can't render, and archived parents are filtered out of the subtree
@@ -344,20 +348,28 @@ extension WorktreeLifecycle {
         let repoRows = try await db.worktrees.listLocal(repoID: repoID)
         var referencedServers = Set(repoRows.map(\.tmuxServer))
         referencedServers.insert(correctTmuxServer)
-        // Also visit every server referenced by scratch rows (repoID nil,
-        // archived included — the retired promoted-scratch row is often the
-        // LAST pointer). Scratch spaces belong to no repo, so no per-repo
-        // visit set would otherwise ever include their shared server once the
-        // repo-side pointer is gone: `repo.remove` on a promoted repo
+        // Full recovery also visits every server referenced by scratch rows
+        // (repoID nil, archived included — the retired promoted-scratch row is
+        // often the LAST pointer). Scratch spaces belong to no repo, so no
+        // per-repo visit set would otherwise ever include their shared server
+        // once the repo-side pointer is gone: `repo.remove` on a promoted repo
         // hard-deletes its main worktree row (deleteForRepo) — the only repo
-        // row referencing the inherited scratch server — leaving that
-        // server, and the removed repo's still-running windows on it,
-        // reachable by no repo reconcile at all (#325-class leak). Both this
-        // repo pass and the independent scratch pass visit those servers; the
-        // live-row checks below span all repos + scratch spaces, so live
-        // scratch windows stay safe.
+        // row referencing the inherited scratch server — leaving that server,
+        // and the removed repo's still-running windows on it, reachable by no
+        // repo reconcile at all (#325-class leak). The live cleanup path skips
+        // those servers until startup recovery because a scratch create can be
+        // in flight before its terminal row exists.
         let scratchRows = try await db.worktrees.listLocal(scratchOnly: true)
-        referencedServers.formUnion(scratchRows.map(\.tmuxServer))
+        let scratchServers = Set(scratchRows.map(\.tmuxServer))
+        if reapSharedScratchTmuxResources {
+            referencedServers.formUnion(scratchServers)
+        } else {
+            // A live cleanup can overlap scratch terminal creation after its
+            // tmux window exists but before its terminal row lands. Exclude
+            // every scratch-referenced server, even when a promoted repo row
+            // also points there, so that gap cannot look like an orphan.
+            referencedServers.subtract(scratchServers)
+        }
         try await reconcileTmuxResources(
             servers: referencedServers, sweepingRepoID: repoID, actuationLog: actuationLog)
 

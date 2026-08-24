@@ -2696,7 +2696,10 @@ extension RPCRouter {
             // Reconcile DB against actual git worktree list
             do {
                 let beforeCount = try await db.worktrees.listLocal(repoID: repo.id, status: .active).count
-                try await lifecycle.reconcile(repoID: repo.id, actuationLog: actuationLog)
+                try await lifecycle.reconcile(
+                    repoID: repo.id,
+                    actuationLog: actuationLog,
+                    reapSharedScratchTmuxResources: false)
                 let afterCount = try await db.worktrees.listLocal(repoID: repo.id, status: .active).count
                 let delta = abs(beforeCount - afterCount)
                 worktreesReconciled += delta
