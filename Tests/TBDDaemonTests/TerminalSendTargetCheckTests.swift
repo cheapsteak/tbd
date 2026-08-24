@@ -83,7 +83,7 @@ struct TerminalSendTargetCheckTests {
             dryRunPaneSendTarget: { _, _ in
                 switch answer {
                 case .missing: return .missing
-                case .dead: return .dead
+                case .dead: return .dead(terminalID: box.id)
                 case .unresolvable: return .live(terminalID: nil)
                 case .matching: return .live(terminalID: box.id)
                 case .matchingLowercased: return .live(terminalID: box.id.lowercased())

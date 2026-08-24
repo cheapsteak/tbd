@@ -193,7 +193,7 @@ struct FakeInspector: PaneProcessInspecting {
     @Test func deadPaneIsTerminalGone() async throws {
         // The case tmux reports as success: `send-keys` into a remain-on-exit
         // pane exits 0, so only the consultation can catch it.
-        tmux.paneTarget = .dead
+        tmux.paneTarget = .dead(terminalID: terminalID.uuidString)
         let outcome = await makeActuator().actuate(row)
         #expect(outcome == .terminalGone)
         #expect(tmux.sends.isEmpty)

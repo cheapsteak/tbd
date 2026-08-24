@@ -11,7 +11,10 @@ public enum PaneSendTarget: Sendable, Equatable {
     case missing
     /// The pane object exists (`remain-on-exit` kept it) but its process has
     /// exited. `send-keys` into it still exits 0 and the keys go nowhere.
-    case dead
+    /// `terminalID` carries the same ownership stamp as a live pane so
+    /// lifecycle reconciliation can preserve an owned gravestone while still
+    /// repairing a recycled coordinate that belongs to another terminal.
+    case dead(terminalID: String?)
     /// The pane is alive. `terminalID` is the TBD terminal UUID the pane itself
     /// answered with, or `nil` when the pane carries no identity to compare —
     /// a pane spawned before TBD stamped one, or by something outside TBD.
@@ -533,9 +536,12 @@ public struct TmuxManager: Sendable {
                 separator: paneSendTargetSeparator, maxSplits: 3, omittingEmptySubsequences: false)
             guard fields.count == 4 else { continue }
             guard fields[0].trimmingCharacters(in: .whitespaces) == paneID else { continue }
-            if fields[1].trimmingCharacters(in: .whitespaces) == "1" { return .dead }
-            return .live(terminalID: resolvePaneTerminalID(
-                paneOption: String(fields[2]), startCommand: String(fields[3])))
+            let terminalID = resolvePaneTerminalID(
+                paneOption: String(fields[2]), startCommand: String(fields[3]))
+            if fields[1].trimmingCharacters(in: .whitespaces) == "1" {
+                return .dead(terminalID: terminalID)
+            }
+            return .live(terminalID: terminalID)
         }
         // rc 0 but no line for this pane (including no output at all): nothing
         // answered for the coordinate the send named.

@@ -547,24 +547,23 @@ extension WorktreeLifecycle {
                         server: wt.tmuxServer, windowID: terminal.tmuxWindowID)
                 }
 
-                var paneBelongsToDifferentTerminal = false
                 if windowAlive {
                     do {
                         switch try await tmux.paneSendTarget(
                             server: wt.tmuxServer, paneID: terminal.tmuxPaneID)
                         {
-                        case .live(let paneTerminalID):
+                        case .live(let paneTerminalID), .dead(let paneTerminalID):
                             if let paneTerminalID {
-                                paneBelongsToDifferentTerminal =
+                                let paneBelongsToDifferentTerminal =
                                     paneTerminalID.caseInsensitiveCompare(
                                         terminal.id.uuidString) != .orderedSame
+                                if !paneBelongsToDifferentTerminal { continue }
                             } else {
                                 // Panes predating the identity stamp remain
-                                // live for backward compatibility.
+                                // attributed for backward compatibility.
                                 continue
                             }
-                            if !paneBelongsToDifferentTerminal { continue }
-                        case .missing, .dead:
+                        case .missing:
                             break
                         }
                     } catch {
@@ -577,9 +576,11 @@ extension WorktreeLifecycle {
 
                 // Preserve the existing extra safety when the window probe
                 // itself says a Claude window is gone: if Claude is still
-                // running, retain the row. A pane that answered `.dead`,
-                // `.missing`, or with another terminal's identity is already
-                // definitive, so never inspect its current command.
+                // running, retain the row. A pane that answered `.missing` or
+                // with another terminal's identity is already definitive, so
+                // never inspect its current command. An owned dead pane
+                // continued above because remain-on-exit makes it an intended
+                // readable gravestone.
                 if terminal.isClaudeResumable && !windowAlive {
                     if let cmd = try? await tmux.paneCurrentCommand(
                         server: wt.tmuxServer, paneID: terminal.tmuxPaneID),

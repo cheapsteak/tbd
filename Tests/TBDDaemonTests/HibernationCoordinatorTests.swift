@@ -399,7 +399,9 @@ struct HibernationCoordinatorTests {
     /// a basis for "already awake" as a missing one — the row refers to a shell.
     @Test func wakeOnUnparkedRowWithExitedProcessReportsSessionGone() async throws {
         let (db, _, terminalID) = try await setup()
-        let tmux = TmuxManager(dryRun: true, dryRunPaneSendTarget: { _, _ in .dead })
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunPaneSendTarget: { _, _ in .dead(terminalID: terminalID.uuidString) })
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
             actuationLog: makeTestActuationLog())

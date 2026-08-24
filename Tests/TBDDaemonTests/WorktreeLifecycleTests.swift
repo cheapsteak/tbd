@@ -761,6 +761,55 @@ import Testing
     #expect(windowIDsAfter == windowIDsBefore, "Window IDs must be unchanged when server and windows are alive")
 }
 
+@Test func testReconcileOwnedDeadRepoTerminalRemainsTrackedThroughResourceSweep() async throws {
+    let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let terminalID = UUID()
+    let server = TmuxManager.serverName(forRepoPath: repoDir.path)
+    let recorded = LockedCommandRecorder()
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: GitManager(),
+        tmux: TmuxManager(
+            dryRun: true,
+            dryRunRecorder: recorded.append,
+            dryRunListWindows: { probed, _ in
+                probed == server ? [(windowID: "@1", paneID: "%1")] : []
+            },
+            dryRunPaneSendTarget: { _, _ in
+                .dead(terminalID: terminalID.uuidString.lowercased())
+            }),
+        hooks: HookResolver())
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+    let main = try await db.worktrees.createMain(
+        repoID: repo.id,
+        name: "main",
+        branch: "main",
+        path: repoDir.path,
+        tmuxServer: server)
+    let terminal = try await db.terminals.create(
+        id: terminalID,
+        worktreeID: main.id,
+        tmuxWindowID: "@1",
+        tmuxPaneID: "%1",
+        label: "Shell",
+        kind: .shell)
+    try await db.tabs.setLabel(
+        tabID: terminal.id, worktreeID: main.id, label: "Finished output")
+
+    try await lifecycle.reconcile(
+        repoID: repo.id,
+        actuationLog: makeTestActuationLog(),
+        reapSharedScratchTmuxResources: true)
+
+    #expect(try await db.terminals.get(id: terminal.id) != nil)
+    #expect(try await db.tabs.listForWorktree(worktreeID: main.id)
+            .first(where: { $0.id == terminal.id })?.label == "Finished output")
+    #expect(!recorded.snapshot().contains { $0.contains("kill-window") })
+}
+
 /// Suspended terminals must not be touched during reconcile, regardless of server/window state.
 /// dryRun mode exercises the serverAlive=true branch; suspended terminals are skipped
 /// before the windowExists check, so this works with dryRun=true.

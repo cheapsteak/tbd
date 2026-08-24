@@ -158,15 +158,15 @@ struct DaemonMockGateTests {
         #expect(recorder.contains("@2"))
     }
 
-    @Test("mock OFF: unstamped scratch pane remains live for compatibility")
-    func mockOffKeepsScratchTerminalWithNoPaneIdentity() async throws {
+    @Test("mock OFF: an unstamped dead scratch pane remains for compatibility")
+    func mockOffKeepsDeadScratchTerminalWithNoPaneIdentity() async throws {
         let db = try TBDDatabase(inMemory: true)
         let lifecycle = WorktreeLifecycle(
             db: db,
             git: GitManager(),
             tmux: TmuxManager(
                 dryRun: true,
-                dryRunPaneSendTarget: { _, _ in .live(terminalID: nil) }
+                dryRunPaneSendTarget: { _, _ in .dead(terminalID: nil) }
             ),
             hooks: HookResolver()
         )
@@ -214,8 +214,8 @@ struct DaemonMockGateTests {
         #expect(try await db.terminals.get(id: terminal.id) != nil)
     }
 
-    @Test("mock OFF: dead scratch pane is stale even if its old command was Claude")
-    func mockOffParksScratchClaudeWhenPaneIsDead() async throws {
+    @Test("mock OFF: a foreign dead scratch pane is stale even if its old command was Claude")
+    func mockOffParksScratchClaudeWhenForeignPaneIsDead() async throws {
         let db = try TBDDatabase(inMemory: true)
         let lifecycle = WorktreeLifecycle(
             db: db,
@@ -223,7 +223,9 @@ struct DaemonMockGateTests {
             tmux: TmuxManager(
                 dryRun: true,
                 dryRunPaneCurrentCommand: { _, _ in "1.2.3" },
-                dryRunPaneSendTarget: { _, _ in .dead }
+                dryRunPaneSendTarget: { _, _ in
+                    .dead(terminalID: UUID().uuidString)
+                }
             ),
             hooks: HookResolver()
         )
@@ -243,6 +245,99 @@ struct DaemonMockGateTests {
         let after = try await db.terminals.get(id: terminal.id)
         #expect(after?.hibernatedAt != nil)
         #expect(after?.claudeSessionID == "session-dead")
+    }
+
+    @Test("mock OFF: an owned dead scratch pane remains as a gravestone")
+    func mockOffPreservesOwnedDeadScratchPane() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorder = StartupReconcileCommandRecorder()
+        let terminalID = UUID()
+        let server = "scratch-shared"
+        let lifecycle = WorktreeLifecycle(
+            db: db,
+            git: GitManager(),
+            tmux: TmuxManager(
+                dryRun: true,
+                dryRunRecorder: recorder.append,
+                dryRunListWindows: { probed, _ in
+                    probed == server ? [(windowID: "@1", paneID: "%1")] : []
+                },
+                dryRunPaneSendTarget: { _, _ in
+                    .dead(terminalID: terminalID.uuidString.lowercased())
+                }),
+            hooks: HookResolver())
+        let scratch = try await db.worktrees.createScratch(
+            name: "scratch-gravestone", displayName: "Scratch Gravestone",
+            path: "/tmp/tbd-scratch-gravestone", tmuxServer: server)
+        let terminal = try await db.terminals.create(
+            id: terminalID,
+            worktreeID: scratch.id,
+            tmuxWindowID: "@1",
+            tmuxPaneID: "%1",
+            label: "Codex",
+            kind: .codex)
+        try await db.tabs.setLabel(
+            tabID: terminal.id, worktreeID: scratch.id, label: "Finished output")
+
+        await Daemon().performStartupReconciliation(
+            mockMode: nil, database: db, git: GitManager(), lifecycle: lifecycle,
+            actuationLog: makeTestActuationLog())
+
+        #expect(try await db.terminals.get(id: terminal.id) != nil)
+        let tabs = try await db.tabs.listForWorktree(worktreeID: scratch.id)
+        #expect(tabs.first(where: { $0.id == terminal.id })?.label == "Finished output")
+        #expect(!recorder.contains("kill-window"))
+    }
+
+    @Test("mock OFF: an owned dead resumable Claude remains active with its pending question")
+    func mockOffPreservesOwnedDeadResumableClaudeState() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorder = StartupReconcileCommandRecorder()
+        let pendingQuestions = PendingQuestionStore()
+        let terminalID = UUID()
+        let server = "scratch-shared"
+        let lifecycle = WorktreeLifecycle(
+            db: db,
+            git: GitManager(),
+            tmux: TmuxManager(
+                dryRun: true,
+                dryRunRecorder: recorder.append,
+                dryRunListWindows: { probed, _ in
+                    probed == server ? [(windowID: "@1", paneID: "%1")] : []
+                },
+                dryRunPaneSendTarget: { _, _ in
+                    .dead(terminalID: terminalID.uuidString)
+                }),
+            hooks: HookResolver(),
+            pendingQuestions: pendingQuestions)
+        let scratch = try await db.worktrees.createScratch(
+            name: "scratch-claude-gravestone", displayName: "Scratch Claude Gravestone",
+            path: "/tmp/tbd-scratch-claude-gravestone", tmuxServer: server)
+        let terminal = try await db.terminals.create(
+            id: terminalID,
+            worktreeID: scratch.id,
+            tmuxWindowID: "@1",
+            tmuxPaneID: "%1",
+            label: "Claude",
+            claudeSessionID: "session-finished",
+            kind: .claude)
+        await pendingQuestions.set(
+            terminalID: terminal.id,
+            PendingAskUserQuestion(
+                toolUseID: "toolu_finished",
+                inputJSON: "{}",
+                timestamp: Date(timeIntervalSince1970: 1)))
+
+        await Daemon().performStartupReconciliation(
+            mockMode: nil, database: db, git: GitManager(), lifecycle: lifecycle,
+            actuationLog: makeTestActuationLog())
+
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(after.hibernatedAt == nil)
+        #expect(after.claudeSessionID == "session-finished")
+        #expect(await pendingQuestions.entries(forTerminal: terminal.id).map(\.toolUseID)
+                == ["toolu_finished"])
+        #expect(!recorder.contains("kill-window"))
     }
 
     @Test("mock OFF: foreign pane identity is not inspected as stale Claude")
