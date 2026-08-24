@@ -2708,7 +2708,9 @@ extension RPCRouter {
         // Scratch spaces have no repo row, so this must stay outside the repo
         // loop: cleanup is also the explicit retry path on zero-repo installs.
         do {
-            try await lifecycle.reconcileScratchTerminals(actuationLog: actuationLog)
+            try await lifecycle.reconcileScratchTerminals(
+                actuationLog: actuationLog,
+                reapOrphanTmuxResources: false)
         } catch {
             errors.append("Scratch terminal reconcile failed: \(error)")
         }

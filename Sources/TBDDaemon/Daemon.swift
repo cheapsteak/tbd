@@ -238,7 +238,9 @@ public final class Daemon: Sendable {
         // server. Reconcile them independently so this still runs when there
         // are zero registered repos and catches recycled pane coordinates.
         do {
-            try await lifecycle.reconcileScratchTerminals(actuationLog: actuationLog)
+            try await lifecycle.reconcileScratchTerminals(
+                actuationLog: actuationLog,
+                reapOrphanTmuxResources: true)
         } catch {
             reconcileLogger.warning("Failed to reconcile scratch terminals: \(error.localizedDescription, privacy: .public)")
         }
@@ -264,7 +266,9 @@ public final class Daemon: Sendable {
     ) async {
         _ = await orphanGC.sweep()
         do {
-            try await lifecycle.reconcileScratchTerminals(actuationLog: actuationLog)
+            try await lifecycle.reconcileScratchTerminals(
+                actuationLog: actuationLog,
+                reapOrphanTmuxResources: false)
         } catch {
             reconcileLogger.warning("Failed to reconcile scratch terminals during orphan maintenance: \(error.localizedDescription, privacy: .public)")
         }

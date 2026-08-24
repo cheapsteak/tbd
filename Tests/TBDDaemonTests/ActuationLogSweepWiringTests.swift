@@ -298,7 +298,8 @@ struct ActuationLogSweepWiringTests {
         #expect(try await db.repos.list().isEmpty)
 
         try await lifecycle.reconcileScratchTerminals(
-            actuationLog: ActuationLog(path: logPath))
+            actuationLog: ActuationLog(path: logPath),
+            reapOrphanTmuxResources: true)
 
         let requests = try requests(at: logPath).filter {
             ($0["target"] as? [String: Any])?["window"] as? String == "@77"

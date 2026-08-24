@@ -381,10 +381,20 @@ extension WorktreeLifecycle {
     /// Reconcile active scratch-space terminals independently of registered
     /// repositories. Scratch spaces deliberately share a tmux server, so tmux
     /// may recycle one pane coordinate after an older scratch row survives.
-    public func reconcileScratchTerminals(actuationLog: ActuationLog) async throws {
+    public func reconcileScratchTerminals(
+        actuationLog: ActuationLog,
+        reapOrphanTmuxResources: Bool
+    ) async throws {
         let scratchWorktrees = try await db.worktrees.listLocal(
             status: .active, scratchOnly: true)
         try await reconcileTerminals(in: scratchWorktrees, actuationLog: actuationLog)
+
+        // Live maintenance may race a terminal spawn between tmux window
+        // creation and terminal-row insertion. Ownership pruning is safe in
+        // that gap because the pane's identity proves stale aliases, but an
+        // orphan sweep would mistake the new window for untracked and kill it.
+        // Full resource reaping therefore remains a startup-only recovery pass.
+        guard reapOrphanTmuxResources else { return }
 
         // Scratch rows have no repo, so the per-repo pass cannot be relied on
         // to visit their servers — particularly on installations with zero

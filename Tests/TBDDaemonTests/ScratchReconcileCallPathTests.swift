@@ -29,6 +29,7 @@ struct ScratchReconcileCallPathTests {
         let lifecycle: WorktreeLifecycle
         let recorder: CommandRecorder
         let staleTerminalID: UUID
+        let currentWorktreeID: UUID
         let currentTerminalID: UUID
     }
 
@@ -57,17 +58,24 @@ struct ScratchReconcileCallPathTests {
         let staleTerminal = try await db.terminals.create(
             worktreeID: staleScratch.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
             label: "Codex", kind: .codex)
-        _ = try await db.terminals.create(
-            id: currentTerminalID,
-            worktreeID: currentScratch.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            label: "Codex", kind: .codex)
         return AliasFixture(
             db: db,
             tmux: tmux,
             lifecycle: lifecycle,
             recorder: recorder,
             staleTerminalID: staleTerminal.id,
+            currentWorktreeID: currentScratch.id,
             currentTerminalID: currentTerminalID)
+    }
+
+    private func insertPlannedCurrentTerminal(_ fixture: AliasFixture) async throws {
+        _ = try await fixture.db.terminals.create(
+            id: fixture.currentTerminalID,
+            worktreeID: fixture.currentWorktreeID,
+            tmuxWindowID: "@1",
+            tmuxPaneID: "%1",
+            label: "Codex",
+            kind: .codex)
     }
 
     @Test("cleanup reconciles scratch aliases with zero registered repos")
@@ -88,8 +96,9 @@ struct ScratchReconcileCallPathTests {
         #expect(result.reposProcessed == 0)
         #expect(result.errors.isEmpty)
         #expect(try await fixture.db.terminals.get(id: fixture.staleTerminalID) == nil)
-        #expect(try await fixture.db.terminals.get(id: fixture.currentTerminalID) != nil)
         #expect(!fixture.recorder.contains("kill-window"))
+        try await insertPlannedCurrentTerminal(fixture)
+        #expect(try await fixture.db.terminals.get(id: fixture.currentTerminalID) != nil)
     }
 
     @Test("hourly orphan maintenance reconciles scratch aliases safely")
@@ -108,7 +117,8 @@ struct ScratchReconcileCallPathTests {
             actuationLog: makeTestActuationLog())
 
         #expect(try await fixture.db.terminals.get(id: fixture.staleTerminalID) == nil)
-        #expect(try await fixture.db.terminals.get(id: fixture.currentTerminalID) != nil)
         #expect(!fixture.recorder.contains("kill-window"))
+        try await insertPlannedCurrentTerminal(fixture)
+        #expect(try await fixture.db.terminals.get(id: fixture.currentTerminalID) != nil)
     }
 }
