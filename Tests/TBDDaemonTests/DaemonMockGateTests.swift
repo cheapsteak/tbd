@@ -73,6 +73,9 @@ struct DaemonMockGateTests {
         let tmux = TmuxManager(
             dryRun: true,
             dryRunRecorder: recorder.append,
+            dryRunListWindows: { server, _ in
+                server == "scratch-shared" ? [(windowID: "@1", paneID: "%1")] : []
+            },
             dryRunPaneSendTarget: { _, _ in
                 .live(terminalID: currentTerminalID.uuidString.lowercased())
             }
@@ -97,6 +100,8 @@ struct DaemonMockGateTests {
             worktreeID: staleScratch.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
             label: "Codex", kind: .codex
         )
+        try await db.tabs.setLabel(
+            tabID: staleTerminal.id, worktreeID: staleScratch.id, label: "Old tab")
         _ = try await db.terminals.create(
             id: currentTerminalID,
             worktreeID: currentScratch.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
@@ -108,8 +113,49 @@ struct DaemonMockGateTests {
             actuationLog: makeTestActuationLog())
 
         #expect(try await db.terminals.get(id: staleTerminal.id) == nil)
+        #expect(try await db.tabs.listForWorktree(worktreeID: staleScratch.id).isEmpty)
         #expect(try await db.terminals.get(id: currentTerminalID) != nil)
         #expect(!recorder.contains("kill-window"), "a recycled pane belongs to the current terminal")
+    }
+
+    @Test("mock OFF: dead scratch terminal cleanup reaps its orphan window and tab metadata")
+    func mockOffReapsDeadScratchTerminalResourcesWithoutRepo() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorder = StartupReconcileCommandRecorder()
+        let sharedServer = "scratch-shared"
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: recorder.append,
+            dryRunWindowIsDead: { $0 == "@2" },
+            dryRunListWindows: { server, _ in
+                server == sharedServer ? [(windowID: "@2", paneID: "%2")] : []
+            }
+        )
+        let lifecycle = WorktreeLifecycle(
+            db: db,
+            git: GitManager(),
+            tmux: tmux,
+            hooks: HookResolver()
+        )
+        let scratch = try await db.worktrees.createScratch(
+            name: "scratch-dead", displayName: "Scratch Dead",
+            path: "/tmp/tbd-scratch-dead", tmuxServer: sharedServer
+        )
+        let terminal = try await db.terminals.create(
+            worktreeID: scratch.id, tmuxWindowID: "@2", tmuxPaneID: "%2",
+            label: "Codex", kind: .codex
+        )
+        try await db.tabs.setLabel(
+            tabID: terminal.id, worktreeID: scratch.id, label: "Dead tab")
+
+        await Daemon().performStartupReconciliation(
+            mockMode: nil, database: db, git: GitManager(), lifecycle: lifecycle,
+            actuationLog: makeTestActuationLog())
+
+        #expect(try await db.terminals.get(id: terminal.id) == nil)
+        #expect(try await db.tabs.listForWorktree(worktreeID: scratch.id).isEmpty)
+        #expect(recorder.contains("kill-window"))
+        #expect(recorder.contains("@2"))
     }
 
     @Test("mock OFF: unstamped scratch pane remains live for compatibility")
