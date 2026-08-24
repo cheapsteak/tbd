@@ -55,6 +55,10 @@ struct RepoSectionView: View {
                 // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                 try await Task.sleep(nanoseconds: 80_000_000)
                 isSectionHovered = false
+                // The chevron is torn down by this same gate, so its
+                // `onHover(false)` may never arrive — without this the
+                // worktree rows would stay dimmed at 0.7 forever.
+                isChevronHovered = false
             }
         }
     }
@@ -130,7 +134,7 @@ struct RepoSectionView: View {
         }
     }
 
-    /// The section header row (chevron + name + `+`) and every modifier
+    /// The section header row (name + chevron + `+`) and every modifier
     /// attached to it — extracted out of `body` alongside `expandedContent`,
     /// and further split into `headerHStack` + its own sub-pieces below, so
     /// the type checker sees several smaller expressions instead of one
@@ -171,14 +175,14 @@ struct RepoSectionView: View {
         .tag(repo.id)
     }
 
-    /// The header row's actual content (chevron + name + optional "missing"
+    /// The header row's actual content (name + chevron + optional "missing"
     /// badge + `+`), with none of `headerRow`'s trailing modifiers — see
     /// `headerRow`'s doc comment.
     @ViewBuilder
     private var headerHStack: some View {
         HStack(spacing: 4) {
-            chevronButton
             nameLabel
+            chevronButton
             if repo.status == .missing {
                 missingBadge
             }
@@ -187,20 +191,42 @@ struct RepoSectionView: View {
         }
     }
 
+    /// The disclosure chevron, revealed on the same hover gate as the `+` (see
+    /// `newWorktreePlusButton`) so the two hover affordances appear and vanish
+    /// together. The hidden branch keeps the 18pt square so the "missing" badge
+    /// doesn't slide sideways as the chevron comes and goes.
     @ViewBuilder
     private var chevronButton: some View {
-        Button {
-            Task { await appState.setRepoExpanded(id: repo.id, expanded: !repo.expanded) }
-        } label: {
-            Image(systemName: repo.expanded ? "chevron.down" : "chevron.right")
-                .font(.system(size: 11))
-                .foregroundStyle(chevronForegroundStyle)
-                .frame(width: 18, height: 18)
-                .contentShape(Rectangle())
+        Group {
+            if HoverMenuModel.shouldShowPlus(hovered: isSectionHovered, menuOpen: newWorktreeMenu.isOpen) {
+                Button {
+                    Task { await appState.setRepoExpanded(id: repo.id, expanded: !repo.expanded) }
+                } label: {
+                    Image(systemName: repo.expanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 10))
+                        // Applied to the glyph, not the button, so it wins over
+                        // `HoverPressButtonStyle`'s blanket `.secondary` and a
+                        // missing repo still renders dimmed.
+                        .foregroundStyle(chevronForegroundStyle)
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(HoverPressButtonStyle())
+                .onHover { isChevronHovered = $0 }
+                .help(repo.expanded ? "Collapse" : "Expand")
+            } else {
+                Color.clear
+            }
         }
-        .buttonStyle(.plain)
-        .onHover { isChevronHovered = $0 }
-        .help(repo.expanded ? "Collapse" : "Expand")
+        .frame(width: 18, height: 18)
+        // The 18pt-square hit target centers the 10pt glyph, leaving ~4pt of
+        // slack on each side. Trim the leading slack so the chevron reads as
+        // attached to the name rather than floating after it.
+        .padding(.leading, -3)
+        // Nudge down so the chevron sits on the name's optical baseline
+        // rather than its cap-height center. Layout-neutral by design — the
+        // hit target rides along with the glyph.
+        .offset(y: 2)
     }
 
     @ViewBuilder
@@ -220,7 +246,6 @@ struct RepoSectionView: View {
                 .truncationMode(.tail)
                 .foregroundStyle(nameForegroundStyle)
         }
-        .padding(.leading, -2)
     }
 
     @ViewBuilder
