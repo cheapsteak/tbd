@@ -196,11 +196,20 @@ struct RepoSectionView: View {
     /// together. The hidden branch keeps the 18pt square so the "missing" badge
     /// doesn't slide sideways as the chevron comes and goes.
     ///
-    /// Hover-gating a disclosure control is deliberate, not incidental: it
-    /// trades the at-a-glance expanded/collapsed read for a quieter sidebar,
-    /// and it is the choice the `+` on this same row already made. The
-    /// always-available path to the same action is the header's context-menu
-    /// Collapse/Expand item, which is not gated on hover.
+    /// Hover-gating a disclosure control is deliberate, not incidental, and
+    /// was signed off by the maintainer. It trades two things for a quieter
+    /// sidebar: the at-a-glance expanded/collapsed read, and pointer-free
+    /// reachability — `isSectionHovered` is driven only by `.onHover`, so the
+    /// button is absent from the focus tree entirely until a pointer enters
+    /// the section, and Tab/Full Keyboard Access skips it. The accepted answer
+    /// for keyboard-only users is the header's context-menu Collapse/Expand
+    /// item (below), which is not gated on hover and performs the same action.
+    /// The `+` on this same row already made this exact trade.
+    ///
+    /// So do not "fix" this by always-mounting the button — that reverses a
+    /// decision someone made on purpose. The `.accessibilityLabel` below is
+    /// worth keeping regardless: it serves VoiceOver whenever the button is
+    /// mounted, which it never did before.
     @ViewBuilder
     private var chevronButton: some View {
         Group {
