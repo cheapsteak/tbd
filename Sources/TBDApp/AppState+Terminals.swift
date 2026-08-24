@@ -473,6 +473,17 @@ extension AppState {
         // Remaining terminals: Codex (Ctrl+C), Claude, or legacy nil-kind sessions.
         if let idx = terminals[terminal.worktreeID]?.firstIndex(where: { $0.id == terminalID }) {
             terminals[terminal.worktreeID]?[idx].activityState = .idle
+            // Clear the cached presentation value for every agent kind. The
+            // daemon drops its own claim on the `userInterrupt` origin below,
+            // but `TerminalActivityDelta` — the real-time push rail — carries
+            // no presentation field, so only a full `terminal.list` refresh
+            // would deliver that clear. Without this line the stale claim keeps
+            // the sidebar spinner lit until the next unscoped poll (~2s), which
+            // is the false-thinking direction the rail must never fail toward.
+            // Clearing it for Codex too is safe: Codex's foreground-working
+            // test requires a `.working` presentation value, so the row can
+            // only reach idle sooner.
+            terminals[terminal.worktreeID]?[idx].presentationActivityState = nil
             if isCodex {
                 let observedAt = Date()
                 terminals[terminal.worktreeID]?[idx].activityStateSource = .terminalInterrupt

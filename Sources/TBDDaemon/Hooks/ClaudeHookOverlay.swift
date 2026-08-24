@@ -140,11 +140,13 @@ public enum ClaudeHookOverlay {
 
     /// Seconds Claude Code will wait for `sessionEndCommand` before killing it.
     ///
-    /// Explicit because Claude Code runs SessionEnd callbacks inside a
-    /// ~1.5-second shutdown budget: the 60-second default would let one wedged
-    /// daemon socket hold a quitting session open long past it. Losing the
-    /// clear to a timeout costs only a stale claim on a terminal whose session
-    /// is gone.
+    /// Explicit only to escape the 60-second default, which would let one
+    /// wedged daemon socket hold a quitting session open for a minute. What
+    /// actually bounds the hook is Claude Code's ~1.5-second SessionEnd
+    /// shutdown budget, which cuts the callback off first either way; this
+    /// value stays above it so a healthy RPC has the whole budget to land the
+    /// clear. Losing the clear to either bound costs only a stale claim on a
+    /// terminal whose session is gone.
     static let sessionEndTimeoutSeconds = 2
 
     /// The extended regex the prefilter greps a Bash hook payload for.
