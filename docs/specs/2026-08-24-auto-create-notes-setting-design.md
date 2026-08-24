@@ -24,9 +24,11 @@ must exist regardless of the preference for ordinary worktrees.
 
 Settings › Worktrees contains a global toggle named **Create a Notes tab for
 new worktrees**. It defaults on, preserving the established creation behavior.
-Turning it off affects future ordinary repo-backed worktrees created through any
-client; it neither removes existing notes nor changes a creation already in
-progress.
+Turning it off affects ordinary repo-backed worktrees whose
+`completeCreateWorktree` config snapshot occurs after the preference is
+persisted, regardless of which client created them. It does not remove existing
+notes. A visibly pending creation may use either value depending on whether it
+has already taken that snapshot.
 
 The preference is daemon-backed rather than app-local. The daemon owns
 worktree creation for both the app and the CLI, so it is the only layer that can
@@ -69,9 +71,11 @@ constant for untouched rows without overriding either explicit state.
 ## Lifecycle semantics
 
 `completeCreateWorktree` reads `Config` once near the start of creation and
-computes whether an initial note is required from that snapshot. A preference
-change during creation therefore applies to the next worktree, not partway
-through the current one.
+computes whether an initial note is required from that snapshot. Once the read
+completes, later preference changes do not affect that creation. Any creation
+whose snapshot occurs after a new value is persisted uses the new value. This
+code boundary, rather than the worktree's visible pending state, determines
+which preference applies.
 
 Both terminal-spawn branches use the same decision:
 
