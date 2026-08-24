@@ -1219,6 +1219,51 @@ extension WorktreeLifecycle {
         /// it nil and gets exactly the overlay it got before the tee existed.
         watchDeskRole: WatchDeskRole? = nil
     ) async throws -> [(id: UUID, label: String)] {
+        try await tmux.withWorktreeServerLock(
+            db: db,
+            worktreeID: worktree.id,
+            allowedStatuses: [worktree.status, .creating]
+        ) { currentWorktree in
+            try await spawnPrimaryTerminalsWhileLocked(
+                worktree: currentWorktree.worktree,
+                repo: repo,
+                worktreePath: worktreePath,
+                skipClaude: skipClaude,
+                archivedClaudeSessions: archivedClaudeSessions,
+                initialPrompt: initialPrompt,
+                cols: cols,
+                rows: rows,
+                preSessionTerminalID: preSessionTerminalID,
+                overrideProfileID: overrideProfileID,
+                modelOverride: modelOverride,
+                primaryAgentPreference: primaryAgentPreference,
+                claudeSettingsOverlay: claudeSettingsOverlay,
+                carryover: carryover,
+                preparedCodexLaunch: preparedCodexLaunch,
+                watchDeskRole: watchDeskRole)
+        }
+    }
+
+    /// Implementation of `spawnPrimaryTerminals` while the worktree's current
+    /// tmux server is exclusively locked through every terminal-row commit.
+    private func spawnPrimaryTerminalsWhileLocked(
+        worktree: Worktree,
+        repo: Repo?,
+        worktreePath: String?,
+        skipClaude: Bool,
+        archivedClaudeSessions: [String]?,
+        initialPrompt: String?,
+        cols: Int?,
+        rows: Int?,
+        preSessionTerminalID: UUID?,
+        overrideProfileID: UUID?,
+        modelOverride: String?,
+        primaryAgentPreference: PrimaryAgentPreference?,
+        claudeSettingsOverlay: String?,
+        carryover: ConversationCarryover?,
+        preparedCodexLaunch: CodexLaunchPreparation?,
+        watchDeskRole: WatchDeskRole?
+    ) async throws -> [(id: UUID, label: String)] {
         let worktreeID = worktree.id
         let tmuxServer = worktree.tmuxServer
         let worktreePath = worktreePath ?? worktree.localPath
@@ -1447,20 +1492,26 @@ extension WorktreeLifecycle {
             cols: resolvedCols,
             rows: resolvedRows
         )
-        _ = try await db.terminals.create(
-            id: plannedTerminalID1,
-            worktreeID: worktreeID,
-            tmuxWindowID: window1.windowID,
-            tmuxPaneID: window1.paneID,
-            label: primaryLabel,
-            claudeSessionID: primarySessionID,
-            profileID: primaryProfileID,
-            kind: primaryTerminalKind,
-            // Same value the overlay above was built from, written to the row
-            // so the fact outlives this call. A desk woken from hibernation
-            // reuses this row, and the wake site has nothing else to read.
-            watchDeskRole: watchDeskRole
-        )
+        do {
+            _ = try await db.terminals.create(
+                id: plannedTerminalID1,
+                worktreeID: worktreeID,
+                tmuxWindowID: window1.windowID,
+                tmuxPaneID: window1.paneID,
+                label: primaryLabel,
+                claudeSessionID: primarySessionID,
+                profileID: primaryProfileID,
+                kind: primaryTerminalKind,
+                // Same value the overlay above was built from, written to the
+                // row so the fact outlives this call. A desk woken from
+                // hibernation reuses this row, and the wake site has nothing
+                // else to read.
+                watchDeskRole: watchDeskRole
+            )
+        } catch {
+            try? await tmux.killWindow(server: tmuxServer, windowID: window1.windowID)
+            throw error
+        }
         if carryover != nil {
             SessionRecaptureScheduler(db: db, tmux: tmux).schedule(
                 terminalID: plannedTerminalID1,
@@ -1541,14 +1592,19 @@ extension WorktreeLifecycle {
                 cols: resolvedCols,
                 rows: resolvedRows
             )
-            _ = try await db.terminals.create(
-                id: plannedTerminalID2,
-                worktreeID: worktreeID,
-                tmuxWindowID: window2.windowID,
-                tmuxPaneID: window2.paneID,
-                label: TerminalLabel.setup,
-                kind: .shell
-            )
+            do {
+                _ = try await db.terminals.create(
+                    id: plannedTerminalID2,
+                    worktreeID: worktreeID,
+                    tmuxWindowID: window2.windowID,
+                    tmuxPaneID: window2.paneID,
+                    label: TerminalLabel.setup,
+                    kind: .shell
+                )
+            } catch {
+                try? await tmux.killWindow(server: tmuxServer, windowID: window2.windowID)
+                throw error
+            }
             createdTerminals.append((id: plannedTerminalID2, label: TerminalLabel.setup))
             if let setupMarkerPath, let setupHookPath {
                 // The auto-close wrapper lets the pane EXIT on hook success,
@@ -1564,6 +1620,7 @@ extension WorktreeLifecycle {
                 }
                 setupAutoCloseSpawn = PreSessionSpawn(
                     terminalID: plannedTerminalID2,
+                    tmuxServer: tmuxServer,
                     windowID: window2.windowID,
                     paneID: window2.paneID,
                     markerPath: setupMarkerPath,
@@ -1644,16 +1701,22 @@ extension WorktreeLifecycle {
                     cols: resolvedCols,
                     rows: resolvedRows
                 )
-                _ = try await db.terminals.create(
-                    id: plannedID,
-                    worktreeID: worktreeID,
-                    tmuxWindowID: window.windowID,
-                    tmuxPaneID: window.paneID,
-                    label: TerminalLabel.claudeCode,
-                    claudeSessionID: sessionID,
-                    profileID: resolvedProfile?.profileID,
-                    kind: .claude
-                )
+                do {
+                    _ = try await db.terminals.create(
+                        id: plannedID,
+                        worktreeID: worktreeID,
+                        tmuxWindowID: window.windowID,
+                        tmuxPaneID: window.paneID,
+                        label: TerminalLabel.claudeCode,
+                        claudeSessionID: sessionID,
+                        profileID: resolvedProfile?.profileID,
+                        kind: .claude
+                    )
+                } catch {
+                    try? await tmux.killWindow(
+                        server: tmuxServer, windowID: window.windowID)
+                    throw error
+                }
                 createdTerminals.append((id: plannedID, label: TerminalLabel.claudeCode))
             }
         }

@@ -8,6 +8,7 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "worktreeLife
 /// wait + primary terminal spawn) consumes it.
 struct PreSessionSpawn: Sendable {
     let terminalID: UUID
+    let tmuxServer: String
     let windowID: String
     let paneID: String
     let markerPath: String
@@ -122,19 +123,8 @@ extension WorktreeLifecycle {
         }
 
         let worktreeID = worktree.id
-        let tmuxServer = worktree.tmuxServer
         let resolvedCols = cols ?? TmuxManager.defaultCols
         let resolvedRows = rows ?? TmuxManager.defaultRows
-
-        // Ensure tmux server exists — capture initial window ID to kill once
-        // the first real window (the pre-session one) exists.
-        let initialWindowID = try await tmux.ensureServer(
-            server: tmuxServer,
-            session: "main",
-            cwd: worktreePath,
-            cols: resolvedCols,
-            rows: resolvedRows
-        )
 
         let terminalID = UUID()
         let markerPath = Self.preSessionMarkerPath(worktreeID: worktreeID)
@@ -147,36 +137,57 @@ extension WorktreeLifecycle {
             markerPath: markerPath,
             shell: defaultShell
         )
-        // Full hook environment per docs/worktree-hooks.md. TBD_WORKTREE_NAME
-        // uses `worktree.name` to match the archive hook's env (the display
-        // name can be renamed later; the folder name is the stable identity).
-        let env: [String: String] = [
-            "TBD_WORKTREE_ID": worktreeID.uuidString,
-            "TBD_TERMINAL_ID": terminalID.uuidString,
-            "TBD_EVENT": HookEvent.preSession.rawValue,
-            "TBD_WORKTREE_NAME": worktree.name,
-            "TBD_WORKTREE_PATH": worktreePath,
-            "TBD_REPO_PATH": repo?.path ?? worktreePath,
-            "TBD_BRANCH": worktree.branch,
-        ]
-        let window = try await tmux.createWindow(
-            server: tmuxServer,
-            session: "main",
-            cwd: worktreePath,
-            shellCommand: command,
-            env: env,
-            sensitiveEnv: Self.hookPaneEnv,
-            cols: resolvedCols,
-            rows: resolvedRows
-        )
-        _ = try await db.terminals.create(
-            id: terminalID,
-            worktreeID: worktreeID,
-            tmuxWindowID: window.windowID,
-            tmuxPaneID: window.paneID,
-            label: TerminalLabel.preSession,
-            kind: .shell
-        )
+        let (window, tmuxServer) = try await tmux.withWorktreeServerLock(
+            db: db, worktreeID: worktreeID, allowedStatuses: [worktree.status]
+        ) { currentWorktree in
+            let currentPath = currentWorktree.path
+            let env: [String: String] = [
+                "TBD_WORKTREE_ID": worktreeID.uuidString,
+                "TBD_TERMINAL_ID": terminalID.uuidString,
+                "TBD_EVENT": HookEvent.preSession.rawValue,
+                "TBD_WORKTREE_NAME": currentWorktree.name,
+                "TBD_WORKTREE_PATH": currentPath,
+                "TBD_REPO_PATH": repo?.path ?? currentPath,
+                "TBD_BRANCH": currentWorktree.branch,
+            ]
+            let initialWindowID = try await tmux.ensureServer(
+                server: currentWorktree.tmuxServer,
+                session: "main",
+                cwd: currentPath,
+                cols: resolvedCols,
+                rows: resolvedRows)
+            let window = try await tmux.createWindow(
+                server: currentWorktree.tmuxServer,
+                session: "main",
+                cwd: currentPath,
+                shellCommand: command,
+                env: env,
+                sensitiveEnv: Self.hookPaneEnv,
+                cols: resolvedCols,
+                rows: resolvedRows
+            )
+            do {
+                _ = try await db.terminals.create(
+                    id: terminalID,
+                    worktreeID: worktreeID,
+                    tmuxWindowID: window.windowID,
+                    tmuxPaneID: window.paneID,
+                    label: TerminalLabel.preSession,
+                    kind: .shell
+                )
+            } catch {
+                try? await tmux.killWindow(
+                    server: currentWorktree.tmuxServer,
+                    windowID: window.windowID)
+                throw error
+            }
+            if let initialWindowID {
+                try? await tmux.killWindow(
+                    server: currentWorktree.tmuxServer,
+                    windowID: initialWindowID)
+            }
+            return (window, currentWorktree.tmuxServer)
+        }
         if claimsFocus {
             // The pre-session terminal is the only tab until phase 3 runs.
             try await db.worktrees.setTabOrder(worktreeID: worktreeID, tabIDs: [terminalID])
@@ -197,17 +208,10 @@ extension WorktreeLifecycle {
             )))
         }
 
-        // Kill the untracked initial window now that a real window exists.
-        // Only the focus-claiming (create/revive) path can have created it —
-        // `ensureServer` returns nil when the server already exists, so this
-        // stays correct for the re-run path without a `claimsFocus` check.
-        if let initialWindowID {
-            try? await tmux.killWindow(server: tmuxServer, windowID: initialWindowID)
-        }
-
         logger.info("preSession hook \(hookPath, privacy: .public) spawned for worktree \(worktreeID, privacy: .public); gating primary terminals on marker")
         return PreSessionSpawn(
             terminalID: terminalID,
+            tmuxServer: tmuxServer,
             windowID: window.windowID,
             paneID: window.paneID,
             markerPath: markerPath,
@@ -290,7 +294,7 @@ extension WorktreeLifecycle {
         preparedCodexLaunch: CodexLaunchPreparation? = nil
     ) async {
         let outcome = await waitForPreSessionCompletion(
-            preSession: preSession, tmuxServer: worktree.tmuxServer
+            preSession: preSession, tmuxServer: preSession.tmuxServer
         )
         // The marker must never outlive the wait, whatever the outcome —
         // `.completed` consumes it inside the wait; this catches any straggler
@@ -320,7 +324,7 @@ extension WorktreeLifecycle {
         guard rowExists else {
             logger.warning("phase-3: worktree \(worktree.id, privacy: .public) row disappeared mid-wait — skipping primary spawn and cleaning up")
             try? await tmux.killWindow(
-                server: worktree.tmuxServer, windowID: preSession.windowID
+                server: preSession.tmuxServer, windowID: preSession.windowID
             )
             return
         }
@@ -434,6 +438,7 @@ extension WorktreeLifecycle {
     func closePreSessionTerminal(worktree: Worktree, preSession: PreSessionSpawn) async {
         await closeHookTerminal(
             worktree: worktree,
+            tmuxServer: preSession.tmuxServer,
             terminalID: preSession.terminalID,
             windowID: preSession.windowID
         )
@@ -445,7 +450,9 @@ extension WorktreeLifecycle {
     /// is a no-op on the create-success path (the primary spawn already set
     /// an order without the hook tab) and keeps the stored order consistent
     /// on the paths that appended the tab (manual re-run, setup auto-close).
-    func closeHookTerminal(worktree: Worktree, terminalID: UUID, windowID: String) async {
+    func closeHookTerminal(
+        worktree: Worktree, tmuxServer: String, terminalID: UUID, windowID: String
+    ) async {
         // Preserve the hook tab's output before the window dies so a user can
         // read an auto-closed setup/pre-session run later (Session History →
         // Closed Terminals). Best-effort: captureOnClose logs failures and
@@ -453,10 +460,10 @@ extension WorktreeLifecycle {
         if let terminal = try? await db.terminals.get(id: terminalID) {
             await db.terminalHistory.captureOnClose(terminal: terminal) {
                 try await tmux.capturePaneScrollback(
-                    server: worktree.tmuxServer, paneID: terminal.tmuxPaneID)
+                    server: tmuxServer, paneID: terminal.tmuxPaneID)
             }
         }
-        try? await tmux.killWindow(server: worktree.tmuxServer, windowID: windowID)
+        try? await tmux.killWindow(server: tmuxServer, windowID: windowID)
         do {
             try await db.terminals.delete(id: terminalID)
             try await db.tabs.delete(tabID: terminalID)
@@ -585,7 +592,7 @@ extension WorktreeLifecycle {
         worktree: Worktree, preSession: PreSessionSpawn
     ) async {
         let outcome = await waitForPreSessionCompletion(
-            preSession: preSession, tmuxServer: worktree.tmuxServer
+            preSession: preSession, tmuxServer: preSession.tmuxServer
         )
         // The marker must never outlive the wait, whatever the outcome.
         try? FileManager.default.removeItem(atPath: preSession.markerPath)

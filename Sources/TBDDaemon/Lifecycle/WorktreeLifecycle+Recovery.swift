@@ -143,6 +143,7 @@ extension WorktreeLifecycle {
             // is picked up on the first poll.
             let spawn = PreSessionSpawn(
                 terminalID: preSessionTerminal.id,
+                tmuxServer: worktree.tmuxServer,
                 windowID: preSessionTerminal.tmuxWindowID,
                 paneID: preSessionTerminal.tmuxPaneID,
                 markerPath: Self.preSessionMarkerPath(worktreeID: worktree.id),

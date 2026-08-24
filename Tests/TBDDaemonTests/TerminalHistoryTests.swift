@@ -141,6 +141,7 @@ import Testing
 
         await lifecycle.closeHookTerminal(
             worktree: fx.worktree,
+            tmuxServer: fx.worktree.tmuxServer,
             terminalID: fx.terminal.id,
             windowID: fx.terminal.tmuxWindowID)
 
