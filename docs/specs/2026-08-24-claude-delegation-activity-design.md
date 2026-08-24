@@ -26,7 +26,8 @@ boundaries, and never touches the persisted activity fact.
 ## Non-goals
 
 - Changing what `activityState` means, or what it gates.
-- Blocking hibernation for a delegating session.
+- Blocking hibernation for a delegating session. See "The hibernation hazard
+  this design does not cover".
 - Reporting the internal progress of a subagent.
 - Distinguishing foreground from background delegation in the UI.
 - Counting subagents for any consumer other than the indicator.
@@ -55,6 +56,41 @@ no load-bearing path. It cannot affect hibernation, because it never writes the
 field `HibernationGate` consults. Every failure mode resolves to the behavior
 that ships today. It therefore carries no feature flag, on the same reasoning
 that shipped the Codex activity reconciliation unflagged.
+
+## The hibernation hazard this design does not cover
+
+Parking a delegating session destroys its delegated work, and this design does
+not prevent that. The hazard is recorded here because the rail deliberately
+stops short of it, not because the risk is theoretical.
+
+`performHibernate` terminates rather than suspends: it sends an in-band `/exit`,
+falls back to a graceful interrupt, and respawns the window, which guarantees
+the process is gone. Background subagents die with their parent. Resuming does
+not recover them, because the parent's transcript holds a launch record whose
+completion notification can no longer arrive, so the resumed session waits on a
+result that will never come.
+
+Reaching that state requires a park to select a delegating session. The idle
+sweep's master switch defaults off, which leaves merge-park and an explicit
+manual park as the live paths.
+
+**The safe direction for the gate is the opposite of the safe direction for the
+indicator, and conflating the two is the trap.** For the indicator, a false
+working claim misleads and a false idle claim costs nothing, so the rail prefers
+idle. For the gate, a false working claim refuses a park — visible, recoverable,
+and costing only memory — while a false idle claim destroys work silently. A
+gate consumer must therefore prefer working, which is why the indicator's rail
+cannot simply be extended to it and called done.
+
+Covering the hazard needs three things this design does not carry. The gate runs
+on the daemon's clock rather than in response to `terminal.list`, so it cannot
+read a response-derived field and would take its own bounded sample at park time;
+that sampling is affordable precisely because parking is rare, and a fresh read
+cannot latch. The veto belongs behind a default-off configuration column and a
+soak, following the typed-but-unsent input veto, which is the same shape of rail
+and refuses a park for the same class of reason. And a stale claim must not
+render a worktree permanently unparkable, which argues for consulting process
+liveness before refusing.
 
 ## Relationship to the supervision session state
 
