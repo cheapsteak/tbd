@@ -3237,6 +3237,16 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// A Claude session ended. Drops any standing delegation claim: a session
+    /// that exits while background subagents are live leaves a final
+    /// `turn_duration` record still reporting them, and no later turn ever
+    /// arrives to retract it.
+    func handleTerminalSessionEnded(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalSessionEndedParams.self, from: paramsData)
+        await claudeDelegationTracker.clear(terminalID: params.terminalID)
+        return .ok()
+    }
+
     func handleTerminalActivityEvent(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalActivityEventParams.self, from: paramsData)
         guard params.origin != .userInterrupt || params.activityState == .idle else {

@@ -726,6 +726,7 @@ extension TBDHomeSerialized {
             "PostToolUse|AskUserQuestion|\(ClaudeHookOverlay.askUserQuestionPostCommand)",
             "PostToolUse|Bash|\(ClaudeHookOverlay.prBindCommand)",
             "PreToolUse|AskUserQuestion|\(ClaudeHookOverlay.askUserQuestionPreCommand)",
+            "SessionEnd|<none>|\(ClaudeHookOverlay.sessionEndCommand)",
             "SessionStart|*|\(ClaudeHookOverlay.sessionStartCommand)",
             "Stop|<none>|\(ClaudeHookOverlay.stopCommand)",
             "Stop|<none>|\(ClaudeHookOverlay.stopRenameCheckCommand)",
@@ -733,6 +734,24 @@ extension TBDHomeSerialized {
             "UserPromptSubmit|<none>|\(ClaudeHookOverlay.workingCommand)"
         ].sorted()
         #expect(rendered == expected)
+    }
+
+    @Test func sessionEndCommandClearsTheClaimAndNeverFails() throws {
+        let rendered = try renderHookEntries(try ClaudeHookOverlay.generateBody())
+        let entry = try #require(rendered.first { $0.hasPrefix("SessionEnd|") })
+        #expect(entry.contains("tbd session-end"))
+        #expect(entry.hasSuffix("2>/dev/null || true"))
+    }
+
+    /// Claude Code runs SessionEnd callbacks inside a 1.5s shutdown budget, so
+    /// this entry carries an explicit short timeout rather than the 60s default.
+    @Test func sessionEndCarriesAnExplicitShortTimeout() throws {
+        let body = try ClaudeHookOverlay.generateBody()
+        let parsed = try JSONSerialization.jsonObject(with: body) as? [String: Any]
+        let hooks = (parsed?["hooks"] as? [String: Any])?["SessionEnd"] as? [[String: Any]]
+        let inner = try #require((hooks?.first?["hooks"] as? [[String: Any]])?.first)
+        #expect((inner["timeout"] as? Int) == ClaudeHookOverlay.sessionEndTimeoutSeconds)
+        #expect(ClaudeHookOverlay.sessionEndTimeoutSeconds <= 2)
     }
 
     @Test func notificationCommandInvokesTheHookBridgeAndNeverFails() throws {

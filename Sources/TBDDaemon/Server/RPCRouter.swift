@@ -418,6 +418,8 @@ public final class RPCRouter: Sendable {
                 return try await handleTerminalSessionEvent(request.paramsData)
             case RPCMethod.terminalActivityEvent:
                 return try await handleTerminalActivityEvent(request.paramsData)
+            case RPCMethod.terminalSessionEnded:
+                return try await handleTerminalSessionEnded(request.paramsData)
             case RPCMethod.terminalNotificationEvent:
                 return try await handleTerminalNotificationEvent(request.paramsData)
             case RPCMethod.sessionStates:
