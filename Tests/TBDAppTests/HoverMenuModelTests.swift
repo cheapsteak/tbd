@@ -1,3 +1,4 @@
+import AppKit
 import Testing
 import SwiftUI
 @testable import TBDApp
@@ -95,5 +96,61 @@ struct HoverMenuModelTests {
         m.triggerHover(true)
         m.closeNow()
         #expect(!m.isTriggerHovered)
+    }
+
+    // MARK: app deactivation (Cmd-Tab away with the menu up)
+
+    /// Deliver a notification and let the observer's `queue: .main` hop run.
+    /// Yielding is a no-op when NotificationCenter delivers synchronously.
+    private func postDeactivation(to center: NotificationCenter) async {
+        center.post(name: NSApplication.didResignActiveNotification, object: nil)
+        for _ in 0..<10 { await Task.yield() }
+    }
+
+    @Test("an open menu closes when the app resigns active")
+    func deactivationClosesOpenMenu() async {
+        let center = NotificationCenter()
+        let m = HoverMenuModel(openDelay: .zero, closeGrace: .zero, notificationCenter: center)
+        m.openImmediately()
+        #expect(m.isOpen)
+
+        await postDeactivation(to: center)
+        #expect(!m.isOpen)
+    }
+
+    /// The stuck case: the pointer is parked over the panel when the app
+    /// deactivates. `.onHover` delivers no exit event, so `overMenu` would stay
+    /// true forever and `reconcile()` would never even schedule a close.
+    @Test("deactivation closes the menu even with the pointer parked over it")
+    func deactivationClosesMenuWithPointerParkedOverIt() async {
+        let center = NotificationCenter()
+        let m = HoverMenuModel(openDelay: .zero, closeGrace: .zero, notificationCenter: center)
+        m.openImmediately()
+        m.menuHover(true)   // pointer sitting on the panel — no exit event will come
+        await m._drainForTesting()
+        #expect(m.isOpen)
+
+        await postDeactivation(to: center)
+        #expect(!m.isOpen)
+
+        // Hover state must be cleared too, or the next reconcile would resurrect
+        // the menu from the stale flags rather than from a real hover.
+        #expect(!m.isTriggerHovered)
+        m.menuHover(false)
+        await m._drainForTesting()
+        #expect(!m.isOpen)
+        #expect(!m.isTriggerHovered)
+    }
+
+    @Test("deactivation posted to a different center does not close the menu")
+    func deactivationOnForeignCenterIsIgnored() async {
+        let center = NotificationCenter()
+        let other = NotificationCenter()
+        let m = HoverMenuModel(openDelay: .zero, closeGrace: .zero, notificationCenter: center)
+        m.openImmediately()
+        m.menuHover(true)
+
+        await postDeactivation(to: other)
+        #expect(m.isOpen)
     }
 }
