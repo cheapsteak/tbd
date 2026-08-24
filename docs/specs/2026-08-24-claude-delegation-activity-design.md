@@ -74,6 +74,12 @@ Reaching that state requires a park to select a delegating session. The idle
 sweep's master switch defaults off, which leaves merge-park and an explicit
 manual park as the live paths.
 
+What the rail does carry is that a parked terminal publishes no claim at all.
+The row ranks working above hibernated, and a parked session runs nothing that
+could ever restate the level, so a claim standing at park time would replace
+the calm moon with animated dots permanently. The publish step therefore skips
+any terminal that is hibernated or suspended.
+
 **The safe direction for the gate is the opposite of the safe direction for the
 indicator, and conflating the two is the trap.** For the indicator, a false
 working claim misleads and a false idle claim costs nothing, so the rail prefers
@@ -192,11 +198,18 @@ user prompt.
 ### Sampling
 
 The next `terminal.list` satisfies outstanding marks. For each marked terminal
-the tracker stats the transcript path, reads at most the final 64 KiB, discards
-the partial leading record through its first newline, and scans backward for the
-newest `turn_duration`. A present `pendingBackgroundAgentCount` greater than
-zero becomes a claim; an absent field, an absent record, or an unreadable file
-produces none. The mark then clears.
+the tracker stats the transcript path, reads at most the final 64 KiB, and
+takes the newest `turn_duration` among the lines that parse. A present
+`pendingBackgroundAgentCount` greater than zero becomes a claim; an absent
+field, an absent record, or an unreadable file produces none. A record must
+also not be a subagent's own — a `turn_duration` carrying `isSidechain` never
+speaks for the main loop. The mark then clears.
+
+The tail's leading fragment needs no special handling. A byte range that
+starts mid-object is not valid JSON, so it fails to parse and is skipped like
+any other unreadable line, while a tail that happens to begin on a record
+boundary — the common case for a short transcript read whole — keeps that
+record instead of losing it to a blind drop through the first newline.
 
 Sampling deliberately does not happen inside the activity handler, and the
 reason is an ordering fact that a reasonable implementation would otherwise get
@@ -230,9 +243,13 @@ to hold it. Two endings do not restate the level, and each gets a fact rather
 than a theory:
 
 - **Interrupt.** An interrupted turn frequently writes no `turn_duration` at
-  all, so the newest record keeps reporting the pre-interrupt count. TBD's own
-  `.terminalInterrupt` fact defeats the rail, matching the precedence the Codex
-  presentation path already follows.
+  all, so the newest record keeps reporting the pre-interrupt count. The
+  interrupt is therefore carried to the daemon as an explicit `userInterrupt`
+  origin for every agent kind, and the handler clears the terminal's claim
+  rather than marking it for a sample that would re-read the stale record.
+  The row's `.terminalInterrupt` precedence defeats the rail in the same
+  direction, matching the Codex presentation path, but that fact is persisted
+  only on the Codex path, so the origin is what carries the Claude case.
 - **Session end.** A session that exits while agents remain live leaves a final
   record reporting them, and no later turn corrects it. A `SessionEnd` entry in
   the Claude hook overlay clears the claim. It follows the file's established
@@ -274,7 +291,8 @@ reconciliation established.
   within a 64 KiB tail for roughly 98% of transcripts.
 - A missing, empty, or unreadable transcript path yields no claim. Inability to
   look is not evidence of work.
-- A truncated leading record in the tail is discarded through its newline.
+- A truncated leading record in the tail fails to parse and yields no claim.
+- A `turn_duration` written by a subagent's own sidechain yields no claim.
 - A transcript path change discards the tracker's state for that terminal.
 - Removing a terminal prunes its tracker state on the existing retention path.
 
@@ -306,7 +324,9 @@ Remaining coverage:
 
 - The composition asymmetry, including a Codex regression guard, since that path
   ships unflagged today.
-- Interrupt and waiting-for-user each defeating the rail.
+- Interrupt and waiting-for-user each defeating the rail, the interrupt driven
+  through the real handler so the origin's own leg is exercised.
+- A parked terminal publishing no claim.
 - A transcript path change discarding a stale count.
 - An absent field reproducing current behavior exactly.
 - The hook overlay's exact-equality entry set, extended with the `SessionEnd`
@@ -322,7 +342,10 @@ New:
 Modified:
 
 - `Sources/TBDDaemon/Server/RPCRouter+TerminalHandlers.swift` — mark before the
-  early return; satisfy marks during `terminal.list`.
+  early return, clear on an interrupt origin; satisfy marks during
+  `terminal.list`, skipping parked terminals.
+- `Sources/TBDApp/AppState+Terminals.swift` — carry the `userInterrupt` origin
+  for every agent kind.
 - `Sources/TBDDaemon/Hooks/ClaudeHookOverlay.swift` — `SessionEnd` entry and its
   timeout constant.
 - `Sources/TBDApp/Sidebar/WorktreeRowView.swift` — the Claude branch.
