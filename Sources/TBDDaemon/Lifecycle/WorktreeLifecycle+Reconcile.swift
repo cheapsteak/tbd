@@ -459,13 +459,20 @@ extension WorktreeLifecycle {
                             logger.warning("reconcile: skipped sweeping orphan window \(window.windowID, privacy: .public) on \(server, privacy: .public) — the actuation record is unwritable")
                             continue
                         }
-                        await killWindowAndReap(
+                        let killFailure = await killWindowAndReap(
                             server: server,
                             windowID: window.windowID,
                             paneID: window.paneID
                         )
-                        await actuationLog.appendOutcome(
-                            confirms: actuationID, result: .dispatched)
+                        if let killFailure {
+                            await actuationLog.appendOutcome(
+                                confirms: actuationID,
+                                result: .transportFailed,
+                                error: killFailure)
+                        } else {
+                            await actuationLog.appendOutcome(
+                                confirms: actuationID, result: .dispatched)
+                        }
                     }
                 } catch {
                     logger.warning("reconcile: failed to list tmux windows for server \(server, privacy: .public): \(error, privacy: .public)")

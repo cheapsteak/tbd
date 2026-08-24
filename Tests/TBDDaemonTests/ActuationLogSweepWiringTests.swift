@@ -275,6 +275,45 @@ struct ActuationLogSweepWiringTests {
         })
     }
 
+    @Test("a failed scratch-only orphan-window sweep records transport failure without a repo")
+    func scratchOrphanWindowKillFailureWritesTransportFailed() async throws {
+        struct TmuxWentAway: Error, CustomStringConvertible {
+            var description: String { "scratch tmux server went away" }
+        }
+
+        let logPath = try makeLogPath()
+        let db = try TBDDatabase(inMemory: true)
+        let server = "scratch-shared"
+        let lifecycle = makeLifecycle(
+            db: db,
+            tmux: TmuxManager(
+                dryRun: true,
+                dryRunListWindows: { probed, _ in
+                    probed == server ? [(windowID: "@77", paneID: "%77")] : []
+                },
+                dryRunKillWindowError: { _, _ in TmuxWentAway() }))
+        _ = try await db.worktrees.createScratch(
+            name: "scratch-only", displayName: "Scratch Only",
+            path: "/tmp/scratch-only", tmuxServer: server)
+        #expect(try await db.repos.list().isEmpty)
+
+        try await lifecycle.reconcileScratchTerminals(
+            actuationLog: ActuationLog(path: logPath))
+
+        let requests = try requests(at: logPath).filter {
+            ($0["target"] as? [String: Any])?["window"] as? String == "@77"
+        }
+        #expect(requests.count == 1)
+        let request = try #require(requests.first)
+        let target = try #require(request["target"] as? [String: Any])
+        #expect(target["server"] as? String == server)
+        #expect(target["repo"] == nil)
+        let outcome = try #require(
+            try outcomes(at: logPath).first { $0["confirms"] as? String == request["id"] as? String })
+        #expect(outcome["result"] as? String == "transport-failed")
+        #expect(outcome["error"] as? String == "\(TmuxWentAway())")
+    }
+
     // MARK: - The auto-archive-on-merge rail
 
     private func makeMergeFixture(
