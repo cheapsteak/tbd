@@ -371,6 +371,8 @@ struct WorktreeReviveFreshTests {
 
             """
         )
+        let order = try await db.worktrees.getTabOrder(worktreeID: created.id)
+        #expect(order.last == note.id)
     }
 
     @Test func fetchFailureCreatesFromLocalBaseAndReturnsStaleWarning() async throws {
