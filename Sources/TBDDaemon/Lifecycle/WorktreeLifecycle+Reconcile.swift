@@ -302,97 +302,9 @@ extension WorktreeLifecycle {
             )
         }
 
-        // Reconcile terminals whose tmux window is gone. A window can vanish two
-        // ways: its specific window died while the server is still up, or the
-        // whole server is gone after a reboot/long sleep. BOTH are handled the
-        // same way — park resumable Claude sessions and let the user bring them
-        // back on demand via wake (HibernationCoordinator.wake, the single
-        // unified resume path; see #285 for the dead-server bootstrap history).
-        //
-        // We deliberately do NOT eagerly recreate terminals on reboot: on a
-        // machine with many worktrees that spawned N simultaneous `claude
-        // --resume` processes (~0.5-1.5 GB each) and OOM'd the machine (#284).
-        // Lazy recreate-on-demand keeps idle worktrees as cheap suspended rows.
         let allLiveWorktrees = try await db.worktrees.listLocal(repoID: repoID, status: .active)
             + (try await db.worktrees.listLocal(repoID: repoID, status: .main))
-        // Probe the server each worktree row actually STORES, not the
-        // canonical name: after a scratch promote the main worktree's windows
-        // live on the inherited scratch server, and probing the canonical
-        // (empty) server would declare every live window dead. Cached per
-        // server name — rows overwhelmingly share one server.
-        var serverAliveByName: [String: Bool] = [:]
-        for wt in allLiveWorktrees {
-            let serverAlive: Bool
-            if let cached = serverAliveByName[wt.tmuxServer] {
-                serverAlive = cached
-            } else {
-                serverAlive = await tmux.serverExists(server: wt.tmuxServer)
-                serverAliveByName[wt.tmuxServer] = serverAlive
-            }
-            let terminals = try await db.terminals.list(worktreeID: wt.id)
-            // Parked rows (`hibernatedAt` OR legacy `suspendedAt` — see
-            // `isParked`) are skipped: a parked terminal's window being gone
-            // is expected (post-reboot), the row is already exactly what this
-            // pass would produce, and re-evaluating it would refresh the park
-            // timestamp or, worse, DELETE a parked non-Claude-resumable row.
-            for terminal in terminals where !terminal.isParked {
-                // After a reboot the server is gone, so every window is dead;
-                // otherwise probe the specific window. (Split across statements
-                // because `&&` builds an autoclosure that can't contain `await`.)
-                var windowAlive = false
-                if serverAlive {
-                    windowAlive = await tmux.windowExists(server: wt.tmuxServer, windowID: terminal.tmuxWindowID)
-                }
-                guard !windowAlive else { continue }
-
-                // Extra safety: If this is a Claude-resumable terminal, double-check
-                // that the process is truly gone before parking. If Claude is still
-                // running, leave the terminal active — the next reconcile can reassess.
-                if terminal.isClaudeResumable {
-                    if let cmd = try? await tmux.paneCurrentCommand(server: wt.tmuxServer, paneID: terminal.tmuxPaneID),
-                       ClaudeStateDetector.isClaudeProcess(cmd) {
-                        // Claude is still running in this pane despite windowExists returning false.
-                        // This shouldn't happen, but don't park if it's true.
-                        logger.warning("reconcile: terminal \(terminal.id, privacy: .public) window marked dead but claude process still running — skipping park")
-                        continue
-                    }
-                }
-
-                if terminal.isClaudeResumable, let sessionID = terminal.claudeSessionID {
-                    // Resumable Claude session: park it. The unified park/wake
-                    // machinery rebuilds a window from the session ID on demand.
-                    // Deleting here would orphan the transcript and the session
-                    // would vanish from TBD. Write the authoritative `hibernatedAt`
-                    // column so `wake()` (which un-parks any parked row) can resume it.
-                    //
-                    // This park bypasses `HibernationCoordinator` entirely, so it
-                    // is this sweep's own act and carries this sweep's own row.
-                    // Fail-closed: an unrecordable park is skipped and the row
-                    // stays as it is for the next sweep.
-                    var row = ActuationRow(
-                        actor: .daemon(rail: ActuationRail.reconcile), kind: .hibernate)
-                    row.target = .local(worktree: wt.id, terminal: terminal.id)
-                    guard let actuationID = try? await actuationLog.appendRequest(row) else {
-                        logger.warning("reconcile: skipped parking terminal \(terminal.id, privacy: .public) — the actuation record is unwritable")
-                        continue
-                    }
-                    do {
-                        try await db.terminals.setHibernated(id: terminal.id, sessionID: sessionID, reason: .recovery)
-                        await actuationLog.appendOutcome(
-                            confirms: actuationID, result: .dispatched)
-                    } catch {
-                        await actuationLog.appendOutcome(
-                            confirms: actuationID, result: .transportFailed, error: "\(error)")
-                    }
-                    logger.info("reconcile: parked terminal \(terminal.id, privacy: .public) — window \(terminal.tmuxWindowID, privacy: .public) gone, session \(sessionID, privacy: .public) preserved, wakeable via the unified resume path")
-                } else {
-                    // Plain shell / Codex: nothing resumable to preserve, delete.
-                    try? await db.terminals.delete(id: terminal.id)
-                    logger.info("reconcile: deleted terminal \(terminal.id, privacy: .public) — window \(terminal.tmuxWindowID, privacy: .public) gone, no session to preserve")
-                }
-                await pendingQuestions.clear(terminalID: terminal.id)
-            }
-        }
+        try await reconcileTerminals(in: allLiveWorktrees, actuationLog: actuationLog)
 
         // Clean up orphaned tmux windows and dead servers. This must cover
         // every server actually referenced by the repo's worktree rows, not
@@ -529,6 +441,122 @@ extension WorktreeLifecycle {
             subscriptions?.broadcast(delta: .repoAdded(RepoDelta(
                 repoID: repo.id, path: repo.path, displayName: repo.displayName
             )))
+        }
+    }
+
+    /// Reconcile active scratch-space terminals independently of registered
+    /// repositories. Scratch spaces deliberately share a tmux server, so tmux
+    /// may recycle one pane coordinate after an older scratch row survives.
+    public func reconcileScratchTerminals(actuationLog: ActuationLog) async throws {
+        let scratchWorktrees = try await db.worktrees.listLocal(
+            status: .active, scratchOnly: true)
+        try await reconcileTerminals(in: scratchWorktrees, actuationLog: actuationLog)
+    }
+
+    /// Reconcile terminals whose tmux window is gone or no longer belongs to
+    /// their database row. Both cases use the same established outcomes: park
+    /// resumable Claude sessions and delete non-resumable Codex/shell rows.
+    ///
+    /// We deliberately do NOT eagerly recreate terminals on reboot: on a
+    /// machine with many worktrees that spawned N simultaneous `claude
+    /// --resume` processes (~0.5-1.5 GB each) and OOM'd the machine (#284).
+    /// Lazy recreate-on-demand keeps idle worktrees as cheap suspended rows.
+    private func reconcileTerminals(
+        in worktrees: [LocalWorktree], actuationLog: ActuationLog
+    ) async throws {
+        // Probe the server each worktree row actually stores, not a canonical
+        // name. Promoted scratch worktrees keep their inherited scratch server.
+        // Cached per server name — rows overwhelmingly share one server.
+        var serverAliveByName: [String: Bool] = [:]
+        for wt in worktrees {
+            let serverAlive: Bool
+            if let cached = serverAliveByName[wt.tmuxServer] {
+                serverAlive = cached
+            } else {
+                serverAlive = await tmux.serverExists(server: wt.tmuxServer)
+                serverAliveByName[wt.tmuxServer] = serverAlive
+            }
+            let terminals = try await db.terminals.list(worktreeID: wt.id)
+            // Parked rows (`hibernatedAt` OR legacy `suspendedAt` — see
+            // `isParked`) are skipped: a parked terminal's window being gone
+            // is expected, and the row is already exactly what this pass would
+            // produce.
+            for terminal in terminals where !terminal.isParked {
+                var windowAlive = false
+                if serverAlive {
+                    windowAlive = await tmux.windowExists(
+                        server: wt.tmuxServer, windowID: terminal.tmuxWindowID)
+                }
+
+                var paneBelongsToDifferentTerminal = false
+                if windowAlive {
+                    do {
+                        switch try await tmux.paneSendTarget(
+                            server: wt.tmuxServer, paneID: terminal.tmuxPaneID)
+                        {
+                        case .live(let paneTerminalID):
+                            if let paneTerminalID {
+                                paneBelongsToDifferentTerminal =
+                                    paneTerminalID.caseInsensitiveCompare(
+                                        terminal.id.uuidString) != .orderedSame
+                            } else {
+                                // Panes predating the identity stamp remain
+                                // live for backward compatibility.
+                                continue
+                            }
+                            if !paneBelongsToDifferentTerminal { continue }
+                        case .missing, .dead:
+                            break
+                        }
+                    } catch {
+                        // An unreadable identity is not evidence of staleness.
+                        // Keep the row and let a later sweep retry the probe.
+                        logger.warning("reconcile: failed to inspect pane ownership for terminal \(terminal.id, privacy: .public): \(error, privacy: .public)")
+                        continue
+                    }
+                }
+
+                // Preserve the existing extra safety when the window probe
+                // itself says a Claude window is gone: if Claude is still
+                // running, retain the row. A pane that answered `.dead`,
+                // `.missing`, or with another terminal's identity is already
+                // definitive, so never inspect its current command.
+                if terminal.isClaudeResumable && !windowAlive {
+                    if let cmd = try? await tmux.paneCurrentCommand(
+                        server: wt.tmuxServer, paneID: terminal.tmuxPaneID),
+                       ClaudeStateDetector.isClaudeProcess(cmd) {
+                        logger.warning("reconcile: terminal \(terminal.id, privacy: .public) window marked dead but claude process still running — skipping park")
+                        continue
+                    }
+                }
+
+                if terminal.isClaudeResumable, let sessionID = terminal.claudeSessionID {
+                    // This park bypasses `HibernationCoordinator`, so the
+                    // reconcile rail records its own independent actuation.
+                    // Fail closed if that authoritative record cannot be made.
+                    var row = ActuationRow(
+                        actor: .daemon(rail: ActuationRail.reconcile), kind: .hibernate)
+                    row.target = .local(worktree: wt.id, terminal: terminal.id)
+                    guard let actuationID = try? await actuationLog.appendRequest(row) else {
+                        logger.warning("reconcile: skipped parking terminal \(terminal.id, privacy: .public) — the actuation record is unwritable")
+                        continue
+                    }
+                    do {
+                        try await db.terminals.setHibernated(
+                            id: terminal.id, sessionID: sessionID, reason: .recovery)
+                        await actuationLog.appendOutcome(
+                            confirms: actuationID, result: .dispatched)
+                    } catch {
+                        await actuationLog.appendOutcome(
+                            confirms: actuationID, result: .transportFailed, error: "\(error)")
+                    }
+                    logger.info("reconcile: parked terminal \(terminal.id, privacy: .public) — window \(terminal.tmuxWindowID, privacy: .public) gone or reassigned, session \(sessionID, privacy: .public) preserved, wakeable via the unified resume path")
+                } else {
+                    try? await db.terminals.delete(id: terminal.id)
+                    logger.info("reconcile: deleted terminal \(terminal.id, privacy: .public) — window \(terminal.tmuxWindowID, privacy: .public) gone or reassigned, no session to preserve")
+                }
+                await pendingQuestions.clear(terminalID: terminal.id)
+            }
         }
     }
 

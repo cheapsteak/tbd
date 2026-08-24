@@ -233,6 +233,14 @@ public final class Daemon: Sendable {
         } catch {
             reconcileLogger.warning("Failed to list repos for reconciliation: \(error.localizedDescription, privacy: .public)")
         }
+        // Scratch spaces have no repo row and deliberately share one tmux
+        // server. Reconcile them independently so this still runs when there
+        // are zero registered repos and catches recycled pane coordinates.
+        do {
+            try await lifecycle.reconcileScratchTerminals(actuationLog: actuationLog)
+        } catch {
+            reconcileLogger.warning("Failed to reconcile scratch terminals: \(error.localizedDescription, privacy: .public)")
+        }
         // Backfill archived worktrees whose branch is missing — repairs
         // rows whose branch was renamed before archive captured the new name.
         // Idempotent and best-effort; never throws.
