@@ -58,7 +58,7 @@ struct TerminalAwaitingInputDeltaTests {
         let terminal = try #require(app.terminals[worktreeID]?.first)
         #expect(terminal.awaitingInputReason == Self.prompt)
         #expect(terminal.awaitingInputObservedAt == observedAt)
-        #expect(WorktreeRowView.isPromptOnScreen(terminal))
+        #expect(terminal.hasPromptOnScreen)
     }
 
     /// The delta says nothing about what the session is doing, and the daemon
@@ -99,7 +99,7 @@ struct TerminalAwaitingInputDeltaTests {
         let terminal = try #require(app.terminals[worktreeID]?.first)
         #expect(terminal.awaitingInputReason == nil)
         #expect(terminal.awaitingInputObservedAt == nil)
-        #expect(!WorktreeRowView.isPromptOnScreen(terminal))
+        #expect(!terminal.hasPromptOnScreen)
     }
 
     @Test func aDeltaForAnUnknownTerminalIsANoOp() {

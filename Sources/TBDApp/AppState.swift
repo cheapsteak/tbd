@@ -2393,6 +2393,15 @@ final class AppState: ObservableObject {
             // Resume" item keep advertising a resume that won't happen for
             // the delta-to-refetch window. No delta field needed.
             terminals[delta.worktreeID]?[idx].pendingResumeAt = nil
+            // Parking also implies retraction, for the same reason and by the
+            // same write: `setHibernated` nils the awaiting-input columns
+            // because a parked session's agent is dead and is waiting for
+            // nothing. Mirroring it here is what makes that true on WAKE too —
+            // `Terminal.hasPromptOnScreen` masks a stale reason only while the
+            // row is parked, so a reason left cached through a park would
+            // resurface as a raised hand on a woken session with no prompt.
+            terminals[delta.worktreeID]?[idx].awaitingInputReason = nil
+            terminals[delta.worktreeID]?[idx].awaitingInputObservedAt = nil
         } else {
             // Woken: clear the reason, keep the snapshot (clearHibernated
             // semantics — reconnect backdrop, overwritten on the next park).

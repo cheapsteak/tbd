@@ -18,7 +18,7 @@ struct JumpMenuViewModelTests {
     /// The switcher's job is finding the worktree that needs you, and the
     /// `.attentionNeeded` notification that would have said so is marked read
     /// the moment its worktree is selected. Every section carries the flag.
-    @Test func promptOnScreenReachesEverySection() {
+    @Test func promptOnScreenReachesEverySection() throws {
         let unreadID = UUID(); let recentID = UUID(); let matchID = UUID()
         let vm = JumpMenuViewModel(
             worktrees: [
@@ -36,9 +36,39 @@ struct JumpMenuViewModelTests {
         #expect(defaults.first { $0.id == recentID }?.hasPromptOnScreen == true)
 
         vm.query = "alpha-three"
-        let match = try! #require(vm.rows.first { $0.id == matchID })
+        let match = try #require(vm.rows.first { $0.id == matchID })
         #expect(match.section == .match)
         #expect(match.hasPromptOnScreen)
+    }
+
+    /// The producer between `AppState.terminals` and the view model. Without a
+    /// test the argument could be dropped at the call site and every row would
+    /// silently revert to notification-only behavior — both sides default.
+    @Test func promptOnScreenWorktreeIDsReadsTheTerminals() {
+        let prompting = UUID(); let quiet = UUID(); let parked = UUID()
+        func terminal(worktreeID: UUID, notificationType: String?) -> Terminal {
+            var t = Terminal(
+                worktreeID: worktreeID, tmuxWindowID: "@1", tmuxPaneID: "%1",
+                kind: .claude, activityState: .working)
+            if let notificationType {
+                t.awaitingInputReason = AwaitingInputReason(
+                    message: "needs your permission",
+                    hookEventName: "Notification",
+                    notificationType: notificationType)
+                t.awaitingInputObservedAt = Date(timeIntervalSince1970: 1)
+            }
+            return t
+        }
+        var parkedTerminal = terminal(worktreeID: parked, notificationType: "permission_prompt")
+        parkedTerminal.hibernatedAt = Date(timeIntervalSince1970: 2)
+
+        let ids = JumpMenuController.promptOnScreenWorktreeIDs(terminals: [
+            prompting: [terminal(worktreeID: prompting, notificationType: "permission_prompt")],
+            quiet: [terminal(worktreeID: quiet, notificationType: nil)],
+            parked: [parkedTerminal],
+        ])
+
+        #expect(ids == [prompting])
     }
 
     @Test func noPromptOnScreenByDefault() {

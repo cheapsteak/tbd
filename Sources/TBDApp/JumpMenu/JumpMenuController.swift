@@ -35,11 +35,11 @@ final class JumpMenuController {
     }
 
     /// Worktrees holding at least one terminal with a prompt on screen, read
-    /// through the same predicate the sidebar row uses so the two surfaces
-    /// cannot disagree about which worktree is blocked.
-    static func promptOnScreenWorktreeIDs(appState: AppState) -> Set<UUID> {
-        Set(appState.terminals.compactMap { worktreeID, terminals in
-            WorktreeRowView.hasPromptOnScreen(in: terminals) ? worktreeID : nil
+    /// through the same `Terminal.hasPromptOnScreen` the sidebar row uses so
+    /// the two surfaces cannot disagree about which worktree is blocked.
+    static func promptOnScreenWorktreeIDs(terminals: [UUID: [Terminal]]) -> Set<UUID> {
+        Set(terminals.compactMap { worktreeID, rows in
+            rows.contains { $0.hasPromptOnScreen } ? worktreeID : nil
         })
     }
 
@@ -58,7 +58,7 @@ final class JumpMenuController {
             worktrees: snapshots,
             unread: appState.unreadByWorktree,
             recentIDs: appState.recentWorktreeIDs,
-            promptOnScreenIDs: Self.promptOnScreenWorktreeIDs(appState: appState)
+            promptOnScreenIDs: Self.promptOnScreenWorktreeIDs(terminals: appState.terminals)
         )
         self.viewModel = vm
 

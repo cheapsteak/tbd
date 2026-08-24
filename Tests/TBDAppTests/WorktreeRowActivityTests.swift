@@ -122,7 +122,7 @@ struct WorktreeRowPromptOnScreenTests {
 
     @Test(arguments: ["permission_prompt", "elicitation_dialog", "agent_needs_input"])
     func promptClassesAreRecognized(notificationType: String) {
-        #expect(WorktreeRowView.isPromptOnScreen(terminal(notificationType: notificationType)))
+        #expect(terminal(notificationType: notificationType).hasPromptOnScreen)
     }
 
     @Test func noReasonIsNoSignal() {
@@ -133,7 +133,7 @@ struct WorktreeRowPromptOnScreenTests {
             kind: .claude,
             activityState: .working)
 
-        #expect(!WorktreeRowView.isPromptOnScreen(working))
+        #expect(!working.hasPromptOnScreen)
     }
 
     /// `.doneWaiting`, `.informational`, and `.unrecognized` are not prompts.
@@ -143,11 +143,11 @@ struct WorktreeRowPromptOnScreenTests {
         "idle_prompt", "auth_success", "agent_completed", "a_brand_new_prompt_type",
     ])
     func otherClassesAreNoSignal(notificationType: String) {
-        #expect(!WorktreeRowView.isPromptOnScreen(terminal(notificationType: notificationType)))
+        #expect(!terminal(notificationType: notificationType).hasPromptOnScreen)
     }
 
     @Test func absentNotificationTypeIsNoSignal() {
-        #expect(!WorktreeRowView.isPromptOnScreen(terminal(notificationType: nil)))
+        #expect(!terminal(notificationType: nil).hasPromptOnScreen)
     }
 
     /// Parking kills the agent process, so whatever prompt was on screen went
@@ -156,12 +156,12 @@ struct WorktreeRowPromptOnScreenTests {
     /// as long as the stale columns survived.
     @Test func aParkedTerminalIsNeverPrompting() {
         var parked = terminal(notificationType: "permission_prompt")
-        #expect(WorktreeRowView.isPromptOnScreen(parked))
+        #expect(parked.hasPromptOnScreen)
 
         parked.hibernatedAt = Date(timeIntervalSince1970: 100)
 
         #expect(parked.isParked)
-        #expect(!WorktreeRowView.isPromptOnScreen(parked))
+        #expect(!parked.hasPromptOnScreen)
         #expect(!WorktreeRowView.hasPromptOnScreen(in: [parked]))
     }
 

@@ -793,6 +793,20 @@ public extension Terminal {
         kind == .codex || label == TerminalLabel.codex
     }
 
+    /// The recorded wait reason says a prompt is on screen right now.
+    ///
+    /// Only `.promptOnScreen` counts. `.doneWaiting`, `.informational` and
+    /// `.unrecognized` are no signal, and an unknown class is never guessed
+    /// into the prompt class — see `AwaitingInputClass`.
+    ///
+    /// A parked terminal never counts, whatever its columns say. Parking kills
+    /// the agent process, so whatever prompt was on screen went with it; the
+    /// park clears the columns in the same write, and this guard keeps a row
+    /// calm through the window before the app learns that.
+    var hasPromptOnScreen: Bool {
+        !isParked && awaitingInputReason?.classification == .promptOnScreen
+    }
+
     /// True only for Claude terminals whose session can be resumed through
     /// Claude-specific lifecycle flows like suspend/resume and dead-window
     /// preservation.

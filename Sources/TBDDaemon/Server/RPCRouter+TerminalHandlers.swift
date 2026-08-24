@@ -3138,7 +3138,7 @@ extension RPCRouter {
         // `observedAt` comes from the router's date seam, never a bare `Date()`
         // at the write site: a persisted observed-at is data, so it is the date
         // seam rather than a `Clock`.
-        let recorded = try await db.terminals.recordAwaitingInputReason(
+        let write = try await db.terminals.recordAwaitingInputReason(
             id: terminal.id, reason: reason, observedAt: observedAt)
 
         // The reason columns are what the sidebar reads for "a prompt is on
@@ -3146,7 +3146,16 @@ extension RPCRouter {
         // notification row would not do: notifications model unread mail and
         // are marked read the moment the worktree is selected, which is
         // exactly the worktree whose prompt the user most needs to see.
-        if recorded {
+        //
+        // Only writes that change whether a prompt is on screen are pushed.
+        // This hook carries no matcher, so it also fires for every
+        // `agent_completed` a parallel subagent produces and every 60-second
+        // `idle_prompt` across the fleet; announcing those would republish the
+        // app's whole terminal collection for a sidebar that cannot change by
+        // a pixel. A write that DISPLACES a standing prompt still goes out —
+        // that one takes the indicator down.
+        if case .written(let displacedPromptOnScreen) = write,
+           reason.classification == .promptOnScreen || displacedPromptOnScreen {
             subscriptions.broadcast(delta: .terminalAwaitingInputChanged(
                 TerminalAwaitingInputDelta(
                     terminalID: terminal.id,
@@ -3271,15 +3280,25 @@ extension RPCRouter {
             }
             guard terminal.activityState != params.activityState else {
                 // Previously a pure no-op. A same-state observation still
-                // supersedes a not-newer wait reason, and it is the only
-                // observation some prompts ever get: a permission prompt is
-                // raised mid-turn, so the row already reads `working` and the
-                // next hook reports `working` again. Gated on the row already
-                // in hand, so the overwhelmingly common case — no standing
-                // reason — still costs no database write.
-                if terminal.awaitingInputReason != nil || terminal.awaitingInputObservedAt != nil,
-                   try await db.terminals.clearAwaitingInputReasonIfNotNewer(
-                       id: terminal.id, observedAt: observedAt) {
+                // supersedes a not-newer wait reason: this is the only rail
+                // that speaks when an activity value repeats, and the reason
+                // column moves independently of the activity stamp.
+                //
+                // Deliberately NOT gated on `terminal`'s reason columns. That
+                // row was read before an unbounded stretch of async work (a
+                // counter actor hop, a worktree read, and on an idle event a
+                // transcript file copy), and `handleTerminalNotificationEvent`
+                // runs concurrently on its own connection — a prompt recorded
+                // inside that window is invisible here, and skipping the call
+                // would leave the database holding a reason older than the
+                // newest activity observation, which is the one state the
+                // ordering rule exists to prevent. The store re-reads inside
+                // its own transaction and returns false without writing when
+                // there is nothing to retract, and a repeated activity value
+                // is a rare event on this rail (a queued prompt mid-turn, a
+                // second Stop), so the saved write was worth little anyway.
+                if try await db.terminals.clearAwaitingInputReasonIfNotNewer(
+                    id: terminal.id, observedAt: observedAt) {
                     broadcastAwaitingInputRetraction(terminal: terminal)
                 }
                 return .ok()

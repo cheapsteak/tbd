@@ -175,4 +175,13 @@ struct ShouldBoldNameTests {
     @Test func doesNotBoldWhenThereIsNoPromptAndNoNotification() {
         #expect(RowStatusIndicator.shouldBoldName(nil, hasPromptOnScreen: false) == false)
     }
+
+    /// `suffix` ranks `.error` above a prompt on screen, so the name must not
+    /// bold: a bold name beside an error octagon shows two severities at once.
+    @Test func aPromptOnScreenDoesNotBoldOverAnError() {
+        #expect(RowStatusIndicator.suffix(
+            notification: .error, isWorking: true, isSuspended: false,
+            hasPromptOnScreen: true) == .error)
+        #expect(RowStatusIndicator.shouldBoldName(.error, hasPromptOnScreen: true) == false)
+    }
 }

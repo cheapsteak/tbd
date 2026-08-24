@@ -143,6 +143,17 @@ enum FactColumnJSON {
     }
 }
 
+/// What a `recordAwaitingInputReason` call did to the record.
+public enum AwaitingInputWrite: Sendable, Equatable {
+    /// The guard refused the report; the standing reason is unchanged.
+    case declined
+    /// The reason columns now hold the reported reason.
+    /// `displacedPromptOnScreen` says whether a prompt-on-screen reason was
+    /// standing before — the case a display consumer has to hear about even
+    /// when the new class is one it does not render.
+    case written(displacedPromptOnScreen: Bool)
+}
+
 public struct AppliedTerminalActivityObservation: Sendable {
     public let activityState: TerminalActivityState
     public let source: FactSource
@@ -785,31 +796,30 @@ public struct TerminalStore: Sendable {
     /// observation of the session moving on still retracts the reason. This
     /// guard only refuses to let a report that observed nothing do it.
     ///
-    /// Returns whether the reason was written. `false` means the guard above
-    /// declined it and the standing reason is unchanged — nothing for a caller
-    /// to announce.
+    /// Reports what the write did, so a caller can decide whether it is worth
+    /// announcing. `.declined` means the guard above refused and the standing
+    /// reason is unchanged.
     @discardableResult
     public func recordAwaitingInputReason(
         id: UUID,
         reason: AwaitingInputReason,
         observedAt: Date
-    ) async throws -> Bool {
+    ) async throws -> AwaitingInputWrite {
         try await writer.write { db in
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Terminal not found")
             }
+            let standing = FactColumnJSON.decode(
+                AwaitingInputReason.self, from: record.awaitingInputReason)
             let establishesNothing = reason.classification == .informational
                 || reason.classification == .unrecognized
-            if establishesNothing,
-               let standing = FactColumnJSON.decode(
-                    AwaitingInputReason.self, from: record.awaitingInputReason),
-               standing.classification == .promptOnScreen {
-                return false
+            if establishesNothing, standing?.classification == .promptOnScreen {
+                return .declined
             }
             record.awaitingInputReason = FactColumnJSON.encode(reason)
             record.awaitingInputObservedAt = observedAt
             try record.update(db)
-            return true
+            return .written(displacedPromptOnScreen: standing?.classification == .promptOnScreen)
         }
     }
 

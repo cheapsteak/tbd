@@ -336,6 +336,34 @@ struct DeltaIngestionTests {
         }
     }
 
+    /// Parking retracts the reason in the same daemon write that sets
+    /// `hibernatedAt`, and the app mirrors both from the one delta — so the
+    /// park costs one publish, not two, and the row wakes with no stale prompt.
+    @Test("terminalHibernationChanged: a park retracts the cached reason")
+    func parkingClearsTheCachedAwaitingInputReason() {
+        withEmissionState { state in
+            let worktreeID = UUID()
+            let terminalID = UUID()
+            var terminal = makeTerminal(
+                id: terminalID, worktreeID: worktreeID, activityState: .idle)
+            terminal.awaitingInputReason = AwaitingInputReason(
+                message: "needs your permission",
+                hookEventName: "Notification",
+                notificationType: "permission_prompt")
+            terminal.awaitingInputObservedAt = Date(timeIntervalSince1970: 20)
+            seatOneTerminal(state, worktreeID: worktreeID, terminal: terminal)
+
+            state.handleDelta(.terminalHibernationChanged(TerminalHibernationDelta(
+                terminalID: terminalID, worktreeID: worktreeID,
+                hibernated: true, keepWarm: false
+            )))
+
+            let parked = state.terminals[worktreeID]?.first
+            #expect(parked?.awaitingInputReason == nil)
+            #expect(parked?.hasPromptOnScreen == false)
+        }
+    }
+
     /// A session rollover delta re-sent with the same session identity is a
     /// semantic no-op and must not republish the terminal collection.
     @Test("terminalSessionUpdated: the same session and transcript path")

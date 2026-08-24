@@ -451,14 +451,30 @@ import TestSupport
         #expect(delta.reason?.classification == .promptOnScreen)
     }
 
-    /// Every class is broadcast, not only the one the sidebar renders: the app
-    /// mirrors the columns rather than deriving them, so a `doneWaiting` that
-    /// replaces a standing prompt has to reach it too.
-    @Test func aNonPromptClassIsBroadcastToo() async throws {
+    /// A class that cannot change whether a prompt is up, recorded over
+    /// nothing, is not announced. This hook carries no matcher, so it fires for
+    /// every `agent_completed` a parallel subagent produces and every
+    /// 60-second `idle_prompt` across the fleet; pushing those would republish
+    /// every subscriber's terminal collection for a sidebar that cannot change.
+    @Test(arguments: ["idle_prompt", "agent_completed", "auth_success", "some_future_type"])
+    func aClassThatChangesNoPromptIsNotBroadcast(type: String) async throws {
+        #expect(await notify(type: type, message: "nothing to see").success)
+
+        #expect(try await terminal().awaitingInputReason != nil, "still recorded")
+        #expect(awaitingInputDeltas().isEmpty, "but not announced")
+    }
+
+    /// The other half: a write that DISPLACES a standing prompt takes the
+    /// indicator down, so it must be announced even though its own class is one
+    /// the sidebar never renders.
+    @Test func aClassThatDisplacesAStandingPromptIsBroadcast() async throws {
+        #expect(await notify(type: "permission_prompt").success)
+        #expect(awaitingInputDeltas().count == 1)
+
         #expect(await notify(type: "idle_prompt", message: "back at the prompt").success)
 
-        let delta = try #require(awaitingInputDeltas().first)
-        #expect(delta.reason?.classification == .doneWaiting)
+        #expect(awaitingInputDeltas().count == 2)
+        #expect(awaitingInputDeltas().last?.reason?.classification == .doneWaiting)
     }
 
     /// The mirror of the write guard: a report that establishes nothing does
@@ -510,13 +526,37 @@ import TestSupport
         #expect(retraction.reason == nil)
     }
 
-    /// No standing reason means no retraction to announce, so an ordinary turn
-    /// boundary does not add a delta per hook event.
+    /// No standing reason means no retraction to announce — on both paths.
+    /// The second pair repeats a value the row already holds, so it enters the
+    /// same-state branch rather than passing on the changed-state one.
     @Test func anActivityObservationWithNoStandingReasonBroadcastsNothing() async throws {
         try await sendActivity(.working, at: Self.observedAt.addingTimeInterval(1))
         try await sendActivity(.idle, at: Self.observedAt.addingTimeInterval(2))
+        #expect(awaitingInputDeltas().isEmpty, "changed-state path")
 
-        #expect(awaitingInputDeltas().isEmpty)
+        #expect(try await terminal().activityState == .idle)
+        try await sendActivity(.idle, at: Self.observedAt.addingTimeInterval(3))
+        try await sendActivity(.idle, at: Self.observedAt.addingTimeInterval(4))
+
+        #expect(awaitingInputDeltas().isEmpty, "same-state path")
+    }
+
+    /// The same-state retraction must not be gated on a row read before the
+    /// handler's async work: `handleTerminalNotificationEvent` runs on its own
+    /// connection, so a prompt can commit inside that window. A gate on the
+    /// stale snapshot would skip the retraction and leave the DATABASE holding
+    /// a reason older than the newest activity observation — which no client
+    /// refresh can repair, because the database itself is then wrong.
+    @Test func aReasonRecordedAfterTheRowWasReadIsStillRetracted() async throws {
+        try await sendActivity(.working, at: Self.observedAt.addingTimeInterval(-2))
+        // Stands in for the concurrent commit: the row the activity handler
+        // reads has no reason, and one lands before its write.
+        #expect(await notify(type: "permission_prompt").success)
+
+        try await sendActivity(.working, at: Self.observedAt.addingTimeInterval(1))
+
+        #expect(try await terminal().awaitingInputReason == nil)
+        #expect(awaitingInputDeltas().last?.reason == nil)
     }
 
     /// The ordering rule survives the move onto the same-state path: a reason

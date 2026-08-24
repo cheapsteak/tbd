@@ -115,11 +115,16 @@ enum RowStatusIndicator {
     /// without it the row this fix targets would show the raised hand beside a
     /// regular-weight name — half-escalated, a state the notification-only
     /// design could never produce.
+    ///
+    /// It does not outrank `.error`, because `suffix` does not either: an error
+    /// takes the slot over a prompt, and `.error` deliberately does not bold.
+    /// Bolding here regardless would put a bold name beside an error glyph —
+    /// two severities at once, the same half-escalation in the other direction.
     static func shouldBoldName(
         _ notification: NotificationType?,
         hasPromptOnScreen: Bool = false
     ) -> Bool {
-        if hasPromptOnScreen { return true }
+        if hasPromptOnScreen, notification != .error { return true }
         switch notification {
         case .responseComplete, .attentionNeeded, .focusRequest, .limitReached:
             return true

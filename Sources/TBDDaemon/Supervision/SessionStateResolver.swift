@@ -129,14 +129,20 @@ struct SessionStateFacts: Sendable, Equatable {
 /// of reporting `.awaitingInput` for a prompt answered seconds after it
 /// appeared.
 ///
-/// A same-state event does now retract a not-newer reason, and that is what
-/// closes this window for an `AskUserQuestion` prompt (whose post-hook fires a
-/// `working` event the moment it is answered). It closes nothing for the
-/// ordinary tool-permission prompt, because **no hook fires when a human
-/// approves a Bash or an Edit**: the overlay's only `PostToolUse` entries are
-/// matched to `AskUserQuestion` and to `Bash`-for-PR-binding, so between the
-/// approval and the turn's `Stop` the hook rail says nothing at all. The
-/// transcript check below is still the only thing that speaks in that window.
+/// A same-state event does now retract a not-newer reason, which is what the
+/// rail could not do before. It does not close this window, and it is worth
+/// being exact about how narrow it is. An `AskUserQuestion` prompt was never in
+/// the window: its pre-hook writes `waiting_for_user` and its post-hook writes
+/// `working`, a *changed* state that has always retracted. And **no hook fires
+/// at all when a human approves a Bash or an Edit** — the overlay's only
+/// `PostToolUse` entries are matched to `AskUserQuestion` and to
+/// `Bash`-for-PR-binding — so between that approval and the turn's `Stop` there
+/// is nothing to retract on. What the same-state retraction reaches is a
+/// repeated value: a queued `UserPromptSubmit` mid-turn, a second `Stop`, or a
+/// post-hook whose paired pre-hook was lost to a stale `tbd` on `PATH`.
+///
+/// So the transcript check below is still the only thing that speaks during a
+/// turn, and it is still what this doctrine rests on.
 ///
 /// The transcript is the only other interface that speaks during a turn, and it
 /// **cannot settle this either — so growth is evidence of ambiguity, not of an
