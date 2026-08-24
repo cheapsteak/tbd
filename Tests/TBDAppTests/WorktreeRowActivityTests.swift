@@ -101,3 +101,61 @@ struct WorktreeRowActivityTests {
         #expect(!WorktreeRowView.hasForegroundWork(in: []))
     }
 }
+
+@Suite("WorktreeRowView — prompt on screen")
+struct WorktreeRowPromptOnScreenTests {
+    private func terminal(notificationType: String?) -> Terminal {
+        var terminal = Terminal(
+            worktreeID: UUID(),
+            tmuxWindowID: "@1",
+            tmuxPaneID: "%1",
+            kind: .claude,
+            activityState: .working
+        )
+        terminal.awaitingInputReason = AwaitingInputReason(
+            message: "Claude needs your permission to use Bash",
+            hookEventName: "Notification",
+            notificationType: notificationType)
+        terminal.awaitingInputObservedAt = Date(timeIntervalSince1970: 1)
+        return terminal
+    }
+
+    @Test(arguments: ["permission_prompt", "elicitation_dialog", "agent_needs_input"])
+    func promptClassesAreRecognized(notificationType: String) {
+        #expect(WorktreeRowView.isPromptOnScreen(terminal(notificationType: notificationType)))
+    }
+
+    @Test func noReasonIsNoSignal() {
+        let working = Terminal(
+            worktreeID: UUID(),
+            tmuxWindowID: "@1",
+            tmuxPaneID: "%1",
+            kind: .claude,
+            activityState: .working)
+
+        #expect(!WorktreeRowView.isPromptOnScreen(working))
+    }
+
+    /// `.doneWaiting`, `.informational`, and `.unrecognized` are not prompts.
+    /// A type this build has never heard of must NOT be guessed into the
+    /// prompt class on the strength of its spelling.
+    @Test(arguments: [
+        "idle_prompt", "auth_success", "agent_completed", "a_brand_new_prompt_type",
+    ])
+    func otherClassesAreNoSignal(notificationType: String) {
+        #expect(!WorktreeRowView.isPromptOnScreen(terminal(notificationType: notificationType)))
+    }
+
+    @Test func absentNotificationTypeIsNoSignal() {
+        #expect(!WorktreeRowView.isPromptOnScreen(terminal(notificationType: nil)))
+    }
+
+    @Test func collectionReportsAnyPromptOnScreen() {
+        let prompt = terminal(notificationType: "permission_prompt")
+        let idlePrompt = terminal(notificationType: "idle_prompt")
+
+        #expect(WorktreeRowView.hasPromptOnScreen(in: [idlePrompt, prompt]))
+        #expect(!WorktreeRowView.hasPromptOnScreen(in: [idlePrompt]))
+        #expect(!WorktreeRowView.hasPromptOnScreen(in: []))
+    }
+}

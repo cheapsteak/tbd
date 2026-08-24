@@ -2045,6 +2045,8 @@ final class AppState: ObservableObject {
             applyTerminalRemovedDelta(d)
         case .terminalActivityUpdated(let d):
             applyTerminalActivityDelta(d)
+        case .terminalAwaitingInputChanged(let d):
+            applyTerminalAwaitingInputDelta(d)
         case .terminalProfileChanged(let d):
             applyTerminalProfileDelta(d)
         case .watchDeskRolesChanged(let d):
@@ -2317,6 +2319,24 @@ final class AppState: ObservableObject {
             terminalPresentationOrderObservedAt.removeValue(forKey: delta.terminalID)
         }
         terminals[delta.worktreeID]?[idx] = terminal
+    }
+
+    /// Mirror the daemon's awaiting-input columns onto the cached terminal.
+    ///
+    /// Deliberately writes ONLY those two fields: a recorded wait reason says
+    /// nothing about `activityState`, and the daemon does not assert one from
+    /// the `Notification` hook either. The sidebar reads this instead of the
+    /// `.attentionNeeded` notification because notifications are unread mail —
+    /// they are marked read as soon as the worktree is selected, so the row
+    /// the user is looking at is exactly the one that would lose the signal.
+    private func applyTerminalAwaitingInputDelta(_ delta: TerminalAwaitingInputDelta) {
+        guard let idx = terminals[delta.worktreeID]?.firstIndex(
+            where: { $0.id == delta.terminalID }) else { return }
+        guard terminals[delta.worktreeID]![idx].awaitingInputReason != delta.reason
+            || terminals[delta.worktreeID]![idx].awaitingInputObservedAt != delta.observedAt
+        else { return }
+        terminals[delta.worktreeID]?[idx].awaitingInputReason = delta.reason
+        terminals[delta.worktreeID]?[idx].awaitingInputObservedAt = delta.observedAt
     }
 
     /// Seamless in-place "Switch account": the terminal row is unchanged except

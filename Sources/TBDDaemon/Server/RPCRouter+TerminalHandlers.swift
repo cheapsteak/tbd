@@ -3080,11 +3080,13 @@ extension RPCRouter {
     ///
     /// The handler records the reason columns, and for a prompt-on-screen
     /// classification additionally raises an `.attentionNeeded` notification
-    /// so the sidebar swaps the thinking dots for the attention indicator and
-    /// bolds the name (the app's `RowStatusIndicator` already ranks attention
-    /// above working). There is still no delta carrying the wait reason
-    /// itself: the notification row is the fact the app renders, and focusing
-    /// the worktree clears it through `notifications.markRead`.
+    /// so the macOS banner fires and the name bolds.
+    ///
+    /// The recorded reason is ALSO pushed as `.terminalAwaitingInputChanged`,
+    /// and that — not the notification — is what the sidebar's suffix slot
+    /// reads. The notification is unread mail: selecting the worktree marks it
+    /// read, so the row the user is looking at would lose the indicator while
+    /// the prompt was still on screen.
     func handleTerminalNotificationEvent(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalNotificationEventParams.self, from: paramsData)
 
@@ -3124,8 +3126,23 @@ extension RPCRouter {
         // `observedAt` comes from the router's date seam, never a bare `Date()`
         // at the write site: a persisted observed-at is data, so it is the date
         // seam rather than a `Clock`.
-        try await db.terminals.recordAwaitingInputReason(
-            id: terminal.id, reason: reason, observedAt: now())
+        let observedAt = now()
+        let recorded = try await db.terminals.recordAwaitingInputReason(
+            id: terminal.id, reason: reason, observedAt: observedAt)
+
+        // The reason columns are what the sidebar reads for "a prompt is on
+        // screen right now", so the app has to learn about them by push. A
+        // notification row would not do: notifications model unread mail and
+        // are marked read the moment the worktree is selected, which is
+        // exactly the worktree whose prompt the user most needs to see.
+        if recorded {
+            subscriptions.broadcast(delta: .terminalAwaitingInputChanged(
+                TerminalAwaitingInputDelta(
+                    terminalID: terminal.id,
+                    worktreeID: terminal.worktreeID,
+                    reason: reason,
+                    observedAt: observedAt)))
+        }
 
         // A prompt on screen is the one class a human has to act on now, so
         // it, and only it, raises the attention notification the sidebar
@@ -3241,17 +3258,37 @@ extension RPCRouter {
                     await limitResumeScheduler?.wake()
                 }
             }
-            guard terminal.activityState != params.activityState else { return .ok() }
-            try await db.terminals.setActivityState(
-                id: terminal.id,
-                activityState: params.activityState,
-                source: .hookEvent(RPCMethod.terminalActivityEvent),
-                observedAt: observedAt)
-            subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
-                terminalID: terminal.id,
-                worktreeID: terminal.worktreeID,
-                activityState: params.activityState
-            )))
+            // Retract a not-newer wait reason BEFORE the unchanged-state guard.
+            // A permission prompt is raised mid-turn, so the hook that fires
+            // once the human answers reports `working` again — the very
+            // observation the guard drops. Clearing only on a *changed* state
+            // would pin the reason to the row until the turn ended.
+            var retractedAwaitingInput = try await db.terminals
+                .clearAwaitingInputReasonIfNotNewer(
+                    id: terminal.id, observedAt: observedAt)
+            if terminal.activityState != params.activityState {
+                // `setActivityState` nils the reason columns unconditionally —
+                // it IS the superseding rail — so take its answer over the
+                // conditional retraction above.
+                retractedAwaitingInput = try await db.terminals.setActivityState(
+                    id: terminal.id,
+                    activityState: params.activityState,
+                    source: .hookEvent(RPCMethod.terminalActivityEvent),
+                    observedAt: observedAt) || retractedAwaitingInput
+                subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
+                    terminalID: terminal.id,
+                    worktreeID: terminal.worktreeID,
+                    activityState: params.activityState
+                )))
+            }
+            if retractedAwaitingInput {
+                subscriptions.broadcast(delta: .terminalAwaitingInputChanged(
+                    TerminalAwaitingInputDelta(
+                        terminalID: terminal.id,
+                        worktreeID: terminal.worktreeID,
+                        reason: nil,
+                        observedAt: nil)))
+            }
             return .ok()
         }
         let source: FactSource = params.origin == .userInterrupt
@@ -3283,6 +3320,14 @@ extension RPCRouter {
             activityStateObservedAt: activityApplication.observedAt,
             activityStateOrderObservedAt: activityApplication.orderObservedAt
         )))
+        if activityApplication.clearedAwaitingInput {
+            subscriptions.broadcast(delta: .terminalAwaitingInputChanged(
+                TerminalAwaitingInputDelta(
+                    terminalID: terminal.id,
+                    worktreeID: terminal.worktreeID,
+                    reason: nil,
+                    observedAt: nil)))
+        }
         return .ok()
     }
     func handleTerminalTranscript(_ paramsData: Data) async throws -> RPCResponse {

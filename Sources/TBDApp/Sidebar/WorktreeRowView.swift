@@ -95,6 +95,30 @@ struct WorktreeRowView: View {
         return Self.hasForegroundWork(in: terminals)
     }
 
+    /// One of the row's terminals has a prompt on screen right now.
+    ///
+    /// Read from the terminal's own `awaitingInputReason`, not from the
+    /// `.attentionNeeded` notification the daemon raises alongside it: that
+    /// notification is auto-marked-read for every visible worktree, so the
+    /// selected or pinned row — the one being looked at — lost it and animated
+    /// the thinking dots at a session waiting on a permission prompt.
+    private var hasPromptOnScreenTerminal: Bool {
+        let terminals = appState.terminals[worktree.id] ?? []
+        return Self.hasPromptOnScreen(in: terminals)
+    }
+
+    /// Whether a terminal's recorded wait reason says a prompt is on screen.
+    /// Only `.promptOnScreen` counts — every other class, `.unrecognized`
+    /// included, is no signal here.
+    nonisolated static func isPromptOnScreen(_ terminal: Terminal) -> Bool {
+        terminal.awaitingInputReason?.classification == .promptOnScreen
+    }
+
+    /// The collection form used by the row and by pure presentation tests.
+    nonisolated static func hasPromptOnScreen(in terminals: [Terminal]) -> Bool {
+        terminals.contains(where: isPromptOnScreen)
+    }
+
     /// Whether one terminal has trustworthy foreground work to animate in the
     /// sidebar. Codex's hook state can remain latched after a turn ends, so its
     /// transcript-derived presentation state is authoritative here unless the
@@ -317,7 +341,8 @@ struct WorktreeRowView: View {
             isWorking: hasWorkingTerminal,
             // Suspend retired: every parked session funnels to the moon.
             isSuspended: false,
-            isHibernated: hasParkedTerminal
+            isHibernated: hasParkedTerminal,
+            hasPromptOnScreen: hasPromptOnScreenTerminal
         ) {
         case .working:
             TypingDotsView(color: SuffixRowIndicator.working.color)

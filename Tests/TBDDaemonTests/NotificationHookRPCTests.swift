@@ -25,6 +25,9 @@ import TestSupport
     /// on the router's own `StateSubscriptionManager` (`broadcast` fans out
     /// synchronously, so the capture is complete once the handler returns).
     fileprivate let broadcasts: BroadcastDeltas
+    /// Shared with `activityRouter` so the retraction broadcast the activity
+    /// rail emits lands in the same collector as the notification's.
+    private let subscriptions: StateSubscriptionManager
 
     /// Pinned through the router's date seam, so the stored observed-at is an
     /// exact assertion rather than a freshness window.
@@ -36,6 +39,7 @@ import TestSupport
         let broadcasts = BroadcastDeltas()
         self.broadcasts = broadcasts
         let subscriptions = StateSubscriptionManager()
+        self.subscriptions = subscriptions
         subscriptions.addSubscriber { data in
             if let delta = try? JSONDecoder().decode(StateDelta.self, from: data) {
                 broadcasts.append(delta)
@@ -104,8 +108,27 @@ import TestSupport
                 tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
+            subscriptions: subscriptions,
             now: { observedAt },
             actuationLog: makeTestActuationLog())
+    }
+
+    /// Every awaiting-input delta the collector saw, in order.
+    private func awaitingInputDeltas() -> [TerminalAwaitingInputDelta] {
+        broadcasts.snapshot().compactMap { delta in
+            if case .terminalAwaitingInputChanged(let d) = delta { return d }
+            return nil
+        }
+    }
+
+    private func sendActivity(
+        _ activityState: TerminalActivityState, at observedAt: Date
+    ) async throws {
+        let request = try RPCRequest(
+            method: RPCMethod.terminalActivityEvent,
+            params: TerminalActivityEventParams(
+                terminalID: terminalID, activityState: activityState))
+        #expect(await activityRouter(observedAt: observedAt).handle(request).success)
     }
 
     /// The park decision for the current row, plus the raw activity triple —
@@ -404,6 +427,109 @@ import TestSupport
             observedAt: Self.observedAt.addingTimeInterval(1)).handle(request).success)
 
         #expect(try await terminal().awaitingInputReason == nil)
+    }
+
+    // MARK: - The awaiting-input delta
+
+    /// The sidebar reads the reason columns, not the notification row, so the
+    /// record has to reach the app by push. The notification is unread mail —
+    /// selecting a worktree marks it read, which is why the row the user was
+    /// looking at kept animating the thinking dots at a session sitting on a
+    /// permission prompt.
+    @Test func aRecordedPromptIsBroadcastAlongsideTheNotification() async throws {
+        let message = "Claude needs your permission to use Bash"
+        #expect(await notify(type: "permission_prompt", message: message).success)
+
+        let delta = try #require(awaitingInputDeltas().first)
+        #expect(awaitingInputDeltas().count == 1)
+        #expect(delta.terminalID == terminalID)
+        #expect(delta.worktreeID == worktreeID)
+        #expect(delta.observedAt == Self.observedAt)
+        #expect(delta.reason?.message == message)
+        #expect(delta.reason?.notificationType == "permission_prompt")
+        #expect(delta.reason?.classification == .promptOnScreen)
+    }
+
+    /// Every class is broadcast, not only the one the sidebar renders: the app
+    /// mirrors the columns rather than deriving them, so a `doneWaiting` that
+    /// replaces a standing prompt has to reach it too.
+    @Test func aNonPromptClassIsBroadcastToo() async throws {
+        #expect(await notify(type: "idle_prompt", message: "back at the prompt").success)
+
+        let delta = try #require(awaitingInputDeltas().first)
+        #expect(delta.reason?.classification == .doneWaiting)
+    }
+
+    /// The mirror of the write guard: a report that establishes nothing does
+    /// not change the record, so there is nothing to announce.
+    @Test func aRefusedReportBroadcastsNothing() async throws {
+        #expect(await notify(type: "permission_prompt", message: "needs permission").success)
+        #expect(awaitingInputDeltas().count == 1)
+
+        #expect(await notify(type: "agent_completed", message: "a subagent finished").success)
+
+        #expect(awaitingInputDeltas().count == 1, "the standing prompt is unchanged")
+    }
+
+    /// **The staleness case, and the reason the retraction cannot ride the
+    /// activity delta.** A permission prompt is raised in the MIDDLE of a turn,
+    /// so the session already reads `working`; the hook that fires once the
+    /// human answers reports `working` again. The handler's unchanged-state
+    /// guard drops that observation, so a reason retracted only on a *changed*
+    /// state would stay pinned to the row until the turn ended — minutes of
+    /// attention indicator for a prompt nobody is looking at.
+    @Test func aSameStateActivityObservationStillRetractsAStandingPrompt() async throws {
+        try await sendActivity(.working, at: Self.observedAt.addingTimeInterval(-1))
+        #expect(await notify(type: "permission_prompt").success)
+        #expect(try await terminal().awaitingInputReason != nil)
+
+        try await sendActivity(.working, at: Self.observedAt.addingTimeInterval(1))
+
+        let after = try await terminal()
+        #expect(after.awaitingInputReason == nil)
+        #expect(after.awaitingInputObservedAt == nil)
+        #expect(after.activityState == .working, "activityState is left exactly as it was")
+
+        let retraction = try #require(awaitingInputDeltas().last)
+        #expect(retraction.reason == nil)
+        #expect(retraction.observedAt == nil)
+        #expect(retraction.terminalID == terminalID)
+        #expect(retraction.worktreeID == worktreeID)
+    }
+
+    /// The changed-state path announces its retraction as well — the app must
+    /// not need a `terminal.list` refresh to stop showing the indicator.
+    @Test func aChangedStateActivityObservationBroadcastsTheRetraction() async throws {
+        #expect(await notify(type: "permission_prompt").success)
+
+        try await sendActivity(.working, at: Self.observedAt.addingTimeInterval(1))
+
+        #expect(try await terminal().awaitingInputReason == nil)
+        let retraction = try #require(awaitingInputDeltas().last)
+        #expect(retraction.reason == nil)
+    }
+
+    /// No standing reason means no retraction to announce, so an ordinary turn
+    /// boundary does not add a delta per hook event.
+    @Test func anActivityObservationWithNoStandingReasonBroadcastsNothing() async throws {
+        try await sendActivity(.working, at: Self.observedAt.addingTimeInterval(1))
+        try await sendActivity(.idle, at: Self.observedAt.addingTimeInterval(2))
+
+        #expect(awaitingInputDeltas().isEmpty)
+    }
+
+    /// A reason recorded AFTER the activity event was stamped is newer than the
+    /// observation superseding it, so it survives — the ordering rule
+    /// `clearAwaitingInputIfNotNewer` has always applied, now reachable on a
+    /// same-state event too.
+    @Test func aNewerReasonSurvivesAnOlderSameStateObservation() async throws {
+        try await sendActivity(.working, at: Self.observedAt.addingTimeInterval(-2))
+        #expect(await notify(type: "permission_prompt").success)
+
+        try await sendActivity(.working, at: Self.observedAt.addingTimeInterval(-1))
+
+        #expect(try await terminal().awaitingInputReason?.classification == .promptOnScreen)
+        #expect(awaitingInputDeltas().allSatisfy { $0.reason != nil })
     }
 
     /// The router's date seam reaches BOTH stamps the resolver's rung-4 decision
