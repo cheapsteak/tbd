@@ -272,6 +272,38 @@ struct TerminalActivityEventHandlerTests {
         #expect(updated.activityStateObservedAt == olderInterruptAt)
     }
 
+    /// Regression guard for the ordering inside `handleTerminalActivityEvent`'s
+    /// non-Codex path: the delegation mark MUST be taken BEFORE the
+    /// unchanged-state guard (`guard terminal.activityState != params.activityState`).
+    /// A background agent's completion wakes the parent, which runs a turn and
+    /// ends it — a second `idle` with no `working` between — so the reported
+    /// state equals the stored one and the handler early-returns. Move the mark
+    /// below that guard and this test fails: the turn boundary is dropped and
+    /// the sidebar latches the previous turn's delegation count forever.
+    @Test("an idle event for an already-idle Claude terminal still marks it")
+    func anIdleEventForAnAlreadyIdleClaudeTerminalStillMarksIt() async throws {
+        let terminal = try await makeTerminal(kind: .claude, label: "Claude")
+        try await db.terminals.setActivityState(
+            id: terminal.id,
+            activityState: .idle,
+            source: .hookEvent(RPCMethod.terminalActivityEvent))
+        let stored = try #require(await db.terminals.get(id: terminal.id))
+        // The crux: the stored state already equals the state about to be
+        // reported, so the unchanged-state guard would early-return.
+        #expect(stored.activityState == .idle)
+        #expect(await router.claudeDelegationTracker.isMarked(terminalID: terminal.id) == false)
+
+        let request = try RPCRequest(
+            method: RPCMethod.terminalActivityEvent,
+            params: TerminalActivityEventParams(
+                terminalID: terminal.id,
+                activityState: .idle))
+
+        #expect((await router.handle(request)).success)
+
+        #expect(await router.claudeDelegationTracker.isMarked(terminalID: terminal.id))
+    }
+
     @Test("unknown terminalID is a soft no-op")
     func unknownTerminalSoftSuccess() async throws {
         let request = try RPCRequest(
