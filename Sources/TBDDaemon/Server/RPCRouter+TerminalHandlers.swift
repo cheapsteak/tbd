@@ -3278,6 +3278,17 @@ extension RPCRouter {
                     await limitResumeScheduler?.wake()
                 }
             }
+            // Marked BEFORE the unchanged-state guard below, deliberately. A
+            // background agent's completion wakes the parent, which runs a
+            // turn and ends it — a second `idle` with no `working` between.
+            // Marking below the guard would drop that boundary and latch the
+            // previous turn's count. Sampling itself is deferred to
+            // `terminal.list`: Claude Code writes the turn's `turn_duration`
+            // record a couple of milliseconds AFTER these hooks return, so a
+            // read here would observe the previous turn.
+            if params.activityState == .idle {
+                await claudeDelegationTracker.mark(terminalID: terminal.id)
+            }
             guard terminal.activityState != params.activityState else {
                 // Previously a pure no-op. A same-state observation still
                 // supersedes a not-newer wait reason: this is the only rail

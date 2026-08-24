@@ -41,6 +41,10 @@ actor ClaudeDelegationTracker {
         marked.insert(terminalID)
     }
 
+    /// Whether a terminal currently owes a sample. Exists so a test can pin
+    /// the mark independently of any filesystem evidence.
+    func isMarked(terminalID: UUID) -> Bool { marked.contains(terminalID) }
+
     func clear(terminalID: UUID) {
         marked.remove(terminalID)
         claims.removeValue(forKey: terminalID)

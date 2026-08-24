@@ -201,6 +201,9 @@ public final class RPCRouter: Sendable {
     /// Daemon-lifetime incremental transcript baselines used only to enrich
     /// terminal-list responses for Codex presentation state.
     let codexActivityTracker = CodexTranscriptActivityTracker()
+    /// Which Claude terminals owe a delegation sample, and what their last
+    /// sample claimed. Marked at every idle report; read during `terminal.list`.
+    let claudeDelegationTracker = ClaudeDelegationTracker()
     /// Opt-in tmux control-mode wiring. `nil` when the daemon did not provide
     /// one (tests, older callers); when present, terminal handlers open a gated
     /// logging-only `tmux -CC` connection after each `ensureServer()`.
