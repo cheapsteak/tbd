@@ -146,16 +146,23 @@ struct CloudCreateEntryPresentationTests {
 
 // MARK: - Cross-surface parity (final review item 4)
 //
-// The three owned create surfaces — `RepoSectionView`'s context menu
-// (`remoteSessionMenuProviders`), its `+` picker
+// The four owned create surfaces — `RepoSectionView`'s context menu
+// (`remoteSessionMenuProviders`), `WorktreeRowView`'s context menu (its own
+// `remoteSessionMenuProviders`), the `+` picker
 // (`CloudCreateEntryPresentation.pickerProviders`), and `RemoteSectionView`'s
 // header `+` (`RemoteProviderHeaderRow.canCreate`) — must reach the same "can
 // this surface offer cloud?" verdict for a given (providers,
 // claudeCloudEnabled) pair, with one documented exception: the picker
-// additionally omits a STALE cloud provider, which the other two instead
+// additionally omits a STALE cloud provider, which the others instead
 // render and disable (see the staleness tests above).
 //
-// Each test below calls the actual `nonisolated static` functions the three
+// `WorktreeRowView`'s item carries one extra gate of its own — the main row
+// offers nothing, because the main worktree is not a parent to nest under —
+// which is orthogonal to the cloud question and so is pinned in
+// `WorktreeRowRemoteSessionMenuTests` rather than here. Every call below
+// passes `isMain: false` so this suite reads only the cloud verdict.
+//
+// Each test below calls the actual `nonisolated static` functions the four
 // view bodies call — not a re-implementation of their logic — so a future
 // edit that re-derives the gate inline in one surface, drops a filter, or
 // stops routing through `CloudCreateEntryPresentation` reddens this suite
@@ -183,24 +190,30 @@ struct CloudCreateEntryPresentationParityTests {
         providers.first { $0.config.name == ClaudeCloudProvider.name }!
     }
 
-    /// Flag off: all three surfaces must agree the cloud row is hidden.
-    @Test func allThreeSurfacesAgreeTheCloudRowIsHiddenWhenTheFlagIsOff() {
+    /// Flag off: all four surfaces must agree the cloud row is hidden.
+    @Test func allFourSurfacesAgreeTheCloudRowIsHiddenWhenTheFlagIsOff() {
         let menu = RepoSectionView.remoteSessionMenuProviders(providers: both, claudeCloudEnabled: false)
+        let rowMenu = WorktreeRowView.remoteSessionMenuProviders(
+            providers: both, claudeCloudEnabled: false, isMain: false)
         let picker = CloudCreateEntryPresentation.pickerProviders(both, claudeCloudEnabled: false)
         let header = RemoteProviderHeaderRow.canCreate(provider: cloudEntry(in: both), claudeCloudEnabled: false)
 
         #expect(!menu.contains { $0.config.name == ClaudeCloudProvider.name })
+        #expect(!rowMenu.contains { $0.config.name == ClaudeCloudProvider.name })
         #expect(!picker.contains { $0.config.name == ClaudeCloudProvider.name })
         #expect(!header)
     }
 
-    /// Flag on, healthy provider: all three surfaces must agree it is shown.
-    @Test func allThreeSurfacesAgreeTheCloudRowIsShownWhenTheFlagIsOnAndHealthy() {
+    /// Flag on, healthy provider: all four surfaces must agree it is shown.
+    @Test func allFourSurfacesAgreeTheCloudRowIsShownWhenTheFlagIsOnAndHealthy() {
         let menu = RepoSectionView.remoteSessionMenuProviders(providers: both, claudeCloudEnabled: true)
+        let rowMenu = WorktreeRowView.remoteSessionMenuProviders(
+            providers: both, claudeCloudEnabled: true, isMain: false)
         let picker = CloudCreateEntryPresentation.pickerProviders(both, claudeCloudEnabled: true)
         let header = RemoteProviderHeaderRow.canCreate(provider: cloudEntry(in: both), claudeCloudEnabled: true)
 
         #expect(menu.contains { $0.config.name == ClaudeCloudProvider.name })
+        #expect(rowMenu.contains { $0.config.name == ClaudeCloudProvider.name })
         #expect(picker.contains { $0.config.name == ClaudeCloudProvider.name })
         #expect(header)
     }
@@ -212,9 +225,12 @@ struct CloudCreateEntryPresentationParityTests {
     @Test func menuAndPickerShowNothingWhenTheProviderWasNeverRegistered() {
         let onlyAcme = [status("acme")]
         let menu = RepoSectionView.remoteSessionMenuProviders(providers: onlyAcme, claudeCloudEnabled: true)
+        let rowMenu = WorktreeRowView.remoteSessionMenuProviders(
+            providers: onlyAcme, claudeCloudEnabled: true, isMain: false)
         let picker = CloudCreateEntryPresentation.pickerProviders(onlyAcme, claudeCloudEnabled: true)
 
         #expect(!menu.contains { $0.config.name == ClaudeCloudProvider.name })
+        #expect(!rowMenu.contains { $0.config.name == ClaudeCloudProvider.name })
         #expect(!picker.contains { $0.config.name == ClaudeCloudProvider.name })
         // No header assertion here: `RemoteSectionView` only ever renders a
         // header for a provider present in `appState.remoteProviders`
@@ -223,20 +239,24 @@ struct CloudCreateEntryPresentationParityTests {
     }
 
     /// The one documented divergence: a STALE cloud provider is disabled
-    /// (not omitted) by the menu and the header's `+`, but OMITTED by the
-    /// picker. The picker's remote-lane row does render other stale providers
+    /// (not omitted) by the two context menus and the header's `+`, but
+    /// OMITTED by the picker. The picker's remote-lane row does render other stale providers
     /// disabled; the cloud entry keeps the narrower gate because a create it
     /// cannot serve is worth no row at all. Pinning this as a deliberate
     /// divergence — rather than asserting the three must always agree —
     /// catches a future change that makes them agree the wrong way.
-    @Test func staleInventoryDivergesByDesignBetweenThePickerAndTheOtherTwo() {
+    @Test func staleInventoryDivergesByDesignBetweenThePickerAndTheOthers() {
         let stale = [status("acme"), status(ClaudeCloudProvider.name, health: .stale, freshnessUnreadable: true)]
         let menu = RepoSectionView.remoteSessionMenuProviders(providers: stale, claudeCloudEnabled: true)
+        let rowMenu = WorktreeRowView.remoteSessionMenuProviders(
+            providers: stale, claudeCloudEnabled: true, isMain: false)
         let picker = CloudCreateEntryPresentation.pickerProviders(stale, claudeCloudEnabled: true)
         let header = RemoteProviderHeaderRow.canCreate(provider: cloudEntry(in: stale), claudeCloudEnabled: true)
 
         #expect(menu.contains { $0.config.name == ClaudeCloudProvider.name },
                 "the menu still lists a stale provider — it disables the row instead of omitting it")
+        #expect(rowMenu.contains { $0.config.name == ClaudeCloudProvider.name },
+                "the worktree row's menu disables a stale provider too, rather than omitting it")
         #expect(header, "the header's + still renders for a stale provider — it disables the button instead")
         #expect(!picker.contains { $0.config.name == ClaudeCloudProvider.name },
                 "a stale cloud provider is omitted from the picker, not offered and disabled")

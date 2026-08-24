@@ -223,6 +223,71 @@ struct WorktreeRowView: View {
         }
     }
 
+    // MARK: - Context menu: "New Remote Session…"
+
+    /// The providers this row's context-menu item lists — the pure, view-free
+    /// form of the decision `newRemoteSessionMenuItem` renders, so a test can
+    /// call it rather than re-deriving it. A thin, named forward to
+    /// `CloudCreateEntryPresentation.createProviders` (the same gate
+    /// `RepoSectionView.remoteSessionMenuProviders` forwards to, and the same
+    /// one `CloudCreateEntryPresentationTests`'s cross-surface parity suite
+    /// pins), plus this row's own `isMain` gate.
+    ///
+    /// `isMain` is a gate here and not on the repo header because the main
+    /// worktree is the repo's checkout, not a parent to nest under: the nested
+    /// `+` is withheld from that row for the same reason, and this item is that
+    /// button's always-opens-the-form twin. The two gates are independent —
+    /// the cloud filter answers "which providers", `isMain` answers "does this
+    /// row offer nesting at all".
+    nonisolated static func remoteSessionMenuProviders(
+        providers: [RemoteProviderStatus], claudeCloudEnabled: Bool, isMain: Bool
+    ) -> [RemoteProviderStatus] {
+        guard !isMain else { return [] }
+        return CloudCreateEntryPresentation.createProviders(providers, claudeCloudEnabled: claudeCloudEnabled)
+    }
+
+    /// A worktree-scoped entry point into the create sheet, nested under this
+    /// row — the always-opens-the-form twin of the nested `+`'s remote-lane
+    /// row, and the exact counterpart of
+    /// `RepoSectionView.newRemoteSessionMenuItem` on the repo header.
+    ///
+    /// It sets `remoteCreateSheetProvider` DIRECTLY rather than going through
+    /// `startRemoteSession(with:)`: opening the form unconditionally is the
+    /// whole point of this item. Routing it through the launch decision would
+    /// make it one-click-create exactly when every answer is already knowable,
+    /// which is precisely the case where there is no other way to type a
+    /// prompt or choose a branch for a NESTED lane.
+    ///
+    /// Same shape as the repo header's item: omitted (not disabled) when no
+    /// provider is offerable, a single provider skips the submenu, and the
+    /// fast-path count is decided AFTER the cloud filter so a hidden entry
+    /// cannot leave a two-entry submenu with a dead row in it.
+    @ViewBuilder
+    private var newRemoteSessionMenuItem: some View {
+        let providers = WorktreeRowView.remoteSessionMenuProviders(
+            providers: appState.remoteProviders,
+            claudeCloudEnabled: appState.daemonCapabilities?.claudeCloudEnabled ?? false,
+            isMain: isMain)
+        if !providers.isEmpty {
+            // Inside the conditional so an omitted item leaves no dangling
+            // trailing separator on the row's action list.
+            Divider()
+            if providers.count == 1, let only = providers.first {
+                Button("New Remote Session…") { remoteCreateSheetProvider = only }
+                    .disabled(only.hasStaleSnapshot)
+            } else {
+                Menu("New Remote Session…") {
+                    ForEach(providers, id: \.config.name) { provider in
+                        Button(provider.describe?.name ?? provider.config.name) {
+                            remoteCreateSheetProvider = provider
+                        }
+                        .disabled(provider.hasStaleSnapshot)
+                    }
+                }
+            }
+        }
+    }
+
     /// Hover-only pin toggle in the gutter left of the row's content — the fast
     /// path for pinning, mirroring the trailing nested-worktree `+`. Rendered as
     /// an overlay so it floats above the row and consumes no layout width: row
@@ -583,6 +648,11 @@ struct WorktreeRowView: View {
         }
         .contextMenu {
             SidebarContextMenu(worktree: worktree, onRename: startRename)
+            // Added here rather than inside `SidebarContextMenu` because the
+            // sheet it opens is this row's state (`remoteCreateSheetProvider`,
+            // `remoteCreateSheetContent(for:)`); pushing the item down would
+            // mean handing that state back up through a closure for no gain.
+            newRemoteSessionMenuItem
         }
         .onChange(of: appState.editingWorktreeID) { _, newID in
             if newID == worktree.id {
