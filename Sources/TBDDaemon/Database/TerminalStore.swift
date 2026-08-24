@@ -173,6 +173,11 @@ struct AppliedTerminalSessionStart: Sendable {
     let orderObservedAt: Date?
     let isInitialAttachment: Bool
     let activityObservation: AppliedTerminalActivityObservation?
+    /// True when applying this SessionStart retracted a standing awaiting-input
+    /// reason. Reported separately from `activityObservation` because the
+    /// Claude/shell branch retracts one while returning no activity observation
+    /// at all — a retraction read off that field alone would be missed there.
+    let clearedAwaitingInput: Bool
 }
 
 private func preservesStoredActivityAtEqualOrder(
@@ -470,6 +475,8 @@ public struct TerminalStore: Sendable {
                     record.transcriptPath = transcriptPath
                 }
                 record.sessionOrderObservedAt = nil
+                let hadReason = record.awaitingInputReason != nil
+                    || record.awaitingInputObservedAt != nil
                 record.awaitingInputReason = nil
                 record.awaitingInputObservedAt = nil
                 try record.update(db)
@@ -478,7 +485,8 @@ public struct TerminalStore: Sendable {
                     transcriptPath: record.transcriptPath,
                     orderObservedAt: nil,
                     isInitialAttachment: false,
-                    activityObservation: nil)
+                    activityObservation: nil,
+                    clearedAwaitingInput: hadReason)
             }
             let isInitialAttachment = record.claudeSessionID == nil
                 && record.transcriptPath == nil
@@ -504,7 +512,7 @@ public struct TerminalStore: Sendable {
             // The activity helper performs this when it accepts Codex's idle
             // fact. Keep the independent call so a rejected stale activity
             // transition still retracts only a prompt known to be older.
-            clearAwaitingInputIfNotNewer(record: &record, than: observedAt)
+            let clearedHere = clearAwaitingInputIfNotNewer(record: &record, than: observedAt)
             try record.update(db)
             guard let persistedRecord = try TerminalRecord.fetchOne(
                 db, key: id.uuidString
@@ -518,7 +526,9 @@ public struct TerminalStore: Sendable {
                 // terminal-list read will reload.
                 orderObservedAt: persistedRecord.sessionOrderObservedAt,
                 isInitialAttachment: isInitialAttachment,
-                activityObservation: activityObservation)
+                activityObservation: activityObservation,
+                clearedAwaitingInput: clearedHere
+                    || (activityObservation?.clearedAwaitingInput ?? false))
         }
     }
 
@@ -623,8 +633,11 @@ public struct TerminalStore: Sendable {
     /// reason, so the stored reason always describes the state stored beside
     /// it, never a wait that has since ended.
     ///
-    /// Returns whether the awaiting-input columns changed, so a caller can
-    /// broadcast the retraction (or the replacement) without re-reading the row.
+    /// Returns whether a standing wait reason was RETRACTED — a reason stood
+    /// before and none stands now — so a caller can announce the retraction
+    /// without re-reading the row. A call that installs a reason returns false:
+    /// there is nothing retracted to announce, and a caller that passes one is
+    /// responsible for broadcasting what it wrote.
     @discardableResult
     public func setActivityState(
         id: UUID,
@@ -652,7 +665,7 @@ public struct TerminalStore: Sendable {
             record.awaitingInputReason = FactColumnJSON.encode(awaitingInputReason)
             record.awaitingInputObservedAt = awaitingInputReason == nil ? nil : observedAt
             try record.update(db)
-            return hadReason || awaitingInputReason != nil
+            return hadReason && awaitingInputReason == nil
         }
     }
 
@@ -810,13 +823,18 @@ public struct TerminalStore: Sendable {
     /// `handleTerminalActivityEvent`'s unchanged-state guard drops. Without
     /// this entry point the reason would stay pinned to the row until the turn
     /// ended, long after the prompt it describes went away.
+    ///
+    /// A terminal that vanished between the caller's read and this write
+    /// reports `false` rather than throwing: the only callers are
+    /// fire-and-forget hooks, whose handlers soft-succeed on an unknown
+    /// terminal, and there is nothing to retract on a row that is gone.
     public func clearAwaitingInputReasonIfNotNewer(
         id: UUID,
         observedAt: Date
     ) async throws -> Bool {
         try await writer.write { db in
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
-                throw DatabaseError(message: "Terminal not found")
+                return false
             }
             guard clearAwaitingInputIfNotNewer(record: &record, than: observedAt) else {
                 return false
@@ -841,12 +859,13 @@ public struct TerminalStore: Sendable {
     /// no turn boundary.
     ///
     /// The activity rail is **not** a sufficient retraction on its own here,
-    /// which is why this writer is not just a `setActivityState` call.
-    /// `handleTerminalActivityEvent` returns early when the state is unchanged,
-    /// so the SessionStart overlay's own `tbd terminal-activity idle` clears
-    /// nothing when the row already reads idle — and it is a second, separate,
-    /// best-effort CLI invocation that a stale `tbd` on `PATH` can lose while
-    /// the first one lands.
+    /// which is why this writer is not just a `setActivityState` call. It is
+    /// unconditional where the rail is ordered: the rail retracts only a reason
+    /// not newer than the observation superseding it, and these two callers
+    /// know the process the prompt was raised on is gone regardless of when it
+    /// was recorded. The rail is also a second, separate, best-effort CLI
+    /// invocation that a stale `tbd` on `PATH` can lose while the first one
+    /// lands.
     ///
     /// Idempotent: clearing columns that are already nil is a no-op write.
     public func clearAwaitingInputReason(id: UUID) async throws {

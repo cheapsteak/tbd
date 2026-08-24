@@ -2332,11 +2332,15 @@ final class AppState: ObservableObject {
     private func applyTerminalAwaitingInputDelta(_ delta: TerminalAwaitingInputDelta) {
         guard let idx = terminals[delta.worktreeID]?.firstIndex(
             where: { $0.id == delta.terminalID }) else { return }
-        guard terminals[delta.worktreeID]![idx].awaitingInputReason != delta.reason
-            || terminals[delta.worktreeID]![idx].awaitingInputObservedAt != delta.observedAt
-        else { return }
-        terminals[delta.worktreeID]?[idx].awaitingInputReason = delta.reason
-        terminals[delta.worktreeID]?[idx].awaitingInputObservedAt = delta.observedAt
+        var terminal = terminals[delta.worktreeID]![idx]
+        guard terminal.awaitingInputReason != delta.reason
+            || terminal.awaitingInputObservedAt != delta.observedAt else { return }
+        terminal.awaitingInputReason = delta.reason
+        terminal.awaitingInputObservedAt = delta.observedAt
+        // One write-back through the `@Published` dictionary, not two: each
+        // assignment is a full copy-on-write plus an `objectWillChange`, and
+        // this delta arrives on every `Notification` hook of every class.
+        terminals[delta.worktreeID]?[idx] = terminal
     }
 
     /// Seamless in-place "Switch account": the terminal row is unchanged except

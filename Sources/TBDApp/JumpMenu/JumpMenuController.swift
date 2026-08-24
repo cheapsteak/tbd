@@ -34,6 +34,15 @@ final class JumpMenuController {
         }
     }
 
+    /// Worktrees holding at least one terminal with a prompt on screen, read
+    /// through the same predicate the sidebar row uses so the two surfaces
+    /// cannot disagree about which worktree is blocked.
+    static func promptOnScreenWorktreeIDs(appState: AppState) -> Set<UUID> {
+        Set(appState.terminals.compactMap { worktreeID, terminals in
+            WorktreeRowView.hasPromptOnScreen(in: terminals) ? worktreeID : nil
+        })
+    }
+
     private func open() {
         guard let appState else {
             logger.warning("toggle() called before configure(appState:)")
@@ -48,7 +57,8 @@ final class JumpMenuController {
         let vm = JumpMenuViewModel(
             worktrees: snapshots,
             unread: appState.unreadByWorktree,
-            recentIDs: appState.recentWorktreeIDs
+            recentIDs: appState.recentWorktreeIDs,
+            promptOnScreenIDs: Self.promptOnScreenWorktreeIDs(appState: appState)
         )
         self.viewModel = vm
 

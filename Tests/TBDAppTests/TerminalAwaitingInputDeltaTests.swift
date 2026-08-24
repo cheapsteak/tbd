@@ -11,8 +11,14 @@ import TBDShared
 @Suite("AppState — terminalAwaitingInputChanged")
 @MainActor
 struct TerminalAwaitingInputDeltaTests {
-    private func state() -> (AppState, worktreeID: UUID, terminalID: UUID) {
-        let state = AppState()
+    /// `UserDefaults.standard` on this unbundled executable is the developer's
+    /// real `TBDApp.plist`, so each `AppState` gets its own suite and the
+    /// caller tears it down.
+    private func state() -> (
+        state: AppState, worktreeID: UUID, terminalID: UUID, suiteName: String
+    ) {
+        let suiteName = "TerminalAwaitingInputDeltaTests-\(UUID().uuidString)"
+        let state = AppState(userDefaults: UserDefaults(suiteName: suiteName)!)
         let worktreeID = UUID()
         let terminalID = UUID()
         state.terminals = [
@@ -30,7 +36,7 @@ struct TerminalAwaitingInputDeltaTests {
                 )
             ]
         ]
-        return (state, worktreeID, terminalID)
+        return (state, worktreeID, terminalID, suiteName)
     }
 
     private static let prompt = AwaitingInputReason(
@@ -39,7 +45,8 @@ struct TerminalAwaitingInputDeltaTests {
         notificationType: "permission_prompt")
 
     @Test func recordsTheReasonOnTheCachedTerminal() throws {
-        let (app, worktreeID, terminalID) = state()
+        let (app, worktreeID, terminalID, suiteName) = state()
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
         let observedAt = Date(timeIntervalSince1970: 20)
 
         app.handleDelta(.terminalAwaitingInputChanged(TerminalAwaitingInputDelta(
@@ -58,7 +65,8 @@ struct TerminalAwaitingInputDeltaTests {
     /// deliberately does not move `activityState` from the `Notification` hook
     /// either — it gates hibernation.
     @Test func leavesTheActivityFactAlone() throws {
-        let (app, worktreeID, terminalID) = state()
+        let (app, worktreeID, terminalID, suiteName) = state()
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
         let before = app.terminals[worktreeID]!.first!
 
         app.handleDelta(.terminalAwaitingInputChanged(TerminalAwaitingInputDelta(
@@ -74,7 +82,8 @@ struct TerminalAwaitingInputDeltaTests {
     }
 
     @Test func retractionClearsBothColumns() throws {
-        let (app, worktreeID, terminalID) = state()
+        let (app, worktreeID, terminalID, suiteName) = state()
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
         app.handleDelta(.terminalAwaitingInputChanged(TerminalAwaitingInputDelta(
             terminalID: terminalID,
             worktreeID: worktreeID,
@@ -94,7 +103,8 @@ struct TerminalAwaitingInputDeltaTests {
     }
 
     @Test func aDeltaForAnUnknownTerminalIsANoOp() {
-        let (app, worktreeID, _) = state()
+        let (app, worktreeID, _, suiteName) = state()
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
 
         app.handleDelta(.terminalAwaitingInputChanged(TerminalAwaitingInputDelta(
             terminalID: UUID(),

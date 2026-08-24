@@ -52,7 +52,7 @@ struct WorktreeRowView: View {
     }
 
     private var hasBoldNotification: Bool {
-        RowStatusIndicator.shouldBoldName(notification)
+        RowStatusIndicator.shouldBoldName(notification, hasPromptOnScreen: hasPromptOnScreenTerminal)
     }
 
     private var prObservation: PRObservation? {
@@ -110,8 +110,14 @@ struct WorktreeRowView: View {
     /// Whether a terminal's recorded wait reason says a prompt is on screen.
     /// Only `.promptOnScreen` counts — every other class, `.unrecognized`
     /// included, is no signal here.
+    ///
+    /// A parked terminal never counts, whatever its columns say. Parking kills
+    /// the agent process, so whatever prompt was on screen went with it; the
+    /// daemon clears the columns at the same moment, and this guard keeps the
+    /// row calm through the window before that retraction lands rather than
+    /// advertising "needs your attention" on a session that no longer exists.
     nonisolated static func isPromptOnScreen(_ terminal: Terminal) -> Bool {
-        terminal.awaitingInputReason?.classification == .promptOnScreen
+        !terminal.isParked && terminal.awaitingInputReason?.classification == .promptOnScreen
     }
 
     /// The collection form used by the row and by pure presentation tests.

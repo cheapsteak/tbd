@@ -280,6 +280,62 @@ struct DeltaIngestionTests {
         }
     }
 
+    /// Broadcast on every `Notification` hook of every class, plus every
+    /// activity-rail retraction, so its publish cost is worth a ratchet.
+    @Test("terminalAwaitingInputChanged: the same reason")
+    func identicalAwaitingInputDelta() {
+        withEmissionState { state in
+            let worktreeID = UUID()
+            let terminalID = UUID()
+            let reason = AwaitingInputReason(
+                message: "needs your permission",
+                hookEventName: "Notification",
+                notificationType: "permission_prompt")
+            let observedAt = Date(timeIntervalSince1970: 20)
+            var terminal = makeTerminal(
+                id: terminalID, worktreeID: worktreeID, activityState: .working)
+            terminal.awaitingInputReason = reason
+            terminal.awaitingInputObservedAt = observedAt
+            seatOneTerminal(state, worktreeID: worktreeID, terminal: terminal)
+
+            let count = countEmissions(of: state) {
+                state.handleDelta(.terminalAwaitingInputChanged(TerminalAwaitingInputDelta(
+                    terminalID: terminalID, worktreeID: worktreeID,
+                    reason: reason, observedAt: observedAt
+                )))
+            }
+
+            #expect(count == 0)
+        }
+    }
+
+    @Test("terminalAwaitingInputChanged: a retraction")
+    func retractingAwaitingInputDelta() {
+        withEmissionState { state in
+            let worktreeID = UUID()
+            let terminalID = UUID()
+            var terminal = makeTerminal(
+                id: terminalID, worktreeID: worktreeID, activityState: .working)
+            terminal.awaitingInputReason = AwaitingInputReason(
+                message: "needs your permission",
+                hookEventName: "Notification",
+                notificationType: "permission_prompt")
+            terminal.awaitingInputObservedAt = Date(timeIntervalSince1970: 20)
+            seatOneTerminal(state, worktreeID: worktreeID, terminal: terminal)
+
+            let count = countEmissions(of: state) {
+                state.handleDelta(.terminalAwaitingInputChanged(TerminalAwaitingInputDelta(
+                    terminalID: terminalID, worktreeID: worktreeID,
+                    reason: nil, observedAt: nil
+                )))
+            }
+
+            // One write-back, not one per column.
+            #expect(count == 1)
+            #expect(state.terminals[worktreeID]?.first?.awaitingInputReason == nil)
+        }
+    }
+
     /// A session rollover delta re-sent with the same session identity is a
     /// semantic no-op and must not republish the terminal collection.
     @Test("terminalSessionUpdated: the same session and transcript path")

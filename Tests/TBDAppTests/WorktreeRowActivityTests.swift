@@ -150,6 +150,21 @@ struct WorktreeRowPromptOnScreenTests {
         #expect(!WorktreeRowView.isPromptOnScreen(terminal(notificationType: nil)))
     }
 
+    /// Parking kills the agent process, so whatever prompt was on screen went
+    /// with it. `.attention` outranks `.hibernated`, so without this the calm
+    /// moon would be replaced by "needs your attention" on a dead session for
+    /// as long as the stale columns survived.
+    @Test func aParkedTerminalIsNeverPrompting() {
+        var parked = terminal(notificationType: "permission_prompt")
+        #expect(WorktreeRowView.isPromptOnScreen(parked))
+
+        parked.hibernatedAt = Date(timeIntervalSince1970: 100)
+
+        #expect(parked.isParked)
+        #expect(!WorktreeRowView.isPromptOnScreen(parked))
+        #expect(!WorktreeRowView.hasPromptOnScreen(in: [parked]))
+    }
+
     @Test func collectionReportsAnyPromptOnScreen() {
         let prompt = terminal(notificationType: "permission_prompt")
         let idlePrompt = terminal(notificationType: "idle_prompt")

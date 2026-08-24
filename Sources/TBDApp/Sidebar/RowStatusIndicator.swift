@@ -108,7 +108,18 @@ enum RowStatusIndicator {
     /// notification. Bold tracks "you should look here" — a completed response
     /// or an attention request. Shared by the sidebar row and the jump menu so
     /// they stay consistent.
-    static func shouldBoldName(_ notification: NotificationType?) -> Bool {
+    ///
+    /// `hasPromptOnScreen` bolds on the same input that gives the suffix slot
+    /// its attention glyph, and for the same reason: the notification saying
+    /// the same thing is marked read the moment its worktree is selected, so
+    /// without it the row this fix targets would show the raised hand beside a
+    /// regular-weight name — half-escalated, a state the notification-only
+    /// design could never produce.
+    static func shouldBoldName(
+        _ notification: NotificationType?,
+        hasPromptOnScreen: Bool = false
+    ) -> Bool {
+        if hasPromptOnScreen { return true }
         switch notification {
         case .responseComplete, .attentionNeeded, .focusRequest, .limitReached:
             return true

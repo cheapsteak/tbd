@@ -13,6 +13,44 @@ struct JumpMenuViewModelTests {
         JumpMenuWorktreeSnapshot(id: id, displayName: name, repoName: repo)
     }
 
+    // MARK: - Prompt on screen
+
+    /// The switcher's job is finding the worktree that needs you, and the
+    /// `.attentionNeeded` notification that would have said so is marked read
+    /// the moment its worktree is selected. Every section carries the flag.
+    @Test func promptOnScreenReachesEverySection() {
+        let unreadID = UUID(); let recentID = UUID(); let matchID = UUID()
+        let vm = JumpMenuViewModel(
+            worktrees: [
+                snap(unreadID, name: "alpha"),
+                snap(recentID, name: "alpha-two"),
+                snap(matchID, name: "alpha-three"),
+            ],
+            unread: [unreadID: UnreadSummary(type: .responseComplete, mostRecentAt: Date())],
+            recentIDs: [recentID],
+            promptOnScreenIDs: [unreadID, recentID, matchID]
+        )
+
+        let defaults = vm.rows
+        #expect(defaults.first { $0.id == unreadID }?.hasPromptOnScreen == true)
+        #expect(defaults.first { $0.id == recentID }?.hasPromptOnScreen == true)
+
+        vm.query = "alpha-three"
+        let match = try! #require(vm.rows.first { $0.id == matchID })
+        #expect(match.section == .match)
+        #expect(match.hasPromptOnScreen)
+    }
+
+    @Test func noPromptOnScreenByDefault() {
+        let id = UUID()
+        let vm = JumpMenuViewModel(
+            worktrees: [snap(id)],
+            unread: [:],
+            recentIDs: [id]
+        )
+        #expect(vm.rows.first?.hasPromptOnScreen == false)
+    }
+
     // MARK: - Tests
 
     @Test func emptyState() {

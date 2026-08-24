@@ -160,4 +160,19 @@ struct ShouldBoldNameTests {
     @Test func doesNotBoldForNoNotification() {
         #expect(RowStatusIndicator.shouldBoldName(nil) == false)
     }
+
+    /// The row this fix targets has no unread notification left — it was
+    /// auto-marked-read on selection — so without this the raised hand would
+    /// sit beside a regular-weight name.
+    @Test func boldsForAPromptOnScreenWithNoNotification() {
+        #expect(RowStatusIndicator.shouldBoldName(nil, hasPromptOnScreen: true) == true)
+    }
+
+    @Test func aPromptOnScreenBoldsEvenOverANonBoldingNotification() {
+        #expect(RowStatusIndicator.shouldBoldName(.taskComplete, hasPromptOnScreen: true) == true)
+    }
+
+    @Test func doesNotBoldWhenThereIsNoPromptAndNoNotification() {
+        #expect(RowStatusIndicator.shouldBoldName(nil, hasPromptOnScreen: false) == false)
+    }
 }

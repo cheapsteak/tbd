@@ -206,9 +206,10 @@ import TestSupport
         #expect(HibernationGate.blockingRail(terminal: after) == nil)
 
         // A prompt on screen is the one class a human has to act on now, so
-        // it, and only it, raises the attention notification the sidebar
-        // renders in place of the thinking dots. Every other class leaves the
-        // notification ledger and the delta stream untouched.
+        // it, and only it, raises the attention notification behind the macOS
+        // banner. Every other class leaves the notification ledger untouched.
+        // (The awaiting-input delta is broadcast for every class that is
+        // written — the app mirrors the columns — and is asserted separately.)
         let unread = try await db.notifications.unread(worktreeID: worktreeID)
         let received = broadcasts.snapshot().filter {
             if case .notificationReceived = $0 { return true }
@@ -518,18 +519,74 @@ import TestSupport
         #expect(awaitingInputDeltas().isEmpty)
     }
 
-    /// A reason recorded AFTER the activity event was stamped is newer than the
-    /// observation superseding it, so it survives — the ordering rule
-    /// `clearAwaitingInputIfNotNewer` has always applied, now reachable on a
-    /// same-state event too.
-    @Test func aNewerReasonSurvivesAnOlderSameStateObservation() async throws {
+    /// The ordering rule survives the move onto the same-state path: a reason
+    /// recorded AFTER the activity event was stamped is newer than the
+    /// observation superseding it, so it stands.
+    ///
+    /// Paired with its control, because the refusal on its own is satisfied by
+    /// simply never running the retraction at all — the shape this test had
+    /// before the control was added, which passed against a tree with no
+    /// same-state retraction in it.
+    @Test(arguments: [(-1.0, true), (1.0, false)])
+    func aSameStateObservationRetractsOnlyANotNewerReason(
+        offset: Double, survives: Bool
+    ) async throws {
         try await sendActivity(.working, at: Self.observedAt.addingTimeInterval(-2))
         #expect(await notify(type: "permission_prompt").success)
+        #expect(awaitingInputDeltas().count == 1)
 
-        try await sendActivity(.working, at: Self.observedAt.addingTimeInterval(-1))
+        try await sendActivity(.working, at: Self.observedAt.addingTimeInterval(offset))
 
-        #expect(try await terminal().awaitingInputReason?.classification == .promptOnScreen)
-        #expect(awaitingInputDeltas().allSatisfy { $0.reason != nil })
+        let reason = try await terminal().awaitingInputReason
+        #expect((reason?.classification == .promptOnScreen) == survives)
+        // The retraction is announced exactly when it happened, so a tree that
+        // stopped retracting on the same-state path fails the control half
+        // rather than passing both.
+        let retractions = awaitingInputDeltas().filter { $0.reason == nil }
+        #expect(retractions.count == (survives ? 0 : 1))
+    }
+
+    /// The Codex rail retracts through `applyActivityObservation` rather than
+    /// the same-state branch, and owes the app the same announcement.
+    @Test func theCodexRailAlsoAnnouncesItsRetraction() async throws {
+        let codex = try await db.terminals.create(
+            worktreeID: worktreeID, tmuxWindowID: "@2", tmuxPaneID: "%2",
+            label: "codex", claudeSessionID: "s-2", kind: .codex)
+        #expect(await notify(type: "permission_prompt", terminalID: codex.id).success)
+        #expect(try await db.terminals.get(id: codex.id)?.awaitingInputReason != nil)
+
+        let request = try RPCRequest(
+            method: RPCMethod.terminalActivityEvent,
+            params: TerminalActivityEventParams(
+                terminalID: codex.id, activityState: .working, sessionID: "s-2"))
+        #expect(await activityRouter(
+            observedAt: Self.observedAt.addingTimeInterval(1)).handle(request).success)
+
+        #expect(try await db.terminals.get(id: codex.id)?.awaitingInputReason == nil)
+        let retraction = try #require(awaitingInputDeltas().last)
+        #expect(retraction.reason == nil)
+        #expect(retraction.terminalID == codex.id)
+    }
+
+    /// A `/clear`, a resume, or a hand relaunch replaces the process the prompt
+    /// was raised on. The store retracts the reason; the app has to be told, or
+    /// its cached row keeps the indicator up on a session that no longer holds
+    /// the prompt.
+    @Test func aSessionStartAnnouncesItsRetraction() async throws {
+        #expect(await notify(type: "permission_prompt").success)
+        #expect(try await terminal().awaitingInputReason != nil)
+
+        let request = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminalID, sessionID: "s-2",
+                transcriptPath: nil, source: "clear"))
+        #expect(await router.handle(request).success)
+
+        #expect(try await terminal().awaitingInputReason == nil)
+        let retraction = try #require(awaitingInputDeltas().last)
+        #expect(retraction.reason == nil)
+        #expect(retraction.terminalID == terminalID)
     }
 
     /// The router's date seam reaches BOTH stamps the resolver's rung-4 decision
