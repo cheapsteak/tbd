@@ -63,4 +63,13 @@ struct AutoCreateNotesSettingTests {
         #expect(state.alertIsError)
         #expect(state.alertMessage != nil)
     }
+
+    @Test("help text names only fresh-branch conversation revival")
+    func helpTextNamesPreciseException() {
+        #expect(
+            GeneralSettingsTab.autoCreateNotesHelp ==
+                "Turn this off to skip empty Notes tabs in ordinary new worktrees. " +
+                "Conversations revived on a fresh branch still receive their populated provenance note."
+        )
+    }
 }

@@ -31,6 +31,10 @@ struct SettingsView: View {
 // MARK: - General Tab
 
 struct GeneralSettingsTab: View {
+    static let autoCreateNotesHelp =
+        "Turn this off to skip empty Notes tabs in ordinary new worktrees. " +
+        "Conversations revived on a fresh branch still receive their populated provenance note."
+
     @EnvironmentObject var appState: AppState
     @AppStorage("enableNotifications") private var enableNotifications: Bool = true
     @AppStorage("skipPermissions") private var skipPermissions: Bool = true
@@ -167,7 +171,7 @@ struct GeneralSettingsTab: View {
                     get: { appState.autoCreateNotesEnabled },
                     set: { newValue in Task { await appState.setAutoCreateNotesEnabled(newValue) } }
                 ))
-                .help("Turn this off to skip empty Notes tabs in ordinary new worktrees. Restored or revived conversations still receive their populated note.")
+                .help(Self.autoCreateNotesHelp)
 
                 Toggle("Automatically clean up orphaned agent worktrees", isOn: Binding(
                     get: { appState.gcEnabled },
