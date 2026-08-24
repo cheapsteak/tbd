@@ -249,6 +249,8 @@ extension WorktreeLifecycle {
             let clock = ContinuousClock()
             let phaseStart = clock.now
             let creationConfig = try await db.config.get()
+            let shouldCreateInitialNote = carryover != nil
+                || creationConfig.autoCreateNotesEnabled
             let creationPrimaryKind: TerminalKind = carryover == nil
                 ? resolvePrimaryTerminalKind(
                     skipClaude: skipClaude,
@@ -525,10 +527,10 @@ extension WorktreeLifecycle {
                         carryover: carryover,
                         preparedCodexLaunch: preparedCodexLaunch
                     )
-                    if let carryover {
-                        await createCarryoverNoteTab(
+                    if shouldCreateInitialNote {
+                        await createInitialNoteTab(
                             worktreeID: worktree.id,
-                            seed: carryover.notesSeed
+                            seed: carryover?.notesSeed
                         )
                     }
                 }
@@ -555,12 +557,13 @@ extension WorktreeLifecycle {
             let terminalSpawnElapsedMs = terminalSpawnStart.duration(to: clock.now) / .milliseconds(1)
             timingLogger.debug("terminal-spawn \(worktreeID.uuidString, privacy: .public) \(Int(terminalSpawnElapsedMs))ms")
 
-            // 3c. A conversation carryover gets a seeded provenance note,
-            // appended last while the primary terminal keeps focus.
-            if let carryover {
-                await createCarryoverNoteTab(
+            // 3c. Conversation carryover always gets a seeded provenance note;
+            // ordinary creates get an empty note only when configured. Either
+            // is appended last while the primary terminal keeps focus.
+            if shouldCreateInitialNote {
+                await createInitialNoteTab(
                     worktreeID: worktreeID,
-                    seed: carryover.notesSeed
+                    seed: carryover?.notesSeed
                 )
             }
 
@@ -581,26 +584,29 @@ extension WorktreeLifecycle {
         }
     }
 
-    /// Creates the seeded provenance note for a conversation carryover and
-    /// appends it to the tab order (last; the primary terminal keeps focus).
-    /// The app materializes the tab from the note row via its
+    /// Creates an initial Notes tab and appends it to the tab order (last; the
+    /// primary terminal keeps focus). Ordinary creates leave it empty; a
+    /// conversation carryover supplies the populated provenance seed. The app
+    /// materializes the tab from the note row via its
     /// `reconcileNoteTabs` poll — note tabs use the note row's UUID as the tab
     /// ID. Best-effort: a failure (e.g. the worktree row vanished mid-create,
     /// FK-failing the insert) must never fail the create, whose checkout and
     /// terminals are already valid.
-    func createCarryoverNoteTab(worktreeID: UUID, seed: String) async {
+    func createInitialNoteTab(worktreeID: UUID, seed: String? = nil) async {
         do {
             let note = try await db.notes.create(worktreeID: worktreeID, title: "Notes")
-            _ = try await db.notes.update(
-                id: note.id,
-                title: note.title,
-                content: seed
-            )
+            if let seed {
+                _ = try await db.notes.update(
+                    id: note.id,
+                    title: note.title,
+                    content: seed
+                )
+            }
             var order = try await db.worktrees.getTabOrder(worktreeID: worktreeID)
             order.append(note.id)
             try await db.worktrees.setTabOrder(worktreeID: worktreeID, tabIDs: order)
         } catch {
-            logger.warning("failed to create carryover note tab for \(worktreeID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            logger.warning("failed to create initial note tab for \(worktreeID, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
     }
 
