@@ -9,6 +9,7 @@ struct ScratchReconcileCallPathTests {
     private final class CommandRecorder: @unchecked Sendable {
         private let lock = NSLock()
         private var commands: [[String]] = []
+        private var ownershipProbes = 0
 
         func append(_ command: [String]) {
             lock.lock()
@@ -26,6 +27,18 @@ struct ScratchReconcileCallPathTests {
             lock.lock()
             defer { lock.unlock() }
             return commands.contains { $0.contains(command) && $0.contains(target) }
+        }
+
+        func recordOwnershipProbe() {
+            lock.lock()
+            ownershipProbes += 1
+            lock.unlock()
+        }
+
+        func ownershipProbeCount() -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return ownershipProbes
         }
     }
 
@@ -59,7 +72,8 @@ struct ScratchReconcileCallPathTests {
                 return additionalWindows(probed)
             },
             dryRunPaneSendTarget: { _, _ in
-                .live(terminalID: currentTerminalID.uuidString.lowercased())
+                recorder.recordOwnershipProbe()
+                return .live(terminalID: currentTerminalID.uuidString.lowercased())
             })
         let lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
@@ -97,6 +111,7 @@ struct ScratchReconcileCallPathTests {
     @Test("cleanup reconciles scratch aliases with zero registered repos")
     func cleanupReconcilesScratchAliasesWithoutRepos() async throws {
         let fixture = try await makeAliasFixture()
+        try await fixture.db.config.setGCEnabled(false)
         let router = RPCRouter(
             db: fixture.db,
             lifecycle: fixture.lifecycle,
@@ -115,6 +130,25 @@ struct ScratchReconcileCallPathTests {
         #expect(!fixture.recorder.contains("kill-window"))
         try await insertPlannedCurrentTerminal(fixture)
         #expect(try await fixture.db.terminals.get(id: fixture.currentTerminalID) != nil)
+    }
+
+    @Test("startup reconciliation repairs scratch aliases even when periodic GC is disabled")
+    func startupReconcilesScratchAliasesWhenGCDisabled() async throws {
+        let fixture = try await makeAliasFixture()
+        try await fixture.db.config.setGCEnabled(false)
+        try await insertPlannedCurrentTerminal(fixture)
+
+        await Daemon().performStartupReconciliation(
+            mockMode: nil,
+            database: fixture.db,
+            git: GitManager(),
+            lifecycle: fixture.lifecycle,
+            actuationLog: makeTestActuationLog())
+
+        #expect(try await fixture.db.terminals.get(id: fixture.staleTerminalID) == nil)
+        #expect(try await fixture.db.terminals.get(id: fixture.currentTerminalID) != nil)
+        #expect(fixture.recorder.ownershipProbeCount() == 2)
+        #expect(!fixture.recorder.contains("kill-window"))
     }
 
     @Test("cleanup reconciles repo resources without sweeping a shared live scratch creation")
@@ -260,8 +294,8 @@ struct ScratchReconcileCallPathTests {
         #expect(try await db.terminals.get(id: plannedTerminalID) != nil)
     }
 
-    @Test("hourly orphan maintenance reconciles scratch aliases safely")
-    func orphanMaintenanceReconcilesScratchAliases() async throws {
+    @Test("hourly orphan maintenance leaves scratch ownership untouched when GC is disabled")
+    func orphanMaintenanceSkipsScratchAliasesWhenGCDisabled() async throws {
         let fixture = try await makeAliasFixture()
         try await fixture.db.config.setGCEnabled(false)
         let gc = OrphanGC(
@@ -273,9 +307,32 @@ struct ScratchReconcileCallPathTests {
         await Daemon.performOrphanMaintenance(
             orphanGC: gc,
             lifecycle: fixture.lifecycle,
+            configStore: fixture.db.config,
+            actuationLog: makeTestActuationLog())
+
+        #expect(try await fixture.db.terminals.get(id: fixture.staleTerminalID) != nil)
+        #expect(fixture.recorder.ownershipProbeCount() == 0)
+        #expect(!fixture.recorder.contains("kill-window"))
+    }
+
+    @Test("hourly orphan maintenance reconciles scratch aliases when GC is enabled")
+    func orphanMaintenanceReconcilesScratchAliasesWhenGCEnabled() async throws {
+        let fixture = try await makeAliasFixture()
+        try await fixture.db.config.setGCEnabled(true)
+        let gc = OrphanGC(
+            db: fixture.db,
+            git: GitManager(),
+            broadcast: { _ in },
+            lsofProvider: { [] })
+
+        await Daemon.performOrphanMaintenance(
+            orphanGC: gc,
+            lifecycle: fixture.lifecycle,
+            configStore: fixture.db.config,
             actuationLog: makeTestActuationLog())
 
         #expect(try await fixture.db.terminals.get(id: fixture.staleTerminalID) == nil)
+        #expect(fixture.recorder.ownershipProbeCount() == 1)
         #expect(!fixture.recorder.contains("kill-window"))
         try await insertPlannedCurrentTerminal(fixture)
         #expect(try await fixture.db.terminals.get(id: fixture.currentTerminalID) != nil)

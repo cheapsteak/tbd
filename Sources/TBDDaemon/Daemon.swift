@@ -265,8 +265,14 @@ public final class Daemon: Sendable {
     static func performOrphanMaintenance(
         orphanGC: OrphanGC,
         lifecycle: WorktreeLifecycle,
+        configStore: ConfigStore,
         actuationLog: ActuationLog
     ) async {
+        // This entire hourly cadence answers to the GC master switch. Read it
+        // before either action so disabling GC also disables the scratch
+        // ownership mutation that shares its timer. OrphanGC keeps its own
+        // gate as defense in depth for direct/manual callers.
+        guard (try? await configStore.get())?.gcEnabled == true else { return }
         _ = await orphanGC.sweep()
         do {
             try await lifecycle.reconcileScratchTerminals(
@@ -875,6 +881,7 @@ public final class Daemon: Sendable {
                     await Self.performOrphanMaintenance(
                         orphanGC: orphanGC,
                         lifecycle: maintenanceLifecycle,
+                        configStore: database.config,
                         actuationLog: actuationLog)
                     while !Task.isCancelled {
                         // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
@@ -883,6 +890,7 @@ public final class Daemon: Sendable {
                         await Self.performOrphanMaintenance(
                             orphanGC: orphanGC,
                             lifecycle: maintenanceLifecycle,
+                            configStore: database.config,
                             actuationLog: actuationLog)
                     }
                 }
