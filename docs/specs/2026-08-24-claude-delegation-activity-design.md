@@ -250,12 +250,21 @@ than a theory:
   The row's `.terminalInterrupt` precedence defeats the rail in the same
   direction, matching the Codex presentation path, but that fact is persisted
   only on the Codex path, so the origin is what carries the Claude case.
+  The app clears its own cached presentation value in the same gesture, for
+  every agent kind. Dropping the daemon's claim alone is not enough: the
+  real-time delta the daemon pushes carries no presentation field, so a clear
+  made only there would reach the sidebar on the next unscoped poll and leave
+  the indicator lit for as long as that interval — the false-thinking direction
+  this rail must never fail toward. Clearing it for Codex too is safe, because
+  Codex's foreground-working test requires a working presentation value and can
+  therefore only reach idle sooner.
 - **Session end.** A session that exits while agents remain live leaves a final
   record reporting them, and no later turn corrects it. A `SessionEnd` entry in
   the Claude hook overlay clears the claim. It follows the file's established
   discipline — silent failure, never wedging the agent — and carries an explicit
-  short timeout, because Claude Code runs `SessionEnd` callbacks inside a
-  1.5-second shutdown budget.
+  short timeout in place of Claude Code's 60-second default, so a wedged socket
+  cannot hold a quitting session open for a minute. Claude Code's own
+  ~1.5-second `SessionEnd` shutdown budget is the tighter bound in practice.
 
 A crash that delivers no `SessionEnd` leaves a claim standing. The residual is
 bounded by the reconcilers and by hibernation, and it is cosmetic by
