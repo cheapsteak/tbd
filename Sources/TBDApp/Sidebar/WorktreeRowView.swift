@@ -118,15 +118,24 @@ struct WorktreeRowView: View {
     /// transcript-derived presentation state is authoritative here unless the
     /// hook reports that Codex is waiting for the user. Missing transcript
     /// evidence deliberately renders idle instead of preserving a false
-    /// thinking indicator. Other terminal kinds retain their existing
-    /// hook-backed behavior.
+    /// thinking indicator. Claude instead composes both rails, as described
+    /// below.
     nonisolated static func isForegroundWorking(_ terminal: Terminal) -> Bool {
         if terminal.isCodexTerminal {
             return terminal.activityStateSource != .terminalInterrupt
                 && terminal.activityState != .waitingForUser
                 && terminal.presentationActivityState == .working
         }
-        return terminal.activityState == .working
+        // Claude composes its two rails by DISJUNCTION, unlike Codex above,
+        // which lets its transcript REPLACE the hook rail. Each Claude rail
+        // speaks about a different interval: the hook rail is authoritative
+        // during a turn, and the delegation rail only after one ends. An
+        // interrupt or a raised prompt defeats the delegation claim, because
+        // neither writes a `turn_duration` that could retract it.
+        if terminal.activityState == .working { return true }
+        return terminal.activityStateSource != .terminalInterrupt
+            && terminal.activityState != .waitingForUser
+            && terminal.presentationActivityState == .working
     }
 
     /// The collection form used by the row and by pure presentation tests.

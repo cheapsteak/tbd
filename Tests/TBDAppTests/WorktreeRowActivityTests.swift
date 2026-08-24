@@ -88,6 +88,78 @@ struct WorktreeRowActivityTests {
         #expect(!WorktreeRowView.isForegroundWorking(codex))
     }
 
+    // MARK: - Claude delegation rail
+    //
+    // Claude ORs the delegation claim with the hook rail; Codex REPLACES its
+    // hook rail with the transcript. Inverting the two is the likely bug.
+
+    @Test func aDelegationClaimLightsTheIndicatorWhileTheHookRailSaysIdle() {
+        let claude = terminal(
+            kind: .claude,
+            activityState: .idle,
+            presentationActivityState: .working
+        )
+
+        #expect(WorktreeRowView.isForegroundWorking(claude))
+    }
+
+    /// The OR direction: the hook rail alone still suffices mid-turn, when no
+    /// delegation claim exists. Inverting to Codex's REPLACE semantics breaks
+    /// this and would darken the indicator for every ordinary working session.
+    @Test func theHookRailAloneStillLightsTheIndicator() {
+        let claude = terminal(
+            kind: .claude,
+            activityState: .working,
+            presentationActivityState: nil
+        )
+
+        #expect(WorktreeRowView.isForegroundWorking(claude))
+    }
+
+    @Test func noClaimAndAnIdleHookRailStaysDark() {
+        let claude = terminal(
+            kind: .claude,
+            activityState: .idle,
+            presentationActivityState: nil
+        )
+
+        #expect(!WorktreeRowView.isForegroundWorking(claude))
+    }
+
+    @Test func anInterruptDefeatsADelegationClaim() {
+        var claude = terminal(
+            kind: .claude,
+            activityState: .idle,
+            presentationActivityState: .working
+        )
+        claude.activityStateSource = .terminalInterrupt
+
+        #expect(!WorktreeRowView.isForegroundWorking(claude))
+    }
+
+    @Test func waitingForUserDefeatsADelegationClaim() {
+        let claude = terminal(
+            kind: .claude,
+            activityState: .waitingForUser,
+            presentationActivityState: .working
+        )
+
+        #expect(!WorktreeRowView.isForegroundWorking(claude))
+    }
+
+    /// Regression guard: Codex ships unflagged today and must keep REPLACE
+    /// semantics — a Codex terminal whose transcript is silent stays dark even
+    /// when its hook rail is latched at working.
+    @Test func codexStillRequiresTranscriptAgreement() {
+        let codex = terminal(
+            kind: .codex,
+            activityState: .working,
+            presentationActivityState: nil
+        )
+
+        #expect(!WorktreeRowView.isForegroundWorking(codex))
+    }
+
     @Test func terminalCollectionReportsAnyTruthfulForegroundWork() {
         let staleCodex = terminal(
             kind: .codex,
