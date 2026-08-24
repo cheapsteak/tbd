@@ -22,17 +22,21 @@ enum RemoteLaneOffer {
 ///  - `.profiles` (default): a fixed "Choose a branch…" drill-in row at the
 ///    top, an optional "New remote session" row beneath it (see
 ///    `remoteLaneOffer`; it carries a trailing ellipsis only when selecting it
-///    will open the create form), then one row per configured model profile. Selecting
-///    a profile row one-click-creates a worktree pinned to that profile. (A
-///    plain click on the `+` — without opening this menu — already creates a
-///    default worktree via repo → scratch → global default precedence, so
-///    there is no separate "resolve automatically" row here.)
+///    will itself open the create form — never when it drills into the
+///    provider list, where the chevron says so), then one row per configured
+///    model profile. Selecting a profile row one-click-creates a worktree
+///    pinned to that profile. (A plain click on the `+` — without opening this
+///    menu — already creates a default worktree via repo → scratch → global
+///    default precedence, so there is no separate "resolve automatically" row
+///    here.)
 ///  - `.branches`: the reused searchable branch list (`BranchListView`) behind
 ///    a back affordance. Selecting a branch creates a worktree on that existing
 ///    branch using the DEFAULT model (accepted tradeoff).
 ///  - `.remoteProviders`: one row per registered remote provider, reached only
 ///    when more than one is registered. A third page rather than a nested
-///    `Menu`/popover for the same reason `.branches` is one.
+///    `Menu`/popover for the same reason `.branches` is one. Each row carries
+///    its own trailing ellipsis when selecting that provider will open the
+///    create form, since these are the rows that act.
 ///
 /// Width matches `BranchPickerView` for consistent popover styling; height is
 /// per-page (see `body`) so the short profiles list isn't padded out to the
@@ -230,20 +234,23 @@ struct WorktreeProfilePickerView: View {
     /// cannot be selected, matching `RepoSectionView.newRemoteSessionMenuItem`.
     @ViewBuilder
     private var remoteLaneRow: some View {
-        switch remoteLaneOffer {
+        let offer = remoteLaneOffer
+        switch offer {
         case .hidden:
             EmptyView()
         case .single(let provider):
             remoteProviderRow(
                 provider,
-                title: Self.remoteLaneRowTitle(opensForm: !willCreateImmediately(provider)),
+                title: Self.remoteLaneRowTitle(offer: offer, opensForm: !willCreateImmediately(provider)),
                 subtitle: Self.providerRowSubtitle(provider) ?? "Run on \(Self.providerLabel(provider))"
             )
         case .chooseProvider:
             ProfilePickerRow(
-                // The provider list always comes first, so this row opens
-                // something whatever the chosen provider then does.
-                title: Self.remoteLaneRowTitle(opensForm: true),
+                // The provider list always comes first, so this row does open
+                // something whatever the chosen provider then does — but the
+                // trailing chevron is what says so here; see
+                // `remoteLaneRowTitle(offer:opensForm:)`.
+                title: Self.remoteLaneRowTitle(offer: offer, opensForm: true),
                 subtitle: "Choose a provider",
                 systemImage: Self.remoteLaneSymbol,
                 showsChevron: true
@@ -319,7 +326,12 @@ struct WorktreeProfilePickerView: View {
                 ForEach(Self.providerList(offer: remoteLaneOffer), id: \.config.name) { provider in
                     remoteProviderRow(
                         provider,
-                        title: Self.providerLabel(provider),
+                        // These rows are the ones that act, so each says for
+                        // itself whether selecting it will ask first —
+                        // decided per provider, from the same inputs the
+                        // click uses.
+                        title: Self.providerRowTitle(
+                            provider, opensForm: !willCreateImmediately(provider)),
                         subtitle: Self.providerRowSubtitle(provider)
                     )
                 }
@@ -330,8 +342,7 @@ struct WorktreeProfilePickerView: View {
 
     // MARK: - Remote lane: pure decision helpers
 
-    /// Row title on both the profiles page and (as the page's purpose) the
-    /// provider list.
+    /// The remote-lane row's copy on the profiles page.
     ///
     /// The trailing ellipsis is a promise, so the row only makes it when it
     /// will keep it: selecting the row opens the create form when some answer
@@ -339,6 +350,39 @@ struct WorktreeProfilePickerView: View {
     /// already knowable (see `RemoteCreateFormLogic.willCreateImmediately`).
     nonisolated static func remoteLaneRowTitle(opensForm: Bool) -> String {
         opensForm ? "New remote session…" : "New remote session"
+    }
+
+    /// The remote-lane row's title for the offer it is rendering — the form
+    /// the view calls, and the one place the ellipsis rule lives.
+    ///
+    /// - `.single`: the promise above, kept exactly when `opensForm`.
+    /// - `.chooseProvider`: never an ellipsis, whatever `opensForm` says. That
+    ///   row drills into the provider list, which its trailing chevron already
+    ///   signals; spending the ellipsis on the same fact doubles the
+    ///   signalling, and it would promise a form the provider chosen on the
+    ///   next page may never show. Each provider row on that page then makes
+    ///   the promise for itself — see `providerRowTitle(_:opensForm:)`.
+    /// - `.hidden`: no row renders, and the ellipsis-free copy is the honest
+    ///   value for a row that will not act.
+    nonisolated static func remoteLaneRowTitle(offer: RemoteLaneOffer, opensForm: Bool) -> String {
+        switch offer {
+        case .single: return remoteLaneRowTitle(opensForm: opensForm)
+        case .chooseProvider, .hidden: return remoteLaneRowTitle(opensForm: false)
+        }
+    }
+
+    /// A provider row's title on the `.remoteProviders` page: the provider's
+    /// display name, carrying the same ellipsis promise the single-provider
+    /// row makes.
+    ///
+    /// These are the rows that actually create, so the signal has to reach
+    /// them — a bare provider name says nothing about whether selecting it
+    /// will ask first, and the row that sent the user here deliberately makes
+    /// no promise on their behalf.
+    nonisolated static func providerRowTitle(
+        _ provider: RemoteProviderStatus, opensForm: Bool
+    ) -> String {
+        opensForm ? "\(providerLabel(provider))…" : providerLabel(provider)
     }
 
     /// Whether selecting this provider's row will create outright — asked with

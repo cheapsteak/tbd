@@ -188,4 +188,59 @@ struct WorktreeProfilePickerRemoteLaneTests {
         #expect(WorktreeProfilePickerView.remoteLaneRowTitle(opensForm: false)
             == "New remote session")
     }
+
+    /// The single-provider row is the one that keeps the promise: its own
+    /// selection either opens the form or creates, and the title follows.
+    @Test func theSingleProviderRowCarriesTheFormPromise() {
+        let offer = RemoteLaneOffer.single(provider(name: "acme"))
+        #expect(WorktreeProfilePickerView.remoteLaneRowTitle(offer: offer, opensForm: true)
+            == "New remote session…")
+        #expect(WorktreeProfilePickerView.remoteLaneRowTitle(offer: offer, opensForm: false)
+            == "New remote session")
+    }
+
+    /// The drill-in row makes no promise: its chevron already says it opens
+    /// something, and it cannot vouch for what the provider chosen on the next
+    /// page will do. So it drops the ellipsis whichever way the form decision
+    /// points — including the `true` the view passes it.
+    @Test func theChooseProviderRowNeverCarriesAnEllipsis() {
+        let offer = RemoteLaneOffer.chooseProvider(
+            [provider(name: "acme"), provider(name: "acme-prod")])
+        #expect(WorktreeProfilePickerView.remoteLaneRowTitle(offer: offer, opensForm: true)
+            == "New remote session")
+        #expect(WorktreeProfilePickerView.remoteLaneRowTitle(offer: offer, opensForm: false)
+            == "New remote session")
+    }
+
+    /// `.hidden` renders no row at all; the ellipsis-free copy is the honest
+    /// value for a row that will not act.
+    @Test func theHiddenOfferHasNoPromiseToMake() {
+        #expect(WorktreeProfilePickerView.remoteLaneRowTitle(offer: .hidden, opensForm: true)
+            == "New remote session")
+    }
+
+    // MARK: - the provider list's rows make the promise for themselves
+
+    /// The rows on the `.remoteProviders` page are the ones that act, so each
+    /// says whether selecting it will ask first — the signal the drill-in row
+    /// deliberately withholds has to land here or it lands nowhere.
+    @Test func aProviderRowKeepsItsEllipsisWhenSelectingItOpensTheForm() {
+        #expect(WorktreeProfilePickerView.providerRowTitle(
+            provider(name: "acme", describeName: "Acme Cloud"), opensForm: true) == "Acme Cloud…")
+    }
+
+    @Test func aProviderRowDropsItsEllipsisWhenSelectingItCreatesOutright() {
+        #expect(WorktreeProfilePickerView.providerRowTitle(
+            provider(name: "acme", describeName: "Acme Cloud"), opensForm: false) == "Acme Cloud")
+    }
+
+    /// The title still goes through `providerLabel`, so a provider that
+    /// negotiated no `describe` name keeps its configured name — with the
+    /// promise appended, not instead of it.
+    @Test func aProviderRowWithoutADescribeNameStillCarriesThePromise() {
+        #expect(WorktreeProfilePickerView.providerRowTitle(provider(name: "acme"), opensForm: true)
+            == "acme…")
+        #expect(WorktreeProfilePickerView.providerRowTitle(provider(name: "acme"), opensForm: false)
+            == "acme")
+    }
 }
