@@ -70,3 +70,13 @@ import Testing
         #expect(ClaudeDelegationSample.pendingCount(inTail: tail([huge])) == nil)
     }
 }
+
+@Suite struct ClaudeDelegationPublicationTests {
+    /// The rail publishes through the SAME response-derived field Codex uses,
+    /// so no column and no migration are involved.
+    @Test func aClaimMapsToWorkingAndNoClaimMapsToNil() {
+        #expect(RPCRouter.delegationPresentation(pendingCount: 2) == .working)
+        #expect(RPCRouter.delegationPresentation(pendingCount: 1) == .working)
+        #expect(RPCRouter.delegationPresentation(pendingCount: nil) == nil)
+    }
+}

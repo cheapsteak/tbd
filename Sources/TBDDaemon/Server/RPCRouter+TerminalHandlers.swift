@@ -83,6 +83,13 @@ extension RPCRouter {
 
     // MARK: - Terminal Handlers
 
+    /// A pending-agent count becomes a working presentation; its absence
+    /// makes no claim at all. Split out so the mapping is assertable without
+    /// standing up a router.
+    static func delegationPresentation(pendingCount: Int?) -> TerminalActivityState? {
+        pendingCount == nil ? nil : .working
+    }
+
     func handleTerminalCreate(
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
@@ -609,6 +616,35 @@ extension RPCRouter {
 
         await codexActivityTracker.retain(
             transcriptPaths: codexTranscriptPaths, scope: params.worktreeID)
+
+        // Claude delegation rail. Only terminals that just ended a turn were
+        // marked, so a session at rest costs neither a stat nor a read. The
+        // claim is stamped with the same instant the Codex observation above
+        // took, so one response never carries two different "now"s.
+        let delegationTargets = terminals.indices
+            .filter { !terminals[$0].isCodexTerminal }
+            .map { ClaudeDelegationTarget(
+                terminalID: terminals[$0].id,
+                transcriptPath: terminals[$0].transcriptPath) }
+        let delegationClaims = await claudeDelegationTracker.sample(
+            targets: delegationTargets)
+        for index in terminals.indices where !terminals[index].isCodexTerminal {
+            // Only a live claim writes. Absence must leave the field alone
+            // rather than publish nil, which is a statement of its own.
+            guard let count = delegationClaims[terminals[index].id] else { continue }
+            terminals[index].presentationActivityState =
+                Self.delegationPresentation(pendingCount: count)
+            terminals[index].presentationActivityObservedAt = codexObservation.observedAt
+        }
+        // Pruning may only follow a FLEET-WIDE listing. `terminals` is filtered
+        // by `params.worktreeID` when one is given, so retaining against a
+        // scoped list would read every other worktree's terminals as gone and
+        // drop marks that were never sampled. The unscoped listing is the
+        // app's recurring refresh, so pruning still happens regularly.
+        if params.worktreeID == nil {
+            await claudeDelegationTracker.retain(
+                terminalIDs: Set(terminals.map(\.id)))
+        }
         return try RPCResponse(result: terminals)
     }
 
