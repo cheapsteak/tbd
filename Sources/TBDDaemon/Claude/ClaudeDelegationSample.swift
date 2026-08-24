@@ -18,12 +18,15 @@ enum ClaudeDelegationSample {
     static func pendingCount(inTail tail: Data) -> Int? {
         guard !tail.isEmpty else { return nil }
         var newest: Int?
-        // A bounded tail almost always begins mid-record. Dropping through the
-        // first newline discards that fragment; a tail that happens to start
-        // exactly at a record boundary loses one record, which the level rail
-        // can afford because the NEWEST record is the one that matters.
+        // A bounded tail almost always begins mid-record, but a leading
+        // fragment does not need to be singled out and discarded: a byte
+        // range that starts mid-object is not valid JSON, so it already fails
+        // to parse below and is skipped like any other unreadable line. A
+        // tail that happens to start exactly at a record boundary — the
+        // common case for a short transcript read whole — keeps that record
+        // instead of losing it to a blind drop.
         let lines = tail.split(separator: UInt8(ascii: "\n"),
-                               omittingEmptySubsequences: true).dropFirst()
+                               omittingEmptySubsequences: true)
         for line in lines {
             guard line.count <= recordByteLimit else { continue }
             guard let object = try? JSONSerialization.jsonObject(with: Data(line)),
