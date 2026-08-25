@@ -5,12 +5,12 @@ import Testing
 /// The chevron-placement setting's storage contract: unset means "never
 /// chose", and both explicit values persist as written. Mirrors
 /// `ShowScratchSectionSettingTests`, and pins that the shipped default is
-/// off — the chevron leads the project name unless a user asks otherwise.
+/// off — nobody's chevron moves, and no row shifts, until they ask.
 @MainActor
-@Suite("chevronAfterProjectName setting")
+@Suite("chevronBeforeProjectName setting")
 struct ChevronPlacementSettingTests {
     @Test func defaultsToOff() {
-        #expect(AppState.chevronAfterProjectNameDefault == false)
+        #expect(AppState.chevronBeforeProjectNameDefault == false)
     }
 
     @Test func storesBothBranches() {
@@ -18,11 +18,11 @@ struct ChevronPlacementSettingTests {
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        #expect(defaults.object(forKey: AppState.chevronAfterProjectNameKey) == nil)
-        defaults.set(true, forKey: AppState.chevronAfterProjectNameKey)
-        #expect(defaults.bool(forKey: AppState.chevronAfterProjectNameKey) == true)
-        defaults.set(false, forKey: AppState.chevronAfterProjectNameKey)
-        #expect(defaults.bool(forKey: AppState.chevronAfterProjectNameKey) == false)
+        #expect(defaults.object(forKey: AppState.chevronBeforeProjectNameKey) == nil)
+        defaults.set(true, forKey: AppState.chevronBeforeProjectNameKey)
+        #expect(defaults.bool(forKey: AppState.chevronBeforeProjectNameKey) == true)
+        defaults.set(false, forKey: AppState.chevronBeforeProjectNameKey)
+        #expect(defaults.bool(forKey: AppState.chevronBeforeProjectNameKey) == false)
     }
 }
 
@@ -34,29 +34,29 @@ struct ChevronPlacementSettingTests {
 @MainActor
 @Suite("chevronMounted gate")
 struct ChevronMountedTests {
-    @Test("leading the name: mounted with no pointer in the section")
+    @Test("setting on, leading the name: mounted with no pointer in the section")
     func leadingUnhoveredMounted() {
-        #expect(RepoSectionView.chevronMounted(afterName: false, hovered: false, menuOpen: false))
+        #expect(RepoSectionView.chevronMounted(beforeName: true, hovered: false, menuOpen: false))
     }
 
-    @Test("leading the name: still mounted while hovered")
+    @Test("setting on, leading the name: still mounted while hovered")
     func leadingHoveredMounted() {
-        #expect(RepoSectionView.chevronMounted(afterName: false, hovered: true, menuOpen: false))
+        #expect(RepoSectionView.chevronMounted(beforeName: true, hovered: true, menuOpen: false))
     }
 
-    @Test("trailing the name: hidden with no pointer in the section")
+    @Test("default, trailing the name: hidden with no pointer in the section")
     func trailingUnhoveredHidden() {
-        #expect(!RepoSectionView.chevronMounted(afterName: true, hovered: false, menuOpen: false))
+        #expect(!RepoSectionView.chevronMounted(beforeName: false, hovered: false, menuOpen: false))
     }
 
-    @Test("trailing the name: revealed on hover")
+    @Test("default, trailing the name: revealed on hover")
     func trailingHoveredMounted() {
-        #expect(RepoSectionView.chevronMounted(afterName: true, hovered: true, menuOpen: false))
+        #expect(RepoSectionView.chevronMounted(beforeName: false, hovered: true, menuOpen: false))
     }
 
-    @Test("trailing the name: stays mounted while the + menu is open off-hover")
+    @Test("default, trailing the name: stays mounted while the + menu is open off-hover")
     func trailingMenuOpenMounted() {
-        #expect(RepoSectionView.chevronMounted(afterName: true, hovered: false, menuOpen: true))
+        #expect(RepoSectionView.chevronMounted(beforeName: false, hovered: false, menuOpen: true))
     }
 }
 
@@ -70,24 +70,24 @@ struct SidebarHeaderMetricsTests {
     /// What a project row's own name ends up at, computed from the row's
     /// pieces rather than from the value under test — so a change to either
     /// one alone fails this.
-    private func projectTitleOffset(chevronAfterName: Bool) -> CGFloat {
-        guard !chevronAfterName else { return 0 }
+    private func projectTitleOffset(chevronBeforeName: Bool) -> CGFloat {
+        guard chevronBeforeName else { return 0 }
         return SidebarHeaderMetrics.chevronColumnWidth
             + SidebarHeaderMetrics.headerSpacing
             + SidebarHeaderMetrics.nameLeadingClawback
     }
 
-    @Test("chevron before the name: a chevron-less title clears the chevron column")
+    @Test("setting on: a chevron-less title clears the chevron column")
     func leadingChevronIndentsSiblings() {
-        let inset = SidebarHeaderMetrics.titleLeadingInset(chevronAfterProjectName: false)
-        #expect(inset == projectTitleOffset(chevronAfterName: false))
+        let inset = SidebarHeaderMetrics.titleLeadingInset(chevronBeforeProjectName: true)
+        #expect(inset == projectTitleOffset(chevronBeforeName: true))
         #expect(inset > 0)
     }
 
-    @Test("chevron after the name: every title starts at the row edge")
+    @Test("default: every title starts at the row edge")
     func trailingChevronNeedsNoIndent() {
-        let inset = SidebarHeaderMetrics.titleLeadingInset(chevronAfterProjectName: true)
-        #expect(inset == projectTitleOffset(chevronAfterName: true))
+        let inset = SidebarHeaderMetrics.titleLeadingInset(chevronBeforeProjectName: false)
+        #expect(inset == projectTitleOffset(chevronBeforeName: false))
         #expect(inset == 0)
     }
 }
@@ -123,32 +123,32 @@ struct ScratchSectionExpandedTests {
 struct SidebarChildRowInsetTests {
     /// Where a section title's text lands, measured from the list edge rather
     /// than from the value under test.
-    private func titleOrigin(chevronAfterName: Bool) -> CGFloat {
+    private func titleOrigin(chevronBeforeName: Bool) -> CGFloat {
         SidebarHeaderMetrics.headerRowLeadingInset
-            + SidebarHeaderMetrics.titleLeadingInset(chevronAfterProjectName: chevronAfterName)
+            + SidebarHeaderMetrics.titleLeadingInset(chevronBeforeProjectName: chevronBeforeName)
     }
 
-    @Test("chevron before the name: rows sit indented past the title")
+    @Test("setting on: rows sit indented past the title")
     func leadingChevronRowsIndented() {
-        let rows = SidebarHeaderMetrics.childRowLeadingInset(chevronAfterProjectName: false)
-        #expect(rows > titleOrigin(chevronAfterName: false))
-        #expect(rows - titleOrigin(chevronAfterName: false) == SidebarHeaderMetrics.childRowIndent)
+        let rows = SidebarHeaderMetrics.childRowLeadingInset(chevronBeforeProjectName: true)
+        #expect(rows > titleOrigin(chevronBeforeName: true))
+        #expect(rows - titleOrigin(chevronBeforeName: true) == SidebarHeaderMetrics.childRowIndent)
     }
 
-    @Test("chevron after the name: rows sit indented past the title there too")
+    @Test("default: rows sit indented past the title there too")
     func trailingChevronRowsIndented() {
-        let rows = SidebarHeaderMetrics.childRowLeadingInset(chevronAfterProjectName: true)
-        #expect(rows > titleOrigin(chevronAfterName: true))
-        #expect(rows - titleOrigin(chevronAfterName: true) == SidebarHeaderMetrics.childRowIndent)
+        let rows = SidebarHeaderMetrics.childRowLeadingInset(chevronBeforeProjectName: false)
+        #expect(rows > titleOrigin(chevronBeforeName: false))
+        #expect(rows - titleOrigin(chevronBeforeName: false) == SidebarHeaderMetrics.childRowIndent)
     }
 
     @Test("the indent step is the same whichever side the chevron is on")
     func stepIsPlacementIndependent() {
-        let leading = SidebarHeaderMetrics.childRowLeadingInset(chevronAfterProjectName: false)
-            - titleOrigin(chevronAfterName: false)
-        let trailing = SidebarHeaderMetrics.childRowLeadingInset(chevronAfterProjectName: true)
-            - titleOrigin(chevronAfterName: true)
-        #expect(leading == trailing)
+        let onSetting = SidebarHeaderMetrics.childRowLeadingInset(chevronBeforeProjectName: true)
+            - titleOrigin(chevronBeforeName: true)
+        let byDefault = SidebarHeaderMetrics.childRowLeadingInset(chevronBeforeProjectName: false)
+            - titleOrigin(chevronBeforeName: false)
+        #expect(onSetting == byDefault)
     }
 }
 
@@ -158,13 +158,51 @@ struct SidebarChildRowInsetTests {
 struct SectionChevronMountTests {
     @Test("before the title: mounted whether or not the row is revealed")
     func leadingAlwaysMounted() {
-        #expect(SidebarHeaderMetrics.chevronMounted(afterTitle: false, revealed: false))
-        #expect(SidebarHeaderMetrics.chevronMounted(afterTitle: false, revealed: true))
+        #expect(SidebarHeaderMetrics.chevronMounted(beforeTitle: true, revealed: false))
+        #expect(SidebarHeaderMetrics.chevronMounted(beforeTitle: true, revealed: true))
     }
 
     @Test("after the title: mounted only once the row is revealed")
     func trailingFollowsReveal() {
-        #expect(!SidebarHeaderMetrics.chevronMounted(afterTitle: true, revealed: false))
-        #expect(SidebarHeaderMetrics.chevronMounted(afterTitle: true, revealed: true))
+        #expect(!SidebarHeaderMetrics.chevronMounted(beforeTitle: false, revealed: false))
+        #expect(SidebarHeaderMetrics.chevronMounted(beforeTitle: false, revealed: true))
+    }
+}
+
+/// The whole point of the default being off: with nobody's setting touched,
+/// the sidebar's geometry is the geometry that shipped before this setting
+/// existed. These are the literal numbers the views used to hardcode, so a
+/// change that moves anybody's rows without them asking fails here.
+@MainActor
+@Suite("default placement changes nothing")
+struct DefaultSidebarGeometryTests {
+    /// What `ScratchSectionView` and `RemoteProviderHeaderRow` used before the
+    /// setting existed: no inset, titles flush with the row's leading edge.
+    private let historicalTitleInset: CGFloat = 0
+    /// What every child row hardcoded before the setting existed.
+    private let historicalChildRowInset: CGFloat = 12
+
+    @Test("titles keep their historical position")
+    func titlesUnmoved() {
+        #expect(AppState.chevronBeforeProjectNameDefault == false)
+        #expect(
+            SidebarHeaderMetrics.titleLeadingInset(
+                chevronBeforeProjectName: AppState.chevronBeforeProjectNameDefault
+            ) == historicalTitleInset)
+    }
+
+    @Test("worktrees, scratch pads and remote sessions keep their historical inset")
+    func rowsUnmoved() {
+        #expect(
+            SidebarHeaderMetrics.childRowLeadingInset(
+                chevronBeforeProjectName: AppState.chevronBeforeProjectNameDefault
+            ) == historicalChildRowInset)
+    }
+
+    @Test("the project chevron keeps its hover gate")
+    func chevronStillHoverGated() {
+        let byDefault = AppState.chevronBeforeProjectNameDefault
+        #expect(!RepoSectionView.chevronMounted(beforeName: byDefault, hovered: false, menuOpen: false))
+        #expect(RepoSectionView.chevronMounted(beforeName: byDefault, hovered: true, menuOpen: false))
     }
 }

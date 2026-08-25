@@ -41,11 +41,11 @@ struct RepoSectionView: View {
     // Hover the `+` (or ⌥-click it) to open the model-profile picker; a plain
     // click still creates a worktree with the default profile.
     @StateObject private var newWorktreeMenu = HoverMenuModel()
-    /// Where this row's disclosure chevron sits — before the name (the
-    /// default) or after it. See `AppState.chevronAfterProjectNameKey` and
+    /// Where this row's disclosure chevron sits — after the name (the
+    /// default) or before it. See `AppState.chevronBeforeProjectNameKey` and
     /// `chevronButton`.
-    @AppStorage(AppState.chevronAfterProjectNameKey)
-    private var chevronAfterProjectName: Bool = AppState.chevronAfterProjectNameDefault
+    @AppStorage(AppState.chevronBeforeProjectNameKey)
+    private var chevronBeforeProjectName: Bool = AppState.chevronBeforeProjectNameDefault
 
     private func onSectionHoverChange(_ hovering: Bool) {
         if hovering {
@@ -182,17 +182,17 @@ struct RepoSectionView: View {
     }
 
     /// The header row's actual content (the chevron and the name in the order
-    /// `chevronAfterProjectName` asks for, an optional "missing" badge, and
+    /// `chevronBeforeProjectName` asks for, an optional "missing" badge, and
     /// the `+`), with none of `headerRow`'s trailing modifiers — see
     /// `headerRow`'s doc comment.
     @ViewBuilder
     private var headerHStack: some View {
         HStack(spacing: SidebarHeaderMetrics.headerSpacing) {
-            if !chevronAfterProjectName {
+            if chevronBeforeProjectName {
                 chevronButton
             }
             nameLabel
-            if chevronAfterProjectName {
+            if !chevronBeforeProjectName {
                 chevronButton
             }
             if repo.status == .missing {
@@ -205,16 +205,17 @@ struct RepoSectionView: View {
 
     /// Whether the chevron button is mounted at all right now — the one
     /// behavior the two placements disagree about, in pure form so a test can
-    /// call it without a SwiftUI render. Before the name it is always mounted;
-    /// after the name it rides the row's hover gate along with the `+`.
+    /// call it without a SwiftUI render. After the name (the default) it rides
+    /// the row's hover gate along with the `+`; before the name it is always
+    /// mounted.
     ///
     /// Main-actor isolated, unlike this file's other pure statics: it forwards
     /// to `HoverMenuModel.shouldShowPlus`, which is isolated itself, and
     /// calling the real gate matters more here than callability from a
     /// nonisolated test.
-    static func chevronMounted(afterName: Bool, hovered: Bool, menuOpen: Bool) -> Bool {
+    static func chevronMounted(beforeName: Bool, hovered: Bool, menuOpen: Bool) -> Bool {
         SidebarHeaderMetrics.chevronMounted(
-            afterTitle: afterName,
+            beforeTitle: beforeName,
             revealed: HoverMenuModel.shouldShowPlus(hovered: hovered, menuOpen: menuOpen)
         )
     }
@@ -226,9 +227,9 @@ struct RepoSectionView: View {
     private var chevronButton: some View {
         SectionDisclosureChevron(
             isExpanded: repo.expanded,
-            afterTitle: chevronAfterProjectName,
+            beforeTitle: chevronBeforeProjectName,
             isMounted: RepoSectionView.chevronMounted(
-                afterName: chevronAfterProjectName,
+                beforeName: chevronBeforeProjectName,
                 hovered: isSectionHovered,
                 menuOpen: newWorktreeMenu.isOpen
             ),
@@ -261,11 +262,12 @@ struct RepoSectionView: View {
                 .foregroundStyle(nameForegroundStyle)
         }
         // Claw back the chevron's trailing slack when it leads the name, so
-        // the pair reads as one label. Nothing to claw back when the chevron
-        // trails instead — see `chevronButton`'s own leading padding. The
-        // constant lives in `SidebarHeaderMetrics` because the chevron-less
-        // section headers derive their own title inset from it.
-        .padding(.leading, chevronAfterProjectName ? 0 : SidebarHeaderMetrics.nameLeadingClawback)
+        // the pair reads as one label. Nothing to claw back in the default
+        // placement, where the chevron trails instead — see `chevronButton`'s
+        // own leading padding there. The constant lives in
+        // `SidebarHeaderMetrics` because the chevron-less section headers
+        // derive their own title inset from it.
+        .padding(.leading, chevronBeforeProjectName ? SidebarHeaderMetrics.nameLeadingClawback : 0)
     }
 
     @ViewBuilder
@@ -332,7 +334,7 @@ struct RepoSectionView: View {
         EdgeInsets(
             top: 0,
             leading: SidebarHeaderMetrics.childRowLeadingInset(
-                chevronAfterProjectName: chevronAfterProjectName),
+                chevronBeforeProjectName: chevronBeforeProjectName),
             bottom: 0,
             trailing: 0)
     }

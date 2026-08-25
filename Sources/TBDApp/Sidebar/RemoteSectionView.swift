@@ -25,8 +25,8 @@ struct RemoteSectionView: View {
     @EnvironmentObject var appState: AppState
     /// Read only to place the session rows under their provider's title —
     /// see `SidebarHeaderMetrics.childRowLeadingInset`.
-    @AppStorage(AppState.chevronAfterProjectNameKey)
-    private var chevronAfterProjectName: Bool = AppState.chevronAfterProjectNameDefault
+    @AppStorage(AppState.chevronBeforeProjectNameKey)
+    private var chevronBeforeProjectName: Bool = AppState.chevronBeforeProjectNameDefault
 
     var body: some View {
         let knownRepoIDs = RemoteSectionView.knownRepoIDs(repos: appState.repos, repoFilter: appState.repoFilter)
@@ -46,7 +46,7 @@ struct RemoteSectionView: View {
                     .listRowInsets(EdgeInsets(
                         top: 0,
                         leading: SidebarHeaderMetrics.childRowLeadingInset(
-                            chevronAfterProjectName: chevronAfterProjectName),
+                            chevronBeforeProjectName: chevronBeforeProjectName),
                         bottom: 0,
                         trailing: 0))
                     .listRowSeparator(.hidden)
@@ -189,8 +189,8 @@ struct RemoteProviderHeaderRow: View {
     /// `ScratchSectionView`'s copy: this header has no chevron, and a project
     /// row's chevron placement decides which column every section title sits
     /// in. See `SidebarHeaderMetrics.titleLeadingInset`.
-    @AppStorage(AppState.chevronAfterProjectNameKey)
-    private var chevronAfterProjectName: Bool = AppState.chevronAfterProjectNameDefault
+    @AppStorage(AppState.chevronBeforeProjectNameKey)
+    private var chevronBeforeProjectName: Bool = AppState.chevronBeforeProjectNameDefault
 
     private var issueSummary: String? {
         RemoteProviderStatusPresentation.issueSummary(provider)
@@ -251,7 +251,7 @@ struct RemoteProviderHeaderRow: View {
                 }
                 .buttonStyle(.plain)
                 .padding(.leading, SidebarHeaderMetrics.titleLeadingInset(
-                    chevronAfterProjectName: chevronAfterProjectName))
+                    chevronBeforeProjectName: chevronBeforeProjectName))
                 .accessibilityLabel("Open \(provider.describe?.name ?? provider.config.name) provider desk")
                 healthSuffix
                 if canCreate {
@@ -280,7 +280,7 @@ struct RemoteProviderHeaderRow: View {
                     // Same inset as the name above, so the summary keeps
                     // hanging under it rather than under the chevron column.
                     .padding(.leading, SidebarHeaderMetrics.titleLeadingInset(
-                        chevronAfterProjectName: chevronAfterProjectName))
+                        chevronBeforeProjectName: chevronBeforeProjectName))
                     .help(issueSummary)
             }
         }

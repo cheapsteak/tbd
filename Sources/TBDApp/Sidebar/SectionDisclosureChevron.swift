@@ -5,17 +5,13 @@ import SwiftUI
 /// this one view so the two cannot drift apart in placement, glyph size, hover
 /// treatment, or what a screen reader hears.
 ///
-/// `AppState.chevronAfterProjectNameKey` decides which of two presentations
+/// `AppState.chevronBeforeProjectNameKey` decides which of two presentations
 /// every section uses; the caller reads the setting and passes it as
-/// `afterTitle`, along with the placement's `isMounted` gate from
-/// `SidebarHeaderMetrics.chevronMounted(afterTitle:revealed:)`.
+/// `beforeTitle`, along with the placement's `isMounted` gate from
+/// `SidebarHeaderMetrics.chevronMounted(beforeTitle:revealed:)`.
 ///
-/// Before the title (the default) the chevron is always mounted and plainly
-/// styled, so the glyph sits in the same column on every row and the
-/// expanded/collapsed state reads at a glance.
-///
-/// After the title it trails the name and takes the `+`'s hover wash and hover
-/// gate, so the two affordances appear and vanish together and the resting
+/// After the title (the default) it trails the name and takes the `+`'s hover
+/// wash and hover gate, so the two affordances appear and vanish together and the resting
 /// sidebar is quieter. That gate is deliberate and was signed off by the
 /// maintainer: it costs the at-a-glance state read and pointer-free
 /// reachability, because the caller's hover state is driven only by `.onHover`,
@@ -26,13 +22,17 @@ import SwiftUI
 /// default placement is never gated. So do not "fix" the trailing placement by
 /// always-mounting it; that reverses a decision someone made on purpose.
 ///
+/// Before the title, the chevron is always mounted and plainly styled, so the
+/// glyph sits in the same column on every row and the expanded/collapsed state
+/// reads at a glance.
+///
 /// The unmounted branch keeps the chevron's square so nothing beside it slides
 /// sideways as the glyph comes and goes.
 struct SectionDisclosureChevron: View {
     let isExpanded: Bool
     /// Where this chevron sits relative to its section title — read from
-    /// `AppState.chevronAfterProjectNameKey` by the caller.
-    let afterTitle: Bool
+    /// `AppState.chevronBeforeProjectNameKey` by the caller.
+    let beforeTitle: Bool
     /// Whether the button is mounted right now; `Color.clear` holds its place
     /// when it isn't. See `SidebarHeaderMetrics.chevronMounted`.
     let isMounted: Bool
@@ -49,10 +49,10 @@ struct SectionDisclosureChevron: View {
     var body: some View {
         Group {
             if isMounted {
-                if afterTitle {
-                    button.buttonStyle(HoverPressButtonStyle())
-                } else {
+                if beforeTitle {
                     button.buttonStyle(.plain)
+                } else {
+                    button.buttonStyle(HoverPressButtonStyle())
                 }
             } else {
                 Color.clear
@@ -67,8 +67,8 @@ struct SectionDisclosureChevron: View {
         // its cap-height center. Both are layout-neutral for the hit target,
         // which rides along with the glyph. Leading the title, that slack is
         // what separates the glyph from the window edge, so it stays.
-        .padding(.leading, afterTitle ? -3 : 0)
-        .offset(y: afterTitle ? 2 : 0)
+        .padding(.leading, beforeTitle ? 0 : -3)
+        .offset(y: beforeTitle ? 0 : 2)
     }
 
     /// The button and its label, styleless — `body` applies the style the
@@ -77,7 +77,7 @@ struct SectionDisclosureChevron: View {
     private var button: some View {
         Button(action: toggle) {
             Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                .font(.system(size: afterTitle ? 10 : 11))
+                .font(.system(size: beforeTitle ? 11 : 10))
                 // Applied to the glyph, not the button, so it wins over
                 // `HoverPressButtonStyle`'s blanket `.secondary` and a missing
                 // repo still renders dimmed.

@@ -3284,13 +3284,23 @@ final class AppState: ObservableObject {
     static let showClaudeTabUsageTooltipKey = "showClaudeTabUsageTooltip"
 
     /// UserDefaults key for where a sidebar project row's disclosure chevron
-    /// sits. Off (the default) puts it before the project name, always
-    /// mounted, so every row's chevron lines up in one column. On moves it to
-    /// immediately after the name, where it also picks up the row's hover gate
-    /// — see `RepoSectionView.chevronButton`. Read via `@AppStorage` in the
-    /// view layer; `RepoSectionView.chevronMounted(afterName:hovered:menuOpen:)`
-    /// is the pure form of the gate the two placements disagree about.
-    static let chevronAfterProjectNameKey = "chevronAfterProjectName"
+    /// sits. Off — the default, and what shipped before this setting existed —
+    /// leaves it immediately after the project name, hover-gated with the
+    /// row's `+`. On moves it before the name, always mounted, so every row's
+    /// chevron lines up in one column; the sidebar's titles and rows shift
+    /// right to clear that column with it (`SidebarHeaderMetrics`).
+    ///
+    /// Read via `@AppStorage` in the view layer;
+    /// `SidebarHeaderMetrics.chevronMounted(beforeTitle:revealed:)` is the
+    /// pure form of the gate the two placements disagree about.
+    static let chevronBeforeProjectNameKey = "chevronBeforeProjectName"
+
+    /// The one default for `chevronBeforeProjectNameKey`. Every read site —
+    /// the Settings toggle and each view's `@AppStorage` — must spell the
+    /// default with this constant rather than a bare literal, for the reason
+    /// spelled out on `enableTranscriptDefault`. Off: nobody's sidebar moves
+    /// until they ask for it.
+    static let chevronBeforeProjectNameDefault = false
 
     /// UserDefaults key for whether the sidebar's Scratch section is
     /// expanded. A project's equivalent is `Repo.expanded`, which the daemon
@@ -3303,12 +3313,6 @@ final class AppState: ObservableObject {
     /// The one default for `scratchSectionExpandedKey`, for the reason
     /// spelled out on `enableTranscriptDefault`.
     static let scratchSectionExpandedDefault = true
-
-    /// The one default for `chevronAfterProjectNameKey`. Every read site — the
-    /// Settings toggle and `RepoSectionView`'s `@AppStorage` — must spell the
-    /// default with this constant rather than a bare literal, for the reason
-    /// spelled out on `enableTranscriptDefault`.
-    static let chevronAfterProjectNameDefault = false
 
     /// Pure, testable mirror of the sidebar's Scratch-section gate:
     /// shown whenever the setting is on, regardless of whether any scratch

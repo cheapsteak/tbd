@@ -19,18 +19,18 @@ struct ScratchSectionView: View {
     /// Which side of the title this section's chevron sits on, and with it
     /// where every sidebar title and row sits. Shared with the project rows so
     /// the two sections cannot disagree — see `SidebarHeaderMetrics`.
-    @AppStorage(AppState.chevronAfterProjectNameKey)
-    private var chevronAfterProjectName: Bool = AppState.chevronAfterProjectNameDefault
+    @AppStorage(AppState.chevronBeforeProjectNameKey)
+    private var chevronBeforeProjectName: Bool = AppState.chevronBeforeProjectNameDefault
 
     private var chevronButton: some View {
         SectionDisclosureChevron(
             isExpanded: isExpanded,
-            afterTitle: chevronAfterProjectName,
+            beforeTitle: chevronBeforeProjectName,
             // The `+` on this row is gated on plain hover rather than
             // `HoverMenuModel` (this section has no profile picker to hold
             // itself open), so that is the gate the chevron shares.
             isMounted: SidebarHeaderMetrics.chevronMounted(
-                afterTitle: chevronAfterProjectName, revealed: isHeaderHovered),
+                beforeTitle: chevronBeforeProjectName, revealed: isHeaderHovered),
             accessibilityLabel: isExpanded
                 ? "Collapse \(AppState.scratchSectionLabel)"
                 : "Expand \(AppState.scratchSectionLabel)",
@@ -46,14 +46,14 @@ struct ScratchSectionView: View {
         EdgeInsets(
             top: 0,
             leading: SidebarHeaderMetrics.childRowLeadingInset(
-                chevronAfterProjectName: chevronAfterProjectName),
+                chevronBeforeProjectName: chevronBeforeProjectName),
             bottom: 0,
             trailing: 0)
     }
 
     var body: some View {
         HStack(spacing: SidebarHeaderMetrics.headerSpacing) {
-            if !chevronAfterProjectName {
+            if chevronBeforeProjectName {
                 chevronButton
             }
             Text(AppState.scratchSectionLabel)
@@ -61,9 +61,9 @@ struct ScratchSectionView: View {
                 .foregroundStyle(appState.selectedScratchSection ? .primary : .secondary)
                 // Claw back the chevron square's slack when it leads the
                 // title, exactly as a project name does.
-                .padding(.leading, chevronAfterProjectName
-                         ? 0 : SidebarHeaderMetrics.nameLeadingClawback)
-            if chevronAfterProjectName {
+                .padding(.leading, chevronBeforeProjectName
+                         ? SidebarHeaderMetrics.nameLeadingClawback : 0)
+            if !chevronBeforeProjectName {
                 chevronButton
             }
             Spacer()
@@ -78,7 +78,8 @@ struct ScratchSectionView: View {
         }
         .onHover { hovering in
             isHeaderHovered = hovering
-            // Trailing the title, the chevron is torn down by this same gate,
+            // Trailing the title — the default — the chevron is torn down by
+            // this same gate,
             // so its own `onHover(false)` may never arrive — without this the
             // pads would stay dimmed at 0.7 forever.
             if !hovering { isChevronHovered = false }

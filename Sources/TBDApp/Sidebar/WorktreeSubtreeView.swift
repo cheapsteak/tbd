@@ -23,8 +23,8 @@ struct WorktreeSubtreeView: View {
     /// Read only to place the row: the project chevron's position decides
     /// which column every section title sits in, and rows follow their title.
     /// See `SidebarHeaderMetrics.childRowLeadingInset`.
-    @AppStorage(AppState.chevronAfterProjectNameKey)
-    private var chevronAfterProjectName: Bool = AppState.chevronAfterProjectNameDefault
+    @AppStorage(AppState.chevronBeforeProjectNameKey)
+    private var chevronBeforeProjectName: Bool = AppState.chevronBeforeProjectNameDefault
 
     var body: some View {
         WorktreeRowView(
@@ -37,7 +37,7 @@ struct WorktreeSubtreeView: View {
         .listRowInsets(EdgeInsets(
             top: 0,
             leading: SidebarHeaderMetrics.childRowLeadingInset(
-                chevronAfterProjectName: chevronAfterProjectName),
+                chevronBeforeProjectName: chevronBeforeProjectName),
             bottom: 0,
             trailing: 0))
         .listRowSeparator(.hidden)
