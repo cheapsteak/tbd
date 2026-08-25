@@ -74,6 +74,26 @@ struct TranscriptLinkPaneRoutingTests {
         #expect(destination == .openInBrowser(url))
     }
 
+    // The daemon-managed panel path (Phase 3b) has no `LayoutNode` to route
+    // into, so it names the operation instead of a rewritten tree.
+    // `.automatic` is the reducer's "reuse the first viewer panel, else split
+    // right of the primary anchor" contract — the same intent `live` spells
+    // out by hand through `routeFileClick`.
+    @Test func daemonManagedDestination_forAFile_opensAPanelAutomatically() {
+        #expect(TranscriptLinkDestination.daemonManaged(.file("/w/a.md"))
+                == .apply(.open(
+                    content: .file(FileReference(path: "/w/a.md")),
+                    placement: .automatic)))
+    }
+
+    // Leaving the app is layout-independent, so both live paths agree — and
+    // asserting it as a value is the only way to cover the branch without a
+    // unit test launching a browser.
+    @Test func daemonManagedDestination_forAURL_leavesTheApp() {
+        let url = URL(string: "https://example.com/x")!
+        #expect(TranscriptLinkDestination.daemonManaged(.web(url)) == .openInBrowser(url))
+    }
+
     // History REVEALS. Opening would execute a resolved path that happens to be
     // a shell script, and transcript text is agent-authored.
     @Test func historyDestination_forAFile_revealsInFinder() {

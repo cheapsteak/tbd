@@ -48,7 +48,13 @@ struct PanePlaceholder: View {
     /// proven-local wrapper rather than a bare `Worktree`.
     let worktree: LocalWorktree
     let tabID: UUID?
-    @Binding var layout: LayoutNode
+    /// Everything this leaf knows about the tree around it — both the
+    /// structural mutations it can request and the two queries it needs
+    /// (transcript-open state, slot history). Deliberately the leaf's ONLY
+    /// window onto the surrounding workspace, so the same view renders on
+    /// top of the legacy `LayoutNode` tree and the daemon-owned panel
+    /// surface without knowing which it is sitting on.
+    let actions: PaneActions
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
     @State private var isHeaderHovering = false
@@ -125,6 +131,10 @@ struct PanePlaceholder: View {
 
             toolbarActions
 
+            // Kept in the layout and disabled rather than omitted when the
+            // leaf cannot be closed (the daemon path's primary anchor): the
+            // header keeps the same shape on both rendering paths, and a
+            // greyed × reads as "not closable" instead of swallowing clicks.
             Button(action: closePane) {
                 Image(systemName: "xmark")
                     .font(.system(size: 9, weight: .bold))
@@ -132,6 +142,7 @@ struct PanePlaceholder: View {
                     .frame(width: 16, height: 16)
             }
             .buttonStyle(.borderless)
+            .disabled(!actions.canClose())
             .help("Close pane")
         }
         .padding(.horizontal, 8)
@@ -201,8 +212,8 @@ struct PanePlaceholder: View {
         switch content {
         case .terminal(let terminalID):
             if terminal(for: terminalID)?.isClaudeResumable == true && transcriptFeatureEnabled {
-                let transcriptOpen = isTranscriptOpen(terminalID: terminalID)
-                Button(action: { toggleTranscriptPane(terminalID: terminalID) }) {
+                let transcriptOpen = actions.isTranscriptOpen(terminalID)
+                Button(action: { actions.toggleTranscript(content.paneID, terminalID) }) {
                     HStack(spacing: 2) {
                         Image(systemName: transcriptOpen ? "text.bubble.fill" : "text.bubble")
                         Text("Transcript")
@@ -249,25 +260,25 @@ struct PanePlaceholder: View {
     @ViewBuilder
     private var historyNavigation: some View {
         // A pane that hasn't navigated yet has no recorded history — but it
-        // always has its current content, so fall back to a single-entry
-        // history seeded with it rather than an empty one. Otherwise the
-        // search button would wrongly read as "nothing to show" for the
-        // common case of a freshly opened viewer slot.
-        let history = appState.paneHistories[content.paneID] ?? PaneHistory.seeded(with: content)
+        // always has its current content, so the action set falls back to a
+        // single-entry history seeded with it rather than an empty one.
+        // Otherwise the search button would wrongly read as "nothing to
+        // show" for the common case of a freshly opened viewer slot.
+        let history = actions.history(content.paneID, content)
 
         historySearchButton(history: history)
 
         historyButton(
             icon: "chevron.left",
             help: "Back",
-            action: { navigateHistory { $0.goBack() } }
+            action: { actions.historyStep(content.paneID, .back) }
         )
         .disabled(!history.canGoBack)
 
         historyButton(
             icon: "chevron.right",
             help: "Forward",
-            action: { navigateHistory { $0.goForward() } }
+            action: { actions.historyStep(content.paneID, .forward) }
         )
         .disabled(!history.canGoForward)
     }
@@ -295,7 +306,7 @@ struct PanePlaceholder: View {
         .disabled(!PaneHistoryPaletteButtonModel.isEnabled(entryCount: history.entries.count))
         .popover(isPresented: $showHistoryPalette, arrowEdge: .bottom) {
             PaneHistoryPaletteView(history: history) { index in
-                navigateHistory { $0.go(to: index) }
+                actions.historyStep(content.paneID, .to(index: index))
             }
         }
     }
@@ -321,19 +332,6 @@ struct PanePlaceholder: View {
         .help(help)
     }
 
-    /// Applies a history navigation to this slot: mutate the slot's history,
-    /// then swap the layout content in place keeping the pane UUID. Goes
-    /// through `replacingContent` directly — never through the routing
-    /// functions — so navigating does not push new history entries.
-    private func navigateHistory(_ step: (inout PaneHistory) -> PaneContent?) {
-        guard var history = appState.paneHistories[content.paneID],
-              let target = step(&history),
-              let updated = layout.replacingContent(at: content.paneID, with: target)
-        else { return }
-        appState.paneHistories[content.paneID] = history
-        layout = updated
-    }
-
     // MARK: - Pane Body
 
     @ViewBuilder
@@ -352,23 +350,13 @@ struct PanePlaceholder: View {
                 TableTranscriptPaneView(terminalID: terminalID, worktreeID: worktree.id)
                 .environment(\.openFilePreview, { path in
                     let newContent = PaneContent.codeViewer(id: UUID(), path: path)
-                    layout = layout.splitPane(id: content.paneID, direction: .horizontal, newContent: newContent)
+                    actions.openBeside(content.paneID, .horizontal, newContent)
                 })
                 .environment(\.openTranscriptOverlay) { itemID in
                     overlayCoordinator.open(terminalID: terminalID, itemID: itemID)
                 }
                 .environment(\.openTranscriptLink) { target in
-                    switch TranscriptLinkDestination.live(
-                        target, layout: layout, terminalID: terminalID
-                    ) {
-                    case .route(let result):
-                        if let replaced = result.replaced {
-                            appState.recordPaneReplacement(replaced)
-                        }
-                        layout = result.layout
-                    case .openInBrowser(let url):
-                        NSWorkspace.shared.open(url)
-                    }
+                    actions.openTranscriptLink(terminalID, target)
                 }
             } else {
                 transcriptDisabledPlaceholder
@@ -428,11 +416,7 @@ struct PanePlaceholder: View {
                     worktreePath: worktree.path,
                     remoteURL: appState.repos.first(where: { $0.id == worktree.repoID })?.remoteURL,
                     onFilePathClicked: { path in
-                        let result = routeFileClick(into: layout, terminalID: terminalID, path: path)
-                        if let replaced = result.replaced {
-                            appState.recordPaneReplacement(replaced)
-                        }
-                        layout = result.layout
+                        actions.routeFile(terminalID, path)
                     },
                     onTerminalNotification: { title, body in
                         debugLog("OSC 777: \(title) — \(body)")
@@ -497,7 +481,7 @@ struct PanePlaceholder: View {
                         )
                         .environment(\.openFilePreview, { path in
                             let newContent = PaneContent.codeViewer(id: UUID(), path: path)
-                            layout = layout.splitPane(id: content.paneID, direction: .horizontal, newContent: newContent)
+                            actions.openBeside(content.paneID, .horizontal, newContent)
                         })
                         .padding(16)
                     }
@@ -566,23 +550,7 @@ struct PanePlaceholder: View {
     // MARK: - Close
 
     private func closePane() {
-        // Delete the underlying resource for note panes
-        if case .note(let noteID) = content {
-            Task { await appState.deleteNote(noteID: noteID, worktreeID: worktree.id) }
-        }
-
-        appState.paneHistories.removeValue(forKey: content.paneID)
-
-        if let newLayout = layout.removePane(id: content.paneID) {
-            layout = newLayout
-        } else {
-            // Last pane in this tab — remove the entire tab
-            let worktreeID = worktree.id
-            if let tabIndex = appState.tabs[worktreeID]?.firstIndex(where: { $0.id == content.paneID || $0.content.paneID == content.paneID }) {
-                appState.tabs[worktreeID]?.remove(at: tabIndex)
-                appState.layouts.removeValue(forKey: content.paneID)
-            }
-        }
+        actions.close(content)
     }
 
     // MARK: - Webview Actions
@@ -599,27 +567,6 @@ struct PanePlaceholder: View {
             try? await Task.sleep(nanoseconds: 1_500_000_000)
             didCopyURL = false
         }
-    }
-
-    private func toggleTranscriptPane(terminalID: UUID) {
-        let result = toggleTranscript(into: layout, terminalID: terminalID, fromPaneID: content.paneID)
-        if let replaced = result.replaced {
-            appState.recordPaneReplacement(replaced)
-        }
-        if let removed = result.removedPaneID {
-            // Reused slot: restore its pre-transcript content in place instead
-            // of applying the removal layout.
-            if let previous = appState.popHistoryForRemovedPane(removed),
-               let restored = layout.replacingContent(at: removed, with: previous) {
-                layout = restored
-                return
-            }
-        }
-        layout = result.layout
-    }
-
-    private func isTranscriptOpen(terminalID: UUID) -> Bool {
-        layout.firstPaneID(where: { isLiveTranscriptPane($0, for: terminalID) }) != nil
     }
 }
 

@@ -262,6 +262,21 @@ struct SingleWorktreeView: View {
                     await appState.createTerminal(worktreeID: worktreeID)
                 }
             }
+            // Phase 3b: seed the daemon panel-surface mirror for this
+            // worktree — nothing else calls `panel.get` for rendering. Keyed
+            // on the effective switch AND the connection so it re-runs when
+            // capabilities land (flipping the switch false → true) and again
+            // after a reconnect, when the daemon may have moved on while the
+            // app was away. Inert with the flag off: the guard skips it and
+            // `loadPanelSurface` would refuse to fetch anyway.
+            .task(id: PanelSurfaceLoadKey(
+                worktreeID: worktreeID,
+                active: appState.daemonManagedPanelsActive,
+                connected: appState.isConnected
+            )) {
+                guard appState.daemonManagedPanelsActive, appState.isConnected else { return }
+                await appState.loadPanelSurface(worktreeID: worktreeID)
+            }
             .task(id: worktreeTabs.isEmpty) {
                 // When a non-main worktree has no tabs, populate session
                 // history so the empty state can show it. `.main` worktrees
@@ -286,18 +301,34 @@ struct SingleWorktreeView: View {
         if appState.historyActiveWorktrees.contains(worktreeID) {
             HistoryPaneView(worktreeID: worktreeID)
         } else if let tab = activeTab, let worktree {
-            let layoutBinding = Binding<LayoutNode>(
-                get: { appState.layouts[tab.id] ?? .pane(tab.content) },
-                set: { appState.layouts[tab.id] = $0 }
-            )
+            // Phase 3b: with `enableDaemonManagedPanels` on AND a surface
+            // actually mirrored for this tab, render from the daemon. The
+            // mirror starts empty and fills asynchronously (the
+            // `PanelSurfaceLoadKey` task on the body above), so "flag on,
+            // nothing loaded yet" deliberately falls through to the legacy
+            // path rather than flashing blank.
+            switch appState.workspaceRenderPath(worktreeID: worktree.id, tabID: tab.id) {
+            case .daemonSurface(let surface):
+                PanelSurfaceWorkspaceView(surface: surface, worktree: worktree)
+                    .id(tab.id) // Force new view hierarchy when switching tabs
+            case .legacy:
+                let layoutBinding = Binding<LayoutNode>(
+                    get: { appState.layouts[tab.id] ?? .pane(tab.content) },
+                    set: { appState.layouts[tab.id] = $0 }
+                )
 
-            SplitLayoutView(
-                node: layoutBinding.wrappedValue,
-                worktree: worktree,
-                tabID: tab.id,
-                layout: layoutBinding
-            )
-            .id(tab.id) // Force new view hierarchy when switching tabs
+                SplitLayoutView(
+                    node: layoutBinding.wrappedValue,
+                    worktree: worktree,
+                    tabID: tab.id,
+                    actions: .legacy(
+                        layout: layoutBinding,
+                        appState: appState,
+                        worktreeID: worktree.id
+                    )
+                )
+                .id(tab.id) // Force new view hierarchy when switching tabs
+            }
         } else {
             switch (appState.historyLoadStates[worktreeID] ?? .idle).emptyTabsContent {
             case .history:
@@ -717,11 +748,16 @@ private struct MultiWorktreeCell: View {
                     appState.gridLayouts[worktreeID] = newLayout
                 }
             )
+            // Grid mode stays on the legacy app-side layout tree.
             PanePlaceholder(
                 content: .terminal(terminalID: terminal.id),
                 worktree: worktree,
                 tabID: activeTab?.id,
-                layout: layoutBinding
+                actions: .legacy(
+                    layout: layoutBinding,
+                    appState: appState,
+                    worktreeID: worktree.id
+                )
             )
         } else {
             ZStack {
