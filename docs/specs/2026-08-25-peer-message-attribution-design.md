@@ -143,8 +143,52 @@ markdown body. A peer therefore can neither author its own attribution nor mint
 a worktree-navigation link inside its message. This is the reason the design
 puts attribution in chrome rather than prepending it to the text.
 
-The body renders `text`. Peer bubbles take a tint distinct from the user's own
-prompts so a received message never reads as something the reader said.
+The body renders `text`.
+
+Adding a header changes the bubble's height math. The table-backed transcript
+computes row height as summed block heights plus fixed chrome, on the stated
+assumption that a bubble carries no role or timestamp line, and its measurer and
+its renderer must agree or heights drift. The header's height therefore enters
+`rowHeight` and the measure path together with the render path, in one change,
+for peer rows only.
+
+### Peer bubbles are amber
+
+A user prompt tints its bubble with the system accent color at 15% alpha. A peer
+message takes the same treatment in amber: the accent tint says *you*, and amber
+says *not you*, which is exactly the distinction a reader needs to make at a
+glance.
+
+The amber is the pair already established elsewhere in the app for the
+`attention` semantic — `#B7791F` on light, GitHub's `attention.fg` `#D29922` on
+dark — resolved per appearance through `adaptiveColor(light:dark:)`, at the same
+15% alpha the accent tint uses. Reusing it keeps one amber in the product rather
+than two that nearly match.
+
+Legibility is a requirement rather than an intention, and a tint at 15% alpha
+composites against whatever sits behind it, so it is checked against the
+composited result rather than the swatch. Composited over the pane background,
+the bubble resolves to `#F4EBDD` on light and `#39301F` on dark. Measured WCAG
+contrast on those:
+
+- **Body text** — 12.8:1 light, 10.7:1 dark. Clears AA for normal text with room
+  to spare, in both appearances.
+- **Inline code**, the existing `chatBubbleInlineCode` pair — 5.8:1 light, 6.3:1
+  dark. Clears AA.
+- **Link and secondary text** — 3.3:1 to 3.6:1, below the 4.5:1 floor.
+
+That last shortfall is not created by the amber. The same two colors measure
+3.3:1 to 3.9:1 on today's accent-tinted user bubble, so link text is already
+below AA on every bubble in the transcript, and amber lands within a tenth of
+the existing figure. The tint is therefore not the thing to change: raising link
+contrast means moving the link color across all bubbles, which is a separate
+piece of work on a pre-existing condition and is out of scope here.
+
+So the requirement this design takes on is that body text and inline code clear
+AA on amber, and that link and secondary text are no worse on a peer bubble than
+on a user bubble. Both are asserted on computed ratios in a test rather than
+eyeballed, because a later change to the tint or to a foreground color would
+otherwise degrade contrast silently.
 
 **The detail overlay** labels the item with the sender rather than `"User"`,
 shows `text` as the body, and reveals `deliveredPayload` behind a disclosure.
@@ -222,3 +266,11 @@ placeholders before landing: substitute values, never shape.
   last message is a peer message no longer surfaces envelope text.
 - An ordinary typed user prompt still parses as `.userPrompt`, and a row with no
   `origin` is untouched.
+- The amber tint composited over the pane background clears WCAG AA 4.5:1 for
+  body text and for inline code, in both light and dark appearance.
+- Link and secondary text on a peer bubble are no worse than on a user bubble,
+  compared as computed ratios so the comparison survives a change to either
+  tint.
+- A peer row's measured height equals its rendered height with the sender header
+  present, in both render sites — the invariant the height math already depends
+  on, extended to the one item kind that now has a header.
