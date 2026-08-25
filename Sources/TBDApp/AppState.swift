@@ -3292,6 +3292,18 @@ final class AppState: ObservableObject {
     /// is the pure form of the gate the two placements disagree about.
     static let chevronAfterProjectNameKey = "chevronAfterProjectName"
 
+    /// UserDefaults key for whether the sidebar's Scratch section is
+    /// expanded. A project's equivalent is `Repo.expanded`, which the daemon
+    /// owns because a repo is a daemon-side record; a scratch section is
+    /// app-side chrome over a filter of worktrees, with no row of its own to
+    /// carry the bit, so it lives here. Default expanded — collapsing is a
+    /// gesture the user makes, never the state they are handed.
+    static let scratchSectionExpandedKey = "scratchSectionExpanded"
+
+    /// The one default for `scratchSectionExpandedKey`, for the reason
+    /// spelled out on `enableTranscriptDefault`.
+    static let scratchSectionExpandedDefault = true
+
     /// The one default for `chevronAfterProjectNameKey`. Every read site — the
     /// Settings toggle and `RepoSectionView`'s `@AppStorage` — must spell the
     /// default with this constant rather than a bare literal, for the reason

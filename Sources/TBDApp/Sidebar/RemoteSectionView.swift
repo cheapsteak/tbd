@@ -23,6 +23,10 @@ private let remoteRowLogger = Logger(subsystem: "com.tbd.app", category: "remote
 /// registered — see `AppState.remoteSectionVisible(providers:)`.
 struct RemoteSectionView: View {
     @EnvironmentObject var appState: AppState
+    /// Read only to place the session rows under their provider's title —
+    /// see `SidebarHeaderMetrics.childRowLeadingInset`.
+    @AppStorage(AppState.chevronAfterProjectNameKey)
+    private var chevronAfterProjectName: Bool = AppState.chevronAfterProjectNameDefault
 
     var body: some View {
         let knownRepoIDs = RemoteSectionView.knownRepoIDs(repos: appState.repos, repoFilter: appState.repoFilter)
@@ -39,7 +43,12 @@ struct RemoteSectionView: View {
             RemoteProviderHeaderRow(provider: provider)
             ForEach(RemoteSectionView.sessions(in: appState.remoteSessions, forProvider: provider.config.name, knownRepoIDs: knownRepoIDs)) { session in
                 RemoteSessionRowView(session: session)
-                    .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
+                    .listRowInsets(EdgeInsets(
+                        top: 0,
+                        leading: SidebarHeaderMetrics.childRowLeadingInset(
+                            chevronAfterProjectName: chevronAfterProjectName),
+                        bottom: 0,
+                        trailing: 0))
                     .listRowSeparator(.hidden)
                     .listRowBackground(Color.clear)
                     .tag(session.id)
@@ -276,7 +285,8 @@ struct RemoteProviderHeaderRow: View {
             }
         }
         .frame(minHeight: 22, alignment: .bottom)
-        .listRowInsets(EdgeInsets(top: 0, leading: -2, bottom: 0, trailing: 0))
+        .listRowInsets(EdgeInsets(top: 0, leading: SidebarHeaderMetrics.headerRowLeadingInset,
+                                  bottom: 0, trailing: 0))
         .listRowSeparator(.hidden)
         .listRowBackground(
             appState.selectedRemoteProvider == provider.config.name

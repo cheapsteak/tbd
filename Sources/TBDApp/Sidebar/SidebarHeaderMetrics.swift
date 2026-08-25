@@ -22,6 +22,15 @@ enum SidebarHeaderMetrics {
     /// name read as one label.
     static let nameLeadingClawback: CGFloat = -2
 
+    /// The `listRowInsets` leading every section HEADER row carries — the
+    /// left edge of a section's chrome, chevron included.
+    static let headerRowLeadingInset: CGFloat = -2
+
+    /// How far a child row's content sits past its section's title, so the
+    /// rows under a title read as belonging to it. Constant across the
+    /// chevron placements: what moves is the title, and the children follow.
+    static let childRowIndent: CGFloat = 14
+
     /// How far a section title sits from its row's leading edge.
     ///
     /// With the chevron before the project name (the default), a project
@@ -33,5 +42,23 @@ enum SidebarHeaderMetrics {
         chevronAfterProjectName
             ? 0
             : chevronColumnWidth + headerSpacing + nameLeadingClawback
+    }
+
+    /// The `listRowInsets` leading for the rows under a section title —
+    /// worktrees, scratch pads, remote sessions. Derived from the title's own
+    /// position so children track it: with the chevron before the project
+    /// name the titles sit a chevron column in, and the rows come with them.
+    static func childRowLeadingInset(chevronAfterProjectName: Bool) -> CGFloat {
+        headerRowLeadingInset
+            + titleLeadingInset(chevronAfterProjectName: chevronAfterProjectName)
+            + childRowIndent
+    }
+
+    /// Whether a section's disclosure chevron is mounted at all. Before the
+    /// title it always is, so the expanded/collapsed state reads without a
+    /// pointer; after the title it appears only once `revealed` — the row's
+    /// hover gate, shared with its `+`.
+    static func chevronMounted(afterTitle: Bool, revealed: Bool) -> Bool {
+        !afterTitle || revealed
     }
 }

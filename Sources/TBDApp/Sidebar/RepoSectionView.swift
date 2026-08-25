@@ -174,7 +174,8 @@ struct RepoSectionView: View {
         } message: {
             Text(removeConfirmMessage)
         }
-        .listRowInsets(EdgeInsets(top: 0, leading: -2, bottom: 0, trailing: 0))
+        .listRowInsets(EdgeInsets(top: 0, leading: SidebarHeaderMetrics.headerRowLeadingInset,
+                                  bottom: 0, trailing: 0))
         .listRowSeparator(.hidden)
         .listRowBackground(Color.clear)
         .tag(repo.id)
@@ -212,89 +213,34 @@ struct RepoSectionView: View {
     /// calling the real gate matters more here than callability from a
     /// nonisolated test.
     static func chevronMounted(afterName: Bool, hovered: Bool, menuOpen: Bool) -> Bool {
-        guard afterName else { return true }
-        return HoverMenuModel.shouldShowPlus(hovered: hovered, menuOpen: menuOpen)
-    }
-
-    private var chevronIsMounted: Bool {
-        RepoSectionView.chevronMounted(
-            afterName: chevronAfterProjectName,
-            hovered: isSectionHovered,
-            menuOpen: newWorktreeMenu.isOpen
+        SidebarHeaderMetrics.chevronMounted(
+            afterTitle: afterName,
+            revealed: HoverMenuModel.shouldShowPlus(hovered: hovered, menuOpen: menuOpen)
         )
     }
 
-    /// The disclosure chevron, in whichever of its two presentations
-    /// `AppState.chevronAfterProjectNameKey` selects.
-    ///
-    /// Before the name (the default) it is always mounted and plainly styled,
-    /// so the glyph sits in the same column on every row and reads the
-    /// expanded/collapsed state at a glance without a pointer.
-    ///
-    /// After the name it trails the title and takes the `+`'s hover wash and
-    /// hover gate, so the two affordances appear and vanish together and the
-    /// resting sidebar is quieter. That gate is deliberate and was signed off
-    /// by the maintainer: it costs the at-a-glance state read and pointer-free
-    /// reachability, because `isSectionHovered` is driven only by `.onHover`,
-    /// so the button is absent from the focus tree until a pointer enters the
-    /// section and Tab/Full Keyboard Access skips it. The accepted answer for
-    /// keyboard-only users is the header's ungated context-menu
-    /// Collapse/Expand item (below), which performs the same action — and the
-    /// setting itself, whose default placement is never gated. So do not
-    /// "fix" the trailing placement by always-mounting it; that reverses a
-    /// decision someone made on purpose.
-    ///
-    /// The unmounted branch keeps the 18pt square so the "missing" badge
-    /// doesn't slide sideways as the chevron comes and goes. The
-    /// `.accessibilityLabel` serves VoiceOver in both placements — the glyph
-    /// carries no text of its own.
-    @ViewBuilder
+    /// This row's disclosure chevron. Everything about how it looks and when
+    /// it is mounted lives in `SectionDisclosureChevron`, which the Scratch
+    /// section wears too; what a project row adds is the dimming of a
+    /// `.missing` repo and the hover edge that dims its worktree rows.
     private var chevronButton: some View {
-        Group {
-            if chevronIsMounted {
-                if chevronAfterProjectName {
-                    chevronToggle.buttonStyle(HoverPressButtonStyle())
-                } else {
-                    chevronToggle.buttonStyle(.plain)
-                }
-            } else {
-                Color.clear
+        SectionDisclosureChevron(
+            isExpanded: repo.expanded,
+            afterTitle: chevronAfterProjectName,
+            isMounted: RepoSectionView.chevronMounted(
+                afterName: chevronAfterProjectName,
+                hovered: isSectionHovered,
+                menuOpen: newWorktreeMenu.isOpen
+            ),
+            accessibilityLabel: repo.expanded
+                ? "Collapse \(repo.displayName)"
+                : "Expand \(repo.displayName)",
+            glyphStyle: chevronForegroundStyle,
+            onHoverChange: { isChevronHovered = $0 },
+            toggle: {
+                Task { await appState.setRepoExpanded(id: repo.id, expanded: !repo.expanded) }
             }
-        }
-        .frame(width: SidebarHeaderMetrics.chevronColumnWidth,
-               height: SidebarHeaderMetrics.chevronColumnWidth)
-        // The 18pt-square hit target centers the glyph, leaving ~4pt of slack
-        // on each side. Trailing the name, trim the leading slack so the
-        // chevron reads as attached to the name rather than floating after it,
-        // and nudge down so it sits on the name's optical baseline rather than
-        // its cap-height center. Both are layout-neutral for the hit target,
-        // which rides along with the glyph. Leading the name, the slack is
-        // what separates the glyph from the window edge, so it stays.
-        .padding(.leading, chevronAfterProjectName ? -3 : 0)
-        .offset(y: chevronAfterProjectName ? 2 : 0)
-    }
-
-    /// The chevron's button and label without a button style — `chevronButton`
-    /// applies the style its placement calls for. The glyph is a point smaller
-    /// trailing the name so it doesn't outweigh the title it follows.
-    @ViewBuilder
-    private var chevronToggle: some View {
-        Button {
-            Task { await appState.setRepoExpanded(id: repo.id, expanded: !repo.expanded) }
-        } label: {
-            Image(systemName: repo.expanded ? "chevron.down" : "chevron.right")
-                .font(.system(size: chevronAfterProjectName ? 10 : 11))
-                // Applied to the glyph, not the button, so it wins over
-                // `HoverPressButtonStyle`'s blanket `.secondary` and a
-                // missing repo still renders dimmed.
-                .foregroundStyle(chevronForegroundStyle)
-                .frame(width: SidebarHeaderMetrics.chevronColumnWidth,
-                       height: SidebarHeaderMetrics.chevronColumnWidth)
-                .contentShape(Rectangle())
-        }
-        .accessibilityLabel(repo.expanded ? "Collapse \(repo.displayName)" : "Expand \(repo.displayName)")
-        .onHover { isChevronHovered = $0 }
-        .help(repo.expanded ? "Collapse" : "Expand")
+        )
     }
 
     @ViewBuilder
@@ -380,6 +326,17 @@ struct RepoSectionView: View {
         .frame(width: 20, height: 20)
     }
 
+    /// Insets for every row under this section's title, so the rows track
+    /// the title's own column rather than a hardcoded number of their own.
+    private var childRowInsets: EdgeInsets {
+        EdgeInsets(
+            top: 0,
+            leading: SidebarHeaderMetrics.childRowLeadingInset(
+                chevronAfterProjectName: chevronAfterProjectName),
+            bottom: 0,
+            trailing: 0)
+    }
+
     /// The expanded repo's rows: main worktree, top-level worktree subtree
     /// (with drag reorder), then matched remote sessions — extracted out of
     /// `body` alongside `headerRow`. Pure restructuring: identical content,
@@ -392,7 +349,7 @@ struct RepoSectionView: View {
                 .background(Color.white.opacity(0.0001))
                 .opacity(isChevronHovered ? 0.7 : 1.0)
                 .onHover { onSectionHoverChange($0) }
-                .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
+                .listRowInsets(childRowInsets)
                 .listRowSeparator(.hidden)
                 .listRowBackground(Color.clear)
                 .tag(main.id)
@@ -419,7 +376,7 @@ struct RepoSectionView: View {
             RemoteSessionRowView(session: session)
                 .opacity(isChevronHovered ? 0.7 : 1.0)
                 .onHover { onSectionHoverChange($0) }
-                .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
+                .listRowInsets(childRowInsets)
                 .listRowSeparator(.hidden)
                 .listRowBackground(Color.clear)
                 .tag(session.id)
