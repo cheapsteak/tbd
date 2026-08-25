@@ -78,13 +78,46 @@ struct RepoSectionView: View {
     /// == repo.id`) that do NOT already own a worktree row in this section,
     /// rendered after every local worktree. See
     /// `RepoSectionView.matchedRemoteSessions` for the filter/sort rule.
+    ///
+    /// Memoized on the two arrays it derives from, because this property is
+    /// evaluated far more often than either of them changes: terminal output
+    /// flushes the SwiftUI graph continuously, and each evaluation would
+    /// otherwise re-run the filter and the date-parsing sort. A hit costs one
+    /// pointer comparison per array — `Array`'s `==` short-circuits on buffer
+    /// identity, and both arrays are handed out unchanged by `AppState` while
+    /// nothing has mutated them.
     var matchedRemoteSessions: [RemoteSessionInfo] {
-        RepoSectionView.matchedRemoteSessions(
-            appState.remoteSessions,
+        let sessions = appState.remoteSessions
+        let sectionWorktrees = appState.worktrees[repo.id] ?? []
+        if let cached = RepoSectionView.matchedRemoteSessionsCache[repo.id],
+           cached.sessions == sessions,
+           cached.worktrees == sectionWorktrees {
+            return cached.result
+        }
+        let result = RepoSectionView.matchedRemoteSessions(
+            sessions,
             repoID: repo.id,
-            worktrees: appState.worktrees[repo.id] ?? []
+            worktrees: sectionWorktrees
         )
+        RepoSectionView.matchedRemoteSessionsCache[repo.id] =
+            (sessions: sessions, worktrees: sectionWorktrees, result: result)
+        return result
     }
+
+    /// Backing store for the memoization above: one entry per repo section
+    /// that has rendered, replaced in place. It is bounded by the number of
+    /// repos, and each entry holds only arrays `AppState` already owns.
+    ///
+    /// A plain `static var` rather than `@State`: it is written from inside a
+    /// `body` evaluation, and SwiftUI state written during a view update
+    /// faults with "Modifying state during view update" (the same hazard that
+    /// keeps `AppState`'s derived caches off `@Published`). `RepoSectionView`
+    /// is inferred `@MainActor` from `View`, so this storage is
+    /// main-actor-isolated and race-free; the `nonisolated` statics below
+    /// deliberately never touch it, which keeps them callable — and pure —
+    /// from a plain test context.
+    @MainActor private static var matchedRemoteSessionsCache:
+        [UUID: (sessions: [RemoteSessionInfo], worktrees: [Worktree], result: [RemoteSessionInfo])] = [:]
 
     private var activeWorktreeCount: Int {
         (appState.worktrees[repo.id] ?? [])
@@ -420,26 +453,40 @@ struct RepoSectionView: View {
         }
     }
 
+    /// Parses the fractional-seconds ISO 8601 profile
+    /// (`2026-07-24T18:02:11.123Z`). Shared rather than built per call:
+    /// `ISO8601DateFormatter.init` bottoms out in ICU's `udat_open`, and
+    /// `isOrderedByCreation` parses both of its operands on every comparison.
+    ///
+    /// `nonisolated(unsafe)`, the pattern `DiffSyntaxHighlighter`'s shared
+    /// highlighters use, keeps it reachable from `parsedCreatedAt` — which is
+    /// `nonisolated` so a plain test context can call it without hopping to
+    /// `RepoSectionView`'s inferred `@MainActor` isolation. `formatOptions` is
+    /// set once here and never mutated afterwards, and a configured
+    /// `ISO8601DateFormatter` is safe to read from concurrently.
+    nonisolated(unsafe) private static let fractionalSecondsFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    /// Parses the whole-second ISO 8601 profile (`2026-07-24T18:00:00Z`),
+    /// shared for the same reason as `fractionalSecondsFormatter`. Two
+    /// formatters and not one: `ISO8601DateFormatter` does not accept both
+    /// profiles in a single `formatOptions` value.
+    nonisolated(unsafe) private static let wholeSecondsFormatter = ISO8601DateFormatter()
+
     nonisolated static func parsedCreatedAt(_ raw: String?) -> Date? {
         guard let raw else { return nil }
-        // A fresh formatter per call (rather than a cached `static let`)
-        // sidesteps `RepoSectionView`'s inferred `@MainActor` isolation
-        // (from being a `View`) so this stays callable from a plain
-        // `nonisolated` test context — session counts are small enough that
-        // the allocation cost here is a non-issue.
-        //
         // `docs/remote-provider-contract.md` shows a whole-second
         // `created_at` example but never pins a profile, so a conforming
         // provider can legally emit fractional seconds
         // (`2026-07-24T18:02:11.123Z`) — a default-options formatter rejects
         // those outright, sorting every such row as undated. Try
         // `.withFractionalSeconds` first, then fall back to the plain
-        // whole-second profile — `ISO8601DateFormatter` does not accept both
-        // in one `formatOptions` value.
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = fractional.date(from: raw) { return date }
-        return ISO8601DateFormatter().date(from: raw)
+        // whole-second profile.
+        if let date = RepoSectionView.fractionalSecondsFormatter.date(from: raw) { return date }
+        return RepoSectionView.wholeSecondsFormatter.date(from: raw)
     }
 
     // MARK: - The cloud gate — pure, view-free forms of what the two owned
