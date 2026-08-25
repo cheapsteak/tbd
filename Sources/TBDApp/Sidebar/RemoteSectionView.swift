@@ -176,6 +176,12 @@ struct RemoteProviderHeaderRow: View {
     /// sheet. Presented from the ROW, not from inside the popover — a
     /// popover can't host a sheet of its own.
     @State private var runningRemediation: RemoteRemediationRun?
+    /// Read only to place the title, for the same reason as
+    /// `ScratchSectionView`'s copy: this header has no chevron, and a project
+    /// row's chevron placement decides which column every section title sits
+    /// in. See `SidebarHeaderMetrics.titleLeadingInset`.
+    @AppStorage(AppState.chevronAfterProjectNameKey)
+    private var chevronAfterProjectName: Bool = AppState.chevronAfterProjectNameDefault
 
     private var issueSummary: String? {
         RemoteProviderStatusPresentation.issueSummary(provider)
@@ -214,10 +220,12 @@ struct RemoteProviderHeaderRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: -1) {
-            HStack(spacing: 4) {
+            HStack(spacing: SidebarHeaderMetrics.headerSpacing) {
                 // The name spans the row's free width instead of a trailing
                 // `Spacer()`, so the whole empty stretch is the desk's hit
-                // target rather than dead chrome.
+                // target rather than dead chrome. The title inset is padding
+                // on the button, not on the label inside it, so the indent
+                // doesn't come out of the desk's hit target.
                 Button {
                     appState.selectRemoteProvider(provider.config.name)
                 } label: {
@@ -233,6 +241,8 @@ struct RemoteProviderHeaderRow: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .padding(.leading, SidebarHeaderMetrics.titleLeadingInset(
+                    chevronAfterProjectName: chevronAfterProjectName))
                 .accessibilityLabel("Open \(provider.describe?.name ?? provider.config.name) provider desk")
                 healthSuffix
                 if canCreate {
@@ -258,6 +268,10 @@ struct RemoteProviderHeaderRow: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
+                    // Same inset as the name above, so the summary keeps
+                    // hanging under it rather than under the chevron column.
+                    .padding(.leading, SidebarHeaderMetrics.titleLeadingInset(
+                        chevronAfterProjectName: chevronAfterProjectName))
                     .help(issueSummary)
             }
         }

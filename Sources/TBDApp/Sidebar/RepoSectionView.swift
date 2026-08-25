@@ -186,7 +186,7 @@ struct RepoSectionView: View {
     /// `headerRow`'s doc comment.
     @ViewBuilder
     private var headerHStack: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: SidebarHeaderMetrics.headerSpacing) {
             if !chevronAfterProjectName {
                 chevronButton
             }
@@ -261,7 +261,8 @@ struct RepoSectionView: View {
                 Color.clear
             }
         }
-        .frame(width: 18, height: 18)
+        .frame(width: SidebarHeaderMetrics.chevronColumnWidth,
+               height: SidebarHeaderMetrics.chevronColumnWidth)
         // The 18pt-square hit target centers the glyph, leaving ~4pt of slack
         // on each side. Trailing the name, trim the leading slack so the
         // chevron reads as attached to the name rather than floating after it,
@@ -287,7 +288,8 @@ struct RepoSectionView: View {
                 // `HoverPressButtonStyle`'s blanket `.secondary` and a
                 // missing repo still renders dimmed.
                 .foregroundStyle(chevronForegroundStyle)
-                .frame(width: 18, height: 18)
+                .frame(width: SidebarHeaderMetrics.chevronColumnWidth,
+                       height: SidebarHeaderMetrics.chevronColumnWidth)
                 .contentShape(Rectangle())
         }
         .accessibilityLabel(repo.expanded ? "Collapse \(repo.displayName)" : "Expand \(repo.displayName)")
@@ -314,8 +316,10 @@ struct RepoSectionView: View {
         }
         // Claw back the chevron's trailing slack when it leads the name, so
         // the pair reads as one label. Nothing to claw back when the chevron
-        // trails instead — see `chevronButton`'s own leading padding.
-        .padding(.leading, chevronAfterProjectName ? 0 : -2)
+        // trails instead — see `chevronButton`'s own leading padding. The
+        // constant lives in `SidebarHeaderMetrics` because the chevron-less
+        // section headers derive their own title inset from it.
+        .padding(.leading, chevronAfterProjectName ? 0 : SidebarHeaderMetrics.nameLeadingClawback)
     }
 
     @ViewBuilder

@@ -9,12 +9,19 @@ struct ScratchSectionView: View {
     @EnvironmentObject var appState: AppState
     @State private var isHeaderHovered = false
     @State private var showingScratchInstructions = false
+    /// Read only to place the title: this section has no chevron of its own,
+    /// but a project row does, and its position decides which column every
+    /// section title sits in. See `SidebarHeaderMetrics.titleLeadingInset`.
+    @AppStorage(AppState.chevronAfterProjectNameKey)
+    private var chevronAfterProjectName: Bool = AppState.chevronAfterProjectNameDefault
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: SidebarHeaderMetrics.headerSpacing) {
             Text(AppState.scratchSectionLabel)
                 .font(.headline)
                 .foregroundStyle(appState.selectedScratchSection ? .primary : .secondary)
+                .padding(.leading, SidebarHeaderMetrics.titleLeadingInset(
+                    chevronAfterProjectName: chevronAfterProjectName))
             Spacer()
             if isHeaderHovered {
                 SectionHeaderPlusButton(help: "New scratch space", action: { appState.createScratch() })
