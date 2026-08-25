@@ -356,17 +356,7 @@ struct PanePlaceholder: View {
                     overlayCoordinator.open(terminalID: terminalID, itemID: itemID)
                 }
                 .environment(\.openTranscriptLink) { target in
-                    switch TranscriptLinkDestination.live(
-                        target, layout: layout, terminalID: terminalID
-                    ) {
-                    case .route(let result):
-                        if let replaced = result.replaced {
-                            appState.recordPaneReplacement(replaced)
-                        }
-                        layout = result.layout
-                    case .openInBrowser(let url):
-                        NSWorkspace.shared.open(url)
-                    }
+                    actions.openTranscriptLink(terminalID, target)
                 }
             } else {
                 transcriptDisabledPlaceholder

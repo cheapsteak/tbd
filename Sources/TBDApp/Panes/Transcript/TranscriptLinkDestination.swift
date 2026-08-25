@@ -25,12 +25,35 @@ enum TranscriptLinkDestination {
         case openInBrowser(URL)
     }
 
+    /// The daemon-managed panel path's decision (Phase 3b).
+    ///
+    /// Same two outcomes as `live`, but the file case names a
+    /// `PanelOperation` instead of a rewritten `LayoutNode`: that path has no
+    /// app-side tree to route into, and rebuilding one would be the rejected
+    /// adapter bridge. `.automatic` is the reducer's "reuse the first viewer
+    /// panel, else split right of the primary anchor" contract — the same
+    /// intent `routeFileClick` expresses by hand for `live`. The web case is
+    /// layout-independent and therefore identical on both paths.
+    enum DaemonManaged: Equatable {
+        case apply(PanelOperation)
+        case openInBrowser(URL)
+    }
+
     static func live(
         _ target: TranscriptLinkTarget, layout: LayoutNode, terminalID: UUID
     ) -> Live {
         switch target {
         case .file(let path):
             return .route(routeFileClick(into: layout, terminalID: terminalID, path: path))
+        case .web(let url):
+            return .openInBrowser(url)
+        }
+    }
+
+    static func daemonManaged(_ target: TranscriptLinkTarget) -> DaemonManaged {
+        switch target {
+        case .file(let path):
+            return .apply(.open(content: .file(FileReference(path: path)), placement: .automatic))
         case .web(let url):
             return .openInBrowser(url)
         }

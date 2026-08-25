@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import TBDShared
 import os
@@ -124,7 +125,7 @@ enum PanelSurfaceLeaf {
 /// Renders one `WorkspaceTabSurface` from the mirror.
 struct PanelSurfaceWorkspaceView: View {
     let surface: WorkspaceTabSurface
-    let worktree: Worktree
+    let worktree: LocalWorktree
 
     var body: some View {
         PanelSurfaceNodeView(node: surface.layout, surface: surface, worktree: worktree)
@@ -136,7 +137,7 @@ struct PanelSurfaceWorkspaceView: View {
 private struct PanelSurfaceNodeView: View {
     let node: PanelLayoutNode
     let surface: WorkspaceTabSurface
-    let worktree: Worktree
+    let worktree: LocalWorktree
     @EnvironmentObject var appState: AppState
 
     var body: some View {
@@ -186,7 +187,7 @@ private struct PanelSurfaceNodeView: View {
 private struct PanelSurfaceSplitContainer: View {
     let split: SplitNode
     let surface: WorkspaceTabSurface
-    let worktree: Worktree
+    let worktree: LocalWorktree
     let resize: @MainActor (UUID, [CGFloat]) -> Void
 
     /// Local mutable copy of ratios used during drag operations. Nothing
@@ -366,6 +367,19 @@ extension PaneActions {
                 // else split right of the primary anchor" contract — the same
                 // routing the legacy `routeFileClick` did by hand.
                 fire(.open(content: .file(FileReference(path: path)), placement: .automatic))
+            },
+            openTranscriptLink: { _, target in
+                // The file case cannot reuse `TranscriptLinkDestination.live`:
+                // it decides by rewriting a `LayoutNode`, and this path has
+                // none. `.daemonManaged` makes the same choice in panel
+                // vocabulary; the browser case is layout-independent and
+                // therefore byte-identical to the legacy set's.
+                switch TranscriptLinkDestination.daemonManaged(target) {
+                case .apply(let operation):
+                    fire(operation)
+                case .openInBrowser(let url):
+                    NSWorkspace.shared.open(url)
+                }
             },
             toggleTranscript: { _, terminalID in
                 if let openPanelID = openTranscriptPanelID(terminalID: terminalID) {

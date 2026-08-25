@@ -341,6 +341,69 @@ struct PanelSurfaceRenderBranchTests {
         }
     }
 
+    @Test("a transcript link to a file becomes an .automatic file open")
+    func openTranscriptLinkFileMapsToAutomaticOpen() async throws {
+        try await Self.makeState(flagEnabled: true) { state in
+            let worktreeID = UUID()
+            let tabID = UUID()
+            let terminalID = UUID()
+            let panelID = UUID()
+            let surface = Self.surface(
+                tabID: tabID, worktreeID: worktreeID, terminalID: terminalID,
+                panelID: panelID, splitID: UUID(),
+                panelContent: .transcript(terminalID: terminalID))
+            state.panelSurfaces[worktreeID] = PanelGetResult(tabs: [surface], activeTabID: tabID)
+            let actions = PaneActions.daemonManaged(
+                appState: state, worktreeID: worktreeID, tabID: tabID, anchor: .panel(panelID))
+
+            let envelope = try Self.single(await Self.collect(state, committing: surface) {
+                actions.openTranscriptLink(terminalID, .file("/tmp/linked.swift"))
+            })
+
+            // Same destination the legacy path reaches by rewriting the tree:
+            // reuse a viewer slot, else split off the primary anchor.
+            #expect(envelope.operation == .open(
+                content: .file(FileReference(path: "/tmp/linked.swift")), placement: .automatic))
+        }
+    }
+
+    // The `.web` arm of `openTranscriptLink` is covered as a VALUE in
+    // `TranscriptLinkPaneRoutingTests` (`daemonManaged(.web:) ==
+    // .openInBrowser`), not by firing the closure: firing it calls
+    // `NSWorkspace.shared.open`, and a unit test must not launch a browser.
+    // Since both action sets switch exhaustively over that decision, proving
+    // a URL decides `.openInBrowser` proves it never becomes a panel
+    // operation or a layout rewrite.
+
+    @Test("the legacy path routes a transcript file link into its own tree")
+    func legacyOpenTranscriptLinkRoutesIntoTheTree() async {
+        await Self.makeState(flagEnabled: false) { state in
+            let terminalID = UUID()
+            let transcriptID = UUID()
+            var tree = LayoutNode.split(
+                id: UUID(), direction: .horizontal,
+                children: [
+                    .pane(.terminal(terminalID: terminalID)),
+                    .pane(.liveTranscript(id: transcriptID, terminalID: terminalID)),
+                ],
+                ratios: [0.5, 0.5])
+            let binding = Binding(get: { tree }, set: { tree = $0 })
+            let actions = PaneActions.legacy(
+                layout: binding, appState: state, worktreeID: UUID())
+
+            actions.openTranscriptLink(terminalID, .file("/tmp/linked.swift"))
+
+            // Byte-for-byte what the inline body in `PanePlaceholder` did
+            // before the seam: the transcript slot is reused for the file,
+            // keeping its pane identity, and the swap lands in that slot's
+            // history via `recordPaneReplacement`.
+            let incoming = PaneContent.codeViewer(id: transcriptID, path: "/tmp/linked.swift")
+            #expect(tree.firstPaneID(where: { $0 == incoming }) == transcriptID)
+            #expect(state.paneHistories[transcriptID]?.entries.contains(incoming) == true,
+                    "the replacement must be recorded in the reused slot's history")
+        }
+    }
+
     @Test("toggleTranscript opens when closed and closes the open transcript panel")
     func toggleTranscriptBothDirections() async throws {
         let worktreeID = UUID()

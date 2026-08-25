@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import TBDShared
 
@@ -31,6 +32,15 @@ struct PaneActions {
     /// Open the file a terminal link pointed at, routed to whichever pane
     /// should show it (reuse a viewer slot, else split off the terminal).
     var routeFile: @MainActor (_ terminalID: UUID, _ path: String) -> Void
+
+    /// Route a link clicked inside the live transcript of `terminalID` — a
+    /// file into whichever pane should show it, a URL out to the browser.
+    ///
+    /// Separate from `routeFile` because the two arrive with different
+    /// vocabulary: this one is handed the undecided `TranscriptLinkTarget`,
+    /// and deciding between "route into the workspace" and "leave the app"
+    /// is per-path (`TranscriptLinkDestination`), not the leaf's.
+    var openTranscriptLink: @MainActor (_ terminalID: UUID, _ target: TranscriptLinkTarget) -> Void
 
     /// Toggle the live-transcript pane for `terminalID`, opening it beside
     /// `paneID` when there is no viewer slot to reuse.
@@ -103,6 +113,19 @@ extension PaneActions {
                     appState.recordPaneReplacement(replaced)
                 }
                 layout.wrappedValue = result.layout
+            },
+            openTranscriptLink: { terminalID, target in
+                switch TranscriptLinkDestination.live(
+                    target, layout: layout.wrappedValue, terminalID: terminalID
+                ) {
+                case .route(let result):
+                    if let replaced = result.replaced {
+                        appState.recordPaneReplacement(replaced)
+                    }
+                    layout.wrappedValue = result.layout
+                case .openInBrowser(let url):
+                    NSWorkspace.shared.open(url)
+                }
             },
             toggleTranscript: { paneID, terminalID in
                 let result = TBDShared.toggleTranscript(
