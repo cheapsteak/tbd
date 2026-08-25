@@ -199,6 +199,15 @@ is not that the rule fails to apply, but that a soak would observe nothing. A
 flag protects a behavior whose failure mode is unknown until it runs at scale,
 and this one's worst outcome is bounded at "the lane stays where it is".
 
+CLAUDE.md names two shapes of sufficient justification — gated behind an explicit
+user action, or extending behavior that is already flagged — and this is neither.
+It introduces those with "e.g.", so a boundedness argument stands as a third form,
+and the maintainer has accepted it as one for this behavior specifically. That
+acceptance is recorded here rather than left implicit, because the call is not an
+agent's to make: a reader deciding whether to reach for the same exception should
+see that a human took it deliberately, and scoped it to a write that happens once
+per row and reuses the existing validation rather than relaxing it.
+
 ## Rejected alternatives
 
 **A parent edge that can never change after the row is minted.** The simplest
