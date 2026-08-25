@@ -138,6 +138,16 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist whether ordinary new worktrees start with an empty Notes tab.
+    /// The create lifecycle snapshots this setting per creation, so the change
+    /// applies to the next worktree without a daemon restart.
+    func handleConfigSetAutoCreateNotes(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConfigSetAutoCreateNotesParams.self, from: paramsData)
+        try await db.config.setAutoCreateNotes(params.enabled)
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the Claude cloud sessions gate (design 2026-08-15 §7).
     ///
     /// The daemon builds its provider manager, and registers the built-in

@@ -31,6 +31,10 @@ struct SettingsView: View {
 // MARK: - General Tab
 
 struct GeneralSettingsTab: View {
+    static let autoCreateNotesHelp =
+        "Turn this off to skip empty Notes tabs in ordinary new worktrees. " +
+        "Conversations revived on a fresh branch still receive their populated provenance note."
+
     @EnvironmentObject var appState: AppState
     @AppStorage("enableNotifications") private var enableNotifications: Bool = true
     @AppStorage("skipPermissions") private var skipPermissions: Bool = true
@@ -162,6 +166,12 @@ struct GeneralSettingsTab: View {
 
                 Toggle("Send first messages immediately", isOn: $sendFirstMessageImmediately)
                     .help("Default for first messages you write while a new worktree is coming up. On: TBD presses Return, and the agent starts working the moment the message is in. Off: the text waits in the composer for you to read and send. The \"Send immediately\" checkbox in that creation sheet changes this too; the identical-looking checkbox on an already-parked message edits only that message.")
+
+                Toggle("Create a Notes tab for new worktrees", isOn: Binding(
+                    get: { appState.autoCreateNotesEnabled },
+                    set: { newValue in Task { await appState.setAutoCreateNotesEnabled(newValue) } }
+                ))
+                .help(Self.autoCreateNotesHelp)
 
                 Toggle("Automatically clean up orphaned agent worktrees", isOn: Binding(
                     get: { appState.gcEnabled },

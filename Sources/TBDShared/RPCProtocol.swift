@@ -261,6 +261,7 @@ public enum RPCMethod {
     public static let configSetDeliveryVerification = "config.setDeliveryVerification"
     public static let configSetQueuedPrompt = "config.setQueuedPrompt"
     public static let configSetClaudeCloud = "config.setClaudeCloud"
+    public static let configSetAutoCreateNotes = "config.setAutoCreateNotes"
     public static let configSetSupervisionEnabled = "config.setSupervisionEnabled"
     public static let superviseStatus = "supervise.status"
     public static let superviseSetProjectMark = "supervise.setProjectMark"
@@ -750,6 +751,8 @@ public struct ModelProfileListResult: Codable, Sendable {
     public let autoResumeOnApiError: Bool
     /// The orphan-GC master switch (config mirror, default true).
     public let gcEnabled: Bool
+    /// Whether ordinary new worktrees start with an empty Notes tab.
+    public let autoCreateNotesEnabled: Bool
     public init(
         profiles: [ModelProfileWithUsage],
         defaultID: UUID? = nil,
@@ -760,7 +763,8 @@ public struct ModelProfileListResult: Codable, Sendable {
         nightwatchMode: NightwatchMode = .off,
         autoResumeOnLimitReset: Bool = false,
         autoResumeOnApiError: Bool = false,
-        gcEnabled: Bool = true
+        gcEnabled: Bool = true,
+        autoCreateNotesEnabled: Bool = Config.autoCreateNotesDefault
     ) {
         self.profiles = profiles
         self.defaultID = defaultID
@@ -772,6 +776,7 @@ public struct ModelProfileListResult: Codable, Sendable {
         self.autoResumeOnLimitReset = autoResumeOnLimitReset
         self.autoResumeOnApiError = autoResumeOnApiError
         self.gcEnabled = gcEnabled
+        self.autoCreateNotesEnabled = autoCreateNotesEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -797,6 +802,9 @@ public struct ModelProfileListResult: Codable, Sendable {
         autoResumeOnApiError = try c.decodeIfPresent(
             Bool.self, forKey: .autoResumeOnApiError) ?? false
         gcEnabled = try c.decodeIfPresent(Bool.self, forKey: .gcEnabled) ?? true
+        autoCreateNotesEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .autoCreateNotesEnabled
+        ) ?? Config.autoCreateNotesDefault
     }
 }
 
@@ -2118,6 +2126,14 @@ public struct ConfigSetDeliveryVerificationParams: Codable, Sendable {
 /// until this verb writes to it, and a written `false` stays off even after the
 /// shipped default graduates.
 public struct ConfigSetQueuedPromptParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setAutoCreateNotes` — the default-ON preference for
+/// adding an empty Notes tab to ordinary new worktrees. Conversation carryover
+/// creates its populated provenance note independently of this preference.
+public struct ConfigSetAutoCreateNotesParams: Codable, Sendable {
     public let enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }

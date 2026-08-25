@@ -478,21 +478,22 @@ import Testing
         #expect(message.contains("/nowhere/Migrations"))
     }
 
-    // MARK: - The inert cutover
+    // MARK: - Shipped migration manifest
 
-    /// The mechanism ships with an EMPTY `Migrations/` directory, so
-    /// `buildMigrator()` is byte-for-byte today's migrator. When the first real
-    /// `.sql` migration lands this expectation changes with it — deliberately.
-    @Test func theShippedMigrationsDirectoryIsEmptyAndTheMigratorIsUnchanged() throws {
+    /// Every shipped timestamp migration is named here deliberately. Adding or
+    /// removing a resource must update this manifest, while the frozen Swift
+    /// block remains independently pinned by `SchemaBaselineDriftTests`.
+    @Test func theShippedMigrationsMatchTheExpectedManifest() throws {
+        let expected = ["20260824214437_auto_create_notes_setting"]
         let found = try SQLMigrationLoader.bundled.get()
-        #expect(found.files.isEmpty, "expected an inert Migrations/ directory, found \(found.files.map(\.identifier))")
+        #expect(found.files.map(\.identifier) == expected)
         #expect(SQLMigrationLoader.inlineTimestampMigrations.isEmpty)
-        #expect(SQLMigrationLoader.migrationsForRegistration().isEmpty)
+        #expect(SQLMigrationLoader.migrationsForRegistration().map(\.identifier) == expected)
 
         let identifiers = TBDDatabase.buildMigratorForTests().migrations
         #expect(identifiers.first == "v1")
-        #expect(identifiers.last == SchemaBaselineDriftTests.frozenBlockLastIdentifier)
-        #expect(!identifiers.contains(where: SQLMigrationLoader.isTimestampIdentifier))
+        #expect(identifiers.last == expected.last)
+        #expect(identifiers.filter(SQLMigrationLoader.isTimestampIdentifier) == expected)
     }
 
     /// Whatever the directory holds, the registered timestamp migrations are

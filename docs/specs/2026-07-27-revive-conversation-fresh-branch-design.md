@@ -135,7 +135,11 @@ the fact, because on the `preSession` branch `createInitialNoteTab` runs *inside
 the detached phase-3 task — `completeCreateWorktree` returns `.preSessionPending`
 before any note row exists, so a caller-side write would race it.
 `createInitialNoteTab` gains an optional `seed: String?` parameter, defaulting to
-nil so the ordinary create path is unchanged.
+nil. An ordinary create has no `ConversationCarryover`, so
+`completeCreateWorktree` applies the global automatic-notes preference before
+calling the helper with no seed. Fresh-branch revival supplies a carryover and
+its provenance seed, so it always calls the helper regardless of that
+preference.
 
 Threaded from `completeCreateWorktree` down to `spawnPrimaryTerminals`. When
 present, `spawnPrimaryTerminals`:

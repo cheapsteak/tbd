@@ -249,6 +249,8 @@ extension WorktreeLifecycle {
             let clock = ContinuousClock()
             let phaseStart = clock.now
             let creationConfig = try await db.config.get()
+            let shouldCreateInitialNote = carryover != nil
+                || creationConfig.autoCreateNotesEnabled
             let creationPrimaryKind: TerminalKind = carryover == nil
                 ? resolvePrimaryTerminalKind(
                     skipClaude: skipClaude,
@@ -525,15 +527,12 @@ extension WorktreeLifecycle {
                         carryover: carryover,
                         preparedCodexLaunch: preparedCodexLaunch
                     )
-                    // Fresh creates get an initial note tab, appended after the
-                    // primary spawn set the tab order. Create path only — a
-                    // revive's surviving note rows re-materialize via the app's
-                    // reconcile instead. Best-effort: if the worktree row
-                    // vanished mid-wait, the note insert FK-fails and is logged.
-                    await createInitialNoteTab(
-                        worktreeID: worktree.id,
-                        seed: carryover?.notesSeed
-                    )
+                    if shouldCreateInitialNote {
+                        await createInitialNoteTab(
+                            worktreeID: worktree.id,
+                            seed: carryover?.notesSeed
+                        )
+                    }
                 }
                 return .preSessionPending(phase3: phase3)
             }
@@ -558,12 +557,15 @@ extension WorktreeLifecycle {
             let terminalSpawnElapsedMs = terminalSpawnStart.duration(to: clock.now) / .milliseconds(1)
             timingLogger.debug("terminal-spawn \(worktreeID.uuidString, privacy: .public) \(Int(terminalSpawnElapsedMs))ms")
 
-            // 3c. Fresh repo-backed creates get an initial note tab (appended
-            // last; the primary terminal keeps focus).
-            await createInitialNoteTab(
-                worktreeID: worktreeID,
-                seed: carryover?.notesSeed
-            )
+            // 3c. Conversation carryover always gets a seeded provenance note;
+            // ordinary creates get an empty note only when configured. Either
+            // is appended last while the primary terminal keeps focus.
+            if shouldCreateInitialNote {
+                await createInitialNoteTab(
+                    worktreeID: worktreeID,
+                    seed: carryover?.notesSeed
+                )
+            }
 
             // 4. Update status to active
             let markActiveStart = clock.now
@@ -582,14 +584,14 @@ extension WorktreeLifecycle {
         }
     }
 
-    /// Creates the initial "Notes" tab for a freshly created repo-backed
-    /// worktree and appends it to the tab order (last; the primary terminal
-    /// keeps focus). Ordinary creates leave the note empty; callers may provide
-    /// a seed for flows whose initial Notes should carry context. The app
-    /// materializes the tab from the note row via its `reconcileNoteTabs` poll
-    /// — note tabs use the note row's UUID as the tab ID. Best-effort: a failure
-    /// (e.g. the worktree row vanished mid-create, FK-failing the insert) must
-    /// never fail the create, whose checkout and terminals are already valid.
+    /// Creates an initial Notes tab and appends it to the tab order (last; the
+    /// primary terminal keeps focus). Ordinary creates leave it empty; a
+    /// conversation carryover supplies the populated provenance seed. The app
+    /// materializes the tab from the note row via its
+    /// `reconcileNoteTabs` poll — note tabs use the note row's UUID as the tab
+    /// ID. Best-effort: a failure (e.g. the worktree row vanished mid-create,
+    /// FK-failing the insert) must never fail the create, whose checkout and
+    /// terminals are already valid.
     func createInitialNoteTab(worktreeID: UUID, seed: String? = nil) async {
         do {
             let note = try await db.notes.create(worktreeID: worktreeID, title: "Notes")

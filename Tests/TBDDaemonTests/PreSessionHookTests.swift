@@ -170,7 +170,8 @@ struct PreSessionHookTests {
 
         // Tab order [claude, setup, initial note], active = claude.
         let note = try #require(try await db.notes.list(worktreeID: wt.id).first)
-        #expect(try await db.worktrees.getTabOrder(worktreeID: wt.id) == [claude.id, setup.id, note.id])
+        #expect(try await db.worktrees.getTabOrder(worktreeID: wt.id)
+                == [claude.id, setup.id, note.id])
         #expect(try await db.worktrees.getActiveTabID(worktreeID: wt.id) == claude.id)
         #expect(try await db.notifications.unread(worktreeID: wt.id).isEmpty)
     }

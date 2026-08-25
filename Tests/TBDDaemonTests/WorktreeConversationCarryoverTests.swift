@@ -19,6 +19,7 @@ struct WorktreeConversationCarryoverTests {
 
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setPrimaryAgentPreference(.codex)
+        try await db.config.setAutoCreateNotes(false)
         let recorder = PreSessionRecordedCommands()
         let claudeHome = tempDir.appendingPathComponent("claude-home", isDirectory: true)
         let lifecycle = makeCarryoverLifecycle(
@@ -65,6 +66,7 @@ struct WorktreeConversationCarryoverTests {
 
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setPrimaryAgentPreference(.codex)
+        try await db.config.setAutoCreateNotes(false)
         let recorder = PreSessionRecordedCommands()
         let claudeHome = tempDir.appendingPathComponent("claude-home", isDirectory: true)
         let lifecycle = makeCarryoverLifecycle(
@@ -106,7 +108,7 @@ struct WorktreeConversationCarryoverTests {
         )
     }
 
-    @Test func ordinaryCreateKeepsConfiguredPrimaryAndEmptyNotes() async throws {
+    @Test func ordinaryCreateKeepsConfiguredPrimaryWithoutNotes() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }
         let (tempDir, repoDir) = try await createTestRepo()
@@ -114,6 +116,7 @@ struct WorktreeConversationCarryoverTests {
 
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setPrimaryAgentPreference(.codex)
+        try await db.config.setAutoCreateNotes(false)
         let lifecycle = makeCarryoverLifecycle(
             db: db,
             recorder: PreSessionRecordedCommands(),
@@ -130,9 +133,7 @@ struct WorktreeConversationCarryoverTests {
         let terminals = try await db.terminals.list(worktreeID: pending.id)
         #expect(terminals.filter { $0.kind == .codex }.count == 1)
         #expect(terminals.allSatisfy { $0.kind != .claude })
-        let note = try #require(try await db.notes.list(worktreeID: pending.id).first)
-        #expect(note.title == "Notes")
-        #expect(note.content.isEmpty)
+        #expect(try await db.notes.list(worktreeID: pending.id).isEmpty)
     }
 
     /// An ordinary archived-session resume never carried an initial prompt, and
@@ -355,6 +356,8 @@ struct WorktreeConversationCarryoverTests {
         let note = try #require(try await db.notes.list(worktreeID: worktree.id).first)
         #expect(note.title == "Notes")
         #expect(note.content == notesSeed)
+        let order = try await db.worktrees.getTabOrder(worktreeID: worktree.id)
+        #expect(order.last == note.id)
     }
 }
 }

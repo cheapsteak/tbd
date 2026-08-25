@@ -1283,6 +1283,13 @@ public struct Config: Codable, Sendable, Equatable {
     /// chose" and follows the shipped default wherever it goes; `0`/`1` is an
     /// explicit gesture and is honored forever.
     public var queuedPromptEnabled: Bool
+    /// Whether ordinary new worktrees start with an empty Notes tab.
+    ///
+    /// **Resolved, not stored.** The backing column carries no SQL default and
+    /// stays NULL until somebody touches the toggle, so this property is
+    /// `auto_create_notes_enabled ?? Config.autoCreateNotesDefault`. NULL
+    /// follows the shipped default; `0`/`1` remains an explicit choice.
+    public var autoCreateNotesEnabled: Bool
     /// The fleet brake for supervision
     /// (`docs/specs/2026-07-26-fleet-supervision-design.md` §3, §8): one bit,
     /// fleet-wide, ANDed over every project's mark and writing none of them.
@@ -1356,6 +1363,9 @@ public struct Config: Codable, Sendable, Equatable {
     /// the feature is a change to this constant — no forcing `UPDATE`
     /// migration, and an explicit opt-out is left alone.
     public static let queuedPromptDefault = false
+    /// The shipped default for `autoCreateNotesEnabled`. Existing behavior is
+    /// preserved until a user explicitly turns automatic Notes tabs off.
+    public static let autoCreateNotesDefault = true
     /// The shipped default for `supervisionEnabled`, and the single place it
     /// lives. Supervision ships with the brake engaged; graduating it is a
     /// change to this constant — no forcing `UPDATE` migration, and an explicit
@@ -1402,6 +1412,7 @@ public struct Config: Codable, Sendable, Equatable {
                 remoteBackendsEnabled: Bool = false,
                 deliveryVerificationEnabled: Bool = false,
                 queuedPromptEnabled: Bool = Config.queuedPromptDefault,
+                autoCreateNotesEnabled: Bool = Config.autoCreateNotesDefault,
                 supervisionEnabled: Bool = Config.supervisionEnabledDefault,
                 gcProfileDirsEnabled: Bool = Config.gcProfileDirsEnabledDefault,
                 claudeCloudEnabled: Bool = Config.claudeCloudEnabledDefault,
@@ -1432,6 +1443,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.remoteBackendsEnabled = remoteBackendsEnabled
         self.deliveryVerificationEnabled = deliveryVerificationEnabled
         self.queuedPromptEnabled = queuedPromptEnabled
+        self.autoCreateNotesEnabled = autoCreateNotesEnabled
         self.supervisionEnabled = supervisionEnabled
         self.gcProfileDirsEnabled = gcProfileDirsEnabled
         self.claudeCloudEnabled = claudeCloudEnabled
@@ -1494,6 +1506,8 @@ public struct Config: Codable, Sendable, Equatable {
         // fall through to the shipped default rather than hardcoding `false`.
         queuedPromptEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .queuedPromptEnabled) ?? Config.queuedPromptDefault
+        autoCreateNotesEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .autoCreateNotesEnabled) ?? Config.autoCreateNotesDefault
         // Same tri-state as above: absent means the sender knew nothing about
         // the flag, which is the NULL column's situation — follow the shipped
         // default rather than hardcoding `false` here as well.
