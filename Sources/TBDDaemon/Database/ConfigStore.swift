@@ -80,6 +80,11 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// "off". Resolve it through `Config.gcOrphanProcessesEnabledDefault`,
     /// never through `?? false`.
     var gc_orphan_processes_enabled: Bool?
+    /// JSON-encoded `[String: String]` remote create-param defaults (machine
+    /// scope), keyed by the provider's own field names. Nil/absent means no
+    /// opinion at this level — every field falls through to its
+    /// provider-declared `default`.
+    var remote_create_defaults: String?
 
     /// - Parameter queuedPromptDefault: the shipped default a NULL
     ///   `queued_prompt_enabled` resolves to. Defaulted to the real constant;
@@ -161,7 +166,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             claudeCloudEnabled: claude_cloud_enabled ?? claudeCloudEnabledDefault,
             // And once more, for the orphaned-process collector's gate —
             // NOT `?? false`.
-            gcOrphanProcessesEnabled: gc_orphan_processes_enabled ?? gcOrphanProcessesDefault
+            gcOrphanProcessesEnabled: gc_orphan_processes_enabled ?? gcOrphanProcessesDefault,
+            remoteCreateDefaults: EnvOverridesCoding.decode(remote_create_defaults)
         )
     }
 }
@@ -233,6 +239,19 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET env_overrides = ? WHERE id = ?",
+                arguments: [json, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the machine-wide remote create-param defaults. An empty map
+    /// clears the column, which is the "no opinion" state every field falls
+    /// through from to its provider-declared `default`.
+    public func setRemoteCreateDefaults(_ defaults: [String: String]) async throws {
+        let json = EnvOverridesCoding.encode(defaults)
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET remote_create_defaults = ? WHERE id = ?",
                 arguments: [json, Self.singletonID]
             )
         }

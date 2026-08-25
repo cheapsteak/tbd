@@ -341,7 +341,8 @@ actor ProviderEventsSupervisor {
 
         for await line in lines {
             lastActivity = Date()
-            guard let event = RemoteEventParser.parse(line: line) else { continue }
+            guard let event = RemoteEventParser.parse(line: line, provider: config.name)
+            else { continue }
             await handle(event)
         }
 

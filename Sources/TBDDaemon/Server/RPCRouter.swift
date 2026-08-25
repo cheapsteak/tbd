@@ -532,6 +532,10 @@ public final class RPCRouter: Sendable {
                 return try await handleRepoSetEnvOverrides(request.paramsData)
             case RPCMethod.modelProfileSetEnvOverrides:
                 return try await handleModelProfileSetEnvOverrides(request.paramsData)
+            case RPCMethod.configSetRemoteCreateDefaults:
+                return try await handleConfigSetRemoteCreateDefaults(request.paramsData)
+            case RPCMethod.repoSetRemoteCreateDefaults:
+                return try await handleRepoSetRemoteCreateDefaults(request.paramsData)
             case RPCMethod.modelProfileFetchUsage:
                 return try await handleModelProfileFetchUsage(request.paramsData)
             case RPCMethod.modelProfileUsageRefresh:

@@ -23,8 +23,11 @@ public struct ProviderResult: Sendable {
     public var decodedError: ProviderErrorObject? {
         (try? JSONDecoder().decode(ProviderErrorEnvelope.self, from: stdout))?.error
     }
-    public func decoded<T: Decodable>(_ type: T.Type) throws -> T {
-        try JSONDecoder().decode(T.self, from: stdout)
+    /// `provider` is carried into the decode purely so a contract diagnostic
+    /// can name whose output it was reading — with several providers
+    /// registered, "some inventory is malformed" is not actionable.
+    public func decoded<T: Decodable>(_ type: T.Type, provider: String? = nil) throws -> T {
+        try JSONDecoder.forRemoteProvider(provider).decode(T.self, from: stdout)
     }
 }
 

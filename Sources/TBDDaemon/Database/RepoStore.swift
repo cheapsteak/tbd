@@ -24,6 +24,10 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var hidden: Bool
     var expanded: Bool
     var env_overrides: String?
+    /// JSON-encoded `[String: String]` remote create-param defaults (repo
+    /// scope), keyed by the provider's own field names. Nil/absent means no
+    /// opinion at this level — resolution falls through to `config`.
+    var remote_create_defaults: String?
 
     init(from repo: Repo) {
         self.id = repo.id.uuidString
@@ -41,6 +45,7 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.hidden = repo.hidden
         self.expanded = repo.expanded
         self.env_overrides = EnvOverridesCoding.encode(repo.envOverrides)
+        self.remote_create_defaults = EnvOverridesCoding.encode(repo.remoteCreateDefaults)
     }
 
     /// Failable decode: skips (returns nil after a logged warning) rather than
@@ -66,7 +71,8 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             status: RepoStatus(rawValue: status) ?? .ok,
             hidden: hidden,
             expanded: expanded,
-            envOverrides: EnvOverridesCoding.decode(env_overrides)
+            envOverrides: EnvOverridesCoding.decode(env_overrides),
+            remoteCreateDefaults: EnvOverridesCoding.decode(remote_create_defaults)
         )
     }
 }
@@ -212,6 +218,18 @@ public struct RepoStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE repo SET env_overrides = ? WHERE id = ?",
+                arguments: [json, id.uuidString]
+            )
+        }
+    }
+
+    /// Set or clear this repo's remote create-param defaults. An empty map
+    /// clears the column, which is the "no opinion — defer to global" state.
+    public func setRemoteCreateDefaults(id: UUID, defaults: [String: String]) async throws {
+        let json = EnvOverridesCoding.encode(defaults)
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE repo SET remote_create_defaults = ? WHERE id = ?",
                 arguments: [json, id.uuidString]
             )
         }

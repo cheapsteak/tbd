@@ -348,12 +348,33 @@ extension AppState {
     /// a respawn, since nothing re-invokes this function merely because the
     /// selection didn't change.
     private func activateRemoteSession(_ selection: RemoteSessionSelection, tab: RemoteSessionDetailTab?) {
-        let isTransition = selectedRemoteSession != selection
         highlightedArchivedWorktreeID = nil
         selectedWorktreeIDs = []
         selectedRepoID = nil
         selectedScratchSection = false
         selectedRemoteProvider = nil
+        showRemoteSessionSurface(selection, tab: tab)
+    }
+
+    /// Put `selection` on the remote-session surface, WITHOUT touching the
+    /// four mutually-exclusive sidebar selections.
+    ///
+    /// Split out of `activateRemoteSession` because a session now has two
+    /// sidebar rows that can lead to it, and they disagree about exactly one
+    /// thing — what stays selected. A Remote-section row IS the selection, so
+    /// activating it clears the worktree selection. An adopted lane's worktree
+    /// row is ALSO the selection, and clearing it would deselect the very row
+    /// the user clicked; that path keeps `selectedWorktreeIDs` and calls this
+    /// half directly (`syncRemoteSurfaceToWorktreeSelection`).
+    ///
+    /// Everything below the selections is identical for both, and that is the
+    /// point: the tab hint, the unread clear, the keep-alive recency touch and
+    /// the detach-flag rule are what make the surface work, so a lane row that
+    /// skipped them would reach the same view in a different state.
+    func showRemoteSessionSurface(
+        _ selection: RemoteSessionSelection, tab: RemoteSessionDetailTab?
+    ) {
+        let isTransition = selectedRemoteSession != selection
         selectedRemoteSession = selection
         remoteSessionRequestedTab = tab
         unreadByRemoteSession[selection] = nil
@@ -361,5 +382,61 @@ extension AppState {
         if isTransition || tab == .attach {
             clearRemoteSessionDetachedFlag(selection)
         }
+    }
+
+    /// Point the remote-session surface at the selected worktree row when that
+    /// row is an adopted remote lane, and clear it otherwise.
+    ///
+    /// Called from `selectedWorktreeIDs`'s `didSet`, where it replaces a bare
+    /// `selectedRemoteSession = nil`. That clearing is load-bearing and is kept
+    /// for every other case: `DetailSectionHostPager.targetTab` routes to the
+    /// remote tab purely on `selectedRemoteSession`, so a stale value would
+    /// leave the remote pane in front while a LOCAL row is selected.
+    ///
+    /// What it fixes: adoption moved remote sessions into the repo tree as
+    /// worktree rows, and an adopted session is deliberately rendered by that
+    /// row alone — `RemoteSectionView.sessions` drops it (it resolved to a
+    /// known repo) and `RepoSectionView.matchedRemoteSessions` drops it (a row
+    /// already stands for it). So the lane row became the ONLY way in, while
+    /// the surface behind it stayed reachable only from a session row that no
+    /// longer exists. Selecting the lane landed on an ordinary worktree pane
+    /// for a row with no path, no tmux server and no terminals — an empty
+    /// pane. The binding was on the row the whole time (`Worktree.location`);
+    /// nothing performed the mapping.
+    func syncRemoteSurfaceToWorktreeSelection() {
+        guard let selection = AppState.remoteSurfaceSelection(
+            forWorktreeSelection: selectedWorktreeIDs, in: allWorktrees)
+        else {
+            selectedRemoteSession = nil
+            return
+        }
+        showRemoteSessionSurface(selection, tab: nil)
+    }
+
+    /// The provider session a worktree selection stands for, or nil when it
+    /// stands for none. Pure, so the rule is testable without a view hierarchy
+    /// — which matters here, because the bug this fixes was invisible to every
+    /// existing unit test.
+    ///
+    /// Exactly one row, and that row a remote lane. The single-selection rule
+    /// is a decision, not an accident: the remote surface describes ONE
+    /// session, while a multi-selection means the split terminal grid. A mixed
+    /// local+remote selection therefore keeps the grid (where a remote lane
+    /// contributes the same empty pane it always has) rather than silently
+    /// promoting one member of the selection to own the whole detail area.
+    ///
+    /// A creation placeholder is excluded by its empty session id: no session
+    /// exists yet, so there is nothing to attach to or describe. Its row shows
+    /// "Creating…" and swaps for the adopted row, which has a real binding —
+    /// see `RemoteLanePlaceholder`.
+    nonisolated static func remoteSurfaceSelection(
+        forWorktreeSelection ids: Set<UUID>, in worktrees: [Worktree]
+    ) -> RemoteSessionSelection? {
+        guard ids.count == 1, let id = ids.first,
+              let worktree = worktrees.first(where: { $0.id == id }),
+              let binding = worktree.providerBinding,
+              !binding.sessionID.isEmpty
+        else { return nil }
+        return RemoteSessionSelection(provider: binding.provider, sessionID: binding.sessionID)
     }
 }

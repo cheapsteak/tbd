@@ -226,6 +226,11 @@ struct GeneralSettingsTab: View {
                 remoteBackendsToggle
                 claudeCloudToggle
                 remoteProvidersRegistryRow
+                RemoteCreateDefaultsEditor(
+                    scope: .global,
+                    providers: appState.remoteProviders,
+                    initial: appState.globalRemoteCreateDefaults
+                ) { await appState.setGlobalRemoteCreateDefaults($0) }
             }
 
             MarkdownSettingsSection()

@@ -112,6 +112,93 @@ import TBDShared
             try await db.worktrees.move(worktreeID: b.id, newParentID: a.id, newSortOrder: 0)
         }
     }
+
+    // MARK: - assignParentIfUnset: a first parent, and only a first parent
+
+    @Test func assignParentIfUnsetGivesAParentlessRowItsFirstParent() async throws {
+        let db = try makeDB()
+        let repo = try await makeRepo(db)
+        let parent = try await makeWT(db, repo: repo, name: "parent")
+        let orphan = try await makeWT(db, repo: repo, name: "orphan")
+
+        let sortOrder = try await db.worktrees.assignParentIfUnset(
+            worktreeID: orphan.id, parentID: parent.id)
+
+        #expect(sortOrder != nil)
+        #expect(try await db.worktrees.get(id: orphan.id)?.parentWorktreeID == parent.id)
+    }
+
+    /// A row the user has already placed is left alone, and says so by
+    /// returning nil rather than by throwing — an already-parented row is the
+    /// expected steady state on every later poll, not an error.
+    @Test func assignParentIfUnsetLeavesAnAlreadyParentedRowAlone() async throws {
+        let db = try makeDB()
+        let repo = try await makeRepo(db)
+        let first = try await makeWT(db, repo: repo, name: "first")
+        let second = try await makeWT(db, repo: repo, name: "second")
+        let child = try await makeWT(db, repo: repo, name: "child")
+        try await db.worktrees.move(worktreeID: child.id, newParentID: first.id, newSortOrder: 0)
+
+        let sortOrder = try await db.worktrees.assignParentIfUnset(
+            worktreeID: child.id, parentID: second.id)
+
+        #expect(sortOrder == nil)
+        #expect(try await db.worktrees.get(id: child.id)?.parentWorktreeID == first.id)
+    }
+
+    /// The late edge is held to `move()`'s rules, not a relaxed copy of them.
+    @Test func assignParentIfUnsetRefusesSelfCycleMainAndArchivedParents() async throws {
+        let db = try makeDB()
+        let repo = try await makeRepo(db)
+        let row = try await makeWT(db, repo: repo, name: "row")
+        let descendant = try await makeWT(db, repo: repo, name: "descendant")
+        try await db.worktrees.move(worktreeID: descendant.id, newParentID: row.id, newSortOrder: 0)
+        let archived = try await makeWT(db, repo: repo, name: "archived")
+        try await db.worktrees.archive(id: archived.id)
+        let mainRow = try await db.worktrees.create(
+            repoID: repo.id, name: "main", branch: "main",
+            path: "/tmp/main-\(UUID())", tmuxServer: "srv", status: .main)
+
+        await #expect(throws: WorktreeMoveError.selfReference) {
+            try await db.worktrees.assignParentIfUnset(worktreeID: row.id, parentID: row.id)
+        }
+        await #expect(throws: WorktreeMoveError.cycle) {
+            try await db.worktrees.assignParentIfUnset(
+                worktreeID: row.id, parentID: descendant.id)
+        }
+        await #expect(throws: WorktreeMoveError.parentIsArchived) {
+            try await db.worktrees.assignParentIfUnset(worktreeID: row.id, parentID: archived.id)
+        }
+        await #expect(throws: WorktreeMoveError.parentIsMain) {
+            try await db.worktrees.assignParentIfUnset(worktreeID: row.id, parentID: mainRow.id)
+        }
+        await #expect(throws: WorktreeMoveError.parentNotFound) {
+            try await db.worktrees.assignParentIfUnset(worktreeID: row.id, parentID: UUID())
+        }
+        await #expect(throws: WorktreeMoveError.worktreeNotFound) {
+            try await db.worktrees.assignParentIfUnset(worktreeID: UUID(), parentID: row.id)
+        }
+        #expect(try await db.worktrees.get(id: row.id)?.parentWorktreeID == nil)
+    }
+
+    /// The row lands after the parent's existing children rather than on top of
+    /// one of them — nothing the user arranged is renumbered.
+    @Test func assignParentIfUnsetAppendsAfterExistingChildren() async throws {
+        let db = try makeDB()
+        let repo = try await makeRepo(db)
+        let parent = try await makeWT(db, repo: repo, name: "parent")
+        let existing = try await makeWT(db, repo: repo, name: "existing")
+        try await db.worktrees.move(worktreeID: existing.id, newParentID: parent.id, newSortOrder: 0)
+        let latecomer = try await makeWT(db, repo: repo, name: "latecomer")
+
+        let sortOrder = try await db.worktrees.assignParentIfUnset(
+            worktreeID: latecomer.id, parentID: parent.id)
+
+        let existingOrder = try await db.worktrees.get(id: existing.id)?.sortOrder
+        #expect(sortOrder != nil)
+        #expect(try await db.worktrees.get(id: existing.id)?.parentWorktreeID == parent.id)
+        #expect((sortOrder ?? 0) > (existingOrder ?? 0))
+    }
 }
 
 @Suite struct WorktreeCreateWithParentTests {

@@ -1,20 +1,42 @@
 import SwiftUI
 import TBDShared
 
+/// What the repo-header `+` menu offers as its remote-lane entry point, for a
+/// given set of registered providers. Computed by
+/// `WorktreeProfilePickerView.remoteLaneOffer(providers:parentWorktreeID:)`,
+/// which owns the rules; this type only names the three outcomes.
+enum RemoteLaneOffer {
+    /// No row at all — no provider is registered.
+    case hidden
+    /// Exactly one provider: the row goes straight to its create sheet.
+    case single(RemoteProviderStatus)
+    /// Several providers: the row drills into the provider list page first.
+    case chooseProvider([RemoteProviderStatus])
+}
+
 /// Menu content shown when the user hovers (or ⌥-clicks) the `+` button next to
 /// a repo in the sidebar. Presented in a borderless `FloatingPanel` (see
 /// `FloatingMenuAnchor`), not a SwiftUI popover.
 ///
-/// Two in-place pages (NOT nested popovers — those are fragile on macOS):
+/// Three in-place pages (NOT nested popovers — those are fragile on macOS):
 ///  - `.profiles` (default): a fixed "Choose a branch…" drill-in row at the
-///    top, then one row per configured model profile. Selecting a profile row
-///    one-click-creates a worktree pinned to that profile. (A plain click on
-///    the `+` — without opening this menu — already creates a default
-///    worktree via repo → scratch → global default precedence, so there is no
-///    separate "resolve automatically" row here.)
+///    top, an optional "New remote session" row beneath it (see
+///    `remoteLaneOffer`; it carries a trailing ellipsis only when selecting it
+///    will itself open the create form — never when it drills into the
+///    provider list, where the chevron says so), then one row per configured
+///    model profile. Selecting a profile row one-click-creates a worktree
+///    pinned to that profile. (A plain click on the `+` — without opening this
+///    menu — already creates a default worktree via repo → scratch → global
+///    default precedence, so there is no separate "resolve automatically" row
+///    here.)
 ///  - `.branches`: the reused searchable branch list (`BranchListView`) behind
 ///    a back affordance. Selecting a branch creates a worktree on that existing
 ///    branch using the DEFAULT model (accepted tradeoff).
+///  - `.remoteProviders`: one row per registered remote provider, reached only
+///    when more than one is registered. A third page rather than a nested
+///    `Menu`/popover for the same reason `.branches` is one. Each row carries
+///    its own trailing ellipsis when selecting that provider will open the
+///    create form, since these are the rows that act.
 ///
 /// Width matches `BranchPickerView` for consistent popover styling; height is
 /// per-page (see `body`) so the short profiles list isn't padded out to the
@@ -34,17 +56,24 @@ struct WorktreeProfilePickerView: View {
     /// `@Environment(\.dismiss)` of its own (that's a SwiftUI popover/sheet
     /// concept). Wired to the owning `HoverMenuModel.closeNow()`.
     var onClose: () -> Void = {}
-    /// Opens the cloud-session create sheet. **Nil omits the row entirely** —
-    /// the repo header's `+` supplies it only when there is a cloud provider
-    /// to create against, and the nested `+` on a worktree row never does: a
-    /// cloud session is created against a repository, not beneath a lane.
-    var onSelectCloudSession: (() -> Void)? = nil
+    /// Called with the chosen provider after this menu has closed itself, so
+    /// the host can present the remote create sheet. The host owns that sheet
+    /// (`RepoSectionView.remoteCreateSheetProvider`,
+    /// `WorktreeRowView.remoteCreateSheetProvider`) because this view lives in
+    /// a `FloatingPanel` that is about to be torn down. Both call sites wire
+    /// it; the default exists only so a preview or a future host can omit it.
+    ///
+    /// The compiled cloud provider reaches the sheet through this same hook:
+    /// it is one registered provider among the others, so it needs no row of
+    /// its own — only the gate `offerableProviders` applies to it.
+    var onStartRemoteSession: (RemoteProviderStatus) -> Void = { _ in }
     @EnvironmentObject var appState: AppState
     @Environment(\.dismiss) private var dismiss
 
     private enum Page {
         case profiles
         case branches
+        case remoteProviders
     }
 
     @State private var page: Page = .profiles
@@ -56,6 +85,8 @@ struct WorktreeProfilePickerView: View {
                 profilesPage
             case .branches:
                 branchesPage
+            case .remoteProviders:
+                remoteProvidersPage
             }
         }
         .frame(width: 300)
@@ -83,14 +114,7 @@ struct WorktreeProfilePickerView: View {
 
     private var profilesPage: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("New worktree with…")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
+            profilesPageHeader
 
             Divider()
 
@@ -106,17 +130,10 @@ struct WorktreeProfilePickerView: View {
             }
             .padding(.top, 2)
 
-            if let onSelectCloudSession {
-                ProfilePickerRow(
-                    title: "New cloud session…",
-                    subtitle: "Runs on Anthropic's infrastructure",
-                    systemImage: "cloud"
-                ) {
-                    dismiss()
-                    onClose()
-                    onSelectCloudSession()
-                }
-            }
+            // Sits with "Choose a branch…" in the top group of "start
+            // something other than a plain local worktree" rows, above the
+            // profile list.
+            remoteLaneRow
 
             Divider()
                 .padding(.vertical, 2)
@@ -184,26 +201,110 @@ struct WorktreeProfilePickerView: View {
         }
     }
 
+    /// Extracted out of `profilesPage` so the conditional title stays a plain
+    /// property reference there — same reason the rest of this page is split
+    /// into small pieces.
+    @ViewBuilder
+    private var profilesPageHeader: some View {
+        HStack {
+            Text(Self.profilesPageTitle(offer: remoteLaneOffer))
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+    }
+
+    /// The registered providers this menu may offer, after the cloud
+    /// provider's own gate. Every other provider passes through untouched.
+    private var offerableProviders: [RemoteProviderStatus] {
+        CloudCreateEntryPresentation.pickerProviders(
+            appState.remoteProviders,
+            claudeCloudEnabled: appState.daemonCapabilities?.claudeCloudEnabled ?? false)
+    }
+
+    /// What this menu offers as a remote-lane entry point right now.
+    private var remoteLaneOffer: RemoteLaneOffer {
+        Self.remoteLaneOffer(providers: offerableProviders, parentWorktreeID: parentWorktreeID)
+    }
+
+    /// The optional "New remote session…" row. Omitted entirely (never shown
+    /// disabled) when there is no provider; a stale provider keeps its row but
+    /// cannot be selected, matching `RepoSectionView.newRemoteSessionMenuItem`.
+    @ViewBuilder
+    private var remoteLaneRow: some View {
+        let offer = remoteLaneOffer
+        switch offer {
+        case .hidden:
+            EmptyView()
+        case .single(let provider):
+            remoteProviderRow(
+                provider,
+                title: Self.remoteLaneRowTitle(offer: offer, opensForm: !willCreateImmediately(provider)),
+                subtitle: Self.providerRowSubtitle(provider) ?? "Run on \(Self.providerLabel(provider))"
+            )
+        case .chooseProvider:
+            ProfilePickerRow(
+                // The provider list always comes first, so this row does open
+                // something whatever the chosen provider then does — but the
+                // trailing chevron is what says so here; see
+                // `remoteLaneRowTitle(offer:opensForm:)`.
+                title: Self.remoteLaneRowTitle(offer: offer, opensForm: true),
+                subtitle: "Choose a provider",
+                systemImage: Self.remoteLaneSymbol,
+                showsChevron: true
+            ) {
+                page = .remoteProviders
+            }
+        }
+    }
+
+    /// One selectable provider, on either the profiles page (single provider)
+    /// or the provider list (several).
+    @ViewBuilder
+    private func remoteProviderRow(
+        _ provider: RemoteProviderStatus,
+        title: String,
+        subtitle: String?
+    ) -> some View {
+        ProfilePickerRow(
+            title: title,
+            subtitle: subtitle,
+            systemImage: Self.remoteLaneSymbol
+        ) {
+            startRemoteSession(provider)
+        }
+        .disabled(provider.hasStaleSnapshot)
+        .opacity(provider.hasStaleSnapshot ? 0.5 : 1)
+    }
+
+    /// Shared back affordance for the two drill-in pages.
+    @ViewBuilder
+    private var backButton: some View {
+        Button {
+            page = .profiles
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 11, weight: .semibold))
+                Text("Back")
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer()
+            }
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
     // MARK: - Page 2: branches
 
     private var branchesPage: some View {
         VStack(spacing: 0) {
-            Button {
-                page = .profiles
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 11, weight: .semibold))
-                    Text("Back")
-                        .font(.system(size: 12, weight: .semibold))
-                    Spacer()
-                }
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
+            backButton
 
             Divider()
 
@@ -211,6 +312,168 @@ struct WorktreeProfilePickerView: View {
             // branch with the default model and dismisses the whole popover.
             BranchListView(repoID: repoID, parentWorktreeID: parentWorktreeID, onClose: onClose)
         }
+    }
+
+    // MARK: - Page 3: remote providers
+
+    private var remoteProvidersPage: some View {
+        VStack(spacing: 0) {
+            backButton
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Self.providerList(offer: remoteLaneOffer), id: \.config.name) { provider in
+                    remoteProviderRow(
+                        provider,
+                        // These rows are the ones that act, so each says for
+                        // itself whether selecting it will ask first —
+                        // decided per provider, from the same inputs the
+                        // click uses.
+                        title: Self.providerRowTitle(
+                            provider, opensForm: !willCreateImmediately(provider)),
+                        subtitle: Self.providerRowSubtitle(provider)
+                    )
+                }
+            }
+            .padding(.top, 2)
+        }
+    }
+
+    // MARK: - Remote lane: pure decision helpers
+
+    /// The remote-lane row's copy on the profiles page.
+    ///
+    /// The trailing ellipsis is a promise, so the row only makes it when it
+    /// will keep it: selecting the row opens the create form when some answer
+    /// is still needed, and creates outright when every required answer is
+    /// already knowable (see `RemoteCreateFormLogic.willCreateImmediately`).
+    nonisolated static func remoteLaneRowTitle(opensForm: Bool) -> String {
+        opensForm ? "New remote session…" : "New remote session"
+    }
+
+    /// The remote-lane row's title for the offer it is rendering — the form
+    /// the view calls, and the one place the ellipsis rule lives.
+    ///
+    /// - `.single`: the promise above, kept exactly when `opensForm`.
+    /// - `.chooseProvider`: never an ellipsis, whatever `opensForm` says. That
+    ///   row drills into the provider list, which its trailing chevron already
+    ///   signals; spending the ellipsis on the same fact doubles the
+    ///   signalling, and it would promise a form the provider chosen on the
+    ///   next page may never show. Each provider row on that page then makes
+    ///   the promise for itself — see `providerRowTitle(_:opensForm:)`.
+    /// - `.hidden`: no row renders, and the ellipsis-free copy is the honest
+    ///   value for a row that will not act.
+    nonisolated static func remoteLaneRowTitle(offer: RemoteLaneOffer, opensForm: Bool) -> String {
+        switch offer {
+        case .single: return remoteLaneRowTitle(opensForm: opensForm)
+        case .chooseProvider, .hidden: return remoteLaneRowTitle(opensForm: false)
+        }
+    }
+
+    /// A provider row's title on the `.remoteProviders` page: the provider's
+    /// display name, carrying the same ellipsis promise the single-provider
+    /// row makes.
+    ///
+    /// These are the rows that actually create, so the signal has to reach
+    /// them — a bare provider name says nothing about whether selecting it
+    /// will ask first, and the row that sent the user here deliberately makes
+    /// no promise on their behalf.
+    nonisolated static func providerRowTitle(
+        _ provider: RemoteProviderStatus, opensForm: Bool
+    ) -> String {
+        opensForm ? "\(providerLabel(provider))…" : providerLabel(provider)
+    }
+
+    /// Whether selecting this provider's row will create outright — asked with
+    /// the SAME inputs the click itself uses (`RepoSectionView` /
+    /// `WorktreeRowView`'s `startRemoteSession(with:)`), so the label and the
+    /// action cannot disagree.
+    private func willCreateImmediately(_ provider: RemoteProviderStatus) -> Bool {
+        let repo = appState.repos.first(where: { $0.id == repoID })
+        return RemoteCreateFormLogic.willCreateImmediately(
+            describe: provider.describe,
+            repoPrefill: RemoteCreateFormLogic.repoPrefill(remoteURL: repo?.remoteURL),
+            repoDefaults: repo?.remoteCreateDefaults ?? [:],
+            globalDefaults: appState.globalRemoteCreateDefaults)
+    }
+
+    /// Leading glyph for every remote-lane row — reads as "a machine that is
+    /// not this one".
+    static let remoteLaneSymbol = "server.rack"
+
+    /// What the `+` menu offers as its remote-lane entry point.
+    ///
+    /// One gate: **no provider registered → nothing at all.** Omitting rather
+    /// than disabling mirrors `RepoSectionView.newRemoteSessionMenuItem` and
+    /// `RemoteSessionActionMenu`, which omit capability-gated items instead of
+    /// graying them out. Exactly one provider goes straight to starting a
+    /// session with it (which creates outright or opens the create form,
+    /// depending on what `RemoteCreateFormLogic.launch` can answer); more than
+    /// one drills into the `.remoteProviders` page first.
+    ///
+    /// `parentWorktreeID` is **not** a gate, and the parameter is kept to say
+    /// so where a test can pin it. The nested `+` promises the new lane nests
+    /// under that worktree; the create path keeps that promise now
+    /// (`RemoteCreateParams.parentWorktreeID` carries the click through to
+    /// adoption), so both `+` buttons offer the row on identical terms.
+    ///
+    /// `nonisolated` so it's directly testable without an `AppState`/view
+    /// hierarchy, for the same reason as `RepoSectionView`'s pure helpers.
+    nonisolated static func remoteLaneOffer(
+        providers: [RemoteProviderStatus],
+        parentWorktreeID: UUID?
+    ) -> RemoteLaneOffer {
+        if providers.count == 1, let only = providers.first { return .single(only) }
+        return providers.isEmpty ? .hidden : .chooseProvider(providers)
+    }
+
+    /// The providers the `.remoteProviders` page lists — taken from the offer
+    /// that sent the user there, so the page cannot show a list the offer
+    /// disagrees with. `.single` yields its one provider (the page is not
+    /// normally reachable then, but a provider list that empties itself while
+    /// the page is open should shrink, not blank), and `.hidden` yields
+    /// nothing, which is the same thing the row would have said.
+    nonisolated static func providerList(offer: RemoteLaneOffer) -> [RemoteProviderStatus] {
+        switch offer {
+        case .hidden: return []
+        case .single(let only): return [only]
+        case .chooseProvider(let all): return all
+        }
+    }
+
+    /// The page's own header copy. "New worktree with…" stops being true once
+    /// the page can also start a remote lane, which is a provider session and
+    /// not a worktree — so the title widens exactly when the row is offered.
+    nonisolated static func profilesPageTitle(offer: RemoteLaneOffer) -> String {
+        switch offer {
+        case .hidden: return "New worktree with…"
+        case .single, .chooseProvider: return "New worktree or remote session…"
+        }
+    }
+
+    /// Display name for a provider — the negotiated `describe` name when the
+    /// provider supplied one, else its configured name (same precedence as
+    /// `RepoSectionView.newRemoteSessionMenuItem`).
+    nonisolated static func providerLabel(_ provider: RemoteProviderStatus) -> String {
+        provider.describe?.name ?? provider.config.name
+    }
+
+    /// Why a provider's row is unselectable, or nil when it is selectable.
+    /// A stale snapshot means TBD can no longer vouch for what it last saw
+    /// from this provider, so its create path is closed off — the same gate
+    /// the context-menu item applies.
+    nonisolated static func providerRowSubtitle(_ provider: RemoteProviderStatus) -> String? {
+        provider.hasStaleSnapshot ? "Unavailable — inventory is stale" : nil
+    }
+
+    /// Close this menu BEFORE the host presents its sheet: the picker lives in
+    /// a borderless `FloatingPanel`, and a sheet racing a still-open floating
+    /// panel is a real macOS failure mode. Same close pair as `pick`.
+    private func startRemoteSession(_ provider: RemoteProviderStatus) {
+        dismiss()
+        onClose()
+        onStartRemoteSession(provider)
     }
 
     /// `model` is an optional per-spawn Claude model override (the row's model

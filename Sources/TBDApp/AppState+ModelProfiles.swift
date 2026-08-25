@@ -29,6 +29,9 @@ extension AppState {
             if result.globalEnvOverrides != globalEnvOverrides {
                 globalEnvOverrides = result.globalEnvOverrides
             }
+            if result.globalRemoteCreateDefaults != globalRemoteCreateDefaults {
+                globalRemoteCreateDefaults = result.globalRemoteCreateDefaults
+            }
             if result.autoArchiveOnMergeDefault != autoArchiveOnMergeDefault {
                 autoArchiveOnMergeDefault = result.autoArchiveOnMergeDefault
             }
@@ -425,6 +428,37 @@ extension AppState {
         } catch {
             logger.error("Failed to set repo env overrides: \(error, privacy: .public)")
             showAlert("Failed to set env overrides: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    // MARK: - Remote create-param defaults
+
+    /// Set or clear the machine-wide remote create-param defaults. An empty
+    /// map is the "no opinion" state — every field then falls through to its
+    /// provider-declared `default`.
+    func setGlobalRemoteCreateDefaults(_ defaults: [String: String]) async {
+        do {
+            try await daemonClient.setGlobalRemoteCreateDefaults(defaults)
+            globalRemoteCreateDefaults = defaults
+        } catch {
+            logger.error("Failed to set global remote create defaults: \(error, privacy: .public)")
+            showAlert("Failed to set remote create defaults: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Set or clear a repo's remote create-param defaults. An empty map is the
+    /// "no opinion" state — the repo then defers to the global map.
+    func setRepoRemoteCreateDefaults(repoID: UUID, defaults: [String: String]) async {
+        do {
+            try await daemonClient.setRepoRemoteCreateDefaults(repoID: repoID, defaults: defaults)
+            if let idx = repos.firstIndex(where: { $0.id == repoID }) {
+                var repo = repos[idx]
+                repo.remoteCreateDefaults = defaults
+                repos[idx] = repo
+            }
+        } catch {
+            logger.error("Failed to set repo remote create defaults: \(error, privacy: .public)")
+            showAlert("Failed to set remote create defaults: \(error.localizedDescription)", isError: true)
         }
     }
 

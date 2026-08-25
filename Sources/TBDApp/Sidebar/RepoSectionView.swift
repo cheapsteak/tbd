@@ -303,13 +303,10 @@ struct RepoSectionView: View {
                             repoID: repo.id,
                             highlightDefaultProfile: newWorktreeMenu.isTriggerHovered,
                             onClose: { newWorktreeMenu.closeNow() },
-                            onSelectCloudSession: RepoSectionView.cloudSessionProvider(
-                                providers: appState.remoteProviders,
-                                claudeCloudEnabled: appState.daemonCapabilities?
-                                    .claudeCloudEnabled ?? false
-                            ).map { provider in
-                                { openRemoteCreateSheet(for: provider) }
-                            }
+                            // The picker closes itself first (see its own
+                            // `startRemoteSession`), so this only has to create
+                            // outright or present the sheet this view owns.
+                            onStartRemoteSession: { startRemoteSession(with: $0) }
                         )
                         .environmentObject(appState)
                         .background(.ultraThickMaterial)
@@ -449,8 +446,10 @@ struct RepoSectionView: View {
     // create surfaces render, so a test can call the exact decision each
     // surface makes rather than re-deriving it. See
     // `CloudCreateEntryPresentationTests`'s cross-surface parity suite,
-    // which checks these two against `RemoteProviderHeaderRow.canCreate`
-    // (`RemoteSectionView.swift`) — the third owned surface — for agreement.
+    // which checks this against `CloudCreateEntryPresentation.pickerProviders`
+    // (the `+` picker's gate) and `RemoteProviderHeaderRow.canCreate`
+    // (`RemoteSectionView.swift`) — the other two owned surfaces — for
+    // agreement.
 
     /// The providers `newRemoteSessionMenuItem`'s context menu lists. A thin,
     /// named forward to `CloudCreateEntryPresentation.createProviders` so the
@@ -462,15 +461,6 @@ struct RepoSectionView: View {
         CloudCreateEntryPresentation.createProviders(providers, claudeCloudEnabled: claudeCloudEnabled)
     }
 
-    /// The provider `newWorktreePlusButton` opens the create sheet for, or
-    /// nil to omit the `+` picker's cloud row entirely. A thin, named forward
-    /// to `CloudCreateEntryPresentation.cloudProvider` for the same reason as
-    /// `remoteSessionMenuProviders` above.
-    nonisolated static func cloudSessionProvider(
-        providers: [RemoteProviderStatus], claudeCloudEnabled: Bool
-    ) -> RemoteProviderStatus? {
-        CloudCreateEntryPresentation.cloudProvider(providers, claudeCloudEnabled: claudeCloudEnabled)
-    }
 
     // MARK: - Context menu
 
@@ -543,8 +533,39 @@ struct RepoSectionView: View {
             // session's `meta["repo"]` back to a repo — so a session created
             // from here round-trips into THIS repo's section instead of
             // landing unmatched.
-            repoPrefill: RemoteCreateFormLogic.repoPrefill(remoteURL: repo.remoteURL)
+            repoPrefill: RemoteCreateFormLogic.repoPrefill(remoteURL: repo.remoteURL),
+            repoDefaults: repo.remoteCreateDefaults,
+            // The section the optimistic lane row belongs to while the
+            // provider is starting the session.
+            repoID: repo.id
         )
+    }
+
+    /// The `+` menu's remote-lane row: create outright when every required
+    /// answer is already knowable, and fall back to the form when it is not.
+    ///
+    /// Deliberately NOT wired to the repo context menu's "New Remote
+    /// Session…", which keeps opening the form unconditionally — that item is
+    /// how you reach the form to type a prompt or pick a branch, and it stays
+    /// the way to do so.
+    private func startRemoteSession(with provider: RemoteProviderStatus) {
+        let launch = RemoteCreateFormLogic.launch(
+            describe: provider.describe,
+            repoPrefill: RemoteCreateFormLogic.repoPrefill(remoteURL: repo.remoteURL),
+            repoDefaults: repo.remoteCreateDefaults,
+            globalDefaults: appState.globalRemoteCreateDefaults,
+            generatedSlug: NameGenerator.generate())
+        switch launch {
+        case .createNow(let paramsJSON):
+            Task {
+                await appState.createRemoteSession(
+                    provider: provider.config.name, paramsJSON: paramsJSON, repoID: repo.id)
+            }
+        case .openForm:
+            // The sheet re-resolves from the same inputs, so it opens on the
+            // values this decision just computed.
+            openRemoteCreateSheet(for: provider)
+        }
     }
 
     private func handlePlusButton() {

@@ -57,6 +57,11 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     // no attempt on record, which is a third thing again from a recorded
     // `.none` ("the forge answered; no PR") or `.undetermined`.
     var prObservation: String?
+    // True once adoption has given this row a parent (v80). nil on rows written
+    // before the column existed, which read as false. Never cleared: a nil
+    // `parentWorktreeID` on a row marked here is the user's un-nesting, and
+    // adoption must not undo it.
+    var remote_parent_assigned: Bool?
 
     init(from wt: Worktree) {
         self.id = wt.id.uuidString
@@ -98,6 +103,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.pending_prompt = wt.pendingPrompt
         self.pending_prompt_submit = wt.pendingPromptSubmit
         self.prObservation = FactColumnJSON.encode(wt.prObservation)
+        self.remote_parent_assigned = wt.remoteParentAssigned
     }
 
     /// Failable decode: skips (returns nil after a logged warning) only when the
@@ -179,7 +185,8 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             origin: worktreeOrigin,
             pendingPrompt: pending_prompt,
             pendingPromptSubmit: pending_prompt_submit,
-            prObservation: Self.decodePRObservation(prObservation)
+            prObservation: Self.decodePRObservation(prObservation),
+            remoteParentAssigned: remote_parent_assigned ?? false
         )
     }
 
@@ -312,7 +319,13 @@ public struct WorktreeStore: Sendable {
                 sortOrder: maxOrder + 1,
                 parentWorktreeID: parentWorktreeID,
                 prNumber: prNumber,
-                location: location
+                location: location,
+                // A remote row is minted by adoption and by nothing else, so a
+                // remote row born with a parent is a parent adoption assigned.
+                // Derived here rather than asked of the caller: the marker
+                // records what this write did, and this is where that is known.
+                // Local rows never carry it — nothing adopts them.
+                remoteParentAssigned: !location.isLocal && parentWorktreeID != nil
             )
             let record = WorktreeRecord(from: wt)
             try record.insert(db)
@@ -826,6 +839,28 @@ public struct WorktreeStore: Sendable {
     /// Validates: not-self, parent exists, parent is not `main`, no cycle.
     /// Renumbers siblings in the destination group so the moved row lands at
     /// the requested sortOrder.
+    ///
+    /// **On a remote row, changing the parent edge spends the row's one
+    /// adoption assignment** (`remote_parent_assigned`), exactly as
+    /// `assignParentIfUnset` and a parented `createRemote` do. This is the only
+    /// place a user's placement gesture lands — the sidebar drag and
+    /// `tbd worktree reparent` both arrive here through `worktree.move` — so it
+    /// is the only place that can record one.
+    ///
+    /// Both directions, because the invariant is "a user's placement decision
+    /// is final" and that is about the gesture, not its direction. Without the
+    /// to-root half a lane the user nested by hand and then un-nested would
+    /// arrive back at a nil parent still unmarked, `assignParentIfUnset`'s
+    /// guard would pass, and the first poll able to resolve the provider's
+    /// static stamp would re-nest it.
+    ///
+    /// Only when the edge actually changes. A move that keeps the same parent
+    /// is a reordering, and reordering inside the top-level group says nothing
+    /// about nesting — so a lane the user merely dragged up the list is still
+    /// one adoption may file under its spawning lane once the stamp resolves.
+    ///
+    /// Local rows are never adoption's business and are left alone.
+    /// `movingRecord` is already in hand, so neither test costs a read.
     public func move(worktreeID: UUID, newParentID: UUID?, newSortOrder: Int) async throws {
         try await writer.write { db in
             guard let movingRecord = try WorktreeRecord.fetchOne(db, key: worktreeID.uuidString) else {
@@ -833,37 +868,7 @@ public struct WorktreeStore: Sendable {
             }
 
             if let pid = newParentID {
-                if pid == worktreeID {
-                    throw WorktreeMoveError.selfReference
-                }
-                guard let parent = try WorktreeRecord.fetchOne(db, key: pid.uuidString) else {
-                    throw WorktreeMoveError.parentNotFound
-                }
-                if parent.status == WorktreeStatus.main.rawValue {
-                    throw WorktreeMoveError.parentIsMain
-                }
-                if parent.status == WorktreeStatus.archived.rawValue {
-                    // Symmetric to ParentResolver's create-time check: moving a
-                    // worktree under an archived parent would produce an
-                    // invisible row until reconcile clears the pointer.
-                    throw WorktreeMoveError.parentIsArchived
-                }
-                // Cycle check: walk up from parent; if we ever hit `worktreeID`, cycle.
-                // The `visited` set defends against a pre-existing cycle in the DB
-                // (manual edit or future regression) by treating any revisit as a
-                // cycle too — otherwise the loop would spin forever inside the
-                // write transaction and block the database.
-                var cursor: String? = parent.parentWorktreeID
-                var visited: Set<String> = [pid.uuidString]
-                while let curID = cursor {
-                    if curID == worktreeID.uuidString {
-                        throw WorktreeMoveError.cycle
-                    }
-                    if !visited.insert(curID).inserted {
-                        throw WorktreeMoveError.cycle
-                    }
-                    cursor = try WorktreeRecord.fetchOne(db, key: curID)?.parentWorktreeID
-                }
+                try Self.validateParent(db, worktreeID: worktreeID, parentID: pid)
             }
 
             // Renumber destination siblings: shift sortOrder of siblings >= newSortOrder by +1,
@@ -885,10 +890,137 @@ public struct WorktreeStore: Sendable {
                 )
             }
 
+            let reparentsARemoteRow = movingRecord.parentWorktreeID != parentArg
+                && movingRecord.location == "remote"
+            if reparentsARemoteRow {
+                try db.execute(
+                    sql: """
+                        UPDATE worktree
+                        SET parentWorktreeID = ?, sortOrder = ?, remote_parent_assigned = 1
+                        WHERE id = ?
+                        """,
+                    arguments: [parentArg, newSortOrder, worktreeID.uuidString]
+                )
+            } else {
+                try db.execute(
+                    sql: "UPDATE worktree SET parentWorktreeID = ?, sortOrder = ? WHERE id = ?",
+                    arguments: [parentArg, newSortOrder, worktreeID.uuidString]
+                )
+            }
+        }
+    }
+
+    /// Every rule about who may be whose parent, in one place: not-self, the
+    /// parent exists, it is neither `main` nor archived, and the edge closes no
+    /// cycle. `move()` and `assignParentIfUnset()` both go through it so a
+    /// second copy cannot drift from the first.
+    ///
+    /// Runs inside the caller's write transaction, since the answer is only
+    /// true for as long as the rows it read stay put.
+    private static func validateParent(_ db: Database, worktreeID: UUID, parentID: UUID) throws {
+        if parentID == worktreeID {
+            throw WorktreeMoveError.selfReference
+        }
+        guard let parent = try WorktreeRecord.fetchOne(db, key: parentID.uuidString) else {
+            throw WorktreeMoveError.parentNotFound
+        }
+        if parent.status == WorktreeStatus.main.rawValue {
+            throw WorktreeMoveError.parentIsMain
+        }
+        if parent.status == WorktreeStatus.archived.rawValue {
+            // Symmetric to ParentResolver's create-time check: nesting a
+            // worktree under an archived parent would produce an
+            // invisible row until reconcile clears the pointer.
+            throw WorktreeMoveError.parentIsArchived
+        }
+        // Cycle check: walk up from parent; if we ever hit `worktreeID`, cycle.
+        // The `visited` set defends against a pre-existing cycle in the DB
+        // (manual edit or future regression) by treating any revisit as a
+        // cycle too — otherwise the loop would spin forever inside the
+        // write transaction and block the database.
+        var cursor: String? = parent.parentWorktreeID
+        var visited: Set<String> = [parentID.uuidString]
+        while let curID = cursor {
+            if curID == worktreeID.uuidString {
+                throw WorktreeMoveError.cycle
+            }
+            if !visited.insert(curID).inserted {
+                throw WorktreeMoveError.cycle
+            }
+            cursor = try WorktreeRecord.fetchOne(db, key: curID)?.parentWorktreeID
+        }
+    }
+
+    /// Ask the parent rules about an edge that does not exist yet, throwing the
+    /// same `WorktreeMoveError` a `move()` would.
+    ///
+    /// For the one caller that decides a parent BEFORE the row exists: a remote
+    /// lane the user started from a worktree's nested `+`, whose parent is
+    /// chosen at create time and written by the very insert that mints the row
+    /// (`RemoteSessionAdopter`). Everything else either moves an existing row
+    /// (`move`) or fills a nil on one (`assignParentIfUnset`), and both of those
+    /// validate inside their own write transaction.
+    ///
+    /// `worktreeID` may therefore name a row that is not in the table yet. That
+    /// is sound for every rule: a row nothing points at can close no cycle, and
+    /// the self-check still catches a parent id equal to the id about to be
+    /// minted. The answer is a read, so it can go stale before the insert —
+    /// acceptable because the caller's fallback is a top-level row, not a
+    /// failed create, and the parent's own deletion cascades that edge away.
+    public func validateParent(worktreeID: UUID, parentID: UUID) async throws {
+        try await writer.read { db in
+            try Self.validateParent(db, worktreeID: worktreeID, parentID: parentID)
+        }
+    }
+
+    /// Give a row that has never been given one its FIRST parent, appended to
+    /// the end of the destination's child group. Returns the assigned
+    /// sortOrder, or nil when the row already has a parent or has already been
+    /// given one.
+    ///
+    /// Deliberately narrower than `move()`: it can only ever fill a nil, so it
+    /// cannot reparent a row the user has already placed, and it never asks the
+    /// caller for a position. It exists for a row adopted before its parent was
+    /// knowable — a remote session whose spawning lane became visible only on a
+    /// later sighting (`RemoteSessionAdopter`). Validation is `move()`'s, not a
+    /// relaxed copy of it, so a late edge is held to the same rules as one the
+    /// user drags into place.
+    ///
+    /// **A nil parent is not sufficient.** `remote_parent_assigned` is the
+    /// second half of the condition, because a row can arrive back at nil by
+    /// the user un-nesting it, and a caller replaying a static provider stamp
+    /// on every poll would undo that gesture within the minute. The marker is
+    /// set by the same write, so "was ever assigned" survives the removal —
+    /// and by `move()` too, so a first parent the user chose by hand counts
+    /// just as much as one adoption gave.
+    ///
+    /// Both checks and the write share one transaction: two concurrent callers
+    /// must not both read "no parent" and both assign one.
+    @discardableResult
+    public func assignParentIfUnset(worktreeID: UUID, parentID: UUID) async throws -> Int? {
+        try await writer.write { db in
+            guard let record = try WorktreeRecord.fetchOne(db, key: worktreeID.uuidString) else {
+                throw WorktreeMoveError.worktreeNotFound
+            }
+            guard record.parentWorktreeID == nil,
+                  record.remote_parent_assigned != true else { return nil }
+            try Self.validateParent(db, worktreeID: worktreeID, parentID: parentID)
+
+            let maxOrder = try Int.fetchOne(
+                db,
+                sql: "SELECT MAX(sortOrder) FROM worktree WHERE parentWorktreeID = ?",
+                arguments: [parentID.uuidString]
+            ) ?? 0
+            let sortOrder = maxOrder + 1
             try db.execute(
-                sql: "UPDATE worktree SET parentWorktreeID = ?, sortOrder = ? WHERE id = ?",
-                arguments: [parentArg, newSortOrder, worktreeID.uuidString]
+                sql: """
+                    UPDATE worktree
+                    SET parentWorktreeID = ?, sortOrder = ?, remote_parent_assigned = 1
+                    WHERE id = ?
+                    """,
+                arguments: [parentID.uuidString, sortOrder, worktreeID.uuidString]
             )
+            return sortOrder
         }
     }
 

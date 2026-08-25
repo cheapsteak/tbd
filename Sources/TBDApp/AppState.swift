@@ -313,7 +313,14 @@ final class AppState: ObservableObject {
                 selectedRepoID = nil
                 selectedScratchSection = false
                 selectedRemoteProvider = nil
-                selectedRemoteSession = nil
+                // Was a bare `selectedRemoteSession = nil`, which is still
+                // what happens for a local row or a multi-selection. A single
+                // ADOPTED REMOTE LANE is the exception: that row IS its
+                // provider session, so it points the remote surface at itself
+                // instead of clearing it — otherwise selecting the only row
+                // that leads to a remote session lands on an empty worktree
+                // pane. See `syncRemoteSurfaceToWorktreeSelection`.
+                syncRemoteSurfaceToWorktreeSelection()
                 recordNavigation(.worktrees(selectionOrder))
                 // Feed the jump menu's Recent section. Insertion-order LRU,
                 // most-recent-first; capped at 32 to bound memory. Only the
@@ -734,6 +741,13 @@ final class AppState: ObservableObject {
     @Published var draggingTabID: UUID? = nil
     @Published var repoFilter: UUID? = nil
     @Published var pendingWorktreeIDs: Set<UUID> = []
+    /// Remote lanes drawn optimistically while `remote.create` is in flight,
+    /// one entry per placeholder row (whose id is also in `pendingWorktreeIDs`,
+    /// so a poll landing mid-create preserves the row like any other
+    /// placeholder). Not `@Published` — no view reads it; it is the bookkeeping
+    /// `AppState+Remote`'s create path uses to retire each placeholder on the
+    /// `(provider, sessionID)` pair. See `PendingRemoteLane`.
+    var pendingRemoteLanes: [PendingRemoteLane] = []
     /// Worktree IDs optimistically removed by an archive that has not yet been
     /// confirmed by daemon data. `refreshWorktrees` filters these out so a
     /// `listWorktrees` poll issued before the daemon flipped the status cannot
@@ -819,6 +833,11 @@ final class AppState: ObservableObject {
     /// Global free-form env overrides (config scope). Loaded from the daemon
     /// alongside `defaultProfileID` via `loadModelProfiles()`.
     @Published var globalEnvOverrides: [String: String] = [:]
+    /// Machine-wide remote create-param defaults (config scope), keyed by the
+    /// provider's own `create_params` field names. The fall-through level
+    /// beneath `Repo.remoteCreateDefaults`. Loaded from the daemon alongside
+    /// `globalEnvOverrides` via `loadModelProfiles()`.
+    @Published var globalRemoteCreateDefaults: [String: String] = [:]
     /// Global default for auto-archive-on-PR-merge. Loaded from the daemon
     /// alongside `globalEnvOverrides` via `loadModelProfiles()`.
     @Published var autoArchiveOnMergeDefault: Bool = false
@@ -1460,6 +1479,22 @@ final class AppState: ObservableObject {
             try await daemonClient.setRemoteSessionPin(
                 provider: provider, sessionID: sessionID, pinned: pinned)
         }
+
+    /// How `createRemoteLane` starts a provider session — injectable for the
+    /// same reason as `remoteRenamePusher` (`DaemonClient` is concrete, no
+    /// protocol), so the optimistic-placeholder paths are testable without a
+    /// real daemon (tests must never touch `~/tbd`).
+    lazy var remoteSessionCreator: @MainActor (String, String, UUID?) async throws -> RemoteSessionPayload =
+        { [daemonClient] provider, paramsJSON, parentWorktreeID in
+            try await daemonClient.remoteCreate(
+                provider: provider, paramsJSON: paramsJSON, parentWorktreeID: parentWorktreeID)
+        }
+    /// How `createRemoteLane` re-reads the worktree list once `remote.create`
+    /// has answered. A plain refresh in production; a seam because a test that
+    /// exercises the placeholder swap must be able to decide whether the
+    /// adopted row shows up, without a daemon to adopt anything.
+    lazy var remoteLaneRowsRefresher: @MainActor () async -> Void =
+        { [weak self] in await self?.refreshWorktrees() }
 
     /// How `reportRemoteAttachExit` tells the daemon an app-spawned `attach`
     /// exited — injectable for the same reason as `remoteSessionPinSetter`

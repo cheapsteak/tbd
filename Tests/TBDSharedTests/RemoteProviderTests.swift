@@ -107,6 +107,139 @@ struct RemoteProviderTests {
         #expect(s.isArchived == false)
     }
 
+    // MARK: - `meta` degrades instead of failing (tier 1)
+
+    /// A provider that puts a nested object under a `meta` key violates the
+    /// contract's flat string-to-string map — but `meta` is untrusted input, so
+    /// the offending key is dropped and every other key survives, including the
+    /// identity keys adoption reads.
+    @Test func aNestedObjectMetaValueIsDroppedAndTheRestOfTheMapSurvives() throws {
+        let parentID = UUID().uuidString
+        let json = """
+        {"id": "s-1", "state": "running",
+         "meta": {"repo": "acme/api", "branch": "fix-ci",
+                  "tbd_parent_worktree_id": "\(parentID)",
+                  "delivery": {"status": "failed", "error": "not verified"},
+                  "tags": ["a", "b"],
+                  "nothing": null}}
+        """.data(using: .utf8)!
+
+        let s = try JSONDecoder().decode(RemoteSessionPayload.self, from: json)
+
+        #expect(s.meta?["repo"] == "acme/api")
+        #expect(s.meta?["branch"] == "fix-ci")
+        #expect(s.meta?["tbd_parent_worktree_id"] == parentID)
+        #expect(s.meta?["delivery"] == nil)
+        #expect(s.meta?["tags"] == nil)
+        #expect(s.meta?["nothing"] == nil)
+    }
+
+    /// `meta` is a display map, so an unambiguously displayable scalar is kept
+    /// in its literal form rather than thrown away.
+    @Test func scalarMetaValuesCoerceToTheirLiteralString() throws {
+        let json = """
+        {"id": "s-1", "state": "running",
+         "meta": {"attached": true, "detached": false, "turns": 42, "cost": 1.5}}
+        """.data(using: .utf8)!
+
+        let s = try JSONDecoder().decode(RemoteSessionPayload.self, from: json)
+
+        #expect(s.meta?["attached"] == "true")
+        #expect(s.meta?["detached"] == "false")
+        #expect(s.meta?["turns"] == "42")
+        #expect(s.meta?["cost"] == "1.5")
+    }
+
+    /// `meta` itself not being an object costs the map, never the session.
+    @Test func aMetaThatIsNotAnObjectDegradesToNoMeta() throws {
+        let json = #"{"id": "s-1", "state": "running", "meta": "not-a-map"}"#.data(using: .utf8)!
+        let s = try JSONDecoder().decode(RemoteSessionPayload.self, from: json)
+        #expect(s.id == "s-1")
+        #expect(s.meta == nil)
+    }
+
+    // MARK: - Every optional field degrades, and only `id` is fatal (tier 1)
+
+    /// The motivating field failure for all of this was a provider using the
+    /// wrong JSON type, and `meta` was never the only place it could happen. A
+    /// wrong-typed optional reads as absent — the same value a provider that
+    /// omitted it would have produced — so the session survives with one fact
+    /// missing instead of vanishing from the inventory and, two polls later,
+    /// being tombstoned as `gone` while it is alive and healthy.
+    @Test func aWrongTypedOptionalFieldCostsItsOwnFieldNotTheSession() throws {
+        let json = """
+        {"id": "s-1", "title": {"text": "fix CI"}, "created_at": 1700000000,
+         "state": 7, "exit_code": "not-a-number", "agent_state": ["working"],
+         "agent_state_reason": 3, "agent_state_at": false, "archived": "yes",
+         "meta": {"repo": "acme/api"}}
+        """.data(using: .utf8)!
+
+        let s = try JSONDecoder().decode(RemoteSessionPayload.self, from: json)
+
+        #expect(s.id == "s-1")
+        #expect(s.title == nil)
+        #expect(s.createdAt == nil)
+        #expect(s.state == .unknown)
+        #expect(s.exitCode == nil)
+        #expect(s.agentState == .unknown)
+        #expect(s.agentStateReason == nil)
+        #expect(s.agentStateAt == nil)
+        // A wrong-typed `archived` costs its own field too: absent means the
+        // provider made no filing claim, which is what a caller that cannot
+        // read one must assume.
+        #expect(s.archived == nil)
+        // The rest of the object is untouched by one field's failure.
+        #expect(s.meta?["repo"] == "acme/api")
+    }
+
+    /// `id` is the exception, and the only one: without it the session has no
+    /// identity, so there is nothing to mirror, adopt, or attach to.
+    @Test func aSessionWithNoUsableIDIsStillSkipped() throws {
+        let json = """
+        {"sessions": [
+          {"id": "good-1", "state": "running"},
+          {"state": "running"},
+          {"id": 7, "state": "running"},
+          {"id": "good-2", "state": "exited", "exit_code": 0}]}
+        """.data(using: .utf8)!
+
+        let envelope = try JSONDecoder().decode(RemoteSessionListEnvelope.self, from: json)
+
+        #expect(envelope.sessions.map(\.id) == ["good-1", "good-2"])
+    }
+
+    /// An element that is not an object at all cannot be a session, and costs
+    /// only itself — the array-level leniency this pairs with.
+    @Test func oneUndecodableElementDoesNotLoseTheOthers() throws {
+        let json = """
+        {"sessions": [
+          {"id": "good-1", "state": "running"},
+          42,
+          {"id": "good-2", "state": "exited", "exit_code": 0}]}
+        """.data(using: .utf8)!
+
+        let envelope = try JSONDecoder().decode(RemoteSessionListEnvelope.self, from: json)
+
+        #expect(envelope.sessions.map(\.id) == ["good-1", "good-2"])
+    }
+
+    /// The whole point of extending the leniency past `meta`: a session with a
+    /// wrong-typed field stays IN the inventory, so the mirror never starts
+    /// counting it absent and never marks a live session `gone`.
+    @Test func aWrongTypedFieldNoLongerCostsASessionItsPlaceInTheInventory() throws {
+        let json = """
+        {"sessions": [
+          {"id": "good-1", "state": "running"},
+          {"id": "typo", "state": "running", "exit_code": "not-a-number"}]}
+        """.data(using: .utf8)!
+
+        let envelope = try JSONDecoder().decode(RemoteSessionListEnvelope.self, from: json)
+
+        #expect(envelope.sessions.map(\.id) == ["good-1", "typo"])
+        #expect(envelope.sessions.last?.state == .running)
+        #expect(envelope.sessions.last?.exitCode == nil)
+    }
+
     @Test func staleProjectionDemotesActiveStateWithoutMutatingTheSnapshot() {
         let original = RemoteSessionPayload(
             id: "x", title: "worker", state: .running,
@@ -358,5 +491,36 @@ struct RemoteProviderTests {
         #expect(decoded.provider == "acme")
         #expect(decoded.sessionID == "s1")
         #expect(decoded.pinned)
+    }
+
+    // MARK: - `remote.create`'s TBD-local parent
+
+    /// The nested `+` sends the worktree the lane should hang under. It is not
+    /// a provider parameter — it never enters `paramsJSON` — so it survives as
+    /// its own field or not at all.
+    @Test func createParamsRoundTripTheParentWorktreeID() throws {
+        let parent = UUID()
+        let params = RemoteCreateParams(
+            provider: "acme", paramsJSON: #"{"repo":"acme/api"}"#, parentWorktreeID: parent)
+        let decoded = try JSONDecoder().decode(
+            RemoteCreateParams.self, from: try JSONEncoder().encode(params))
+        #expect(decoded.provider == "acme")
+        #expect(decoded.paramsJSON == #"{"repo":"acme/api"}"#)
+        #expect(decoded.parentWorktreeID == parent)
+    }
+
+    /// A top-level create omits it, and so does every set of params an older
+    /// app encoded — neither may fail to decode.
+    @Test func createParamsDecodeWhenTheParentWorktreeIDIsAbsent() throws {
+        let json = #"{"provider": "acme", "paramsJSON": "{}"}"#.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(RemoteCreateParams.self, from: json)
+        #expect(decoded.provider == "acme")
+        #expect(decoded.parentWorktreeID == nil)
+    }
+
+    /// The default keeps every existing call site — the repo header's create,
+    /// the Remote section's — meaning "top level" without saying so.
+    @Test func createParamsDefaultToNoParent() {
+        #expect(RemoteCreateParams(provider: "acme", paramsJSON: "{}").parentWorktreeID == nil)
     }
 }
