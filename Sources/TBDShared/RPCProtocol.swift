@@ -203,6 +203,7 @@ public enum RPCMethod {
     public static let terminalSwapProfile = "terminal.swapProfile"
     public static let terminalSessionEvent = "terminal.sessionEvent"
     public static let terminalActivityEvent = "terminal.activityEvent"
+    public static let terminalSessionEnded = "terminal.sessionEnded"
     public static let terminalNotificationEvent = "terminal.notificationEvent"
     public static let terminalAskUserQuestionPending = "terminal.askUserQuestionPending"
     public static let terminalAskUserQuestionCleared = "terminal.askUserQuestionCleared"
@@ -3189,6 +3190,20 @@ public struct TerminalActivityEventParams: Codable, Sendable {
         self.sessionID = sessionID
         self.origin = origin
     }
+}
+
+/// Params for `terminal.sessionEnded` — sent by `tbd session-end` from the
+/// Claude Code `SessionEnd` hook. Carries identity only: the daemon decides
+/// what ending a session means.
+///
+/// A dedicated method rather than a new `TerminalActivityEventOrigin` case:
+/// an unknown enum raw value throws inside the shared params decode on an
+/// older daemon, while an unknown *method* fails cleanly and the hook's
+/// trailing `|| true` swallows it. `~/.local/bin/tbd` can be stale relative
+/// to a running daemon, so that skew is real.
+public struct TerminalSessionEndedParams: Codable, Sendable, Equatable {
+    public let terminalID: UUID
+    public init(terminalID: UUID) { self.terminalID = terminalID }
 }
 
 /// Params for `terminal.notificationEvent` — sent by `tbd hooks notification`

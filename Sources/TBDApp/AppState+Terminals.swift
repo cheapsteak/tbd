@@ -473,6 +473,17 @@ extension AppState {
         // Remaining terminals: Codex (Ctrl+C), Claude, or legacy nil-kind sessions.
         if let idx = terminals[terminal.worktreeID]?.firstIndex(where: { $0.id == terminalID }) {
             terminals[terminal.worktreeID]?[idx].activityState = .idle
+            // Clear the cached presentation value for every agent kind. The
+            // daemon drops its own claim on the `userInterrupt` origin below,
+            // but `TerminalActivityDelta` — the real-time push rail — carries
+            // no presentation field, so only a full `terminal.list` refresh
+            // would deliver that clear. Without this line the stale claim keeps
+            // the sidebar spinner lit until the next unscoped poll (~2s), which
+            // is the false-thinking direction the rail must never fail toward.
+            // Clearing it for Codex too is safe: Codex's foreground-working
+            // test requires a `.working` presentation value, so the row can
+            // only reach idle sooner.
+            terminals[terminal.worktreeID]?[idx].presentationActivityState = nil
             if isCodex {
                 let observedAt = Date()
                 terminals[terminal.worktreeID]?[idx].activityStateSource = .terminalInterrupt
@@ -483,10 +494,21 @@ extension AppState {
 
         Task {
             do {
+                // The origin travels for EVERY agent kind, not just Codex. The
+                // local optimistic assignments above stay Codex-only because
+                // they carry Codex's ordering semantics, but the daemon needs
+                // the interrupt fact for Claude too: an interrupted Claude turn
+                // often writes no `turn_duration`, so without this the
+                // delegation rail would re-read the pre-interrupt record on the
+                // next poll and relight the spinner with no agents running.
+                // The handler's other origin-conditional branches — the
+                // hook-event counter and the Stop-hook transcript sync — already
+                // read a present origin as "a user action, not an agent hook",
+                // which is what an Esc on a Claude session is.
                 try await daemonClient.setTerminalActivity(
                     terminalID: terminalID,
                     activityState: .idle,
-                    origin: isCodex ? .userInterrupt : nil
+                    origin: .userInterrupt
                 )
             } catch {
                 logger.debug("Failed to publish terminal interrupt state: \(error.localizedDescription, privacy: .public)")

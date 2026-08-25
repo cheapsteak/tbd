@@ -83,6 +83,13 @@ extension RPCRouter {
 
     // MARK: - Terminal Handlers
 
+    /// A pending-agent count becomes a working presentation; its absence
+    /// makes no claim at all. Split out so the mapping is assertable without
+    /// standing up a router.
+    static func delegationPresentation(pendingCount: Int?) -> TerminalActivityState? {
+        pendingCount == nil ? nil : .working
+    }
+
     func handleTerminalCreate(
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
@@ -609,6 +616,41 @@ extension RPCRouter {
 
         await codexActivityTracker.retain(
             transcriptPaths: codexTranscriptPaths, scope: params.worktreeID)
+
+        // Claude delegation rail. Only terminals that just ended a turn were
+        // marked, so a session at rest costs neither a stat nor a read. The
+        // claim is stamped with the same instant the Codex observation above
+        // took, so one response never carries two different "now"s.
+        let delegationTargets = terminals.indices
+            .filter { !terminals[$0].isCodexTerminal }
+            .map { ClaudeDelegationTarget(
+                terminalID: terminals[$0].id,
+                transcriptPath: terminals[$0].transcriptPath) }
+        let delegationClaims = await claudeDelegationTracker.sample(
+            targets: delegationTargets)
+        for index in terminals.indices where !terminals[index].isCodexTerminal {
+            // A parked session runs nothing, so its last count speaks for work
+            // that is already gone. The row's indicator ranks working above
+            // hibernated, so publishing here would replace the moon with
+            // animated dots that nothing can ever retract.
+            guard terminals[index].hibernatedAt == nil,
+                  terminals[index].suspendedAt == nil else { continue }
+            // Only a live claim writes. Absence must leave the field alone
+            // rather than publish nil, which is a statement of its own.
+            guard let count = delegationClaims[terminals[index].id] else { continue }
+            terminals[index].presentationActivityState =
+                Self.delegationPresentation(pendingCount: count)
+            terminals[index].presentationActivityObservedAt = codexObservation.observedAt
+        }
+        // Pruning may only follow a FLEET-WIDE listing. `terminals` is filtered
+        // by `params.worktreeID` when one is given, so retaining against a
+        // scoped list would read every other worktree's terminals as gone and
+        // drop marks that were never sampled. The unscoped listing is the
+        // app's recurring refresh, so pruning still happens regularly.
+        if params.worktreeID == nil {
+            await claudeDelegationTracker.retain(
+                terminalIDs: Set(terminals.map(\.id)))
+        }
         return try RPCResponse(result: terminals)
     }
 
@@ -3201,6 +3243,16 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// A Claude session ended. Drops any standing delegation claim: a session
+    /// that exits while background subagents are live leaves a final
+    /// `turn_duration` record still reporting them, and no later turn ever
+    /// arrives to retract it.
+    func handleTerminalSessionEnded(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalSessionEndedParams.self, from: paramsData)
+        await claudeDelegationTracker.clear(terminalID: params.terminalID)
+        return .ok()
+    }
+
     func handleTerminalActivityEvent(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalActivityEventParams.self, from: paramsData)
         guard params.origin != .userInterrupt || params.activityState == .idle else {
@@ -3277,6 +3329,25 @@ extension RPCRouter {
                     terminalID: terminal.id)) == true {
                     await limitResumeScheduler?.wake()
                 }
+            }
+            // Marked BEFORE the unchanged-state guard below, deliberately. A
+            // background agent's completion wakes the parent, which runs a
+            // turn and ends it — a second `idle` with no `working` between.
+            // Marking below the guard would drop that boundary and latch the
+            // previous turn's count. Sampling itself is deferred to
+            // `terminal.list`: Claude Code writes the turn's `turn_duration`
+            // record a couple of milliseconds AFTER these hooks return, so a
+            // read here would observe the previous turn.
+            //
+            // An explicit interrupt CLEARS instead of marking. An interrupted
+            // turn frequently writes no `turn_duration`, so sampling after one
+            // would re-read the PRE-interrupt record and relight the indicator
+            // with nothing running — the false-thinking direction this rail is
+            // never allowed to fail toward.
+            if params.origin == .userInterrupt {
+                await claudeDelegationTracker.clear(terminalID: terminal.id)
+            } else if params.activityState == .idle {
+                await claudeDelegationTracker.mark(terminalID: terminal.id)
             }
             guard terminal.activityState != params.activityState else {
                 // Previously a pure no-op. A same-state observation still

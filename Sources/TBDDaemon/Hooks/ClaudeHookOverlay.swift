@@ -12,7 +12,7 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claude-overl
 /// its own overlay file pinned at spawn time without touching the user's
 /// settings.json at all.
 ///
-/// The overlay registers seven event types:
+/// The overlay registers eight event types:
 /// - `SessionStart` (matcher `*`): calls `tbd session-event`, which
 ///   relays the new session ID + transcript path to the daemon. This is
 ///   what fixes the post-`/clear`/`/compact` transcript freeze. Also
@@ -42,6 +42,10 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claude-overl
 /// - `Notification` (no matcher): runs `tbd hooks notification`, which
 ///   forwards the payload verbatim so the daemon can record a structured
 ///   reason an agent is waiting.
+/// - `SessionEnd` (no matcher): runs `tbd session-end`, which drops any
+///   standing delegation claim for the terminal. A session that exits
+///   while background subagents are live leaves a final `turn_duration`
+///   record still reporting them, and no later turn corrects it.
 ///
 /// The overlay is regenerated on every daemon startup so changes to the
 /// shape (new hooks, new commands) take effect on the next worktree open.
@@ -126,6 +130,24 @@ public enum ClaudeHookOverlay {
     /// Sets the terminal activity state to waiting_for_user.
     static let waitingForUserCommand =
         #"tbd terminal-activity waiting_for_user 2>/dev/null || true"#
+
+    /// Clears any standing delegation claim when a session ends. A session
+    /// that exits while background agents are live leaves a final
+    /// `turn_duration` record still reporting them, and no later turn ever
+    /// corrects it — so without this the claim would stand forever.
+    static let sessionEndCommand =
+        #"tbd session-end 2>/dev/null || true"#
+
+    /// Seconds Claude Code will wait for `sessionEndCommand` before killing it.
+    ///
+    /// Explicit only to escape the 60-second default, which would let one
+    /// wedged daemon socket hold a quitting session open for a minute. What
+    /// actually bounds the hook is Claude Code's ~1.5-second SessionEnd
+    /// shutdown budget, which cuts the callback off first either way; this
+    /// value stays above it so a healthy RPC has the whole budget to land the
+    /// clear. Losing the clear to either bound costs only a stale claim on a
+    /// terminal whose session is gone.
+    static let sessionEndTimeoutSeconds = 2
 
     /// The extended regex the prefilter greps a Bash hook payload for.
     ///
@@ -267,6 +289,16 @@ public enum ClaudeHookOverlay {
                     [
                         "hooks": [
                             ["type": "command", "command": stopFailureCommand]
+                        ]
+                    ]
+                ],
+                // No "matcher" key: SessionEnd carries a reason, not a matcher
+                // subject, and every reason retires the session's claim.
+                "SessionEnd": [
+                    [
+                        "hooks": [
+                            ["type": "command", "command": sessionEndCommand,
+                             "timeout": sessionEndTimeoutSeconds] as [String: Any]
                         ]
                     ]
                 ],

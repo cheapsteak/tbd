@@ -1783,6 +1783,41 @@ func appState_claudeInterruptRetainsLegacyRawIdle(viaEscape: Bool) {
 }
 
 @MainActor
+@Test(
+    "Interrupting a delegating Claude clears the cached delegation claim",
+    arguments: [false, true]
+)
+func appState_claudeInterruptClearsCachedPresentationState(viaEscape: Bool) {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    state.terminals = [
+        worktreeID: [
+            Terminal(
+                id: terminalID,
+                worktreeID: worktreeID,
+                tmuxWindowID: "@1",
+                tmuxPaneID: "%1",
+                label: "Claude",
+                kind: .claude,
+                activityState: .idle,
+                presentationActivityState: .working,
+                activityStateSource: .hookEvent("Stop"),
+                activityStateObservedAt: Date(timeIntervalSinceReferenceDate: 20)
+            )
+        ]
+    ]
+    #expect(WorktreeRowView.isForegroundWorking(state.terminals[worktreeID]![0]))
+
+    state.handleTerminalInterrupt(terminalID: terminalID, viaEscape: viaEscape)
+
+    // The delta rail carries no presentation field, so only this optimistic
+    // clear keeps the spinner from outliving the interrupt by a poll interval.
+    #expect(state.terminals[worktreeID]?[0].presentationActivityState == nil)
+    #expect(!WorktreeRowView.isForegroundWorking(state.terminals[worktreeID]![0]))
+}
+
+@MainActor
 @Test func appState_escDoesNotInterruptCodex() {
     let state = AppState()
     let worktreeID = UUID()
