@@ -89,6 +89,10 @@ public final class Daemon: Sendable {
     /// leaves `loadRegistryAndDescribe` spawning `describe` child processes
     /// after `shutdown()` has already torn down the manager, orphaning them.
     public nonisolated(unsafe) var remoteStartTask: Task<Void, Never>?
+    /// Deferred archived-worktree backfill task (step 11a-backfill). Stored so
+    /// `stop()` can cancel and await it — the pass spawns one `git` child per
+    /// archived row, so a SIGTERM mid-pass has a child to reap.
+    public nonisolated(unsafe) var archivedBackfillTask: Task<Void, Never>?
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
     public nonisolated(unsafe) var oauthUsagePoller: OAuthProfileUsagePoller?
     /// Session-limit auto-resume scheduler. Owned here so it can be stopped
@@ -247,10 +251,6 @@ public final class Daemon: Sendable {
         } catch {
             reconcileLogger.warning("Failed to reconcile scratch terminals: \(error.localizedDescription, privacy: .public)")
         }
-        // Backfill archived worktrees whose branch is missing — repairs
-        // rows whose branch was renamed before archive captured the new name.
-        // Idempotent and best-effort; never throws.
-        await ArchivedWorktreeBackfill(db: database, git: git).run()
         // Validate repo health — flips repos with stale paths to .missing.
         // Must come *after* reconcile so newly-discovered worktrees see the
         // correct status, and *before* the periodic tasks so users get accurate
@@ -330,6 +330,33 @@ public final class Daemon: Sendable {
         rpcRouter.deliveryVerifier = verifier
         await verifier.replayMissedObservations(activeSegmentPath: actuationLog.path)
         return verifier
+    }
+
+    /// Start the archived-worktree branch backfill as a background task.
+    ///
+    /// **Ordering contract: this runs only AFTER the RPC listener is bound
+    /// (step 9), never inside `performStartupReconciliation` (step 8d).** The
+    /// pass spawns one `git` subprocess per archived row; measured on a box
+    /// with 1,825 archived worktrees it ran for ~3 minutes, during which the
+    /// daemon had bound no socket, written no port file, and the app's connect
+    /// retries each spawned a daemon that exited "Another daemon is already
+    /// running". Nothing the backfill does needs to precede serving: it repairs
+    /// archived (inactive) rows, is idempotent, never deletes a row and never
+    /// throws.
+    ///
+    /// Returns `nil` in mock mode, where the backfill is a total no-op like
+    /// every other background rail.
+    @discardableResult
+    static func startArchivedWorktreeBackfill(
+        mockMode: MockMode?, database: TBDDatabase, git: GitManager
+    ) -> Task<Void, Never>? {
+        guard mockMode == nil else {
+            daemonLogger.info("Mock mode: skipping archived worktree backfill")
+            return nil
+        }
+        return Task {
+            await ArchivedWorktreeBackfill(db: database, git: git).run()
+        }
     }
 
     /// The construction behind `remote_backends_enabled` / `claude_cloud_enabled`
@@ -911,6 +938,15 @@ public final class Daemon: Sendable {
                 }
             }
 
+            // 11a-backfill. Repair archived worktree rows whose branch was
+            // renamed before archive captured the new name. Deferred off the
+            // boot critical path for the same reason as the tasks above — one
+            // `git` subprocess per archived row is minutes of work on a large
+            // fleet, and the listener must not wait on it. See
+            // `startArchivedWorktreeBackfill` for the ordering contract.
+            self.archivedBackfillTask = Daemon.startArchivedWorktreeBackfill(
+                mockMode: mockMode, database: database, git: git)
+
             // 11a-pre. Prune per-session Claude `fallbackModel` overlay files
             // orphaned by crashes or teardown paths that didn't clean up. Keep only
             // files whose key matches a live terminal. Best-effort.
@@ -1232,6 +1268,13 @@ public final class Daemon: Sendable {
         // child exactly as before.
         remoteStartTask?.cancel()
         await remoteStartTask?.value
+
+        // Cancel-and-await for the same reason as `remoteStartTask` above: the
+        // backfill can be mid `runBoundedProcess`, and the cancellation relay's
+        // interruption unwinds ON this task, so the process must stay alive to
+        // reap the killed `git` child.
+        archivedBackfillTask?.cancel()
+        await archivedBackfillTask?.value
 
         // Stop remote-backends poll loops / events supervisors. Required,
         // not optional: the events supervisor's supervision task retains

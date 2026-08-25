@@ -800,6 +800,45 @@ public struct WorktreeStore: Sendable {
         }
     }
 
+    /// Repair an archived worktree's stale branch — but only if the row is
+    /// still the one the caller decided to repair.
+    ///
+    /// This is the compare-and-swap `ArchivedWorktreeBackfill` writes through.
+    /// Its pass runs while the daemon is serving, so an RPC can revive,
+    /// re-archive, rename or forget a row between the snapshot that decided on
+    /// a repair and this write. The write is therefore conditional on the row
+    /// still being `.archived` AND still carrying `expectedBranch`.
+    ///
+    /// Returns `false` when the row changed under the caller (revived,
+    /// re-archived under a different branch, or deleted) and nothing was
+    /// written. That is an expected outcome, not an error: the repair is
+    /// idempotent and best-effort, so losing the race costs nothing — the next
+    /// daemon start either picks the row up again or finds it no longer needs
+    /// repair.
+    ///
+    /// `archivedHeadSHA` is written only when it is non-nil AND the record has
+    /// none: this populates a missing value and never overwrites one.
+    public func repairArchivedBranch(
+        id: UUID, expectedBranch: String, newBranch: String, archivedHeadSHA: String?
+    ) async throws -> Bool {
+        try await writer.write { db -> Bool in
+            guard var record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else {
+                return false
+            }
+            guard record.status == WorktreeStatus.archived.rawValue,
+                  record.branch == expectedBranch
+            else {
+                return false
+            }
+            record.branch = newBranch
+            if let sha = archivedHeadSHA, record.archivedHeadSHA == nil {
+                record.archivedHeadSHA = sha
+            }
+            try record.update(db)
+            return true
+        }
+    }
+
     /// Record that this worktree's contents were checked out from an unvetted
     /// ref (a PR head, whose commits may come from a third-party fork).
     /// One-way: only ever sets the flag to `true`. Nothing clears it, because

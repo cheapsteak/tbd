@@ -16,6 +16,12 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "archivedBack
 ///
 /// Idempotent: rows with a resolvable branch are skipped — running twice is a
 /// no-op for already-fixed rows. Never deletes rows; never throws to the caller.
+///
+/// The pass runs *while the daemon serves RPCs* (see
+/// `Daemon.startArchivedWorktreeBackfill`), so every write goes through
+/// `WorktreeStore.repairArchivedBranch`, which refuses a row that changed under
+/// the pass, and every loop checks `Task.isCancelled` so shutdown does not have
+/// to wait out one `git` subprocess per archived row.
 public struct ArchivedWorktreeBackfill: Sendable {
     public let db: TBDDatabase
     public let git: GitManager
@@ -36,6 +42,12 @@ public struct ArchivedWorktreeBackfill: Sendable {
         }
 
         for repo in repos where repo.status != .missing {
+            // The pass now runs alongside a serving daemon, so a SIGTERM must
+            // not have to wait out one `git` subprocess per archived row.
+            guard !Task.isCancelled else {
+                logger.debug("backfill: cancelled before repo \(repo.displayName, privacy: .public)")
+                return
+            }
             await runForRepo(repo: repo)
         }
     }
@@ -66,6 +78,10 @@ public struct ArchivedWorktreeBackfill: Sendable {
         logger.debug("backfill: repo=\(repo.displayName, privacy: .public) archivedCount=\(archived.count, privacy: .public)")
 
         for wt in archived {
+            guard !Task.isCancelled else {
+                logger.debug("backfill: cancelled mid-repo \(repo.displayName, privacy: .public)")
+                return
+            }
             let branchOK = await git.refExists(repoPath: repo.path, ref: wt.branch)
             logger.debug("backfill:   wt=\(wt.name, privacy: .public) branch=\(wt.branch, privacy: .public) exists=\(branchOK, privacy: .public)")
             if branchOK {
@@ -81,7 +97,10 @@ public struct ArchivedWorktreeBackfill: Sendable {
         }
     }
 
-    private func attemptRepair(worktree: Worktree, repo: Repo, renameMap: [String: String]) async {
+    /// Repair one row. `internal` (like `runForRepo`) so tests can drive it
+    /// with a deliberately stale snapshot — the race this pass has to survive
+    /// now that it runs alongside a serving daemon.
+    func attemptRepair(worktree: Worktree, repo: Repo, renameMap: [String: String]) async {
         // Walk the rename chain (a → b → c) until we hit a branch that no
         // longer appears as a key (i.e. the latest known name).
         var current = worktree.branch
@@ -102,26 +121,49 @@ public struct ArchivedWorktreeBackfill: Sendable {
             return
         }
 
+        // Resolve everything the write needs BEFORE touching the row, so the
+        // repair lands as one compare-and-swap rather than two unguarded
+        // writes. A SHA lookup that fails still must not block the branch
+        // repair, so it degrades to `nil` — which the store reads as "leave
+        // archivedHeadSHA alone".
+        var headSHA: String? = nil
+        if worktree.archivedHeadSHA == nil {
+            // Populate archivedHeadSHA from the renamed branch's *current*
+            // HEAD — not the commit the worktree was on at archive time, which
+            // we can't recover after the fact. If the user committed on the
+            // renamed branch post-archive, a later SHA-fallback revive will
+            // land on the newer commit. Acceptable: the fallback only fires
+            // when the branch is also gone, and a slightly newer starting point
+            // beats outright failure.
+            do {
+                headSHA = try await git.headSHA(repoPath: repo.path, ref: current)
+            } catch {
+                logger.warning("backfill: failed to resolve archivedHeadSHA for \(worktree.id, privacy: .public) (branch \(current, privacy: .public)): \(error, privacy: .public)")
+            }
+        }
+
+        // The snapshot this decision came from can be stale: the daemon is
+        // serving, so an RPC may have revived, re-archived, renamed or deleted
+        // this row since. `repairArchivedBranch` writes only if the row is
+        // still archived and still carries the branch we decided to repair.
+        // Losing that race is expected and costs nothing — the repair is
+        // idempotent, so the next daemon start picks the row up again if it
+        // still needs one. No lock and no generation column: a lock held
+        // across one `git` subprocess per archived row would block exactly the
+        // RPCs this deferral exists to unblock.
+        let repaired: Bool
         do {
-            try await db.worktrees.updateBranch(id: worktree.id, branch: current)
+            repaired = try await db.worktrees.repairArchivedBranch(
+                id: worktree.id, expectedBranch: worktree.branch,
+                newBranch: current, archivedHeadSHA: headSHA)
         } catch {
             logger.warning("backfill: failed to update branch for \(worktree.id, privacy: .public): \(error, privacy: .public)")
             return
         }
 
-        // Populate archivedHeadSHA from the renamed branch's *current* HEAD —
-        // not the commit the worktree was on at archive time, which we can't
-        // recover after the fact. If the user committed on the renamed branch
-        // post-archive, a later SHA-fallback revive will land on the newer
-        // commit. Acceptable: the fallback only fires when the branch is also
-        // gone, and a slightly newer starting point beats outright failure.
-        if worktree.archivedHeadSHA == nil {
-            do {
-                let sha = try await git.headSHA(repoPath: repo.path, ref: current)
-                try await db.worktrees.updateArchivedHeadSHA(id: worktree.id, sha: sha)
-            } catch {
-                logger.warning("backfill: failed to populate archivedHeadSHA for \(worktree.id, privacy: .public) (branch \(current, privacy: .public)): \(error, privacy: .public)")
-            }
+        guard repaired else {
+            logger.debug("backfill: worktree \(worktree.id, privacy: .public) changed under the pass (no longer archived on '\(worktree.branch, privacy: .public)') — skipped")
+            return
         }
 
         logger.info("backfill: repaired worktree \(worktree.id, privacy: .public) branch '\(worktree.branch, privacy: .public)' → '\(current, privacy: .public)'")
