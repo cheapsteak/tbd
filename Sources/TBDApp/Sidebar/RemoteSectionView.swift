@@ -23,6 +23,10 @@ private let remoteRowLogger = Logger(subsystem: "com.tbd.app", category: "remote
 /// registered — see `AppState.remoteSectionVisible(providers:)`.
 struct RemoteSectionView: View {
     @EnvironmentObject var appState: AppState
+    /// Read only to place the session rows under their provider's title —
+    /// see `SidebarHeaderMetrics.childRowLeadingInset`.
+    @AppStorage(AppState.chevronBeforeProjectNameKey)
+    private var chevronBeforeProjectName: Bool = AppState.chevronBeforeProjectNameDefault
 
     var body: some View {
         let knownRepoIDs = RemoteSectionView.knownRepoIDs(repos: appState.repos, repoFilter: appState.repoFilter)
@@ -39,7 +43,12 @@ struct RemoteSectionView: View {
             RemoteProviderHeaderRow(provider: provider)
             ForEach(RemoteSectionView.sessions(in: appState.remoteSessions, forProvider: provider.config.name, knownRepoIDs: knownRepoIDs)) { session in
                 RemoteSessionRowView(session: session)
-                    .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
+                    .listRowInsets(EdgeInsets(
+                        top: 0,
+                        leading: SidebarHeaderMetrics.childRowLeadingInset(
+                            chevronBeforeProjectName: chevronBeforeProjectName),
+                        bottom: 0,
+                        trailing: 0))
                     .listRowSeparator(.hidden)
                     .listRowBackground(Color.clear)
                     .tag(session.id)
@@ -176,6 +185,12 @@ struct RemoteProviderHeaderRow: View {
     /// sheet. Presented from the ROW, not from inside the popover — a
     /// popover can't host a sheet of its own.
     @State private var runningRemediation: RemoteRemediationRun?
+    /// Read only to place the title, for the same reason as
+    /// `ScratchSectionView`'s copy: this header has no chevron, and a project
+    /// row's chevron placement decides which column every section title sits
+    /// in. See `SidebarHeaderMetrics.titleLeadingInset`.
+    @AppStorage(AppState.chevronBeforeProjectNameKey)
+    private var chevronBeforeProjectName: Bool = AppState.chevronBeforeProjectNameDefault
 
     private var issueSummary: String? {
         RemoteProviderStatusPresentation.issueSummary(provider)
@@ -214,10 +229,13 @@ struct RemoteProviderHeaderRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: -1) {
-            HStack(spacing: 4) {
+            HStack(spacing: SidebarHeaderMetrics.headerSpacing) {
                 // The name spans the row's free width instead of a trailing
                 // `Spacer()`, so the whole empty stretch is the desk's hit
-                // target rather than dead chrome.
+                // target rather than dead chrome. The title inset is padding
+                // INSIDE the label, ahead of that full-width frame, so the
+                // indent still belongs to the desk's hit target — padding the
+                // button instead would carve the gutter back out of it.
                 Button {
                     appState.selectRemoteProvider(provider.config.name)
                 } label: {
@@ -229,6 +247,8 @@ struct RemoteProviderHeaderRow: View {
                                 : HierarchicalShapeStyle.secondary
                         )
                         .lineLimit(1)
+                        .padding(.leading, SidebarHeaderMetrics.titleLeadingInset(
+                            chevronBeforeProjectName: chevronBeforeProjectName))
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .contentShape(Rectangle())
                 }
@@ -258,11 +278,16 @@ struct RemoteProviderHeaderRow: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
+                    // Same inset as the name above, so the summary keeps
+                    // hanging under it rather than under the chevron column.
+                    .padding(.leading, SidebarHeaderMetrics.titleLeadingInset(
+                        chevronBeforeProjectName: chevronBeforeProjectName))
                     .help(issueSummary)
             }
         }
         .frame(minHeight: 22, alignment: .bottom)
-        .listRowInsets(EdgeInsets(top: 0, leading: -2, bottom: 0, trailing: 0))
+        .listRowInsets(EdgeInsets(top: 0, leading: SidebarHeaderMetrics.headerRowLeadingInset,
+                                  bottom: 0, trailing: 0))
         .listRowSeparator(.hidden)
         .listRowBackground(
             appState.selectedRemoteProvider == provider.config.name

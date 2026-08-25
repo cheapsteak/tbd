@@ -3318,6 +3318,37 @@ final class AppState: ObservableObject {
     /// turns it off for users who find the hover card noisy.
     static let showClaudeTabUsageTooltipKey = "showClaudeTabUsageTooltip"
 
+    /// UserDefaults key for where a sidebar project row's disclosure chevron
+    /// sits. Off — the default, and what shipped before this setting existed —
+    /// leaves it immediately after the project name, hover-gated with the
+    /// row's `+`. On moves it before the name, always mounted, so every row's
+    /// chevron lines up in one column; the sidebar's titles and rows shift
+    /// right to clear that column with it (`SidebarHeaderMetrics`).
+    ///
+    /// Read via `@AppStorage` in the view layer;
+    /// `SidebarHeaderMetrics.chevronMounted(beforeTitle:revealed:)` is the
+    /// pure form of the gate the two placements disagree about.
+    static let chevronBeforeProjectNameKey = "chevronBeforeProjectName"
+
+    /// The one default for `chevronBeforeProjectNameKey`. Every read site —
+    /// the Settings toggle and each view's `@AppStorage` — must spell the
+    /// default with this constant rather than a bare literal, for the reason
+    /// spelled out on `enableTranscriptDefault`. Off: nobody's sidebar moves
+    /// until they ask for it.
+    static let chevronBeforeProjectNameDefault = false
+
+    /// UserDefaults key for whether the sidebar's Scratch section is
+    /// expanded. A project's equivalent is `Repo.expanded`, which the daemon
+    /// owns because a repo is a daemon-side record; a scratch section is
+    /// app-side chrome over a filter of worktrees, with no row of its own to
+    /// carry the bit, so it lives here. Default expanded — collapsing is a
+    /// gesture the user makes, never the state they are handed.
+    static let scratchSectionExpandedKey = "scratchSectionExpanded"
+
+    /// The one default for `scratchSectionExpandedKey`, for the reason
+    /// spelled out on `enableTranscriptDefault`.
+    static let scratchSectionExpandedDefault = true
+
     /// Pure, testable mirror of the sidebar's Scratch-section gate:
     /// shown whenever the setting is on, regardless of whether any scratch
     /// spaces exist yet. This keeps the section (and its hover "+" create
