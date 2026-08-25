@@ -233,8 +233,9 @@ struct RemoteProviderHeaderRow: View {
                 // The name spans the row's free width instead of a trailing
                 // `Spacer()`, so the whole empty stretch is the desk's hit
                 // target rather than dead chrome. The title inset is padding
-                // on the button, not on the label inside it, so the indent
-                // doesn't come out of the desk's hit target.
+                // INSIDE the label, ahead of that full-width frame, so the
+                // indent still belongs to the desk's hit target — padding the
+                // button instead would carve the gutter back out of it.
                 Button {
                     appState.selectRemoteProvider(provider.config.name)
                 } label: {
@@ -246,12 +247,12 @@ struct RemoteProviderHeaderRow: View {
                                 : HierarchicalShapeStyle.secondary
                         )
                         .lineLimit(1)
+                        .padding(.leading, SidebarHeaderMetrics.titleLeadingInset(
+                            chevronBeforeProjectName: chevronBeforeProjectName))
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .padding(.leading, SidebarHeaderMetrics.titleLeadingInset(
-                    chevronBeforeProjectName: chevronBeforeProjectName))
                 .accessibilityLabel("Open \(provider.describe?.name ?? provider.config.name) provider desk")
                 healthSuffix
                 if canCreate {
