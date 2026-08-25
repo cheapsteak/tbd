@@ -220,6 +220,21 @@ config column; app-only behavior may gate on `UserDefaults`).
   can hold both models at once, with `tbd panel …` silently doing nothing on the
   legacy tabs. That materially narrows what the soak exercises. The fix is
   daemon-side surface creation on tab creation, outside 3b's app-only scope.
+- **Legacy `layouts` read sites are stale on a daemon-rendered tab — required
+  before graduation.** Several call sites still derive "which terminals does
+  this tab render" from the legacy `layouts` store (`AppState`,
+  `AppState+Terminals`, `AppState+TerminalFocus`, `TerminalContainerView`), and
+  the terminal-pane reconciliation in `AppState.removingTerminalPanes(notIn:)`
+  writes to `layouts` without touching the mirror. On a daemon-rendered tab they
+  fall back to `.pane(tab.content)`, which is correct today only because the
+  primary anchor is the sole terminal-bearing node. That stops holding the
+  moment a surface carries a terminal anywhere else. Inert while the flag is
+  off.
+- **Features that create tabs widen the split-model window.** Anything that
+  parks a new tab without a user gesture — automatic notes tabs, opening a PR as
+  a webview tab — produces a tab with no surface, so it renders legacy while its
+  siblings render from the daemon. Worth naming in the soak plan, since the
+  effect compounds with the post-import gap above.
 - Note deletion affordance (#7) — required before graduation, since close no
   longer deletes.
 - Native resize indicator / unified divider (#9).
