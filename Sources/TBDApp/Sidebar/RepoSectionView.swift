@@ -41,6 +41,11 @@ struct RepoSectionView: View {
     // Hover the `+` (or ⌥-click it) to open the model-profile picker; a plain
     // click still creates a worktree with the default profile.
     @StateObject private var newWorktreeMenu = HoverMenuModel()
+    /// Where this row's disclosure chevron sits — before the name (the
+    /// default) or after it. See `AppState.chevronAfterProjectNameKey` and
+    /// `chevronButton`.
+    @AppStorage(AppState.chevronAfterProjectNameKey)
+    private var chevronAfterProjectName: Bool = AppState.chevronAfterProjectNameDefault
 
     private func onSectionHoverChange(_ hovering: Bool) {
         if hovering {
@@ -134,7 +139,7 @@ struct RepoSectionView: View {
         }
     }
 
-    /// The section header row (name + chevron + `+`) and every modifier
+    /// The section header row (chevron, name, `+`) and every modifier
     /// attached to it — extracted out of `body` alongside `expandedContent`,
     /// and further split into `headerHStack` + its own sub-pieces below, so
     /// the type checker sees several smaller expressions instead of one
@@ -175,14 +180,20 @@ struct RepoSectionView: View {
         .tag(repo.id)
     }
 
-    /// The header row's actual content (name + chevron + optional "missing"
-    /// badge + `+`), with none of `headerRow`'s trailing modifiers — see
+    /// The header row's actual content (the chevron and the name in the order
+    /// `chevronAfterProjectName` asks for, an optional "missing" badge, and
+    /// the `+`), with none of `headerRow`'s trailing modifiers — see
     /// `headerRow`'s doc comment.
     @ViewBuilder
     private var headerHStack: some View {
         HStack(spacing: 4) {
+            if !chevronAfterProjectName {
+                chevronButton
+            }
             nameLabel
-            chevronButton
+            if chevronAfterProjectName {
+                chevronButton
+            }
             if repo.status == .missing {
                 missingBadge
             }
@@ -191,60 +202,97 @@ struct RepoSectionView: View {
         }
     }
 
-    /// The disclosure chevron, revealed on the same hover gate as the `+` (see
-    /// `newWorktreePlusButton`) so the two hover affordances appear and vanish
-    /// together. The hidden branch keeps the 18pt square so the "missing" badge
-    /// doesn't slide sideways as the chevron comes and goes.
+    /// Whether the chevron button is mounted at all right now — the one
+    /// behavior the two placements disagree about, in pure form so a test can
+    /// call it without a SwiftUI render. Before the name it is always mounted;
+    /// after the name it rides the row's hover gate along with the `+`.
     ///
-    /// Hover-gating a disclosure control is deliberate, not incidental, and
-    /// was signed off by the maintainer. It trades two things for a quieter
-    /// sidebar: the at-a-glance expanded/collapsed read, and pointer-free
-    /// reachability — `isSectionHovered` is driven only by `.onHover`, so the
-    /// button is absent from the focus tree entirely until a pointer enters
-    /// the section, and Tab/Full Keyboard Access skips it. The accepted answer
-    /// for keyboard-only users is the header's context-menu Collapse/Expand
-    /// item (below), which is not gated on hover and performs the same action.
-    /// The `+` on this same row already made this exact trade.
+    /// Main-actor isolated, unlike this file's other pure statics: it forwards
+    /// to `HoverMenuModel.shouldShowPlus`, which is isolated itself, and
+    /// calling the real gate matters more here than callability from a
+    /// nonisolated test.
+    static func chevronMounted(afterName: Bool, hovered: Bool, menuOpen: Bool) -> Bool {
+        guard afterName else { return true }
+        return HoverMenuModel.shouldShowPlus(hovered: hovered, menuOpen: menuOpen)
+    }
+
+    private var chevronIsMounted: Bool {
+        RepoSectionView.chevronMounted(
+            afterName: chevronAfterProjectName,
+            hovered: isSectionHovered,
+            menuOpen: newWorktreeMenu.isOpen
+        )
+    }
+
+    /// The disclosure chevron, in whichever of its two presentations
+    /// `AppState.chevronAfterProjectNameKey` selects.
     ///
-    /// So do not "fix" this by always-mounting the button — that reverses a
-    /// decision someone made on purpose. The `.accessibilityLabel` below is
-    /// worth keeping regardless: it serves VoiceOver whenever the button is
-    /// mounted, which it never did before.
+    /// Before the name (the default) it is always mounted and plainly styled,
+    /// so the glyph sits in the same column on every row and reads the
+    /// expanded/collapsed state at a glance without a pointer.
+    ///
+    /// After the name it trails the title and takes the `+`'s hover wash and
+    /// hover gate, so the two affordances appear and vanish together and the
+    /// resting sidebar is quieter. That gate is deliberate and was signed off
+    /// by the maintainer: it costs the at-a-glance state read and pointer-free
+    /// reachability, because `isSectionHovered` is driven only by `.onHover`,
+    /// so the button is absent from the focus tree until a pointer enters the
+    /// section and Tab/Full Keyboard Access skips it. The accepted answer for
+    /// keyboard-only users is the header's ungated context-menu
+    /// Collapse/Expand item (below), which performs the same action — and the
+    /// setting itself, whose default placement is never gated. So do not
+    /// "fix" the trailing placement by always-mounting it; that reverses a
+    /// decision someone made on purpose.
+    ///
+    /// The unmounted branch keeps the 18pt square so the "missing" badge
+    /// doesn't slide sideways as the chevron comes and goes. The
+    /// `.accessibilityLabel` serves VoiceOver in both placements — the glyph
+    /// carries no text of its own.
     @ViewBuilder
     private var chevronButton: some View {
         Group {
-            if HoverMenuModel.shouldShowPlus(hovered: isSectionHovered, menuOpen: newWorktreeMenu.isOpen) {
-                Button {
-                    Task { await appState.setRepoExpanded(id: repo.id, expanded: !repo.expanded) }
-                } label: {
-                    Image(systemName: repo.expanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 10))
-                        // Applied to the glyph, not the button, so it wins over
-                        // `HoverPressButtonStyle`'s blanket `.secondary` and a
-                        // missing repo still renders dimmed.
-                        .foregroundStyle(chevronForegroundStyle)
-                        .frame(width: 18, height: 18)
-                        .contentShape(Rectangle())
+            if chevronIsMounted {
+                if chevronAfterProjectName {
+                    chevronToggle.buttonStyle(HoverPressButtonStyle())
+                } else {
+                    chevronToggle.buttonStyle(.plain)
                 }
-                .buttonStyle(HoverPressButtonStyle())
-                // The glyph carries no text, so VoiceOver has nothing to
-                // announce without this — parity with the `+`'s label.
-                .accessibilityLabel(repo.expanded ? "Collapse \(repo.displayName)" : "Expand \(repo.displayName)")
-                .onHover { isChevronHovered = $0 }
-                .help(repo.expanded ? "Collapse" : "Expand")
             } else {
                 Color.clear
             }
         }
         .frame(width: 18, height: 18)
-        // The 18pt-square hit target centers the 10pt glyph, leaving ~4pt of
-        // slack on each side. Trim the leading slack so the chevron reads as
-        // attached to the name rather than floating after it.
-        .padding(.leading, -3)
-        // Nudge down so the chevron sits on the name's optical baseline
-        // rather than its cap-height center. Layout-neutral by design — the
-        // hit target rides along with the glyph.
-        .offset(y: 2)
+        // The 18pt-square hit target centers the glyph, leaving ~4pt of slack
+        // on each side. Trailing the name, trim the leading slack so the
+        // chevron reads as attached to the name rather than floating after it,
+        // and nudge down so it sits on the name's optical baseline rather than
+        // its cap-height center. Both are layout-neutral for the hit target,
+        // which rides along with the glyph. Leading the name, the slack is
+        // what separates the glyph from the window edge, so it stays.
+        .padding(.leading, chevronAfterProjectName ? -3 : 0)
+        .offset(y: chevronAfterProjectName ? 2 : 0)
+    }
+
+    /// The chevron's button and label without a button style — `chevronButton`
+    /// applies the style its placement calls for. The glyph is a point smaller
+    /// trailing the name so it doesn't outweigh the title it follows.
+    @ViewBuilder
+    private var chevronToggle: some View {
+        Button {
+            Task { await appState.setRepoExpanded(id: repo.id, expanded: !repo.expanded) }
+        } label: {
+            Image(systemName: repo.expanded ? "chevron.down" : "chevron.right")
+                .font(.system(size: chevronAfterProjectName ? 10 : 11))
+                // Applied to the glyph, not the button, so it wins over
+                // `HoverPressButtonStyle`'s blanket `.secondary` and a
+                // missing repo still renders dimmed.
+                .foregroundStyle(chevronForegroundStyle)
+                .frame(width: 18, height: 18)
+                .contentShape(Rectangle())
+        }
+        .accessibilityLabel(repo.expanded ? "Collapse \(repo.displayName)" : "Expand \(repo.displayName)")
+        .onHover { isChevronHovered = $0 }
+        .help(repo.expanded ? "Collapse" : "Expand")
     }
 
     @ViewBuilder
@@ -264,6 +312,10 @@ struct RepoSectionView: View {
                 .truncationMode(.tail)
                 .foregroundStyle(nameForegroundStyle)
         }
+        // Claw back the chevron's trailing slack when it leads the name, so
+        // the pair reads as one label. Nothing to claw back when the chevron
+        // trails instead — see `chevronButton`'s own leading padding.
+        .padding(.leading, chevronAfterProjectName ? 0 : -2)
     }
 
     @ViewBuilder

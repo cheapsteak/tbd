@@ -3283,6 +3283,21 @@ final class AppState: ObservableObject {
     /// turns it off for users who find the hover card noisy.
     static let showClaudeTabUsageTooltipKey = "showClaudeTabUsageTooltip"
 
+    /// UserDefaults key for where a sidebar project row's disclosure chevron
+    /// sits. Off (the default) puts it before the project name, always
+    /// mounted, so every row's chevron lines up in one column. On moves it to
+    /// immediately after the name, where it also picks up the row's hover gate
+    /// — see `RepoSectionView.chevronButton`. Read via `@AppStorage` in the
+    /// view layer; `RepoSectionView.chevronMounted(afterName:hovered:menuOpen:)`
+    /// is the pure form of the gate the two placements disagree about.
+    static let chevronAfterProjectNameKey = "chevronAfterProjectName"
+
+    /// The one default for `chevronAfterProjectNameKey`. Every read site — the
+    /// Settings toggle and `RepoSectionView`'s `@AppStorage` — must spell the
+    /// default with this constant rather than a bare literal, for the reason
+    /// spelled out on `enableTranscriptDefault`.
+    static let chevronAfterProjectNameDefault = false
+
     /// Pure, testable mirror of the sidebar's Scratch-section gate:
     /// shown whenever the setting is on, regardless of whether any scratch
     /// spaces exist yet. This keeps the section (and its hover "+" create

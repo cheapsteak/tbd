@@ -42,6 +42,8 @@ struct GeneralSettingsTab: View {
     @AppStorage(AppState.enableTranscriptKey) private var enableTranscript: Bool = AppState.enableTranscriptDefault
     @AppStorage(AppState.nightwatchExperimentalKey) private var nightwatchExperimental: Bool = false
     @AppStorage(AppState.showScratchSectionKey) private var showScratchSection: Bool = true
+    @AppStorage(AppState.chevronAfterProjectNameKey)
+    private var chevronAfterProjectName: Bool = AppState.chevronAfterProjectNameDefault
     @AppStorage(QueuedPromptComposer.sendImmediatelyKey)
     private var sendFirstMessageImmediately: Bool = QueuedPromptComposer.sendImmediatelyDefault
     @AppStorage(AppState.showClaudeTabUsageTooltipKey) private var showClaudeTabUsageTooltip: Bool = true
@@ -163,6 +165,9 @@ struct GeneralSettingsTab: View {
 
                 Toggle("Show Scratch section", isOn: $showScratchSection)
                     .help("Hide the repo-less Scratch section. Existing scratch spaces and their terminals keep running.")
+
+                Toggle("Put the project chevron after the name", isOn: $chevronAfterProjectName)
+                    .help("Off: each project's expand/collapse chevron sits before its name, in the same column on every row. On: the chevron trails the name, appearing on hover alongside the row's +, so its position shifts with the length of each name.")
 
                 Toggle("Send first messages immediately", isOn: $sendFirstMessageImmediately)
                     .help("Default for first messages you write while a new worktree is coming up. On: TBD presses Return, and the agent starts working the moment the message is in. Off: the text waits in the composer for you to read and send. The \"Send immediately\" checkbox in that creation sheet changes this too; the identical-looking checkbox on an already-parked message edits only that message.")
