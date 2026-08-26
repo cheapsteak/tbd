@@ -96,13 +96,22 @@ split that difference; the thresholds and the reasoning behind them are in
   session refusing to. The hold is bounded by a 25-minute wall clock, past which
   the hook stands aside — measured from the session's first stop attempt, not from
   the start of the job.
-- **Each hold sleeps 30 seconds before it blocks.** A block costs a turn, and the
-  session's `--max-turns` budget runs out well before 25 minutes of holding would;
-  sleeping spends wall clock instead, which is what makes the deadline the real
-  bound. Two numbers follow from it and must move together: the hook's command
-  timeout in `hooks/settings.json` is 60 seconds, strictly greater than the sleep,
-  because a hook killed mid-sleep emits no block at all; and the defensive cap of
-  60 holds is 30 minutes of sleeping, so the 25-minute deadline still binds first.
+- **Each hold waits up to 90 seconds, watching for the files, before it blocks.**
+  Blocks are what the hold is short of, not seconds: the harness overrides a Stop
+  hook after **8 consecutive blocks**, ending the turn and reporting the session as
+  normally completed, so at the default the whole hold is only eight windows long
+  however many turns or minutes remain. The hold therefore buys wall clock per
+  block — eight 90-second windows is about twelve minutes, past the ten the
+  specialists need — and it spends each window in five-second polling steps so it
+  ends the moment the last findings file lands rather than a window later. The job
+  also sets `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP: 100`, clearing the hook's own worst
+  case (20 holds plus five nudges) so the hook's bounds decide when a waiting
+  session is released; the window is the leg that still works if a
+  `claude-code-action@v1` release ever drops that knob. Two local numbers move with
+  the window: the hook's command timeout in `hooks/settings.json` is 120 seconds,
+  strictly greater than it, because a hook killed mid-wait emits no block at all;
+  and the defensive cap of 20 holds is 30 minutes of waiting, so the 25-minute
+  deadline still binds first.
 - **The hook nudges, boundedly, once only the merge is missing.** When every
   expected findings file is present and parses but `review-result.json` is not
   there, the model has all its inputs and is simply not writing the merge. The hook
@@ -131,6 +140,13 @@ distinguishing error line in the job log is what an operator reads:
   rather than a verdict, and read nothing into it about the diff. Re-running the
   check may clear it, because the underlying failure is a race; a stall that
   recurs is a pipeline defect to fix, not a check to re-run.
+- **An unmerged review** — `every expected specialist reported VALID findings and
+  review-result.json was never written`. The opposite shape to a stall: the whole
+  review is on disk and only the artifact the verdict is computed from is missing,
+  so the session was cut off after reviewing and before merging. That is the Stop
+  hook's business — usually something overriding it, such as the harness's cap on
+  consecutive blocks — and not a statement about the diff. Re-running may clear it;
+  a recurrence is a pipeline defect.
 - **A partial fan-out** — one lens named as having produced no findings file while
   another reported. The session ran and the review is incomplete.
 - **A findings file the schema rejected** — a lens named as having produced a file
@@ -162,7 +178,7 @@ distinguishing error line in the job log is what an operator reads:
   `gh pr diff`, which computes the same merge-base diff server-side; the
   specialists run no `gh` and have no such fallback.)
 
-All five fail closed, and none of them posts a review comment: the post step runs
+All six fail closed, and none of them posts a review comment: the post step runs
 only behind a trustworthy verdict. A stall is therefore something you read in the
 run — `validate.py` writes the diagnosis to the job log — never on the PR. Whatever
 a step annotation or check summary shows alongside it is the workflow's and GitHub's

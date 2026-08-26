@@ -37,7 +37,7 @@ is lost the moment the orchestrator ends its turn early, and holding that turn o
 the findings files exist is what removes the failure. A design that encoded one mechanism
 would be wrong half the time; this one is indifferent to which is right.
 
-Two independent defects produce this, and either alone is survivable.
+Three independent defects produce this, and any one alone is survivable.
 
 **The prompt teaches turn-end as the waiting mechanism.** The fan-out step asserts that
 Task results return immediately with launch acknowledgments and that each specialist's
@@ -54,6 +54,16 @@ that will not comply still terminates. It cannot distinguish that model from one
 turns rather than elapsed time, and each nudge costs one short round trip, a hook meant
 to prevent a premature end instead imposed a roughly three-minute deadline on a
 fourteen-minute job. The bound released a session that was obeying its instructions.
+
+**The harness overrides a Stop hook that blocks too many times in a row.** Past eight
+consecutive blocks — its default — it ends the turn regardless of what the hook returned,
+and reports the session as `stop_reason: end_turn`, `subtype: success`. The override is
+silent from the workflow's side: the step goes green, and only the empty workspace says
+anything happened. So a hook bounded in minutes is really bounded in blocks, and a hold
+that does not buy wall clock per block cannot reach its own deadline no matter what that
+deadline says. Measured on run 33010660928: eight holds released the session two seconds
+after the second specialist's findings landed, leaving both findings files on disk, no
+`review-result.json`, and a gate that failed closed on a review that had in fact finished.
 
 Two properties make this worse than an ordinary intermittent failure. A stall is
 indistinguishable from a rejected review at the check level — both are a red
@@ -82,8 +92,8 @@ of ours. A fix that encodes the current scheduling behavior would inherit that e
   run for the hook, with a generous outer bound on the job. The threshold errs toward
   paying for a slow review rather than killing a working one, because killing a working
   review reproduces the failure this design exists to remove. A wall-clock deadline is
-  only reachable if holding costs wall clock, so each hold sleeps 30 seconds before it
-  blocks; §3.2 gives the turn-budget arithmetic that fixes that number.
+  only reachable if holding costs wall clock, so each hold waits up to 90 seconds before
+  it blocks; §3.2 gives the block-budget arithmetic that fixes that number.
 
 ## 3. Design
 
@@ -111,11 +121,13 @@ changes, from "a notification arrived" to "both files are on disk".
 wall-clock deadline. On its first invocation it stamps a start time beside its counter
 file.
 
-- **A findings file is missing, and the run is inside 25 minutes** — sleep 30 seconds,
-  then block **without consuming the nudge budget**, with a reason that tells the
-  orchestrator its specialists are still running and its turn must continue. This is the
-  repair: an uncounted hold keeps the process alive, and the in-flight specialists with
-  it.
+- **A findings file is missing, and the run is inside 25 minutes** — wait up to 90
+  seconds, watching for the files and returning as soon as they land, then block
+  **without consuming the nudge budget**, with a reason that tells the orchestrator its
+  specialists are still running and its turn must continue. This is the repair: an
+  uncounted hold keeps the process alive, and the in-flight specialists with it. The
+  block reports the state *after* the wait, not before it, so findings that land inside
+  a window are merged in the next turn rather than a whole window later.
 - **Every findings file is present and `review-result.json` is missing** — block and
   consume the budget, exactly as today, with today's reason. The model has everything it
   needs and is not writing the result. This is the state the five-nudge ceiling was
@@ -123,26 +135,40 @@ file.
 - **Past 25 minutes** — exit 0 and let the session end. `validate.py` then fails closed.
   The deadline is what keeps an uncounted hold from becoming an unbounded one.
 
-**The hold sleeps, because a hold costs a turn.** Every hold is a block, and every block
-costs one turn of the session's `--max-turns 100` budget — so the scarce resource is turns,
-not seconds. PR #604 burned 35 turns in 184 seconds, about five seconds a turn, leaving
-roughly 65. Holding at that rate spends those 65 turns in about five minutes of wall clock,
-against specialists that need ten: the session would die of turn exhaustion long before a
-25-minute deadline could be reached, in exactly the case the deadline exists for, and a
-60-hold cap would never be approached either. Sleeping converts a turn into wall clock at
-zero token cost, which is precisely the currency the hold is short of. At 30 seconds a
-hold, the remaining turns cover a little over thirty minutes, so the 25-minute wall clock
-becomes the binding bound as designed.
+**The hold waits, because blocks are rationed twice over.** Every hold is a block, and a
+block is spent against two separate budgets. The session's `--max-turns 100` charges one
+turn per block; PR #604 burned 35 turns in 184 seconds, about five seconds a turn, leaving
+roughly 65 — enough for five minutes of unwaiting holds against specialists that need ten.
+And the harness caps **consecutive** Stop-hook blocks: past its default of eight it
+overrides the hook, ends the turn, and reports the session as normally completed. That cap
+is the tighter of the two by a wide margin, and it does not care how many turns or minutes
+remain — at the default, the entire hold is eight blocks long.
 
-The same arithmetic keeps the two bounds consistent: 60 holds of 30 seconds is 30 minutes
-of sleep against a 25-minute deadline, so the deadline is always reached first and the hold
-cap remains what it is meant to be — a backstop against a broken clock, not a second
-deadline. The cap also sits below the turns the budget leaves, so neither bound asks for
-turns the session does not have.
+Both budgets are counted in blocks, so the hold buys wall clock per block rather than blocks
+per minute. At 90 seconds a window, the harness's eight cover about twelve minutes, past the
+ten the specialists need; the turn budget is nowhere near binding. Waiting converts a block
+into wall clock at zero token cost, which is precisely the currency the hold is short of.
 
-The sleep makes the hook's command timeout load-bearing, so `hooks/settings.json` declares
-one explicitly at 60 seconds rather than relying on a default that a harness release could
-move. It must stay strictly greater than the sleep: a hook killed mid-sleep emits no block,
+The window is spent in five-second polling steps, and the block reports what the poll last
+saw. Waiting out the whole window regardless would hand the orchestrator a stale "still
+running" for files already on disk — and each such block is one of only eight.
+
+The job raises the harness cap directly, `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP: 100`, clearing
+the hook's own worst case of 20 holds plus five nudges so that the hook's bounds, not the
+harness's, decide when a waiting session is released. Both legs are deliberate rather than
+redundant. The cap is a knob inside a floating action tag this repository does not control —
+§1's exposure exactly — so the window has to hold the review up on its own if a release ever
+drops it; and the window alone would leave a genuinely slow review at twelve minutes rather
+than the twenty-five §2 chose.
+
+The two local bounds stay consistent by the same arithmetic as before: 20 holds of 90
+seconds is 30 minutes of waiting against a 25-minute deadline, so the deadline is always
+reached first and the hold cap remains what it is meant to be — a backstop against a broken
+clock, not a second deadline.
+
+The wait makes the hook's command timeout load-bearing, so `hooks/settings.json` declares
+one explicitly at 120 seconds rather than relying on a default that a harness release could
+move. It must stay strictly greater than the window: a hook killed mid-wait emits no block,
 and the session ends — the failure the hold exists to prevent.
 
 The hook learns which files to expect from `REVIEW_SPECIALISTS`, a job-level environment
@@ -184,7 +210,14 @@ an infrastructure failure rather than a review — and the existing per-lens wor
 misdiagnoses it, since its "orchestrator may have merged before all specialists completed"
 parenthetical describes a merge that never happened.
 
-All three classes still fail closed and write no verdict. Only the sentence differs, which
+It gains a fourth for the mirror-image signature, which the harness's block cap produces:
+**every** expected specialist reported **valid** findings and `review-result.json` is
+absent. There the review is entirely on disk and only the merge is missing, so the session
+was cut off between reviewing and merging — the Stop hook's business. Without the class the
+operator's only annotation is the result file's own "no such file or directory", which is
+true, is the last error line, and says nothing about a review that in fact completed.
+
+All four classes still fail closed and write no verdict. Only the sentence differs, which
 is the point: `validate.py` writes the diagnosis into the job log, so an operator looking
 into a red check reads a line that names a stalled session as an infrastructure failure
 rather than inferring it from an empty workspace. Whether any of that reaches a surface
@@ -237,13 +270,25 @@ The unit tests live beside the code they cover, in
   no result file blocks and increments the counter; a run past the deadline exits 0. The
   counter assertion is the discriminating one — a test that only checks "it blocked" passes
   against a hook that conflates the two states.
-- **The sleep and the bounds it interacts with.** A pending hold takes at least its
-  configured sleep before emitting the block; a run past the deadline, and one at the hold
-  cap, each return promptly and release, proving both bounds are tested before the sleep
+- **The wait and the bounds it interacts with.** A pending hold takes at least its
+  configured window before emitting the block; a run past the deadline, and one at the hold
+  cap, each return promptly and release, proving both bounds are tested before the wait
   rather than after it. The unit tests drive the duration to zero through an environment
   variable so the suite stays fast, so two further assertions pin what the tests cannot
-  exercise: that the shipped default is 30 seconds with no configuration, and that
+  exercise: that the shipped default is 90 seconds with no configuration, and that
   `settings.json` declares a hook timeout strictly greater than it.
+- **That the wait watches.** Findings dropped onto disk partway through a window must end
+  that window and change the message the block carries, from "your specialists are still
+  running" to the merge instruction, charged to the nudge budget. This is the discriminating
+  case for the polling: a hook that waits blindly still blocks, so "did it block" passes
+  against it.
+- **That the window survives the harness cap on its own.** `test_workflow_structure.py`
+  multiplies the hook's window by the harness's *default* of eight blocks and requires the
+  product to exceed the ten minutes a review takes, so the hold does not silently come to
+  rest on `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` — a knob inside a floating action tag. A
+  companion check requires that variable to clear the hook's own worst case, and a third
+  requires hold cap × window to exceed the deadline, so the deadline stays the binding
+  bound.
 - **The fail-safe contract**, in a form that can fail. Exit code 0 alone is not an
   assertion here — every path of the script exits 0, so a test that checks only that passes
   against a hook that holds forever. Empty stdin and an absent `REVIEW_SPECIALISTS` are
@@ -294,13 +339,24 @@ repeating the trust, checkout, and restore sequence per job.
   waiting between turns, not something the orchestrator can invoke — so the poll degrades
   to a tight loop of `Read` calls that burns the turn budget, and each iteration remains a
   turn that can end. It re-creates the failure with more steps.
-- **Raising `--max-turns` instead of sleeping** — buy the hold its wall clock by giving the
+- **Raising `--max-turns` instead of waiting** — buy the hold its wall clock by giving the
   session more turns rather than by spending fewer. Every hold is a real model round trip,
   so the cost scales with the budget, and the number that would have to be guessed is the
   product of two unknowns: how long a review takes and how fast the harness turns holds
-  over. The sleep fixes the seconds-per-hold directly, which is why 60 holds and 25 minutes
-  can be stated as a single arithmetic rather than as a hope about pacing. The budget stays
-  where the fan-out spec set it, sized for review work rather than for waiting.
+  over. Worse, it buys nothing against the bound that actually binds: the harness's
+  consecutive-block cap is counted in blocks, and more turns produce more blocks, not
+  fewer. The wait fixes the seconds-per-block directly, which is why 20 holds and 25
+  minutes can be stated as a single arithmetic rather than as a hope about pacing. The
+  budget stays where the fan-out spec set it, sized for review work rather than for
+  waiting.
+- **Raising the harness block cap alone** — set `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` and leave
+  the 30-second window as it was. It removes the observed failure in one line, and the
+  workflow does set it. It is rejected as the *whole* fix because it makes the gate's
+  liveness depend on an undeclared knob inside `anthropics/claude-code-action@v1`, a
+  floating tag — the exposure §1 names — and the failure it prevents is silent, so a
+  release that dropped or renamed the variable would look exactly like the intermittent
+  red this design already exists to remove. The window is sized so the review survives that
+  release; the cap is what lets a slow review use the full 25 minutes.
 - **Automatic retry of the review step** — recovers the observed case without a human, at
   double the worst-case cost and latency. Rejected mainly because it makes a systematic
   regression present as an intermittent one, which is how a required check quietly stops

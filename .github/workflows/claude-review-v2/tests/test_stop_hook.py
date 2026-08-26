@@ -11,11 +11,13 @@ Every case also re-asserts the hook's fail-safe contract: exit code 0. A
 hook that exits non-zero wedges the session, and allowing a stop is never a
 gate bypass because validate.py fails closed downstream.
 
-The hold path sleeps in production, because a hold costs a turn and the
-session's turn budget is scarcer than its wall clock. Cases here drive the
-sleep to 0 via REVIEW_HOLD_SLEEP_SECONDS so the suite stays fast; the cases
-that are ABOUT the sleep set it explicitly, and one asserts the production
-default is still 30 seconds with no configuration.
+The hold path waits in production, because BLOCKS are what the hold is short
+of: the harness overrides a Stop hook after 8 consecutive blocks and ends the
+turn regardless, so the hold has to buy wall clock per block rather than
+blocks per minute. Cases here drive the wait to 0 via
+REVIEW_HOLD_SLEEP_SECONDS so the suite stays fast; the cases that are ABOUT
+the wait set it explicitly, and one asserts the production default is still
+90 seconds with no configuration.
 """
 
 from __future__ import annotations
@@ -68,6 +70,15 @@ def _run(
     )
 
 
+def _slept(sleep_log: Path) -> int:
+    """Total seconds the hook asked `sleep` for across the whole window.
+
+    The window is spent in short polling steps so the hold can end early, so
+    no single `sleep` call carries the window length — the sum does.
+    """
+    return sum(int(arg) for arg in sleep_log.read_text().split())
+
+
 def _path_without_jq(tmp_path: Path) -> str:
     """A PATH carrying everything the hook shells out to EXCEPT jq.
 
@@ -89,10 +100,12 @@ def _path_without_jq(tmp_path: Path) -> str:
 def _path_with_sleep_stub(tmp_path: Path) -> tuple[str, Path]:
     """A PATH whose `sleep` records its argument and returns at once.
 
-    The hook's sleep is the one behavior a test cannot observe by waiting for
-    it: the shipped default is 30 seconds, so asserting on the real wait would
-    cost the suite 30 seconds per case. Recording the argument asserts the same
-    thing — which number reached `sleep` — in no time at all.
+    The hook's wait is the one behavior a test cannot observe by waiting for
+    it: the shipped default is 90 seconds, so asserting on the real wait would
+    cost the suite 90 seconds per case. Recording the arguments asserts the
+    same thing — how much wall clock the hook asked for — in no time at all.
+    The hook spends the window in short polling steps, so the invariant is the
+    SUM of what reached `sleep`, not any single call.
     """
     bindir = tmp_path / "sleepstub-bin"
     bindir.mkdir(exist_ok=True)
@@ -279,13 +292,15 @@ def test_the_pending_hold_sleeps_before_emitting_its_block(
 
 
 def test_the_production_sleep_default_needs_no_configuration() -> None:
-    """30 s is the shipped default: the workflow sets no override, so the
-    arithmetic in the hook's comment holds for the real job."""
-    assert 'REVIEW_HOLD_SLEEP_SECONDS:-30}' in HOOK.read_text()
+    """90 s is the shipped default: the workflow sets no override, so the
+    arithmetic in the hook's comment holds for the real job. It is the number
+    that makes the harness's 8-block cap survivable — 8 x 90 s is ~12 minutes,
+    past the ~10 the specialists need."""
+    assert 'REVIEW_HOLD_SLEEP_SECONDS:-90}' in HOOK.read_text()
 
 
 def test_the_stop_hook_command_outlives_its_own_sleep() -> None:
-    """A hook killed at its default timeout mid-sleep would emit no block and
+    """A hook killed at its declared timeout mid-wait would emit no block and
     the session would end — the exact failure the hold exists to prevent."""
     settings = json.loads(SETTINGS.read_text())
     entries = [
@@ -295,8 +310,8 @@ def test_the_stop_hook_command_outlives_its_own_sleep() -> None:
     ]
     assert entries, "no Stop hook command declared"
     for cmd in entries:
-        assert cmd["timeout"] == 60
-        assert cmd["timeout"] > 30  # strictly longer than the sleep
+        assert cmd["timeout"] == 120
+        assert cmd["timeout"] > 90  # strictly longer than the hold window
 
 
 def test_the_deadline_is_checked_before_the_hook_sleeps(
@@ -317,7 +332,7 @@ def test_the_hold_cap_is_checked_before_the_hook_sleeps(
     dirs: tuple[Path, Path],
 ) -> None:
     project, state = dirs
-    (state / HOLD_FILE).write_text("60")
+    (state / HOLD_FILE).write_text("20")
     started = time.monotonic()
     proc = _run(project, state, sleep_seconds="30")
     elapsed = time.monotonic() - started
@@ -461,6 +476,78 @@ def test_an_unwritable_hold_counter_alone_releases(
     assert (state / START_FILE).exists()
 
 
+# --- the wait watches, so the hold ends when the work does -----------------
+
+
+def _path_with_findings_dropping_sleep(
+    tmp_path: Path, project_dir: Path
+) -> str:
+    """A `sleep` stub that lands both findings files on its FIRST call.
+
+    Models what the hold exists for: the specialists finish partway through a
+    wait the hook has already committed to. A stub is the only way to place
+    that event inside the window deterministically.
+    """
+    bindir = tmp_path / "landing-bin"
+    bindir.mkdir(exist_ok=True)
+    for tool in ("bash", "cat", "date", "tr", "jq"):
+        found = shutil.which(tool)
+        assert found, f"test prerequisite missing: {tool}"
+        link = bindir / tool
+        if not link.exists():
+            link.symlink_to(found)
+    payload = json.dumps({"specialist": "x", "findings": []})
+    stub = bindir / "sleep"
+    stub.write_text(
+        "#!/bin/sh\n"
+        f"for n in correctness conventions; do\n"
+        f"  [ -f '{project_dir}'/findings-$n.json ] "
+        f"|| printf '%s' '{payload}' > '{project_dir}'/findings-$n.json\n"
+        "done\n"
+    )
+    stub.chmod(0o755)
+    return str(bindir)
+
+
+def test_findings_landing_mid_wait_end_the_wait_and_change_the_message(
+    dirs: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """The block that follows a wait must report the state AFTER it.
+
+    A hold is one of only 8 consecutive blocks the harness allows, so a hold
+    that reported its pre-wait snapshot would spend a whole further block
+    telling the orchestrator to keep waiting for files already on disk. The
+    discriminating assertion is on WHICH reason came back: a hook that waits
+    blindly still blocks, so "did it block" passes against the bug.
+    """
+    project, state = dirs
+    path = _path_with_findings_dropping_sleep(tmp_path, project)
+    proc = _run(project, state, sleep_seconds="90", path=path)
+    assert proc.returncode == 0
+    reason = _decision(proc)["reason"]
+    assert "review-result.json" in reason
+    assert "specialist subagents are still running" not in reason
+    # And it is charged to the nudge budget, which is the budget for a model
+    # that now HAS everything it needs.
+    assert _count(state) == 1
+
+
+def test_the_wait_stops_polling_once_the_findings_land(
+    dirs: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """Early exit is the point: the remaining window is not spent."""
+    project, state = dirs
+    path = _path_with_findings_dropping_sleep(tmp_path, project)
+    log = tmp_path / "landing-sleep.log"
+    stub = Path(path) / "sleep"
+    stub.write_text(
+        stub.read_text() + f'printf "%s\\n" "$@" >> "{log}"\n'
+    )
+    log.touch()
+    _run(project, state, sleep_seconds="90", path=path)
+    assert _slept(log) == 5  # one poll step, not the whole 90 s window
+
+
 def test_a_non_numeric_sleep_override_falls_back_to_the_default(
     dirs: tuple[Path, Path], tmp_path: Path
 ) -> None:
@@ -470,7 +557,7 @@ def test_a_non_numeric_sleep_override_falls_back_to_the_default(
     wait entirely — the hold stops costing wall clock and starts costing only
     turns, which is the trade the sleep exists to reverse. Asserting on the
     argument the hook actually passes to `sleep` (recorded by a stub, so the
-    green path does not spend 30 real seconds) is what makes the clamp
+    green path does not spend 90 real seconds) is what makes the clamp
     observable at all.
     """
     project, state = dirs
@@ -479,7 +566,7 @@ def test_a_non_numeric_sleep_override_falls_back_to_the_default(
     assert proc.returncode == 0
     assert _decision(proc)["decision"] == "block"
     assert proc.stderr == ""
-    assert sleep_log.read_text().split() == ["30"]
+    assert _slept(sleep_log) == 90
 
 
 def test_a_numeric_sleep_override_is_passed_through(
@@ -491,7 +578,7 @@ def test_a_numeric_sleep_override_is_passed_through(
     path, sleep_log = _path_with_sleep_stub(tmp_path)
     proc = _run(project, state, sleep_seconds="7", path=path)
     assert _decision(proc)["decision"] == "block"
-    assert sleep_log.read_text().split() == ["7"]
+    assert _slept(sleep_log) == 7
 
 
 # --- jq absent: the fallback must not invent a pending review --------------

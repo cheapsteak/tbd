@@ -12,12 +12,16 @@
 #
 # It distinguishes two reasons the file is absent, because the right response
 # differs. While an expected findings-<name>.json is missing, the specialists
-# are still running and the hook sleeps, then holds WITHOUT consuming its nudge
-# budget — bounded by a 25-minute wall clock. Once every findings file is
-# present and only the merge is missing, the model has what it needs and the
-# bounded nudge applies. Conflating the two is what let a session exit 3 minutes
-# into a 14-minute review
-# (docs/specs/2026-08-10-review-orchestrator-liveness-design.md).
+# are still running and the hook waits — watching for the files, up to 90
+# seconds a turn — then holds WITHOUT consuming its nudge budget, bounded by a
+# 25-minute wall clock. Once every findings file is present and only the merge
+# is missing, the model has what it needs and the bounded nudge applies.
+# Conflating the two is what let a session exit 3 minutes into a 14-minute
+# review (docs/specs/2026-08-10-review-orchestrator-liveness-design.md).
+#
+# The wait is long, and watchful, because BLOCKS are what the hold is short of:
+# the harness overrides a Stop hook after 8 consecutive blocks and ends the
+# turn anyway. See the arithmetic at the hold itself.
 #
 # Contract (Claude Code Stop hook):
 #   - stdin: JSON with at least { "stop_hook_active": bool }
@@ -90,12 +94,20 @@ case "$specialists" in
      specialists="${REVIEW_SPECIALISTS:-correctness,conventions}" ;;
 esac
 
-findings_pending=0
-for name in $(printf '%s' "$specialists" | tr ',' ' '); do
-  [ -n "$name" ] || continue
-  findings_file="$workdir/findings-$name.json"
-  json_ready "$findings_file" || findings_pending=1
-done
+# Re-runnable, because the hold below re-scans while it waits: a hold that
+# reported the state it saw BEFORE its wait would tell the orchestrator its
+# specialists are still running when they had in fact just finished, spending
+# a whole further hold — and one of the harness's eight — on stale news.
+scan_findings() {
+  findings_pending=0
+  for name in $(printf '%s' "$specialists" | tr ',' ' '); do
+    [ -n "$name" ] || continue
+    findings_file="$workdir/findings-$name.json"
+    json_ready "$findings_file" || findings_pending=1
+  done
+}
+
+scan_findings
 
 if [ "$findings_pending" -eq 1 ]; then
   # THE SPECIALISTS ARE STILL RUNNING. Blocking here is what keeps the process
@@ -109,33 +121,46 @@ if [ "$findings_pending" -eq 1 ]; then
   # is a defensive backstop so a broken clock cannot make the session
   # unstoppable. Past either, we give up and validate.py fails closed.
   hold_deadline_seconds=1500   # 25 minutes (spec §2)
-  max_holds=60
+  max_holds=20
 
-  # WHY THE HOLD SLEEPS, AND THE ARITHMETIC THAT MAKES THE BOUNDS AGREE.
+  # WHY THE HOLD WAITS, AND THE ARITHMETIC THAT MAKES THE BOUNDS AGREE.
   #
-  # Every hold is a block, and every block costs one turn of the session's
-  # --max-turns 100 budget. Turns, not seconds, are what the session runs out
-  # of: PR #604 burned 35 turns in 184 s (~5 s per turn), leaving ~65. Held at
-  # that rate those 65 turns cover about 5 minutes of wall clock — less than
-  # the ~10 minutes the specialists need — so the session would die of turn
-  # exhaustion with the 25-minute deadline never reached, in exactly the case
-  # the deadline exists for. Sleeping converts a turn into wall clock at zero
-  # token cost, which is the currency that is short. At 30 s per hold, ~65
-  # remaining turns cover ~32 minutes, so the wall clock binds first.
+  # A hold is a block, and blocks are rationed twice over. The session's
+  # --max-turns 100 budget charges one turn per block; and the HARNESS caps
+  # CONSECUTIVE Stop-hook blocks — default 8 — after which it overrides the
+  # hook, ends the turn and reports the session as normally completed. That
+  # harness cap is the tighter of the two by a wide margin, and it is the one
+  # this hook has to be built around: at 8 blocks the entire hold is only ever
+  # 8 windows long, however many turns or minutes remain.
   #
-  # The two bounds are consistent by the same arithmetic: 60 holds x 30 s =
-  # 1800 s of sleep against a 1500 s deadline, so the deadline is always
-  # reached first and the hold cap is only a backstop for a broken clock. 60
-  # holds also sits under the ~65 turns the budget leaves, so neither bound
-  # asks for turns the session does not have.
+  # So the hold buys wall clock per block rather than blocks per minute. At
+  # 90 s a window, the harness's 8 give ~12 minutes — past the ~10 minutes the
+  # specialists need — and the job also raises the cap (CLAUDE_CODE_STOP_HOOK_
+  # BLOCK_CAP in .github/workflows/claude-code-review.yml) so the deadline
+  # below is what really binds. Both legs are deliberate: the raised cap is a
+  # floating-tag harness knob this repository does not control, and the window
+  # holds the review up on its own if a release ever drops it.
   #
-  # The Stop hook's command timeout in hooks/settings.json (60 s) must stay
-  # strictly greater than this sleep: a hook killed mid-sleep emits no block,
+  # The two local bounds stay consistent as they always were: 20 holds x 90 s =
+  # 1800 s of waiting against a 1500 s deadline, so the deadline is always
+  # reached first and the hold cap is only a backstop for a broken clock. 20
+  # blocks also sits far under the turn budget, so neither bound asks for turns
+  # the session does not have.
+  #
+  # The Stop hook's command timeout in hooks/settings.json (120 s) must stay
+  # strictly greater than this window: a hook killed mid-wait emits no block,
   # and the session ends. The env override exists so the unit tests need not
-  # spend 30 s per invocation; the job sets it nowhere, so production is 30 s
+  # spend 90 s per invocation; the job sets it nowhere, so production is 90 s
   # with no configuration.
-  hold_sleep_seconds="${REVIEW_HOLD_SLEEP_SECONDS:-30}"
-  case "$hold_sleep_seconds" in ''|*[!0-9]*) hold_sleep_seconds=30 ;; esac
+  hold_sleep_seconds="${REVIEW_HOLD_SLEEP_SECONDS:-90}"
+  case "$hold_sleep_seconds" in ''|*[!0-9]*) hold_sleep_seconds=90 ;; esac
+
+  # The window is spent in short steps so the hold ends the moment the last
+  # findings file lands rather than up to 90 s later. Waiting out the full
+  # window regardless would hand the orchestrator a stale "still running" when
+  # it could already be merging — and each such wasted block is one of the
+  # eight the harness allows.
+  hold_poll_seconds=5
 
   now="$(date +%s 2>/dev/null || echo 0)"
   started="$(cat "$start_file" 2>/dev/null || echo '')"
@@ -155,7 +180,7 @@ if [ "$findings_pending" -eq 1 ]; then
   holds="$(cat "$hold_file" 2>/dev/null || echo 0)"
   case "$holds" in ''|*[!0-9]*) holds=0 ;; esac
 
-  # Both bounds are tested BEFORE the sleep. Sleeping and then releasing would
+  # Both bounds are tested BEFORE the wait. Waiting and then releasing would
   # buy nothing and spend runner minutes doing it.
   if [ "$((now - started))" -ge "$hold_deadline_seconds" ] \
      || [ "$holds" -ge "$max_holds" ]; then
@@ -163,16 +188,25 @@ if [ "$findings_pending" -eq 1 ]; then
   fi
   printf '%s' "$((holds + 1))" > "$hold_file" 2>/dev/null || exit 0
 
-  # Hold the turn open in wall clock rather than in turns. The specialists run
-  # in the same process, so this sleep is time they get to finish in.
-  [ "$hold_sleep_seconds" -eq 0 ] || sleep "$hold_sleep_seconds"
+  # Hold the turn open in wall clock rather than in blocks. The specialists run
+  # in the same process, so this wait is time they get to finish in.
+  waited=0
+  while [ "$waited" -lt "$hold_sleep_seconds" ] && [ "$findings_pending" -eq 1 ]; do
+    step="$hold_poll_seconds"
+    [ "$((waited + step))" -le "$hold_sleep_seconds" ] \
+      || step="$((hold_sleep_seconds - waited))"
+    sleep "$step"
+    waited="$((waited + step))"
+    scan_findings
+  done
+fi
 
-  # The reason asks for a bare acknowledgment and NO tool calls, because the
-  # sleep arithmetic above prices a hold at one turn. Every tool call the model
+if [ "$findings_pending" -eq 1 ]; then
+  # The reason asks for a bare acknowledgment and NO tool calls, because a
+  # block is rationed (see the arithmetic above). Every tool call the model
   # makes while waiting is another turn, so inviting it to poll for the files
-  # halves the wall clock the turn budget buys — and buys nothing, since this
-  # hook just checked those files and will check them again on the next stop
-  # attempt.
+  # buys nothing — this hook just watched those files for a whole window and
+  # will watch them again on the next stop attempt.
   hold_reason="Your specialist subagents are still running — at least one findings-<name>.json is not yet on disk. Do NOT end your turn. This session is headless: ending the turn ends the whole session and kills the specialists with it, so no findings are ever written and the review gate fails with no verdict. Do NOT call any tools while waiting: this hook is already checking the files for you and will keep holding until they land, and every tool call spends turn budget the wait needs. Reply with one short sentence acknowledging that you are waiting. When every findings file is on disk you will be allowed to stop, so merge them into review-result.json then. Expected specialists: ${specialists}."
 
   jq -n --arg reason "$hold_reason" '{decision: "block", reason: $reason}' 2>/dev/null \

@@ -6,7 +6,7 @@
           {
             "type": "command",
             "command": "bash \"$CLAUDE_PROJECT_DIR/.github/workflows/claude-review-v2/hooks/stop-hook.sh\"",
-            "timeout": 60
+            "timeout": 120
           }
         ]
       }

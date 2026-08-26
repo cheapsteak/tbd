@@ -444,6 +444,73 @@ def _hook_specialist_fallback() -> str:
     return fallbacks[0]
 
 
+_HOOK_NUMBER_RES = {
+    "max_holds": re.compile(r"^\s*max_holds=(?P<value>\d+)\s*$", re.MULTILINE),
+    "max_blocks": re.compile(r"^\s*max_blocks=(?P<value>\d+)\s*$", re.MULTILINE),
+    "deadline": re.compile(
+        r"^\s*hold_deadline_seconds=(?P<value>\d+)", re.MULTILINE
+    ),
+    "window": re.compile(
+        r'REVIEW_HOLD_SLEEP_SECONDS:-(?P<value>\d+)\}"\s*$', re.MULTILINE
+    ),
+}
+
+
+def _hook_number(name: str) -> int:
+    """One of the hold's bounds, read out of the hook itself.
+
+    The bounds are compared against each other and against the workflow below,
+    so they have to be read rather than restated — a restated copy is the drift
+    these checks exist to catch.
+    """
+    matches = _HOOK_NUMBER_RES[name].findall(HOOK_PATH.read_text(encoding="utf-8"))
+    assert matches, (
+        f"{HOOK_PATH.name} no longer sets `{name}` where this test looks for "
+        "it; retarget the pattern rather than deleting the check"
+    )
+    assert len(set(matches)) == 1, f"{name} is spelled more than one way: {matches}"
+    return int(matches[0])
+
+
+def test_the_job_raises_the_harness_consecutive_block_cap() -> None:
+    """The harness overrides a Stop hook after N consecutive blocks.
+
+    Its default is 8, and it does not fail the run when it fires: it ends the
+    turn and reports the session as normally completed, so the whole hold is 8
+    blocks long however many turns or minutes remain. Run 33010660928 died
+    that way — both findings files on disk, no review-result.json, gate failed
+    closed 2 seconds after the second specialist landed. The cap must clear the
+    hook's OWN worst case so the hook's bounds, not the harness's, decide when
+    a waiting session is released.
+    """
+    cap = int(_review_job()["env"]["CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"])
+    assert cap > _hook_number("max_holds") + _hook_number("max_blocks")
+
+
+def test_the_hold_window_survives_the_harness_default_cap_alone() -> None:
+    """The raised cap is a harness knob this repository does not control.
+
+    `anthropics/claude-code-action@v1` is a floating tag, so a release could
+    drop or rename the variable with no change of ours. The window is the leg
+    that does not depend on it: at the harness's own default of 8 blocks the
+    hold must still cover the ~10 minutes the specialists need, or the failure
+    comes straight back the day the knob stops working.
+    """
+    HARNESS_DEFAULT_BLOCK_CAP = 8
+    SPECIALIST_SECONDS = 600  # ~10 min, measured on the PR #604 good run
+    assert _hook_number("window") * HARNESS_DEFAULT_BLOCK_CAP > SPECIALIST_SECONDS
+
+
+def test_the_deadline_stays_the_binding_bound_locally() -> None:
+    """The hold count is a backstop against a broken clock, not a second
+    deadline: spending every hold must take longer than the deadline, so the
+    deadline is always what releases a genuinely stalled session."""
+    assert (
+        _hook_number("max_holds") * _hook_number("window")
+        > _hook_number("deadline")
+    )
+
+
 _PROMPT_FINDINGS_RE = re.compile(r"findings-(?P<name>[a-z][a-z0-9_-]*)\.json")
 
 

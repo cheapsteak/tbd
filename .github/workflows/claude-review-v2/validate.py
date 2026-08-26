@@ -184,6 +184,51 @@ STALL_REPORT = (
 )
 
 
+UNMERGED_REPORT = (
+    "every expected specialist reported VALID findings and review-result.json "
+    "was never written. This is an INFRASTRUCTURE failure — the review ran and "
+    "the session ended before merging it — and is not a review verdict: the "
+    "findings reported above were never dispositioned, so no verdict can be "
+    "computed from them. The Stop hook exists to hold the session open until "
+    "that file lands, so the cause is normally something that overrode it: the "
+    "harness releases a hook that blocks too many times CONSECUTIVELY (see "
+    "CLAUDE_CODE_STOP_HOOK_BLOCK_CAP in the workflow), and the hold has a "
+    "25-minute deadline of its own. Re-running the check may clear it. If it "
+    "recurs, see docs/specs/2026-08-10-review-orchestrator-liveness-design.md; "
+    "failing closed"
+)
+
+
+def is_unmerged_review(
+    expected: list[str],
+    seen: list[str],
+    result_present: bool,
+) -> bool:
+    """True when every expected lens reported and only the merge is missing.
+
+    The complement of a stall: there, nothing reached disk and no code was
+    reviewed; here the whole review is on disk and the one artifact the verdict
+    is computed from is not. Both fail closed, and the distinction is entirely
+    in where it sends an operator — a stall is a session that never started, an
+    unmerged review is a finished review whose session was cut off, which is
+    the Stop hook's business and nobody else's.
+
+    Without it the operator's only annotation is the result file's own
+    "no such file or directory", which is true, is the last error line, and
+    says nothing about a review that in fact completed.
+
+    `result_present` is PRESENCE, never validity, for the same reason it is in
+    `is_session_stall`: a present-but-invalid result file is a schema problem,
+    and its error names the actual defect.
+
+    Requires a declared expected set — without one there is no claim to make
+    about which lenses should have reported.
+    """
+    if result_present or not expected:
+        return False
+    return not missing_specialists(expected, seen)
+
+
 def is_session_stall(
     expected: list[str],
     seen: list[str],
@@ -681,7 +726,20 @@ def main() -> int:
                 )
                 failed = True
         if result_error is not None:
-            print(_sanitize_log_text(f"error: {result_error}"), file=sys.stderr)
+            # One decisive line instead of a bare "no such file". A complete,
+            # valid specialist set with no result file is not a missing file
+            # the operator can go look for — it is a review that finished and
+            # a session that ended before merging it. The suppressed
+            # `result_error` is only ever "no such file" here, because this
+            # class requires the result file to be ABSENT, so a schema
+            # rejection can never be swallowed. Printed last so it is the line
+            # the workflow lifts into the step annotation.
+            if is_unmerged_review(expected, seen_specialists, result_present):
+                print(f"error: {UNMERGED_REPORT}", file=sys.stderr)
+            else:
+                print(
+                    _sanitize_log_text(f"error: {result_error}"), file=sys.stderr
+                )
             failed = True
 
     if expected:

@@ -954,6 +954,82 @@ def test_main_mixed_causes_are_reported_separately(
     assert _WAS_REJECTED in err and "conventions" in err
 
 
+# --- unmerged-review class --------------------------------------------------
+
+from validate import UNMERGED_REPORT, is_unmerged_review  # noqa: E402
+
+
+def test_a_complete_lens_set_with_no_result_file_is_unmerged() -> None:
+    assert is_unmerged_review(["correctness", "conventions"],
+                              ["correctness", "conventions"], False)
+
+
+def test_a_result_file_on_disk_is_never_unmerged() -> None:
+    """PRESENCE, not validity — a rejected result file is a schema problem and
+    its own error names the defect."""
+    assert not is_unmerged_review(["correctness"], ["correctness"], True)
+
+
+def test_a_missing_lens_is_a_partial_fan_out_not_an_unmerged_review() -> None:
+    """The per-lens diagnostic owns this shape: the review itself is
+    incomplete, so pointing the operator at the Stop hook would be a false
+    lead."""
+    assert not is_unmerged_review(
+        ["correctness", "conventions"], ["correctness"], False
+    )
+
+
+def test_no_expected_set_means_no_unmerged_claim() -> None:
+    assert not is_unmerged_review([], [], False)
+
+
+def test_unmerged_report_names_infrastructure_not_verdict() -> None:
+    assert "INFRASTRUCTURE" in UNMERGED_REPORT
+    assert "not a review verdict" in UNMERGED_REPORT
+
+
+def test_main_on_an_unmerged_review_replaces_the_bare_missing_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The discriminating assertion is on WHICH last error line came out.
+
+    The workflow lifts the last `error:` line into the step annotation, and an
+    operator reading a red check sees that and nothing else. "No such file or
+    directory" is true and useless here: the review ran, both lenses reported,
+    and a session was cut off before merging them.
+    """
+    for name in ("correctness", "conventions"):
+        payload = _valid_findings()
+        payload["specialist"] = name
+        for index, finding in enumerate(payload["findings"], start=1):
+            finding["id"] = f"{name}-{index}"
+        _write(tmp_path / f"findings-{name}.json", payload)
+    exit_code = _run_main(monkeypatch, tmp_path, "correctness,conventions")
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    last_error = [
+        line for line in err.splitlines() if line.startswith("error: ")
+    ][-1]
+    assert "never written" in last_error
+    assert "No such file or directory" not in last_error
+
+
+def test_main_keeps_the_bare_missing_file_when_a_lens_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A partial fan-out is not an unmerged review, and must not be dressed as
+    one — the missing lens is the finding, not the missing merge."""
+    _write(tmp_path / "findings-correctness.json", _valid_findings())
+    assert _run_main(monkeypatch, tmp_path, "correctness,conventions") == 1
+    err = capsys.readouterr().err
+    assert "never written" not in err
+    assert "review-result.json" in err
+
+
 # --- session-stall class ----------------------------------------------------
 
 from validate import STALL_REPORT, is_session_stall  # noqa: E402
