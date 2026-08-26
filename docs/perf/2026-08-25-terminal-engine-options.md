@@ -97,6 +97,38 @@ own GPU code. Cost: TBD writes both the renderer and the Swift bindings.
 converged here. TBD is unusually close to this already, since its pty command is
 already a tmux attach — the difference is who owns the process.
 
+## Why other products feed bytes, and why their reasons may not transfer
+
+The two documented reasons both come from one product, stated in its own commits
+and design docs.
+
+**Fan-out and replay.** The engine's process-owning backend admits exactly one
+consumer and offers no tap on the byte stream. That product needed two consumers
+— a local surface and a companion device — plus a one-megabyte replay ring so a
+late attacher could catch up. Owning the pty itself was how it got a stream it
+could fan out.
+
+**A daemon owning session lifetime.** Its later architecture makes a session a
+first-class object living in a daemon, with every UI "a stateless client that
+attaches and detaches" — pty, grid, and scrollback owned by the daemon, and
+rendering, selection, and theme owned by the client. It completed that migration
+on 2026-08-22 by deleting its host-managed pty implementation entirely. Its
+trajectory is away from process ownership, not toward it.
+
+Neither reason clearly binds TBD, and the difference is tmux.
+
+The second does not apply at all: viewer-independent session lifetime is exactly
+what that daemon was built to obtain, and tmux already provides it. The first may
+not either — that product had no multiplexer beneath it, so the app was the only
+place a tap could exist. TBD has one. Control-mode `%output` and `capture-pane`
+both reach the daemon independently of whether the app ever sees a byte, so TBD's
+in-app tap may be redundant with tmux's in a way that product's was not.
+
+That is the question worth answering before choosing a path: **does anything
+other than the visible terminal actually require the app to see the byte
+stream?** If the answer is no, the option of letting the terminal own an attach
+command is open on evidence rather than on optimism.
+
 ## The reversal, and why TBD cannot simply copy it
 
 One project built the design TBD would be proposing, and abandoned it within a
@@ -109,6 +141,26 @@ TBD cannot make that trade, per the constraint above. The reversal is still the
 most important evidence here, but its conclusion transfers only partially: it
 argues against bytes-fed as an *architecture*, while TBD's bytes-fed-ness is a
 local implementation choice sitting on top of a pty it already owns.
+
+The problem list that reversal diagnoses is narrower than it first appears, and
+the distinction matters. Its six complaints are grid mismatches between two
+layout engines, pty output re-encoded to octal and decoded again, keystrokes
+re-encoded through a send-keys path, state reconciliation races, a documented
+incompatibility between fullscreen agent TUIs and tmux control mode, and roughly
+two thousand lines of adapter code spanning a control-mode client, a command
+runner, a state parser, a sync engine, an output router, and resize negotiation.
+
+Every one of those is a property of **control mode**, not of tmux. TBD's
+control-mode subsystem matches that inventory closely, but it is disabled, and
+the default path carries none of those costs: no octal re-encoding, no send-keys
+input path, no state reconciliation. So the reversal indicts the path TBD is not
+currently using far more than the path it is.
+
+The fullscreen-incompatibility claim in that list is unverified and worth
+checking on its own terms. It is asserted without citation by a team that had
+built and measured the arrangement, and if it holds it is a product-level
+constraint on the control-mode design that stands regardless of which engine
+renders.
 
 ## Confirmed hazards from projects that migrated
 
@@ -174,9 +226,11 @@ taking.
 
 ## Open questions
 
-- **Why a comparable bytes-fed product chose that mode** rather than handing the
-  terminal a command. If it had a concrete reason it could not, the same reason
-  likely applies to TBD. Unresolved.
+- **Whether the alternative was ever weighed by the products that chose bytes-fed.**
+  Their reasons *for* the choice are documented (see "Why other products feed
+  bytes"); no document weighs handing the terminal an attach command and rejects
+  it. So the record shows why they chose what they chose, not why they declined
+  the alternative — a distinction worth preserving rather than reading past.
 - **Why TBD hand-feeds** rather than using the engine's process-owning class, and
   whether the hooks it needs survive the switch.
 - **Whether a VT implementation swap changes replay semantics.** TBD's
