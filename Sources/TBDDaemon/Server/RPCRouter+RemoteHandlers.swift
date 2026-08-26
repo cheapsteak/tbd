@@ -138,6 +138,10 @@ extension RPCRouter {
         guard let manager = try await remoteGate() else {
             return Self.remoteBackendsDisabledResponse
         }
+        // Re-read the registry first, so a provider added to
+        // `agent-providers.json` while the daemon runs is registered and
+        // enrolled rather than staying invisible until a restart.
+        await manager.refreshRegistry()
         return try RPCResponse(result: RemoteProvidersResult(providers: await manager.providerStatuses()))
     }
 
