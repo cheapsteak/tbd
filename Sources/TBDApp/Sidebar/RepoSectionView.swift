@@ -1,4 +1,5 @@
 import AppKit
+import os
 import SwiftUI
 import TBDShared
 
@@ -83,13 +84,61 @@ struct RepoSectionView: View {
     /// == repo.id`) that do NOT already own a worktree row in this section,
     /// rendered after every local worktree. See
     /// `RepoSectionView.matchedRemoteSessions` for the filter/sort rule.
+    ///
+    /// Memoized on the two arrays it derives from, because this property is
+    /// evaluated far more often than either of them changes: terminal output
+    /// flushes the SwiftUI graph continuously, and each evaluation would
+    /// otherwise re-run the filter and the date-parsing sort.
+    ///
+    /// The two comparisons are not equally cheap. `AppState` guards its
+    /// `worktrees` writes on inequality, so a refresh that changed nothing
+    /// hands back the same buffer, which `Array`'s `==` is implemented to
+    /// short-circuit on — an optimization, not a guaranteed contract, and
+    /// correctness here does not rest on it: without the short-circuit the
+    /// comparison is merely elementwise. `remoteSessions` is assigned
+    /// unconditionally on every `refreshRemote()`, so it is elementwise —
+    /// still far cheaper than the sort it replaces, and `refreshRemote()` is
+    /// driven by change events rather than a timer, so it mostly runs when a
+    /// recompute was due anyway.
     var matchedRemoteSessions: [RemoteSessionInfo] {
-        RepoSectionView.matchedRemoteSessions(
-            appState.remoteSessions,
+        let sessions = appState.remoteSessions
+        let sectionWorktrees = appState.worktrees[repo.id] ?? []
+        if let cached = RepoSectionView.matchedRemoteSessionsCache[repo.id],
+           cached.sessions == sessions,
+           cached.worktrees == sectionWorktrees {
+            return cached.result
+        }
+        let result = RepoSectionView.matchedRemoteSessions(
+            sessions,
             repoID: repo.id,
-            worktrees: appState.worktrees[repo.id] ?? []
+            worktrees: sectionWorktrees
         )
+        RepoSectionView.matchedRemoteSessionsCache[repo.id] =
+            (sessions: sessions, worktrees: sectionWorktrees, result: result)
+        return result
     }
+
+    /// Backing store for the memoization above: one entry per repo section
+    /// that has rendered, replaced in place. Entries are never evicted, so the
+    /// bound is repos rendered over the life of the process, not repos
+    /// currently registered — removing a repo from the list leaves an inert
+    /// entry behind, holding the two source arrays as they stood at that
+    /// render — including a snapshot of the whole `remoteSessions` list, which
+    /// `AppState` may since have replaced — plus the derived result, which is
+    /// this cache's own. That is deliberate: repos are low-cardinality and
+    /// user-created, and a removed repo whose section renders again wants the
+    /// entry anyway.
+    ///
+    /// A plain `static var` rather than `@State`: it is written from inside a
+    /// `body` evaluation, and SwiftUI state written during a view update
+    /// faults with "Modifying state during view update" (the same hazard that
+    /// keeps `AppState`'s derived caches off `@Published`). `RepoSectionView`
+    /// is inferred `@MainActor` from `View`, so this storage is
+    /// main-actor-isolated and race-free; the `nonisolated` statics below
+    /// deliberately never touch it, which keeps them callable — and pure —
+    /// from a plain test context.
+    @MainActor private static var matchedRemoteSessionsCache:
+        [UUID: (sessions: [RemoteSessionInfo], worktrees: [Worktree], result: [RemoteSessionInfo])] = [:]
 
     private var activeWorktreeCount: Int {
         (appState.worktrees[repo.id] ?? [])
@@ -435,26 +484,64 @@ struct RepoSectionView: View {
         }
     }
 
+    /// The two ISO 8601 profiles `parsedCreatedAt` accepts, built once and
+    /// reused. `ISO8601DateFormatter.init` bottoms out in ICU's `udat_open`,
+    /// and `isOrderedByCreation` parses both of its operands on every
+    /// comparison, so building them per call dominated the sort.
+    ///
+    /// Two formatters and not one: `ISO8601DateFormatter` does not accept both
+    /// profiles in a single `formatOptions` value. `formatOptions` is set here
+    /// and never mutated afterwards.
+    ///
+    /// Deliberately NOT `Sendable`, which is what makes the confinement below
+    /// machine-checked rather than merely intended: `withLock` requires its
+    /// return type to be `Sendable`, so a body that handed a formatter back
+    /// out — `withLock { $0 }` — fails to compile.
+    private struct CreatedAtParsers {
+        let fractionalSeconds: ISO8601DateFormatter = {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            return formatter
+        }()
+        let wholeSeconds = ISO8601DateFormatter()
+    }
+
+    /// Guards the shared parsers. `parsedCreatedAt` is `nonisolated` so a
+    /// plain test context can call it without hopping to `RepoSectionView`'s
+    /// inferred `@MainActor` isolation, and Swift Testing runs suites in
+    /// parallel — so two threads genuinely can reach one formatter at once,
+    /// even though every caller in the app is already on the main actor.
+    ///
+    /// A lock rather than `nonisolated(unsafe)` because the platform does not
+    /// promise what that would assume. Both `NSDateFormatter.h` and
+    /// `NSISO8601DateFormatter.h` are audited for sendability, and only
+    /// `DateFormatter` carries `NS_SWIFT_SENDABLE` ("All mutable state
+    /// protected by locks") — so the subclass's silence is a deliberate
+    /// withholding, not an oversight. An uncontended `os_unfair_lock` acquire
+    /// is nothing next to the ICU parse it wraps, so the guarantee is close to
+    /// free here.
+    ///
+    /// `uncheckedState:` rather than `initialState:` because the state is not
+    /// `Sendable` — see `CreatedAtParsers`. That is the point: it is the
+    /// unconstrained initializer that lets a non-`Sendable` value be locked,
+    /// and keeping the value non-`Sendable` is what makes escaping it a
+    /// compile error.
+    nonisolated private static let createdAtParsers =
+        OSAllocatedUnfairLock(uncheckedState: CreatedAtParsers())
+
     nonisolated static func parsedCreatedAt(_ raw: String?) -> Date? {
         guard let raw else { return nil }
-        // A fresh formatter per call (rather than a cached `static let`)
-        // sidesteps `RepoSectionView`'s inferred `@MainActor` isolation
-        // (from being a `View`) so this stays callable from a plain
-        // `nonisolated` test context — session counts are small enough that
-        // the allocation cost here is a non-issue.
-        //
         // `docs/remote-provider-contract.md` shows a whole-second
         // `created_at` example but never pins a profile, so a conforming
         // provider can legally emit fractional seconds
         // (`2026-07-24T18:02:11.123Z`) — a default-options formatter rejects
         // those outright, sorting every such row as undated. Try
         // `.withFractionalSeconds` first, then fall back to the plain
-        // whole-second profile — `ISO8601DateFormatter` does not accept both
-        // in one `formatOptions` value.
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = fractional.date(from: raw) { return date }
-        return ISO8601DateFormatter().date(from: raw)
+        // whole-second profile.
+        return RepoSectionView.createdAtParsers.withLock { parsers -> Date? in
+            if let date = parsers.fractionalSeconds.date(from: raw) { return date }
+            return parsers.wholeSeconds.date(from: raw)
+        }
     }
 
     // MARK: - The cloud gate — pure, view-free forms of what the two owned
