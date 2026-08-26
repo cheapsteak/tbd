@@ -1,4 +1,5 @@
 import AppKit
+import os
 import SwiftUI
 import TBDShared
 
@@ -82,10 +83,16 @@ struct RepoSectionView: View {
     /// Memoized on the two arrays it derives from, because this property is
     /// evaluated far more often than either of them changes: terminal output
     /// flushes the SwiftUI graph continuously, and each evaluation would
-    /// otherwise re-run the filter and the date-parsing sort. A hit costs one
-    /// pointer comparison per array — `Array`'s `==` short-circuits on buffer
-    /// identity, and both arrays are handed out unchanged by `AppState` while
-    /// nothing has mutated them.
+    /// otherwise re-run the filter and the date-parsing sort.
+    ///
+    /// The two comparisons are not equally cheap. `AppState` guards its
+    /// `worktrees` writes on inequality, so a refresh that changed nothing
+    /// hands back the same buffer and `Array`'s `==` short-circuits on buffer
+    /// identity. `remoteSessions` is assigned unconditionally on every
+    /// `refreshRemote()`, so that comparison degrades to an elementwise one —
+    /// still far cheaper than the sort it replaces, and `refreshRemote()` is
+    /// driven by change events rather than a timer, so it mostly runs when a
+    /// recompute was due anyway.
     var matchedRemoteSessions: [RemoteSessionInfo] {
         let sessions = appState.remoteSessions
         let sectionWorktrees = appState.worktrees[repo.id] ?? []
@@ -105,8 +112,13 @@ struct RepoSectionView: View {
     }
 
     /// Backing store for the memoization above: one entry per repo section
-    /// that has rendered, replaced in place. It is bounded by the number of
-    /// repos, and each entry holds only arrays `AppState` already owns.
+    /// that has rendered, replaced in place. Entries are never evicted, so the
+    /// bound is repos rendered over the life of the process, not repos
+    /// currently registered — removing a repo from the list leaves an inert
+    /// entry behind. That is deliberate: repos are low-cardinality and
+    /// user-created, each entry only retains array buffers `AppState` already
+    /// owns, and a removed repo whose section renders again wants the entry
+    /// anyway.
     ///
     /// A plain `static var` rather than `@State`: it is written from inside a
     /// `body` evaluation, and SwiftUI state written during a view update
@@ -453,28 +465,43 @@ struct RepoSectionView: View {
         }
     }
 
-    /// Parses the fractional-seconds ISO 8601 profile
-    /// (`2026-07-24T18:02:11.123Z`). Shared rather than built per call:
-    /// `ISO8601DateFormatter.init` bottoms out in ICU's `udat_open`, and
-    /// `isOrderedByCreation` parses both of its operands on every comparison.
+    /// The two ISO 8601 profiles `parsedCreatedAt` accepts, built once and
+    /// reused. `ISO8601DateFormatter.init` bottoms out in ICU's `udat_open`,
+    /// and `isOrderedByCreation` parses both of its operands on every
+    /// comparison, so building them per call dominated the sort.
     ///
-    /// `nonisolated(unsafe)`, the pattern `DiffSyntaxHighlighter`'s shared
-    /// highlighters use, keeps it reachable from `parsedCreatedAt` — which is
-    /// `nonisolated` so a plain test context can call it without hopping to
-    /// `RepoSectionView`'s inferred `@MainActor` isolation. `formatOptions` is
-    /// set once here and never mutated afterwards, and a configured
-    /// `ISO8601DateFormatter` is safe to read from concurrently.
-    nonisolated(unsafe) private static let fractionalSecondsFormatter: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter
-    }()
+    /// Two formatters and not one: `ISO8601DateFormatter` does not accept both
+    /// profiles in a single `formatOptions` value. `formatOptions` is set here
+    /// and never mutated afterwards.
+    ///
+    /// `@unchecked Sendable` because `ISO8601DateFormatter` is not `Sendable`:
+    /// the conformance is what lets the value sit behind
+    /// `OSAllocatedUnfairLock`, and the lock is what makes it true — the
+    /// instances are unreachable except through `withLock`, and nothing
+    /// mutates them after `init`.
+    private struct CreatedAtParsers: @unchecked Sendable {
+        let fractionalSeconds: ISO8601DateFormatter = {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            return formatter
+        }()
+        let wholeSeconds = ISO8601DateFormatter()
+    }
 
-    /// Parses the whole-second ISO 8601 profile (`2026-07-24T18:00:00Z`),
-    /// shared for the same reason as `fractionalSecondsFormatter`. Two
-    /// formatters and not one: `ISO8601DateFormatter` does not accept both
-    /// profiles in a single `formatOptions` value.
-    nonisolated(unsafe) private static let wholeSecondsFormatter = ISO8601DateFormatter()
+    /// Guards the shared parsers. `parsedCreatedAt` is `nonisolated` so a
+    /// plain test context can call it without hopping to `RepoSectionView`'s
+    /// inferred `@MainActor` isolation, and Swift Testing runs suites in
+    /// parallel — so two threads genuinely can reach one formatter at once,
+    /// even though every caller in the app is already on the main actor.
+    ///
+    /// A lock rather than `nonisolated(unsafe)` because the platform does not
+    /// promise what that would assume: `DateFormatter` is declared
+    /// `NS_SWIFT_SENDABLE`, and `ISO8601DateFormatter` — sharing the same
+    /// audited header — is not. An uncontended `os_unfair_lock` acquire is
+    /// nothing next to the ICU parse it wraps, so the guarantee is close to
+    /// free here.
+    nonisolated private static let createdAtParsers =
+        OSAllocatedUnfairLock(initialState: CreatedAtParsers())
 
     nonisolated static func parsedCreatedAt(_ raw: String?) -> Date? {
         guard let raw else { return nil }
@@ -485,8 +512,10 @@ struct RepoSectionView: View {
         // those outright, sorting every such row as undated. Try
         // `.withFractionalSeconds` first, then fall back to the plain
         // whole-second profile.
-        if let date = RepoSectionView.fractionalSecondsFormatter.date(from: raw) { return date }
-        return RepoSectionView.wholeSecondsFormatter.date(from: raw)
+        return RepoSectionView.createdAtParsers.withLock { parsers -> Date? in
+            if let date = parsers.fractionalSeconds.date(from: raw) { return date }
+            return parsers.wholeSeconds.date(from: raw)
+        }
     }
 
     // MARK: - The cloud gate — pure, view-free forms of what the two owned
