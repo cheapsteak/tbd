@@ -2,10 +2,15 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 import TBDShared
+import TestSupport
 
 /// Tier 1: pure classification and parsing. No database, no filesystem, no
 /// subprocess and no real signal — the collector is handed its `ps` snapshot,
 /// its pid-to-cwd map and its root classification, and answers.
+///
+/// The exception is the pair of `parseLiveCWDs` tests that name real paths:
+/// canonicalizing a cwd is a `realpath(3)` call, so those are tier 2 and own a
+/// scratch directory rather than naming a path on the developer's machine.
 @Suite("OrphanProcessCollector")
 struct OrphanProcessCollectorTests {
 
@@ -521,13 +526,56 @@ struct OrphanProcessCollectorTests {
 
     /// The pid header lsof always printed and `parseLiveCWDs` used to discard.
     /// Both shapes come from one pass, and the path list is unchanged.
-    @Test("parseLiveCWDs yields both the deduped path list and the pid-to-cwd map")
-    func parseLiveCWDsKeepsThePID() throws {
-        let stdout = Data("p100\nn/tmp/a\np200\nn/tmp/b\np300\nn/tmp/a\n".utf8)
+    ///
+    /// The fixture cwds sit under a scratch directory this test owns, whose own
+    /// path is `realpath`-resolved, so the parser's canonicalization is the
+    /// identity on them — and the test runs with them absent from disk and with
+    /// them present to prove it. Bare `/tmp/a` and `/tmp/b` literals made this
+    /// test's outcome depend on whether an unrelated process had left those
+    /// paths lying around: existing, they canonicalize to `/private/tmp/...`.
+    @Test(
+        "parseLiveCWDs yields both the deduped path list and the pid-to-cwd map",
+        arguments: [false, true]
+    )
+    func parseLiveCWDsKeepsThePID(fixtureCWDsExistOnDisk: Bool) throws {
+        let scratch = try makeCanonicalScratchDirectory(prefix: "tbd-live-cwds")
+        defer { try? FileManager.default.removeItem(atPath: scratch) }
+        let pathA = scratch + "/a"
+        let pathB = scratch + "/b"
+        if fixtureCWDsExistOnDisk {
+            for path in [pathA, pathB] {
+                try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
+            }
+        }
+
+        let stdout = Data("p100\nn\(pathA)\np200\nn\(pathB)\np300\nn\(pathA)\n".utf8)
         let parsed = try #require(
             OrphanGC.parseLiveCWDs(.completed(status: 0, stdout: stdout, stderr: Data())))
-        #expect(parsed.paths == ["/tmp/a", "/tmp/b"])
-        #expect(parsed.cwdByPID == [100: "/tmp/a", 200: "/tmp/b", 300: "/tmp/a"])
+        #expect(parsed.paths == [pathA, pathB])
+        #expect(parsed.cwdByPID == [100: pathA, 200: pathB, 300: pathA])
+    }
+
+    /// Canonicalization is load-bearing, not cosmetic: these cwds are compared
+    /// against git's own worktree paths, which git records already resolved. A
+    /// cwd lsof reports through a symlink has to arrive as the same string, or
+    /// a live worktree reads as idle and gets reaped out from under its agent.
+    /// It also has to happen before the dedup, so two spellings of one
+    /// directory collapse to a single entry.
+    @Test("parseLiveCWDs resolves each cwd to the path git would report")
+    func parseLiveCWDsCanonicalizes() throws {
+        let scratch = try makeCanonicalScratchDirectory(prefix: "tbd-live-cwds-canon")
+        defer { try? FileManager.default.removeItem(atPath: scratch) }
+        let worktree = scratch + "/worktree"
+        try FileManager.default.createDirectory(atPath: worktree, withIntermediateDirectories: true)
+        let viaSymlink = scratch + "/link-to-worktree"
+        try FileManager.default.createSymbolicLink(atPath: viaSymlink, withDestinationPath: worktree)
+
+        let stdout = Data("p100\nn\(viaSymlink)\np200\nn\(worktree)\n".utf8)
+        let parsed = try #require(
+            OrphanGC.parseLiveCWDs(.completed(status: 0, stdout: stdout, stderr: Data())))
+        #expect(parsed.paths == [worktree],
+                "a cwd reported through a symlink resolves to its target, and dedupes against it")
+        #expect(parsed.cwdByPID == [100: worktree, 200: worktree])
     }
 
     @Test("an unavailable lsof invalidates both halves together")
