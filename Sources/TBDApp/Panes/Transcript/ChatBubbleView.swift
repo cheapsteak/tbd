@@ -10,19 +10,64 @@ import MarkdownUI
 struct ChatBubbleView: View {
     let item: TranscriptItem
 
-    private var isUser: Bool {
-        if case .userPrompt = item { return true } else { return false }
+    /// The three bubble shapes this view draws. Mirrors
+    /// `TranscriptBubbleGeometry.Role` so the two render sites agree; kept as a
+    /// local enum so this view stays free of the geometry helper's `@MainActor`
+    /// isolation.
+    private enum BubbleRole {
+        case user
+        case peer
+        case assistant
     }
+
+    private var bubbleRole: BubbleRole {
+        if case .userPrompt = item { return .user }
+        if case .peerMessage = item { return .peer }
+        return .assistant
+    }
+
+    /// True for the roles drawn on the READER's side of the transcript. A peer
+    /// message is a received message shown alongside the reader's own prompts, so
+    /// it aligns and pads exactly like a user prompt — only the tint differs. This
+    /// drives geometry; tint switches on `bubbleRole` instead.
+    private var isUserAligned: Bool { bubbleRole != .assistant }
 
     private var text: String {
         switch item {
         case .userPrompt(_, let t, _): return t
+        case .peerMessage(_, _, let t, _, _): return t
         case .assistantText(_, let t, _, _): return t
         default: return ""
         }
     }
 
-    private var roleLabel: String { isUser ? "You" : "Claude" }
+    private var roleLabel: String {
+        switch bubbleRole {
+        case .user: return "You"
+        case .peer: return "Peer"
+        case .assistant: return "Claude"
+        }
+    }
+
+    /// Role name for the perf signpost only — never drawn.
+    private var signpostRoleName: String {
+        switch bubbleRole {
+        case .user: return "user"
+        case .peer: return "peer"
+        case .assistant: return "assistant"
+        }
+    }
+
+    /// Bubble fill. The accent tint says *you*, the amber says *not you*, both at
+    /// the same 15% alpha so the two differ in hue alone. Mirrors
+    /// `TranscriptBubbleGeometry.backgroundColor(for:)`.
+    private var bubbleTint: Color {
+        switch bubbleRole {
+        case .user: return Color.accentColor.opacity(0.15)
+        case .peer: return AttentionAmber.bubbleTintColor
+        case .assistant: return Color.clear
+        }
+    }
 
     /// Speaker attribution for assistive technology only — never drawn. A
     /// transcript is not a group chat, so the bubble shows no role/timestamp
@@ -31,7 +76,7 @@ struct ChatBubbleView: View {
     /// `TranscriptBubbleGeometry.accessibilityAttribution(for:)`.
     private var accessibilityAttribution: String {
         guard let ts = item.timestamp?.absoluteShort else { return roleLabel }
-        return isUser ? "\(ts) · \(roleLabel)" : "\(roleLabel) · \(ts)"
+        return isUserAligned ? "\(ts) · \(roleLabel)" : "\(roleLabel) · \(ts)"
     }
 
     var body: some View {
@@ -43,7 +88,7 @@ struct ChatBubbleView: View {
         // The role/timestamp header is gone too, which took the enclosing VStack
         // with it — one fewer StackLayout node per bubble row.
         bubbleBody
-            .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
+            .frame(maxWidth: .infinity, alignment: isUserAligned ? .trailing : .leading)
             // Single EdgeInsets folds the 52pt opposite-side gutter into the 8/12
             // chrome insets (12 + 52 = 64) — one _PaddingLayout instead of two,
             // per bubble row. Nested uniform paddings compose additively, so this
@@ -53,7 +98,7 @@ struct ChatBubbleView: View {
             // from the next.
             .padding(EdgeInsets(
                 top: 8,
-                leading: isUser ? 64 : 16,
+                leading: isUserAligned ? 64 : 16,
                 bottom: 8,
                 trailing: 12
             ))
@@ -70,7 +115,7 @@ struct ChatBubbleView: View {
         let state = TranscriptSignposts.signposter.beginInterval(
             "transcript.markdown.build",
             id: TranscriptSignposts.signposter.makeSignpostID(),
-            "len=\(text.count, privacy: .public) role=\(isUser ? "user" : "assistant", privacy: .public)"
+            "len=\(text.count, privacy: .public) role=\(signpostRoleName, privacy: .public)"
         )
         defer { TranscriptSignposts.signposter.endInterval("transcript.markdown.build", state) }
         let segments = MarkdownSegments.split(text)
@@ -90,15 +135,11 @@ struct ChatBubbleView: View {
         }
         .padding(EdgeInsets(
             top: 8,
-            leading: isUser ? 11 : 0,
+            leading: isUserAligned ? 11 : 0,
             bottom: 8,
-            trailing: isUser ? 11 : 0
+            trailing: isUserAligned ? 11 : 0
         ))
-        .background(
-            isUser
-                ? Color.accentColor.opacity(0.15)
-                : Color.clear
-        )
+        .background(bubbleTint)
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 

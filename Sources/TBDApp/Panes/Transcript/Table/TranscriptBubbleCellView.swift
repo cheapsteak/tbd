@@ -15,6 +15,10 @@ import TBDShared
 enum TranscriptBubbleGeometry {
     enum Role {
         case user
+        /// A message received from another agent session. Aligns and pads exactly
+        /// like `.user` — it is a received message shown on the reader's side of
+        /// the transcript — and differs from it only in tint.
+        case peer
         case assistant
     }
 
@@ -26,7 +30,7 @@ enum TranscriptBubbleGeometry {
     /// span the full column width.
     static func outerHorizontal(for role: Role, columnWidth: CGFloat) -> CGFloat {
         switch role {
-        case .user: return columnWidth < 680 ? 24 : 76
+        case .user, .peer: return columnWidth < 680 ? 24 : 76
         case .assistant: return 24
         }
     }
@@ -45,7 +49,7 @@ enum TranscriptBubbleGeometry {
     /// aligns with the 12pt tool-row inset.
     static func bodyHorizontal(for role: Role) -> CGFloat {
         switch role {
-        case .user: return 22
+        case .user, .peer: return 22
         case .assistant: return 0
         }
     }
@@ -74,6 +78,7 @@ enum TranscriptBubbleGeometry {
 
     static func role(for item: TranscriptItem) -> Role {
         if case .userPrompt = item { return .user }
+        if case .peerMessage = item { return .peer }
         return .assistant
     }
 
@@ -87,6 +92,11 @@ enum TranscriptBubbleGeometry {
         case .user:
             if let ts { return "\(ts) · You" }
             return "You"
+        case .peer:
+            // Position and tint say "received from elsewhere"; VoiceOver perceives
+            // neither, so the cell speaks it.
+            if let ts { return "\(ts) · Peer" }
+            return "Peer"
         case .assistant:
             if let ts { return "Claude · \(ts)" }
             return "Claude"
@@ -97,6 +107,7 @@ enum TranscriptBubbleGeometry {
     static func text(for item: TranscriptItem) -> String {
         switch item {
         case .userPrompt(_, let t, _): return t
+        case .peerMessage(_, _, let t, _, _): return t
         case .assistantText(_, let t, _, _): return t
         default: return ""
         }
@@ -139,9 +150,14 @@ enum TranscriptBubbleGeometry {
     }
 
     /// Bubble background color for a role (matches ChatBubbleView).
+    ///
+    /// The accent tint says *you*; the amber says *not you*. Same 15% alpha on
+    /// both, so the two bubbles differ in hue alone and a reader tells them apart
+    /// at a glance without reading a word.
     static func backgroundColor(for role: Role) -> NSColor {
         switch role {
         case .user: return NSColor.controlAccentColor.withAlphaComponent(0.15)
+        case .peer: return AttentionAmber.bubbleTint
         case .assistant: return .clear
         }
     }
@@ -502,15 +518,16 @@ final class TranscriptBubbleCellView: NSTableCellView {
 
         rebuildBlockStack(blocks: blocks, blockHeights: blockHeights, bodyWidth: bodyWidth)
 
-        // Box width: user bubbles shrink-to-fit (right-anchored), assistant fills.
-        // Per-role block-stack inset: user keeps the 11pt-per-side bubble padding,
-        // assistant sits flush at the box edge (0), aligning with the tool rows.
+        // Box width: reader-side bubbles (user, peer) shrink-to-fit (right-anchored),
+        // assistant fills. Per-role block-stack inset: reader-side bubbles keep the
+        // 11pt-per-side bubble padding, assistant sits flush at the box edge (0),
+        // aligning with the tool rows.
         let bodyInset = g.bodyHorizontal(for: role) / 2
         blockLeading.constant = bodyInset
         blockTrailing.constant = -bodyInset
         let bubbleWidth = bodyWidth + g.bodyHorizontal(for: role)
         switch role {
-        case .user:
+        case .user, .peer:
             // Measure the widest prose block and clamp to the available bubble.
             let usedWidth = userContentWidth(blocks: blocks, bodyWidth: bodyWidth)
             let fitWidth = min(usedWidth + g.bodyHorizontal(for: role), bubbleWidth)

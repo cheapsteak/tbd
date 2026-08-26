@@ -159,11 +159,16 @@ message takes the same treatment in amber: the accent tint says *you*, and amber
 says *not you*, which is exactly the distinction a reader needs to make at a
 glance.
 
-The amber is the pair already established elsewhere in the app for the
-`attention` semantic — `#B7791F` on light, GitHub's `attention.fg` `#D29922` on
-dark — resolved per appearance through `adaptiveColor(light:dark:)`, at the same
-15% alpha the accent tint uses. Reusing it keeps one amber in the product rather
+The amber is the pair already established for the sidebar's `attention`
+semantic — `#B7791F` on light, GitHub's `attention.fg` `#D29922` on dark —
+resolved per appearance through `adaptiveColor(light:dark:)`, at the same 15%
+alpha the accent tint uses. Reusing it keeps one amber in the product rather
 than two that nearly match.
+
+The PR-status `pending` swatch shares only the dark half of that pair; its light
+value is a distinct olive, `#936921`. So the amber has one home, not two, and
+whether the olive should converge on it is a question about PR status colors
+rather than about this feature.
 
 Legibility is a requirement rather than an intention, and a tint at 15% alpha
 composites against whatever sits behind it, so it is checked against the
@@ -171,8 +176,10 @@ composited result rather than the swatch. Composited over the pane background,
 the bubble resolves to `#F4EBDD` on light and `#39301F` on dark. Measured WCAG
 contrast on those:
 
-- **Body text** — 12.8:1 light, 10.7:1 dark. Clears AA for normal text with room
-  to spare, in both appearances.
+- **Body text** — around 13:1 light and 10:1 dark. Clears AA for normal text
+  with room to spare, in both appearances. The exact figure moves with
+  `labelColor`'s system-defined alpha, so the floor is the requirement and the
+  number is an indication.
 - **Inline code**, the existing `chatBubbleInlineCode` pair — 5.8:1 light, 6.3:1
   dark. Clears AA.
 - **Link and secondary text** — 3.3:1 to 3.6:1, below the 4.5:1 floor.
