@@ -428,3 +428,77 @@ The composition shift replicates across both post-fix windows independently: the
 view-list rebuild fell from 31.5% of expensive-flush CPU before the change to
 6.7% and 12.8% after, and body evaluation is now the largest slice in both, led
 by `WorktreeRowView`, `TabBarItem`, and `PanePlaceholder`.
+
+## Key-to-paint latency, and what it refutes — 2026-08-26
+
+A deterministic benchmark — the real agent TUI driven by a scripted local
+endpoint, so token rate is a parameter rather than a variable — measured the leg
+that matters to a user: the time from a keystroke to the next display pass that
+could show it. Harness and full method: `2026-08-26-claude-code-render-benchmark.md`.
+
+| condition | keys | p50 | p90 | max | over 100 ms |
+|---|---|---|---|---|---|
+| bare shell, typing only | 84 | 53.8 ms | 156.8 ms | 303.8 ms | 28.6% |
+| bare shell, typing only | 76 | 45.7 ms | 102.3 ms | 257.6 ms | 10.5% |
+| typing while streaming | 84 | 40.8 ms | 119.3 ms | 270.0 ms | 13.1% |
+| typing while streaming | 72 | 41.6 ms | 100.8 ms | 188.8 ms | 11.1% |
+
+**The lag is a paint-scheduling floor, not a cost problem.** Median 40-55 ms with
+a tail past 300 ms and one keystroke in ten or more taking over 100 ms to appear —
+while the main thread is ~99% idle in every condition, parse work is 0.00-0.02
+seconds per wall-second, and each display pass costs 10-15 ms. Nothing is
+CPU-bound. TBD is not busy; it is not painting promptly.
+
+### Three earlier readings this overturns
+
+**Streaming does not make typing worse — it slightly improves it.** The streaming
+pair ran at machine load 95-119 against the typing-only pair's 78-103 and still
+came out faster. More output means more frequently scheduled draws, so a
+keystroke waits less for the next one. The expectation that heavy agent output
+would be the worst case for typing was wrong, and backwards.
+
+**An agent cannot saturate TBD.** Claude Code emits ~30-40 screen updates per
+second regardless of renderer, and raising its token rate tenfold *lowered* the
+observed chunk rate. Renderer choice — fullscreen or classic — is immaterial to
+throughput. The hypothesis that fullscreen full-viewport repaints constitute a
+maximum-cost path does not survive: the producer is the limit, not the renderer.
+
+**Gaps between display passes are not lag when input is bursty.** During a pause
+between typing bursts there is nothing to draw, so a long gap is correct
+behaviour. The earlier reading of 846 ms gaps as render-loop starvation over-read
+that metric; keystroke-anchored latency is the sound measure and supersedes it.
+
+### The one genuinely expensive path, and why it changes the fix
+
+High-rate line-append while scrolling — reachable with a build log or `cat`, not
+with an agent — costs 6.15 ms per chunk and 0.96 seconds of parse work per
+wall-second. That is saturation, and it starves the view to roughly one display
+pass per second.
+
+**That cost sits in `feed` — parse and damage tracking — which is upstream of
+`drawTerminalContents`.** So optimising the per-row `NSAttributedString` rebuild
+would target the wrong stage for the one path where cost genuinely dominates.
+
+### Caveats
+
+**The input leg is excluded and the figures are a lower bound.** macOS refused
+synthetic keystrokes without Accessibility permission, so keys were injected at
+the tmux layer; TBD's own view keydown handling is not in these numbers. True
+perceived latency is this plus that leg.
+
+**Machine load was 63-119 throughout**, with the window server alone at 65-73%.
+Within-pair comparisons are sound; comparison against baselines taken under
+unknown load is not.
+
+**A discarded metric, recorded so it is not re-derived.** "Time from chunk to next
+display pass" gave a plausible 133-146 ms median but is inflated and partly
+circular: a shell emits roughly 8.75 chunks per typed character while only about
+one draw occurs, so most chunks are mid-burst fragments waiting on the next
+character's draw.
+
+### Where this points
+
+At *when* TBD schedules a paint, rather than at parse or draw cost. A ~40 ms floor
+on an otherwise idle main thread suggests a coalescing or timer policy rather than
+contention — so the next question is what marks the terminal view as needing
+display, and how that is throttled.

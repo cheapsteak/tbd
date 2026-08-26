@@ -31,6 +31,27 @@ same binary.
 
 This design enables that renderer behind a default-off flag and measures it.
 
+### What later measurement says about this experiment's premise
+
+Deterministic benchmarking after this spec was written found that the one
+genuinely expensive path — high-rate line-append while scrolling — spends its
+cost in `feed`, that is parse and damage tracking, which is **upstream of
+`drawTerminalContents`**. A GPU renderer replaces the draw stage and would not
+address it.
+
+The same work found that an agent cannot saturate the renderer at all (~30-40
+screen updates per second regardless of renderer, with a tenfold token-rate
+increase *lowering* the chunk rate), and that perceived typing lag is a
+paint-scheduling floor of 40-55 ms on a main thread that is ~99% idle, rather
+than a cost problem.
+
+This does not make the experiment worthless — the draw path is genuinely
+inefficient, and the flag is cheap and reversible. It does mean the expected
+prize is smaller than the spec assumed, and that a null result should be read as
+confirming the cost lies elsewhere rather than as a failure of the GPU path. See
+`docs/perf/2026-08-25-terminal-render-cost-investigation.md` and
+`2026-08-26-claude-code-render-benchmark.md`.
+
 ### Two ways a null result is expected, stated before measuring
 
 Recording these in advance so that a flat result is diagnosed rather than
