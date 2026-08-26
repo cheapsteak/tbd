@@ -63,7 +63,7 @@ enum TranscriptHeaderActions {
 struct HistoryPaneView: View {
     let worktreeID: UUID
     var transcriptAction: TranscriptAction = .resume
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     private var loadState: HistoryLoadState {
         appState.historyLoadStates[worktreeID] ?? .idle
@@ -207,7 +207,7 @@ struct HistoryPaneView: View {
 private struct HistoryHeaderRow: View {
     let loadState: HistoryLoadState
     let worktreeID: UUID
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @State private var statusMessage: String? = nil
     @State private var statusClearTask: Task<Void, Never>? = nil
 
@@ -357,7 +357,7 @@ struct SessionTranscriptView: View {
     let worktreeID: UUID
     let summary: SessionSummary
     let action: TranscriptAction
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
 
     /// True when the visible viewport is within ~50pt of the bottom of
@@ -660,7 +660,7 @@ private struct ClosedTerminalRowView: View {
 private struct ClosedTerminalDetailView: View {
     let entry: TerminalHistoryEntry
     let worktreeID: UUID
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     private var content: String? {
         appState.closedTerminalContents[entry.id]

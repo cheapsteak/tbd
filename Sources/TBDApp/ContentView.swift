@@ -8,7 +8,7 @@ private enum FilePanelStorageKey {
 }
 
 struct ContentView: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
     @AppStorage(FilePanelStorageKey.isVisible) private var showFilePanel = true
     @AppStorage(FilePanelStorageKey.width) private var filePanelWidth: Double = 280
@@ -36,6 +36,7 @@ struct ContentView: View {
     }
 
     var body: some View {
+        @Bindable var appState = appState
         VStack(spacing: 0) {
             // Persistent, non-blocking cross-build warning: the shared daemon
             // was started from a different worktree's build than this app.
@@ -61,7 +62,19 @@ struct ContentView: View {
                 SidebarView()
                     .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 400)
             } detail: {
-                DetailSectionHostPager()
+                // The tab choice is resolved HERE, in a real `body`, and handed
+                // down as a value. Reading these three properties inside
+                // `updateNSViewController` instead would register no
+                // dependency — Observation tracks what a `body` evaluation
+                // reads — so a selection change that touched nothing else this
+                // body reads would leave the detail area on the previous tab.
+                DetailSectionHostPager(
+                    targetTab: DetailSectionHostPager.targetTab(
+                        isConnected: appState.isConnected,
+                        selectedRemoteSession: appState.selectedRemoteSession,
+                        selectedRemoteProvider: appState.selectedRemoteProvider
+                    )
+                )
             }
             .toolbar(removing: .sidebarToggle)
             .toolbar {
@@ -311,9 +324,9 @@ struct ContentView: View {
         ) { sheet in
             switch sheet {
             case .compose(let target):
-                QueuedPromptModal(target: target).environmentObject(appState)
+                QueuedPromptModal(target: target).environment(appState)
             case .readback(let readback):
-                ParkedPromptReadbackView(readback: readback).environmentObject(appState)
+                ParkedPromptReadbackView(readback: readback).environment(appState)
             }
         }
         .alert(
@@ -554,7 +567,7 @@ struct ContentView: View {
 /// the `tv.window != nil` guards in `TerminalPanelView`).
 ///
 /// Each tab's content is a small internally-reactive wrapper — it reads
-/// `@EnvironmentObject`/`@AppStorage` state itself rather than being handed a
+/// `@Environment`/`@AppStorage` state itself rather than being handed a
 /// fresh value on every `updateNSViewController` — so its
 /// `NSHostingController` is created exactly once and its `rootView` is
 /// never reassigned: the same "stable identity, reactive interior" shape
@@ -567,7 +580,12 @@ struct DetailSectionHostPager: NSViewControllerRepresentable {
         case other
     }
 
-    @EnvironmentObject var appState: AppState
+    /// Resolved by the caller's `body` rather than read from `appState` here —
+    /// see the call site in `ContentView.body` for why. Changing it is what
+    /// drives `updateNSViewController` to bring a different tab forward.
+    let targetTab: DetailTab
+
+    @Environment(AppState.self) var appState
     @EnvironmentObject var appearance: AppearanceSettings
     @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
 
@@ -588,7 +606,7 @@ struct DetailSectionHostPager: NSViewControllerRepresentable {
         if !currentIDs.contains(Self.remoteTabID) {
             let host = NSHostingController(
                 rootView: RemoteSessionHostSlot()
-                    .environmentObject(appState)
+                    .environment(appState)
                     .environmentObject(appearance)
             )
             let item = NSTabViewItem(viewController: host)
@@ -599,7 +617,7 @@ struct DetailSectionHostPager: NSViewControllerRepresentable {
         if !currentIDs.contains(Self.providerDeskTabID) {
             let host = NSHostingController(
                 rootView: ProviderDeskHostSlot()
-                    .environmentObject(appState)
+                    .environment(appState)
                     .environmentObject(appearance)
             )
             let item = NSTabViewItem(viewController: host)
@@ -610,7 +628,7 @@ struct DetailSectionHostPager: NSViewControllerRepresentable {
         if !currentIDs.contains(Self.otherTabID) {
             let host = NSHostingController(
                 rootView: OtherSectionContent()
-                    .environmentObject(appState)
+                    .environment(appState)
                     .environmentObject(overlayCoordinator)
             )
             let item = NSTabViewItem(viewController: host)
@@ -618,11 +636,7 @@ struct DetailSectionHostPager: NSViewControllerRepresentable {
             vc.addTabViewItem(item)
         }
 
-        let targetID = Self.targetTab(
-            isConnected: appState.isConnected,
-            selectedRemoteSession: appState.selectedRemoteSession,
-            selectedRemoteProvider: appState.selectedRemoteProvider
-        ).rawValue
+        let targetID = targetTab.rawValue
         if let idx = vc.tabViewItems.firstIndex(where: { $0.identifier as? String == targetID }),
            vc.selectedTabViewItemIndex != idx {
             vc.selectedTabViewItemIndex = idx
@@ -660,7 +674,7 @@ struct DetailSectionHostPager: NSViewControllerRepresentable {
 /// already built to handle (see its own doc comment on why it's not
 /// `.id()`-keyed).
 private struct RemoteSessionHostSlot: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     var body: some View {
         if let selection = appState.remoteSessionHostSelection {
@@ -681,7 +695,7 @@ private struct RemoteSessionHostSlot: View {
 /// window rather than a resting state — and the desk has no honest content
 /// to show for a provider TBD no longer knows about.
 private struct ProviderDeskHostSlot: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     var body: some View {
         if let name = appState.selectedRemoteProvider,
@@ -702,7 +716,7 @@ private struct OtherSectionContent: View {
     @AppStorage(FilePanelStorageKey.isVisible) private var showFilePanel = true
     @AppStorage(FilePanelStorageKey.width) private var filePanelWidth: Double = 280
 
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
 
     var body: some View {
@@ -808,7 +822,7 @@ private struct OtherSectionContent: View {
 /// `contentAreaHeight` moves in as this view's own `@State` instead: nothing
 /// outside this branch ever read it in `ContentView`.
 private struct WorktreeDetailAreaView: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
     @Binding var showFilePanel: Bool
     @Binding var filePanelWidth: Double

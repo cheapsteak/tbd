@@ -18,7 +18,7 @@ struct PinnedDockView: View {
     /// interleaved.
     let remoteRows: [PinnedDockRemoteRow]
     let availableHeight: CGFloat
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     /// The pinned roots, in display order — the elements `.onMove` addresses.
     private var roots: [PinnedDockRow] {
@@ -59,6 +59,7 @@ struct PinnedDockView: View {
     }
 
     var body: some View {
+        @Bindable var appState = appState
         if !rows.isEmpty || !remoteRows.isEmpty {
             ScrollViewReader { proxy in
                 List(selection: $appState.selectedWorktreeIDs) {

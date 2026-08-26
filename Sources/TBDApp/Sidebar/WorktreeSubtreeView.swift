@@ -19,7 +19,7 @@ struct WorktreeSubtreeView: View {
     let worktree: Worktree
     let depth: Int
     let sectionRepoID: UUID
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     /// Read only to place the row: the project chevron's position decides
     /// which column every section title sits in, and rows follow their title.
     /// See `SidebarHeaderMetrics.childRowLeadingInset`.

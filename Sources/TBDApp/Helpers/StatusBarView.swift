@@ -3,7 +3,7 @@ import SwiftUI
 import TBDShared
 
 struct StatusBarView: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     /// Path + repo of the resolved single-selected worktree. Taking a
     /// `LocalWorktree?` is what makes "nil when it has no path yet" true —
@@ -553,7 +553,7 @@ private struct PRChipCluster: View {
 /// *glyph*, so a click always does what the slot is drawing: an xmark untracks,
 /// a status dot opens the PR exactly as it did before this control existed.
 private struct PRChipView: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     let chip: StatusBarView.PRChip
 
     @State private var isHovering = false
@@ -798,7 +798,7 @@ private struct PRChipOverflowMenu: View {
 /// `StatusBarHoverAffordance` rather than wiring `onHover` by hand, so its
 /// cursor push can never lose its matching pop.
 private struct ParkedPromptStatusItem: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     let worktree: Worktree
 
     @State private var isHovering = false
@@ -861,7 +861,7 @@ private struct ParkedPromptStatusItem: View {
 /// close cannot arise here. Adopting it would add three constants and an
 /// overlay that resolve an ambiguity this chip does not have.
 private struct AutoArchiveChipView: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     let worktreeID: UUID
     let chip: StatusBarView.AutoArchiveChip
 
@@ -942,7 +942,7 @@ private struct AutoArchiveChipView: View {
 /// cursor are the whole affordance, and the toast is what confirms the copy
 /// landed (the label itself is too small to flash a "Copied" state legibly).
 private struct CopyableStatusText: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     /// Optional leading glyph naming what the value is. Part of the same click
     /// target and hover affordance as the text.

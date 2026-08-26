@@ -27,7 +27,7 @@ struct HoverPressButtonStyle: ButtonStyle {
 
 struct RepoSectionView: View {
     let repo: Repo
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     @State private var isEditing = false
     @State private var isSectionHovered = false
@@ -132,7 +132,13 @@ struct RepoSectionView: View {
     /// A plain `static var` rather than `@State`: it is written from inside a
     /// `body` evaluation, and SwiftUI state written during a view update
     /// faults with "Modifying state during view update" (the same hazard that
-    /// keeps `AppState`'s derived caches off `@Published`). `RepoSectionView`
+    /// keeps `AppState`'s derived caches `@ObservationIgnored`).
+    ///
+    /// Note the getter above reads both `remoteSessions` and `worktrees`
+    /// *before* consulting this cache. It has to: they are the cache key, but
+    /// they are also what registers this view's dependency on them, and a body
+    /// served from a cache hit that read neither would drop both — see "THE
+    /// WARM-CACHE DEPENDENCY TRAP" in `AppState.swift`. `RepoSectionView`
     /// is inferred `@MainActor` from `View`, so this storage is
     /// main-actor-isolated and race-free; the `nonisolated` statics below
     /// deliberately never touch it, which keeps them callable — and pure —
@@ -361,7 +367,7 @@ struct RepoSectionView: View {
                             // outright or present the sheet this view owns.
                             onStartRemoteSession: { startRemoteSession(with: $0) }
                         )
-                        .environmentObject(appState)
+                        .environment(appState)
                         .background(.ultraThickMaterial)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                         .onHover { newWorktreeMenu.menuHover($0) }

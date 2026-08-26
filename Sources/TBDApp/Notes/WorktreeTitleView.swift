@@ -7,7 +7,7 @@ import TBDShared
 /// action menu (Rename, Archive, …).
 ///
 /// `appState`/`worktree`/`repoName` are passed in (not read from the
-/// environment) so this view has no `@EnvironmentObject` dependency inside the
+/// environment) so this view has no `@Environment` dependency inside the
 /// `.principal` toolbar item — matching the `PRButtonLabel` convention.
 struct WorktreeTitleView: View {
     let appState: AppState

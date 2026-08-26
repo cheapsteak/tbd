@@ -67,7 +67,7 @@ struct WorktreeProfilePickerView: View {
     /// it is one registered provider among the others, so it needs no row of
     /// its own — only the gate `offerableProviders` applies to it.
     var onStartRemoteSession: (RemoteProviderStatus) -> Void = { _ in }
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @Environment(\.dismiss) private var dismiss
 
     private enum Page {

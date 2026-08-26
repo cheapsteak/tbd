@@ -8,7 +8,7 @@ import TBDShared
 /// `scratch.delete`, so there are no Claude sessions to browse. No split
 /// pane, no pagination — scratch archive volume is expected to be low.
 struct ScratchArchivedView: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @State private var pendingDeleteID: UUID?
 
     private var rows: [Worktree] {

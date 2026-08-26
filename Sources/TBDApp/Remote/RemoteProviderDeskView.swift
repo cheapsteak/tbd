@@ -7,7 +7,7 @@ import TBDShared
 struct RemoteProviderDeskView: View {
     let provider: RemoteProviderStatus
 
-    @EnvironmentObject private var appState: AppState
+    @Environment(AppState.self) private var appState
     @State private var isRefreshing = false
     @State private var runningRemediation: RemoteRemediationRun?
 

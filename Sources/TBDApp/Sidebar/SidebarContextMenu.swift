@@ -7,7 +7,7 @@ import TBDShared
 struct SidebarContextMenu: View {
     let worktree: Worktree
     var onRename: () -> Void
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     var body: some View {
         RowActionMenuItemsView(

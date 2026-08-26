@@ -15,7 +15,7 @@ struct TranscriptOverlayView: View {
     let onBack: () -> Void
     let onClose: () -> Void
 
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     private static let decoder = JSONDecoder()
 

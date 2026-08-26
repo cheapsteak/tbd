@@ -3,7 +3,7 @@ import TBDShared
 
 struct RepoInstructionsView: View {
     let repoID: UUID
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     @State private var renamePromptDraft: String = ""
     @State private var customInstructionsDraft: String = ""

@@ -759,7 +759,7 @@ struct TableTranscriptView: NSViewRepresentable {
                 .environment(\.transcriptStaticCards, true)
                 .environment(\.openTranscriptOverlay, context.openTranscriptOverlay)
                 .environment(\.toggleTranscriptActivityGroup, context.toggleActivityGroup)
-                .environmentObjectIfPresent(context.appState)
+                .environmentIfPresent(context.appState)
         }
 
         // MARK: Activity-row height
@@ -2090,14 +2090,14 @@ final class TranscriptHostingCellView: NSTableCellView {
 // MARK: - Environment helper
 
 private extension View {
-    /// Injects the `AppState` environment object only when present, so the
-    /// hosted row's `@EnvironmentObject var appState` resolves exactly as it does
-    /// in the SwiftUI pane. A nil appState (headless harness without a wired
+    /// Injects `AppState` into the environment only when present, so the
+    /// hosted row's `@Environment(AppState.self) var appState` resolves exactly
+    /// as it does in the SwiftUI pane. A nil appState (headless harness without a wired
     /// state) leaves the row to render its appState-independent content.
     @ViewBuilder
-    func environmentObjectIfPresent(_ appState: AppState?) -> some View {
+    func environmentIfPresent(_ appState: AppState?) -> some View {
         if let appState {
-            self.environmentObject(appState)
+            self.environment(appState)
         } else {
             self
         }

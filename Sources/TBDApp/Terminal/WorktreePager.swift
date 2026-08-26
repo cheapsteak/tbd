@@ -15,7 +15,7 @@ import AppKit
 struct WorktreePager: NSViewControllerRepresentable {
     let worktreeIDs: [UUID]
     let activeID: UUID?
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     static func mountedWorktreeIDs(recentIDs: [UUID], activeID: UUID?) -> [UUID] {
         guard let activeID else { return recentIDs }
@@ -46,7 +46,7 @@ struct WorktreePager: NSViewControllerRepresentable {
         for id in mountedIDs where !currentIDs.contains(id) {
             let host = NSHostingController(
                 rootView: SingleWorktreeView(worktreeID: id)
-                    .environmentObject(appState)
+                    .environment(appState)
             )
             let item = NSTabViewItem(viewController: host)
             item.identifier = id

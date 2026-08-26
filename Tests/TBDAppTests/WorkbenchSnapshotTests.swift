@@ -176,7 +176,7 @@ struct WorkbenchSnapshotTests {
             let host = NSHostingView(rootView: AnyView(
                 workbenchView
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .environmentObject(appState)
+                    .environment(appState)
             ))
             host.translatesAutoresizingMaskIntoConstraints = false
             if let appearance = appearance {

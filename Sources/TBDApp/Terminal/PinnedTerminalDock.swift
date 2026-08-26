@@ -6,7 +6,6 @@ import TBDShared
 /// When multiple terminals are docked, draggable dividers between cells allow vertical resizing.
 struct PinnedTerminalDock: View {
     let terminals: [Terminal]
-    @EnvironmentObject var appState: AppState
     @State private var ratios: [CGFloat] = []
 
     var body: some View {
@@ -102,7 +101,7 @@ private struct DockCellDivider: View {
 /// A single cell in the pinned terminal dock.
 private struct PinnedTerminalCell: View {
     let terminal: Terminal
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     var body: some View {
         // Bind ONCE per render — findWorktree is a linear scan, and both the

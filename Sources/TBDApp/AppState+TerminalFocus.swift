@@ -29,9 +29,23 @@ extension AppState {
         terminalTabCloseContexts.removeValue(forKey: terminalID)
     }
 
+    /// The tab ⌘W would close: the one owning the focused terminal view, or the
+    /// last-focused context when no terminal view has registered yet.
+    ///
+    /// The unconditional read of `focusedTabCloseContext` is load-bearing even
+    /// though the non-empty branch below ignores its value. Everything that
+    /// branch consults is invisible to Observation — `terminalFocusTargets` and
+    /// `terminalTabCloseContexts` are `@ObservationIgnored`, and
+    /// `NSApp.keyWindow?.firstResponder` is not observable at all — so without
+    /// this touch, `canCloseFocusedTab` would register no dependency on the one
+    /// property that actually moves when focus does, and the File ▸ Close Tab
+    /// item would stay stuck at whatever it computed last. `TerminalPanelView`
+    /// writes `focusedTabCloseContext` on every focus in and out, which makes it
+    /// the correct observable proxy for a first-responder change.
     func resolvedFocusedTabCloseContext() -> TabCloseContext? {
+        let lastFocused = focusedTabCloseContext
         if terminalFocusTargets.isEmpty {
-            return focusedTabCloseContext
+            return lastFocused
         }
         guard let terminalView = NSApp.keyWindow?.firstResponder as? TBDTerminalView else {
             return nil

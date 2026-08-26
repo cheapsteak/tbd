@@ -8,7 +8,7 @@ struct GlobCardBody: View {
     let terminalID: UUID?
 
     @State private var fullResultText: String? = nil
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {

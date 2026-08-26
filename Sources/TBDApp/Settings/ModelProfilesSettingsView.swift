@@ -19,10 +19,11 @@ enum SettingsWindowCloser {
 }
 
 struct ModelProfilesSettingsView: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @State private var showAddSheet = false
 
     var body: some View {
+        @Bindable var appState = appState
         VStack(alignment: .leading, spacing: 12) {
             globalDefaultHeader
             // Same persisted flag the spawn-time account picker's checkbox
@@ -39,7 +40,7 @@ struct ModelProfilesSettingsView: View {
         .task { await appState.loadModelProfiles() }
         .sheet(isPresented: $showAddSheet) {
             AddModelProfileSheet()
-                .environmentObject(appState)
+                .environment(appState)
         }
     }
 
@@ -68,7 +69,7 @@ struct ModelProfilesSettingsView: View {
         List {
             ForEach(appState.modelProfiles, id: \.profile.id) { entry in
                 ModelProfileRow(entry: entry)
-                    .environmentObject(appState)
+                    .environment(appState)
             }
             .onMove { source, destination in
                 appState.reorderModelProfiles(fromOffsets: source, toOffset: destination)
@@ -90,7 +91,7 @@ struct ModelProfilesSettingsView: View {
 // MARK: - Row
 
 struct ModelProfileRow: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     let entry: ModelProfileWithUsage
 
     @State private var isEditingName = false
@@ -165,15 +166,15 @@ struct ModelProfileRow: View {
         }
         .sheet(isPresented: $showEditEndpoint) {
             EditEndpointSheet(profile: profile)
-                .environmentObject(appState)
+                .environment(appState)
         }
         .sheet(isPresented: $showEditBedrock) {
             EditBedrockSheet(profile: profile)
-                .environmentObject(appState)
+                .environment(appState)
         }
         .sheet(isPresented: $showEditClaudeDirect) {
             EditClaudeDirectSheet(profile: profile)
-                .environmentObject(appState)
+                .environment(appState)
         }
     }
 
@@ -519,7 +520,7 @@ private func modelDiscoveryStatus(profile: String, discovery: BedrockModels.Disc
 }
 
 struct AddModelProfileSheet: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @Environment(\.dismiss) private var dismiss
 
     @State private var preset: AddPreset = .claudeDirect
@@ -882,7 +883,7 @@ struct AddModelProfileSheet: View {
 // MARK: - Edit endpoint sheet
 
 struct EditEndpointSheet: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @Environment(\.dismiss) private var dismiss
     let profile: ModelProfile
 
@@ -1032,7 +1033,7 @@ struct EditEndpointSheet: View {
 // MARK: - Edit Bedrock sheet
 
 struct EditBedrockSheet: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @Environment(\.dismiss) private var dismiss
     let profile: ModelProfile
 
@@ -1211,7 +1212,7 @@ struct EditBedrockSheet: View {
 // MARK: - Edit Claude (direct) sheet
 
 struct EditClaudeDirectSheet: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @Environment(\.dismiss) private var dismiss
     let profile: ModelProfile
 

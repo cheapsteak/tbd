@@ -13,9 +13,10 @@ import TBDShared
 /// respond to clicks — and `.onTapGesture` would kill its `.contextMenu`.
 struct PinnedDockDeskSlot: View {
     let desk: Worktree?
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     var body: some View {
+        @Bindable var appState = appState
         if let desk {
             List(selection: $appState.selectedWorktreeIDs) {
                 WorktreeRowView(worktree: desk)

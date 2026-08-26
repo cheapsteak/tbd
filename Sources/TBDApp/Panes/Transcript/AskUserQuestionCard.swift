@@ -25,7 +25,7 @@ struct AskUserQuestionCard: View {
 
     @State private var fullResultText: String? = nil
     @State private var fullInputJSON: String? = nil
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     // MARK: - Decoded input shape
 

@@ -147,7 +147,7 @@ struct FileViewerPanel: View {
     /// Every read below is of a directory on this disk, so the panel takes the
     /// proven-local wrapper rather than a bare `Worktree`.
     let worktree: LocalWorktree
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     @State private var staged: [GitFileStatus] = []
     @State private var unstaged: [GitFileStatus] = []

@@ -156,7 +156,7 @@ enum ArchivedHideEmptyFilter {
 
 struct ArchivedWorktreesView: View {
     let repoID: UUID
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     @State private var listWidth: CGFloat = 280
     @State private var dragStartWidth: CGFloat? = nil
@@ -715,7 +715,6 @@ private struct ArchivedRow: Identifiable {
 private struct ArchivedWorktreeRow: View {
     let row: ArchivedRow
     let isSelected: Bool
-    @EnvironmentObject var appState: AppState
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {

@@ -426,7 +426,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct TBDAppMain: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @StateObject private var appState = AppState(userDefaults: TBDAppMain.resolveUserDefaults())
+    /// `@State`, not `@StateObject`: `AppState` is `@Observable`.
+    ///
+    /// The swap is not purely notational and was audited rather than assumed.
+    /// `StateObject.init(wrappedValue:)` takes an `@autoclosure @escaping`, so
+    /// this expression used to run lazily, on the first body evaluation;
+    /// `State.init(wrappedValue:)` takes the value directly, so it now runs when
+    /// this struct is constructed, inside `App.main()`. `AppState.init` does
+    /// real work — a tmux-executable resolve, three `UserDefaults` restores, a
+    /// memory-pressure source, focus observers, a theme-file watcher and a
+    /// connect/poll `Task` — so *when* it runs matters.
+    ///
+    /// It is safe here for a reason that does not generalise to views: this is
+    /// the `@main` `App`, which `App.main()` instantiates exactly once. The
+    /// separate trap the repo has already been bitten by — a `@State` default
+    /// expression re-running on every memberwise init — needs a struct SwiftUI
+    /// recreates, and an `App` is not one. Do not copy this pattern into a
+    /// `View`.
+    @State private var appState = AppState(userDefaults: TBDAppMain.resolveUserDefaults())
     @StateObject private var appearance = AppearanceSettings()
     @StateObject private var overlayCoordinator = TranscriptOverlayCoordinator()
 
@@ -453,7 +470,7 @@ struct TBDAppMain: App {
     var body: some Scene {
         Window("TBD", id: "main") {
             ContentView()
-                .environmentObject(appState)
+                .environment(appState)
                 .environmentObject(appearance)
                 .environmentObject(overlayCoordinator)
                 .onAppear {
@@ -462,9 +479,10 @@ struct TBDAppMain: App {
                     // Hand AppState a reference to the appearance settings so
                     // `mainAreaTerminalSize()` can compute pre-spawn tmux pane
                     // dimensions using the user's current font. Done in
-                    // `onAppear` rather than `init` because `@StateObject`
-                    // values aren't guaranteed to be initialized when the
-                    // App's `init` runs.
+                    // `onAppear` rather than `init` because the two objects
+                    // are separate `@State`/`@StateObject` properties and
+                    // nothing orders their construction against each other;
+                    // by first appearance both exist.
                     appState.appearance = appearance
                 }
                 .onOpenURL { url in
@@ -494,7 +512,7 @@ struct TBDAppMain: App {
 
         Settings {
             SettingsView()
-                .environmentObject(appState)
+                .environment(appState)
                 .environmentObject(appearance)
                 .environmentObject(overlayCoordinator)
         }

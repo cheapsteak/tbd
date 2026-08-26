@@ -49,7 +49,7 @@ struct PanePlaceholder: View {
     let worktree: LocalWorktree
     let tabID: UUID?
     @Binding var layout: LayoutNode
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
     @State private var isHeaderHovering = false
     @State private var showSourceCode = false
@@ -669,7 +669,7 @@ private extension View {
 struct EditableNoteTitle: View {
     let noteID: UUID
     let worktreeID: UUID
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @State private var isEditing = false
     @State private var editText = ""
     @FocusState private var isFocused: Bool

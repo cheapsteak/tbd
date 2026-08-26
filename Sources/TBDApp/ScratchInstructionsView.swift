@@ -7,7 +7,7 @@ import TBDShared
 /// rather than a persistent autosaving tab — see `EditEndpointSheet` in
 /// `Settings/ModelProfilesSettingsView.swift` for the sheet convention.
 struct ScratchInstructionsView: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @Environment(\.dismiss) private var dismiss
 
     @State private var draft: String = ""

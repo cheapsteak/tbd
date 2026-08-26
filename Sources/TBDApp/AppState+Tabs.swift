@@ -88,7 +88,7 @@ extension AppState {
     /// clamp that would land on the trailing note tab.
     ///
     /// Writes nothing when the entry already holds the right value — every
-    /// write to `activeTabIndices` publishes an `AppState.objectWillChange`.
+    /// write to `activeTabIndices` notifies every view that reads it.
     func repointActiveTab(worktreeID: UUID, to tabID: UUID?) {
         guard let tabID,
               let newIdx = tabs[worktreeID]?.firstIndex(where: { $0.id == tabID }) else {
@@ -149,8 +149,8 @@ extension AppState {
     /// Called the first time a worktree's tabs appear in memory.
     ///
     /// Every state write below is guarded on an actual change: this runs on a
-    /// retry path, and an unconditional `@Published` write fires a full
-    /// `AppState.objectWillChange` for a response that changed nothing.
+    /// retry path, and an unconditional write to a tracked property notifies
+    /// every reader of it for a response that changed nothing.
     func loadTabStates(worktreeID: UUID) async {
         do {
             let response = try await tabStatesFetcher(worktreeID)
