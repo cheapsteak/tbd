@@ -144,7 +144,7 @@ nonisolated func transcriptRenderNodes(from items: [TranscriptItem]) -> [Transcr
         let badge: TokenUsage? = (item.id == latestUsageItemID) ? item.usage : nil
 
         switch item {
-        case .userPrompt, .assistantText:
+        case .userPrompt, .assistantText, .peerMessage:
             out.append(TranscriptRenderNode(id: item.id, kind: .chatBubble(item), badgeUsage: badge))
 
         case .systemReminder(let id, let kind, let text, let ts, let source, let truncatedTo):

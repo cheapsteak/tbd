@@ -148,6 +148,8 @@ struct TranscriptOverlayView: View {
             }
         case .userPrompt, .assistantText, .slashCommand:
             return "doc.text"
+        case .peerMessage:
+            return "arrow.left.arrow.right.circle"
         }
     }
 
@@ -174,6 +176,12 @@ struct TranscriptOverlayView: View {
             return "\(label) · \(source)"
         case .userPrompt:   return "User"
         case .assistantText: return "Assistant"
+        case .peerMessage(_, let sender, _, _, _):
+            // A verified sender's name comes from the harness's own peer
+            // verification; an asserted `from` is a self-chosen label, so it is
+            // never presented as if it were a confirmed identity.
+            if sender.verified, let name = sender.name { return name }
+            return "Peer · \(sender.from)"
         case .slashCommand(_, let name, _, _): return "/\(name)"
         }
     }

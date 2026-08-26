@@ -2077,6 +2077,28 @@ public struct TokenUsage: Codable, Sendable, Equatable, Hashable {
     }
 }
 
+/// The sender of a peer message, as recorded by the receiving harness in the
+/// JSONL row's `origin` dictionary — see
+/// `docs/specs/2026-08-25-peer-message-attribution-design.md`.
+///
+/// `from` is sender-asserted and unverified: anything running as the same OS
+/// user can set it. `verified` is true only when the harness independently
+/// confirmed the sending peer's socket and pid, in which case `name` and
+/// `pid` are populated from that verification, not from `from`.
+public struct PeerSender: Codable, Sendable, Equatable, Hashable {
+    public let name: String?
+    public let from: String
+    public let verified: Bool
+    public let pid: Int?
+
+    public init(name: String?, from: String, verified: Bool, pid: Int?) {
+        self.name = name
+        self.from = from
+        self.verified = verified
+        self.pid = pid
+    }
+}
+
 public indirect enum TranscriptItem: Codable, Sendable, Identifiable, Equatable, Hashable {
     case userPrompt(id: String, text: String, timestamp: Date?)
     case assistantText(id: String, text: String, timestamp: Date?, usage: TokenUsage? = nil)
@@ -2093,6 +2115,12 @@ public indirect enum TranscriptItem: Codable, Sendable, Identifiable, Equatable,
     case systemReminder(id: String, kind: SystemKind, text: String, timestamp: Date?,
                         source: String? = nil, truncatedTo: Int? = nil)
     case slashCommand(id: String, name: String, args: String?, timestamp: Date?)
+    /// A message received from another Claude session. `text` is the clean
+    /// body (harness-recorded `origin.body`, or the raw content with the
+    /// delivery envelope stripped); `deliveredPayload` is the untouched
+    /// original content, or nil when it would merely repeat `text`.
+    case peerMessage(id: String, sender: PeerSender, text: String,
+                     deliveredPayload: String?, timestamp: Date?)
 
     public var id: String {
         switch self {
@@ -2102,6 +2130,7 @@ public indirect enum TranscriptItem: Codable, Sendable, Identifiable, Equatable,
         case .thinking(let id, _, _): return id
         case .systemReminder(let id, _, _, _, _, _): return id
         case .slashCommand(let id, _, _, _): return id
+        case .peerMessage(let id, _, _, _, _): return id
         }
     }
 
@@ -2112,7 +2141,8 @@ public indirect enum TranscriptItem: Codable, Sendable, Identifiable, Equatable,
              .toolCall(_, _, _, _, _, _, let t, _),
              .thinking(_, _, let t),
              .systemReminder(_, _, _, let t, _, _),
-             .slashCommand(_, _, _, let t):
+             .slashCommand(_, _, _, let t),
+             .peerMessage(_, _, _, _, let t):
             return t
         }
     }

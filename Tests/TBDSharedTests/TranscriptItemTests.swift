@@ -133,6 +133,52 @@ struct TranscriptItemTests {
         #expect(args == "main")
     }
 
+    @Test func roundtrip_peerMessage_verifiedSender() throws {
+        let sender = PeerSender(name: "Acme Deploy Watch", from: "uds:/tmp/cc-socks/4242.sock", verified: true, pid: 4242)
+        let original: TranscriptItem = .peerMessage(
+            id: "p1", sender: sender, text: "deploy finished",
+            deliveredPayload: "Another Claude session sent a message:\n<cross-session-message …>deploy finished</cross-session-message>",
+            timestamp: Date(timeIntervalSince1970: 1_700_000_000))
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(TranscriptItem.self, from: data)
+        guard case .peerMessage(let id, let decodedSender, let text, let deliveredPayload, let timestamp) = decoded else {
+            Issue.record("expected .peerMessage"); return
+        }
+        #expect(id == "p1")
+        #expect(decodedSender == sender)
+        #expect(decodedSender.name == "Acme Deploy Watch")
+        #expect(decodedSender.from == "uds:/tmp/cc-socks/4242.sock")
+        #expect(decodedSender.verified == true)
+        #expect(decodedSender.pid == 4242)
+        #expect(text == "deploy finished")
+        #expect(deliveredPayload != nil)
+        #expect(timestamp == Date(timeIntervalSince1970: 1_700_000_000))
+        #expect(decoded.id == "p1")
+        #expect(decoded.timestamp == Date(timeIntervalSince1970: 1_700_000_000))
+    }
+
+    @Test func roundtrip_peerMessage_assertedSender_nilFields() throws {
+        let sender = PeerSender(name: nil, from: "acme-bot", verified: false, pid: nil)
+        let original: TranscriptItem = .peerMessage(
+            id: "p2", sender: sender, text: "report ready", deliveredPayload: nil, timestamp: nil)
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(TranscriptItem.self, from: data)
+        guard case .peerMessage(let id, let decodedSender, let text, let deliveredPayload, let timestamp) = decoded else {
+            Issue.record("expected .peerMessage"); return
+        }
+        #expect(id == "p2")
+        #expect(decodedSender == sender)
+        #expect(decodedSender.name == nil)
+        #expect(decodedSender.pid == nil)
+        #expect(decodedSender.from == "acme-bot")
+        #expect(decodedSender.verified == false)
+        #expect(text == "report ready")
+        #expect(deliveredPayload == nil)
+        #expect(timestamp == nil)
+        #expect(decoded.id == "p2")
+        #expect(decoded.timestamp == nil)
+    }
+
     @Test func toolResult_truncated_field_decodes() throws {
         let original = ToolResult(text: "first 2KB", truncatedTo: 50_000, isError: false)
         let data = try JSONEncoder().encode(original)

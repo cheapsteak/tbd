@@ -290,7 +290,8 @@ enum TranscriptCompareRealSessions {
         case .userPrompt(_, let text, _),
              .assistantText(_, let text, _, _),
              .thinking(_, let text, _),
-             .systemReminder(_, _, let text, _, _, _):
+             .systemReminder(_, _, let text, _, _, _),
+             .peerMessage(_, _, let text, _, _):
             return text
         case .toolCall(_, let name, let inputJSON, _, let result, _, _, _):
             return "\(name)\n\(inputJSON)\n\(result?.text ?? "")"

@@ -432,6 +432,11 @@ struct TranscriptParserTests {
             return "toolCall|\(id)|\(name)|\(result?.text ?? "<nil>")"
         case .slashCommand(let id, let name, let args, _):
             return "slashCommand|\(id)|\(name)|\(args ?? "")"
+        case .peerMessage(let id, let sender, let t, let payload, _):
+            // The delivered payload is part of the signature: a tail parse that
+            // recovered the clean body but dropped the original would otherwise
+            // compare equal to a full parse that kept both.
+            return "peerMessage|\(id)|\(sender.from)|\(sender.verified)|\(t)|\(payload ?? "<nil>")"
         }
     }
 

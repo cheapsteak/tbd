@@ -35,6 +35,7 @@ enum TranscriptSignposts {
             case .thinking: return "thinking"
             case .systemReminder: return "chatSystemReminder"
             case .slashCommand: return "slashCommand"
+            case .peerMessage: return "peerMessage"
             case .toolCall(_, let name, _, _, _, _, _, _): return "chatTool:\(name)"
             }
         case .systemReminder: return "systemReminder"
@@ -55,7 +56,8 @@ enum TranscriptSignposts {
             switch item {
             case .userPrompt(_, let t, _),
                  .assistantText(_, let t, _, _),
-                 .thinking(_, let t, _):
+                 .thinking(_, let t, _),
+                 .peerMessage(_, _, let t, _, _):
                 return t.count
             case .systemReminder(_, _, let t, _, _, _):
                 return t.count
