@@ -248,54 +248,61 @@ latency. Answering it requires signpost instrumentation inside the render path.
   under that pressure — which would explain why a simpler emulator on the same
   backend stays smooth — but nothing here demonstrates it.
 
-## The stall is found: a synchronous burst inside the poll cycle — 2026-08-26
+## The stall is found; its cause is not — 2026-08-26
 
-Signpost instrumentation on the render path answered the question the sections
-above left open. Intervals were emitted around the main-thread hop in
+Signpost instrumentation on the render path measured the wait that every earlier
+method was blind to. Intervals were emitted around the main-thread hop in
 `TerminalPanelView.dataReceived` (enqueue to execute), around `feed`, and around
-the display pass; `rpc.pollCycle` was already instrumented. Collected with
-`log stream --style ndjson --signpost` over a 30-second window of ordinary
-operation, with agents streaming and no user interaction:
+the display pass; `rpc.pollCycle` was already instrumented. Three windows were
+collected with `log stream --style ndjson --signpost` during ordinary operation,
+all three from the same process — process IDs were checked, and no restart
+occurred in any of them.
 
-- **`mainThreadHop` — p50 0.08 ms, p90 2.03 ms, p99 156 ms, max 162 ms.**
-- `rpc.pollCycle` — p50 231 ms, p90 539 ms, max 605 ms; about fifteen in thirty seconds.
-- `feed` — p50 0.11 ms, max 1.36 ms.
-- `displayPass` — p50 5.28 ms, max 10.6 ms.
+**Terminal output waits far longer than it should to reach the renderer, and the
+wait grows across the three windows:**
 
-**Terminal output waits up to 162 ms to reach the renderer, while the median wait
-is 0.08 ms.** Averages cannot see this, which is why every earlier measurement
-missed it: a main thread that is idle 81% of the time still stalls terminal I/O
-for a sixth of a second at a stretch, because what matters is when work lands
-rather than how much of it there is.
+- `mainThreadHop` — p50 0.08 / 0.89 / 1.84 ms, p99 157 / 28 / 281 ms, max 162 /
+  311 / **1,096 ms**.
+- `feed` — p50 0.11 ms.
+- `displayPass` — p50 5 to 9 ms.
 
-**Twelve of fourteen stalls over 20 ms began while a poll cycle was in flight**,
-including all eight of the worst.
+A wait of over a second for output to reach the renderer is the symptom users
+report. The median wait is under two milliseconds, which is why averages and CPU
+percentages never revealed it: what matters is when work lands, not how much of
+it there is.
 
-### What the correlation does and does not show
+**Rendering is not the bottleneck.** Parse costs a tenth of a millisecond and a
+display pass costs single-digit milliseconds. The per-row attributed-string
+rebuild, the eight-character shaped-line cache, and the full-grid blink scan are
+real inefficiencies, and none of them is what stalls a keystroke.
 
-It is not that the poll cycle holds the main thread for its whole duration.
-`runPollCycleIfIdle` awaits its body, and an await on the main actor yields, so
-the interval spans suspensions during which the main thread is free.
+### The poll cycle was a suspect, and was eliminated
 
-The stalls begin at scattered points within a cycle — 5%, 46%, 50%, 82% of the
-way through — and every one ends before its cycle does. They also arrive in
-near-identical batches: four stalls of 162.2, 162.3, 162.3 and 160.1 ms all
-beginning within 0.7% of each other, which is the signature of several chunks
-queued behind a single blocking burst and released together.
+The first window showed twelve of fourteen stalls beginning during a poll cycle,
+which looked decisive. It was not. The test that matters compares observed
+co-occurrence against what chance predicts given how much of the timeline the
+suspect occupies:
 
-So one phase of the poll cycle is synchronous on the main actor and runs for
-roughly 155 to 162 ms. **Which phase is not yet identified** and needs finer
-instrumentation inside the poll body. The plausible candidate is the phase that
-applies results to `AppState`: decoding, diffing, and assigning published
-properties, each assignment invalidating every observing view.
+- window one — poll duty 14.2%, 14 stalls, 12 in-poll against 2.0 expected: 6.04x
+- window two — poll duty 22.5%, 12 stalls, 5 in-poll against 2.7 expected: 1.85x
+- window three — poll duty 43.7%, 363 stalls, 162 in-poll against 158.6 expected: **1.02x**
 
-### What this reorders
+Window three carries twenty-six times the data of window one, and at 1.02x the
+association is indistinguishable from chance. Poll cycles had grown to occupy
+nearly half the timeline, so "45% of stalls fall inside a poll" restates "polls
+run half the time" and nothing more.
 
-**Rendering is not the bottleneck.** Parse costs 0.11 ms and a display pass 5 to
-9 ms. The per-row attributed-string rebuild, the shaped-line cache, and the blink
-scan are real inefficiencies, and none of them is what stalls a keystroke.
+**Raw co-occurrence is not evidence when the suspect occupies a large fraction of
+the timeline.** Computing the duty cycle and testing enrichment is what caught
+this, and it belongs in the method section alongside window validation.
 
-The observation-churn work is closer to the mark than the rendering work, since
-whole-object invalidation is a candidate for what makes the burst expensive — but
-that connection is inferred from the shape of the evidence rather than measured,
-and the finer instrumentation is what would settle it.
+### What remains open
+
+Something occupies the main thread in bursts long enough to stall terminal I/O by
+hundreds of milliseconds, and it is unidentified. Finding it requires
+instrumentation that catches an arbitrary main-actor burst rather than one named
+suspect — a watchdog recording the stack when a runloop turn exceeds a threshold,
+or a sampling profile correlated on time against the signpost stream.
+
+Separately worth investigating on its own terms: a poll cycle occupying 43.7% of
+wall time is remarkable regardless of its relationship to these stalls.
