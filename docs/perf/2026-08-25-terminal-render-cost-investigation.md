@@ -502,3 +502,78 @@ At *when* TBD schedules a paint, rather than at parse or draw cost. A ~40 ms flo
 on an otherwise idle main thread suggests a coalescing or timer policy rather than
 contention — so the next question is what marks the terminal view as needing
 display, and how that is throttled.
+
+## The paint floor is real, and typed keys already bypass it — 2026-08-26
+
+A controlled A/B on a purpose-built binary confirmed the scheduling mechanism and
+then found it does not apply to interactive typing.
+
+**The mechanism is confirmed.** Turning `queuePendingDisplay` from a fixed delay
+into a rate limit cut key-to-paint from a 23.3 ms median to 5.1 ms across eight
+runs with no overlap between conditions — a spread of 1.4 ms unpatched and 0.2 ms
+patched against an 18.2 ms effect. The drop is exactly one display frame, which is
+the mechanism's own prediction rather than a coincidence, and burst coalescing was
+unchanged.
+
+**But typed keys never take that path.** `TerminalView.send(data:)` calls
+`recordUserInput()`, and for 150 ms afterwards `feedFinish()` routes to
+`displayImmediately()` rather than `queuePendingDisplay()`. Because TBD feeds on
+the main thread, `displayImmediately()` takes its synchronous branch — calling
+`updateDisplay()` directly, with **no coalescing check on that branch at all**.
+A typed character's echo returns in well under a millisecond, and each keypress
+refreshes the window, so it stays open continuously while someone types.
+
+Injected keys are different: `tbd terminal send` reaches a pane through
+`tmux send-keys` and never touches the view, so `recordUserInput()` never fires.
+**Every keystroke measurement in this investigation used injected keys, and
+therefore measured a path a genuinely typed key does not take.** The frame that
+patch removes is paid by agent output and by TBD's own injected input; interactive
+typing was already on the fast route.
+
+### A refutation of ours that does not hold
+
+The 150 ms window was earlier dismissed here on the grounds that 2,545 chunks
+produced only 617 display passes, so coalescing must be working. That inference is
+invalid: `updateDisplay` returns early when nothing changed, so a pass count does
+not measure how often the fast path fired. The window is not refuted.
+
+It also points the opposite way from a scheduling floor. If every chunk arriving
+within 150 ms of a keypress drives a synchronous full display update, then typing
+is expensive because the fast path does *too much* work, not because it waits.
+That is consistent with the one window here taken while a human actually typed,
+where the median wait for output rose from 0.08 ms to 6.91 ms.
+
+### The tail did not reproduce
+
+Key-to-paint showed **0.0% of keystrokes over 100 ms** in every clean run on both
+builds, against the 10-29% recorded earlier. Every tail that did appear was the
+measurement tab leaving the screen, and its slow keystrokes were *contiguous* — a
+scheduling defect scatters, a window going away does not. That contiguity check is
+a cheap discriminator.
+
+The likely source of the earlier tail: a harness variant that leaves `tmux
+send-keys` process-spawn cost inside the measurement reads 0.8% to 39% over 100 ms
+depending on load, spanning the range reported, and spawn cost reached a 57 ms
+median at load ~51. The earlier runs were taken at load 63-119.
+
+### Two instrument rules this produced
+
+**Order every comparison A/B/A.** Taking the two sides in sequence suggested the
+patch had halved the saturated draw rate. It did not survive load matching — the
+*unpatched* build at low load drew at the same rate, and the entire apparent effect
+was machine load 91-139 against load 7. Only reverting, rebuilding and re-measuring
+caught it.
+
+**`displayPass` duration under saturation measures main-queue backlog, not draw
+cost**, because the interval ends on the next main-queue turn. The same build read
+12-15 ms at load 91-139 and 1.7-1.9 *seconds* at load 7-11. It is the instrument,
+not the renderer.
+
+### The measurement that would settle typing
+
+Neither the fast path nor its cost can be driven from a script: macOS refuses
+synthetic keystrokes without an Accessibility grant, so `send(data:)` cannot be
+exercised programmatically. Confirming any of this requires that grant, or a human
+typing into a terminal while signposts are captured. **That is the highest-value
+outstanding measurement in this line of work**, and every keystroke number recorded
+so far is of the wrong path until it is taken.
