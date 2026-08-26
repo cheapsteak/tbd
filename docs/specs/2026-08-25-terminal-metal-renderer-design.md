@@ -52,6 +52,27 @@ confirming the cost lies elsewhere rather than as a failure of the GPU path. See
 `docs/perf/2026-08-25-terminal-render-cost-investigation.md` and
 `2026-08-26-claude-code-render-benchmark.md`.
 
+### Metal does not move painting off the main thread
+
+Verified in the pinned revision: `MacTerminalView` sets `mtkView.isPaused = true`
+and `mtkView.enableSetNeedsDisplay = true`, so the Metal view runs no display
+loop of its own. It paints on demand from the main runloop via
+`queueMetalDisplay()`, on the same schedule as the CoreGraphics path.
+
+So enabling Metal changes *how* a frame is drawn, not *when*. The paint-scheduling
+delay measured separately — a fixed frame of latency before any draw is posted —
+applies identically to both renderers, and the main thread remains on the path to
+pixels either way.
+
+That narrows what this experiment can win to the cost of the draw itself, on a
+path where drawing was already measured cheap (a display pass costs 5-15 ms, and
+parse costs a tenth of a millisecond). It does not address scheduling, and it does
+not free the main thread.
+
+An engine that paints from its own renderer thread would be a different
+proposition, since the main thread would leave the path to pixels entirely — but
+that is an engine change, not a flag.
+
 ### Two ways a null result is expected, stated before measuring
 
 Recording these in advance so that a flat result is diagnosed rather than
