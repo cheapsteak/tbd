@@ -249,6 +249,59 @@ import Testing
     #expect(after?.archivedHeadSHA == beforeSHA)
 }
 
+/// A remote lane has no checkout on this disk, so the backfill — which probes
+/// every archived row's branch against the LOCAL repo — must leave it alone.
+/// Made to bite: the local reflog carries a rename keyed by exactly the lane's
+/// branch name, so a pass that fetches location-neutrally does not merely log a
+/// spurious warning, it rewrites the lane's branch to an unrelated local one.
+@Test func testBackfillIgnoresRemoteLanes() async throws {
+    let (tempDir, repoDir) = try await createTestRepo()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let git = GitManager()
+    let lifecycle = WorktreeLifecycle(
+        db: db, git: git, tmux: TmuxManager(dryRun: true), hooks: HookResolver()
+    )
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+
+    // A local archived row that genuinely needs repair, so the assertions below
+    // tell "skipped the remote lane" apart from "did nothing at all".
+    let local = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
+    let localOriginal = local.branch
+    let localRenamed = "renamed-\(UUID().uuidString.prefix(6))"
+    try await shell("git branch -m \(localRenamed)", at: URL(fileURLWithPath: local.localPath))
+    try await lifecycle.archiveWorktree(worktreeID: local.id, force: true)
+    try await db.worktrees.updateBranch(id: local.id, branch: localOriginal)
+    try await db.worktrees.updateArchivedHeadSHA(id: local.id, sha: nil)
+
+    // The trap: a local branch named like the lane's, renamed away. The lane's
+    // branch now resolves to nothing locally AND appears as a rename key.
+    let laneBranch = "lane-\(UUID().uuidString.prefix(6))"
+    let decoyBranch = "decoy-\(UUID().uuidString.prefix(6))"
+    try await shell(
+        "git branch \(laneBranch) && git branch -m \(laneBranch) \(decoyBranch)", at: repoDir)
+
+    // Mint the lane through the production path, then archive it the same way.
+    let lane = try await db.worktrees.createRemote(
+        repoID: repo.id, name: "lane", branch: laneBranch,
+        provider: "agentbox", sessionID: "s-\(UUID().uuidString.prefix(6))")
+    try await db.worktrees.archive(id: lane.id)
+
+    let backfill = ArchivedWorktreeBackfill(db: db, git: git)
+    await backfill.run()
+
+    // The lane is untouched: branch not rewritten to the decoy, no SHA invented.
+    let laneAfter = try await db.worktrees.get(id: lane.id)
+    #expect(laneAfter?.branch == laneBranch)
+    #expect(laneAfter?.archivedHeadSHA == nil)
+
+    // ...while the local row it was listed alongside still got repaired.
+    let localAfter = try await db.worktrees.get(id: local.id)
+    #expect(localAfter?.branch == localRenamed)
+    #expect(localAfter?.archivedHeadSHA?.isEmpty == false)
+}
+
 // MARK: - Revive must --resume archived Claude sessions
 
 /// Captures the argv tmux would have been invoked with so we can assert the
