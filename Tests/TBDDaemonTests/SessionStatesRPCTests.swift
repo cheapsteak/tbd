@@ -11,7 +11,7 @@ import TestSupport
 /// `dryRunRecorder` alone is **not** enough, and the gap matters here more than
 /// anywhere: it fires on the mutating commands, while `capturePaneOutput`,
 /// `capturePaneWithAnsi`, `capturePaneScrollback`, `paneCurrentCommand`,
-/// `paneSendTarget`, `listWindows` and `windowExists` short-circuit on their own
+/// `paneSendTarget`, `listWindows` and `windowPresence` short-circuit on their own
 /// dryRun hooks and never reach it. A pane *read* is exactly what this method
 /// must never do, so the fixture wires every one of those hooks into the same
 /// recorder and the assertion covers the composed set rather than one arm of it.

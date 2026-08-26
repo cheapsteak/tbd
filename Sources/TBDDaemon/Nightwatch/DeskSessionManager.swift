@@ -290,7 +290,7 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// is issue #384, and picking the newest row alone would not prevent it.
     ///
     /// Neither guard is sufficient on its own, and neither proves *ownership*.
-    /// `windowExists` proves a window id resolves to SOME window;
+    /// `windowPresence` proves a window id resolves to SOME window;
     /// `paneCurrentCommand` proves an agent of the right kind is in the
     /// foreground of SOME pane. A recycled pane id running a stranger's Claude
     /// satisfies both. So each surviving candidate is asked who it is
@@ -319,12 +319,31 @@ public actor DeskSessionManager: DeskSessionManaging {
 
         var live: [Terminal] = []
         for terminal in candidates {
-            guard await tmux.windowExists(server: server, windowID: terminal.tmuxWindowID) else {
+            switch await tmux.windowPresence(server: server, windowID: terminal.tmuxWindowID) {
+            case .present:
+                break
+            case .absent:
                 logger.notice("""
                     Skipping stale Watch Desk terminal \(terminal.id, privacy: .public): \
                     window \(terminal.tmuxWindowID, privacy: .public) no longer exists
                     """)
                 continue
+            case .unreachable:
+                // Same rule, and the same reasoning, as the `.unreachable` arm
+                // of `paneIdentityPermitsSend`: on this rail dropping a
+                // candidate is itself an action. An empty candidate list makes
+                // `ensureDeskSession`/`nudgeDeskSession` SPAWN a replacement
+                // agent and makes `leasedJudgeTerminal` REVOKE a valid lease, so
+                // a window read that failed must abort the pass rather than
+                // quietly shrink the list.
+                logger.warning("""
+                    Watch Desk pass aborted: could not reach tmux server \
+                    \(server, privacy: .public) to check window \
+                    \(terminal.tmuxWindowID, privacy: .public) for terminal \
+                    \(terminal.id, privacy: .public) — no desk terminal will be spawned, \
+                    replaced or revoked on a failed read
+                    """)
+                throw DeskPaneUnreachable(server: server, paneID: terminal.tmuxPaneID)
             }
             guard try await paneIdentityPermitsSend(server: server, terminal: terminal)
             else { continue }

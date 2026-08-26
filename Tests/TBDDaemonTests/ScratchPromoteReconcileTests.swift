@@ -97,7 +97,7 @@ struct ScratchPromoteReconcileTests {
         #expect(promoted.mainWorktree.tmuxServer != canonical)
         #expect(promoted.mainWorktree.tmuxServer == promoted.scratch.tmuxServer)
 
-        // dryRun tmux without dryRunWindowIsDead reports every window ALIVE —
+        // dryRun tmux without a window-presence hook reports every window ALIVE —
         // the live-session case reconcile must leave alone.
         let lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())

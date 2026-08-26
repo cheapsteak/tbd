@@ -112,6 +112,60 @@ struct PaneSendTargetQueryTests {
             paneInventory: "%12\n", paneID: "%1") == .absent)
     }
 
+    // MARK: - The window probe, on the same rule
+
+    /// The window-space twin of `probeShape`/`probeIsServerWide`. It has to be
+    /// server-wide for the identical reason: a target-scoped window query fails
+    /// for both of the reasons the split exists to tell apart, so it could never
+    /// disambiguate its own failure. It also reports one formatted identity per
+    /// line and nothing else — the alternative, reading `can't find window` off
+    /// stderr, is the prose-parsing the bounded-recovery spec rejects.
+    @Test("the window reachability probe asks one server-wide list-windows for window ids")
+    func windowProbeShape() {
+        let args = TmuxManager.allWindowIDsQuery(server: "tbd-acme")
+        #expect(args == ["-L", "tbd-acme", "list-windows", "-a", "-F", "#{window_id}"])
+        #expect(args.contains("-a"))
+        #expect(!args.contains("-t"))
+    }
+
+    /// THE REGRESSION, in the window's identity space: the consultation failed,
+    /// but the server answered the probe and listed the window. A window tmux
+    /// just named must never be reported gone — that verdict parks live
+    /// sessions and deletes their rows.
+    @Test("a window the probe still lists is never reported as absent")
+    func failedWindowConsultationWithLiveWindowIsUnreachable() {
+        #expect(TmuxManager.classifyFailedWindowConsultation(
+            windowInventory: "@1\n@7\n@9\n", windowID: "@7") == .unreachable)
+    }
+
+    /// The reclaim half: a server that answered and does not list the window is
+    /// positive evidence of absence, and reconcile still acts on it.
+    @Test("a window a reachable server does not list is absent")
+    func failedWindowConsultationWithReachableServerIsAbsent() {
+        #expect(TmuxManager.classifyFailedWindowConsultation(
+            windowInventory: "@1\n@9\n", windowID: "@7") == .absent)
+        #expect(TmuxManager.classifyFailedWindowConsultation(
+            windowInventory: "", windowID: "@7") == .absent)
+    }
+
+    /// Two failed reads in a row still say nothing about the window.
+    @Test("a window probe that also fails proves nothing and stays unreachable")
+    func failedWindowProbeIsUnreachable() {
+        #expect(TmuxManager.classifyFailedWindowConsultation(
+            windowInventory: nil, windowID: "@7") == .unreachable)
+    }
+
+    /// Matched whole, so `@1` listed does not answer for `@12` — otherwise a
+    /// genuinely absent window would be excused as unreadable forever and never
+    /// reclaimed.
+    @Test("the window probe's inventory is matched whole, not by prefix")
+    func windowProbeInventoryMatchIsExact() {
+        #expect(TmuxManager.classifyFailedWindowConsultation(
+            windowInventory: "@12\n", windowID: "@1") == .absent)
+        #expect(TmuxManager.classifyFailedWindowConsultation(
+            windowInventory: "  @12  \n", windowID: "@12") == .unreachable)
+    }
+
     @Test("the stamp command sets the pane-scoped option on the given target")
     func stampShape() {
         let args = TmuxManager.setPaneTerminalIDCommand(

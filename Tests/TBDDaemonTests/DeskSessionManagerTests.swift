@@ -27,21 +27,35 @@ private final class DeskTmuxRecorder: @unchecked Sendable {
     }
 }
 
-/// Mutable set of tmux windows that `windowExists` should report as gone. Mutable rather
-/// than a fixed closure because one test has to *revive* a desk mid-flight to prove a
-/// failed nudge didn't start the overlap cooldown.
+/// Mutable set of tmux windows `windowPresence` should report as gone, plus the
+/// separate set whose READ fails. Mutable rather than a fixed closure because
+/// one test has to *revive* a desk mid-flight to prove a failed nudge didn't
+/// start the overlap cooldown.
+///
+/// The two sets are deliberately different facts: a dead window is tmux
+/// answering, an unreadable one is tmux never being reached — and on this rail
+/// they must produce opposite behaviour (reclaim versus abort the pass).
 private final class DeadWindows: @unchecked Sendable {
     private let lock = NSLock()
     private var dead: Set<String> = []
+    private var unreadable: Set<String> = []
 
     func markDead(_ windowID: String) {
         lock.lock(); defer { lock.unlock() }
         dead.insert(windowID)
     }
 
-    func isDead(_ windowID: String) -> Bool {
+    /// The window's probe fails to reach any server — nothing is learned about
+    /// the window, which may well still be running an agent.
+    func markUnreadable(_ windowID: String) {
         lock.lock(); defer { lock.unlock() }
-        return dead.contains(windowID)
+        unreadable.insert(windowID)
+    }
+
+    func presence(for windowID: String) -> TmuxResourcePresence {
+        lock.lock(); defer { lock.unlock() }
+        if unreadable.contains(windowID) { return .unreachable }
+        return dead.contains(windowID) ? .absent : .present
     }
 }
 
@@ -911,7 +925,7 @@ extension TBDHomeSerialized {
                 tmux: TmuxManager(
                     dryRun: true,
                     dryRunRecorder: { recorder.record($0) },
-                    dryRunWindowIsDead: { dead.isDead($0) },
+                    dryRunWindowPresence: { _, windowID in dead.presence(for: windowID) },
                     dryRunPaneCurrentCommand: { _, paneID in commands.command(for: paneID) },
                     dryRunPaneSendTarget: { _, paneID in try identities.answer(for: paneID) }
                 ),
@@ -1337,7 +1351,7 @@ extension TBDHomeSerialized {
                 tmux: TmuxManager(
                     dryRun: true,
                     dryRunRecorder: { f.recorder.record($0) },
-                    dryRunWindowIsDead: { f.dead.isDead($0) },
+                    dryRunWindowPresence: { _, windowID in f.dead.presence(for: windowID) },
                     dryRunPaneCurrentCommand: { _, pane in f.commands.command(for: pane) }),
                 skillDir: f.home.appendingPathComponent("skills/nightwatch").path, actuationLog: makeTestActuationLog())
             _ = try await laterManager.ensureDeskSession(mode: .nightwatch)
@@ -1375,7 +1389,7 @@ extension TBDHomeSerialized {
                 tmux: TmuxManager(
                     dryRun: true,
                     dryRunRecorder: { f.recorder.record($0) },
-                    dryRunWindowIsDead: { f.dead.isDead($0) },
+                    dryRunWindowPresence: { _, windowID in f.dead.presence(for: windowID) },
                     dryRunPaneCurrentCommand: { _, pane in f.commands.command(for: pane) }),
                 skillDir: f.home.appendingPathComponent("skills/nightwatch").path, actuationLog: makeTestActuationLog())
             _ = try await laterManager.ensureDeskSession(mode: .nightwatch)
@@ -1384,6 +1398,61 @@ extension TBDHomeSerialized {
             let recovered = try #require(try await f.db.watchDeskLeases.status(worktreeID: desk.id))
             #expect(recovered.terminalID == successor.id)
             #expect(recovered.generation == first.generation + 1)
+        }
+
+        /// The same setup as `deadOwnerRecovery` with one fact changed: the
+        /// owner's window is UNREADABLE rather than dead. Nothing about that
+        /// window has been established, so none of the actions that recovery
+        /// performs may fire — the lease must not move to the successor, its
+        /// generation must not bump, and the judge prompt must not be pasted
+        /// anywhere. Fencing a live judge and anointing a second one on the
+        /// strength of a failed read is exactly the duplicate-desk incident this
+        /// rail exists to avoid, and it is the destructive twin of the assertion
+        /// above: same fixture, opposite verdict.
+        @Test("an unreadable owner window neither moves the judge lease nor pastes")
+        func unreadableOwnerWindowKeepsTheLease() async throws {
+            let f = try makeDeskFixture(tag: "judge-owner-unreadable")
+            defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
+
+            let desk = try await f.manager.ensureDeskSession(mode: .nightwatch)
+            await f.manager.nudgeDeskSession(worktreeID: desk.id, act: true)
+            let first = try #require(try await f.db.watchDeskLeases.status(worktreeID: desk.id))
+            let owner = try #require(try await f.db.terminals.get(id: first.terminalID))
+            f.dead.markUnreadable(owner.tmuxWindowID)
+            let successor = try await f.db.terminals.create(
+                worktreeID: desk.id, tmuxWindowID: "@successor", tmuxPaneID: "%successor",
+                label: TerminalLabel.claudeCode, kind: .claude)
+            let rowsBefore = try await f.db.terminals.list(worktreeID: desk.id).count
+
+            // A second manager, as in the sibling test, so the ten-minute nudge
+            // overlap does not hide the behaviour. It deliberately does NOT run
+            // `ensureDeskSession` first: that call would itself abort on the
+            // unreadable window, which is the same property under test one
+            // surface earlier, and `nudgeDeskSession` takes its worktree by id.
+            let laterManager = DeskSessionManager(
+                db: f.db,
+                lifecycle: WorktreeLifecycle(
+                    db: f.db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+                tmux: TmuxManager(
+                    dryRun: true,
+                    dryRunRecorder: { f.recorder.record($0) },
+                    dryRunWindowPresence: { _, windowID in f.dead.presence(for: windowID) },
+                    dryRunPaneCurrentCommand: { _, pane in f.commands.command(for: pane) }),
+                skillDir: f.home.appendingPathComponent("skills/nightwatch").path,
+                actuationLog: makeTestActuationLog())
+            let pastedBefore = f.recorder.pastedPanes.count
+            await laterManager.nudgeDeskSession(worktreeID: desk.id, act: true)
+
+            let after = try #require(try await f.db.watchDeskLeases.status(worktreeID: desk.id))
+            #expect(after.terminalID == owner.id,
+                    "a failed read must not fence the lease owner")
+            #expect(after.terminalID != successor.id)
+            #expect(after.generation == first.generation,
+                    "a failed read must not bump the lease generation")
+            #expect(Array(f.recorder.pastedPanes.dropFirst(pastedBefore)).isEmpty,
+                    "nothing may be pasted on a pass that could not read its candidates")
+            #expect(try await f.db.terminals.list(worktreeID: desk.id).count == rowsBefore,
+                    "a failed read must not spawn a replacement desk agent")
         }
     }
 }

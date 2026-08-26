@@ -286,7 +286,7 @@ private func actuationRows(at path: String) throws -> [[String: Any]] {
 }
 
 /// The re-park branch kills a window it read as dead and parks the session. It
-/// is an actuation, not a DB-only edit — the `windowExists` read one line
+/// is an actuation, not a DB-only edit — the `windowPresence` read one line
 /// earlier can be stale — so it writes its own `hibernate` row through
 /// `terminal.recreateWindow`'s door, the same act reconcile's recovery park
 /// records.
@@ -347,6 +347,60 @@ func testRecreateWindowReparkWritesHibernateRow() async throws {
 
     let updated = try #require(try await db.terminals.get(id: terminal.id))
     #expect(updated.isParked, "the park itself must still happen")
+}
+
+/// The same branch's other gate. `recreateWindow` re-parks only a window it
+/// read as GONE — and that read kills the window on the way. A probe that
+/// reached no tmux server has read nothing, so the request is declined
+/// (successfully, with the row returned unchanged) instead of tearing down a
+/// window that may be running a live agent.
+@Test("recreateWindow declines rather than re-parking when the window cannot be read")
+func testRecreateWindowDeclinesOnUnreadableWindow() async throws {
+    let db = try TBDDatabase(inMemory: true)
+    let recorded = RecordedCommands()
+    let tmux = TmuxManager(
+        dryRun: true,
+        dryRunRecorder: { recorded.append($0) },
+        dryRunWindowPresence: { _, _ in .unreachable })
+    let (log, logPath) = try makeReadableActuationLog()
+    let router = RPCRouter(
+        db: db,
+        lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
+        tmux: tmux,
+        actuationLog: log
+    )
+
+    let repo = try await db.repos.create(
+        path: "/tmp/fake-repo-repark-unreadable", displayName: "test", defaultBranch: "main")
+    let wt = try await db.worktrees.create(
+        repoID: repo.id,
+        name: "wt-repark-unreadable",
+        branch: "tbd/wt-repark-unreadable",
+        path: "/tmp/fake-repo-repark-unreadable/wt",
+        tmuxServer: "tbd-4e9a4c02"
+    )
+    let terminal = try await db.terminals.create(
+        worktreeID: wt.id,
+        tmuxWindowID: "@unreadable-claude",
+        tmuxPaneID: "%unreadable-claude",
+        label: "claude",
+        claudeSessionID: "aaaaaaaa-bbbb-cccc-dddd-ffffffffffff",
+        kind: .claude
+    )
+
+    let response = await router.handle(try RPCRequest(
+        method: RPCMethod.terminalRecreateWindow,
+        params: TerminalRecreateWindowParams(terminalID: terminal.id),
+        actor: ActuationActor.app))
+
+    #expect(response.success, "declining is a no-op success, not an error")
+    let updated = try #require(try await db.terminals.get(id: terminal.id))
+    #expect(!updated.isParked, "a failed read must not park the session")
+    #expect(updated.tmuxWindowID == "@unreadable-claude")
+    #expect(!recorded.snapshot().contains { $0.contains("kill-window") },
+            "a failed read must not kill the window")
+    let rows = try actuationRows(at: logPath)
+    #expect(rows.isEmpty, "nothing was actuated, so nothing may be recorded as actuated")
 }
 
 /// Fail-closed: an unwritable record refuses the re-park before the kill. The

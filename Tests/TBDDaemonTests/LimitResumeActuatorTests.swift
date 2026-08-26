@@ -10,7 +10,10 @@ struct FakeTmuxSendError: Error {}
 /// Records every tmux call; scriptable pane state.
 final class FakeResumeTmux: ResumeSendingTmux, @unchecked Sendable {
     private let queue = DispatchQueue(label: "FakeResumeTmux")
-    var windowAlive = true
+    /// What the window probe answers. Three-valued, because the actuator has
+    /// three different behaviours: fire, cancel the row, and refuse to touch
+    /// the row at all.
+    var windowPresenceValue: TmuxResourcePresence = .present
     var inMode = false
     /// When non-empty, `paneInMode` pops values off the front (in call
     /// order) before falling back to `inMode` — scripts a value that
@@ -25,7 +28,9 @@ final class FakeResumeTmux: ResumeSendingTmux, @unchecked Sendable {
     private var _escapeCount = 0
     var sends: [String] { queue.sync { _sends } }
 
-    func windowExists(server: String, windowID: String) async -> Bool { windowAlive }
+    func windowPresence(server: String, windowID: String) async -> TmuxResourcePresence {
+        windowPresenceValue
+    }
     func paneInMode(server: String, paneID: String) async throws -> Bool {
         queue.sync {
             if !inModeSequence.isEmpty { return inModeSequence.removeFirst() }
@@ -142,15 +147,33 @@ struct FakeInspector: PaneProcessInspecting {
     }
 
     @Test func deadWindowIsTerminalGone() async throws {
-        tmux.windowAlive = false
+        tmux.windowPresenceValue = .absent
         let outcome = await makeActuator().actuate(row)
         #expect(outcome == .terminalGone)
+    }
+
+    /// `.terminalGone` cancels the row SILENTLY, on the claim that the terminal
+    /// is gone. A window probe that could not reach any tmux server has not
+    /// established that, and this actuator types unattended, so the failed read
+    /// must not be the thing that ends a resume without a word. `.failed`
+    /// carries the reason to the user instead.
+    @Test func unreachableWindowProbeDoesNotCancelSilently() async throws {
+        tmux.windowPresenceValue = .unreachable
+        let outcome = await makeActuator().actuate(row)
+        guard case .failed(let message) = outcome else {
+            Issue.record(
+                "expected .failed, got \(outcome) — an unreadable window must not cancel silently")
+            return
+        }
+        #expect(message.contains("could not reach tmux server"))
+        #expect(message.contains("window"))
+        #expect(tmux.sends.isEmpty)
     }
 
     // MARK: - Pane target consultation (eligibility step 1a)
     //
     // The auto-resume actuator is the component issue #384 caught typing into
-    // a stranger: `windowExists` proves a window id resolves, never that the
+    // a stranger: `windowPresence` proves a window id resolves, never that the
     // pane still belongs to this terminal. Same rule as `terminal.send` —
     // only a POSITIVE disagreement refuses.
 
@@ -199,15 +222,19 @@ struct FakeInspector: PaneProcessInspecting {
         #expect(tmux.sends.isEmpty)
     }
 
-    /// `.terminalGone` CANCELS the scheduled resume, permanently. Doing that
-    /// because no tmux server answered would throw away a pending resume for a
-    /// session that is very likely still running, so an unreachable server
-    /// fails the attempt (retryable) instead of cancelling the row.
-    @Test func unreachableServerDoesNotCancelTheResume() async throws {
+    /// `.terminalGone` cancels the scheduled resume SILENTLY, asserting the
+    /// terminal is gone. An unreachable server has asserted nothing, and the
+    /// session is very likely still running. Both statuses end the row —
+    /// nothing re-fires a resume once it leaves `pending` — so what changes is
+    /// the honesty of the record and the notification the user gets: `.failed`
+    /// says why, where a silent cancellation would claim a terminal died on the
+    /// strength of a read that never landed.
+    @Test func unreachableServerDoesNotCancelSilently() async throws {
         tmux.paneTarget = .unreachable
         let outcome = await makeActuator().actuate(row)
         guard case .failed(let message) = outcome else {
-            Issue.record("expected .failed, got \(outcome) — an unreachable server must not cancel")
+            Issue.record(
+                "expected .failed, got \(outcome) — an unreachable server must not cancel silently")
             return
         }
         #expect(message.contains("could not reach tmux server"))

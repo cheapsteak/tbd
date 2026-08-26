@@ -10,7 +10,7 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "limitResume"
 /// without a user gesture, behind the SAME target consultation
 /// (`paneSendTarget`) that `handleTerminalSend` runs before it types.
 public protocol ResumeSendingTmux: Sendable {
-    func windowExists(server: String, windowID: String) async -> Bool
+    func windowPresence(server: String, windowID: String) async -> TmuxResourcePresence
     func paneInMode(server: String, paneID: String) async throws -> Bool
     func panePID(server: String, paneID: String) async throws -> String
     func paneSendTarget(server: String, paneID: String) async throws -> PaneSendTarget
@@ -262,12 +262,30 @@ public struct LimitResumeActuator: LimitResumeActuating {
               let worktree = ((try? await db.worktrees.getLocal(id: terminal.worktreeID)) ?? nil)
         else { return .notEligible(.terminalGone) }
         let server = worktree.tmuxServer
-        guard await tmux.windowExists(server: server, windowID: terminal.tmuxWindowID) else {
+        switch await tmux.windowPresence(server: server, windowID: terminal.tmuxWindowID) {
+        case .present:
+            break
+        case .absent:
+            // tmux answered on a reachable server: the window is gone. Cancel
+            // silently, as this check has always done.
             return .notEligible(.terminalGone)
+        case .unreachable:
+            // The window read failed, so nothing is known about it.
+            // `.terminalGone` ends the scheduled resume, so concluding it from
+            // a failed read would throw away a resume for a session that is
+            // very likely still running. `.failed` ends the row too — see
+            // `paneTargetVerdict` — but says so out loud, naming the reason.
+            logger.warning("""
+                actuate: could not reach tmux server \(server, privacy: .public) to check \
+                window \(terminal.tmuxWindowID, privacy: .public) for terminal \
+                \(terminal.id.uuidString, privacy: .public) — not cancelling on a failed read
+                """)
+            return .notEligible(.failed(
+                "could not reach tmux server \(server) to verify the target window"))
         }
 
         // 1a. Ask the pane who it is, before any key is typed into it.
-        //     `windowExists` above proves a window id resolves to SOME window;
+        //     `windowPresence` above proves a window id resolves to SOME window;
         //     it cannot prove the pane still belongs to THIS terminal. tmux
         //     reuses pane ids, so a stale `tmuxPaneID` names a live stranger
         //     that passes every remaining check — window alive, Claude
@@ -342,14 +360,20 @@ public struct LimitResumeActuator: LimitResumeActuating {
     /// Classify one `paneSendTarget` consultation into an eligibility verdict.
     ///
     /// The outcomes mirror how this actuator already treats the same facts:
-    /// a pane that is gone or whose process has exited is the `windowExists`
+    /// a pane that is gone or whose process has exited is the `windowPresence`
     /// case one level finer, so it cancels silently as `.terminalGone`. A pane
-    /// that answers with a DIFFERENT terminal is not "gone" and not a
-    /// transient state to retry — the row's coordinate is stale and will stay
-    /// stale until something respawns the window, so retrying would only aim
-    /// at the same stranger again. It fails the row with a message naming both
-    /// ids, the way step 3's not-foreground check fails a row a retry cannot
-    /// help either.
+    /// that answers with a DIFFERENT terminal is not "gone": the row's
+    /// coordinate is stale and will stay stale until something respawns the
+    /// window, so it fails the row with a message naming both ids, the way
+    /// step 3's not-foreground check does.
+    ///
+    /// `.failed` versus `.terminalGone` is a choice about what the user is
+    /// TOLD, not about whether anything runs again. A row that leaves `pending`
+    /// never re-fires under either status (`ScheduledResumeStore.setStatus`
+    /// refuses to write `pending` back, and `reschedule` only moves rows that
+    /// are still pending), and only `.paneInCopyMode` reschedules. `.failed`
+    /// surfaces a notification carrying its reason; `.terminalGone` cancels
+    /// silently on the claim that the terminal is gone.
     private func paneTargetVerdict(
         server: String, terminal: Terminal
     ) async -> PaneTargetVerdict {
@@ -374,9 +398,14 @@ public struct LimitResumeActuator: LimitResumeActuating {
             return .notEligible(.terminalGone)
         case .unreachable:
             // The consultation reached no server, so nothing is known about the
-            // pane. `.terminalGone` would CANCEL the scheduled resume on the
-            // strength of a failed read; `.failed` leaves the row for a later
-            // attempt, matching the throwing branch above.
+            // pane. Both verdicts end this scheduled resume — nothing re-fires
+            // a row once it leaves `pending`, for `.cancelled` or `.failed`
+            // alike — so the difference is not retryability, it is what the
+            // user is told: `.terminalGone` cancels SILENTLY, asserting the
+            // terminal is gone, while `.failed` surfaces a notification
+            // carrying the reason. On a failed read the silent assertion is
+            // the one that is wrong, and the reason is the thing worth saying.
+            // Matches the throwing branch above.
             logger.warning("""
                 actuate: could not reach tmux server \(server, privacy: .public) to consult \
                 pane \(terminal.tmuxPaneID, privacy: .public) for terminal \

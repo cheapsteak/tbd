@@ -244,13 +244,20 @@ extension WorktreeLifecycle {
             if let outcome = Self.consumeMarker(atPath: preSession.markerPath) {
                 return outcome
             }
-            let windowAlive = await tmux.windowExists(
+            // Only a positive absence ends the wait early. `.unreachable` keeps
+            // polling: reporting `.paneKilled` abandons a hook that may still
+            // be running (and, on the create path, notifies the user that their
+            // pre-session was killed), and a read that failed is no evidence
+            // the pane died. If the server really is gone the marker never
+            // lands and the deadline below reports `.timedOut`, which is the
+            // honest answer for a window nobody could read.
+            let windowPresence = await tmux.windowPresence(
                 server: tmuxServer, windowID: preSession.windowID
             )
-            if !windowAlive {
+            if windowPresence == .absent {
                 // Same-iteration race: the hook can write the marker after the
                 // fileExists check above and exit (closing the pane) before the
-                // windowExists check. Re-check the marker once so a hook that
+                // windowPresence check. Re-check the marker once so a hook that
                 // actually finished isn't misreported as a killed pane.
                 if let outcome = Self.consumeMarker(atPath: preSession.markerPath) {
                     return outcome

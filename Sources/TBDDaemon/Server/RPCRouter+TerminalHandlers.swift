@@ -686,13 +686,14 @@ extension RPCRouter {
         // does). Refuse to kill an in-flight turn or a raised permission hand,
         // matching `isManuallyHibernatable`'s rails.
         //
-        // Qualified on the window actually being ALIVE. `activityState` is
-        // hook-fed and carries no timestamp, so a session that died mid-turn
-        // (crash, OOM, killed pane) stays `.working` forever. An unqualified
-        // rail would then refuse forever on exactly the wedged terminal a
-        // caller most needs to close — turning the safety rail into a trap for
-        // this command's primary cleanup use case. A dead-window row cannot be
-        // mid-turn, so it stays closeable without --force.
+        // Qualified on tmux positively answering that the window is GONE.
+        // `activityState` is hook-fed and carries no timestamp, so a session
+        // that died mid-turn (crash, OOM, killed pane) stays `.working`
+        // forever. An unqualified rail would then refuse forever on exactly the
+        // wedged terminal a caller most needs to close — turning the safety
+        // rail into a trap for this command's primary cleanup use case. A
+        // dead-window row cannot be mid-turn, so it stays closeable without
+        // --force.
         if params.respectActivityRails == true,
            terminal.activityState == .working || terminal.activityState == .waitingForUser {
             // Resolved inside the rails branch, not in the condition list, so
@@ -702,9 +703,17 @@ extension RPCRouter {
             let railWorktree = try await actuating(actuationID) {
                 try await db.worktrees.getLocal(id: terminal.worktreeID)
             }
+            // Only a POSITIVE absence lowers the rail. It is lowered so a wedged
+            // terminal whose window really died stays closeable without
+            // `--force`; a window read that FAILED is not that fact, and
+            // lowering the rail on it would let a close kill an in-flight turn
+            // in a live session the daemon merely could not see. `.unreachable`
+            // therefore keeps the rail up exactly as `.present` does — refusing
+            // is reversible, `--force` is still there, and the next call asks
+            // tmux again.
             if let railWorktree,
-               await tmux.windowExists(
-                server: railWorktree.tmuxServer, windowID: terminal.tmuxWindowID) {
+               await tmux.windowPresence(
+                server: railWorktree.tmuxServer, windowID: terminal.tmuxWindowID) != .absent {
                 let what = terminal.activityState == .working
                     ? "mid-turn"
                     : "waiting on a permission prompt"
@@ -1074,8 +1083,17 @@ extension RPCRouter {
             // and updated the row's ids. Killing it here would tear down the
             // freshly-spawned claude and re-park the row (wake flap). Leave
             // the row untouched.
-            if await tmux.windowExists(server: worktree.tmuxServer, windowID: terminal.tmuxWindowID) {
-                logger.info("recreateWindow: window \(terminal.tmuxWindowID, privacy: .public) for claude terminal \(terminal.id, privacy: .public) is alive — ignoring stale recreate request")
+            // `.unreachable` declines with `.present`, and deliberately: the
+            // branch below KILLS this window and re-parks the row, so a read
+            // that failed must not reach it. Returning the row untouched is the
+            // same answer a live window gets, and the caller can ask again.
+            let recreatePresence = await tmux.windowPresence(
+                server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
+            if recreatePresence != .absent {
+                let why = recreatePresence == .present
+                    ? "is alive — ignoring stale recreate request"
+                    : "could not be read (no tmux server answered) — declining to recreate on a failed read"
+                logger.info("recreateWindow: window \(terminal.tmuxWindowID, privacy: .public) for claude terminal \(terminal.id, privacy: .public) \(why, privacy: .public)")
                 return try RPCResponse(result: terminal)
             }
             // This branch actuates too, and differently: it kills a window the
