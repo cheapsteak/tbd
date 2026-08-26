@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import TBDShared
 @testable import TBDDaemonLib
 
 @Suite struct PendingQuestionStoreTests {

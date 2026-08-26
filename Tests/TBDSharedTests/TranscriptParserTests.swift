@@ -1,8 +1,7 @@
 import Foundation
 import Testing
-import TBDShared
 
-@testable import TBDDaemonLib
+@testable import TBDShared
 
 @Suite("TranscriptParser")
 struct TranscriptParserTests {

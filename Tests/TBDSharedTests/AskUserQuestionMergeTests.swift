@@ -1,7 +1,6 @@
 import Testing
 import Foundation
-@testable import TBDDaemonLib
-import TBDShared
+@testable import TBDShared
 
 @Suite struct AskUserQuestionMergeTests {
     private static func toolCall(_ id: String, name: String = "AskUserQuestion") -> TranscriptItem {

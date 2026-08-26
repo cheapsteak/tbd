@@ -1,14 +1,13 @@
 import Foundation
 import os
-import TBDShared
 
 /// Loads a Claude Code session JSONL into a structured `[TranscriptItem]`.
 ///
 /// This parser is deliberately permissive — malformed or unknown lines are
 /// skipped rather than failing the whole session. JSONL writes from Claude
 /// Code may be partial during live polling; we tolerate that.
-enum TranscriptParser {
-    private static let perfLog = Logger(subsystem: "com.tbd.daemon", category: "perf-transcript")
+public enum TranscriptParser {
+    private static let perfLog = Logger(subsystem: "com.tbd.shared", category: "perf-transcript")
     /// Shared ISO8601 formatter that accepts Claude Code's fractional-seconds
     /// timestamps (e.g. `2026-05-05T03:06:16.813Z`). Without
     /// `.withFractionalSeconds`, every such timestamp silently fails to parse.
@@ -27,7 +26,7 @@ enum TranscriptParser {
     /// every subagent transcript made opening a session with many subagents cost
     /// O(all subagent bytes) — ~13s on heavy sessions — for content the UI no
     /// longer surfaces. Parse cost is now O(parent file).
-    static func parse(filePath: String) -> [TranscriptItem] {
+    public static func parse(filePath: String) -> [TranscriptItem] {
         let basename = (filePath as NSString).lastPathComponent
         perfLog.debug("parse.start file=\(basename, privacy: .public)")
         let start = ContinuousClock.now
@@ -111,7 +110,7 @@ enum TranscriptParser {
     /// the full parse, so the items it produces for the windowed lines are
     /// byte-identical to the corresponding bottom of the full parse — the
     /// tail→full UI swap therefore does not shift the visible bottom.
-    static func parseTail(filePath: String, limit: Int) -> [TranscriptItem] {
+    public static func parseTail(filePath: String, limit: Int) -> [TranscriptItem] {
         guard let handle = FileHandle(forReadingAtPath: filePath) else { return [] }
         defer { try? handle.close() }
         guard let fileSize = (try? handle.seekToEnd()).map({ Int($0) }) else { return [] }
@@ -418,7 +417,7 @@ enum TranscriptParser {
     /// `type:"queue-operation"` rather than an attachment flavor, so they fail
     /// the first guard below and reach no rendering path — which is what keeps
     /// one queued prompt from rendering once per queue event.
-    static func queuedCommandText(from json: [String: Any]) -> String? {
+    public static func queuedCommandText(from json: [String: Any]) -> String? {
         guard json["type"] as? String == "attachment",
               let att = json["attachment"] as? [String: Any],
               att["type"] as? String == "queued_command" else {
@@ -661,10 +660,10 @@ enum TranscriptParser {
 
     // MARK: - helpers
 
-    static let bodyCharCap = 2000
+    public static let bodyCharCap = 2000
     static let bodyLineCap = 20
 
-    static func extractToolResult(from block: [String: Any]) -> ToolResult {
+    public static func extractToolResult(from block: [String: Any]) -> ToolResult {
         let isError = (block["is_error"] as? Bool) ?? false
         let raw: String
         if let s = block["content"] as? String {
@@ -752,14 +751,14 @@ enum TranscriptParser {
 
     /// What one opened row can recover from the JSONL: its un-truncated body
     /// plus, for `attachment` rows, how the context got injected.
-    struct ItemDetail {
-        let text: String?
-        let attachment: TranscriptAttachmentMetadata?
+    public struct ItemDetail {
+        public let text: String?
+        public let attachment: TranscriptAttachmentMetadata?
     }
 
     /// `lookupFullBody` plus the injection metadata. Same single pass, same id
     /// forms — see `lookupFullBody` for the id grammar.
-    static func lookupDetail(filePath: String, itemID: String) -> ItemDetail {
+    public static func lookupDetail(filePath: String, itemID: String) -> ItemDetail {
         guard let data = FileManager.default.contents(atPath: filePath),
               let content = String(data: data, encoding: .utf8) else {
             return ItemDetail(text: nil, attachment: nil)
@@ -892,7 +891,7 @@ enum TranscriptParser {
 
     /// Parse `<command-name>foo</command-name><command-args>bar</command-args>` envelopes.
     /// Returns the command name (without leading `/`) and optional args text.
-    static func parseSlashEnvelope(_ text: String) -> (name: String, args: String?) {
+    public static func parseSlashEnvelope(_ text: String) -> (name: String, args: String?) {
         func extract(_ tag: String) -> String? {
             let open = "<\(tag)>"
             let close = "</\(tag)>"

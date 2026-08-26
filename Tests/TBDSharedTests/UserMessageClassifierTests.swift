@@ -1,7 +1,6 @@
 import Testing
 import Foundation
 import TBDShared
-@testable import TBDDaemonLib
 
 @Suite("UserMessageClassifier")
 struct UserMessageClassifierTests {

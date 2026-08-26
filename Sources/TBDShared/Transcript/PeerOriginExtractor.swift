@@ -1,5 +1,4 @@
 import Foundation
-import TBDShared
 
 /// Reads the harness-written `origin` dictionary off a single decoded
 /// transcript row and, when that row is a message from another Claude session,
@@ -21,13 +20,13 @@ import TBDShared
 /// peer can write `</cross-session-message>` — or quote the security preamble —
 /// inside its own message, and must not be able to make that text disappear or
 /// take the rest of the message with it.
-enum PeerOriginExtractor {
-    struct Extracted: Equatable {
-        let sender: PeerSender
-        let text: String
+public enum PeerOriginExtractor {
+    public struct Extracted: Equatable {
+        public let sender: PeerSender
+        public let text: String
         /// The untouched original content, retained for the detail overlay, or
         /// nil when it would merely repeat `text`.
-        let deliveredPayload: String?
+        public let deliveredPayload: String?
     }
 
     /// The line the harness prepends to every delivered peer message.
@@ -41,7 +40,7 @@ enum PeerOriginExtractor {
     /// of its ~90 words can be reworded without breaking extraction.
     private static let preamblePrefix = "This came from another Claude session —"
 
-    static func extract(from json: [String: Any]) -> Extracted? {
+    public static func extract(from json: [String: Any]) -> Extracted? {
         guard let origin = json["origin"] as? [String: Any],
               origin["kind"] as? String == "peer" else { return nil }
 
