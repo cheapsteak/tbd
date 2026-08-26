@@ -16,8 +16,12 @@ import TBDShared
 /// opaque: it gets displayed and, on request, executed as text — never
 /// parsed, split, or rewritten.
 struct RemoteProviderAuthPresentation: Equatable {
-    /// The provider's display name (its `describe.name` when it has one,
-    /// otherwise the registry name).
+    /// How the provider is named to the user: its REGISTRY key, which is
+    /// unique by construction, falling back to `describe.name` and then to
+    /// the caller's own fallback. The remedy a user has to run is scoped to
+    /// the registered entry, and two registrations of the same provider kind
+    /// share a `describe.name` that cannot say which one needs
+    /// re-authenticating — see `RemoteProviderIdentityPresentation`.
     let providerName: String
     /// The explanatory line. The provider's `errorMessage` when it supplied
     /// one, else `fallbackMessage`.
@@ -63,10 +67,12 @@ struct RemoteProviderAuthPresentation: Equatable {
     /// the app knows the provider couldn't authenticate without yet knowing
     /// anything the provider had to say about it.
     ///
-    /// `providerName` resolves `describe.name` → registry name →
+    /// `providerName` resolves registry name → `describe.name` →
     /// `fallbackProviderName` (the caller's own name for the provider, e.g.
     /// a selection's `provider`). `nil` when none of the three exists, since
-    /// a CTA with nothing to name isn't worth showing.
+    /// a CTA with nothing to name isn't worth showing. The registry key
+    /// leads because it is what identifies the registration a user has to go
+    /// and re-authenticate.
     static func make(
         from status: RemoteProviderStatus?,
         fallbackProviderName: String? = nil,

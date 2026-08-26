@@ -37,6 +37,14 @@ struct RemoteAttachDiagnosisView: View {
                 .font(.caption.monospaced())
                 .foregroundStyle(.tertiary)
                 .textSelection(.enabled)
+            // Every diagnosis but one describes something a person can fix
+            // while looking at this pane, so the pane must not read as a
+            // dead end: `RemoteAttachPager` re-runs the preflight on each
+            // render and replaces this view with the terminal the moment it
+            // passes.
+            Text("TBD re-checks this automatically — no need to reopen the session.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
             Spacer(minLength: 0)
         }
         .padding(20)

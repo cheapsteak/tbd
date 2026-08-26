@@ -156,9 +156,14 @@ struct RemoteProviderAuthPresentationTests {
 
     // MARK: - Provider name
 
-    @Test func describeNameWinsOverTheRegistryName() throws {
+    /// The registry key leads, even when `describe` supplied a prettier
+    /// name. `describe.name` identifies the provider's KIND, so two
+    /// registrations running the same binary against different backends
+    /// report the same one — and this CTA's whole job is to send a user to
+    /// re-authenticate a specific registration.
+    @Test func registryNameWinsOverTheDescribeName() throws {
         let cta = try #require(RemoteProviderAuthPresentation.make(from: status(describeName: "Acme Cloud")))
-        #expect(cta.providerName == "Acme Cloud")
+        #expect(cta.providerName == "acme")
     }
 
     @Test func registryNameIsUsedWhenDescribeIsMissing() throws {
@@ -171,7 +176,7 @@ struct RemoteProviderAuthPresentationTests {
     @Test func fallbackNameLosesToBothNamesOnTheStatus() throws {
         let fromDescribe = try #require(RemoteProviderAuthPresentation.make(
             from: status(describeName: "Acme Cloud"), fallbackProviderName: "raw-name"))
-        #expect(fromDescribe.providerName == "Acme Cloud")
+        #expect(fromDescribe.providerName == "acme")
 
         let fromRegistry = try #require(RemoteProviderAuthPresentation.make(
             from: status(), fallbackProviderName: "raw-name"))
@@ -185,7 +190,7 @@ struct RemoteProviderAuthPresentationTests {
             describeName: "Acme Cloud", message: "credentials expired",
             label: "Sign in", command: "acme-provider login")))
         #expect(cta == RemoteProviderAuthPresentation(
-            providerName: "Acme Cloud", message: "credentials expired",
+            providerName: "acme", message: "credentials expired",
             actionLabel: "Sign in", command: "acme-provider login"))
     }
 }

@@ -67,7 +67,7 @@ struct RemoteProviderIdentityPresentationTests {
             identity: ["environment": "staging", "account": "acme-1234", "tenant_slug": "acme"],
             providerVersion: "0.4.2", contractVersion: 2)
 
-        let rows = RemoteProviderIdentityPresentation.rows(provider, homeDirectory: "/Users/dev")
+        let rows = RemoteProviderIdentityPresentation.rows(provider, homeDirectory: "/Users/me")
 
         #expect(rows.map(\.label) == ["Account", "Environment", "Tenant slug", "Command", "Version"])
         #expect(rows[0].value == "acme-1234")
@@ -82,8 +82,8 @@ struct RemoteProviderIdentityPresentationTests {
         let staging = status(
             registryName: "agentbox-staging", kind: "agentbox", args: ["--control-plane", "staging"])
 
-        let managementRows = RemoteProviderIdentityPresentation.rows(management, homeDirectory: "/Users/dev")
-        let stagingRows = RemoteProviderIdentityPresentation.rows(staging, homeDirectory: "/Users/dev")
+        let managementRows = RemoteProviderIdentityPresentation.rows(management, homeDirectory: "/Users/me")
+        let stagingRows = RemoteProviderIdentityPresentation.rows(staging, homeDirectory: "/Users/me")
 
         #expect(managementRows.map(\.label) == ["Command", "Version"])
         #expect(managementRows[0].value == "/opt/agentbox/bin/agentbox --control-plane management")
@@ -94,13 +94,13 @@ struct RemoteProviderIdentityPresentationTests {
 
     @Test("the command line is tilde-abbreviated against an injected home")
     func abbreviatesHome() {
-        let provider = status(registryName: "agentbox", exec: "/Users/dev/bin/agentbox")
+        let provider = status(registryName: "agentbox", exec: "/Users/me/bin/agentbox")
 
         #expect(RemoteProviderIdentityPresentation.commandLine(
-            provider.config, homeDirectory: "/Users/dev") == "~/bin/agentbox")
+            provider.config, homeDirectory: "/Users/me") == "~/bin/agentbox")
         // A different user's home never gets abbreviated away.
         #expect(RemoteProviderIdentityPresentation.commandLine(
-            provider.config, homeDirectory: "/Users/other") == "/Users/dev/bin/agentbox")
+            provider.config, homeDirectory: "/Users/acme") == "/Users/me/bin/agentbox")
     }
 
     @Test("a secret-looking registry argument never reaches the screen")
@@ -110,7 +110,7 @@ struct RemoteProviderIdentityPresentationTests {
             args: ["--token=sk-live-1", "--profile", "acme"])
 
         let command = RemoteProviderIdentityPresentation.commandLine(
-            provider.config, homeDirectory: "/Users/dev")
+            provider.config, homeDirectory: "/Users/me")
 
         #expect(command.contains("sk-live-1") == false)
         #expect(command.contains(ProviderIdentityRedaction.redactedPlaceholder))
@@ -123,7 +123,7 @@ struct RemoteProviderIdentityPresentationTests {
             registryName: "agentbox", kind: "agentbox",
             identity: ["account": "acme-1234", "session_token": "AQoDYXdz"])
 
-        let rows = RemoteProviderIdentityPresentation.rows(provider, homeDirectory: "/Users/dev")
+        let rows = RemoteProviderIdentityPresentation.rows(provider, homeDirectory: "/Users/me")
 
         #expect(rows.contains { $0.value.contains("AQoDYXdz") } == false)
         #expect(rows.first?.label == "Account")
@@ -132,7 +132,7 @@ struct RemoteProviderIdentityPresentationTests {
     @Test("version is omitted entirely before describe has ever succeeded")
     func noVersionWithoutDescribe() {
         let rows = RemoteProviderIdentityPresentation.rows(
-            status(registryName: "agentbox"), homeDirectory: "/Users/dev")
+            status(registryName: "agentbox"), homeDirectory: "/Users/me")
 
         #expect(rows.map(\.label) == ["Command"])
     }

@@ -32,6 +32,22 @@ struct RemoteAttachPager: NSViewControllerRepresentable {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var appearance: AppearanceSettings
 
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    /// Which mounted tabs are showing a preflight diagnosis rather than a
+    /// live terminal, and which diagnosis each is showing.
+    ///
+    /// A tab is created once per selection and then kept — that is the whole
+    /// point of the pager — so without this record a failed preflight would
+    /// freeze at whatever it concluded on first mount. Several diagnoses
+    /// describe conditions a user fixes while looking at them (`chmod +x`,
+    /// re-registering a provider), and before the preflight existed an
+    /// unresolvable selection was simply skipped and therefore retried on
+    /// every render. Keeping that self-healing is what this exists for.
+    final class Coordinator {
+        var diagnosed: [RemoteSessionSelection: RemoteAttachPreflight.Diagnosis] = [:]
+    }
+
     func makeNSViewController(context: Context) -> NSTabViewController {
         let vc = NSTabViewController()
         vc.tabStyle = .unspecified
@@ -41,7 +57,7 @@ struct RemoteAttachPager: NSViewControllerRepresentable {
 
     func updateNSViewController(_ vc: NSTabViewController, context: Context) {
         let mountedSelections = Set(selections)
-        let currentSelections = vc.tabViewItems.compactMap { $0.identifier as? RemoteSessionSelection }
+        var currentSelections = vc.tabViewItems.compactMap { $0.identifier as? RemoteSessionSelection }
 
         // 1. Remove tab items for selections no longer in the mount set
         //    (cap eviction, explicit detach, or the session vanishing from
@@ -50,7 +66,29 @@ struct RemoteAttachPager: NSViewControllerRepresentable {
         for (idx, selection) in currentSelections.enumerated().reversed() {
             if !mountedSelections.contains(selection) {
                 vc.removeTabViewItem(vc.tabViewItems[idx])
+                context.coordinator.diagnosed[selection] = nil
             }
+        }
+
+        // 1a. Re-resolve every tab that is currently showing a diagnosis, and
+        //     drop it when the answer has changed — the add loop below then
+        //     rebuilds it, as a live terminal once the preflight passes. Only
+        //     diagnosis tabs are re-resolved: a mounted terminal owns a live
+        //     PTY, and tearing it down because a provider's registration
+        //     momentarily looked different would kill the connection this
+        //     pager exists to keep alive.
+        for (selection, shown) in context.coordinator.diagnosed {
+            let current = RemoteAttachPreflight.resolve(
+                selection: selection,
+                providers: appState.remoteProviders,
+                sessions: appState.remoteSessions)
+            guard current != shown else { continue }
+            if let idx = vc.tabViewItems.firstIndex(
+                where: { $0.identifier as? RemoteSessionSelection == selection }) {
+                vc.removeTabViewItem(vc.tabViewItems[idx])
+            }
+            context.coordinator.diagnosed[selection] = nil
+            currentSelections.removeAll { $0 == selection }
         }
 
         // 2. Add tab items for newly-mounted selections.
@@ -83,6 +121,10 @@ struct RemoteAttachPager: NSViewControllerRepresentable {
                 host = NSHostingController(rootView: AnyView(
                     RemoteAttachDiagnosisView(selection: selection, diagnosis: diagnosis)
                 ))
+                // Recorded so 1a re-resolves it on every later render: this
+                // pane is a report about conditions that change, not a
+                // permanent verdict.
+                context.coordinator.diagnosed[selection] = diagnosis
             }
             let item = NSTabViewItem(viewController: host)
             item.identifier = selection

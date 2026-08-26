@@ -146,9 +146,14 @@ struct WorktreeProfilePickerRemoteLaneTests {
 
     // MARK: - provider display name
 
-    @Test func providerLabelPrefersTheNegotiatedDescribeName() {
+    /// The REGISTRY key, even when `describe` negotiated a prettier name:
+    /// `describe.name` names the provider's kind, so two registrations of the
+    /// same kind would appear in this picker under one label with no way to
+    /// tell which backend a new session would be created against. See
+    /// `RemoteProviderIdentityPresentation`.
+    @Test func providerLabelPrefersTheRegistryKey() {
         #expect(WorktreeProfilePickerView.providerLabel(
-            provider(name: "acme", describeName: "Acme Cloud")) == "Acme Cloud")
+            provider(name: "acme", describeName: "Acme Cloud")) == "acme")
     }
 
     @Test func providerLabelFallsBackToTheConfiguredName() {
@@ -226,12 +231,12 @@ struct WorktreeProfilePickerRemoteLaneTests {
     /// deliberately withholds has to land here or it lands nowhere.
     @Test func aProviderRowKeepsItsEllipsisWhenSelectingItOpensTheForm() {
         #expect(WorktreeProfilePickerView.providerRowTitle(
-            provider(name: "acme", describeName: "Acme Cloud"), opensForm: true) == "Acme Cloud…")
+            provider(name: "acme", describeName: "Acme Cloud"), opensForm: true) == "acme…")
     }
 
     @Test func aProviderRowDropsItsEllipsisWhenSelectingItCreatesOutright() {
         #expect(WorktreeProfilePickerView.providerRowTitle(
-            provider(name: "acme", describeName: "Acme Cloud"), opensForm: false) == "Acme Cloud")
+            provider(name: "acme", describeName: "Acme Cloud"), opensForm: false) == "acme")
     }
 
     /// The title still goes through `providerLabel`, so a provider that
