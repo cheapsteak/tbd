@@ -3,6 +3,98 @@ import TBDShared
 import AppKit
 import MarkdownUI
 
+/// Resolves a peer sender to the worktree it came from. Nil (the default) leaves
+/// a peer bubble's sender header as plain text — the name still renders, it simply
+/// is not clickable.
+///
+/// Injected as a closure rather than an `AppState` so this view stays testable
+/// without standing up a pane, and so a host that has no worktree list at all
+/// (a preview, a snapshot test) degrades visibly rather than trapping.
+private struct TranscriptPeerSenderResolutionKey: EnvironmentKey {
+    static let defaultValue: (@MainActor (PeerSender) -> UUID?)? = nil
+}
+
+/// Navigates to a worktree — the same entry point `tbd://open?worktree=<uuid>`
+/// uses. Nil leaves a resolved sender name unlinked.
+private struct TranscriptOpenWorktreeKey: EnvironmentKey {
+    static let defaultValue: (@MainActor (UUID) -> Void)? = nil
+}
+
+extension EnvironmentValues {
+    var transcriptPeerSenderResolution: (@MainActor (PeerSender) -> UUID?)? {
+        get { self[TranscriptPeerSenderResolutionKey.self] }
+        set { self[TranscriptPeerSenderResolutionKey.self] = newValue }
+    }
+
+    var transcriptOpenWorktree: (@MainActor (UUID) -> Void)? {
+        get { self[TranscriptOpenWorktreeKey.self] }
+        set { self[TranscriptOpenWorktreeKey.self] = newValue }
+    }
+}
+
+/// The sender attribution drawn above a PEER bubble's body, and above no other.
+///
+/// Native SwiftUI chrome built from `PeerSender` — the harness-written `origin` —
+/// and rendered outside the markdown body, so a peer can neither author its own
+/// attribution nor mint a worktree-navigation link inside its message. Mirrors
+/// `PeerSenderHeaderView` at the native render site: same glyph, same marker,
+/// same three shapes.
+///
+/// A separate `View` rather than an inline branch so the two environment reads
+/// happen ONLY on a peer row — a user or assistant bubble never evaluates them.
+///
+/// Explicitly `@MainActor` (which conformance to `View` already implies) because
+/// its helper properties call the two `@MainActor` environment closures outside
+/// `body`, and relying on inference there is exactly the kind of thing that
+/// changes under a compiler upgrade.
+@MainActor
+private struct PeerSenderHeaderRow: View {
+    let sender: PeerSender
+
+    @Environment(\.transcriptPeerSenderResolution) private var resolveSender
+    @Environment(\.transcriptOpenWorktree) private var openWorktree
+
+    private var name: String { PeerHeaderChrome.displayName(for: sender) }
+
+    /// The worktree to navigate to, or nil when the sender is asserted, does not
+    /// resolve, or nothing here can act on it.
+    private var target: UUID? {
+        guard sender.verified, let resolveSender, openWorktree != nil else { return nil }
+        return resolveSender(sender)
+    }
+
+    var body: some View {
+        HStack(spacing: PeerHeaderChrome.itemSpacing) {
+            Text(PeerHeaderChrome.glyph)
+                .foregroundStyle(AttentionAmber.color)
+                .accessibilityHidden(true)
+            attribution
+        }
+        .font(.system(size: PeerHeaderChrome.fontSize, weight: .semibold))
+        .lineLimit(1)
+    }
+
+    @ViewBuilder private var attribution: some View {
+        if let target, let openWorktree {
+            Button { openWorktree(target) } label: {
+                Text(name).underline()
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.accentColor)
+            .accessibilityLabel("Go to \(name)")
+        } else if sender.verified {
+            Text(name)
+        } else {
+            // An asserted label is a string the sender chose for itself. Muted and
+            // italic, and never without its marker: it must not read as a
+            // confirmed identity.
+            Text(name)
+                .italic()
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
 /// Single user/assistant prose bubble. Renders block-level markdown
 /// (paragraphs, lists, tables, blockquotes, headings) via MarkdownUI
 /// and fenced code blocks via the local `codeBlock(...)` view, with
@@ -38,6 +130,19 @@ struct ChatBubbleView: View {
         case .peerMessage(_, _, let t, _, _): return t
         case .assistantText(_, let t, _, _): return t
         default: return ""
+        }
+    }
+
+    /// The peer bubble's sender header, and `EmptyView` for every other role.
+    ///
+    /// `EmptyView` contributes no subview to the enclosing `VStack`, so a user or
+    /// assistant bubble's geometry is byte-for-byte what it was — the header line
+    /// #129 deleted does not come back for them. Reintroducing it for peer rows
+    /// only is acceptable because peer messages are rare; do not add a node to the
+    /// common path to make this symmetrical.
+    @ViewBuilder private var peerSenderHeader: some View {
+        if case .peerMessage(_, let sender, _, _, _) = item {
+            PeerSenderHeaderRow(sender: sender)
         }
     }
 
@@ -119,7 +224,11 @@ struct ChatBubbleView: View {
         )
         defer { TranscriptSignposts.signposter.endInterval("transcript.markdown.build", state) }
         let segments = MarkdownSegments.split(text)
+        // The 6pt stack spacing is `TranscriptBubbleGeometry.interBlockSpacing`:
+        // the header→body gap is the same gap the native cell's block stack puts
+        // there, which is the other half of `headerHeight(for: .peer)`.
         return VStack(alignment: .leading, spacing: 6) {
+            peerSenderHeader
             ForEach(segments) { seg in
                 switch seg {
                 case .prose(let p):

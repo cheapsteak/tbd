@@ -284,7 +284,8 @@ struct TranscriptEstimatorAccuracyTests {
                         blocksHeight: MessageBlockMeasurer().blocksHeight(
                             MarkdownAttributedRenderer.renderBlocks(
                                 text, theme: .chatBubble, linkResolver: nil),
-                            bodyWidth: bodyWidth))
+                            bodyWidth: bodyWidth),
+                        role: role)
                     let delta = estimate - measured
                     signedLineError += Int((delta / Self.renderedLineHeight).rounded())
                     if delta > 0.5 {
@@ -403,7 +404,8 @@ struct TranscriptEstimatorAccuracyTests {
                                 TranscriptBubbleGeometry.composedBlocks(
                                     for: item, badgeUsage: usage, linkResolver: nil),
                                 bodyWidth: TranscriptBubbleGeometry.bodyWidth(
-                                    columnWidth: width, role: role)))
+                                    columnWidth: width, role: role)),
+                            role: role)
                         total += 1
                         signedTotal += estimate - measured
                         if estimate - measured > 0.5 {

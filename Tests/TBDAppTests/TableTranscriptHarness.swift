@@ -409,7 +409,8 @@ struct TableTranscriptHarness {
             let bodyWidth = TranscriptBubbleGeometry.bodyWidth(
                 columnWidth: Self.width, role: TranscriptBubbleGeometry.role(for: item))
             let blocksHeight = MessageBlockMeasurer().blocksHeight(blocks, bodyWidth: bodyWidth)
-            return TranscriptBubbleGeometry.rowHeight(blocksHeight: blocksHeight)
+            return TranscriptBubbleGeometry.rowHeight(
+                blocksHeight: blocksHeight, role: TranscriptBubbleGeometry.role(for: item))
         }
         let controller = NSHostingController(rootView: AnyView(
             SelectableTranscriptRow(node: node, terminalID: nil)
@@ -957,10 +958,93 @@ struct TableTranscriptHarness {
         // The cached per-block body height + chrome must equal the row height the
         // cache fed — proving the cache is the single source of truth for the row.
         let bodyHeight = MessageBlockMeasurer().blocksHeight(fromBlockHeights: cached)
-        let expectedRowHeight = TranscriptBubbleGeometry.rowHeight(blocksHeight: bodyHeight)
+        let expectedRowHeight = TranscriptBubbleGeometry.rowHeight(
+            blocksHeight: bodyHeight, role: .assistant)
         #expect(abs(expectedRowHeight - measured) <= 0.5,
                 Comment(rawValue: "cached block heights must sum (with chrome) to the row height "
                     + "(fromCache=\(expectedRowHeight) measured=\(measured))"))
+    }
+
+    // MARK: - Peer sender header
+
+    /// The row-height invariant, extended to the one item kind that now draws a
+    /// header: a peer bubble's `heightOfRow` must equal what the realized cell
+    /// draws, and the SAME body as a user prompt must still measure exactly one
+    /// header shorter. The second half is the regression the header can most
+    /// easily cause — a user row that silently grew or shrank.
+    ///
+    /// Cheap + headless, so it runs in the ordinary test pass rather than behind
+    /// the harness env gate: it only asks the coordinator for heights and cells.
+    @Test("peer bubble: heightOfRow == realized, and a user row is unchanged")
+    func peerBubbleRowMeasureEqualsRender() throws {
+        let suiteName = "table-harness-peer-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+
+        let repoID = UUID()
+        let target = Worktree(
+            id: UUID(), repoID: repoID, name: "Acme Deploy Watch",
+            displayName: "Acme Deploy Watch", branch: "b",
+            path: "/tmp/acme-deploy-watch", tmuxServer: "s")
+        appState.worktrees = [repoID: [target]]
+
+        // The SAME text on both rows, and `.user`/`.peer` share a body width, so
+        // any difference between the two heights is the header and nothing else.
+        let body = """
+            Deploy finished on `acme-prod`. Two checks were skipped because their \
+            upstream job had already gone green on the same commit, and the release \
+            note draft is waiting in the queue for a human to read it.
+            """
+        let sender = PeerSender(
+            name: "Acme Deploy Watch", from: "uds:/tmp/cc-socks/4242.sock",
+            verified: true, pid: 4242)
+        let items: [TranscriptItem] = [
+            .userPrompt(id: "u1", text: body, timestamp: nil),
+            .peerMessage(id: "p1", sender: sender, text: body,
+                         deliveredPayload: nil, timestamp: nil)
+        ]
+        let nodes = transcriptRenderNodes(from: items)
+
+        let scene = makeScene(items: items, appState: appState, fixedSize: true)
+        defer { withExtendedLifetime(scene.coordinator) {} }
+        // Both rows must carry their EXACT height, not the estimate.
+        scene.coordinator.precomputeBottomWindow()
+        scene.tableView.reloadData()
+        settle(scene.tableView)
+
+        let userRow = try #require(nodes.firstIndex { $0.id == "u1" })
+        let peerRow = try #require(nodes.firstIndex { $0.id == "p1" })
+
+        // One row at a time: `viewFor` dequeues and RECONFIGURES a shared cell, so
+        // the second call would reconfigure the first row's cell out from under us.
+        let peerMeasured = scene.coordinator.tableView(scene.tableView, heightOfRow: peerRow)
+        let peerCell = try #require(
+            scene.coordinator.tableView(scene.tableView, viewFor: nil, row: peerRow)
+                as? TranscriptBubbleCellView,
+            "a peer message must dispatch to TranscriptBubbleCellView")
+        peerCell.layoutSubtreeIfNeeded()
+        let peerRealized = peerCell.realizedRowHeight
+        #expect(abs(peerMeasured - peerRealized) <= 1.0,
+                Comment(rawValue: "peer row must render at the height it was measured at "
+                    + "(measured=\(peerMeasured) realized=\(peerRealized))"))
+
+        let userMeasured = scene.coordinator.tableView(scene.tableView, heightOfRow: userRow)
+        let userCell = try #require(
+            scene.coordinator.tableView(scene.tableView, viewFor: nil, row: userRow)
+                as? TranscriptBubbleCellView,
+            "a user prompt must dispatch to TranscriptBubbleCellView")
+        userCell.layoutSubtreeIfNeeded()
+        let userRealized = userCell.realizedRowHeight
+        #expect(abs(userMeasured - userRealized) <= 1.0,
+                Comment(rawValue: "user row must render at the height it was measured at "
+                    + "(measured=\(userMeasured) realized=\(userRealized))"))
+
+        let header = TranscriptBubbleGeometry.headerHeight(for: .peer)
+        #expect(header > 0)
+        #expect(abs((peerMeasured - userMeasured) - header) <= 1.0,
+                Comment(rawValue: "the same body must cost exactly one header more as a peer "
+                    + "(peer=\(peerMeasured) user=\(userMeasured) header=\(header))"))
     }
 
     // MARK: - Native activity-cell dispatch
