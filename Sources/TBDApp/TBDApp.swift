@@ -443,6 +443,13 @@ struct TBDAppMain: App {
     /// expression re-running on every memberwise init — needs a struct SwiftUI
     /// recreates, and an `App` is not one. Do not copy this pattern into a
     /// `View`.
+    ///
+    /// That "exactly once" is an undocumented SwiftUI behaviour, and it is what
+    /// this line rests on, so it is worth naming what would break without it:
+    /// `AppState` has no `deinit` unregistering its observers, so a second
+    /// construction would silently leave behind a second memory-pressure
+    /// source, a second set of focus observers, a second theme-file watcher and
+    /// a second connect/poll `Task` — extra RPC traffic with no visible cause.
     @State private var appState = AppState(userDefaults: TBDAppMain.resolveUserDefaults())
     @StateObject private var appearance = AppearanceSettings()
     @StateObject private var overlayCoordinator = TranscriptOverlayCoordinator()
@@ -479,10 +486,12 @@ struct TBDAppMain: App {
                     // Hand AppState a reference to the appearance settings so
                     // `mainAreaTerminalSize()` can compute pre-spawn tmux pane
                     // dimensions using the user's current font. Done in
-                    // `onAppear` rather than `init` because the two objects
-                    // are separate `@State`/`@StateObject` properties and
-                    // nothing orders their construction against each other;
-                    // by first appearance both exist.
+                    // `onAppear` rather than `init` because `appearance` is a
+                    // `@StateObject`, whose value is not guaranteed to be
+                    // installed when the App's `init` runs. By first appearance
+                    // both objects exist. (`appState` is eager now that it is
+                    // `@State`, but that only removes half the ordering
+                    // problem, so the hook stays where it is.)
                     appState.appearance = appearance
                 }
                 .onOpenURL { url in

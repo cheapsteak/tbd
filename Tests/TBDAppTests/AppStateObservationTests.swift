@@ -490,6 +490,15 @@ struct AppStateFocusedTabTrackingTests {
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let state = AppState(userDefaults: defaults)
 
+        // `resolvedFocusedTabCloseContext()` reaches `NSApp.keyWindow` on the
+        // path this test drives, and `NSApp` is an implicitly-unwrapped global
+        // that stays nil until an application object exists — so without this
+        // the force-unwrap takes the whole test process down rather than
+        // failing one test. Same guard, same reason, as
+        // `ComposerTextOwnershipTests`. Suites run in parallel across one
+        // process, so relying on another suite having done it first is luck.
+        _ = NSApplication.shared
+
         let view = TBDTerminalView(
             frame: CGRect(x: 0, y: 0, width: 320, height: 240),
             font: TBDTerminalView.defaultMonospaceFont,

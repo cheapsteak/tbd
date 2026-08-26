@@ -27,13 +27,22 @@ import Testing
 /// - **`onChange` fires in `willSet` position**, before the write commits. That
 ///   is irrelevant to a counter, which never reads the new value.
 ///
-/// The subtlety this whole file exists to expose survives the migration intact:
+/// The subtlety this whole file exists to expose mostly survives the migration:
 /// Observation notifies on **assignment**, not on change. A guard inside a
 /// property's `didSet` suppresses the downstream work but not the notification.
 /// To spare a render pass, the equality guard has to sit at the *assignment
 /// site*. What per-property tracking changed is *who* pays for a redundant
 /// notification — every reader of that one property, rather than every view
 /// observing the object — not whether one is sent.
+///
+/// The one carve-out, because reading the paragraph above without it leads
+/// straight to a wrong conclusion about the counts in
+/// `AppStatePublishFrequencyTests`: Swift 6.2's macro *does* drop the
+/// notification for a whole-property assignment of an equal value when the
+/// property's type is `Equatable`. It does not do so for anything reached
+/// through `_modify` — `dict[k] = v`, `rows[i].field = x`, `set.insert(…)` —
+/// nor for a property whose type is not `Equatable`.
+/// ``AppStateObservationContractTests`` pins both halves of that rule.
 ///
 /// ``AppStateTrackedPropertyCoverageTests`` pins the read list against the
 /// class, so a property added to `AppState` without being added here fails a

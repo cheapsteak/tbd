@@ -40,8 +40,18 @@ extension AppState {
     /// this touch, `canCloseFocusedTab` would register no dependency on the one
     /// property that actually moves when focus does, and the File ▸ Close Tab
     /// item would stay stuck at whatever it computed last. `TerminalPanelView`
-    /// writes `focusedTabCloseContext` on every focus in and out, which makes it
-    /// the correct observable proxy for a first-responder change.
+    /// writes `focusedTabCloseContext` on mouse-driven focus changes, in and
+    /// out, which makes it the best observable proxy available for a
+    /// first-responder change.
+    ///
+    /// It is a proxy, not a mirror. Focus can also move programmatically —
+    /// `makeFirstResponder` from the webview find bar, an inline rename field,
+    /// a submitting text editor — and those paths do not write the property, so
+    /// Close Tab can stay *enabled* after focus leaves a terminal that way.
+    /// Pressing ⌘W then re-resolves and no-ops, so the consequence is a stale
+    /// menu state rather than a wrong close. Closing that gap properly means
+    /// writing nil on resign-first-responder, which is a change to the focus
+    /// bookkeeping rather than to this read.
     func resolvedFocusedTabCloseContext() -> TabCloseContext? {
         let lastFocused = focusedTabCloseContext
         if terminalFocusTargets.isEmpty {
