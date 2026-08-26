@@ -180,3 +180,70 @@ considerably better, but it is a live possibility rather than a settled one.
   bytes-fed-without-a-child-process mode that TBD operates in. If that reading is
   right, renderer tuning will not close the gap. Enabling the GPU renderer is the
   cheap measurement that discriminates.
+
+## Perceived lag is intermittent, and is not explained by app CPU — 2026-08-26
+
+The measurements above describe cost. They do not explain the symptom that
+prompted the investigation, and a second day of measurement separated the two.
+
+**The condition cycles.** Perceived lag alternates with periods that feel fine,
+on a timescale of minutes. That alone rules out any explanation that is constant
+— a view graph competing for the main thread is always competing. It also
+explains why single-window measurements disagreed with each other: each was a
+lottery ticket on which state it happened to sample.
+
+**During a reported laggy period the app was not compute-bound.** Its main thread
+was 81% idle and it used 26% of a core — *less* than several windows in which
+nothing felt wrong. Terminal draw was 3.6% and view-graph flush 5.4%, both well
+below their scroll-time figures.
+
+**A 20-second sample took 73 seconds of wall clock to complete.** A system
+profiling tool could not get its own work scheduled on time, which is a
+machine-level signal rather than an application one.
+
+**The machine is nonetheless fast where it matters for echo.** A bare pty round
+trip — write to an open descriptor, child echoes, read back, with no process
+spawns inside the loop — measures 0.1 ms at p50 and 7.7 ms at worst, even at
+load average ~70 with swap near capacity. Keystroke echo is not limited by the
+operating system, the pty layer, or scheduling beneath it.
+
+**Process spawns, by contrast, are expensive here**: a single `tmux` client spawn
+measures 114 ms at p50. Any probe that spawns a process per iteration measures
+spawn cost and nothing else. An earlier round-trip probe reported 627 ms at p50
+purely from this effect and was discarded.
+
+### What this reframes
+
+Average idle percentage says nothing about queueing delay. A main thread that is
+81% idle can still run long bursts, and every chunk of terminal output is
+dispatched onto that thread by `TerminalPanelView.dataReceived` — with no check
+for whether the terminal is even visible. The distribution of main-thread block
+durations, not the mean, is what would explain the symptom, and no measurement
+here captures it.
+
+External probing is exhausted: accessibility queries against the app are refused
+for want of assistive access, and no external tool can observe dispatch-queue
+latency. Answering it requires signpost instrumentation inside the render path.
+
+### Eliminated, with the evidence
+
+- **Machine pty and scheduling beneath it** — 0.1 ms round trip under load.
+- **Compilation** — a laggy period was captured with zero compiler processes.
+  Note the instrument that established this was initially blind to test
+  execution and was corrected; the corrected form counts test helpers too.
+- **Sidebar body evaluation as the dominant cause** — collapsing every repo
+  section, which removes the largest measured view-graph consumer, did not
+  change the symptom.
+- **A large population of invisible terminals feeding the main thread** — the
+  keep-alive cap is eight, but only three terminals were attached, so the effect
+  is real in code and small in practice at present.
+
+### Still open
+
+- **The distribution of main-thread block durations**, which is the mechanism
+  that would connect an idle-on-average main thread to a laggy-feeling terminal.
+- **Whether the compositor is implicated.** It was the top system process through
+  most of the laggy period, with 84 hours of accumulated CPU over 18 days of
+  uptime. A view hierarchy that presents more work per frame would degrade first
+  under that pressure — which would explain why a simpler emulator on the same
+  backend stays smooth — but nothing here demonstrates it.
