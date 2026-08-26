@@ -204,15 +204,32 @@ Why credentials never travel, by kind:
     {"name": "size",   "type": "enum",   "label": "Size", "values": ["small","large"], "default": "small"}
   ],
   "profile_kinds": ["oauth", "api_key", "bedrock"],
-  "credential_ref_hint": "acme-vault path, e.g. acme-vault://oauth/<name>"
+  "credential_ref_hint": "acme-vault path, e.g. acme-vault://oauth/<name>",
+  "identity": {"account": "acme-prod-1234", "environment": "staging", "region": "us-east-1"}
 }
 ```
 
 - `contract_versions` — every contract major version this provider supports (see Versioning).
-- `name` — a stable machine identifier for the provider (used, along with each session id, as the caller's key for this provider's sessions).
+- `name` — a stable machine identifier for the provider's KIND, not for this registration of it. Two registry entries running the same executable against different backends report the same `name`, so a caller MUST NOT use it as the identity of a registration: the caller's own registry key is that identity, and is what it keys sessions, mirrors, and attach targets on.
+- `identity` (optional) — see Provider identity below.
 - `capabilities` — which optional verbs/features (`stop`, `log`, `transcript`, `send`, `attach`, `events`, `rename`, `profile`, `set-profile`, `archive`, `unarchive`, `land`) this provider implements. Every capability string except `profile` names the verb of the same name: declaring it means the verb is implemented, and omitting it means the caller never invokes it and never offers the corresponding action. `profile` is the exception — it gates whether `create`'s `profile` field is honored (see `create` and the Profile object above), while `set-profile` gates the verb of the same name.
 - `create_params` — a flat field list, not a JSON Schema, describing the form for `create`. Supported `type` values: `string`, `text`, `bool`, `int`, `enum`. The caller renders this generically (the most complex widget is an enum dropdown) and only does required/type checks client-side — the provider is the validator of record, via the error model below. The field names `repo`, `slug`, `branch`, `prompt`, and `title` are well-known: a caller may prefill them from ambient context (e.g. a currently selected repository) when present, and for `slug` a caller may generate a lane identifier of its own choosing. Well-known is a caller-side prefill convention and nothing more: it obliges a provider to nothing, changes no validation, and a provider that declares any of these names is simply one whose form a caller can fill in without asking. A caller that can answer every `required` field this way may skip the form entirely and create straight away; one that cannot must ask rather than guess.
 - `profile_kinds` and `credential_ref_hint` are meaningful only when `capabilities` includes `profile`; a provider without that capability SHOULD omit both, and a caller MUST ignore them if present without it. `profile_kinds` lists which `kind` values (from the Profile object above) this provider can actually realize. `credential_ref_hint` is placeholder text — not validation — describing the shape of a `credential_ref` this provider expects; a caller shows it as placeholder text in its credential-reference input.
+
+### Provider identity (optional)
+
+`identity` is a flat string-to-string map of **non-secret display pairs naming the backend this registration is pointed at** — the account, environment, region, box, or endpoint a human needs in order to tell two registrations apart. It answers the question `name` cannot: `name` identifies the provider's kind, so two registry entries running the same executable against a production and a staging control plane report the same `name`, and a caller that leads with it shows the same label for both.
+
+A caller cannot derive this itself. A registration is an executable path and a flag list, and the mapping from those flags to a control plane is the provider's private business, so a caller that inferred an environment from an argument would be guessing precisely where a wrong answer is most expensive.
+
+```json
+"identity": {"account": "acme-prod-1234", "environment": "staging", "box": "i-0abc123def"}
+```
+
+- **Entirely optional**, like every other additive field: a provider that omits it stays fully conformant, and a caller MUST degrade to whatever identity it can derive locally (its own registry key, and the command it runs).
+- **Answered from static local data, no network and no authentication**, on the same terms as the rest of `describe`. A provider that would have to call its backend to learn a value omits that key rather than making `describe` fall over on an expired credential.
+- **Values are display text and are never interpreted.** The keys `account`, `environment`, `region`, `box`, `host`, and `endpoint` are well-known only in the sense that a caller MAY order them first; no key is required, none changes any behavior, and every other key renders opaquely beside them. This mirrors `meta` on the Session object, and degrades the same way: a value that is not a string costs its own key, and an `identity` that is not an object costs the map without costing the `describe` response.
+- **It MUST NOT carry credential material** — no token, secret, password, session credential, or signature, whole or partial. Identity here means *which backend*, never *how to reach it*. A caller displays these pairs to a human, and a value that must not be displayed does not belong in the map. TBD additionally drops any pair whose key names credential material rather than trusting this rule alone, so a provider that violates it loses the pair rather than leaking it.
 
 `describe.capabilities` reports **interface capabilities**: which contract verbs TBD may call. It does not prove that a session has the external **task capabilities** a workload needs. A provider or workflow that claims ownership transfer or completion MUST preflight the concrete external capabilities required by that task and fail visibly before transfer when they are unavailable. Successful `create`, `state: "running"`, or `send` handoff proves only that the corresponding contract or transport step succeeded; it does not prove workload permission. The provider or higher-level workflow owns this preflight because TBD cannot infer vendor-specific permissions from the provider contract.
 

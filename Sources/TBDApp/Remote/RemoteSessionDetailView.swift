@@ -303,7 +303,10 @@ struct RemoteSessionDetailView: View {
             }
 
             HStack(spacing: 8) {
-                Text(providerStatus?.describe?.name ?? selection.provider)
+                // The selection's own registry key: the identity every other
+                // subsystem keys on, and the one that differs between two
+                // entries of the same kind.
+                Text(selection.provider)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if let session {

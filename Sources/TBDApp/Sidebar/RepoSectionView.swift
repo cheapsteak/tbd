@@ -612,7 +612,7 @@ struct RepoSectionView: View {
             } else {
                 Menu("New Remote Session…") {
                     ForEach(providers, id: \.config.name) { provider in
-                        Button(provider.describe?.name ?? provider.config.name) {
+                        Button(RemoteProviderIdentityPresentation.headline(provider)) {
                             openRemoteCreateSheet(for: provider)
                         }
                         .disabled(provider.hasStaleSnapshot)

@@ -11,7 +11,23 @@ struct RemoteProviderDeskView: View {
     @State private var isRefreshing = false
     @State private var runningRemediation: RemoteRemediationRun?
 
-    private var displayName: String { provider.describe?.name ?? provider.config.name }
+    /// The registry key, never `describe.name` — see
+    /// `RemoteProviderIdentityPresentation` for why the desk must not lead
+    /// with the provider's KIND.
+    private var displayName: String { RemoteProviderIdentityPresentation.headline(provider) }
+
+    private var identityRows: [RemoteProviderIdentityPresentation.Row] {
+        RemoteProviderIdentityPresentation.rows(provider)
+    }
+
+    private var inventoryState: RemoteProviderInventoryState {
+        RemoteProviderInventoryState.make(provider: provider, sessionCount: summary.total)
+    }
+
+    private var crossProviderNote: String? {
+        RemoteProviderInventoryState.crossProviderNote(
+            currentProvider: provider.config.name, sessions: appState.remoteSessions)
+    }
 
     private var summary: RemoteProviderDeskSummary {
         RemoteProviderDeskSummary(provider: provider.config.name, sessions: appState.remoteSessions)
@@ -21,7 +37,9 @@ struct RemoteProviderDeskView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 masthead
+                identityBlock
                 healthNotice
+                attentionNotices
                 stateStrips
                 sessionLedger
             }
@@ -49,8 +67,19 @@ struct RemoteProviderDeskView: View {
             .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(displayName)
-                    .font(.system(size: 24, weight: .semibold, design: .rounded))
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(displayName)
+                        .font(.system(size: 24, weight: .semibold, design: .rounded))
+                    // Only when it says something the registry key doesn't:
+                    // two entries running the same binary report the same
+                    // kind, so showing it unconditionally is what made them
+                    // look like the same provider.
+                    if let kind = RemoteProviderIdentityPresentation.kindSubtitle(provider) {
+                        Text(kind)
+                            .font(.callout)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
                 HStack(spacing: 7) {
                     Text(healthTitle)
                     Text("·")
@@ -72,6 +101,93 @@ struct RemoteProviderDeskView: View {
             .keyboardShortcut("r", modifiers: .command)
             .help("Refresh provider and mirrored session state")
             .accessibilityLabel(isRefreshing ? "Refreshing provider" : "Refresh provider")
+        }
+    }
+
+    /// Which backend this registry entry is pointed at, as far as TBD can
+    /// honestly say: the provider's own `describe.identity` pairs when it
+    /// sends them, and the locally-derivable command line and versions
+    /// regardless.
+    private var identityBlock: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(identityRows) { row in
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text(row.label)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 108, alignment: .leading)
+                    Text(row.value)
+                        .font(.callout.monospaced())
+                        .foregroundStyle(row.isDistinguishing ? .primary : .secondary)
+                        .textSelection(.enabled)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                }
+                .accessibilityElement(children: .combine)
+            }
+            if provider.describe?.identity?.hasDisplayablePairs != true {
+                Text("This provider reports no backend identity, so TBD can only show the "
+                     + "command it runs. Two entries pointing at different backends are "
+                     + "distinguishable here only by that command.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    /// The attention axis, in words: which sessions are blocked and on what,
+    /// and how many live terminals are reporting nothing about their agent.
+    @ViewBuilder
+    private var attentionNotices: some View {
+        if !summary.needsAttention.isEmpty || summary.unattributedRunningNotice != nil {
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(summary.needsAttention) { session in
+                    Button {
+                        appState.selectRemoteSession(
+                            provider: session.provider, sessionID: session.payload.id)
+                    } label: {
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: "hand.raised.fill")
+                                .foregroundStyle(SuffixRowIndicator.attention.color)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(session.payload.title ?? session.payload.id)
+                                    .fontWeight(.semibold)
+                                Text(RemoteAgentAttention.explanation(for: session) ?? "Waiting for input.")
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            Spacer(minLength: 0)
+                        }
+                        .font(.callout)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+                if let notice = summary.unattributedRunningNotice {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: "questionmark.circle")
+                            .foregroundStyle(.secondary)
+                        Text(notice)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .font(.callout)
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                SuffixRowIndicator.attention.color.opacity(summary.needsAttention.isEmpty ? 0 : 0.08),
+                in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.09))
+            }
         }
     }
 
@@ -131,7 +247,10 @@ struct RemoteProviderDeskView: View {
             subtitle: "Process state",
             metrics: [
                 .init(label: "Starting", value: summary.terminal.starting, tint: .secondary),
-                .init(label: "Running", value: summary.terminal.running, tint: .green),
+                // Not green. Green is the colour a reader takes for progress,
+                // and a running terminal is not progress — the agent strip
+                // beside this one is the only place that can say so.
+                .init(label: "Running", value: summary.terminal.running, tint: .primary),
                 .init(label: "Exited", value: summary.terminal.exited, tint: .secondary),
                 .init(label: "Gone", value: summary.terminal.gone, tint: .orange),
                 .init(label: "Unknown", value: summary.terminal.unknown, tint: .secondary),
@@ -144,8 +263,8 @@ struct RemoteProviderDeskView: View {
             title: "Agent",
             subtitle: "Attention state",
             metrics: [
-                .init(label: "Working", value: summary.agent.working, tint: .blue),
-                .init(label: "Waiting", value: summary.agent.waitingInput, tint: .orange),
+                .init(label: "Working", value: summary.agent.working, tint: .green),
+                .init(label: "Waiting", value: summary.agent.waitingInput, tint: SuffixRowIndicator.attention.color),
                 .init(label: "Idle", value: summary.agent.idle, tint: .secondary),
                 .init(label: "Exited", value: summary.agent.exited, tint: .secondary),
                 .init(label: "Unknown", value: summary.agent.unknown, tint: .secondary),
@@ -166,19 +285,19 @@ struct RemoteProviderDeskView: View {
                     .foregroundStyle(.tertiary)
             }
 
+            if inventoryState.warrantsNotice {
+                inventoryNotice
+            }
+
             if summary.sessions.isEmpty {
                 VStack(spacing: 10) {
                     Image(systemName: "rectangle.stack.badge.minus")
                         .font(.system(size: 28))
                         .foregroundStyle(.tertiary)
-                    Text(provider.hasStaleSnapshot ? "No sessions in the last good inventory" : "No mirrored sessions")
+                    Text(inventoryState.title)
                         .font(.headline)
-                    // Don't send the user to a control this provider's own
-                    // state has disabled: `RemoteProviderHeaderRow` gates `+`
-                    // on `hasStaleSnapshot` until a full inventory recovers.
-                    Text(provider.hasStaleSnapshot
-                         ? "This provider's inventory is stale, so creating sessions is unavailable until a refresh succeeds."
-                         : "Use the + button beside \(displayName) in the sidebar to create one.")
+                        .multilineTextAlignment(.center)
+                    Text(emptyStateGuidance)
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -204,6 +323,50 @@ struct RemoteProviderDeskView: View {
                 }
             }
         }
+    }
+
+    /// The four not-simply-current readings of this provider's inventory,
+    /// each stated as itself. A stale list, a list TBD has never populated,
+    /// a list whose freshness is unreadable, and a successfully EMPTY list
+    /// are four different facts, and only the last is evidence about the
+    /// backend.
+    private var inventoryNotice: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: inventoryState.isCurrent ? "tray" : "clock.badge.questionmark")
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(inventoryState.title).fontWeight(.semibold)
+                Text(inventoryState.detail())
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                // The direct answer to "did I just look at the wrong
+                // provider" — the confusion this whole surface exists to end.
+                if let crossProviderNote {
+                    Text(crossProviderNote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .font(.callout)
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    /// What to do next when the list is empty, which depends on whether the
+    /// emptiness is a fact about the provider or about TBD's knowledge of it.
+    private var emptyStateGuidance: String {
+        // Don't send the user to a control this provider's own state has
+        // disabled: `RemoteProviderHeaderRow` gates `+` on `hasStaleSnapshot`
+        // until a full inventory recovers.
+        if provider.hasStaleSnapshot {
+            return "Creating sessions is unavailable until a refresh succeeds."
+        }
+        if case .emptySuccess = inventoryState {
+            return "Use the + button beside \(displayName) in the sidebar to create one."
+        }
+        return "Refresh to ask \(displayName) for its inventory."
     }
 
     private var freshnessLabel: String {
@@ -400,11 +563,15 @@ private struct ProviderSessionLedgerRow: View {
                 Text(RemoteSessionStatePresentation.agentLabel(session.payload.agentState))
             }
             .lineLimit(1)
-            if let reason = session.payload.agentStateReason, !reason.isEmpty {
-                Text(reason)
+            // `RemoteAgentAttention` supersedes the bare reason string: it
+            // prefers the structured question block when there is one, and
+            // it also speaks for the running-but-unattributed row, which has
+            // no reason string at all and used to say only "Updated 3m ago".
+            if let explanation = RemoteAgentAttention.explanation(for: session) {
+                Text(explanation)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                    .lineLimit(2)
             } else {
                 Text("Updated \(RemoteProviderDeskSummary.agePhrase(since: session.lastSeen))")
                     .font(.caption)
@@ -429,7 +596,10 @@ private struct ProviderSessionLedgerRow: View {
         case .idle: return .secondary
         case .exited: return .secondary
         case .unknown:
-            return session.payload.state == .running ? .green : .secondary
+            // A running terminal with no agent state was green here, which
+            // read as "this session is working" — the exact claim the
+            // contract says this combination cannot support.
+            return .secondary
         }
     }
 
