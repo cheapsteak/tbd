@@ -103,10 +103,26 @@ across worktree switches, not just for correctness.
 
 ## Acceptance
 
-**Graduation requires closing the gap to a standalone emulator.** The bar is that
-a TBD terminal hosting an agent TUI feels comparable to a standalone emulator
-hosting the same TUI, attached to the same tmux session, on the same machine —
-the control described in "Why". The repository owner is the judge of comparable.
+**Graduation requires closing the gap to a standalone emulator under realistic
+load.** The bar is that a TBD terminal hosting an agent TUI feels comparable to a
+standalone emulator hosting the same TUI, attached to the same tmux session, on
+the same machine — the control described in "Why". The repository owner is the
+judge of comparable.
+
+**The comparison must be made on a loaded machine, not a quiet one.** A browser
+open, agents running, memory under pressure: the conditions the app is actually
+used in. This is not incidental strictness. Field observation established that
+TBD's terminal is usable when the machine is quiet and degrades badly when it is
+not, while a standalone emulator stays smooth through both — so a gate applied to
+a quiet machine can pass while the defect that motivated this work is entirely
+intact. Closing a browser and freeing roughly 3 GB was measured to halve system
+load, stop paging, and produce a large subjective improvement, while leaving TBD's
+own CPU unchanged. A gate that can be satisfied by that kind of ambient relief is
+measuring the machine, not the change.
+
+The failure mode this guards against is specific: the surplus work TBD performs
+per keystroke and per frame is invisible when everything has headroom, and
+decisive when it does not. The client with the least headroom degrades first.
 
 Feel is the bar rather than a threshold on the profile because the profile can
 improve while the terminal still feels slow: the upstream streaming report above

@@ -344,12 +344,22 @@ naive conversion, per the repo rule that plan-authored tests must discriminate:
   against the broken one-shot implementation; two sequential fires are the
   discriminator.
 
-**A measured gate, over validated windows.** Re-run the scroll profile and
-compare against the baseline recorded here: `GraphHost.flushTransactions` at
-25.1% and 18.1% of main-thread samples while scrolling against 3.7% quiet, with
-`RepoSectionView.body` at 3.7% and 3.0% against 0.7%, the main thread 45% to 64%
-busy, and TBDApp near 47% of a core. The graph-flush share is the primary
-number; the named view bodies are how a regression is localized.
+**A measured gate, over validated windows, on a loaded machine.** Re-run the
+scroll profile and compare against the baseline recorded here:
+`GraphHost.flushTransactions` at 25.1% and 18.1% of main-thread samples while
+scrolling against 3.7% quiet, with `RepoSectionView.body` at 3.7% and 3.0%
+against 0.7%, the main thread 45% to 64% busy, and TBDApp near 47% of a core. The
+graph-flush share is the primary number; the named view bodies are how a
+regression is localized.
+
+Both sides of the comparison must be taken under comparable machine load, and
+that load must resemble real use — a browser open, agents running — rather than a
+quiet machine. Field observation established that the app's surplus work is
+invisible when there is headroom and decisive when there is not: relieving memory
+pressure produced a large subjective improvement while leaving the app's own CPU
+unchanged. A gate satisfied by ambient relief has measured the machine rather
+than the change. Record the machine's state alongside the numbers so a later
+reader can tell whether two measurements are comparable at all.
 
 Compare subtree totals, not summed symbol occurrences — `sample` counts are
 inclusive of children.
