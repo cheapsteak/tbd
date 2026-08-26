@@ -90,8 +90,8 @@ public final class Daemon: Sendable {
     /// after `shutdown()` has already torn down the manager, orphaning them.
     public nonisolated(unsafe) var remoteStartTask: Task<Void, Never>?
     /// Deferred archived-worktree backfill task (step 11a-backfill). Stored so
-    /// `stop()` can cancel and await it — the pass spawns one `git` child per
-    /// archived row, so a SIGTERM mid-pass has a child to reap.
+    /// `stop()` can cancel and await it — the pass spawns `git` children, so a
+    /// SIGTERM mid-pass has an in-flight child to signal on the way out.
     public nonisolated(unsafe) var archivedBackfillTask: Task<Void, Never>?
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
     public nonisolated(unsafe) var oauthUsagePoller: OAuthProfileUsagePoller?
@@ -1261,19 +1261,28 @@ public final class Daemon: Sendable {
         // in-flight `describe` immediately rather than only being observed
         // between providers in `loadRegistryAndDescribe`'s loop — but that
         // interruption still runs ON this task, so it needs the daemon
-        // process (and the `SubprocessWatchdog` thread that reaps the killed
-        // child) to still be alive to finish unwinding. Awaiting `.value`
+        // process (and the `SubprocessWatchdog` thread the SIGKILL escalation
+        // is scheduled on) to still be alive to finish unwinding. Awaiting `.value`
         // here, before `Foundation.exit(0)` below, is what guarantees that;
         // without it the process could tear down mid-unwind and orphan the
         // child exactly as before.
+        //
+        // The archived-worktree backfill is cancelled here too, and awaited
+        // just below, for the same reason: it can be mid `runBoundedProcess`,
+        // and the cancellation relay's interruption unwinds ON this task, so
+        // the process must stay alive for that unwind to finish. What awaiting
+        // buys is the unwind, not a reap — the relay signals the `git` child
+        // with SIGTERM and the continuation resumes immediately after, while
+        // the +500 ms SIGKILL escalation is scheduled on the watchdog thread
+        // and does not survive the `Foundation.exit(0)` below.
+        //
+        // Both cancels go out before either await, so the two unwinds overlap
+        // rather than sum. Nothing above this bounds `stop()`'s latency —
+        // `main.swift` has no shutdown watchdog — and both must still complete
+        // before the manager teardown below.
         remoteStartTask?.cancel()
-        await remoteStartTask?.value
-
-        // Cancel-and-await for the same reason as `remoteStartTask` above: the
-        // backfill can be mid `runBoundedProcess`, and the cancellation relay's
-        // interruption unwinds ON this task, so the process must stay alive to
-        // reap the killed `git` child.
         archivedBackfillTask?.cancel()
+        await remoteStartTask?.value
         await archivedBackfillTask?.value
 
         // Stop remote-backends poll loops / events supervisors. Required,
