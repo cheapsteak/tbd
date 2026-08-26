@@ -248,61 +248,118 @@ latency. Answering it requires signpost instrumentation inside the render path.
   under that pressure — which would explain why a simpler emulator on the same
   backend stays smooth — but nothing here demonstrates it.
 
-## The stall is found; its cause is not — 2026-08-26
+## The stall's cause: SwiftUI's view-graph flush — 2026-08-26
 
-Signpost instrumentation on the render path measured the wait that every earlier
-method was blind to. Intervals were emitted around the main-thread hop in
-`TerminalPanelView.dataReceived` (enqueue to execute), around `feed`, and around
-the display pass; `rpc.pollCycle` was already instrumented. Three windows were
-collected with `log stream --style ndjson --signpost` during ordinary operation,
-all three from the same process — process IDs were checked, and no restart
-occurred in any of them.
+Signpost instrumentation measured a wait that every earlier method was blind to,
+and a subsequent investigation (issue #735) identified its cause and confirmed a
+fix. What follows records both.
 
-**Terminal output waits far longer than it should to reach the renderer, and the
-wait grows across the three windows:**
+**Terminal output waited far longer than it should to reach the renderer.**
+Intervals around the main-thread hop in `TerminalPanelView.dataReceived` measured
+a median under two milliseconds and a maximum of 1,096 ms across three windows.
+The median is why averages and CPU percentages never revealed it: what matters is
+when work lands, not how much of it there is.
 
-- `mainThreadHop` — p50 0.08 / 0.89 / 1.84 ms, p99 157 / 28 / 281 ms, max 162 /
-  311 / **1,096 ms**.
-- `feed` — p50 0.11 ms.
-- `displayPass` — p50 5 to 9 ms.
+**Rendering was never the bottleneck.** Parse costs a tenth of a millisecond and
+a display pass single-digit milliseconds. The per-row attributed-string rebuild,
+the eight-character shaped-line cache, and the full-grid blink scan are real
+inefficiencies, and none of them is what stalls terminal output.
 
-A wait of over a second for output to reach the renderer is the symptom users
-report. The median wait is under two milliseconds, which is why averages and CPU
-percentages never revealed it: what matters is when work lands, not how much of
-it there is.
+**The cause is SwiftUI's own runloop observer, `Update.end`, flushing the view
+graph.** It was the only class of main-thread work that ever ran longer than
+about 35 ms without returning to the runloop: 105 and 118 runs over 50 ms across
+two windows, p90 179-205 ms, maximum 366 ms, against a maximum of 89 ms for
+everything else combined. The flush is bimodal — trivial or enormous, with a
+median of 2-3 ms against that p90.
 
-**Rendering is not the bottleneck.** Parse costs a tenth of a millisecond and a
-display pass costs single-digit milliseconds. The per-row attributed-string
-rebuild, the eight-character shaped-line cache, and the full-grid blink scan are
-real inefficiencies, and none of them is what stalls a keystroke.
+The mechanism is not a correlation and needs no statistical correction. During
+stalls, 87-92% of main-thread CPU sat inside a runloop-observer callout while CPU
+servicing the main dispatch queue fell from 25-28% to 0.2-5.1%. A block on the
+main queue cannot run while the thread is inside a callout, so a long callout
+*is* an undrained queue — one event described from two sides.
 
-### The poll cycle was a suspect, and was eliminated
+**Per-property observation tracking fixed it.** After the change, the worst wait
+for terminal output fell from **325 ms to 58 ms** and p99 from **258 ms to
+5.3 ms**, measured with the same instrument at matched process uptime.
 
-The first window showed twelve of fourteen stalls beginning during a poll cycle,
-which looked decisive. It was not. The test that matters compares observed
-co-occurrence against what chance predicts given how much of the timeline the
-suspect occupies:
+### A prediction that was wrong, and why the correction matters
 
-- window one — poll duty 14.2%, 14 stalls, 12 in-poll against 2.0 expected: 6.04x
-- window two — poll duty 22.5%, 12 stalls, 5 in-poll against 2.7 expected: 1.85x
-- window three — poll duty 43.7%, 363 stalls, 162 in-poll against 158.6 expected: **1.02x**
+The expectation was that per-property tracking would cut attribute-graph
+propagation hardest and leave the `ForEach` view-list rebuild largely intact,
+since that rebuild runs whenever list data changes regardless of tracking
+granularity. The opposite happened, in absolute CPU inside expensive flushes:
+the view-list rebuild fell 31-fold (6,190 ms to 201 ms), against 7.4-fold for
+attribute-graph propagation and 2.8-fold for body evaluation, and `Worktree`
+copy-and-destroy left the top entry points entirely.
 
-Window three carries twenty-six times the data of window one, and at 1.02x the
-association is indistinguishable from chance. Poll cycles had grown to occupy
-nearly half the timeline, so "45% of stalls fall inside a poll" restates "polls
-run half the time" and nothing more.
+The rebuild was itself being *triggered* by object-wide invalidation: any write
+invalidated the observing views, forcing the whole nested list to be
+reconstructed, with the value copies happening inside that reconstruction.
 
-**Raw co-occurrence is not evidence when the suspect occupies a large fraction of
-the timeline.** Computing the duty cycle and testing enrichment is what caught
-this, and it belongs in the method section alongside window validation.
+### Suspects eliminated along the way
 
-### What remains open
+The poll cycle was named as the cause on one 30-second window and refuted on a
+larger one: enrichment against chance was **1.02x** once the poll's 43.7% duty
+cycle was accounted for. `displayPass` showed 3.99x enrichment on twelve
+observations and was likewise noise. Process age was tested rather than assumed —
+the post-fix side measured at 6 and 59 minutes of uptime agreed almost exactly.
 
-Something occupies the main thread in bursts long enough to stall terminal I/O by
-hundreds of milliseconds, and it is unidentified. Finding it requires
-instrumentation that catches an arbitrary main-actor burst rather than one named
-suspect — a watchdog recording the stack when a runloop turn exceeds a threshold,
-or a sampling profile correlated on time against the signpost stream.
+### Method worth reusing
 
-Separately worth investigating on its own terms: a poll cycle occupying 43.7% of
-wall time is remarkable regardless of its relationship to these stalls.
+**Define windows by the symptom, never by a suspect.** A window here was a period
+during which terminal bytes were demonstrably sitting undelivered on the main
+queue. Nothing about any candidate entered that definition, which is what allowed
+the analysis to rule the poll cycle out rather than assume it in.
+
+**Put every instrument in one trace so they share a clock** — a sampling
+profiler, the signposts, and the platform's own hang detector correlated exactly
+rather than aligned after the fact.
+
+**Attribute by which runloop callout the work hangs off, not by what it
+contains.** Stack composition inside stall windows was near-identical to
+composition outside them, so what code runs did not discriminate at all. The
+trigger did.
+
+Three further instrument traps, each of which produced a wrong intermediate
+reading: trace exports may reference-compress backtrace frames, yielding a stack
+that reads as legitimately truncated but is not; a 21-second pilot window
+contradicted the 150-second windows outright, because short windows catch
+mistimed captures rather than supporting conclusions; and counting matching
+processes by line count over-reports wildly when command lines are multi-line.
+
+### A cheaper instrument already exists
+
+`HangWatchdog` writes stacks to `~/Library/Logs/TBD/hang-stacks/` above a
+threshold tunable by `TBD_HANG_THRESHOLD_MS`, and had independently captured the
+same path. It is cheaper to read than to record a trace. Note that directory held
+110,512 files — a durable resource with no named reconciler.
+
+## What this does NOT cover
+
+**Every window in this work was taken during ordinary operation with agents
+streaming and no user interaction.** The intervals measure terminal output
+travelling *towards* the screen. They do not measure keystroke-to-echo, and they
+do not measure scrolling.
+
+**Typing has still never been measured under a validated window**, and neither
+has scrolling. The good numbers above must not be read as covering either.
+
+Two named mechanisms target exactly those cases and are untouched by the fix:
+wheel-event amplification, where every wheel event emits
+`max(1, Int(abs(deltaY)))` mouse reports with no momentum-phase filter and no
+fractional accumulator; and the 150 ms window after each keystroke during which
+`interactiveInputDisplayWindowNs` disables the frame limiter so every output
+chunk forces a synchronous redraw. If typing or scrolling still feel bad, those
+are the better suspects.
+
+Any window intending to cover them must be checked for containing the action —
+the trap that put a wrong conclusion into a committed spec earlier in this
+investigation.
+
+## Residual
+
+Long flushes have not vanished — 50 callouts over 50 ms, up to 200 ms, in a
+59-minute window — they simply far less often have terminal output waiting behind
+them. Expensive flushes are now 54.5% body evaluation, led by `WorktreeRowView`,
+`TabBarItem`, and `PanePlaceholder`, with 35.4% attribute-graph propagation and
+only 6.7% view-list rebuild.
