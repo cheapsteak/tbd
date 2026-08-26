@@ -42,9 +42,16 @@ public struct ArchivedWorktreeBackfill: Sendable {
 
     /// Run the backfill for a single repo. `internal` so tests can drive it directly.
     func runForRepo(repo: Repo) async {
-        let archived: [Worktree]
+        // `listLocal`, not `list`: this pass probes each row's branch against
+        // the repo's checkout on THIS disk, so a remote lane — which has no
+        // checkout here — is not broken, it is out of scope. Probing one would
+        // classify it broken on every daemon start, and a local reflog rename
+        // that happened to key on its branch name would rewrite a row that was
+        // never wrong. (`limit`/`offset` are applied in SQL before the
+        // location filter; this call passes neither, so that caveat is moot.)
+        let archived: [LocalWorktree]
         do {
-            archived = try await db.worktrees.list(repoID: repo.id, status: .archived)
+            archived = try await db.worktrees.listLocal(repoID: repo.id, status: .archived)
         } catch {
             logger.warning("backfill: failed to list archived worktrees for \(repo.displayName, privacy: .public): \(error, privacy: .public)")
             return
@@ -70,7 +77,7 @@ public struct ArchivedWorktreeBackfill: Sendable {
                 renameMap = await mineReflogRenames(repoPath: repo.path)
             }
 
-            await attemptRepair(worktree: wt, repo: repo, renameMap: renameMap ?? [:])
+            await attemptRepair(worktree: wt.worktree, repo: repo, renameMap: renameMap ?? [:])
         }
     }
 
