@@ -448,7 +448,12 @@ struct TableTranscriptView: NSViewRepresentable {
                 blockHeightCache[BlockHeightKey(id: node.id, version: node.contentVersion, width: width)] = perBlock
                 let blocksHeight = blockMeasurer.blocksHeight(fromBlockHeights: perBlock)
                 let measureEnd = DispatchTime.now().uptimeNanoseconds
-                height = TranscriptBubbleGeometry.rowHeight(blocksHeight: blocksHeight)
+                // The role carries the header budget: a peer bubble draws a sender
+                // header the cell adds to the SAME block stack, and measure has to
+                // reserve it here or the row drifts from what renders (#129).
+                height = TranscriptBubbleGeometry.rowHeight(
+                    blocksHeight: blocksHeight,
+                    role: TranscriptBubbleGeometry.role(for: item))
                 openPerf.chatBubbleNanos &+= measureEnd &- branchStart
                 openPerf.chatBubbleRenderNanos &+= renderEnd &- renderStart
                 openPerf.chatBubbleMeasureNanos &+= measureEnd &- renderEnd
@@ -670,16 +675,45 @@ struct TableTranscriptView: NSViewRepresentable {
             let height = measuredHeight(for: node, width: width)
             let blockHeights = blockHeightCache[
                 BlockHeightKey(id: node.id, version: node.contentVersion, width: width)] ?? []
+            // Resolved on every configure rather than cached with the composed
+            // blocks: the composed cache is keyed by `contentVersion`, which covers
+            // the sender (it is part of the item) but NOT the worktree list the
+            // sender resolves against. Recomputing keeps a renamed or newly-loaded
+            // worktree from leaving a stale link behind. It cannot move the row
+            // height either way — the header's height is a role constant.
+            var navigate: (@MainActor (UUID) -> Void)?
+            if let appState = context.appState {
+                navigate = { @MainActor id in appState.navigateToWorktree(id) }
+            }
+            let peerHeader = TranscriptBubbleGeometry.peerHeader(
+                for: item,
+                worktrees: context.appState?.allWorktrees ?? [],
+                navigate: navigate)
+            // A peer message is the one chat bubble whose overlay shows something
+            // the bubble does not: the delivery it arrived in, envelope and
+            // preamble included (`TranscriptOverlayView.peerBody`). Without this
+            // the overlay is unreachable from a bubble — every other row kind
+            // reaches it through `ActivityRowPresentation.openTargetID`, and
+            // `.chatBubble` has no presentation. Wired for peer rows ONLY: a user
+            // or assistant bubble has nothing extra to show, so its menu is
+            // unchanged.
+            var showDelivered: (() -> Void)?
+            if case .peerMessage = item, let openOverlay = context.openTranscriptOverlay {
+                let itemID = item.id
+                showDelivered = { openOverlay(itemID) }
+            }
             cell.configure(
                 blocks: blocks,
                 blockHeights: blockHeights,
                 sourceText: TranscriptBubbleGeometry.text(for: item),
                 role: role,
+                peerHeader: peerHeader,
                 accessibilityAttribution: TranscriptBubbleGeometry.accessibilityAttribution(for: item),
                 bodyWidth: TranscriptBubbleGeometry.bodyWidth(columnWidth: width, role: role),
                 columnWidth: width,
                 cachedHeight: height,
-                onLinkClicked: context.onLinkClicked
+                onLinkClicked: context.onLinkClicked,
+                onShowDelivered: showDelivered
             )
             return cell
         }
@@ -735,6 +769,23 @@ struct TableTranscriptView: NSViewRepresentable {
             return cell
         }
 
+        /// Resolves a peer sender against the app's ACTIVE worktrees, for the
+        /// SwiftUI bubble's sender header. Nil without an `AppState`, which leaves
+        /// the header plain rather than clickable.
+        private var peerSenderResolution: (@MainActor (PeerSender) -> UUID?)? {
+            guard let appState = context.appState else { return nil }
+            return { @MainActor sender in
+                PeerSenderResolver.resolve(sender, worktrees: appState.allWorktrees)
+            }
+        }
+
+        /// Follows a resolved peer sender, through the same entry point a
+        /// `tbd://open?worktree=<uuid>` click uses.
+        private var openWorktree: (@MainActor (UUID) -> Void)? {
+            guard let appState = context.appState else { return nil }
+            return { @MainActor id in appState.navigateToWorktree(id) }
+        }
+
         /// Builds the SwiftUI root view for a node: the existing
         /// `SelectableTranscriptRow` with the transcript environment injected so
         /// card affordances (overlay open, thread drill, text selection) work
@@ -757,6 +808,11 @@ struct TableTranscriptView: NSViewRepresentable {
                 // The pending-question interaction lives in the live SwiftUI
                 // pane, which leaves this env false. (#129)
                 .environment(\.transcriptStaticCards, true)
+                // The SwiftUI bubble's peer sender header resolves and follows
+                // through the same two capabilities the native cell gets. Absent
+                // them the header still draws — the name simply is not clickable.
+                .environment(\.transcriptPeerSenderResolution, peerSenderResolution)
+                .environment(\.transcriptOpenWorktree, openWorktree)
                 .environment(\.openTranscriptOverlay, context.openTranscriptOverlay)
                 .environment(\.toggleTranscriptActivityGroup, context.toggleActivityGroup)
                 .environmentIfPresent(context.appState)
@@ -1105,7 +1161,9 @@ struct TableTranscriptView: NSViewRepresentable {
             // No floor: a message that renders to NO blocks — one that is only raw
             // HTML, or only a reference-link definition — measures at bare chrome,
             // and flooring it to one line put it 16 pt over.
-            return TranscriptBubbleGeometry.rowHeight(blocksHeight: blocks.totalHeight)
+            return TranscriptBubbleGeometry.rowHeight(
+                blocksHeight: blocks.totalHeight,
+                role: TranscriptBubbleGeometry.role(for: item))
         }
 
         /// Accumulates the estimated block structure of one chat message: a

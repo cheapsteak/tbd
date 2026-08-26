@@ -199,15 +199,26 @@ enum ClaudeSessionScanner {
     /// Returns nil for a queued row that classifies as a system envelope —
     /// a background-task notification is not something the user said.
     ///
-    /// Peer traffic is NOT filtered, and that is deliberate: an
-    /// `<agent-message>` or `<cross-session-message>` envelope matches no
-    /// system prefix, so it classifies as a real prompt and can become the
-    /// subtitle. It arrives only queued — no `type:"user"` line ever carries
-    /// one — so there is no typed twin to match, and the choice is between
-    /// showing it and showing a subtitle that predates it. It IS a message
-    /// this session received, so it is shown; deciding it deserves its own
-    /// kind would be a design change, not a parser fix.
+    /// Peer traffic is NOT filtered, and that is deliberate: it IS a message
+    /// this session received, so it is shown rather than leaving the subtitle
+    /// stuck on a turn that predates it. What changed is how it is shown. A
+    /// row carrying a harness-written `origin` dictionary is routed through
+    /// `PeerOriginExtractor` — the same entry point the transcript parser and
+    /// bubble use — which strips the delivery envelope (the framing line, the
+    /// `<cross-session-message>` tags, the anti-escalation preamble) and
+    /// supplies the sender. This composes `"<name>: <first line>"` for a
+    /// verified sender or `"<from>: <first line>"` for an asserted one, so the
+    /// subtitle reads as an attributed message rather than raw envelope text.
+    /// An older-style peer message with no `origin` dictionary (only ever seen
+    /// as a `queued_command` attachment predating the envelope's `origin`
+    /// field) falls through unrecognized to the plain-text paths below, exactly
+    /// as before.
     private static func userPromptText(_ json: [String: Any]) -> String? {
+        if let peer = PeerOriginExtractor.extract(from: json) {
+            let firstLine = String(peer.text.prefix(while: { $0 != "\n" }))
+            let label = peer.sender.verified ? (peer.sender.name ?? peer.sender.from) : peer.sender.from
+            return "\(label): \(firstLine)"
+        }
         if UserMessageClassifier.isRealUserMessage(json) {
             return UserMessageClassifier.extractText(json)
         }

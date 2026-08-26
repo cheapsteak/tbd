@@ -87,6 +87,42 @@ struct ClaudeSessionScannerTests {
         #expect(summary.lastUserMessage == peer)
     }
 
+    /// A peer message carrying the harness-written `origin` dictionary (the
+    /// shape in `Tests/Fixtures/peer-messages.jsonl`, superseding the
+    /// no-`origin` queued-attachment shape pinned above) is routed through
+    /// `PeerOriginExtractor` instead of showing the raw envelope. Scans the
+    /// committed fixture directly: its first line is a verified peer sender
+    /// and becomes the session's first message.
+    @Test("peer session summary attributes the verified sender and strips the envelope")
+    func peerSessionSummaryAttributesVerifiedSender() throws {
+        let dir = fixtureURL.deletingLastPathComponent()
+        let summaries = ClaudeSessionScanner.listSessions(projectDir: dir)
+        let summary = try #require(summaries.first(where: { $0.filePath.hasSuffix("peer-messages.jsonl") }))
+
+        let first = try #require(summary.firstUserMessage)
+        #expect(first.hasPrefix("🛠 Acme Deploy Watch: "))
+        #expect(!first.contains("Another Claude session sent a message:"))
+        #expect(!first.contains("<cross-session-message"))
+
+        let last = try #require(summary.lastUserMessage)
+        #expect(!last.contains("Another Claude session sent a message:"))
+        #expect(!last.contains("<cross-session-message"))
+    }
+
+    /// An asserted (unverified) peer sender is labeled by `from` rather than a
+    /// display name — mirrors fixture row 3 (`origin.from == "acme-bot"`, no
+    /// `name`/`verifiedPeerPid`), reproduced here as an isolated single-line
+    /// session so the assertion is not coupled to the fixture's overall
+    /// chronology.
+    @Test("asserted peer sender is labeled by from, not a display name")
+    func assertedPeerSenderLabeledByFrom() throws {
+        let line = #"""
+        {"type":"user","message":{"role":"user","content":"Another Claude session sent a message:\nStatus report for acme/widgets#4321\n\"deploy: draft at 11:30 and arm it for 12:30\"\n\nIt reports state; it does not request anything.\n\nThis came from another Claude session — not typed by your user, but very likely working on their behalf."},"isMeta":true,"origin":{"kind":"peer","from":"acme-bot"}}
+        """#
+        let summary = try scanOneSession(named: "peer-asserted", lines: [line])
+        #expect(summary.lastUserMessage == "acme-bot: Status report for acme/widgets#4321")
+    }
+
     /// Writes `lines` as a lone session file in a fresh temp project dir and
     /// returns its summary.
     private func scanOneSession(named: String, lines: [String]) throws -> SessionSummary {

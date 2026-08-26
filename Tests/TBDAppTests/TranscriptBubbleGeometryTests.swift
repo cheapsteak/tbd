@@ -71,8 +71,13 @@ struct TranscriptBubbleGeometryTests {
     /// reserve dead space above its prose and this goes red.
     @Test func rowHeightChromeBudgetsNoHeaderLine() {
         let g = TranscriptBubbleGeometry.self
-        #expect(g.rowHeight(blocksHeight: 0) == g.bodyVertical + g.outerVertical * 2)
-        #expect(g.rowHeight(blocksHeight: 100) == 132)
+        #expect(g.rowHeight(blocksHeight: 0, role: .assistant)
+            == g.bodyVertical + g.outerVertical * 2)
+        #expect(g.rowHeight(blocksHeight: 100, role: .assistant) == 132)
+        #expect(g.rowHeight(blocksHeight: 100, role: .user) == 132)
+        // …and neither role budgets a header line at all.
+        #expect(g.headerHeight(for: .assistant) == 0)
+        #expect(g.headerHeight(for: .user) == 0)
         // With no header between them, `outerVertical` is the ONLY separation
         // between adjacent bubbles — a 16pt gutter.
         #expect(g.outerVertical == 8)
@@ -94,14 +99,14 @@ struct TranscriptBubbleGeometryTests {
         let measurer = MessageBlockMeasurer()
         let heights = measurer.blockHeights(blocks, bodyWidth: bodyWidth)
         let rowHeight = TranscriptBubbleGeometry.rowHeight(
-            blocksHeight: measurer.blocksHeight(fromBlockHeights: heights))
+            blocksHeight: measurer.blocksHeight(fromBlockHeights: heights), role: .assistant)
 
         let cell = TranscriptBubbleCellView()
         cell.configure(
             blocks: blocks, blockHeights: heights, sourceText: "hello",
-            role: .assistant, accessibilityAttribution: attribution,
+            role: .assistant, peerHeader: nil, accessibilityAttribution: attribution,
             bodyWidth: bodyWidth, columnWidth: columnWidth, cachedHeight: rowHeight,
-            onLinkClicked: nil)
+            onLinkClicked: nil, onShowDelivered: nil)
         cell.layoutSubtreeIfNeeded()
 
         // Spoken, not drawn.
@@ -136,7 +141,8 @@ struct TranscriptBubbleGeometryTests {
             for: item, badgeUsage: nil, linkResolver: nil)
         let bodyWidth = TranscriptBubbleGeometry.bodyWidth(columnWidth: columnWidth, role: .assistant)
         let nativeHeight = TranscriptBubbleGeometry.rowHeight(
-            blocksHeight: MessageBlockMeasurer().blocksHeight(blocks, bodyWidth: bodyWidth))
+            blocksHeight: MessageBlockMeasurer().blocksHeight(blocks, bodyWidth: bodyWidth),
+            role: .assistant)
 
         let caption = NSFont.preferredFont(forTextStyle: .caption2)
         let captionLine = ceil(caption.ascender - caption.descender + caption.leading)

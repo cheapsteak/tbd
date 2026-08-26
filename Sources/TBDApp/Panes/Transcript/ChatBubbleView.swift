@@ -3,6 +3,98 @@ import TBDShared
 import AppKit
 import MarkdownUI
 
+/// Resolves a peer sender to the worktree it came from. Nil (the default) leaves
+/// a peer bubble's sender header as plain text — the name still renders, it simply
+/// is not clickable.
+///
+/// Injected as a closure rather than an `AppState` so this view stays testable
+/// without standing up a pane, and so a host that has no worktree list at all
+/// (a preview, a snapshot test) degrades visibly rather than trapping.
+private struct TranscriptPeerSenderResolutionKey: EnvironmentKey {
+    static let defaultValue: (@MainActor (PeerSender) -> UUID?)? = nil
+}
+
+/// Navigates to a worktree — the same entry point `tbd://open?worktree=<uuid>`
+/// uses. Nil leaves a resolved sender name unlinked.
+private struct TranscriptOpenWorktreeKey: EnvironmentKey {
+    static let defaultValue: (@MainActor (UUID) -> Void)? = nil
+}
+
+extension EnvironmentValues {
+    var transcriptPeerSenderResolution: (@MainActor (PeerSender) -> UUID?)? {
+        get { self[TranscriptPeerSenderResolutionKey.self] }
+        set { self[TranscriptPeerSenderResolutionKey.self] = newValue }
+    }
+
+    var transcriptOpenWorktree: (@MainActor (UUID) -> Void)? {
+        get { self[TranscriptOpenWorktreeKey.self] }
+        set { self[TranscriptOpenWorktreeKey.self] = newValue }
+    }
+}
+
+/// The sender attribution drawn above a PEER bubble's body, and above no other.
+///
+/// Native SwiftUI chrome built from `PeerSender` — the harness-written `origin` —
+/// and rendered outside the markdown body, so a peer can neither author its own
+/// attribution nor mint a worktree-navigation link inside its message. Mirrors
+/// `PeerSenderHeaderView` at the native render site: same glyph, same marker,
+/// same three shapes.
+///
+/// A separate `View` rather than an inline branch so the two environment reads
+/// happen ONLY on a peer row — a user or assistant bubble never evaluates them.
+///
+/// Explicitly `@MainActor` (which conformance to `View` already implies) because
+/// its helper properties call the two `@MainActor` environment closures outside
+/// `body`, and relying on inference there is exactly the kind of thing that
+/// changes under a compiler upgrade.
+@MainActor
+private struct PeerSenderHeaderRow: View {
+    let sender: PeerSender
+
+    @Environment(\.transcriptPeerSenderResolution) private var resolveSender
+    @Environment(\.transcriptOpenWorktree) private var openWorktree
+
+    private var name: String { PeerHeaderChrome.displayName(for: sender) }
+
+    /// The worktree to navigate to, or nil when the sender is asserted, does not
+    /// resolve, or nothing here can act on it.
+    private var target: UUID? {
+        guard sender.verified, let resolveSender, openWorktree != nil else { return nil }
+        return resolveSender(sender)
+    }
+
+    var body: some View {
+        HStack(spacing: PeerHeaderChrome.itemSpacing) {
+            Text(PeerHeaderChrome.glyph)
+                .foregroundStyle(AttentionAmber.color)
+                .accessibilityHidden(true)
+            attribution
+        }
+        .font(.system(size: PeerHeaderChrome.fontSize, weight: .semibold))
+        .lineLimit(1)
+    }
+
+    @ViewBuilder private var attribution: some View {
+        if let target, let openWorktree {
+            Button { openWorktree(target) } label: {
+                Text(name).underline()
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.accentColor)
+            .accessibilityLabel("Go to \(name)")
+        } else if sender.verified {
+            Text(name)
+        } else {
+            // An asserted label is a string the sender chose for itself. Muted and
+            // italic, and never without its marker: it must not read as a
+            // confirmed identity.
+            Text(name)
+                .italic()
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
 /// Single user/assistant prose bubble. Renders block-level markdown
 /// (paragraphs, lists, tables, blockquotes, headings) via MarkdownUI
 /// and fenced code blocks via the local `codeBlock(...)` view, with
@@ -10,19 +102,77 @@ import MarkdownUI
 struct ChatBubbleView: View {
     let item: TranscriptItem
 
-    private var isUser: Bool {
-        if case .userPrompt = item { return true } else { return false }
+    /// The three bubble shapes this view draws. Mirrors
+    /// `TranscriptBubbleGeometry.Role` so the two render sites agree; kept as a
+    /// local enum so this view stays free of the geometry helper's `@MainActor`
+    /// isolation.
+    private enum BubbleRole {
+        case user
+        case peer
+        case assistant
     }
+
+    private var bubbleRole: BubbleRole {
+        if case .userPrompt = item { return .user }
+        if case .peerMessage = item { return .peer }
+        return .assistant
+    }
+
+    /// True for the roles drawn on the READER's side of the transcript. A peer
+    /// message is a received message shown alongside the reader's own prompts, so
+    /// it aligns and pads exactly like a user prompt — only the tint differs. This
+    /// drives geometry; tint switches on `bubbleRole` instead.
+    private var isUserAligned: Bool { bubbleRole != .assistant }
 
     private var text: String {
         switch item {
         case .userPrompt(_, let t, _): return t
+        case .peerMessage(_, _, let t, _, _): return t
         case .assistantText(_, let t, _, _): return t
         default: return ""
         }
     }
 
-    private var roleLabel: String { isUser ? "You" : "Claude" }
+    /// The peer bubble's sender header, and `EmptyView` for every other role.
+    ///
+    /// `EmptyView` contributes no subview to the enclosing `VStack`, so a user or
+    /// assistant bubble's geometry is byte-for-byte what it was — the header line
+    /// #129 deleted does not come back for them. Reintroducing it for peer rows
+    /// only is acceptable because peer messages are rare; do not add a node to the
+    /// common path to make this symmetrical.
+    @ViewBuilder private var peerSenderHeader: some View {
+        if case .peerMessage(_, let sender, _, _, _) = item {
+            PeerSenderHeaderRow(sender: sender)
+        }
+    }
+
+    private var roleLabel: String {
+        switch bubbleRole {
+        case .user: return "You"
+        case .peer: return "Peer"
+        case .assistant: return "Claude"
+        }
+    }
+
+    /// Role name for the perf signpost only — never drawn.
+    private var signpostRoleName: String {
+        switch bubbleRole {
+        case .user: return "user"
+        case .peer: return "peer"
+        case .assistant: return "assistant"
+        }
+    }
+
+    /// Bubble fill. The accent tint says *you*, the amber says *not you*, both at
+    /// the same 15% alpha so the two differ in hue alone. Mirrors
+    /// `TranscriptBubbleGeometry.backgroundColor(for:)`.
+    private var bubbleTint: Color {
+        switch bubbleRole {
+        case .user: return Color.accentColor.opacity(0.15)
+        case .peer: return AttentionAmber.bubbleTintColor
+        case .assistant: return Color.clear
+        }
+    }
 
     /// Speaker attribution for assistive technology only — never drawn. A
     /// transcript is not a group chat, so the bubble shows no role/timestamp
@@ -31,7 +181,7 @@ struct ChatBubbleView: View {
     /// `TranscriptBubbleGeometry.accessibilityAttribution(for:)`.
     private var accessibilityAttribution: String {
         guard let ts = item.timestamp?.absoluteShort else { return roleLabel }
-        return isUser ? "\(ts) · \(roleLabel)" : "\(roleLabel) · \(ts)"
+        return isUserAligned ? "\(ts) · \(roleLabel)" : "\(roleLabel) · \(ts)"
     }
 
     var body: some View {
@@ -43,7 +193,7 @@ struct ChatBubbleView: View {
         // The role/timestamp header is gone too, which took the enclosing VStack
         // with it — one fewer StackLayout node per bubble row.
         bubbleBody
-            .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
+            .frame(maxWidth: .infinity, alignment: isUserAligned ? .trailing : .leading)
             // Single EdgeInsets folds the 52pt opposite-side gutter into the 8/12
             // chrome insets (12 + 52 = 64) — one _PaddingLayout instead of two,
             // per bubble row. Nested uniform paddings compose additively, so this
@@ -53,7 +203,7 @@ struct ChatBubbleView: View {
             // from the next.
             .padding(EdgeInsets(
                 top: 8,
-                leading: isUser ? 64 : 16,
+                leading: isUserAligned ? 64 : 16,
                 bottom: 8,
                 trailing: 12
             ))
@@ -70,11 +220,15 @@ struct ChatBubbleView: View {
         let state = TranscriptSignposts.signposter.beginInterval(
             "transcript.markdown.build",
             id: TranscriptSignposts.signposter.makeSignpostID(),
-            "len=\(text.count, privacy: .public) role=\(isUser ? "user" : "assistant", privacy: .public)"
+            "len=\(text.count, privacy: .public) role=\(signpostRoleName, privacy: .public)"
         )
         defer { TranscriptSignposts.signposter.endInterval("transcript.markdown.build", state) }
         let segments = MarkdownSegments.split(text)
+        // The 6pt stack spacing is `TranscriptBubbleGeometry.interBlockSpacing`:
+        // the header→body gap is the same gap the native cell's block stack puts
+        // there, which is the other half of `headerHeight(for: .peer)`.
         return VStack(alignment: .leading, spacing: 6) {
+            peerSenderHeader
             ForEach(segments) { seg in
                 switch seg {
                 case .prose(let p):
@@ -90,15 +244,11 @@ struct ChatBubbleView: View {
         }
         .padding(EdgeInsets(
             top: 8,
-            leading: isUser ? 11 : 0,
+            leading: isUserAligned ? 11 : 0,
             bottom: 8,
-            trailing: isUser ? 11 : 0
+            trailing: isUserAligned ? 11 : 0
         ))
-        .background(
-            isUser
-                ? Color.accentColor.opacity(0.15)
-                : Color.clear
-        )
+        .background(bubbleTint)
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 

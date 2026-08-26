@@ -486,7 +486,8 @@ struct TranscriptImageAttachmentTests {
 
         let before = MessageBlockMeasurer().blockHeights(blocks, bodyWidth: bodyWidth)
         let heightBefore = TranscriptBubbleGeometry.rowHeight(
-            blocksHeight: MessageBlockMeasurer().blocksHeight(fromBlockHeights: before))
+            blocksHeight: MessageBlockMeasurer().blocksHeight(fromBlockHeights: before),
+            role: .user)
         #expect(!TranscriptImageService.shared.hasCachedThumbnail(forPath: path, maxPixelSize: 400))
 
         _ = await withCheckedContinuation { continuation in
@@ -497,7 +498,8 @@ struct TranscriptImageAttachmentTests {
 
         let after = MessageBlockMeasurer().blockHeights(blocks, bodyWidth: bodyWidth)
         let heightAfter = TranscriptBubbleGeometry.rowHeight(
-            blocksHeight: MessageBlockMeasurer().blocksHeight(fromBlockHeights: after))
+            blocksHeight: MessageBlockMeasurer().blocksHeight(fromBlockHeights: after),
+            role: .user)
         #expect(before == after)
         #expect(heightBefore == heightAfter)
     }
@@ -516,14 +518,15 @@ struct TranscriptImageAttachmentTests {
             for: item, badgeUsage: nil, linkResolver: nil)
         let heights = MessageBlockMeasurer().blockHeights(blocks, bodyWidth: bodyWidth)
         let rowHeight = TranscriptBubbleGeometry.rowHeight(
-            blocksHeight: MessageBlockMeasurer().blocksHeight(fromBlockHeights: heights))
+            blocksHeight: MessageBlockMeasurer().blocksHeight(fromBlockHeights: heights),
+            role: .user)
 
         let cell = TranscriptBubbleCellView()
         cell.configure(
             blocks: blocks, blockHeights: heights, sourceText: marker(path),
-            role: .user, accessibilityAttribution: "You",
+            role: .user, peerHeader: nil, accessibilityAttribution: "You",
             bodyWidth: bodyWidth, columnWidth: columnWidth, cachedHeight: rowHeight,
-            onLinkClicked: nil)
+            onLinkClicked: nil, onShowDelivered: nil)
         cell.layoutSubtreeIfNeeded()
         #expect(abs(cell.realizedRowHeight - rowHeight) <= 1.0,
                 "realized=\(cell.realizedRowHeight) reserved=\(rowHeight)")

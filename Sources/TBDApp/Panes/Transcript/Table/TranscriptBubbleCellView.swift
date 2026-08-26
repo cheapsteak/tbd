@@ -2,6 +2,65 @@ import AppKit
 import SwiftUI
 import TBDShared
 
+/// Chrome the peer sender header is built from, shared verbatim by the two
+/// render sites (`TranscriptBubbleCellView` here, `ChatBubbleView` in SwiftUI).
+///
+/// Deliberately NOT nested inside `TranscriptBubbleGeometry`: these are plain
+/// values with no AppKit isolation, so the SwiftUI bubble can read them and stay
+/// free of that helper's `@MainActor` isolation.
+///
+/// Everything here is derived from the harness-written `origin` — never from the
+/// agent-authored message body — so a peer can neither author its own
+/// attribution nor mint a worktree-navigation link inside its message. See
+/// `docs/specs/2026-08-25-peer-message-attribution-design.md`, "Rendering".
+enum PeerHeaderChrome {
+    /// Sender glyph. Says "this arrived from elsewhere" before a word is read.
+    static let glyph = "\u{21C4}"
+    /// Point size of the header line, on both render sites.
+    static let fontSize: CGFloat = 11
+    /// Horizontal gap between the glyph and the sender name.
+    static let itemSpacing: CGFloat = 4
+    /// Marker appended to a self-asserted sender label.
+    ///
+    /// `origin.from` is sender-asserted: anything running as the same OS user can
+    /// set it. Drawing it bare would present a self-chosen string as a confirmed
+    /// identity, so it never appears without this.
+    static let assertedSuffix = " (unverified)"
+
+    /// What the header draws for `sender`: the verified peer name, or the raw
+    /// asserted label carrying `assertedSuffix`.
+    static func displayName(for sender: PeerSender) -> String {
+        guard sender.verified, let name = sender.name, !name.isEmpty else {
+            return sender.from + assertedSuffix
+        }
+        return name
+    }
+}
+
+/// The sender attribution one peer bubble draws above its body.
+///
+/// A value, not a view: both render sites build it from `PeerSender` plus the
+/// worktree list, and a test can assert the whole decision — name, marker,
+/// whether a link is offered — without standing up a pane.
+struct TranscriptPeerHeader {
+    /// Drawn label — a verified peer name, or the asserted label plus its marker.
+    let name: String
+    /// Whether the harness verified the peer socket and pid behind this message.
+    let verified: Bool
+    /// The worktree this sender resolved to, or nil. Nil renders as plain text:
+    /// the name still shows, it simply is not clickable. An archived sender and a
+    /// duplicated display name both land here — a visible degradation rather than
+    /// a silent one, and never a navigation to the wrong session.
+    let worktreeID: UUID?
+    /// Follows a resolved sender. Nil leaves the name plain even when it
+    /// resolved — the affordance is only offered where something can act on it.
+    let navigate: (@MainActor (UUID) -> Void)?
+
+    /// Whether the header offers a click target. An asserted sender never does:
+    /// there is no verified identity to navigate to.
+    var isLink: Bool { verified && worktreeID != nil && navigate != nil }
+}
+
 /// Shared geometry + content helpers for the block-based chat-bubble cell.
 ///
 /// A message is an ordered list of typed `MessageBlock`s (prose / table) rendered
@@ -15,6 +74,10 @@ import TBDShared
 enum TranscriptBubbleGeometry {
     enum Role {
         case user
+        /// A message received from another agent session. Aligns and pads exactly
+        /// like `.user` — it is a received message shown on the reader's side of
+        /// the transcript — and differs from it only in tint.
+        case peer
         case assistant
     }
 
@@ -26,7 +89,7 @@ enum TranscriptBubbleGeometry {
     /// span the full column width.
     static func outerHorizontal(for role: Role, columnWidth: CGFloat) -> CGFloat {
         switch role {
-        case .user: return columnWidth < 680 ? 24 : 76
+        case .user, .peer: return columnWidth < 680 ? 24 : 76
         case .assistant: return 24
         }
     }
@@ -45,7 +108,7 @@ enum TranscriptBubbleGeometry {
     /// aligns with the 12pt tool-row inset.
     static func bodyHorizontal(for role: Role) -> CGFloat {
         switch role {
-        case .user: return 22
+        case .user, .peer: return 22
         case .assistant: return 0
         }
     }
@@ -65,15 +128,80 @@ enum TranscriptBubbleGeometry {
         max(columnWidth - outerHorizontal(for: role, columnWidth: columnWidth) - bodyHorizontal(for: role), 1)
     }
 
-    /// Total row height: summed block heights + inter-block spacing + fixed chrome
-    /// (body vertical insets + outer vertical padding). There is no header line to
-    /// account for — bubbles carry no visible role/timestamp attribution.
-    static func rowHeight(blocksHeight: CGFloat) -> CGFloat {
-        blocksHeight + bodyVertical + outerVertical * 2
+    /// Font of the peer sender header. Small and semibold — chrome, not content.
+    static let peerHeaderFont = NSFont.systemFont(
+        ofSize: PeerHeaderChrome.fontSize, weight: .semibold)
+
+    /// Height of the peer sender header line. `defaultLineHeight(for:)` is the
+    /// canonical single-line height of a font — the same quantity a one-line
+    /// `NSTextField` lays out at — plus 2pt so a descender is never clipped.
+    ///
+    /// The header view is pinned to exactly this constant by a constraint, the
+    /// way every message block is, so the realized height is this number whatever
+    /// the label's intrinsic size turns out to be. That is what keeps measure and
+    /// render in agreement rather than an assumption about AppKit's metrics.
+    static let peerHeaderLineHeight: CGFloat =
+        ceil(NSLayoutManager().defaultLineHeight(for: peerHeaderFont)) + 2
+
+    /// Extra vertical budget a role's bubble carries ABOVE its message blocks.
+    ///
+    /// A peer bubble draws a sender header as the FIRST arranged subview of the
+    /// same block stack its message blocks live in, so it costs one header line
+    /// plus the one `interBlockSpacing` gap the stack puts between the header and
+    /// the first block. Every other role still draws no header at all and budgets
+    /// nothing — position and tint say who spoke.
+    ///
+    /// The `interBlockSpacing` term over-reserves by exactly that gap for a peer
+    /// message that renders to NO blocks at all (only raw HTML, say), because the
+    /// stack then has nothing to space the header against. Over-reserving leaves
+    /// a hair of empty space; it can never clip, which is the direction that
+    /// matters.
+    static func headerHeight(for role: Role) -> CGFloat {
+        switch role {
+        case .peer: return peerHeaderLineHeight + interBlockSpacing
+        case .user, .assistant: return 0
+        }
+    }
+
+    /// Total row height from an ALREADY-REALIZED stack height — one whose peer
+    /// header, if any, is already part of `stackHeight`. Adds only the fixed
+    /// chrome (body vertical insets + outer vertical padding).
+    static func rowHeight(stackHeight: CGFloat) -> CGFloat {
+        stackHeight + bodyVertical + outerVertical * 2
+    }
+
+    /// Total row height from MEASURED block heights: summed block heights +
+    /// inter-block spacing, plus the role's header budget, plus fixed chrome.
+    ///
+    /// The role is required rather than defaulted so every caller states which
+    /// bubble it is sizing. A `.user` or `.assistant` bubble still carries no
+    /// header line at all, so its arithmetic is byte-for-byte what it was.
+    static func rowHeight(blocksHeight: CGFloat, role: Role) -> CGFloat {
+        rowHeight(stackHeight: blocksHeight + headerHeight(for: role))
+    }
+
+    /// The sender attribution a peer bubble draws, or nil for every other item
+    /// kind — nothing else in the transcript has a sender to attribute.
+    ///
+    /// Pure: the worktree list is a parameter and resolution goes through
+    /// `PeerSenderResolver`, which refuses to guess between duplicate display
+    /// names. No I/O, no registry lookup, no singletons.
+    static func peerHeader(
+        for item: TranscriptItem,
+        worktrees: [Worktree],
+        navigate: (@MainActor (UUID) -> Void)?
+    ) -> TranscriptPeerHeader? {
+        guard case .peerMessage(_, let sender, _, _, _) = item else { return nil }
+        return TranscriptPeerHeader(
+            name: PeerHeaderChrome.displayName(for: sender),
+            verified: sender.verified,
+            worktreeID: PeerSenderResolver.resolve(sender, worktrees: worktrees),
+            navigate: navigate)
     }
 
     static func role(for item: TranscriptItem) -> Role {
         if case .userPrompt = item { return .user }
+        if case .peerMessage = item { return .peer }
         return .assistant
     }
 
@@ -87,6 +215,11 @@ enum TranscriptBubbleGeometry {
         case .user:
             if let ts { return "\(ts) · You" }
             return "You"
+        case .peer:
+            // Position and tint say "received from elsewhere"; VoiceOver perceives
+            // neither, so the cell speaks it.
+            if let ts { return "\(ts) · Peer" }
+            return "Peer"
         case .assistant:
             if let ts { return "Claude · \(ts)" }
             return "Claude"
@@ -97,6 +230,7 @@ enum TranscriptBubbleGeometry {
     static func text(for item: TranscriptItem) -> String {
         switch item {
         case .userPrompt(_, let t, _): return t
+        case .peerMessage(_, _, let t, _, _): return t
         case .assistantText(_, let t, _, _): return t
         default: return ""
         }
@@ -139,9 +273,14 @@ enum TranscriptBubbleGeometry {
     }
 
     /// Bubble background color for a role (matches ChatBubbleView).
+    ///
+    /// The accent tint says *you*; the amber says *not you*. Same 15% alpha on
+    /// both, so the two bubbles differ in hue alone and a reader tells them apart
+    /// at a glance without reading a word.
     static func backgroundColor(for role: Role) -> NSColor {
         switch role {
         case .user: return NSColor.controlAccentColor.withAlphaComponent(0.15)
+        case .peer: return AttentionAmber.bubbleTint
         case .assistant: return .clear
         }
     }
@@ -377,10 +516,105 @@ extension TranscriptBubbleTextView: NSTextViewDelegate {
     }
 }
 
+/// The sender attribution drawn above a peer bubble's body.
+///
+/// Native chrome, built entirely from `TranscriptPeerHeader` — which comes from
+/// the harness-written `origin`, never from the agent-authored message text — so
+/// a peer can neither author its own attribution nor mint a worktree-navigation
+/// link inside its message. This is the reason attribution lives here rather than
+/// being prepended to the body. See
+/// `docs/specs/2026-08-25-peer-message-attribution-design.md`, "Rendering".
+///
+/// Three shapes, one line tall in every case:
+///   * resolved  — a link-styled button that navigates to the sender's worktree
+///   * verified but unresolved — plain text, no click affordance
+///   * asserted  — muted and italic, carrying `PeerHeaderChrome.assertedSuffix`
+@MainActor
+private final class PeerSenderHeaderView: NSView {
+    private let worktreeID: UUID?
+    private let navigate: (@MainActor (UUID) -> Void)?
+
+    init(header: TranscriptPeerHeader) {
+        self.worktreeID = header.isLink ? header.worktreeID : nil
+        self.navigate = header.isLink ? header.navigate : nil
+        super.init(frame: .zero)
+
+        let font = TranscriptBubbleGeometry.peerHeaderFont
+
+        let glyph = NSTextField(labelWithString: PeerHeaderChrome.glyph)
+        glyph.font = font
+        glyph.textColor = AttentionAmber.nsColor(alpha: 1)
+        glyph.setAccessibilityHidden(true)
+
+        let name: NSView
+        if header.isLink {
+            let button = NSButton(title: header.name, target: self, action: #selector(follow))
+            button.isBordered = false
+            button.attributedTitle = NSAttributedString(
+                string: header.name,
+                attributes: [
+                    .font: font,
+                    .foregroundColor: NSColor.linkColor,
+                    .underlineStyle: NSUnderlineStyle.single.rawValue
+                ])
+            // `lineBreakMode` lives on NSCell, not on NSButton/NSTextField.
+            button.cell?.lineBreakMode = .byTruncatingTail
+            button.setAccessibilityLabel("Go to \(header.name)")
+            name = button
+        } else {
+            let label = NSTextField(labelWithString: header.name)
+            label.maximumNumberOfLines = 1
+            label.cell?.lineBreakMode = .byTruncatingTail
+            // An asserted label is a string the sender chose for itself, so it is
+            // drawn the way an unconfirmed thing should be — muted and italic —
+            // and never in the weight a verified name gets.
+            if header.verified {
+                label.font = font
+                label.textColor = .labelColor
+            } else {
+                label.font = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
+                label.textColor = .secondaryLabelColor
+            }
+            name = label
+        }
+
+        let row = NSStackView(views: [glyph, name])
+        row.orientation = .horizontal
+        row.alignment = .firstBaseline
+        row.spacing = PeerHeaderChrome.itemSpacing
+        row.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(row)
+        NSLayoutConstraint.activate([
+            // Equality on BOTH edges so the row's content actually determines this
+            // view's width — with only a `<=` there is no equality driving it and
+            // the header collapses to nothing inside the hugging block stack. The
+            // caller's `width <= bodyWidth` cap then truncates a long name rather
+            // than widening the bubble.
+            row.leadingAnchor.constraint(equalTo: leadingAnchor),
+            row.trailingAnchor.constraint(equalTo: trailingAnchor),
+            row.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+    }
+
+    @objc private func follow() {
+        guard let worktreeID, let navigate else { return }
+        navigate(worktreeID)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+}
+
 /// `NSTableCellView` that renders a chat message as a vertical stack of typed
 /// block views inside ONE rounded bubble. There is no role/timestamp header —
 /// a transcript is not a group chat, and the bubble's side and tint already say
-/// who spoke; the attribution survives as the cell's accessibility label. Prose
+/// who spoke; the attribution survives as the cell's accessibility label. The one
+/// exception is a PEER message, whose sender is not derivable from position or
+/// tint and so gets a drawn header (`PeerSenderHeaderView`) as the first element
+/// of the block stack. It is deliberately not extended to the other roles: peer
+/// messages are rare, and the header is the layout node #129 removed. Prose
 /// blocks render in selectable TextKit-1 `NSTextView`s; table blocks render in an
 /// `NSHostingView` over the native grid. The row height (from `heightOfRow`) is
 /// pinned via `columnWidth × cachedHeight`, and each block is laid out at the SAME
@@ -399,6 +633,13 @@ final class TranscriptBubbleCellView: NSTableCellView {
     /// Routes a link click out of the cell. Reset on every `configure` so a
     /// scroll-reused cell never fires the previous row's closure.
     private var onLinkClicked: ((TranscriptLinkTarget) -> Void)?
+
+    /// Opens this row's detail overlay. Non-nil ONLY for a peer message — the one
+    /// bubble whose overlay shows something the bubble does not (the delivery it
+    /// arrived in). Nil for every other role, so their context menu is byte-for-
+    /// byte what it was. Reset on every `configure`, like `onLinkClicked`, so a
+    /// scroll-reused cell never offers the previous row's entry.
+    private var onShowDelivered: (() -> Void)?
 
     /// Monotonic token bumped on every (re)build of the block stack. Async syntax-
     /// highlight completions capture the value current when they were dispatched
@@ -470,22 +711,37 @@ final class TranscriptBubbleCellView: NSTableCellView {
     /// `columnWidth × cachedHeight`, each block laid out at the SAME `bodyWidth`
     /// the height was measured at. Resets every role-dependent piece of state and
     /// rebuilds the block stack so a reused cell never shows stale content.
+    ///
+    /// `peerHeader` is non-nil ONLY for a peer message, and its presence must match
+    /// the role the row was sized with: `rowHeight(blocksHeight:role:)` budgets
+    /// `headerHeight(for: .peer)` for exactly this view. It is a required argument
+    /// with no default so a new call site has to say which it is, rather than
+    /// silently sizing a peer row without its header.
+    ///
+    /// `onShowDelivered` is likewise non-nil only for a peer message, and it is
+    /// what puts the detail overlay within reach of a chat bubble: nothing else in
+    /// the bubble opens it. Required with no default for the same reason — a new
+    /// call site has to decide, rather than silently rendering a peer row whose
+    /// delivery nobody can see.
     func configure(
         blocks: [MessageBlock],
         blockHeights: [CGFloat],
         sourceText: String,
         role: TranscriptBubbleGeometry.Role,
+        peerHeader: TranscriptPeerHeader?,
         accessibilityAttribution: String,
         bodyWidth: CGFloat,
         columnWidth: CGFloat,
         cachedHeight: CGFloat,
-        onLinkClicked: ((TranscriptLinkTarget) -> Void)?
+        onLinkClicked: ((TranscriptLinkTarget) -> Void)?,
+        onShowDelivered: (() -> Void)?
     ) {
         let g = TranscriptBubbleGeometry.self
         messageSourceText = sourceText
         // Set before `rebuildBlockStack`, which re-enters `makeProseView` and
         // reads it: `configure` never reuses a prose view across rows.
         self.onLinkClicked = onLinkClicked
+        self.onShowDelivered = onShowDelivered
 
         // Pin the cell box.
         let w = max(columnWidth, 1)
@@ -500,19 +756,27 @@ final class TranscriptBubbleCellView: NSTableCellView {
         setAccessibilityRole(.group)
         backgroundBox.fillColor = g.backgroundColor(for: role)
 
-        rebuildBlockStack(blocks: blocks, blockHeights: blockHeights, bodyWidth: bodyWidth)
+        rebuildBlockStack(
+            blocks: blocks, blockHeights: blockHeights, bodyWidth: bodyWidth,
+            peerHeader: peerHeader)
 
-        // Box width: user bubbles shrink-to-fit (right-anchored), assistant fills.
-        // Per-role block-stack inset: user keeps the 11pt-per-side bubble padding,
-        // assistant sits flush at the box edge (0), aligning with the tool rows.
+        // Box width: reader-side bubbles (user, peer) shrink-to-fit (right-anchored),
+        // assistant fills. Per-role block-stack inset: reader-side bubbles keep the
+        // 11pt-per-side bubble padding, assistant sits flush at the box edge (0),
+        // aligning with the tool rows.
         let bodyInset = g.bodyHorizontal(for: role) / 2
         blockLeading.constant = bodyInset
         blockTrailing.constant = -bodyInset
         let bubbleWidth = bodyWidth + g.bodyHorizontal(for: role)
         switch role {
-        case .user:
-            // Measure the widest prose block and clamp to the available bubble.
-            let usedWidth = userContentWidth(blocks: blocks, bodyWidth: bodyWidth)
+        case .user, .peer:
+            // Measure the widest prose block and clamp to the available bubble. A
+            // peer bubble must also be wide enough for its sender header, or a
+            // short message would truncate the attribution above it.
+            var usedWidth = userContentWidth(blocks: blocks, bodyWidth: bodyWidth)
+            if let peerHeader {
+                usedWidth = max(usedWidth, Self.peerHeaderWidth(peerHeader))
+            }
             let fitWidth = min(usedWidth + g.bodyHorizontal(for: role), bubbleWidth)
             applyUserAnchor(width: max(fitWidth, 1))
         case .assistant:
@@ -531,7 +795,12 @@ final class TranscriptBubbleCellView: NSTableCellView {
     /// `NSHostingController` to re-measure a `.table` block. The defensive fallback
     /// (a missing/short `blockHeights` array) re-measures the affected block so the
     /// cell can never render at a wrong height. (#129)
-    private func rebuildBlockStack(blocks: [MessageBlock], blockHeights: [CGFloat], bodyWidth: CGFloat) {
+    private func rebuildBlockStack(
+        blocks: [MessageBlock],
+        blockHeights: [CGFloat],
+        bodyWidth: CGFloat,
+        peerHeader: TranscriptPeerHeader?
+    ) {
         // Invalidate any in-flight async syntax-highlight completions targeting the
         // previous content: a recycled cell rebuilds onto a different message, so
         // those completions must become no-ops (see `applyAsyncHighlights`).
@@ -543,6 +812,27 @@ final class TranscriptBubbleCellView: NSTableCellView {
         }
 
         let width = max(bodyWidth, 1)
+
+        // The sender header goes into the SAME stack as the message blocks, as its
+        // first arranged subview, pinned to the SAME constant `headerHeight(for:)`
+        // budgets — so the stack's realized height carries it by construction and
+        // the row cannot drift (the #129 failure mode). The stack's own
+        // `interBlockSpacing` supplies the header→body gap, which is the other
+        // half of that budget. It is native chrome built from `TranscriptPeerHeader`
+        // and never from the message text.
+        if let peerHeader {
+            let header = PeerSenderHeaderView(header: peerHeader)
+            header.translatesAutoresizingMaskIntoConstraints = false
+            blockStack.addArrangedSubview(header)
+            NSLayoutConstraint.activate([
+                header.heightAnchor.constraint(
+                    equalToConstant: TranscriptBubbleGeometry.peerHeaderLineHeight),
+                // Never let a long sender name push the bubble past its body width;
+                // the label and the button both truncate at the tail instead.
+                header.widthAnchor.constraint(lessThanOrEqualToConstant: width)
+            ])
+        }
+
         for (index, block) in blocks.enumerated() {
             // Cache hit (the common scroll-reuse path): use the Coordinator's
             // pre-measured height. Miss (defensive): re-measure this one block.
@@ -659,6 +949,18 @@ final class TranscriptBubbleCellView: NSTableCellView {
         return host
     }
 
+    /// Laid-out width the sender header wants: glyph + gap + name, plus a couple
+    /// of points of slack for the borderless button's own insets. Width only — the
+    /// header's HEIGHT is the pinned constant, so this cannot move a row height.
+    private static func peerHeaderWidth(_ header: TranscriptPeerHeader) -> CGFloat {
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: TranscriptBubbleGeometry.peerHeaderFont
+        ]
+        let glyph = (PeerHeaderChrome.glyph as NSString).size(withAttributes: attributes).width
+        let name = (header.name as NSString).size(withAttributes: attributes).width
+        return ceil(glyph + PeerHeaderChrome.itemSpacing + name) + 8
+    }
+
     /// Widest used width across the message's prose blocks, for user shrink-to-fit.
     private func userContentWidth(blocks: [MessageBlock], bodyWidth: CGFloat) -> CGFloat {
         var widest: CGFloat = 0
@@ -700,18 +1002,42 @@ final class TranscriptBubbleCellView: NSTableCellView {
         boxLeading.constant = g.outerNear  // leading 12
     }
 
-    // MARK: - Copy message
+    // MARK: - Context menu
 
-    /// Right-click context menu offering "Copy message" (the whole message's
-    /// source text). Per-prose-block text selection still works via the text
-    /// views; this copies the entire message regardless of selection.
+    /// Title of the entry that opens a peer message's detail overlay. A constant
+    /// so the wiring test names the same string the menu draws.
+    static let showDeliveredTitle = "Show delivered message"
+
+    /// Right-click context menu. Always offers "Copy message" (the whole message's
+    /// source text — per-prose-block text selection still works via the text views;
+    /// this copies the entire message regardless of selection).
+    ///
+    /// A PEER row additionally offers `showDeliveredTitle`, which opens the row's
+    /// detail overlay — the only place the delivery a peer message arrived in
+    /// ("As delivered") is shown. It appears only where `onShowDelivered` was
+    /// supplied, i.e. for a peer bubble; a user or assistant bubble's menu is
+    /// exactly what it was.
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = NSMenu()
-        let item = NSMenuItem(
+        let copyItem = NSMenuItem(
             title: "Copy message", action: #selector(copyMessage(_:)), keyEquivalent: "")
-        item.target = self
-        menu.addItem(item)
+        copyItem.target = self
+        menu.addItem(copyItem)
+        if onShowDelivered != nil {
+            let showItem = NSMenuItem(
+                title: Self.showDeliveredTitle,
+                action: #selector(showDeliveredMessage(_:)), keyEquivalent: "")
+            showItem.target = self
+            menu.addItem(showItem)
+        }
         return menu
+    }
+
+    /// Opens this row's detail overlay. Inert on a non-peer bubble, whose
+    /// `configure` passed no closure and whose menu therefore never shows the
+    /// entry that reaches here.
+    @objc func showDeliveredMessage(_ sender: Any?) {
+        onShowDelivered?()
     }
 
     /// ⌘C copies the whole message's source text when no prose text view holds an
@@ -722,13 +1048,17 @@ final class TranscriptBubbleCellView: NSTableCellView {
         pasteboard.setString(messageSourceText, forType: .string)
     }
 
-    /// Test backstop: realized drawn height of all blocks (their actual laid-out
-    /// frames) plus the fixed chrome — i.e. the row height the live cell genuinely
-    /// requires. The harness asserts this equals the value `heightOfRow` returned.
+    /// Test backstop: realized drawn height of the block stack (its actual
+    /// laid-out frame) plus the fixed chrome — i.e. the row height the live cell
+    /// genuinely requires. The harness asserts this equals the value `heightOfRow`
+    /// returned.
+    ///
+    /// The stack already CONTAINS the peer sender header when there is one, so
+    /// this goes through the `stackHeight:` form: adding `headerHeight(for:)` here
+    /// as well would count the header twice.
     var realizedRowHeight: CGFloat {
         layoutSubtreeIfNeeded()
-        let blocksHeight = blockStack.frame.height
-        return TranscriptBubbleGeometry.rowHeight(blocksHeight: blocksHeight)
+        return TranscriptBubbleGeometry.rowHeight(stackHeight: blockStack.frame.height)
     }
 
     @available(*, unavailable)
