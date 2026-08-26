@@ -43,6 +43,43 @@ public struct DeskPaneUnreachable: LocalizedError, Equatable, CustomStringConver
     public var errorDescription: String? { description }
 }
 
+/// A Watch Desk candidate's pane could not be consulted because the
+/// consultation itself failed to run — a wedged tmux tripping the subprocess
+/// timeout, a query that exited non-zero, a binary that could not be spawned.
+///
+/// The same category of non-answer as `DeskPaneUnreachable`, thrown for exactly
+/// the same reason: on this rail an empty candidate list is an ACTION, so a read
+/// that learned nothing about the pane must abort the pass rather than shrink
+/// the list.
+///
+/// Kept distinct from `DeskPaneUnreachable` rather than folded into it because
+/// the two describe different facts and point an operator at different remedies.
+/// `DeskPaneUnreachable` asserts that a query ran and no server answered on the
+/// socket the daemon resolved — a claim that would be simply false for a query
+/// that exited 1, or one that never started. This type asserts only that the
+/// consultation failed, and carries the underlying failure so the log says which
+/// one it was. `LocalizedError` for the same reason as its sibling: the callers
+/// that catch this log `error.localizedDescription`, and a bare `Error` bridges
+/// to NSError there, rendering "The operation couldn't be completed" with the
+/// whole diagnostic stripped out.
+public struct DeskPaneConsultationFailed: LocalizedError, Equatable, CustomStringConvertible {
+    public let server: String
+    public let paneID: String
+    /// The underlying failure, rendered at the throw site. A `String` rather
+    /// than the `Error` itself so this type stays `Equatable`, matching its
+    /// sibling and keeping it assertable from a test.
+    public let reason: String
+
+    public var description: String {
+        """
+        Watch Desk pane \(paneID) could not be consulted: querying tmux server \
+        \(server) failed: \(reason)
+        """
+    }
+
+    public var errorDescription: String? { description }
+}
+
 /// Manages the persistent "Watch Desk" scratch space for daywatch/nightwatch operations.
 /// Idempotent creation: mode switches reuse the existing desk session.
 /// Nudges the session when judgment items are queued (tick exit code 10).
@@ -388,13 +425,15 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// masquerade as the lease owner, nor pad the candidate count into a
     /// spurious fail-closed contention report.
     ///
-    /// "Could not reach the server" is the case exclusion gets wrong, and it
-    /// throws instead — see the `.unreachable` arm below for why an empty
-    /// candidate list is an action on this rail rather than a silence.
+    /// A consultation that produced no answer at all is the case exclusion gets
+    /// wrong, and both of its shapes throw instead — the server unreachable, and
+    /// the query failing outright. See the `.unreachable` arm below for why an
+    /// empty candidate list is an action on this rail rather than a silence.
     ///
     /// - Returns: `true` when this pane may be sent to.
     /// - Throws: `DeskPaneUnreachable` when the consultation reached no server
-    ///   at all, so the caller aborts rather than treating an unread pane as an
+    ///   at all, or `DeskPaneConsultationFailed` when it could not be run at
+    ///   all, so the caller aborts rather than treating an unread pane as an
     ///   absent one.
     private func paneIdentityPermitsSend(
         server: String, terminal: Terminal
@@ -404,18 +443,27 @@ public actor DeskSessionManager: DeskSessionManaging {
             target = try await tmux.paneSendTarget(server: server, paneID: terminal.tmuxPaneID)
         } catch {
             // The consultation could not be RUN at all (a wedged tmux tripping
-            // the subprocess timeout) — no answer about the pane either way.
-            // Dropped, matching how the `paneCurrentCommand` check below already
-            // treats the same wedged server: `try?` there turns a failed query
-            // into a skipped candidate. Pasting a judge prompt into a pane we
-            // could not look at is exactly what this check exists to stop, and
-            // the cost of being wrong is only a skipped tick.
-            logger.notice("""
-                Skipping Watch Desk terminal \(terminal.id, privacy: .public): could not verify \
-                pane \(terminal.tmuxPaneID, privacy: .public) belongs to it: \
-                \(String(describing: error), privacy: .public)
+            // the subprocess timeout) — no answer about the pane either way,
+            // which is the same non-answer the `.unreachable` arm below gets,
+            // and it gets the same treatment. Quietly excluding the candidate is
+            // not the cheap option on this rail: an empty candidate list makes
+            // `ensureDeskSession`/`nudgeDeskSession` SPAWN a replacement agent
+            // and makes `leasedJudgeTerminal` REVOKE a valid lease, so a read
+            // that failed would buy a duplicated desk on a live one, not a
+            // skipped tick. Throwing aborts the pass before any of those act;
+            // the callers' existing `catch` logs and skips the tick, and the
+            // next tick asks again.
+            logger.warning("""
+                Watch Desk pass aborted: could not consult pane \
+                \(terminal.tmuxPaneID, privacy: .public) for terminal \
+                \(terminal.id, privacy: .public) on tmux server \
+                \(server, privacy: .public): \(String(describing: error), privacy: .public) \
+                — no desk terminal will be spawned, replaced or revoked on a failed read
                 """)
-            return false
+            throw DeskPaneConsultationFailed(
+                server: server,
+                paneID: terminal.tmuxPaneID,
+                reason: String(describing: error))
         }
 
         switch target {

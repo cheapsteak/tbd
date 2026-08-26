@@ -1130,12 +1130,19 @@ extension TBDHomeSerialized {
                 "a pane that agrees it is this terminal must be nudged")
         }
 
-        /// A consultation that cannot be RUN at all is not an answer about the
-        /// pane. The candidate is dropped, matching how the sibling
-        /// `paneCurrentCommand` check already treats a wedged server (`try?` →
-        /// skip). Skipping costs one tick; pasting into a pane nobody could
-        /// look at is the thing the check exists to stop.
-        @Test("a pane whose identity cannot be read is not nudged")
+        /// The thrown twin of `testUnreachableServerDoesNotReplaceTheDeskAgent`,
+        /// below — same rail, same verdict, different way of learning nothing. A
+        /// consultation that could not be RUN at all (a wedged tmux tripping the
+        /// subprocess timeout) is no more an answer about the pane than one that
+        /// ran and reached no server, and on this rail dropping a candidate is
+        /// destructive rather than merely quiet. With this row the SOLE
+        /// candidate, excluding it makes `nudgeDeskSession` spawn a replacement
+        /// agent onto a desk that may be perfectly alive, and
+        /// `leasedJudgeTerminal` revoke the live judge's lease. So the pass
+        /// aborts instead, and spawn recovery is deliberately left ENABLED here
+        /// (unlike the exclusion tests above) because "the desk was never
+        /// touched" is the whole property under test.
+        @Test("a pane whose identity cannot be read is not nudged, replaced, or unleased")
         func testNudgeSkipsPaneWhoseIdentityCannotBeRead() async throws {
             let f = try makeDeskFixture(tag: "nudge-wedged")
             defer { restoreTBDHome(f.priorTBDHome); try? FileManager.default.removeItem(at: f.home) }
@@ -1143,15 +1150,35 @@ extension TBDHomeSerialized {
             let desk = try await f.manager.ensureDeskSession(mode: .daywatch)
             let seeded = try await f.db.terminals.list(worktreeID: desk.id)
             let claude = try #require(seeded.first(where: { $0.label == TerminalLabel.claudeCode }))
+            let rowsBefore = seeded.count
+
+            // A live judge holds the lease, so "the lease survived" is a fact
+            // the pass could destroy rather than one that was never true.
+            let acquiredAt = Date()
+            let lease = try await f.db.watchDeskLeases.acquire(
+                worktreeID: desk.id, terminalID: claude.id, now: acquiredAt)
 
             f.identities.markUnreachable(claude.tmuxPaneID)
-            f.spawnFailures.setFailing(true)
 
             let before = f.recorder.pastedPanes.count
             await f.manager.nudgeDeskSession(worktreeID: desk.id, act: true)
 
             let targets = Array(f.recorder.pastedPanes.dropFirst(before))
             #expect(targets.isEmpty, "an unverifiable pane must receive nothing, got \(targets)")
+
+            let rowsAfter = try await f.db.terminals.list(worktreeID: desk.id)
+            #expect(rowsAfter.count == rowsBefore,
+                    "a failed read must not spawn a replacement desk agent")
+            // And the row it could not read is left exactly where it was.
+            #expect(rowsAfter.contains { $0.id == claude.id })
+
+            let after = try #require(try await f.db.watchDeskLeases.status(worktreeID: desk.id))
+            #expect(after.terminalID == claude.id,
+                    "a failed read must not fence the lease owner")
+            #expect(after.generation == lease.generation,
+                    "a failed read must not bump the lease generation")
+            #expect(after.isValid(at: acquiredAt),
+                    "a failed read must not revoke a valid lease")
         }
 
         /// The defect, on the rail where "not a candidate" is destructive. A
