@@ -32,6 +32,14 @@ public actor RemoteProviderManager {
     /// §"Never silent").
     private let actuationLog: ActuationLog?
     static let pollInterval: TimeInterval = 60
+    /// How many times one provider may be enrolled post-boot before this
+    /// actor stops trying. More than one because a describe failure is
+    /// routinely transient (the provider is mid-deploy, or a credential is
+    /// being refreshed); bounded because nothing clears the count, so an
+    /// unbounded retry would become a describe subprocess per RPC for a
+    /// provider that is permanently unreachable. A daemon restart resets it,
+    /// as it resets every other in-memory enrollment fact.
+    static let maxEnrollmentAttempts = 3
 
     private var providers: [String: RemoteProviderConfig] = [:]
     private var describes: [String: ProviderDescribe] = [:]
@@ -54,16 +62,27 @@ public actor RemoteProviderManager {
     private var snapshotFreshnessUnreadable: Set<String> = []
     private var loops: [String: Task<Void, Never>] = [:]
     private var supervisors: [String: ProviderEventsSupervisor] = [:]
-    /// One entry per provider this actor has enrolled post-boot — see
-    /// `enrollIfNeeded`. The stored `Task` IS the idempotency record: entries
-    /// are never removed, so a completed one is what stops a later `invoke`
-    /// from re-describing a provider boot never saw.
+    /// The most recent post-boot enrollment task per provider — see
+    /// `enrollIfNeeded`. Retained after completion so `shutdown()` can cancel
+    /// AND await it; the burst guard is `enrollmentsInFlight` and the retry
+    /// budget is `enrollmentAttempts`.
     ///
     /// "Enrollment" is deliberately not "adoption": in this actor adoption
     /// already means `RemoteSessionAdopter` pulling a provider's SESSIONS
     /// into the local mirror, which is a different thing happening to a
     /// different noun.
     private var enrollments: [String: Task<Void, Never>] = [:]
+    /// Names with an enrollment currently running. Separate from
+    /// `enrollments`, which retains the last task handle so `shutdown()` can
+    /// drain it: this is the burst guard, and it is cleared when the
+    /// enrollment finishes so a FAILED one can be retried.
+    private var enrollmentsInFlight: Set<String> = []
+    /// Enrollment attempts spent per provider, capped by
+    /// `maxEnrollmentAttempts`. A describe that fails leaves no `describes`
+    /// entry, so without a budget the retry would fire on every single
+    /// `invoke` and roster refresh for a provider that is simply down — a
+    /// describe subprocess per RPC, forever.
+    private var enrollmentAttempts: [String: Int] = [:]
     /// Guards `spawnPollLoops`'s compound stopAll()+startLoop() sequence
     /// against a second concurrent call to the same sequence (e.g. two
     /// overlapping `start()`s). See the comment on `spawnPollLoops` for the
@@ -295,11 +314,27 @@ public actor RemoteProviderManager {
     /// believes is torn down. `shuttingDown` (set here, before `stopAll()`,
     /// and never cleared) makes shutdown terminal: every `spawnPollLoops()`
     /// call that resumes after this one — queued or future — is a no-op.
+    /// Enrollment is drained FIRST, and deliberately BEFORE the reconfigure
+    /// lock is taken. Cancelling an in-flight `describe` without awaiting it
+    /// orphans the child process — the interruption still runs on the
+    /// cancelled task, so the process must stay alive to finish unwinding it,
+    /// which is exactly why `Daemon.stop()` pairs `remoteStartTask?.cancel()`
+    /// with `await remoteStartTask?.value`. Draining inside the lock would
+    /// deadlock instead: `enroll` acquires that same lock to arm its poll
+    /// loop, so awaiting it while holding the lock would wait on a task that
+    /// is waiting on us. Setting `shuttingDown` before the drain (it is
+    /// actor-isolated with no `await` ahead of it, and never cleared) closes
+    /// the window: an enrollment scheduled between here and the lock is
+    /// refused by `enrollIfNeeded`, and one already past that point finds
+    /// `shuttingDown` true under the lock and arms nothing.
     func shutdown() async {
+        shuttingDown = true
+        let pending = Array(enrollments.values)
+        for task in pending { task.cancel() }
+        for task in pending { await task.value }
+
         await acquireReconfigureLock()
         defer { releaseReconfigureLock() }
-        shuttingDown = true
-        for task in enrollments.values { task.cancel() }
         await stopAll()
     }
 
@@ -976,6 +1011,13 @@ public actor RemoteProviderManager {
         for task in enrollments.values { await task.value }
     }
 
+    /// Test seam: whether an enrollment is still running for `name` — the
+    /// only way to observe that `shutdown()` awaited what it cancelled
+    /// rather than leaving a describe subprocess unwinding behind it.
+    func hasEnrollmentInFlight(named name: String) -> Bool {
+        enrollmentsInFlight.contains(name)
+    }
+
     /// Test seam: how many post-boot enrollments have been scheduled for
     /// `name` — 0 or 1 by construction. Makes the "a burst of invokes must
     /// not spawn N describes" invariant assertable at the source rather than
@@ -1033,19 +1075,26 @@ public actor RemoteProviderManager {
     /// describe's 10s timeout.
     ///
     /// Idempotent by construction, which matters because `invoke` reaches
-    /// here on EVERY call: the `enrollments` entry is written with no `await`
-    /// between the check and the insert, so actor isolation makes it atomic,
-    /// and it is never removed. A burst of invokes therefore spawns exactly
-    /// one describe, and `enroll`'s own `loops` check keeps it to at most one
-    /// poll loop.
+    /// here on EVERY call: `enrollmentsInFlight` is written with no `await`
+    /// between the check and the insert, so actor isolation makes it atomic.
+    /// A burst of invokes therefore spawns exactly one describe, and
+    /// `enroll`'s own `loops` check keeps it to at most one poll loop.
+    ///
+    /// A FAILED enrollment is retryable, which is why the burst guard is that
+    /// separate set rather than the presence of an `enrollments` entry. A
+    /// describe can fail transiently, and treating one failure as final would
+    /// strand the provider in exactly the state this method exists to
+    /// prevent — no describe, capability gates closed, no poll loop — until a
+    /// daemon restart. `enrollmentAttempts` bounds that retry.
     ///
     /// Three ways to be skipped, all deliberate:
     /// - **before `registrySwept`** — `start()` hasn't finished its sweep
     ///   yet, and it will describe every registry entry itself; enrolling
     ///   here would just race it to the same describe.
     /// - **a describe already on file** — boot handled this provider. Note a
-    ///   FAILED boot describe leaves none, so the first post-boot invoke buys
-    ///   one retry; the `enrollments` record keeps it to exactly one.
+    ///   FAILED boot describe leaves none, so post-boot invokes may still
+    ///   enroll it, bounded by `maxEnrollmentAttempts`.
+    /// - **the attempt budget is spent** — see `maxEnrollmentAttempts`.
     /// - **shutting down** — `enroll` re-checks under the reconfigure lock
     ///   too, since it can be scheduled just before `shutdown()` runs.
     ///
@@ -1057,14 +1106,23 @@ public actor RemoteProviderManager {
     /// `recordFailure` spell out at length.
     private func enrollIfNeeded(_ config: RemoteProviderConfig) {
         guard registrySwept, !shuttingDown,
-            enrollments[config.name] == nil,
-            describes[config.name] == nil
+            !enrollmentsInFlight.contains(config.name),
+            describes[config.name] == nil,
+            (enrollmentAttempts[config.name] ?? 0) < Self.maxEnrollmentAttempts
         else { return }
+        enrollmentsInFlight.insert(config.name)
+        enrollmentAttempts[config.name, default: 0] += 1
         remoteLogger.debug("enrolling post-boot provider \(config.name, privacy: .public)")
         enrollments[config.name] = Task { [weak self] in await self?.enroll(config) }
     }
 
     private func enroll(_ config: RemoteProviderConfig) async {
+        // Released on EVERY exit, including the failure returns below — that
+        // is what lets a later `invoke` or roster refresh retry a describe
+        // that failed, up to `maxEnrollmentAttempts`. The `enrollments` entry
+        // itself is deliberately NOT cleared: `shutdown()` drains it, and a
+        // handle removed on completion could not be awaited.
+        defer { enrollmentsInFlight.remove(config.name) }
         guard !Task.isCancelled else { return }
         // Same order the boot sweep uses: recover persisted freshness before
         // the describe, so this provider's first status read reports what the
