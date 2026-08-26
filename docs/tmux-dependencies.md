@@ -548,6 +548,130 @@ usually told.
 - **The supervision tick's whole fleet read** — it enumerates panes from the DB
   and captures each one.
 
+Three more are easy to omit from such a list because no TBD code calls them —
+tmux supplies them to the user directly, and they would have to be rebuilt in
+the app rather than in the daemon.
+
+- **In-pane scrollback and search.** `set -g mouse on` (`TmuxManager.swift:771`)
+  is what makes the scroll wheel enter tmux's copy-mode. That copy-mode is used
+  often enough that the rate-limit rail has to check for it and refuse to type
+  (`paneInMode`, `LimitResumeActuator.swift:326`).
+- **Manual pane splits inside a TBD window.** `paneSendTargetQuery` treats a
+  user splitting a window by hand as routine and selects its answer line by pane
+  id specifically to stay correct when it happens
+  (`TmuxManager.swift:593-599`).
+- **Attaching from outside TBD.** These are ordinary tmux servers on named
+  sockets, driven by ordinary `tmux -L <server> …` commands — the by-hand
+  command reference at `docs/tmux-integration.md:94-103` is written on that
+  basis. It follows that a plain `tmux -L <server> attach` reaches a session
+  with the app shut, which is an escape hatch when the app is wedged. That the
+  affordance exists is structural; that anyone uses it is an inference this
+  document does not support.
+
+## What of that is actually irreducible
+
+The list above is what depends on tmux. It is not the same list as what could
+not be rebuilt. Sorting it that way is what a replacement decision turns on, so
+it is sorted here.
+
+### Easier without tmux
+
+These are losses on paper only. Each becomes simpler the moment TBD owns the pty
+master file descriptor itself, because tmux is currently an indirection between
+TBD and a thing TBD would then hold directly.
+
+- **Out-of-band writes.** `send-keys` and `paste-buffer` become a write to the
+  master fd.
+- **Environment delivery.** The `-e` flags and the inlined `export` prefix
+  become an environment dictionary handed to `posix_spawn`. The hook rail is
+  downstream of environment delivery, not of tmux, so it follows along.
+- **Sizing detached sessions.** `resize-window` becomes `TIOCSWINSZ`.
+- **Process-tree reclamation.** `AgentReaper` finds orphans by "parent is the
+  tmux server"; it would find them by "parent is the pty holder". Same shape,
+  same sweep.
+- **Liveness ground truth.** The reconcile sweep's `list-sessions` /
+  `list-panes` / `list-windows` become in-process lookups. Note that this does
+  not retire the reconciler doctrine: a crash between spawning a process and
+  committing its row still orphans a resource, so the sweep is still required.
+  Only its ground-truth source changes.
+
+### Actively gained
+
+**Pane identity stops being a problem TBD has.** The `@tbd_terminal_id` stamp,
+the `#{pane_start_command}` fallback with its UUID-parse hardening against
+user-authored env values, the four-field `paneSendTargetQuery`, and the
+five callers that consult it exist for exactly one reason: tmux recycles pane
+ids, so a stale coordinate can resolve to a live session belonging to somebody
+else. If TBD owns the process, the session handle *is* the identity, and that
+failure class disappears along with the apparatus defending against it — from
+the send path, the reconcile sweep, and the supervision desk at once.
+
+### Genuinely hard, and separable
+
+Two things are left. They are usually spoken of as one ("session persistence"),
+and they are not one: they have different mechanisms, different reference
+implementations, and one of them can be built without the other.
+
+**Process and pty lifetime independent of both viewer and daemon.** Not "a
+session survives closing its tab" — that is any pty holder. The requirement is
+that a session survives `scripts/restart.sh`, a daemon crash, and an upgrade,
+which is why `reconcileOnStartup` (`HibernationCoordinator.swift:1087`) exists
+at all: the sessions are still there when the daemon comes back. If the pty
+holder *is* the daemon, every daemon restart kills the fleet.
+
+**A VT and scrollback that exist while nothing is attached.** tmux keeps 50,000
+lines per pane (`TmuxManager.swift:274-286`) for panes nobody is looking at,
+which is the normal state for most of a fleet most of the time. Four
+capabilities are downstream of that and fail together without it: parked-pane
+display snapshots, closed-terminal history, the supervision tick's fleet read,
+and bracketed-paste correctness — the last because `paste-buffer -p` wraps only
+when the pane has set DECSET 2004, so replacing it means tracking 2004 per
+session, which means having parsed the output stream.
+
+### The reference designs are different for each half
+
+**For process and pty lifetime, iTerm2 is a proven precedent.** Its own
+documentation states that sessions run "as long-lived servers rather than as
+child processes of iTerm2", that those servers persist across an app crash or
+upgrade, and that on relaunch it "searches for running servers and connects to
+them" — that is, the same fd-recovery shape TBD would need, shipped for years on
+this platform.
+
+Two qualifications before treating it as a template.
+
+- **It is GPLv2 and TBD is MIT.** The design is referenceable; the code is not
+  copyable into this tree. Anything taken from it must be re-derived from the
+  documented behavior rather than lifted.
+- **Its guarantee is narrower than tmux's.** The same documentation records that
+  quitting deliberately terminates the jobs, that a reboot terminates them, and
+  that window *contents* are restored by a separate mechanism which can succeed
+  while process restoration fails — that disagreement is visible enough to have
+  its own on-screen banner. So it is a precedent for surviving a crash and an
+  upgrade, which is what TBD needs, and not a precedent for the stronger
+  property tmux happens to also provide.
+
+**For the headless VT, iTerm2 is not a reference at all.** Its emulator state —
+grid, scrollback, cursor — lives in the app alongside the session, not in the
+server process; the server holds the process and the pty and nothing else. That
+is sufficient for a terminal emulator, because nothing in a terminal emulator
+needs to read a session's screen while no window is showing it.
+
+It is not sufficient for TBD, and the gap is not incidental: reading unattended
+sessions is TBD's normal operating mode, not an edge case. A fleet-wide
+supervision read looks at panes none of which are on screen. A park snapshot is
+taken after a session may have gone unviewed for hours. Closed-terminal history
+is captured at kill time. So TBD's VT would have to live in the daemon or in the
+pty holder — a step beyond the iTerm2 shape, with its own references (a
+headless VT library, or tmux itself) rather than that one.
+
+Stated plainly, so the size of the thing is not lost in the decomposition: the
+honest end state of removing tmux is writing the portion of tmux that TBD
+actually uses — a process supervisor that outlives its clients, plus a headless
+VT with scrollback, plus fd handoff between them. Each piece has precedent and
+none is research. Whether owning that is better than depending on it is the
+decision; this document's contribution is only that the bill is two items and
+not one, and that the two can be built and evaluated separately.
+
 ## Invocations with no live caller
 
 None found. Every argv builder in `TmuxManager` and `TmuxBridge` traces to at
@@ -591,6 +715,13 @@ Stated so nobody reads more confidence into the above than it earns.
   depends entirely on whether the candidate engine exposes an outgoing-input
   hook. That is an engine-API question, not a tmux question, and this document
   deliberately does not answer it.
+- **iTerm2's file-descriptor recovery mechanism was not read in source.** The
+  architecture claims above rest on that project's own published documentation —
+  long-lived servers, not children of the app, reconnected on relaunch — and on
+  its stated restoration limits. The transport by which a pty master fd is
+  handed back, and whether one server holds one session or many, were not
+  confirmed against its code. What would settle it: read the source, which is
+  public. Do that before costing the work, not before believing the shape.
 - **`ClaudeStateDetector.captureSessionID`** (`:67-95`) uses `panePID` and then
   falls back to `pgrep -P <pid> -x claude`. Whether that fallback still fires in
   practice — the doc comment says zsh usually execs into Claude directly, making
