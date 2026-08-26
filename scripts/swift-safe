@@ -65,6 +65,19 @@ stale binaries were already there, which is this repo's documented
 test lane cannot silently stop a developer's rebuild.  A build that finds the
 variable set says so once on stderr and queues as usual, because a knob that is
 ignored in silence is indistinguishable from one that does not work.
+
+Every failure of the wrapper itself also names its numeric exit status on a
+final stderr line.  The status is already the process's, but almost nobody
+reads it: this wrapper is nearly always run piped — ``scripts/swift-safe build
+2>&1 | tail -30`` — to keep compiler output out of a context window, and a
+pipeline's ``$?`` belongs to the last command, so the number is `tail`'s and the
+wrapper's is discarded.  Readers of the surviving text have repeatedly
+concluded from that that this wrapper swallows failures and exits 0 — a false
+claim that has reached both a memory file and a CLAUDE.md draft.  Prose cannot
+inoculate against a trap that regenerates the belief on contact, so the number
+is put into the text, where the pipe carries it.  There is deliberately no such
+line for a *compile* failure: the success path execs SwiftPM and this process is
+gone, and that status belongs to SwiftPM.
 """
 
 from __future__ import annotations
@@ -91,6 +104,19 @@ HOLDER_FIELDS = ("pid", "cwd", "command")
 MAX_REPORTED_COMMAND_CHARACTERS = 120
 COMPILE_SUBCOMMANDS = {"build", "run", "test"}
 SUPPORTED_SUBCOMMANDS = COMPILE_SUBCOMMANDS
+# Every status this wrapper produces itself, and what it means.  SwiftPM's own
+# status is deliberately absent and cannot be added: by then this process has
+# been replaced by the compiler.  A status missing from here still gets its
+# number reported, only without a name.
+EXIT_MEANINGS = {
+    1: "invalid argument or environment value; nothing was compiled",
+    64: "EX_USAGE: unsupported subcommand; nothing was compiled",
+    69: "EX_UNAVAILABLE: no swift executable; nothing was compiled",
+    71: "EX_OSERR: could not exec swift; nothing was compiled",
+    75: "EX_TEMPFAIL: the shared build slot was not obtained, nothing was "
+    "compiled; retrying later is reasonable",
+    76: "yielded the place in the queue; verify this run elsewhere",
+}
 RUN_OPTIONS_WITH_VALUES = {
     "--build-system",
     "--cache-path",
@@ -282,6 +308,24 @@ def _lock_path() -> Path:
 def _report(message: str) -> None:
     """Waiting is diagnostics: stderr only, so stdout stays SwiftPM's alone."""
     print(message, file=sys.stderr, flush=True)
+
+
+def _reported_status(status: int) -> int:
+    """Name a non-zero exit status on stderr, and return it unchanged.
+
+    See the module docstring: the status survives on its own only for a caller
+    that does not pipe us, and almost every caller does.  Complements the
+    explanatory line each failure path already prints rather than repeating it
+    — that line says what went wrong, this one says what `$?` would have been.
+
+    Every failure funnels through here, from `_entry` rather than from the call
+    sites, so a path added later cannot forget the line.
+    """
+    if status:
+        meaning = EXIT_MEANINGS.get(status)
+        detail = f" ({meaning})" if meaning else ""
+        _report(f"swift-safe: exit status {status}{detail}")
+    return status
 
 
 def _holder_fields(lock_path: Path) -> dict[str, str]:
@@ -613,5 +657,25 @@ def main(arguments: list[str]) -> int:
             return 71
 
 
+def _entry(arguments: list[str]) -> int:
+    """`main`, plus the exit-status line, for every way this wrapper can fail.
+
+    Two shapes of failure reach here.  `main` returns a status for the ones it
+    decides itself, and the validation helpers raise `SystemExit` with a message
+    from wherever they are called — the interpreter would print that message and
+    exit 1, so it is printed here instead and the 1 named like any other status.
+    A `SystemExit` carrying anything but a message is re-raised untouched; none
+    is raised today, and guessing a status for one would be inventing a number.
+    """
+    try:
+        status = main(arguments)
+    except SystemExit as refusal:
+        if not isinstance(refusal.code, str):
+            raise
+        _report(refusal.code)
+        return _reported_status(1)
+    return _reported_status(status)
+
+
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+    raise SystemExit(_entry(sys.argv[1:]))
