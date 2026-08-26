@@ -1,5 +1,4 @@
 import AppKit
-import os
 import SwiftUI
 import TBDShared
 
@@ -484,64 +483,19 @@ struct RepoSectionView: View {
         }
     }
 
-    /// The two ISO 8601 profiles `parsedCreatedAt` accepts, built once and
-    /// reused. `ISO8601DateFormatter.init` bottoms out in ICU's `udat_open`,
-    /// and `isOrderedByCreation` parses both of its operands on every
-    /// comparison, so building them per call dominated the sort.
+    /// A session's `created_at`, in either ISO 8601 profile a conforming
+    /// provider may legally emit. `docs/remote-provider-contract.md` shows a
+    /// whole-second example but never pins a profile, and a default-options
+    /// formatter rejects the fractional form outright — which sorted every
+    /// such row as undated.
     ///
-    /// Two formatters and not one: `ISO8601DateFormatter` does not accept both
-    /// profiles in a single `formatOptions` value. `formatOptions` is set here
-    /// and never mutated afterwards.
-    ///
-    /// Deliberately NOT `Sendable`, which is what makes the confinement below
-    /// machine-checked rather than merely intended: `withLock` requires its
-    /// return type to be `Sendable`, so a body that handed a formatter back
-    /// out — `withLock { $0 }` — fails to compile.
-    private struct CreatedAtParsers {
-        let fractionalSeconds: ISO8601DateFormatter = {
-            let formatter = ISO8601DateFormatter()
-            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            return formatter
-        }()
-        let wholeSeconds = ISO8601DateFormatter()
-    }
-
-    /// Guards the shared parsers. `parsedCreatedAt` is `nonisolated` so a
-    /// plain test context can call it without hopping to `RepoSectionView`'s
-    /// inferred `@MainActor` isolation, and Swift Testing runs suites in
-    /// parallel — so two threads genuinely can reach one formatter at once,
-    /// even though every caller in the app is already on the main actor.
-    ///
-    /// A lock rather than `nonisolated(unsafe)` because the platform does not
-    /// promise what that would assume. Both `NSDateFormatter.h` and
-    /// `NSISO8601DateFormatter.h` are audited for sendability, and only
-    /// `DateFormatter` carries `NS_SWIFT_SENDABLE` ("All mutable state
-    /// protected by locks") — so the subclass's silence is a deliberate
-    /// withholding, not an oversight. An uncontended `os_unfair_lock` acquire
-    /// is nothing next to the ICU parse it wraps, so the guarantee is close to
-    /// free here.
-    ///
-    /// `uncheckedState:` rather than `initialState:` because the state is not
-    /// `Sendable` — see `CreatedAtParsers`. That is the point: it is the
-    /// unconstrained initializer that lets a non-`Sendable` value be locked,
-    /// and keeping the value non-`Sendable` is what makes escaping it a
-    /// compile error.
-    nonisolated private static let createdAtParsers =
-        OSAllocatedUnfairLock(uncheckedState: CreatedAtParsers())
-
+    /// The parsing (and the shared, lock-guarded formatters that make it
+    /// cheap enough to call from a sort comparator) lives in
+    /// `RemoteTimestamp`, alongside the ordering rule that reads the
+    /// contract's other timestamp. Two parsers for one wire format is one
+    /// too many.
     nonisolated static func parsedCreatedAt(_ raw: String?) -> Date? {
-        guard let raw else { return nil }
-        // `docs/remote-provider-contract.md` shows a whole-second
-        // `created_at` example but never pins a profile, so a conforming
-        // provider can legally emit fractional seconds
-        // (`2026-07-24T18:02:11.123Z`) — a default-options formatter rejects
-        // those outright, sorting every such row as undated. Try
-        // `.withFractionalSeconds` first, then fall back to the plain
-        // whole-second profile.
-        return RepoSectionView.createdAtParsers.withLock { parsers -> Date? in
-            if let date = parsers.fractionalSeconds.date(from: raw) { return date }
-            return parsers.wholeSeconds.date(from: raw)
-        }
+        RemoteTimestamp.parse(raw)
     }
 
     // MARK: - The cloud gate — pure, view-free forms of what the two owned

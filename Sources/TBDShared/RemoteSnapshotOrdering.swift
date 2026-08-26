@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Parses the ISO-8601 timestamps the provider contract puts on the Session
 /// object (`created_at`, `agent_state_at`).
@@ -9,17 +10,45 @@ import Foundation
 /// provider-specific loss that makes a timestamp field useless for anything
 /// but display.
 public enum RemoteTimestamp {
-    private static let plain: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter
-    }()
+    /// The two ISO 8601 profiles `parse` accepts, built once and reused.
+    /// `ISO8601DateFormatter.init` bottoms out in ICU's `udat_open`, and this
+    /// runs once per session per sighting, so building them per call would
+    /// dominate the poll.
+    ///
+    /// Two formatters and not one: `ISO8601DateFormatter` does not accept
+    /// both profiles in a single `formatOptions` value. `formatOptions` is
+    /// set here and never mutated afterwards.
+    ///
+    /// Deliberately NOT `Sendable`, which is what makes the confinement below
+    /// machine-checked rather than merely intended: `withLock` requires its
+    /// return type to be `Sendable`, so a body that handed a formatter back
+    /// out — `withLock { $0 }` — fails to compile.
+    private struct Parsers {
+        let fractionalSeconds: ISO8601DateFormatter = {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            return formatter
+        }()
+        let wholeSeconds = ISO8601DateFormatter()
+    }
 
-    private static let fractional: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter
-    }()
+    /// Guards the shared parsers. Two threads genuinely can reach one
+    /// formatter at once — the daemon parses these on its poll actor while
+    /// the app parses them for display, and Swift Testing runs suites in
+    /// parallel.
+    ///
+    /// A lock rather than `nonisolated(unsafe)` because the platform does not
+    /// promise what that would assume: both `NSDateFormatter.h` and
+    /// `NSISO8601DateFormatter.h` are audited for sendability, and only
+    /// `DateFormatter` carries `NS_SWIFT_SENDABLE` — the subclass's silence
+    /// is a deliberate withholding, not an oversight. An uncontended
+    /// `os_unfair_lock` acquire is nothing next to the ICU parse it wraps.
+    ///
+    /// `uncheckedState:` rather than `initialState:` because the state is not
+    /// `Sendable` — see `Parsers`. That is the point: it is the unconstrained
+    /// initializer that lets a non-`Sendable` value be locked, and keeping
+    /// the value non-`Sendable` is what makes escaping it a compile error.
+    private static let parsers = OSAllocatedUnfairLock(uncheckedState: Parsers())
 
     /// The instant `value` names, or nil when it is absent or unparseable.
     /// Never throws and never guesses: an unparseable stamp is treated as no
@@ -27,7 +56,10 @@ public enum RemoteTimestamp {
     /// information rather than gaining a wrong instant.
     public static func parse(_ value: String?) -> Date? {
         guard let value, !value.isEmpty else { return nil }
-        return fractional.date(from: value) ?? plain.date(from: value)
+        return parsers.withLock { parsers -> Date? in
+            if let date = parsers.fractionalSeconds.date(from: value) { return date }
+            return parsers.wholeSeconds.date(from: value)
+        }
     }
 }
 
