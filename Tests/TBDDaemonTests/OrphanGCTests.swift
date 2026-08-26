@@ -359,25 +359,31 @@ struct OrphanGCTests {
                 "partial output from a failed lsof is not a complete cwd picture — fail toward keep")
     }
 
-    @Test func parseLiveCWDsParsesCompletedOutput() {
-        // Nonexistent paths pass through canon() unchanged (realpath fallback),
-        // so expectations are deterministic. Mixed lines: p-prefixed pid
-        // headers are dropped, n-prefixed cwds are kept (prefix stripped),
-        // duplicates are deduped preserving first-seen order, and a bare "n"
-        // (empty path) is dropped.
+    @Test func parseLiveCWDsParsesCompletedOutput() throws {
+        // Fixture cwds under a scratch directory whose own path is already
+        // realpath-resolved, so canon() is the identity on them whether or not
+        // they exist — a bare literal makes the expectation depend on the
+        // machine's filesystem instead. Mixed lines: p-prefixed pid headers are
+        // dropped from the path list, n-prefixed cwds are kept (prefix
+        // stripped), duplicates are deduped preserving first-seen order, and a
+        // bare "n" (empty path) is dropped.
+        let scratch = try makeCanonicalScratchDirectory(prefix: "tbd-gc-parse-cwds")
+        defer { try? FileManager.default.removeItem(atPath: scratch) }
+        let wtA = scratch + "/wt-a"
+        let wtB = scratch + "/wt-b"
         let stdout = """
         p101
-        n/nonexistent/gc-test/wt-a
+        n\(wtA)
         p102
-        n/nonexistent/gc-test/wt-b
+        n\(wtB)
         p103
-        n/nonexistent/gc-test/wt-a
+        n\(wtA)
         p104
         n
         """
         let outcome = BoundedProcessOutcome.completed(status: 0, stdout: Data(stdout.utf8), stderr: Data())
         let parsed = OrphanGC.parseLiveCWDs(outcome)
-        #expect(parsed?.paths == ["/nonexistent/gc-test/wt-a", "/nonexistent/gc-test/wt-b"])
+        #expect(parsed?.paths == [wtA, wtB])
     }
 
     // MARK: - lsof unavailable skips the entire sweep

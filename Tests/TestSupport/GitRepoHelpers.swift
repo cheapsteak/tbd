@@ -33,6 +33,46 @@ public func createTestRepoResolvingSymlinks() async throws -> (tempDir: URL, rep
     return (tempDir: resolved, repoDir: repoDir)
 }
 
+/// Thrown when `realpath()` refuses a directory this process just created —
+/// never expected, but it is the one way `makeCanonicalScratchDirectory` can
+/// hand back a path that is not actually canonical, so it fails loudly instead.
+public struct CanonicalScratchDirectoryFailure: Error, CustomStringConvertible {
+    public let path: String
+    public let errnoValue: Int32
+    public var description: String {
+        "realpath() failed with errno \(errnoValue) on the freshly created scratch directory \(path)"
+    }
+}
+
+/// Creates a unique empty scratch directory and returns its `realpath`-resolved
+/// path, so every path built underneath it is already canonical. The caller
+/// owns it (`try? FileManager.default.removeItem(atPath: dir)`).
+///
+/// For tests whose subject canonicalizes the paths it is handed, which TBD
+/// does everywhere it compares a path against git's always-canonical worktree
+/// output. A hardcoded literal is the wrong fixture there, because `realpath(3)`
+/// takes a different branch depending on whether the path happens to exist:
+/// it resolves an existing one (following `/tmp` -> `/private/tmp`) and fails
+/// with `ENOENT` on a missing one, leaving callers to fall back to the input.
+/// So `/tmp/a` means `/private/tmp/a` on a machine where some unrelated
+/// process left that file lying around and `/tmp/a` on one where it did not —
+/// a unit test silently reading the developer's filesystem.
+///
+/// Paths built under this directory close that branch by construction: every
+/// component is already symlink-free, so resolving one of them is the identity
+/// whether or not it exists on disk.
+public func makeCanonicalScratchDirectory(prefix: String) throws -> String {
+    let raw = FileManager.default.temporaryDirectory
+        .appendingPathComponent("\(prefix)-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: raw, withIntermediateDirectories: true)
+    errno = 0
+    guard let resolved = realpath(raw.path, nil) else {
+        throw CanonicalScratchDirectoryFailure(path: raw.path, errnoValue: errno)
+    }
+    defer { free(resolved) }
+    return String(cString: resolved)
+}
+
 /// Sets up a temp git repo with one worktree at a non-canonical (external)
 /// path. Returns the canonicalized worktree path (via `realpath`) so it
 /// matches what `git worktree list` reports.
