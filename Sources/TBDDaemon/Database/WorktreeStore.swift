@@ -800,6 +800,57 @@ public struct WorktreeStore: Sendable {
         }
     }
 
+    /// Repair an archived worktree's stale branch, writing only if the row
+    /// still matches the three fields the caller's decision rested on: it is
+    /// still `.archived`, still carries `expectedBranch`, and still has
+    /// `expectedArchivedAt` as its archive timestamp.
+    ///
+    /// This is the compare-and-swap `ArchivedWorktreeBackfill` writes through.
+    /// Its pass runs while the daemon is serving, so an RPC can revive,
+    /// re-archive or forget a row between the snapshot that decided on a repair
+    /// and this write.
+    ///
+    /// The three fields are checked rather than the row's identity of state,
+    /// which SQLite gives no handle on. Status and branch alone are not enough:
+    /// the revive path recreates the *stale* branch name from `archivedHeadSHA`
+    /// (`WorktreeLifecycle+Archive.swift`), so a row revived and archived again
+    /// comes back `.archived` on `expectedBranch` and would otherwise pass.
+    /// `archivedAt` closes that: `archive` stamps `Date()` on every archive and
+    /// `revive` clears it to nil, so a revive/re-archive cycle necessarily
+    /// changes it.
+    ///
+    /// Returns `false` when any of the three no longer matches (the row was
+    /// revived, re-archived, moved to another branch, or deleted) and nothing
+    /// was written. That is an expected outcome, not an error: the repair is
+    /// idempotent and best-effort, so losing the race costs nothing — the next
+    /// daemon start either picks the row up again or finds it no longer needs
+    /// repair.
+    ///
+    /// `archivedHeadSHA` is written only when it is non-nil AND the record has
+    /// none: this populates a missing value and never overwrites one.
+    public func repairArchivedBranch(
+        id: UUID, expectedBranch: String, newBranch: String, expectedArchivedAt: Date?,
+        archivedHeadSHA: String?
+    ) async throws -> Bool {
+        try await writer.write { db -> Bool in
+            guard var record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else {
+                return false
+            }
+            guard record.status == WorktreeStatus.archived.rawValue,
+                  record.branch == expectedBranch,
+                  record.archivedAt == expectedArchivedAt
+            else {
+                return false
+            }
+            record.branch = newBranch
+            if let sha = archivedHeadSHA, record.archivedHeadSHA == nil {
+                record.archivedHeadSHA = sha
+            }
+            try record.update(db)
+            return true
+        }
+    }
+
     /// Record that this worktree's contents were checked out from an unvetted
     /// ref (a PR head, whose commits may come from a third-party fork).
     /// One-way: only ever sets the flag to `true`. Nothing clears it, because

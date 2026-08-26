@@ -89,6 +89,10 @@ public final class Daemon: Sendable {
     /// leaves `loadRegistryAndDescribe` spawning `describe` child processes
     /// after `shutdown()` has already torn down the manager, orphaning them.
     public nonisolated(unsafe) var remoteStartTask: Task<Void, Never>?
+    /// Deferred archived-worktree backfill task (step 11a-backfill). Stored so
+    /// `stop()` can cancel and await it — the pass spawns `git` children, so a
+    /// SIGTERM mid-pass has an in-flight child to signal on the way out.
+    public nonisolated(unsafe) var archivedBackfillTask: Task<Void, Never>?
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
     public nonisolated(unsafe) var oauthUsagePoller: OAuthProfileUsagePoller?
     /// Session-limit auto-resume scheduler. Owned here so it can be stopped
@@ -247,10 +251,6 @@ public final class Daemon: Sendable {
         } catch {
             reconcileLogger.warning("Failed to reconcile scratch terminals: \(error.localizedDescription, privacy: .public)")
         }
-        // Backfill archived worktrees whose branch is missing — repairs
-        // rows whose branch was renamed before archive captured the new name.
-        // Idempotent and best-effort; never throws.
-        await ArchivedWorktreeBackfill(db: database, git: git).run()
         // Validate repo health — flips repos with stale paths to .missing.
         // Must come *after* reconcile so newly-discovered worktrees see the
         // correct status, and *before* the periodic tasks so users get accurate
@@ -330,6 +330,33 @@ public final class Daemon: Sendable {
         rpcRouter.deliveryVerifier = verifier
         await verifier.replayMissedObservations(activeSegmentPath: actuationLog.path)
         return verifier
+    }
+
+    /// Start the archived-worktree branch backfill as a background task.
+    ///
+    /// **Ordering contract: this runs only AFTER the RPC listener is bound
+    /// (step 9), never inside `performStartupReconciliation` (step 8d).** The
+    /// pass spawns one `git` subprocess per archived row; measured on a box
+    /// with 1,825 archived worktrees it ran for ~3 minutes, during which the
+    /// daemon had bound no socket, written no port file, and the app's connect
+    /// retries each spawned a daemon that exited "Another daemon is already
+    /// running". Nothing the backfill does needs to precede serving: it repairs
+    /// archived (inactive) rows, is idempotent, never deletes a row and never
+    /// throws.
+    ///
+    /// Returns `nil` in mock mode, where the backfill is a total no-op like
+    /// every other background rail.
+    @discardableResult
+    static func startArchivedWorktreeBackfill(
+        mockMode: MockMode?, database: TBDDatabase, git: GitManager
+    ) -> Task<Void, Never>? {
+        guard mockMode == nil else {
+            daemonLogger.info("Mock mode: skipping archived worktree backfill")
+            return nil
+        }
+        return Task {
+            await ArchivedWorktreeBackfill(db: database, git: git).run()
+        }
     }
 
     /// The construction behind `remote_backends_enabled` / `claude_cloud_enabled`
@@ -911,6 +938,15 @@ public final class Daemon: Sendable {
                 }
             }
 
+            // 11a-backfill. Repair archived worktree rows whose branch was
+            // renamed before archive captured the new name. Deferred off the
+            // boot critical path for the same reason as the tasks above — one
+            // `git` subprocess per archived row is minutes of work on a large
+            // fleet, and the listener must not wait on it. See
+            // `startArchivedWorktreeBackfill` for the ordering contract.
+            self.archivedBackfillTask = Daemon.startArchivedWorktreeBackfill(
+                mockMode: mockMode, database: database, git: git)
+
             // 11a-pre. Prune per-session Claude `fallbackModel` overlay files
             // orphaned by crashes or teardown paths that didn't clean up. Keep only
             // files whose key matches a live terminal. Best-effort.
@@ -1225,13 +1261,29 @@ public final class Daemon: Sendable {
         // in-flight `describe` immediately rather than only being observed
         // between providers in `loadRegistryAndDescribe`'s loop — but that
         // interruption still runs ON this task, so it needs the daemon
-        // process (and the `SubprocessWatchdog` thread that reaps the killed
-        // child) to still be alive to finish unwinding. Awaiting `.value`
+        // process (and the `SubprocessWatchdog` thread the SIGKILL escalation
+        // is scheduled on) to still be alive to finish unwinding. Awaiting `.value`
         // here, before `Foundation.exit(0)` below, is what guarantees that;
         // without it the process could tear down mid-unwind and orphan the
         // child exactly as before.
+        //
+        // The archived-worktree backfill is cancelled here too, and awaited
+        // just below, for the same reason: it can be mid `runBoundedProcess`,
+        // and the cancellation relay's interruption unwinds ON this task, so
+        // the process must stay alive for that unwind to finish. What awaiting
+        // buys is the unwind, not a reap — the relay signals the `git` child
+        // with SIGTERM and the continuation resumes immediately after, while
+        // the +500 ms SIGKILL escalation is scheduled on the watchdog thread
+        // and does not survive the `Foundation.exit(0)` below.
+        //
+        // Both cancels go out before either await, so the two unwinds overlap
+        // rather than sum. Nothing above this bounds `stop()`'s latency —
+        // `main.swift` has no shutdown watchdog — and both must still complete
+        // before the manager teardown below.
         remoteStartTask?.cancel()
+        archivedBackfillTask?.cancel()
         await remoteStartTask?.value
+        await archivedBackfillTask?.value
 
         // Stop remote-backends poll loops / events supervisors. Required,
         // not optional: the events supervisor's supervision task retains
