@@ -148,10 +148,26 @@ MODULE_CACHE_FLAGS=(
     -Xcc -fmodules-cache-path="$SHARED_MODULE_CACHE"
 )
 
+# Everything below this point ships what is in .build/debug — it assembles the
+# bundle, copies it over /Applications/TBD.app, and restarts the shared
+# daemon. So a build that did not succeed must stop the script here, before
+# any of that. The status of the governed build is CAPTURED, never read
+# through a pipe: `scripts/swift-safe … | tail -3` reports tail's status
+# (always 0), so `set -e` never fires and a build that compiled nothing is
+# indistinguishable from one that succeeded — which is how an 1800s lock
+# timeout (exit 75) once relaunched the app and daemon machine-wide from
+# stale binaries. run_governed_build keeps the output trimming and returns
+# the real status; see scripts/restart-build-lib.sh (harness:
+# scripts/restart-build-lib.test.sh). `--quick`/`--skip-build` is unaffected:
+# shipping the existing binaries is the point there, and no build was
+# attempted to have a status.
+# shellcheck source=/dev/null
+source "$REPO_ROOT/scripts/restart-build-lib.sh"
+
 if [ "$skip_build" = false ]; then
     echo "Building..."
     t0=$SECONDS
-    (cd "$REPO_ROOT" && scripts/swift-safe build "${MODULE_CACHE_FLAGS[@]}") 2>&1 | tail -3
+    run_governed_build "$REPO_ROOT" "${MODULE_CACHE_FLAGS[@]}" || exit $?
     echo "  Build: $((SECONDS - t0))s"
 fi
 

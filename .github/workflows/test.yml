@@ -159,6 +159,7 @@ jobs:
           bash scripts/remote-verify.test.sh
           bash scripts/sweep-preflight-refs.test.sh
           bash scripts/nightly-flake-stress.test.sh
+          bash scripts/restart-build-lib.test.sh
 
   review-scripts-tests:
     name: Review scripts tests
