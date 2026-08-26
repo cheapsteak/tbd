@@ -63,18 +63,27 @@ captured *no* scrolling, i.e. uncorrelated.
 
 ## Measured cost, validated windows
 
-Percentages are of all main-thread samples, as top-level subtree totals. Two
-validated scroll windows, against the quiet baseline:
+Percentages are of all main-thread samples. Two validated scroll windows, against
+the quiet baseline.
+
+**Only the four top-level entries below are additive.** Everything indented under
+one is already counted inside its parent, so summing a parent together with its
+children double-counts the subtree — the same trap described above, in the same
+numbers. The nesting here is the guard against it.
 
 - **SwiftUI view-graph flush** (`GraphHost.flushTransactions`) — 25.1% and 18.1%,
   against 3.7% quiet. The largest single consumer during scroll.
+  - of which `RepoSectionView.body` — 3.7% and 3.0%, against 0.7%.
+  - of which `WorktreeRowView.body` — 1.2% and 1.7%, against 0.4%.
+  - `TabBarItem` and `PanePlaceholder` re-evaluate alongside them; the remainder
+    is other view bodies plus the attribute-graph machinery itself.
 - **Terminal draw** (`TerminalView.draw`) — 20.7% and 11.6%, against 4.0% quiet.
   - of which `buildAttributedString` — 12.8% and 7.5%, against 2.2%.
-- `RepoSectionView.body` — 3.7% and 3.0%, against 0.7%.
-- `WorktreeRowView.body` — 1.2% and 1.7%, against 0.4%.
-- Blink lifecycle scan — 1.4% and 1.0% during scroll, but **6.1% of the quiet
-  baseline's main thread**.
-- Terminal feed and parse — around 2.7%.
+- **Blink lifecycle scan** — 1.4% and 1.0% during scroll, but **6.1% of the quiet
+  baseline's main thread**. Note this sits *outside* the draw subtree: it hangs
+  off the display-queue dispatch, not off `draw`, so it is additive to the two
+  entries above rather than part of either.
+- **Terminal feed and parse** — around 2.7%.
 
 Main thread 45% to 64% busy across the scroll windows against 18.7% quiet, with
 the app near 47% of a core.
