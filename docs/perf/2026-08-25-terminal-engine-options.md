@@ -156,11 +156,43 @@ the default path carries none of those costs: no octal re-encoding, no send-keys
 input path, no state reconciliation. So the reversal indicts the path TBD is not
 currently using far more than the path it is.
 
-The fullscreen-incompatibility claim in that list is unverified and worth
-checking on its own terms. It is asserted without citation by a team that had
-built and measured the arrangement, and if it holds it is a product-level
-constraint on the control-mode design that stands regardless of which engine
-renders.
+The fullscreen-incompatibility claim in that list holds, and it is a
+product-level constraint on the control-mode design that stands regardless of
+which engine renders.
+
+The hosted agent's own documentation states that its fullscreen renderer is
+incompatible with a terminal's tmux integration mode — the mode entered with
+`tmux -CC` — because that host renders each tmux pane itself rather than letting
+tmux draw to the terminal. The documented symptoms are that the alternate screen
+buffer and mouse tracking do not work correctly: the mouse wheel does nothing,
+and a double-click can corrupt terminal state. Regular tmux, without control
+mode, is documented as fine.
+
+Three qualifications matter for TBD.
+
+The incompatibility is scoped to that agent's **fullscreen** renderer, which
+draws on the alternate screen. Its classic renderer keeps output in native
+scrollback and is not documented as broken under control mode. So this
+constrains a rendering mode, not the agent as such.
+
+The mechanism is documented for one specific terminal's integration mode, not for
+control mode as a wire protocol — neither tmux's own documentation nor that
+terminal's states a general rule that alternate-screen applications break under
+control mode. But the mechanism described, a host application rendering panes
+from control-mode output rather than tmux drawing them, is structurally what
+TBD's control mode does. The risk transfers by construction even though the
+citation does not.
+
+The agent ships a mitigation TBD may not inherit: it detects that integration
+mode and declines to start its fullscreen renderer there. That detection
+presumably keys on the specific terminal, and an agent process running inside a
+tmux pane has no obvious way to know that its outer client is some other
+control-mode consumer. TBD could therefore meet the failure without the automatic
+fallback that protects users elsewhere.
+
+What would settle it: run a known alternate-screen application under TBD's own
+control-mode pipeline and observe whether mouse reporting and the alternate
+screen behave, rather than reasoning from a citation scoped to a different host.
 
 ## Confirmed hazards from projects that migrated
 
