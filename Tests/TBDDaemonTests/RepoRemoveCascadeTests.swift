@@ -86,6 +86,12 @@ struct RepoRemoveCascadeTests {
             if await condition() { return }
             try await Task.sleep(for: .milliseconds(10))
         }
+        // Fresh read before giving up: the loop tests the deadline before the
+        // condition, so its last sample is up to `timeout` old, and a poller
+        // whose 10 ms step aside returns its turn late under the fast parallel
+        // pass would otherwise throw a timeout at a condition that already
+        // holds. Same re-read as `SidecarTestSupport.waitUntil`.
+        if await condition() { return }
         throw CascadeWaitTimeout(what: what, observed: await observed(), seconds: timeout)
     }
 

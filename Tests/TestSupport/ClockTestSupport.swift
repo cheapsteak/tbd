@@ -392,6 +392,19 @@ public extension TestClock {
             }
             try? await Task.sleep(for: pollInterval)
         } while ContinuousClock.now < deadline
+        // One last probe, so the verdict is a fresh read rather than the loop's
+        // exit. The deadline is tested *after* the poll sleep, so the last probe
+        // is already `pollInterval` old before that test runs — and under the
+        // fast parallel pass a 25 ms step aside can return its turn tens of
+        // seconds later, by which time an arming that happened during the sleep
+        // would be reported as never having happened. Same shape as
+        // `advanceUntil` above, which re-reads its condition here for the same
+        // reason. Costs one extra probe, and only on the path about to fail.
+        do {
+            try await checkSuspension()
+        } catch {
+            return
+        }
         Issue.record(
             """
             TestClock: no task was suspended on the clock within \(timeout) — the \

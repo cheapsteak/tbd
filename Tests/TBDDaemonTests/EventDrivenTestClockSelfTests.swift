@@ -38,6 +38,16 @@ struct EventDrivenTestClockSelfTests {
             if condition() { return }
             try? await Task.sleep(for: .milliseconds(5))
         }
+        // The verdict must come from a *fresh* read, never from the loop's exit.
+        // The loop tests the deadline before the condition, so its last sample
+        // is up to `timeout` old: a poller that steps aside for 5 ms and gets
+        // its next turn 40 s later exits here having looked exactly once, at
+        // the top, before the task it is waiting on had run at all. Reporting
+        // that as "still not true" is a false red, and under the fast parallel
+        // pass — one process, no concurrency cap, p50 per-test latency 56-70 s
+        // — it is the *expected* outcome rather than a rare one. Same shape as
+        // `advanceUntil` and `watchForSleeper`, which both re-read here.
+        if condition() { return }
         Issue.record(
             HandshakeTimeout(what: what, timeout: timeout),
             sourceLocation: sourceLocation
@@ -96,6 +106,56 @@ struct EventDrivenTestClockSelfTests {
                 return "other: \(error)"
             }
         }
+    }
+
+    // MARK: The suite's own wait helper
+
+    /// The worst bug a self-test suite can have is a **false red**, and this
+    /// helper shipped one.
+    ///
+    /// `waitUntil` tested the deadline *before* the condition and recorded its
+    /// diagnostic straight off the loop's exit, so the verdict it printed was
+    /// whatever the last sample said — a sample taken up to `timeout` ago. The
+    /// fast parallel pass makes that gap routine rather than exotic: Swift
+    /// Testing starts every non-serialized test in one process with no
+    /// concurrency cap, and mined xUnit from CI puts p50 *per-test* latency at
+    /// 56-70 s against a 123-158 s pass. A poller that steps aside for 5 ms can
+    /// wait tens of seconds for its turn, and a turn that lands past the
+    /// deadline ends the loop having never looked again.
+    ///
+    /// Field instance: PR #716 attempts 1 and 2, where all nine `waitUntil`
+    /// call sites in this file recorded "still not true after 30.0 seconds"
+    /// while every downstream assertion in those same tests passed — including
+    /// `sleeperCount == 2` after the first advance, and two 50 ms hang guards
+    /// that would each have recorded a second issue had the handshake genuinely
+    /// been missing. The conditions were true; the helper had stopped looking.
+    /// The green run it was compared against was *slower* (p50 70 s, EDclock
+    /// tests 83-99 s), which is what rules load out as the discriminator.
+    ///
+    /// A zero timeout is the limiting case of that gap and the only shape of it
+    /// that is deterministic: the loop gives up having sampled nothing at all.
+    @Test("waitUntil reads the condition before declaring it never became true")
+    func waitUntilRereadsTheConditionBeforeGivingUp() async {
+        // No `withKnownIssue` here on purpose: a recorded diagnostic IS the
+        // failure this test exists to catch.
+        await Self.waitUntil("a condition that is already true", timeout: .zero) { true }
+    }
+
+    /// The mutation check the fix above needs: a re-read that always returned
+    /// happily would satisfy that test and silently delete every hang guard in
+    /// this file. A condition that never holds must still be reported, and the
+    /// diagnostic must still carry the caller's wording.
+    @Test("waitUntil still reports a condition that never becomes true")
+    func waitUntilStillReportsAConditionThatNeverHolds() async {
+        let recorded = Captured()
+        await withKnownIssue("the condition never holds, so the wait must give up") {
+            await Self.waitUntil("a condition that never holds", timeout: .zero) { false }
+        } matching: { issue in
+            recorded.set(issue.error.map { String(describing: $0) } ?? "")
+            return true
+        }
+        #expect(recorded.value.contains("observed: a condition that never holds"),
+                "the diagnostic must carry the caller's wording — got: \(recorded.value)")
     }
 
     // MARK: Arming
