@@ -1,0 +1,103 @@
+diff --git a/Sources/SwiftTerm/Apple/AppleTerminalView.swift b/Sources/SwiftTerm/Apple/AppleTerminalView.swift
+index 109252a..a2997ac 100644
+--- a/Sources/SwiftTerm/Apple/AppleTerminalView.swift
++++ b/Sources/SwiftTerm/Apple/AppleTerminalView.swift
+@@ -2289,6 +2289,7 @@ extension TerminalView {
+     /// Update visible area
+     func updateDisplay (notifyAccessibility: Bool)
+     {
++        recordDisplayPass()
+         defer { pendingDisplay = false }
+         if terminal.synchronizedOutputActive {
+             return
+@@ -2514,19 +2515,48 @@ extension TerminalView {
+         if terminal.synchronizedOutputActive {
+             return
+         }
+-        // throttle
++        // Rate limit, not a fixed delay. Waiting a whole frame unconditionally
++        // also delays the first chunk after an idle period, which has nothing to
++        // coalesce with: the delay buys no coalescing there and costs a frame on
++        // every echo. So a draw that is already due is posted for the next
++        // main-queue turn, and only one that would land sooner than a frame after
++        // the previous draw waits out the remainder of the interval. Bursts are
++        // still collapsed -- `pendingDisplay` admits one scheduled draw at a time
++        // and `lastDisplayUptimeNs` caps the rate at 60 Hz however fast chunks
++        // arrive -- so the saturated line-append path draws no more than before.
+         if !pendingDisplay {
+-            let fps60 = 16670000
+-            // let fps30 = 16670000*2
+-            let fpsDelay = fps60
++            let fps60: UInt64 = 16670000
+             pendingDisplay = true
+-            DispatchQueue.main.asyncAfter(
+-                deadline: DispatchTime (uptimeNanoseconds: DispatchTime.now().uptimeNanoseconds + UInt64 (fpsDelay)),
+-                execute: updateDisplay)
+-        } else {
++            let now = DispatchTime.now().uptimeNanoseconds
++            let last = loadLastDisplayUptimeNs()
++            let sinceLastDisplay = now >= last ? now - last : fps60
++            if last == 0 || sinceLastDisplay >= fps60 {
++                DispatchQueue.main.async (execute: updateDisplay)
++            } else {
++                DispatchQueue.main.asyncAfter(
++                    deadline: DispatchTime (uptimeNanoseconds: now + (fps60 - sinceLastDisplay)),
++                    execute: updateDisplay)
++            }
+         }
+     }
+ 
++    /// Stamps the start of a display pass, so `queuePendingDisplay` can tell a
++    /// draw that is due from one that would break the 60 Hz cap. Written on the
++    /// main thread and read from the (possibly background) feed thread, so both
++    /// go through `displayStampLock`.
++    func recordDisplayPass() {
++        let now = DispatchTime.now().uptimeNanoseconds
++        displayStampLock.lock()
++        lastDisplayUptimeNs = now
++        displayStampLock.unlock()
++    }
++
++    private func loadLastDisplayUptimeNs() -> UInt64 {
++        displayStampLock.lock()
++        defer { displayStampLock.unlock() }
++        return lastDisplayUptimeNs
++    }
++
+ #if canImport(MetalKit)
+     func requestMetalDisplay() {
+         guard let metalView = metalView else {
+diff --git a/Sources/SwiftTerm/Mac/MacTerminalView.swift b/Sources/SwiftTerm/Mac/MacTerminalView.swift
+index 1a012b9..661deb7 100644
+--- a/Sources/SwiftTerm/Mac/MacTerminalView.swift
++++ b/Sources/SwiftTerm/Mac/MacTerminalView.swift
+@@ -216,6 +216,12 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations,
+     /// Output received shortly after local input is likely echo or prompt redraw;
+     /// render it without the 16.67ms frame-rate throttle so typing feels responsive.
+     var lastUserInputUptimeNs: UInt64 = 0
++    /// Uptime of the last display pass, so the frame-rate throttle can act as a
++    /// rate limit rather than a fixed per-chunk delay. See queuePendingDisplay().
++    var lastDisplayUptimeNs: UInt64 = 0
++    /// Guards lastDisplayUptimeNs, written on the main thread and read from the
++    /// (possibly background) feed thread.
++    let displayStampLock = NSLock()
+     /// Guards lastUserInputUptimeNs, which is written on the main thread and
+     /// read from the (possibly background) feed thread.
+     let userInputLock = NSLock()
+diff --git a/Sources/SwiftTerm/iOS/iOSTerminalView.swift b/Sources/SwiftTerm/iOS/iOSTerminalView.swift
+index c515e6a..902c0ac 100644
+--- a/Sources/SwiftTerm/iOS/iOSTerminalView.swift
++++ b/Sources/SwiftTerm/iOS/iOSTerminalView.swift
+@@ -210,6 +210,12 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
+     /// Output received shortly after local input is likely echo or prompt redraw;
+     /// render it without the 16.67ms frame-rate throttle so typing feels responsive.
+     var lastUserInputUptimeNs: UInt64 = 0
++    /// Uptime of the last display pass, so the frame-rate throttle can act as a
++    /// rate limit rather than a fixed per-chunk delay. See queuePendingDisplay().
++    var lastDisplayUptimeNs: UInt64 = 0
++    /// Guards lastDisplayUptimeNs, written on the main thread and read from the
++    /// (possibly background) feed thread.
++    let displayStampLock = NSLock()
+     /// Guards lastUserInputUptimeNs, which is written on the main thread and
+     /// read from the (possibly background) feed thread.
+     let userInputLock = NSLock()
