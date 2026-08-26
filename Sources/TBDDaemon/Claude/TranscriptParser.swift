@@ -9,15 +9,49 @@ import TBDShared
 /// Code may be partial during live polling; we tolerate that.
 enum TranscriptParser {
     private static let perfLog = Logger(subsystem: "com.tbd.daemon", category: "perf-transcript")
-    /// Shared ISO8601 formatter that accepts Claude Code's fractional-seconds
-    /// timestamps (e.g. `2026-05-05T03:06:16.813Z`). Without
-    /// `.withFractionalSeconds`, every such timestamp silently fails to parse.
-    /// `ISO8601DateFormatter` is documented as thread-safe for read-only use.
-    nonisolated(unsafe) private static let iso8601: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f
-    }()
+    /// The shared ISO8601 formatter, deliberately NOT `Sendable`, so the lock
+    /// below is the only way to reach it.
+    private struct TimestampParser {
+        /// Accepts Claude Code's fractional-seconds timestamps (e.g.
+        /// `2026-05-05T03:06:16.813Z`). Without `.withFractionalSeconds`,
+        /// every such timestamp silently fails to parse.
+        let iso8601: ISO8601DateFormatter = {
+            let f = ISO8601DateFormatter()
+            f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            return f
+        }()
+    }
+
+    /// Guards the shared formatter. `TranscriptParser` is a `nonisolated enum`
+    /// and `parse`/`parseTail` are called straight from concurrent daemon RPC
+    /// handlers (`RPCRouter+SessionHandlers`, `RPCRouter+TerminalHandlers`), so
+    /// nothing serializes two transcript parses — they genuinely can be inside
+    /// `date(from:)` on one formatter at the same time.
+    ///
+    /// A lock rather than `nonisolated(unsafe)` because the platform does not
+    /// promise what that would assume. Both `NSDateFormatter.h` and
+    /// `NSISO8601DateFormatter.h` sit inside
+    /// `NS_HEADER_AUDIT_BEGIN(nullability, sendability)`, and only
+    /// `DateFormatter` carries `NS_SWIFT_SENDABLE` ("All mutable state
+    /// protected by locks") — the subclass's silence is a deliberate
+    /// withholding, and Swift surfaces it as an explicitly *unavailable*
+    /// `Sendable` conformance. An uncontended `os_unfair_lock` acquire is
+    /// nothing next to the ICU parse it wraps, so the guarantee is close to
+    /// free on this hot path.
+    ///
+    /// `uncheckedState:` rather than `initialState:` because `TimestampParser`
+    /// is not `Sendable`. That is the point: `withLock` constrains its return
+    /// type to `Sendable`, so a body that handed the formatter back out —
+    /// `withLock { $0.iso8601 }` — is a compile error rather than a convention
+    /// somebody has to remember. Do not add a `Sendable` conformance to
+    /// `TimestampParser`; it would make that escape legal again.
+    nonisolated private static let timestampParser =
+        OSAllocatedUnfairLock(uncheckedState: TimestampParser())
+
+    /// Parse one Claude Code timestamp under the formatter lock.
+    private static func parseTimestamp(_ raw: String) -> Date? {
+        timestampParser.withLock { $0.iso8601.date(from: raw) }
+    }
 
     /// Parse a top-level Claude session JSONL into transcript items in file order.
     ///
@@ -221,7 +255,7 @@ enum TranscriptParser {
             if json["isSidechain"] as? Bool == true { continue }
 
             let lineUUID = stableIDs[i]
-            let timestamp = (json["timestamp"] as? String).flatMap { iso8601.date(from: $0) }
+            let timestamp = (json["timestamp"] as? String).flatMap { parseTimestamp($0) }
             let typeStr = json["type"] as? String
 
             // A prompt typed while the agent was mid-turn is QUEUED, and Claude
