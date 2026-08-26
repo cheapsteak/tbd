@@ -27,7 +27,16 @@ struct OrphanGCDeletionQueueTests {
             liveCWDsProvider: { [] },
             scratchpadBase: nil,
             now: now,
-            beforeInterruptedArchiveReap: beforeInterruptedArchiveReap
+            beforeInterruptedArchiveReap: beforeInterruptedArchiveReap,
+            // Injected empty rather than defaulted. `sweep(dryRun: true)`
+            // reaches the orphan-process phase regardless of
+            // `gcOrphanProcessesEnabled`, and the default provider is the real
+            // `/bin/ps -axww` over every process on the machine — a subprocess
+            // this suite has no business spawning (`Tests/CLAUDE.md`: prefer the
+            // injection seam). Behaviour-preserving: `liveCWDsProvider` is empty
+            // too, so every pid's cwd is unreadable and the phase already plans
+            // nothing.
+            processSnapshotProvider: { [] }
         )
     }
 

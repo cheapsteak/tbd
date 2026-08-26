@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDDaemonLib
 
@@ -152,5 +153,137 @@ struct TmuxServerPresenceTests {
         ]
         #expect(TmuxManager.tmuxServerProcessesExist(
             in: snapshot, uid: 501, daemonPID: 99))
+    }
+}
+
+/// A one-shot async gate. `wait()` suspends until `open()` is called and
+/// returns immediately after that.
+///
+/// Deliberately not a `DispatchSemaphore`: nothing here needs to hold a thread,
+/// and parking cooperative threads on a 3-core runner is the hazard
+/// `Tests/CLAUDE.md` documents under "Thread-blocking gates run off the
+/// cooperative pool".
+private actor AsyncGate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            waiters.append(continuation)
+        }
+    }
+
+    func open() {
+        guard !isOpen else { return }
+        isOpen = true
+        let pending = waiters
+        waiters = []
+        for continuation in pending { continuation.resume() }
+    }
+}
+
+/// How many times the memo actually took a reading.
+private actor ReadingCounter {
+    private(set) var count = 0
+    func bump() { count += 1 }
+}
+
+/// Tier 1 — the memo in front of the machine-global process probe, driven
+/// entirely through injected closures: no `ps`, no subprocess, no wall-clock
+/// wait. The behaviour under test is "how many readings were taken", and the
+/// window is compared against an injected date source rather than measured.
+@Suite("Tmux server process probe memo")
+struct TmuxServerProcessProbeCacheTests {
+
+    /// The point of the whole type. `serverPresence` asks this question once per
+    /// server that did not answer, and the answer does not depend on the server
+    /// — so a post-reboot sweep over N dead servers must cost one `ps`, not N.
+    @Test("a reading inside the freshness window is reused rather than retaken")
+    func readingInsideTheWindowIsReused() async {
+        let date = TestDateSource()
+        let counter = ReadingCounter()
+        let cache = TmuxServerProcessProbeCache(now: date.provider)
+        let take: @Sendable () async -> Bool? = { await counter.bump(); return false }
+
+        #expect(await cache.reading(taking: take) == false)
+        date.advance(by: TmuxServerProcessProbeCache.freshness - 1)
+        #expect(await cache.reading(taking: take) == false)
+
+        #expect(await counter.count == 1,
+                "a reading still inside its window must not be retaken")
+    }
+
+    /// The other half, and the one that keeps the memo honest: `.absent` is the
+    /// verdict that licenses parking and deleting rows, so a reading may not
+    /// outlive its window. The boundary is pinned exactly — at `freshness` the
+    /// reading is already stale — so shortening or lengthening the window is a
+    /// deliberate edit rather than a silent drift.
+    @Test("a reading older than the freshness window is retaken")
+    func staleReadingIsRetaken() async {
+        let date = TestDateSource()
+        let counter = ReadingCounter()
+        let cache = TmuxServerProcessProbeCache(now: date.provider)
+        let take: @Sendable () async -> Bool? = { await counter.bump(); return false }
+
+        #expect(await cache.reading(taking: take) == false)
+        date.advance(by: TmuxServerProcessProbeCache.freshness)
+        #expect(await cache.reading(taking: take) == false)
+
+        #expect(await counter.count == 2,
+                "a reading at or past its window must be taken again")
+    }
+
+    /// A reading that could not be taken is memoized like any other — rerunning
+    /// a `ps` that just failed is no more likely to answer — and it still means
+    /// `.unreachable`, never absence. Memoizing must not turn "I don't know"
+    /// into a licence to reclaim.
+    @Test("a reading that could not be taken is memoized and still never means absence")
+    func failedReadingIsMemoizedAndNeverAbsent() async {
+        let date = TestDateSource()
+        let counter = ReadingCounter()
+        let cache = TmuxServerProcessProbeCache(now: date.provider)
+        let take: @Sendable () async -> Bool? = { await counter.bump(); return nil }
+
+        #expect(await cache.reading(taking: take) == nil)
+        #expect(await cache.reading(taking: take) == nil)
+        #expect(await counter.count == 1, "a failed reading is memoized like any other")
+        #expect(TmuxManager.classifyFailedServerConsultation(
+            tmuxServerProcessesExist: nil) == .unreachable)
+    }
+
+    /// The arm that matters under a sweep, where the askers arrive together
+    /// rather than one after another: a second asker that arrives while a
+    /// reading is in the air joins it instead of spawning a second `ps`
+    /// alongside. `runBoundedProcess` has no concurrency limit of its own, so
+    /// without this the machine takes N simultaneous full process-table scans.
+    ///
+    /// No wall-clock wait anywhere: the first reading is held open on a gate
+    /// until the second asker has been launched.
+    @Test("concurrent askers join one reading instead of each taking their own")
+    func concurrentAskersJoinOneReading() async {
+        let entered = AsyncGate()
+        let release = AsyncGate()
+        let counter = ReadingCounter()
+        let cache = TmuxServerProcessProbeCache()
+        let take: @Sendable () async -> Bool? = {
+            await counter.bump()
+            await entered.open()
+            await release.wait()
+            return false
+        }
+
+        let first = Task { await cache.reading(taking: take) }
+        // The reading is now in the air, and `reading` claims the in-flight slot
+        // with no suspension after starting it, so the actor cannot hand a
+        // second asker an empty slot.
+        await entered.wait()
+        let second = Task { await cache.reading(taking: take) }
+        await release.open()
+
+        #expect(await first.value == false)
+        #expect(await second.value == false)
+        #expect(await counter.count == 1,
+                "the second asker must join the reading in flight, not take one")
     }
 }

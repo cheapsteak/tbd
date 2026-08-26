@@ -234,6 +234,18 @@ public struct TmuxManager: Sendable {
     /// — is not something a test on a shared developer box or a CI runner can
     /// arrange, and certainly not one that starts real tmux servers of its own.
     public let tmuxServerProcessProbe: (@Sendable () async -> Bool?)?
+    /// Collapses the production `/bin/ps` reading behind `serverPresence` onto
+    /// one in-flight call plus a seconds-long memo, because the question it
+    /// answers is machine-global and does not vary with the server name — see
+    /// `TmuxServerProcessProbeCache`. Shared by every value-copy of this
+    /// manager, the same way `resourceCoordinator` is, so the daemon's one
+    /// manager gives the whole process one probe per sweep.
+    ///
+    /// Deliberately NOT applied to `tmuxServerProcessProbe`: an injected probe
+    /// is a fixture, and a fixture that silently answered from a memo would
+    /// make a test's second call unable to see a changed answer. The memo's own
+    /// behavior is pinned directly in `TmuxServerPresenceTests`.
+    private let serverProcessProbeCache = TmuxServerProcessProbeCache()
 
     /// Whether callers should treat `paneCurrentCommand` as a meaningful
     /// process-liveness signal. Plain dry-run fixtures intentionally return a
@@ -862,9 +874,15 @@ public struct TmuxManager: Sendable {
     /// (never a partial picture) for a timeout, a non-zero exit or non-UTF-8
     /// output, which is precisely the "the probe itself failed" case.
     ///
-    /// Only ever reached after a `list-sessions` that did not answer, and
-    /// `reconcileTerminalsWhileLocked` caches `serverPresence` per server name,
-    /// so a sweep pays at most one `ps` per unanswered server.
+    /// Only ever reached after a `list-sessions` that did not answer, and never
+    /// reached directly: `serverPresence` routes it through
+    /// `serverProcessProbeCache`, so concurrent askers share one reading and a
+    /// sweep over many unanswered servers pays for one `ps` rather than one per
+    /// server. The per-server `serverPresence` memos in
+    /// `reconcileTerminalsWhileLocked` and `HibernationCoordinator` are a
+    /// complement, not a substitute — they save the `list-sessions` too, but
+    /// each covers only its own pass and neither reaches the other's, nor
+    /// `liveWindowPresence`'s once-per-noncanonical-row consultation.
     static func probeTmuxServerProcesses() async -> Bool? {
         guard let snapshot = await OrphanProcessCollector.realProcessSnapshot() else {
             return nil
@@ -1573,7 +1591,12 @@ public struct TmuxManager: Sendable {
             if let injectedProbe = tmuxServerProcessProbe {
                 probe = await injectedProbe()
             } else {
-                probe = await Self.probeTmuxServerProcesses()
+                // Memoized: the reading is about the machine, not about
+                // `server`, so a sweep that finds many unanswered servers pays
+                // for one `ps` rather than one per server.
+                probe = await serverProcessProbeCache.reading {
+                    await Self.probeTmuxServerProcesses()
+                }
             }
             let verdict = Self.classifyFailedServerConsultation(
                 tmuxServerProcessesExist: probe)
