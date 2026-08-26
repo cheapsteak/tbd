@@ -15,7 +15,25 @@ Both windows below are from pid 89137, `/Applications/TBD.app`, built from
 branch `tbd/diag-render-signposts` (commit `00c8ac35`). No restart occurred
 during or between them; the pid was verified stable rather than inferred.
 
-## Method, and what each instrument actually counts
+## Method: state what the instrument counts, and check it matches the claim
+
+This is the first rule, not a footnote. **Every wrong answer across this
+investigation came from an instrument measuring a superset or a subset of the
+claim being made — not once from bad reasoning over correct data.** A grep
+counted every observable rather than the one named. A compiler-process counter
+was blind to test processes. A round-trip probe measured process spawns. A
+profile summed a symbol with its own child and double-counted the subtree. A
+`pgrep -f` matched the investigator's own command lines. A line count over
+multi-line command text reported 457 processes where there were six. An XML
+export returned ref-compressed stack frames that read exactly like truncated
+ones.
+
+So: before reporting any number, say what the instrument actually counts, and
+check that it matches the claim. Treat *"the instrument cannot see what I am
+claiming"* as the first suspicion, not the last.
+
+The rest of this section applies that rule to each instrument used here.
+
 
 Three instruments were recorded into **one** `xctrace` trace, so they share a
 single timeline and correlation between them is exact rather than clock-matched:
@@ -172,6 +190,84 @@ flush and is recorded here so it is not rediscovered as a surprise.
   being copied and destroyed by value inside `ForEach` identity and view-list
   transforms (~4%), and generic-metadata lookup at ~11%, which is a symptom of
   deeply nested generic view types.
+
+## The fix, measured with the same instrument
+
+Per-property observation tracking (#724) landed while this was being written, so
+the same recipe was re-run against it: same window definition, same scripts, same
+machine, on an app verified built from `main` + #724 by the source paths baked
+into its binary.
+
+**Process age was tested rather than assumed.** Perceived lag had appeared to
+worsen with uptime, which would confound any comparison against a freshly
+restarted app, so the post-fix side was measured at three ages. It does not
+explain the effect: the 6-minute and 59-minute windows agree almost exactly.
+
+```
+                          stall%  | hop p99    max  | flush-s  >50ms callouts
+w2  before (50min uptime)  1.33%  |   187.9  227.7  |   19.4        105
+w3  before (60min uptime)  3.71%  |   257.9  325.2  |   22.2        118
+a1  after  ( 6min uptime)  0.26%  |    16.3  139.1  |    3.4         10
+a3  after  (59min uptime)  0.26%  |     5.3   58.4  |    6.3         50
+a4  after  (76min uptime)  0.83%  |   148.5  162.4  |   11.5         77
+```
+
+Stated conservatively, because the post-fix side is variable and a single window
+does not characterise it — `a3` reached p99 5.3 ms and `a4` 148.5 ms:
+
+- **Worst observed wait fell from 228–325 ms to 58–162 ms.**
+- **Stall load fell from 1.33–3.71% to 0.26–0.83%**, roughly 5x on the means.
+- Long callouts have not vanished. `a4` still shows 77 over 50 ms, up to 253 ms.
+  They far less often have terminal output waiting behind them, which is why the
+  symptom improved more than the flush count did.
+
+### A prediction this record made, and its falsification
+
+An earlier draft of this document predicted that #724 would cut the
+attribute-graph slice hardest and leave the `ForEach` view-list rebuild and the
+`Worktree` copying largely intact — reasoning that the rebuild runs whenever the
+list data changes, which the 2-second poll does regardless of how narrowly
+properties are tracked.
+
+That was wrong, and the correction is worth more than the prediction. In absolute
+CPU inside expensive flushes:
+
+- **`ForEach` view-list rebuild: 6,190 ms → 201 ms — a 31x cut, the largest.**
+- attribute-graph propagation: 7,922 ms → 1,066 ms (7.4x)
+- `View.body` evaluation: 4,677 ms → 1,642 ms (2.8x)
+- `Worktree` copy and destroy left the top entry points entirely.
+
+So the view-list rebuild was not independent of invalidation — it was *triggered*
+by it. Under object-wide notification any `AppState` write invalidated the
+observing views, forcing the whole nested `ForEach` list to be reconstructed, and
+the `Worktree` copies happened inside that reconstruction. Per-property tracking
+stops most of those reconstructions from being requested at all.
+
+The residual has a different shape: body evaluation is now the largest slice
+(54.5% in `a3`, 44.8% in `a4`), led by `WorktreeRowView.body`, `TabBarItem.body`
+and `PanePlaceholder.body`. That is the next target if anyone pursues the view
+graph — but at these latencies it is no longer what a user feels.
+
+## What this does not cover
+
+Every window in this record was taken during ordinary operation with agents
+streaming and **no user interaction**. Both intervals measure terminal output
+travelling *towards* the screen.
+
+- **Keystroke-to-echo was never measured**, here or anywhere. That gap predates
+  this work and survives it.
+- **Scrolling was not measured** in any window here either.
+
+Two named mechanisms target exactly those cases and are untouched by anything
+measured here: wheel-event amplification (#719), and the 150 ms window after each
+keystroke during which `interactiveInputDisplayWindowNs` disables the frame
+limiter so every output chunk forces a synchronous redraw. If typing or scrolling
+still feel slow, those are better suspects than the view graph.
+
+A window intended to cover typing or scrolling **must be checked for containing
+the action**. Four windows earlier in this investigation silently captured no
+scrolling and produced a confident, wrong conclusion that reached a committed
+spec before a validated re-run reversed it.
 
 ## Still open
 
