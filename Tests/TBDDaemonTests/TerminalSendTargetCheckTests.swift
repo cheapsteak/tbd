@@ -32,7 +32,7 @@ struct TerminalSendTargetCheckTests {
     /// the terminal rather than as a literal, because the interesting cases are
     /// agreement and disagreement with an id the fixture only mints later.
     private enum PaneAnswer: Sendable {
-        case missing
+        case absent
         case dead
         /// Alive, carrying no identity at all.
         case unresolvable
@@ -44,10 +44,13 @@ struct TerminalSendTargetCheckTests {
         case stranger(String)
         /// The consultation could not be run at all — a wedged tmux tripping
         /// the subprocess timeout. Not an answer about the pane.
+        case wedged
+        /// The consultation ran and reached no server. Also not an answer about
+        /// the pane, and the case the daemon used to conflate with `.absent`.
         case unreachable
     }
 
-    /// The error a `.unreachable` consultation fails with, so the test can
+    /// The error a `.wedged` consultation fails with, so the test can
     /// assert the handler propagated *that* error rather than inventing one.
     private struct WedgedTmux: Error {}
 
@@ -82,13 +85,14 @@ struct TerminalSendTargetCheckTests {
             dryRunRecorder: { recorder.record($0) },
             dryRunPaneSendTarget: { _, _ in
                 switch answer {
-                case .missing: return .missing
+                case .absent: return .absent
                 case .dead: return .dead(terminalID: box.id)
                 case .unresolvable: return .live(terminalID: nil)
                 case .matching: return .live(terminalID: box.id)
                 case .matchingLowercased: return .live(terminalID: box.id.lowercased())
                 case .stranger(let other): return .live(terminalID: other)
-                case .unreachable: throw WedgedTmux()
+                case .wedged: throw WedgedTmux()
+                case .unreachable: return .unreachable
                 }
             })
         let db = try TBDDatabase(inMemory: true)
@@ -158,7 +162,7 @@ struct TerminalSendTargetCheckTests {
 
     @Test("a pane tmux cannot find is refused as not-found")
     func missingPaneRefused() async throws {
-        let fixture = try await makeFixture(answer: .missing)
+        let fixture = try await makeFixture(answer: .absent)
         let response = try await send(fixture)
 
         #expect(!response.success)
@@ -200,7 +204,7 @@ struct TerminalSendTargetCheckTests {
     /// its target, and the record says `transport-failed`.
     @Test("a consultation that cannot be run is a transport failure, not a refusal")
     func unreachableConsultationIsTransportFailure() async throws {
-        let fixture = try await makeFixture(answer: .unreachable)
+        let fixture = try await makeFixture(answer: .wedged)
 
         // The handler rethrows; the router turns that into an error response.
         let response = try await send(fixture)
@@ -215,6 +219,62 @@ struct TerminalSendTargetCheckTests {
         // Not misfiled as any flavour of refusal.
         #expect(outcome["reason"] == nil)
         #expect(!written.contains { $0["result"] as? String == "dispatched" })
+    }
+
+    /// The field defect this suite grew for: the daemon could not reach the
+    /// server (its `TMUX_TMPDIR` differs from the user's shell, so the same
+    /// `-L <name>` resolved elsewhere) and the send refused with "no longer
+    /// exists on server …" while the pane was demonstrably alive and accepting
+    /// `send-keys` from a shell. A failed read must not wear the words of a
+    /// missing pane, and must not be filed as a refusal.
+    @Test("an unreachable server is a transport failure, and never says the pane is gone")
+    func unreachableServerIsNotReportedAsMissing() async throws {
+        let fixture = try await makeFixture(answer: .unreachable)
+        let response = try await send(fixture)
+
+        #expect(!response.success)
+        let error = try #require(response.error)
+        // The exact phrase the old code produced for this state.
+        #expect(!error.contains("no longer exists"))
+        // It says what actually happened, and that it is worth retrying.
+        #expect(error.contains("could not reach tmux server"))
+        #expect(error.contains("tbd-acme"))
+        #expect(error.contains("%7"))
+        #expect(error.lowercased().contains("retry"))
+        // Nothing was typed.
+        #expect(fixture.recorder.calls.isEmpty)
+
+        let written = try rows(at: fixture.logPath)
+        #expect(written.count == 2)
+        let outcome = try #require(written.last)
+        #expect(outcome["result"] as? String == "transport-failed")
+        // Emphatically not filed as any flavour of refusal — least of all
+        // `not-found`, which would put "the pane is gone" on the record.
+        #expect(outcome["reason"] == nil)
+        #expect(!written.contains { $0["result"] as? String == "dispatched" })
+    }
+
+    /// Liveness comes from what tmux answered, never from the row's own
+    /// bookkeeping. A terminal the DB still calls `working` whose pane is dead
+    /// is dead — stale activity metadata must not soften the verdict into
+    /// "unknown", nor harden an unreachable read into a verdict.
+    @Test("stale working activity does not change a dead pane's verdict")
+    func staleActivityDoesNotChangeLivenessVerdict() async throws {
+        for state in [TerminalActivityState.working, .waitingForUser] {
+            let fixture = try await makeFixture(answer: .dead)
+            try await fixture.router.db.terminals.setActivityState(
+                id: fixture.terminal.id, activityState: state,
+                source: .hookEvent("UserPromptSubmit"))
+            let stamped = try await fixture.router.db.terminals.get(id: fixture.terminal.id)
+            #expect(stamped?.activityState == state)
+
+            let response = try await send(fixture)
+            #expect(!response.success)
+            #expect(response.error?.contains("dead") == true)
+            let outcome = try lastOutcome(at: fixture.logPath)
+            #expect(outcome["result"] as? String == "refused")
+            #expect(outcome["reason"] as? String == "not-eligible")
+        }
     }
 
     // MARK: - The branches that still send

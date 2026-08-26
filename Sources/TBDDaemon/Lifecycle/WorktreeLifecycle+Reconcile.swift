@@ -600,8 +600,23 @@ extension WorktreeLifecycle {
                                 // attributed for backward compatibility.
                                 continue
                             }
-                        case .missing:
+                        case .absent:
                             break
+                        case .unreachable:
+                            // A failed READ, not evidence the pane is gone.
+                            // This is the destructive path — the next lines
+                            // park a session or delete its row — so an "I don't
+                            // know" must leave the row exactly as it is and let
+                            // a later sweep ask again. Treated identically to
+                            // the thrown-consultation case below, because it is
+                            // the same fact arriving by a different route.
+                            logger.warning("""
+                                reconcile: could not reach tmux server \
+                                \(wt.tmuxServer, privacy: .public) to consult pane \
+                                \(terminal.tmuxPaneID, privacy: .public) for terminal \
+                                \(terminal.id, privacy: .public) — leaving the row untouched
+                                """)
+                            continue
                         }
                     } catch {
                         // An unreadable identity is not evidence of staleness.
@@ -613,7 +628,7 @@ extension WorktreeLifecycle {
 
                 // Preserve the existing extra safety when the window probe
                 // itself says a Claude window is gone: if Claude is still
-                // running, retain the row. A pane that answered `.missing` or
+                // running, retain the row. A pane that answered `.absent` or
                 // with another terminal's identity is already definitive, so
                 // never inspect its current command. An owned dead pane
                 // continued above because remain-on-exit makes it an intended

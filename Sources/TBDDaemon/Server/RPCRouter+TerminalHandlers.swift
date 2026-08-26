@@ -72,8 +72,14 @@ actor TranscriptParseCache {
 /// record gets and the message the caller sees.
 ///
 /// One type for both typing paths — the send handler and the verifier's
-/// retry — so a refusal cannot be classified two ways depending on which one
+/// retry — so a decline cannot be classified two ways depending on which one
 /// asked.
+///
+/// `outcome` is the full `ActuationOutcome` rather than a `RefusedReason`
+/// because not every "do not type here" is a refusal: a consultation that could
+/// not reach the server declined nothing about the target, and carries
+/// `.transportFailed` instead. Collapsing that into a refusal reason would make
+/// the record claim the daemon decided something it never learned.
 struct PaneSendRefusal: Sendable {
     let outcome: ActuationOutcome
     let message: String
@@ -2309,10 +2315,11 @@ extension RPCRouter {
         }
 
         // Ask the pane about itself before typing into it — the honest-transport
-        // check of issue #384 and the dead-pane class beside it. A decline here
-        // is a refusal, never a transport failure: the daemon declined without
-        // touching the transport. The consultation itself failing is the
-        // opposite, and is classified as such.
+        // check of issue #384 and the dead-pane class beside it. A decline made
+        // on an ANSWER is a refusal: the daemon declined without touching the
+        // transport. A consultation that could not be completed — thrown here,
+        // or answered `.unreachable` — is the opposite, and carries
+        // `.transportFailed` on the record instead of a refusal reason.
         let refusal: PaneSendRefusal?
         do {
             refusal = try await consultPaneBeforeTyping(
@@ -2437,8 +2444,9 @@ extension RPCRouter {
     /// Consult the pane the send names, and classify the answer.
     ///
     /// `nil` means "proceed" — the pane is alive and either agrees it is this
-    /// terminal or claims no identity at all. Anything else is a refusal the
-    /// caller records and returns, with the message a human reads.
+    /// terminal or claims no identity at all. Anything else is a decline the
+    /// caller records and returns, with the message a human reads: a refusal
+    /// when tmux answered, a transport failure when it could not be reached.
     ///
     /// tmux's own exit status cannot carry this: `send-keys` into a
     /// `remain-on-exit` dead pane exits 0, and keys sent to a reused pane id
@@ -2454,10 +2462,29 @@ extension RPCRouter {
         terminal: Terminal, server: String
     ) async throws -> PaneSendRefusal? {
         switch try await tmux.paneSendTarget(server: server, paneID: terminal.tmuxPaneID) {
-        case .missing:
+        case .absent:
             return PaneSendRefusal(outcome: .refused(.notFound), message: """
                 tmux pane \(terminal.tmuxPaneID) for terminal \(terminal.id.uuidString) \
                 no longer exists on server \(server) — nothing was sent
+                """)
+        case .unreachable:
+            // NOT a refusal, and above all not "no longer exists": the daemon
+            // could not reach the server, so it knows nothing about the pane.
+            // `transportFailed` is the honest classification — the daemon
+            // reached for the transport and the transport did not answer — and
+            // it is what keeps this out of the refusal reasons, none of which
+            // can describe a failed read without asserting something false
+            // about the target.
+            logger.warning("""
+                terminal.send: could not reach tmux server \(server, privacy: .public) to \
+                consult pane \(terminal.tmuxPaneID, privacy: .public) for terminal \
+                \(terminal.id.uuidString, privacy: .public); nothing was sent
+                """)
+            return PaneSendRefusal(outcome: .transportFailed, message: """
+                could not reach tmux server \(server) to check pane \(terminal.tmuxPaneID) \
+                for terminal \(terminal.id.uuidString) — nothing was sent, and the pane's \
+                state is unknown (this is a failed read, not a missing pane). Retry; if it \
+                persists, check that the daemon and your shell resolve the same tmux socket.
                 """)
         case .dead:
             return PaneSendRefusal(outcome: .refused(.notEligible), message: """

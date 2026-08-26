@@ -20,6 +20,29 @@ public extension DeskSessionManaging {
     func maintainJudgeLease(worktreeID: UUID) async {}
 }
 
+/// A Watch Desk candidate's pane could not be consulted because no tmux server
+/// answered on the socket the daemon resolved (`PaneSendTarget.unreachable`).
+///
+/// Thrown rather than folded into "not a live candidate" because on this rail an
+/// empty candidate list is an ACTION, not a silence: it spawns a replacement
+/// desk terminal and revokes a valid judge lease. A failed read must produce
+/// neither, so the whole pass aborts and the next tick asks again.
+/// `LocalizedError`, not merely `Error`: the callers that catch this log
+/// `error.localizedDescription`, and a bare `Error` bridges to NSError there —
+/// rendering "The operation couldn't be completed" with the server and pane
+/// stripped out, which is exactly the diagnostic this case exists to leave
+/// behind.
+public struct DeskPaneUnreachable: LocalizedError, Equatable, CustomStringConvertible {
+    public let server: String
+    public let paneID: String
+
+    public var description: String {
+        "Watch Desk pane \(paneID) could not be consulted: tmux server \(server) did not answer"
+    }
+
+    public var errorDescription: String? { description }
+}
+
 /// Manages the persistent "Watch Desk" scratch space for daywatch/nightwatch operations.
 /// Idempotent creation: mode switches reuse the existing desk session.
 /// Nudges the session when judgment items are queued (tick exit code 10).
@@ -303,7 +326,8 @@ public actor DeskSessionManager: DeskSessionManaging {
                     """)
                 continue
             }
-            guard await paneIdentityPermitsSend(server: server, terminal: terminal) else { continue }
+            guard try await paneIdentityPermitsSend(server: server, terminal: terminal)
+            else { continue }
             if tmux.verifiesPaneCurrentCommand {
                 guard let command = try? await tmux.paneCurrentCommand(
                     server: server,
@@ -338,15 +362,24 @@ public actor DeskSessionManager: DeskSessionManaging {
     /// would not merely receive a stray keystroke, it would read and act on
     /// instructions addressed to another session, with permissions bypassed.
     ///
-    /// Excluding rather than throwing is what makes the outcome safe by
-    /// default. A dropped candidate is simply not live, so the callers'
+    /// Excluding rather than throwing is what makes a POSITIVE disagreement
+    /// safe by default. A dropped candidate is simply not live, so the callers'
     /// existing "no uniquely owned live terminal … skipping" path handles it,
     /// and `leasedJudgeTerminal` gets *more* correct: a stranger can no longer
     /// masquerade as the lease owner, nor pad the candidate count into a
     /// spurious fail-closed contention report.
     ///
+    /// "Could not reach the server" is the case exclusion gets wrong, and it
+    /// throws instead — see the `.unreachable` arm below for why an empty
+    /// candidate list is an action on this rail rather than a silence.
+    ///
     /// - Returns: `true` when this pane may be sent to.
-    private func paneIdentityPermitsSend(server: String, terminal: Terminal) async -> Bool {
+    /// - Throws: `DeskPaneUnreachable` when the consultation reached no server
+    ///   at all, so the caller aborts rather than treating an unread pane as an
+    ///   absent one.
+    private func paneIdentityPermitsSend(
+        server: String, terminal: Terminal
+    ) async throws -> Bool {
         let target: PaneSendTarget
         do {
             target = try await tmux.paneSendTarget(server: server, paneID: terminal.tmuxPaneID)
@@ -367,12 +400,29 @@ public actor DeskSessionManager: DeskSessionManaging {
         }
 
         switch target {
-        case .missing:
+        case .absent:
             logger.notice("""
                 Skipping stale Watch Desk terminal \(terminal.id, privacy: .public): \
                 pane \(terminal.tmuxPaneID, privacy: .public) no longer exists
                 """)
             return false
+        case .unreachable:
+            // Not an answer about the pane, and on this rail "not a candidate"
+            // is destructive rather than merely quiet: an empty candidate list
+            // makes `ensureDeskSession` and `nudgeDeskSession` SPAWN a
+            // replacement agent, and makes `leasedJudgeTerminal` REVOKE a valid
+            // lease. Doing either because a read failed would duplicate a live
+            // desk. So this does not answer the question at all — it throws,
+            // which aborts the whole pass before any of those act, and the
+            // callers' existing `catch` logs and skips the tick.
+            logger.warning("""
+                Watch Desk pass aborted: could not reach tmux server \
+                \(server, privacy: .public) to consult pane \
+                \(terminal.tmuxPaneID, privacy: .public) for terminal \
+                \(terminal.id, privacy: .public) — no desk terminal will be spawned, \
+                replaced or revoked on a failed read
+                """)
+            throw DeskPaneUnreachable(server: server, paneID: terminal.tmuxPaneID)
         case .dead:
             logger.notice("""
                 Skipping stale Watch Desk terminal \(terminal.id, privacy: .public): \

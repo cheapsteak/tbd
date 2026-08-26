@@ -366,12 +366,24 @@ public struct LimitResumeActuator: LimitResumeActuating {
         }
 
         switch target {
-        case .missing:
+        case .absent:
             logger.info("""
                 actuate: pane \(terminal.tmuxPaneID, privacy: .public) for terminal \
                 \(terminal.id.uuidString, privacy: .public) no longer exists — cancelling
                 """)
             return .notEligible(.terminalGone)
+        case .unreachable:
+            // The consultation reached no server, so nothing is known about the
+            // pane. `.terminalGone` would CANCEL the scheduled resume on the
+            // strength of a failed read; `.failed` leaves the row for a later
+            // attempt, matching the throwing branch above.
+            logger.warning("""
+                actuate: could not reach tmux server \(server, privacy: .public) to consult \
+                pane \(terminal.tmuxPaneID, privacy: .public) for terminal \
+                \(terminal.id.uuidString, privacy: .public) — not cancelling on a failed read
+                """)
+            return .notEligible(.failed(
+                "could not reach tmux server \(server) to verify the target pane"))
         case .dead:
             logger.info("""
                 actuate: pane \(terminal.tmuxPaneID, privacy: .public) for terminal \

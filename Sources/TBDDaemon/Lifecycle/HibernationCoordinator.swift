@@ -15,7 +15,9 @@ public enum HibernateResult: Equatable, Sendable {
 /// awake. Only states tmux gave a positive answer for appear here; "the probe
 /// failed" is deliberately not a case, because it is not a disagreement.
 public enum UnparkedPaneDisagreement: Equatable, Sendable {
-    /// tmux cannot find the pane — it, its window, or the whole server is gone.
+    /// tmux answered about a reachable server and the pane is not on it — it,
+    /// or its window, is gone. A server that could not be REACHED is not this
+    /// case and never becomes a disagreement; it is `WakeResult.paneUnreadable`.
     case paneMissing
     /// The pane object survives (`remain-on-exit`) but its process has exited,
     /// so the row's "awake" refers to a shell, not a session.
@@ -38,6 +40,14 @@ public enum WakeResult: Equatable, Sendable {
     /// rather than silently discarded. Nothing is respawned — see
     /// `classifyUnparkedWake` for why repair is a separate change.
     case sessionGone(paneID: String, detail: UnparkedPaneDisagreement)
+    /// The row is NOT parked and its pane could not be READ: no tmux server
+    /// answered on the socket the daemon resolved. Distinct from `.sessionGone`
+    /// because nothing disagreed — the question was never answered — and
+    /// distinct from `.notHibernated` because the caller must learn the check
+    /// failed rather than be told "already awake, nothing to do". Nothing was
+    /// woken and any `initialPrompt` was NOT delivered, so an autonomous caller
+    /// has to know it should retry rather than assume delivery.
+    case paneUnreadable(paneID: String, server: String)
     case notFound        // terminal/worktree DB row missing — NOT tmux failures
     case noSessionID
     case inFlight        // a wake for this terminal is already respawning
@@ -527,11 +537,18 @@ public actor HibernationCoordinator {
     /// primitive that would drift from it. That probe already answers both
     /// halves of the question: is a process there, and is the pane still ours.
     ///
-    /// Only a POSITIVE disagreement downgrades the answer, exactly as on the
-    /// send path. A probe that merely threw keeps the benign historical no-op:
-    /// a failed tmux call proves nothing, and tmux calls fail spuriously
-    /// precisely when the machine is loaded enough for the session to be alive.
-    /// A pane carrying no identity at all is likewise left alone.
+    /// Only a POSITIVE disagreement downgrades the answer to `.sessionGone`,
+    /// exactly as on the send path. A probe that merely threw keeps the benign
+    /// historical no-op: a failed tmux call proves nothing, and tmux calls fail
+    /// spuriously precisely when the machine is loaded enough for the session
+    /// to be alive. A pane carrying no identity at all is likewise left alone.
+    ///
+    /// A probe that ran and reached no server is the third answer,
+    /// `.paneUnreadable`: like a throw it is not a disagreement, but unlike a
+    /// throw it is a fact the caller can act on — it names the server and pane
+    /// that could not be consulted, so an autonomous caller learns its prompt
+    /// was not delivered instead of reading "already awake" off a check that
+    /// never happened.
     ///
     /// This reports; it deliberately does NOT repair. Respawning an unparked
     /// row would make tmux authoritative over the parked flag, and then one
@@ -573,10 +590,23 @@ public actor HibernationCoordinator {
                   paneTerminalID.caseInsensitiveCompare(terminal.id.uuidString) != .orderedSame
             else { return .notHibernated }
             disagreement = .paneBelongsToAnotherTerminal(actualTerminalID: paneTerminalID)
-        case .missing:
+        case .absent:
             disagreement = .paneMissing
         case .dead:
             disagreement = .processExited
+        case .unreachable:
+            // The probe ran and reached no server. That is not a
+            // disagreement — nothing answered to disagree — so it must not
+            // become `.sessionGone`, which asserts the session is gone. Report
+            // the failed read as itself so the caller knows its prompt was not
+            // delivered and a retry is the right move.
+            logger.warning("""
+                wake: could not reach tmux server \(worktree.tmuxServer, privacy: .public) to \
+                consult pane \(terminal.tmuxPaneID, privacy: .public) for unparked terminal \
+                \(terminal.id, privacy: .public) — reporting the failed read, not sessionGone
+                """)
+            return .paneUnreadable(
+                paneID: terminal.tmuxPaneID, server: worktree.tmuxServer)
         }
 
         logger.warning("""

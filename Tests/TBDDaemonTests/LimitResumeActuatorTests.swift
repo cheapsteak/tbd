@@ -184,7 +184,7 @@ struct FakeInspector: PaneProcessInspecting {
     }
 
     @Test func vanishedPaneIsTerminalGone() async throws {
-        tmux.paneTarget = .missing
+        tmux.paneTarget = .absent
         let outcome = await makeActuator().actuate(row)
         #expect(outcome == .terminalGone)
         #expect(tmux.sends.isEmpty)
@@ -196,6 +196,22 @@ struct FakeInspector: PaneProcessInspecting {
         tmux.paneTarget = .dead(terminalID: terminalID.uuidString)
         let outcome = await makeActuator().actuate(row)
         #expect(outcome == .terminalGone)
+        #expect(tmux.sends.isEmpty)
+    }
+
+    /// `.terminalGone` CANCELS the scheduled resume, permanently. Doing that
+    /// because no tmux server answered would throw away a pending resume for a
+    /// session that is very likely still running, so an unreachable server
+    /// fails the attempt (retryable) instead of cancelling the row.
+    @Test func unreachableServerDoesNotCancelTheResume() async throws {
+        tmux.paneTarget = .unreachable
+        let outcome = await makeActuator().actuate(row)
+        guard case .failed(let message) = outcome else {
+            Issue.record("expected .failed, got \(outcome) — an unreachable server must not cancel")
+            return
+        }
+        #expect(message.contains("could not reach tmux server"))
+        #expect(outcome != .terminalGone)
         #expect(tmux.sends.isEmpty)
     }
 

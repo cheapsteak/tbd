@@ -387,7 +387,7 @@ struct HibernationCoordinatorTests {
     /// live session made without ever asking tmux.
     @Test func wakeOnUnparkedRowWithMissingPaneReportsSessionGone() async throws {
         let (db, _, terminalID) = try await setup()
-        let tmux = TmuxManager(dryRun: true, dryRunPaneSendTarget: { _, _ in .missing })
+        let tmux = TmuxManager(dryRun: true, dryRunPaneSendTarget: { _, _ in .absent })
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
             actuationLog: makeTestActuationLog())
@@ -431,7 +431,7 @@ struct HibernationCoordinatorTests {
         let (db, _, terminalID) = try await setup()
         let recorded = RecordedTmuxCommands()
         let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) },
-                               dryRunPaneSendTarget: { _, _ in .missing })
+                               dryRunPaneSendTarget: { _, _ in .absent })
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
             actuationLog: makeTestActuationLog())
@@ -457,6 +457,38 @@ struct HibernationCoordinatorTests {
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
             actuationLog: makeTestActuationLog())
         #expect(await coord.wake(terminalID: terminalID) == .notHibernated)
+    }
+
+    /// A consultation that RAN and reached no tmux server is not a
+    /// disagreement: nothing answered, so nothing disagreed. Reporting
+    /// `.sessionGone` would tell the caller its live session is gone on the
+    /// strength of a failed read — the exact conflation this change removes.
+    @Test func unreachableServerIsNotReportedAsSessionGone() async throws {
+        let (db, _, terminalID) = try await setup()
+        let tmux = TmuxManager(dryRun: true, dryRunPaneSendTarget: { _, _ in .unreachable })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        let result = await coord.wake(terminalID: terminalID)
+        #expect(result == .paneUnreadable(paneID: "%0", server: "tbd-hib"))
+        // Named explicitly, because "not sessionGone" is the whole property and
+        // a future refactor could reintroduce it through a different detail.
+        if case .sessionGone = result {
+            Issue.record("an unreachable server must never be reported as sessionGone")
+        }
+        // And the row is left exactly as it was — reporting, never repairing.
+        let after = try await db.terminals.get(id: terminalID)
+        #expect(after?.isParked == false)
+        #expect(after?.tmuxPaneID == "%0")
+    }
+
+    /// The record must not claim a refusal either: nothing was decided, the
+    /// transport simply did not answer.
+    @Test func unreachableServerWakeIsRecordedAsTransportFailure() {
+        #expect(ActuationOutcome.classify(
+            WakeResult.paneUnreadable(paneID: "%0", server: "tbd-hib")) == .transportFailed)
+        #expect(ActuationOutcome.classify(
+            WakeResult.paneUnreadable(paneID: "%0", server: "tbd-hib")).reason == nil)
     }
 
     /// A live pane carrying no identity is left alone — refusal requires
@@ -490,7 +522,7 @@ struct HibernationCoordinatorTests {
         let (db, _, terminalID) = try await setup()
         try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
         let tmux = TmuxManager(dryRun: true, dryRunWindowIsDead: { _ in true },
-                               dryRunPaneSendTarget: { _, _ in .missing })
+                               dryRunPaneSendTarget: { _, _ in .absent })
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
             actuationLog: makeTestActuationLog())
@@ -1426,6 +1458,35 @@ struct RPCRouterWakePromptDeliveryTests {
         #expect(try resp.decodeResult(TerminalWakeResult.self).woken == false)
         #expect(recorded.snapshot().isEmpty,
                 "a no-op wake must not touch tmux at all; got: \(recorded.snapshot())")
+    }
+
+    /// An unreachable tmux server: the RPC must report an error (the prompt
+    /// went nowhere, so `woken: false` would let an autonomous caller believe
+    /// it was merely already awake) WITHOUT claiming the session is gone. In
+    /// particular it must not carry `terminalSessionGone`, whose contract is a
+    /// pane that positively disagreed.
+    @Test func wakeOnUnreachableServerErrorsWithoutClaimingSessionGone() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxCommands()
+        let tmux = TmuxManager(
+            dryRun: true, dryRunRecorder: { recorded.append($0) },
+            dryRunPaneSendTarget: { _, _ in .unreachable })
+        let terminal = try await makeTerminal(db: db)  // NOT hibernated
+
+        let req = try RPCRequest(
+            method: RPCMethod.terminalWake,
+            params: TerminalWakeParams(terminalID: terminal.id, prompt: "must never appear"))
+        let resp = await makeRouter(db: db, tmux: tmux).handle(req)
+
+        #expect(!resp.success)
+        let error = try #require(resp.error)
+        #expect(error.contains("Could not reach tmux server"))
+        #expect(error.contains("tbd-wake-prompt"))
+        #expect(error.contains("%0"))
+        #expect(!error.contains("is gone"))
+        #expect(resp.errorCode != RPCErrorCode.terminalSessionGone.rawValue)
+        #expect(recorded.snapshot().isEmpty,
+                "a failed read must not touch tmux; got: \(recorded.snapshot())")
     }
 }
 
