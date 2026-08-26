@@ -102,7 +102,7 @@ struct TranscriptOverlayView: View {
             Image(systemName: headerIcon(item: item))
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text(headerLabel(item: item))
+            Text(Self.headerLabel(item: item))
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -153,7 +153,12 @@ struct TranscriptOverlayView: View {
         }
     }
 
-    private func headerLabel(item: TranscriptItem?) -> String {
+    /// The one-line label the overlay's title bar shows for an opened row.
+    ///
+    /// Static so it can be asserted directly: the peer branch is the reason a
+    /// peer message stops reading `"User"` in the overlay, and nothing else
+    /// about the rendered view would reveal a regression there.
+    static func headerLabel(item: TranscriptItem?) -> String {
         guard let item else { return "" }
         switch item {
         case .toolCall(_, let name, let inputJSON, _, _, _, _, _):
@@ -189,7 +194,7 @@ struct TranscriptOverlayView: View {
     /// One-line label matching what each collapsed row's `ActivityRowChrome`
     /// header `Text(...)` renders. For tool calls, decodes the input enough to
     /// surface the same first-line summary the card itself shows.
-    private func toolCallLabel(name: String, inputJSON: String) -> String {
+    private static func toolCallLabel(name: String, inputJSON: String) -> String {
         struct AnyInput: Decodable {
             let command: String?
             let description: String?
@@ -222,6 +227,24 @@ struct TranscriptOverlayView: View {
             return name.replacingOccurrences(of: "mcp__", with: "mcp · ")
                 .replacingOccurrences(of: "__", with: " · ")
         }
+    }
+
+    /// Splits a peer row into the two strings the overlay shows: `body` is the
+    /// cleaned message the bubble also renders, and `delivered` is the message
+    /// exactly as it reached the model — framing line,
+    /// `<cross-session-message …>` envelope and security preamble intact —
+    /// which the disclosure reveals. `delivered` is nil when the delivery was
+    /// already the body, and there is nothing extra to show.
+    ///
+    /// Lifted out of `bodyContent` so the assignment is assertable without
+    /// materializing a view. Both strings render as plain text, so putting the
+    /// cleaned body behind the disclosure would look plausible while making the
+    /// overlay useless for auditing what the model was actually told.
+    static func peerBody(item: TranscriptItem) -> (body: String, delivered: String?)? {
+        guard case .peerMessage(_, _, let text, let deliveredPayload, _) = item else {
+            return nil
+        }
+        return (text, deliveredPayload)
     }
 
     @ViewBuilder
@@ -293,6 +316,10 @@ struct TranscriptOverlayView: View {
                         truncatedTo: truncatedTo,
                         terminalID: f?.terminalID
                     )
+                case .peerMessage:
+                    if let peer = Self.peerBody(item: item) {
+                        PeerMessageOverlayBody(message: peer.body, delivered: peer.delivered)
+                    }
                 default:
                     Text(String(describing: item))
                         .font(.system(.caption, design: .monospaced))
@@ -353,5 +380,62 @@ struct TranscriptOverlayView: View {
             }
         }
         return nil
+    }
+}
+
+/// Overlay body for a `.peerMessage` row: the cleaned message, with the
+/// delivery exactly as the model received it one click away.
+///
+/// The bubble hides the framing line, the `<cross-session-message …>` envelope
+/// and the ~90-word anti-escalation preamble because they are identical
+/// boilerplate on every peer message and belong nowhere near the top of a
+/// bubble. They are still what the model was told, and a viewer that cannot
+/// show that is a worse debugging instrument — so the overlay keeps them,
+/// collapsed rather than dropped.
+///
+/// Rendered outside the transcript pane's `LazyVStack` (see the note on
+/// `TranscriptOverlayView`), so plain `.textSelection(.enabled)` is safe here.
+private struct PeerMessageOverlayBody: View {
+    /// The cleaned message. Named `message` rather than `body` because `body`
+    /// is `View`'s own requirement.
+    let message: String
+    let delivered: String?
+
+    @State private var showingDelivered = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.primary)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            if let delivered {
+                Divider()
+                Button {
+                    showingDelivered.toggle()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: showingDelivered ? "chevron.down" : "chevron.right")
+                        Text("As delivered")
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .help("Show the message exactly as it reached the model — envelope and preamble included")
+
+                if showingDelivered {
+                    Text(delivered)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+        .padding(.horizontal, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

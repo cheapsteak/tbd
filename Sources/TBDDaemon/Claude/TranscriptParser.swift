@@ -751,10 +751,28 @@ enum TranscriptParser {
     }
 
     /// What one opened row can recover from the JSONL: its un-truncated body
-    /// plus, for `attachment` rows, how the context got injected.
+    /// plus, for `attachment` rows, how the context got injected and, for peer
+    /// rows, the delivery the body was cleaned out of.
     struct ItemDetail {
         let text: String?
         let attachment: TranscriptAttachmentMetadata?
+        /// For a peer-message row, the delivery exactly as it reached the
+        /// model — framing line, `<cross-session-message …>` envelope and
+        /// security preamble intact. Nil for every other kind of row, and for
+        /// a peer row whose cleaned body already was the whole delivery.
+        let deliveredPayload: String?
+
+        /// Spelled out rather than left to the synthesized memberwise
+        /// initializer: `deliveredPayload` concerns exactly one branch below,
+        /// and every other construction site names only the first two
+        /// parameters.
+        init(text: String?,
+             attachment: TranscriptAttachmentMetadata?,
+             deliveredPayload: String? = nil) {
+            self.text = text
+            self.attachment = attachment
+            self.deliveredPayload = deliveredPayload
+        }
     }
 
     /// `lookupFullBody` plus the injection metadata. Same single pass, same id
@@ -843,6 +861,22 @@ enum TranscriptParser {
 
             // line UUID match.
             if (json["uuid"] as? String) == lineUUID {
+                // A peer row's item id is its bare line UUID, and its
+                // `message.content` is the whole delivery — framing line,
+                // `<cross-session-message …>` envelope, security preamble —
+                // which the plain-content branch at the bottom would hand back
+                // raw. The detail overlay opens a row through this path rather
+                // than reading the parsed item, so cleaning the text in
+                // `buildItems` never reaches it. Run the same extractor here,
+                // so the overlay body and the bubble body are one string, and
+                // carry the untouched delivery alongside for the disclosure.
+                if blockIndex == nil,
+                   json["type"] as? String == "user",
+                   let peer = PeerOriginExtractor.extract(from: json) {
+                    return ItemDetail(text: peer.text, attachment: nil,
+                                      deliveredPayload: peer.deliveredPayload)
+                }
+
                 // Attachment rows carry no `message`, so the branches below
                 // can never recover their (truncated) body. Re-run the same
                 // extraction `buildItems` used and return it whole, alongside
