@@ -1303,6 +1303,100 @@ struct TranscriptParserTests {
                 "a tail window containing a queued row must equal the bottom of the full parse")
     }
 
+    // MARK: - peer messages
+    //
+    // Tier 1. The committed six-row fixture: four peer rows (two verified-rich,
+    // one asserted, one older-verified) followed by two ordinary typed prompts.
+
+    private var peerFixturePath: String {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/peer-messages.jsonl")
+            .path
+    }
+
+    @Test func peer_rows_emit_peerMessage_items_in_order() throws {
+        let items = TranscriptParser.parse(filePath: peerFixturePath)
+        let peers = items.compactMap { item -> PeerSender? in
+            if case .peerMessage(_, let sender, _, _, _) = item { return sender }
+            return nil
+        }
+        #expect(peers.count == 4, "the fixture's four peer rows must each render as a peer message")
+
+        #expect(peers.map(\.from) == [
+            "uds:/tmp/cc-socks/26152.sock",
+            "uds:/tmp/cc-socks/4300.sock",
+            "acme-bot",
+            "uds:/tmp/cc-socks/20202.sock",
+        ], "peer messages must keep the transcript's row order")
+        #expect(peers.map(\.verified) == [true, true, false, false])
+        #expect(peers.map(\.name) == ["🛠 Acme Deploy Watch", "📝 Acme Release Notes", nil, nil])
+        #expect(peers.map(\.pid) == [26152, 4300, nil, nil])
+    }
+
+    @Test func peer_rows_carry_clean_text_and_the_untouched_payload() throws {
+        let items = TranscriptParser.parse(filePath: peerFixturePath)
+        let peers = items.compactMap { item -> (text: String, payload: String?)? in
+            if case .peerMessage(_, _, let text, let payload, _) = item { return (text, payload) }
+            return nil
+        }
+        #expect(peers.count == 4)
+
+        for peer in peers {
+            #expect(!peer.text.hasPrefix("\n"), "no peer body may start with a blank line")
+            #expect(!peer.text.contains("<cross-session-message"),
+                    "the envelope's open tag must not survive into the rendered body")
+            #expect(!peer.text.contains("Another Claude session sent a message:"))
+            #expect(!peer.text.contains("This came from another Claude session"))
+        }
+
+        // The overlay reads the original delivery verbatim, so it must be kept
+        // whenever cleaning changed anything — which, for every fixture row,
+        // it did.
+        for peer in peers {
+            let payload = try #require(peer.payload, "a cleaned body must retain its delivered payload")
+            #expect(payload.hasPrefix("Another Claude session sent a message:"))
+            #expect(payload != peer.text)
+        }
+    }
+
+    @Test func non_peer_rows_still_render_as_user_prompts() throws {
+        let items = TranscriptParser.parse(filePath: peerFixturePath)
+        let prompts = items.compactMap { item -> String? in
+            if case .userPrompt(_, let text, _) = item { return text }
+            return nil
+        }
+        #expect(prompts == ["please rebase this onto main", "and run the tests"],
+                "the human-origin row and the origin-less row stay ordinary prompts")
+    }
+
+    @Test func no_user_prompt_carries_the_peer_delivery_framing() throws {
+        let items = TranscriptParser.parse(filePath: peerFixturePath)
+        for item in items {
+            if case .userPrompt(let id, let text, _) = item {
+                #expect(!text.hasPrefix("Another Claude session sent a message:"),
+                        "row \(id) rendered a peer delivery as a typed prompt")
+            }
+        }
+    }
+
+    @Test func parseTail_window_with_peer_rows_matches_the_full_parse() throws {
+        // The purity contract: `buildItems` sees only the lines inside the
+        // tail's byte window, and a peer row must be derivable from itself
+        // alone. The signature includes the delivered payload, so a tail that
+        // recovered the clean body but dropped the original goes red here.
+        let full = TranscriptParser.parse(filePath: peerFixturePath)
+        #expect(full.count == 6, "the fixture must produce one item per row")
+
+        let tail = TranscriptParser.parseTail(filePath: peerFixturePath, limit: 4)
+        #expect(tail.count == 4)
+        #expect(tail.contains { if case .peerMessage = $0 { return true }; return false },
+                "the tail window must contain a peer row for this comparison to mean anything")
+        #expect(full.suffix(4).map(signature) == tail.map(signature),
+                "a tail window containing peer rows must equal the bottom of the full parse")
+    }
+
     // MARK: - helpers
 
     private func writeTempJSONL(_ contents: String) throws -> String {

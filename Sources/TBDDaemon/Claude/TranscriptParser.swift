@@ -273,6 +273,24 @@ enum TranscriptParser {
                 continue
             }
 
+            // A message delivered from another Claude session. The receiving
+            // harness records the sender on the row itself, so this classifies
+            // ahead of the user branches below — otherwise the delivery
+            // envelope renders as something the user typed.
+            //
+            // Purity holds: `PeerOriginExtractor` reads only this row's
+            // `origin` dictionary and its own content string, so a tail window
+            // that contains the row derives the same item the full parse does.
+            if typeStr == "user", let peer = PeerOriginExtractor.extract(from: json) {
+                items.append(.peerMessage(
+                    id: lineUUID,
+                    sender: peer.sender,
+                    text: peer.text,
+                    deliveredPayload: peer.deliveredPayload,
+                    timestamp: timestamp))
+                continue
+            }
+
             if typeStr == "user", let kind = UserMessageClassifier.classify(json) {
                 items.append(promptItem(
                     id: lineUUID,
