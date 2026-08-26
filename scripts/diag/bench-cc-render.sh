@@ -41,10 +41,13 @@ mkdir -p "$OUT"
 SOCK=""
 [ -n "${TMUX:-}" ] && SOCK="$(basename "${TMUX%%,*}")"
 
-TERMID=""; SRVPID=""
+TERMID=""; SRVPID=""; LOGPID=""
 cleanup() {
   [ -n "$TERMID" ] && tbd terminal close --terminal "$TERMID" >/dev/null 2>&1 || true
   [ -n "$SRVPID" ] && kill "$SRVPID" >/dev/null 2>&1 || true
+  # `log stream` never terminates on its own, so an interrupt during the capture
+  # sleep would leave it running and writing to disk for the rest of the session.
+  [ -n "$LOGPID" ] && kill "$LOGPID" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -131,6 +134,7 @@ LOGPID=$!
 sleep "$CAPTURE"
 kill "$LOGPID" 2>/dev/null || true
 wait "$LOGPID" 2>/dev/null || true
+LOGPID=""
 
 echo
 python3 "$DIR/signpost-report.py" "$OUT/$LABEL.ndjson" "$LABEL"
@@ -149,9 +153,14 @@ print(n)
 PY
 )"
 echo
+VOID=0
 if [ "${PASSES:-0}" -lt 20 ]; then
-  echo "*** VOID: only ${PASSES} displayPass begins -- the tab was not drawing."
-  echo "*** Re-run with the subject tab on screen; do not report these numbers."
+  echo "*** VOID: only ${PASSES} displayPass begins -- the tab was not drawing." >&2
+  echo "*** Re-run with the subject tab on screen; do not report these numbers." >&2
+  VOID=1
 fi
 echo
 echo "capture: $OUT/$LABEL.ndjson"
+# Fail the run, not just the reader: a caller that only checks the exit code must
+# not treat a void capture as a successful measurement.
+[ "$VOID" -eq 0 ] || exit 1
