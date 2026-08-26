@@ -495,10 +495,17 @@ def test_the_hold_window_survives_the_harness_default_cap_alone() -> None:
     that does not depend on it: at the harness's own default of 8 blocks the
     hold must still cover the ~10 minutes the specialists need, or the failure
     comes straight back the day the knob stops working.
+
+    One block is subtracted rather than counted as hold time. The block whose
+    window the findings land in carries the merge instruction, and the
+    orchestrator can still end a turn between reading those files and writing
+    the result — so the last of the eight has to be available for the merge,
+    not spent waiting for it.
     """
     HARNESS_DEFAULT_BLOCK_CAP = 8
     SPECIALIST_SECONDS = 600  # ~10 min, measured on the PR #604 good run
-    assert _hook_number("window") * HARNESS_DEFAULT_BLOCK_CAP > SPECIALIST_SECONDS
+    holds = HARNESS_DEFAULT_BLOCK_CAP - 1  # one reserved for the merge itself
+    assert _hook_number("window") * holds > SPECIALIST_SECONDS
 
 
 def test_the_deadline_stays_the_binding_bound_locally() -> None:

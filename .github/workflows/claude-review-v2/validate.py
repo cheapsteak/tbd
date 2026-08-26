@@ -203,6 +203,7 @@ def is_unmerged_review(
     expected: list[str],
     seen: list[str],
     result_present: bool,
+    other_failures: bool,
 ) -> bool:
     """True when every expected lens reported and only the merge is missing.
 
@@ -221,10 +222,20 @@ def is_unmerged_review(
     `is_session_stall`: a present-but-invalid result file is a schema problem,
     and its error names the actual defect.
 
+    `other_failures` is what keeps the class from swallowing a defect it does
+    not describe. This branch prints LAST, so the workflow lifts it into the
+    step annotation and it becomes the only line an operator sees. A schema
+    rejection anywhere — an unexpected lens's file, or a `findings-.json` that
+    matches the glob but names no lens — would otherwise be annotated as
+    "every expected specialist reported VALID findings, re-running may clear
+    it", sending the operator to the Stop hook and to a re-run for a defect
+    that will not clear on one. The claim is only true when the missing merge
+    is the SOLE thing wrong.
+
     Requires a declared expected set — without one there is no claim to make
     about which lenses should have reported.
     """
-    if result_present or not expected:
+    if result_present or other_failures or not expected:
         return False
     return not missing_specialists(expected, seen)
 
@@ -734,7 +745,9 @@ def main() -> int:
             # class requires the result file to be ABSENT, so a schema
             # rejection can never be swallowed. Printed last so it is the line
             # the workflow lifts into the step annotation.
-            if is_unmerged_review(expected, seen_specialists, result_present):
+            if is_unmerged_review(
+                expected, seen_specialists, result_present, other_failures=failed
+            ):
                 print(f"error: {UNMERGED_REPORT}", file=sys.stderr)
             else:
                 print(

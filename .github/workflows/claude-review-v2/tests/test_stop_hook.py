@@ -532,6 +532,38 @@ def test_findings_landing_mid_wait_end_the_wait_and_change_the_message(
     assert _count(state) == 1
 
 
+def test_a_result_file_landing_mid_wait_releases_the_session(
+    dirs: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """The result check at the top of the hook is up to a window stale.
+
+    Everything the hold says after its wait rests on that file still being
+    absent, so it is re-checked for the same reason the findings are. Blocking
+    here would nudge the model to write a file already on disk, spending one of
+    the rationed blocks — and this branch ENDS the session rather than holding
+    it, so a test that only watched the findings would never see the gap.
+    """
+    project, state = dirs
+    bindir = tmp_path / "result-bin"
+    bindir.mkdir()
+    for tool in ("bash", "cat", "date", "tr", "jq"):
+        found = shutil.which(tool)
+        assert found, f"test prerequisite missing: {tool}"
+        (bindir / tool).symlink_to(found)
+    payload = json.dumps({"findings": [], "disposition": [], "comment_body": "x"})
+    stub = bindir / "sleep"
+    stub.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s' '{payload}' > '{project}'/review-result.json\n"
+    )
+    stub.chmod(0o755)
+    proc = _run(project, state, sleep_seconds="90", path=str(bindir))
+    assert proc.returncode == 0
+    assert _decision(proc) is None
+    # Not the nudge budget either: nothing was nudged.
+    assert _count(state) == 0
+
+
 def test_the_wait_stops_polling_once_the_findings_land(
     dirs: tuple[Path, Path], tmp_path: Path
 ) -> None:

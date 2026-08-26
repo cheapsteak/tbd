@@ -960,14 +960,20 @@ from validate import UNMERGED_REPORT, is_unmerged_review  # noqa: E402
 
 
 def test_a_complete_lens_set_with_no_result_file_is_unmerged() -> None:
-    assert is_unmerged_review(["correctness", "conventions"],
-                              ["correctness", "conventions"], False)
+    assert is_unmerged_review(
+        ["correctness", "conventions"],
+        ["correctness", "conventions"],
+        result_present=False,
+        other_failures=False,
+    )
 
 
 def test_a_result_file_on_disk_is_never_unmerged() -> None:
     """PRESENCE, not validity — a rejected result file is a schema problem and
     its own error names the defect."""
-    assert not is_unmerged_review(["correctness"], ["correctness"], True)
+    assert not is_unmerged_review(
+        ["correctness"], ["correctness"], result_present=True, other_failures=False
+    )
 
 
 def test_a_missing_lens_is_a_partial_fan_out_not_an_unmerged_review() -> None:
@@ -975,12 +981,26 @@ def test_a_missing_lens_is_a_partial_fan_out_not_an_unmerged_review() -> None:
     incomplete, so pointing the operator at the Stop hook would be a false
     lead."""
     assert not is_unmerged_review(
-        ["correctness", "conventions"], ["correctness"], False
+        ["correctness", "conventions"],
+        ["correctness"],
+        result_present=False,
+        other_failures=False,
     )
 
 
 def test_no_expected_set_means_no_unmerged_claim() -> None:
-    assert not is_unmerged_review([], [], False)
+    assert not is_unmerged_review(
+        [], [], result_present=False, other_failures=False
+    )
+
+
+def test_another_failure_alongside_it_is_not_an_unmerged_review() -> None:
+    """This branch prints last, so it becomes the step annotation. Claiming it
+    while something else already failed hides the defect that actually needs
+    acting on behind a line that says re-running may clear it."""
+    assert not is_unmerged_review(
+        ["correctness"], ["correctness"], result_present=False, other_failures=True
+    )
 
 
 def test_unmerged_report_names_infrastructure_not_verdict() -> None:
@@ -1014,6 +1034,34 @@ def test_main_on_an_unmerged_review_replaces_the_bare_missing_file(
     ][-1]
     assert "never written" in last_error
     assert "No such file or directory" not in last_error
+
+
+def test_main_keeps_the_schema_error_visible_alongside_a_missing_merge(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A rejected EXTRA lens does not make the missing merge the diagnosis.
+
+    Both expected lenses reported valid findings, so the shape looks like an
+    unmerged review — but a third file failed the schema, and that is what an
+    operator has to act on. The annotation is the last error line, so the
+    discriminating assertion is on which one that is: a re-run clears a cut-off
+    session and does nothing at all for a schema rejection.
+    """
+    for name in ("correctness", "conventions"):
+        payload = _valid_findings()
+        payload["specialist"] = name
+        for index, finding in enumerate(payload["findings"], start=1):
+            finding["id"] = f"{name}-{index}"
+        _write(tmp_path / f"findings-{name}.json", payload)
+    (tmp_path / "findings-security.json").write_text("{not json", encoding="utf-8")
+    assert _run_main(monkeypatch, tmp_path, "correctness,conventions") == 1
+    err = capsys.readouterr().err
+    last_error = [
+        line for line in err.splitlines() if line.startswith("error: ")
+    ][-1]
+    assert "never written" not in last_error
 
 
 def test_main_keeps_the_bare_missing_file_when_a_lens_is_absent(

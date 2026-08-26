@@ -145,13 +145,19 @@ is the tighter of the two by a wide margin, and it does not care how many turns 
 remain — at the default, the entire hold is eight blocks long.
 
 Both budgets are counted in blocks, so the hold buys wall clock per block rather than blocks
-per minute. At 90 seconds a window, the harness's eight cover about twelve minutes, past the
-ten the specialists need; the turn budget is nowhere near binding. Waiting converts a block
-into wall clock at zero token cost, which is precisely the currency the hold is short of.
+per minute. At 90 seconds a window the harness's eight cover about twelve minutes, and the
+last of them is spent on the merge rather than on waiting: the block whose window the
+findings land in carries the merge instruction, and the orchestrator can still end a turn
+between reading those files and writing the result, so a spare block has to be there for it.
+That leaves about ten and a half minutes of specialist time against the ten a review takes;
+the turn budget is nowhere near binding. Waiting converts a block into wall clock at zero
+token cost, which is precisely the currency the hold is short of.
 
 The window is spent in five-second polling steps, and the block reports what the poll last
-saw. Waiting out the whole window regardless would hand the orchestrator a stale "still
-running" for files already on disk — and each such block is one of only eight.
+saw — `review-result.json` as well as the findings, since the top-of-script check on it is
+by then a whole window old. Waiting out the window regardless would hand the orchestrator a
+stale "still running", or nudge it to write a file that landed while the hook waited — and
+each such block is one of only eight.
 
 The job raises the harness cap directly, `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP: 100`, clearing
 the hook's own worst case of 20 holds plus five nudges so that the hook's bounds, not the

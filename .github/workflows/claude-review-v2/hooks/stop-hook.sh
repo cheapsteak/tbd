@@ -134,12 +134,16 @@ if [ "$findings_pending" -eq 1 ]; then
   # 8 windows long, however many turns or minutes remain.
   #
   # So the hold buys wall clock per block rather than blocks per minute. At
-  # 90 s a window, the harness's 8 give ~12 minutes — past the ~10 minutes the
-  # specialists need — and the job also raises the cap (CLAUDE_CODE_STOP_HOOK_
-  # BLOCK_CAP in .github/workflows/claude-code-review.yml) so the deadline
-  # below is what really binds. Both legs are deliberate: the raised cap is a
-  # floating-tag harness knob this repository does not control, and the window
-  # holds the review up on its own if a release ever drops it.
+  # 90 s a window the harness's 8 cover ~12 minutes, and the LAST of them is
+  # spent on the merge rather than on waiting: the block whose window the
+  # findings land in carries the merge instruction, and the orchestrator may
+  # yet end a turn between reading those files and writing the result, so a
+  # spare block has to be there for it. That leaves ~10.5 minutes of specialist
+  # time against the ~10 a review takes. The job also raises the cap
+  # (CLAUDE_CODE_STOP_HOOK_BLOCK_CAP in .github/workflows/claude-code-review.yml)
+  # so the deadline below is what really binds. Both legs are deliberate: the
+  # raised cap is a floating-tag harness knob this repository does not control,
+  # and the window holds the review up on its own if a release ever drops it.
   #
   # The two local bounds stay consistent as they always were: 20 holds x 90 s =
   # 1800 s of waiting against a 1500 s deadline, so the deadline is always
@@ -199,6 +203,14 @@ if [ "$findings_pending" -eq 1 ]; then
     waited="$((waited + step))"
     scan_findings
   done
+
+  # The result file is checked at the top of this script, up to a whole window
+  # ago. Everything the hook says from here rests on it still being absent, so
+  # re-check it for the same reason the findings are re-scanned: nudging the
+  # model to write a file that landed during the wait would spend one of the
+  # rationed blocks on stale news, and this is the branch that ends the session
+  # rather than blocking it.
+  json_ready "$result_file" && exit 0
 fi
 
 if [ "$findings_pending" -eq 1 ]; then

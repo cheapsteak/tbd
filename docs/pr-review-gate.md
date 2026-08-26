@@ -101,9 +101,12 @@ split that difference; the thresholds and the reasoning behind them are in
   hook after **8 consecutive blocks**, ending the turn and reporting the session as
   normally completed, so at the default the whole hold is only eight windows long
   however many turns or minutes remain. The hold therefore buys wall clock per
-  block — eight 90-second windows is about twelve minutes, past the ten the
-  specialists need — and it spends each window in five-second polling steps so it
-  ends the moment the last findings file lands rather than a window later. The job
+  block — eight 90-second windows is about twelve minutes, of which the last is
+  reserved for the merge rather than the wait, leaving ~10.5 minutes against the
+  ten a review takes — and it spends each window in five-second polling steps so
+  it ends the moment the last findings file lands rather than a window later. The
+  block that follows a wait reports what the poll last saw, `review-result.json`
+  included, so a hold never nudges for a file that arrived while it waited. The job
   also sets `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP: 100`, clearing the hook's own worst
   case (20 holds plus five nudges) so the hook's bounds decide when a waiting
   session is released; the window is the leg that still works if a
