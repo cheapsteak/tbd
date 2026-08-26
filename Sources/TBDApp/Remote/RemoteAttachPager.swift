@@ -54,20 +54,36 @@ struct RemoteAttachPager: NSViewControllerRepresentable {
         }
 
         // 2. Add tab items for newly-mounted selections.
+        //
+        //    Resolution goes through `RemoteAttachPreflight`, which matches
+        //    the registry key exactly or fails by name — it has no expression
+        //    for attaching through a provider other than the selected one.
+        //    An unresolvable selection used to `continue` here: no tab, no
+        //    error, and a blank pane where the terminal should be. Now the
+        //    pane says which provider was asked and what stopped it.
         for selection in selections where !currentSelections.contains(selection) {
-            guard let config = appState.remoteProviders.first(where: { $0.config.name == selection.provider })?.config
-            else { continue } // provider unregistered/unknown — nothing to spawn against
-            let host = NSHostingController(
-                rootView: RemoteAttachTerminalView(
-                    provider: config,
-                    sessionID: selection.sessionID,
-                    onDetached: { [weak appState] exitCode in
-                        appState?.markRemoteSessionDetached(selection, exitCode: exitCode)
-                    }
-                )
-                .environmentObject(appState)
-                .environmentObject(appearance)
-            )
+            let diagnosis = RemoteAttachPreflight.resolve(
+                selection: selection,
+                providers: appState.remoteProviders,
+                sessions: appState.remoteSessions)
+            let host: NSHostingController<AnyView>
+            if let config = diagnosis.readyConfig {
+                host = NSHostingController(rootView: AnyView(
+                    RemoteAttachTerminalView(
+                        provider: config,
+                        sessionID: selection.sessionID,
+                        onDetached: { [weak appState] exitCode in
+                            appState?.markRemoteSessionDetached(selection, exitCode: exitCode)
+                        }
+                    )
+                    .environmentObject(appState)
+                    .environmentObject(appearance)
+                ))
+            } else {
+                host = NSHostingController(rootView: AnyView(
+                    RemoteAttachDiagnosisView(selection: selection, diagnosis: diagnosis)
+                ))
+            }
             let item = NSTabViewItem(viewController: host)
             item.identifier = selection
             vc.addTabViewItem(item)

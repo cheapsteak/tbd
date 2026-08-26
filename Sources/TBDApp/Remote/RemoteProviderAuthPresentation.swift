@@ -73,8 +73,11 @@ struct RemoteProviderAuthPresentation: Equatable {
         localAuthExit: Bool = false
     ) -> RemoteProviderAuthPresentation? {
         guard status?.health == .needsAuth || localAuthExit else { return nil }
-        guard let providerName = nonBlank(status?.describe?.name)
-            ?? nonBlank(status?.config.name)
+        // Registry key first: the remedy a user has to run is scoped to the
+        // registered entry, and two entries of the same kind share a
+        // `describe.name` that cannot say which one needs re-authenticating.
+        guard let providerName = nonBlank(status?.config.name)
+            ?? nonBlank(status?.describe?.name)
             ?? nonBlank(fallbackProviderName) else { return nil }
         return RemoteProviderAuthPresentation(
             providerName: providerName,

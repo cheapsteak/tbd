@@ -239,7 +239,11 @@ struct RemoteProviderHeaderRow: View {
                 Button {
                     appState.selectRemoteProvider(provider.config.name)
                 } label: {
-                    Text(provider.describe?.name ?? provider.config.name)
+                    // The registry key. `describe.name` names the provider's
+                    // KIND, so two entries running the same binary against
+                    // different backends rendered as two identical rows —
+                    // see `RemoteProviderIdentityPresentation`.
+                    Text(RemoteProviderIdentityPresentation.headline(provider))
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(
                             appState.selectedRemoteProvider == provider.config.name
@@ -253,7 +257,8 @@ struct RemoteProviderHeaderRow: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Open \(provider.describe?.name ?? provider.config.name) provider desk")
+                .accessibilityLabel("Open \(RemoteProviderIdentityPresentation.headline(provider)) provider desk")
+                .help(RemoteProviderIdentityPresentation.compactSummary(provider))
                 healthSuffix
                 if canCreate {
                     Button {
@@ -269,7 +274,7 @@ struct RemoteProviderHeaderRow: View {
                     .disabled(provider.hasStaleSnapshot)
                     .help(provider.hasStaleSnapshot
                           ? "Inventory is stale; refresh must recover before creating sessions"
-                          : "New \(provider.describe?.name ?? provider.config.name) session")
+                          : "New \(RemoteProviderIdentityPresentation.headline(provider)) session")
                 }
             }
             if let issueSummary {

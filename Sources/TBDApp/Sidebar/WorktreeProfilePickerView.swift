@@ -452,11 +452,12 @@ struct WorktreeProfilePickerView: View {
         }
     }
 
-    /// Display name for a provider — the negotiated `describe` name when the
-    /// provider supplied one, else its configured name (same precedence as
-    /// `RepoSectionView.newRemoteSessionMenuItem`).
+    /// Display name for a provider: its REGISTRY key, which is unique by
+    /// construction — never `describe.name`, which names the provider's kind
+    /// and is therefore identical across two entries running the same binary
+    /// against different backends. See `RemoteProviderIdentityPresentation`.
     nonisolated static func providerLabel(_ provider: RemoteProviderStatus) -> String {
-        provider.describe?.name ?? provider.config.name
+        RemoteProviderIdentityPresentation.headline(provider)
     }
 
     /// Why a provider's row is unselectable, or nil when it is selectable.
