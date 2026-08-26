@@ -278,9 +278,25 @@ servicing the main dispatch queue fell from 25-28% to 0.2-5.1%. A block on the
 main queue cannot run while the thread is inside a callout, so a long callout
 *is* an undrained queue — one event described from two sides.
 
-**Per-property observation tracking fixed it.** After the change, the worst wait
-for terminal output fell from **325 ms to 58 ms** and p99 from **258 ms to
-5.3 ms**, measured with the same instrument at matched process uptime.
+**Per-property observation tracking fixed it**, by roughly fivefold on stall
+load. Five windows, same instrument, same window definition, matched uptimes:
+
+| window | uptime | stalled | hop p99 | hop max | callouts >50ms |
+|---|---|---|---|---|---|
+| before | 50 min | 1.33% | 187.9 ms | 227.7 ms | 105 |
+| before | 60 min | 3.71% | 257.9 ms | 325.2 ms | 118 |
+| after | 6 min | 0.26% | 16.3 ms | 139.1 ms | 10 |
+| after | 59 min | 0.26% | 5.3 ms | 58.4 ms | 50 |
+| after | 76 min | 0.83% | 148.5 ms | 162.4 ms | 77 |
+
+Stated honestly: stall load fell from 1.33-3.71% to 0.26-0.83%, and the worst
+wait from 228-325 ms to 58-162 ms.
+
+**The post-fix side is variable and one window does not characterise it** — p99
+was 5.3 ms in one after-window and 148.5 ms in another. Quoting the best
+after-window against the worst before-window yields a fourteenfold improvement
+and is not defensible; the direction is solid and replicated across three
+post-fix windows, the magnitude is roughly fivefold.
 
 ### A prediction that was wrong, and why the correction matters
 
@@ -358,8 +374,11 @@ investigation.
 
 ## Residual
 
-Long flushes have not vanished — 50 callouts over 50 ms, up to 200 ms, in a
-59-minute window — they simply far less often have terminal output waiting behind
-them. Expensive flushes are now 54.5% body evaluation, led by `WorktreeRowView`,
-`TabBarItem`, and `PanePlaceholder`, with 35.4% attribute-graph propagation and
-only 6.7% view-list rebuild.
+Long flushes have not vanished — 50 and 77 callouts over 50 ms in the two later
+post-fix windows — they simply far less often have terminal output waiting behind
+them.
+
+The composition shift replicates across both post-fix windows independently: the
+view-list rebuild fell from 31.5% of expensive-flush CPU before the change to
+6.7% and 12.8% after, and body evaluation is now the largest slice in both, led
+by `WorktreeRowView`, `TabBarItem`, and `PanePlaceholder`.
