@@ -22,7 +22,7 @@ private let remoteRowLogger = Logger(subsystem: "com.tbd.app", category: "remote
 /// its Provider Desk. The whole section renders nothing when no providers are
 /// registered — see `AppState.remoteSectionVisible(providers:)`.
 struct RemoteSectionView: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     /// Read only to place the session rows under their provider's title —
     /// see `SidebarHeaderMetrics.childRowLeadingInset`.
     @AppStorage(AppState.chevronBeforeProjectNameKey)
@@ -176,7 +176,7 @@ enum RemoteProviderStatusPresentation {
 /// painted onto every row.
 struct RemoteProviderHeaderRow: View {
     let provider: RemoteProviderStatus
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @State private var showingCreateSheet = false
     /// Whether the auth CTA popover (opened from the `.needsAuth` indicator)
     /// is showing.
@@ -393,7 +393,7 @@ struct RemoteProviderHeaderRow: View {
 /// below) or by keyboard.
 struct RemoteSessionRowView: View {
     let session: RemoteSessionInfo
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @State private var isEditing = false
     @State private var isRowHovered = false
     @State private var isNameTruncated = false

@@ -21,7 +21,7 @@ final class JumpMenuController {
 
     /// Wire AppState once at app launch. Called from TBDApp.swift after
     /// the AppState instance is created. Keeping this out of the
-    /// initializer avoids a chicken-and-egg with @StateObject AppState.
+    /// initializer avoids a chicken-and-egg with the root-owned AppState.
     func configure(appState: AppState) {
         self.appState = appState
     }

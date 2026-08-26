@@ -54,7 +54,7 @@ enum TextFinderCommand {
 
 /// Menu commands providing keyboard shortcuts for the app.
 struct TBDCommands: Commands {
-    @ObservedObject var appState: AppState
+    var appState: AppState
 
     var body: some Commands {
         CommandGroup(after: .appInfo) {
@@ -91,39 +91,12 @@ struct TBDCommands: Commands {
 
         // Worktree commands
         CommandMenu("Worktree") {
-            Button("New Worktree") {
-                Task { @MainActor in
-                    appState.newWorktreeInFocusedRepo()
-                }
-            }
-            .keyboardShortcut("n", modifiers: .command)
-
-            Button("Archive Worktree") {
-                Task { @MainActor in
-                    appState.archiveSelectedWorktree()
-                }
-            }
-            .keyboardShortcut("a", modifiers: [.command, .shift])
-            .disabled(appState.selectedWorktreeIDs.isEmpty)
+            WorktreeCommandsContent().environment(appState)
         }
 
         // Terminal commands
         CommandMenu("Terminal") {
-            Button("New Tab") {
-                Task { @MainActor in
-                    appState.newTerminalTab()
-                }
-            }
-            .keyboardShortcut("t", modifiers: .command)
-            .disabled(appState.selectedWorktreeIDs.isEmpty)
-
-            Button("Close Tab") {
-                Task { @MainActor in
-                    appState.closeFocusedTab()
-                }
-            }
-            .keyboardShortcut("w", modifiers: .command)
-            .disabled(!appState.canCloseFocusedTab)
+            TerminalCommandsContent().environment(appState)
         }
 
         // Worktree selection by index (Cmd-1 through Cmd-9)
@@ -146,5 +119,58 @@ struct TBDCommands: Commands {
                 .keyboardShortcut(KeyEquivalent(Character("\(index)")), modifiers: .command)
             }
         }
+    }
+}
+
+/// The two menus whose items are *gated* on `AppState` live in nested `View`s,
+/// not directly in the `Commands` body above — the same shape
+/// `ModelProfileMenu` and `NightwatchStatusItem` use, and for the same reason:
+/// a `Commands` body does not reliably re-evaluate when the state it reads
+/// changes, so a `.disabled(…)` computed there can be captured once and never
+/// re-computed. Selection is empty at launch, so a captured value would leave
+/// ⌘⇧A, ⌘T and ⌘W permanently disabled.
+///
+/// The ungated items stay in the `Commands` body: their closures only *call*
+/// `AppState`, and a closure that runs later needs no dependency.
+private struct WorktreeCommandsContent: View {
+    @Environment(AppState.self) var appState
+
+    var body: some View {
+        Button("New Worktree") {
+            Task { @MainActor in
+                appState.newWorktreeInFocusedRepo()
+            }
+        }
+        .keyboardShortcut("n", modifiers: .command)
+
+        Button("Archive Worktree") {
+            Task { @MainActor in
+                appState.archiveSelectedWorktree()
+            }
+        }
+        .keyboardShortcut("a", modifiers: [.command, .shift])
+        .disabled(appState.selectedWorktreeIDs.isEmpty)
+    }
+}
+
+private struct TerminalCommandsContent: View {
+    @Environment(AppState.self) var appState
+
+    var body: some View {
+        Button("New Tab") {
+            Task { @MainActor in
+                appState.newTerminalTab()
+            }
+        }
+        .keyboardShortcut("t", modifiers: .command)
+        .disabled(appState.selectedWorktreeIDs.isEmpty)
+
+        Button("Close Tab") {
+            Task { @MainActor in
+                appState.closeFocusedTab()
+            }
+        }
+        .keyboardShortcut("w", modifiers: .command)
+        .disabled(!appState.canCloseFocusedTab)
     }
 }

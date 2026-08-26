@@ -21,7 +21,7 @@ struct WorktreeRowView: View {
     var isMain: Bool = false
     var indentLevel: Int = 0
     var sectionRepoID: UUID? = nil
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @State private var isEditing = false
     @State private var isRowHovered: Bool = false
     @State private var isPRIconHovered: Bool = false
@@ -166,7 +166,7 @@ struct WorktreeRowView: View {
                     // present the sheet — same division as `RepoSectionView`.
                     onStartRemoteSession: { startRemoteSession(with: $0) }
                 )
-                .environmentObject(appState)
+                .environment(appState)
                 .background(.ultraThickMaterial)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
                 .onHover { newChildMenu.menuHover($0) }
@@ -686,8 +686,8 @@ struct WorktreeRowView: View {
     /// Cache for sidebar PR status icons, keyed by icon name. The returned
     /// NSImage must be identity-stable across body evaluations:
     /// `Image(nsImage:)` diffs by object identity, so a fresh instance per
-    /// render made every row's icon layer rebuild at once whenever an
-    /// AppState-wide @Published reassignment re-evaluated all rows (visible
+    /// render made every row's icon layer rebuild at once whenever a write to
+    /// an `AppState` property the rows read re-evaluated all of them (visible
     /// mass flicker). Also skips the disk I/O (`Bundle.module.url` +
     /// `NSImage(contentsOf:)`) per evaluation. MainActor confinement
     /// (SwiftUI body runs on main) makes this safe without locks.

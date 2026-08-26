@@ -30,7 +30,7 @@ struct TmuxConfigurationPathPresentation: Equatable {
 
 struct TerminalSettingsView: View {
     @EnvironmentObject var appearance: AppearanceSettings
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @AppStorage(AppState.terminalAutoResizeKey) private var enableTerminalAutoResize: Bool = false
 
     @StateObject private var editorVM = TerminalThemeEditorViewModel()

@@ -9,17 +9,43 @@ import TBDShared
 //
 // WHAT THIS FILE MEASURES, AND WHY IT IS SHAPED THIS WAY
 //
-// `AppState` is an `ObservableObject` with ~107 `@Published` properties, read by
-// ~56 view files through `@EnvironmentObject`. `objectWillChange` is object-wide,
-// so one write to one property re-runs the body of every observing view. A
-// property nobody reads costs exactly as much as one everybody reads; only how
-// often it is *written* matters.
+// `AppState` is `@Observable` with ~104 tracked properties, read by ~60 view
+// files through `@Environment(AppState.self)`. Notification is per-property, so
+// a redundant write now costs only the views that read *that* property rather
+// than every view observing the object. What it does not do is stop the
+// notification being sent.
 //
-// The second mechanic is the one these tests are built around: `@Published`
-// publishes on ASSIGNMENT, not on change. `willSet` sends `objectWillChange`
-// before `didSet` runs, so an equality guard inside `didSet` suppresses the
-// downstream work and none of the SwiftUI invalidation. Only a guard at the
-// *assignment site* — or not being `@Published` at all — spares a render pass.
+// That is the mechanic these tests are built around, and it mostly survived
+// the migration from `ObservableObject`: Observation notifies on ASSIGNMENT,
+// not on change. The notification is sent from `willSet`, before `didSet` runs,
+// so an equality guard inside `didSet` suppresses the downstream work and none
+// of the SwiftUI invalidation. Only a guard at the *assignment site* — or the
+// property not being tracked at all — spares a render pass.
+//
+// ONE EXCEPTION, AND IT IS THE TOOLCHAIN'S, NOT OURS. Swift 6.2's `@Observable`
+// macro drops the notification for a **whole-property assignment of an equal
+// value** when the property's type is `Equatable`. Two large classes of write
+// are NOT covered and still notify unconditionally:
+//
+//   - anything reached through the `_modify` accessor — `dict[k] = v`,
+//     `rows[i].field = x`, `set.insert(…)`, `array.removeAll(where:)` — because
+//     `_modify` yields storage `inout` and never sees a before-and-after pair;
+//   - any property whose type is not `Equatable`, e.g. `remoteProviders`
+//     (`[RemoteProviderStatus]`, which has no `Equatable` conformance).
+//
+// Every count below is a consequence of that rule, so a count that moves
+// without a code change is the first sign the toolchain's behaviour did.
+// `AppStateObservationContractTests` pins the rule itself in one place, so
+// such a change fails there by name instead of scattering across this file.
+//
+// It is a floor, not the fix. The assignment-site guard audit tracked in #667
+// stays open: it is what stops the notification being *sent* on the two paths
+// above, which is most of what this file measures.
+//
+// The counts below are still object-wide: `countEmissions` arms a tracker that
+// reads every tracked property, so one unit is one notification from any of
+// them. That keeps a multi-property path (a `didSet` tail that clears four
+// other properties, say) measurable as the single number it costs.
 //
 // So each significant writer is measured twice: once re-applying what is already
 // there (the ideal is 0 emissions) and once applying a genuine change (the ideal
@@ -97,15 +123,18 @@ private func seatOneTerminal(
 
 /// Direct re-assignment of an unchanged value. These are not exotic: they are
 /// what a resize tick, a heartbeat, or a poll that found nothing new does when
-/// its call site has no equality guard. The ideal for every one of them is 0.
+/// its call site has no equality guard. The ideal for every one of them is 0,
+/// and all three reach it — but by the toolchain's equal-value exemption for
+/// whole-property assignments, not by a guard at the call site. The suites
+/// below are where that exemption stops applying.
 @MainActor
-@Suite("A @Published re-assignment publishes even when nothing changed")
+@Suite("A whole-property re-assignment of an equal value notifies nobody")
 struct IdempotentReassignmentTests {
 
     /// `mainAreaSize` is the known instance of the bug shape. Its `didSet`
     /// guards (`guard mainAreaSize != oldValue else { return }`,
     /// `AppState.swift:671`) — but that guard only suppresses the daemon
-    /// broadcast, because `objectWillChange` was already sent by `willSet`. The
+    /// broadcast, because the notification was already sent by `willSet`. The
     /// single writer is `TerminalContainerView.swift:68`, inside
     /// `.onPreferenceChange(MainAreaSizeKey.self)`, which AppKit fires on every
     /// layout pass of a window-resize drag.
@@ -117,13 +146,12 @@ struct IdempotentReassignmentTests {
 
             let count = countEmissions(of: state) { state.mainAreaSize = size }
 
-            // KNOWN ISSUE — `AppState.mainAreaSize`. Ideal 0, observed 1.
-            // The `didSet` guard cannot help; the fix is an equality guard at
-            // the assignment site in `TerminalContainerView.onPreferenceChange`
-            // (or dropping `@Published` and republishing manually).
-            withKnownIssue("mainAreaSize republishes on every resize tick (#667)") {
-                #expect(count == 0)
-            }
+            // Whole-property assignment of an equal `CGSize`, so the macro
+            // drops it. The `didSet` guard still cannot help — it runs after
+            // the notification would have been sent — and an assignment-site
+            // guard in `TerminalContainerView.onPreferenceChange` would be
+            // what spared this if the property's type were not `Equatable`.
+            #expect(count == 0)
         }
     }
 
@@ -136,11 +164,8 @@ struct IdempotentReassignmentTests {
 
             let count = countEmissions(of: state) { state.isConnected = true }
 
-            // KNOWN ISSUE — `AppState.isConnected`. Ideal 0, observed 1.
-            // Fix: guard at the assignment site.
-            withKnownIssue("isConnected republishes on an unchanged liveness result (#667)") {
-                #expect(count == 0)
-            }
+            // Whole-property assignment of an equal `Bool`.
+            #expect(count == 0)
         }
     }
 
@@ -162,11 +187,11 @@ struct IdempotentReassignmentTests {
 
             let count = countEmissions(of: state) { state.tabs = snapshot }
 
-            // KNOWN ISSUE — `AppState.tabs`. Ideal 0, observed 1.
-            // Fix: guard at the assignment site (`reconcileTabs`, below).
-            withKnownIssue("tabs republishes on an identical dictionary (#667)") {
-                #expect(count == 0)
-            }
+            // Whole-property assignment of an equal dictionary. Note this is
+            // the *only* shape of `tabs` write that gets the exemption:
+            // `reconcileTabs` below assigns through a subscript and still
+            // notifies on an identical response.
+            #expect(count == 0)
         }
     }
 }
@@ -473,11 +498,15 @@ struct DeltaIngestionTests {
 
             #expect(state.terminals[worktreeID]?.first?.hibernatedAt != nil)
             // KNOWN ISSUE — `AppState.terminals`, via
-            // `applyTerminalHibernationDelta` (AppState.swift:2224). Ideal 1
-            // (one logical park), observed 7 — one per field written through
-            // the subscript. Fix: mutate a local copy of the row and assign it
+            // `applyTerminalHibernationDelta`. Ideal 1 (one logical park),
+            // observed 9 — one per field written through the subscript
+            // (`tmuxWindowID`, `tmuxPaneID`, `hibernatedAt`, `keepWarm`,
+            // `suspendedSnapshot`, `hibernateReason`, `pendingResumeAt`,
+            // `awaitingInputReason`, `awaitingInputObservedAt`). Every one is a
+            // `_modify`, so none of them is eligible for the equal-value
+            // exemption. Fix: mutate a local copy of the row and assign it
             // back once.
-            withKnownIssue("one park costs one publish per field written (#667)") {
+            withKnownIssue("one park costs one notification per field written (#667)") {
                 #expect(count == 1)
             }
         }
@@ -500,7 +529,7 @@ struct DeltaIngestionTests {
             // KNOWN ISSUE — `AppState.controlModeFailingInputPanes`, via
             // `applyControlModeInputHealthDelta` (AppState.swift:2101).
             // `Set.remove` on an absent member is still a get-modify-set of the
-            // `@Published` property, so it publishes. Ideal 0, observed 1.
+            // tracked property, so it notifies. Ideal 0, observed 1.
             // Fix: `guard controlModeFailingInputPanes.contains(key)`.
             withKnownIssue("a redundant recovery still republishes (#667)") {
                 #expect(count == 0)
@@ -592,7 +621,7 @@ struct NotificationDeltaTests {
             }
 
             // KNOWN ISSUE — `AppState.unreadTerminals` (AppState.swift:2331).
-            // `Set.insert` is a get-modify-set of the `@Published` property, so
+            // `Set.insert` is a get-modify-set of the tracked property, so
             // an already-unread terminal republishes. Ideal 0, observed 1.
             // Fix: `guard !unreadTerminals.contains(tid)` at the assignment site.
             withKnownIssue("a repeat arrival for an unread terminal republishes (#667)") {
@@ -634,23 +663,32 @@ struct RemoteRefreshTests {
             await state.refreshRemote()
         }
 
-        // KNOWN ISSUE — ideal 0, observed 7, from five properties across three
-        // functions, none of them guarded:
-        //   `remoteProviders`, `remoteSessions`     — AppState+Remote.swift:44–45
+        // KNOWN ISSUE — ideal 0, observed 1. Seven properties across three
+        // functions are written unguarded by an idle refresh:
+        //   `remoteProviders`, `remoteSessions`     — AppState+Remote.swift
         //   `unreadByRemoteSession`,
-        //   `remoteSessionDisplayNames`             — AppState+Remote.swift:84–85
+        //   `remoteSessionDisplayNames`             — AppState+Remote.swift
         //   `explicitlyDetachedRemoteSessions`,
         //   `pendingReconnectRemoteSessions`,
-        //   `recentlyAttachedRemoteSessions`        — AppState.swift:1067–1069
-        // The five prunes are `x = x.filter { … }`, which is unconditional by
-        // construction: `filter` always returns a fresh collection, so the
-        // assignment always publishes even when nothing was dropped. And
-        // `remoteSessionDisplayNames` has a `didSet` that re-encodes and
-        // re-writes UserDefaults (AppState.swift:485), so an idle refresh also
-        // costs a disk write.
+        //   `recentlyAttachedRemoteSessions`        — AppState.swift
+        // All seven are `x = x.filter { … }` or a wholesale replace, which is
+        // unconditional by construction: `filter` always returns a fresh
+        // collection, so the assignment is made even when nothing was dropped.
+        // Six of them are spared by the equal-value exemption. The seventh,
+        // `remoteProviders`, is not: `RemoteProviderStatus` has no `Equatable`
+        // conformance, so the macro cannot compare and always notifies.
+        //
+        // That asymmetry is the argument for the guard rather than against it:
+        // whether an idle refresh costs a render pass currently depends on
+        // whether somebody remembered to conform an unrelated model type.
         // Fix: compare before assigning in all three functions — the shape
         // every sibling refresher already uses.
-        withKnownIssue("an unchanged remote refresh publishes 7 times (#667)") {
+        //
+        // `remoteSessionDisplayNames` additionally has a `didSet` that
+        // re-encodes and re-writes UserDefaults, and `didSet` runs whether or
+        // not the notification was dropped — so an idle refresh still costs a
+        // disk write regardless.
+        withKnownIssue("an unchanged remote refresh still notifies (#667)") {
             #expect(count == 0)
         }
     }
@@ -824,7 +862,7 @@ struct TerminalPollTickTests {
 // MARK: - Selection
 
 /// Selection is a user gesture, so its frequency is bounded by clicks — but the
-/// `didSet` cascade at `AppState.swift:192` writes five further `@Published`
+/// `didSet` cascade at `AppState.swift:192` writes five further tracked
 /// properties unconditionally, so one click costs many invalidations, and
 /// re-clicking the already-selected row costs the same as a real move.
 @MainActor
@@ -844,16 +882,22 @@ struct SelectionCascadeTests {
                 state.selectedWorktreeIDs = [row.id]
             }
 
-            // KNOWN ISSUE — ideal 0, observed 7: `selectedWorktreeIDs` itself
-            // (1), the four unconditional clears in its own `didSet` tail —
-            // `selectedRepoID`, `selectedScratchSection`,
-            // `selectedRemoteProvider`, `selectedRemoteSession`
-            // (AppState.swift:303–306) — and the `recentWorktreeIDs`
-            // `removeAll`/`insert` pair (:316–:317), which rewrites the LRU to
-            // the arrangement it already had.
-            // `selectionOrder` contributes nothing: its write IS guarded
-            // (:292), which is the model the other six should follow.
-            withKnownIssue("re-selecting the current worktree costs 7 publishes (#667)") {
+            // KNOWN ISSUE — ideal 0, observed 2: the `recentWorktreeIDs`
+            // `removeAll`/`insert` pair, which rewrites the LRU to the
+            // arrangement it already had. Both are `_modify` writes, so
+            // neither is eligible for the equal-value exemption.
+            //
+            // Five further unguarded writes on this path cost nothing *here*
+            // only because the exemption covers them — `selectedWorktreeIDs`
+            // itself, re-assigned to an equal set, and the four unconditional
+            // clears in its own `didSet` tail (`selectedRepoID`,
+            // `selectedScratchSection`, `selectedRemoteProvider`,
+            // `selectedRemoteSession`), each already nil or false. They are
+            // still unguarded; see the sibling test for what they cost when
+            // the values do differ.
+            // `selectionOrder` contributes nothing for the right reason: its
+            // write IS guarded, which is the model the other six should follow.
+            withKnownIssue("re-selecting the current worktree still notifies twice (#667)") {
                 #expect(count == 0)
             }
         }
@@ -862,12 +906,18 @@ struct SelectionCascadeTests {
     /// A real selection change. Not zero, and not one either — the number is the
     /// finding. Pinned as a live assertion so the cascade cannot silently grow.
     ///
-    /// The 9 accounted for in full, because an unattributed total invites a
+    /// The 5 accounted for in full, because an unattributed total invites a
     /// reader to "fix" the wrong line: `selectedWorktreeIDs` (1) +
-    /// `selectionOrder` (1) + the four unconditional clears at
-    /// `AppState.swift:303`–`:306` (4) + `canGoBack`, flipped to true by
-    /// `recordNavigation` because this is the second entry in the history (1) +
-    /// the `recentWorktreeIDs` `removeAll`/`insert` pair at `:316`–`:317` (2).
+    /// `selectionOrder` (1) + `canGoBack`, flipped to true by `recordNavigation`
+    /// because this is the second entry in the history (1) + the
+    /// `recentWorktreeIDs` `removeAll`/`insert` pair (2).
+    ///
+    /// The four unconditional clears in the `didSet` tail (`selectedRepoID`,
+    /// `selectedScratchSection`, `selectedRemoteProvider`,
+    /// `selectedRemoteSession`) contribute nothing: each is a whole-property
+    /// assignment of the nil or false it already held, so the equal-value
+    /// exemption drops them. They remain unguarded, and cost four notifications
+    /// each time the selection actually moves off a repo or remote row.
     @Test("selecting a different worktree")
     func realSelectionChange() {
         withEmissionState { state in
@@ -882,7 +932,7 @@ struct SelectionCascadeTests {
             }
 
             #expect(state.selectionOrder == [rows[1].id])
-            #expect(count == 9)
+            #expect(count == 5)
         }
     }
 
@@ -891,10 +941,10 @@ struct SelectionCascadeTests {
     /// regression back to the per-id mutation `SelectionOrderWriteCoalescingTests`
     /// removed.
     ///
-    /// 8, one fewer than the test above, and the missing one is `canGoBack`:
+    /// 4, one fewer than the test above, and the missing one is `canGoBack`:
     /// this is the FIRST navigation entry, so there is nothing to go back to
-    /// and `updateNavigationFlags` leaves the flag alone. That guard
-    /// (`AppState.swift:413`) is one of the few already in the right place.
+    /// and `updateNavigationFlags` leaves the flag alone. That guard is one of
+    /// the few already in the right place.
     @Test("selecting five worktrees in one gesture")
     func multiSelection() {
         withEmissionState { state in
@@ -908,7 +958,7 @@ struct SelectionCascadeTests {
             }
 
             #expect(state.selectedWorktreeIDs.count == 5)
-            #expect(count == 8)
+            #expect(count == 4)
         }
     }
 }

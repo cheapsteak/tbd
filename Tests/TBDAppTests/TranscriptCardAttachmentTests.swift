@@ -60,7 +60,7 @@ struct TranscriptCardAttachmentTests {
                 .fixedSize(horizontal: false, vertical: true)
                 .environment(\.transcriptStaticCards, true)
                 .environment(\.openTranscriptOverlay, { _ in })
-                .environmentObject(appState)
+                .environment(appState)
         )
 
         let width = TranscriptCardSizing.width(forLineFragmentWidth: 680)

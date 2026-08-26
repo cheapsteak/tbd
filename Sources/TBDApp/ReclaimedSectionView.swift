@@ -9,7 +9,7 @@ import TBDShared
 /// `appState.reapRecords[repoID]` is non-empty.
 struct ReclaimedSectionView: View {
     let repoID: UUID
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     @State private var isExpanded = false
 
@@ -189,7 +189,7 @@ private struct ReclaimedRow: View {
 struct ReclaimedDetailView: View {
     let record: ReapRecord
     let repoID: UUID
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {

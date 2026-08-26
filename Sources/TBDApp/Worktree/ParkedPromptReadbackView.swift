@@ -205,7 +205,7 @@ enum ParkedPromptUndeliverable: Equatable {
 /// understood. Copy works when nothing else does, Discard throws the message
 /// away, and Deliver stays honestly disabled where delivery cannot happen.
 struct ParkedPromptReadbackView: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @Environment(\.dismiss) private var dismiss
     let readback: ParkedPromptReadback
 

@@ -47,7 +47,7 @@ struct TerminalPanelView: View {
     var remoteURL: String?
     var onFilePathClicked: ((String) -> Void)?
     var onTerminalNotification: ((String, String) -> Void)?
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @EnvironmentObject var appearance: AppearanceSettings
     /// Called only after tmux positively confirms the requested window is absent.
     /// The callback owns the persistent automatic-recovery budget and recreation.
@@ -241,7 +241,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
     var remoteURL: String?
     var onFilePathClicked: ((String) -> Void)?
     var onTerminalNotification: ((String, String) -> Void)?
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @EnvironmentObject var appearance: AppearanceSettings
     var onMissingWindow: (@MainActor () async -> AutomaticTerminalRecreationOutcome)?
     var onRecoveryGuidance: (@MainActor (String) -> Void)?

@@ -3,7 +3,7 @@ import SwiftUI
 import TBDShared
 
 struct SidebarView: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @AppStorage("sidebar.showHiddenRepos") private var showHiddenRepos: Bool = false
     @AppStorage(AppState.showScratchSectionKey) private var showScratchSection: Bool = true
     @AppStorage(AppState.nightwatchExperimentalKey) private var nightwatchExperimental: Bool = false
@@ -24,6 +24,7 @@ struct SidebarView: View {
     }
 
     var body: some View {
+        @Bindable var appState = appState
         ScrollViewReader { proxy in
             List(selection: $appState.selectedWorktreeIDs) {
                 if AppState.scratchSectionVisible(setting: showScratchSection, spaces: appState.scratchWorktrees) {

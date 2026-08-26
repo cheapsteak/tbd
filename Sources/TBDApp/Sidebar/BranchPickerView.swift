@@ -30,7 +30,7 @@ struct BranchListView: View {
     /// `WorktreeProfilePickerView`. The standalone `BranchPickerView` wrapper
     /// is currently unused, so its default empty closure is harmless.
     var onClose: () -> Void = {}
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @Environment(\.dismiss) private var dismiss
 
     @State private var branches: [BranchInfo] = []

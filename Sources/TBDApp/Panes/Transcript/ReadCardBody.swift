@@ -9,7 +9,7 @@ struct ReadCardBody: View {
     let terminalID: UUID?
 
     @State private var fullResultText: String? = nil
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @Environment(\.openFilePreview) private var openFilePreview
 
     private struct Input: Decodable {

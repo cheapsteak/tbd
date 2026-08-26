@@ -84,7 +84,7 @@ private struct TabDropDelegate: DropDelegate {
 struct TabBar: View {
     let tabs: [TBDShared.Tab]
     let worktreeID: UUID
-    @EnvironmentObject private var appState: AppState
+    @Environment(AppState.self) private var appState
     @Binding var activeTabIndex: Int
     var onAddShell: () -> Void = {}
     var onAddClaude: () -> Void = {}
@@ -164,10 +164,9 @@ private struct AddTabButton: View {
     /// mount, it does not stop the expression from re-evaluating. `AddTabButton`
     /// is built inside `TabBar.body`, itself built inside `SingleWorktreeView.body`,
     /// and `WorktreePager` keeps one of those mounted per kept-alive worktree, all
-    /// observing `AppState` — so any `@Published` change (the 2 s poll, terminal
-    /// churn, `mainAreaSize` during a window resize) re-ran `detect()` for every
-    /// mounted worktree, each doing `2 × (PATH dirs + 8)` synchronous `stat`s on
-    /// the main thread. The two real refresh paths below cover the value: `.task`
+    /// reading `AppState` — so a change to any property they read (the 2 s poll,
+    /// terminal churn) re-ran `detect()` for every mounted worktree, each doing
+    /// `2 × (PATH dirs + 8)` synchronous `stat`s on the main thread. The two real refresh paths below cover the value: `.task`
     /// on appear, and a synchronous re-detect in `showMenu()`.
     @State private var availability = AgentExecutableAvailability.allAvailable
 
@@ -556,7 +555,7 @@ private struct TabBarItem: View {
     private var showClaudeTabUsageTooltip: Bool = true
     @AppStorage(AppState.usageResetTimeStyleKey)
     private var usageResetTimeStyle: ProfileUsagePresentation.ResetTimeStyle = .timeOfReset
-    @EnvironmentObject private var appState: AppState
+    @Environment(AppState.self) private var appState
 
     private var showClose: Bool {
         isSelected || isHovering
@@ -766,7 +765,7 @@ private struct TabBarItem: View {
             .background(Color(nsColor: .controlBackgroundColor))
             .cornerRadius(4)
             .opacity(0.85)
-            // Defer the @Published write off SwiftUI's view-graph update pass.
+            // Defer the tracked write off SwiftUI's view-graph update pass.
             // Writing it synchronously here re-invalidates the body that owns
             // this preview, causing a runaway re-render loop. The equality
             // guard also keeps a redundant same-value write (the catch-all

@@ -12,7 +12,7 @@ struct EditCardBody: View {
     let terminalID: UUID?
 
     @State private var fullInputJSON: String? = nil
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @Environment(\.openFilePreview) private var openFilePreview
 
     private struct EditHunk: Decodable, Equatable {

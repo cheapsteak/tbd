@@ -9,7 +9,7 @@ struct WriteCardBody: View {
     let terminalID: UUID?
 
     @State private var fullInputJSON: String? = nil
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @Environment(\.openFilePreview) private var openFilePreview
 
     private struct Input: Decodable { let file_path: String; let content: String }

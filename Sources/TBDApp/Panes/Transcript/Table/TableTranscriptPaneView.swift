@@ -12,7 +12,7 @@ import os
 struct TableTranscriptPaneView: View {
     let terminalID: UUID
     let worktreeID: UUID
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @Environment(\.openTranscriptOverlay) private var openTranscriptOverlay
     @Environment(\.openTranscriptLink) private var openTranscriptLink
 

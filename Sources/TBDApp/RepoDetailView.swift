@@ -9,7 +9,7 @@ enum RepoDetailTab: String, CaseIterable {
 
 struct RepoDetailView: View {
     let repoID: UUID
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     @State private var selectedTab: RepoDetailTab = .archived
     /// The repo whose pre-session hook editor should be revealed, pending
@@ -74,7 +74,7 @@ struct RepoSettingsView: View {
     /// Set by `RepoDetailView` when a pre-session-hook reveal targets this
     /// repo; consumed (set back to `nil`) the moment this view acts on it.
     @Binding var pendingHookReveal: UUID?
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     /// Drives focus into the pre-session TextEditor once scrolled.
     @FocusState private var focusedHook: RepoHooksSettingsView.HookField?
 

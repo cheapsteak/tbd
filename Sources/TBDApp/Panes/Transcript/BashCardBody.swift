@@ -13,7 +13,7 @@ struct BashCardBody: View {
 
     @State private var fullResultText: String? = nil
     @State private var fullInputJSON: String? = nil
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     private struct Input: Decodable { let command: String; let description: String? }
     private static let decoder = JSONDecoder()

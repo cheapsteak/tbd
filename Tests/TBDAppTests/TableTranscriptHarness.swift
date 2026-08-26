@@ -1754,7 +1754,7 @@ struct TableTranscriptHarness {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 8)
                 .fixedSize(horizontal: false, vertical: true)
-                .environmentObject(appState)
+                .environment(appState)
         ))
         host.translatesAutoresizingMaskIntoConstraints = false
         let container = NSView(frame: frame)

@@ -11,21 +11,23 @@ import TBDShared
 /// Tab pre-selection in Settings is deferred — "Manage profiles…" simply
 /// opens the Settings window and the user clicks the Model Profiles tab.
 struct ModelProfileMenu: Commands {
-    @ObservedObject var appState: AppState
+    var appState: AppState
 
     var body: some Commands {
         CommandMenu("Model Profile") {
             ModelProfileMenuContent()
-                .environmentObject(appState)
+                .environment(appState)
         }
     }
 }
 
-/// Extracted into a `View` so SwiftUI re-renders the menu body when
-/// `@Published` properties on `AppState` change. `Commands` bodies do not
-/// always observe `@ObservedObject` mutations reliably for nested content.
+/// Extracted into a `View` so SwiftUI re-renders the menu body when the
+/// `AppState` properties it reads change. A `Commands` body does not reliably
+/// re-evaluate on state changes — that was true of `@ObservedObject` before and
+/// is true of Observation now — so anything whose *rendering* depends on
+/// `AppState` belongs in a nested `View` like this one.
 private struct ModelProfileMenuContent: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     var body: some View {
         Button(action: {

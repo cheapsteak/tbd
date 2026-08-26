@@ -11,7 +11,7 @@ struct GenericToolCardBody: View {
 
     @State private var fullResultText: String? = nil
     @State private var fullInputJSON: String? = nil
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {

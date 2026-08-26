@@ -46,7 +46,7 @@ struct ScratchDetailView: View {
 /// `@State` rather than read from a live in-memory array entry. No env
 /// overrides / hooks sections — out of scope for scratch settings.
 struct ScratchSettingsView: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     @State private var scratchProfileOverrideID: UUID?
     @State private var isLoaded = false

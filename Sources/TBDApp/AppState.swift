@@ -81,14 +81,19 @@ enum TmuxStartupResolutionDiagnostic: Equatable {
 }
 
 @MainActor
-final class AppState: ObservableObject {
+@Observable
+final class AppState {
     /// Reference to the global appearance settings, wired by `TBDAppMain`
-    /// after both StateObjects are constructed. Used by
+    /// after both root-owned objects are constructed. Used by
     /// `mainAreaTerminalSize()` to compute initial tmux pane dimensions
     /// from the user's current font, before any `TBDTerminalView` exists.
     /// Plain (non-weak) optional — `AppState` and `AppearanceSettings` share
     /// the app's lifetime, so this reference cannot outlive its target.
-    var appearance: AppearanceSettings? {
+    ///
+    /// `@ObservationIgnored`: no view body reads it — the one consumer is
+    /// `mainAreaTerminalSize()` — and it is assigned from the root scene's
+    /// `onAppear`, where an observed write would land inside a view update.
+    @ObservationIgnored var appearance: AppearanceSettings? {
         didSet {
             if let appearance {
                 appearance.themeStore = themeStore
@@ -97,14 +102,14 @@ final class AppState: ObservableObject {
         }
     }
     /// Subscription to appearance.$schemeID changes for pushing COLORFGBG updates to running tmux servers.
-    private var appearanceSubscription: AnyCancellable?
+    @ObservationIgnored private var appearanceSubscription: AnyCancellable?
     /// Owns the trailing-edge quiet window in front of that subscription.
     private let appearanceDebouncer = AppearanceBroadcastDebouncer()
     /// Subscription to themeStore.$userThemes changes for reconciling the active scheme.
-    private var themeStoreSubscription: AnyCancellable?
+    @ObservationIgnored private var themeStoreSubscription: AnyCancellable?
 
-    @Published var repos: [Repo] = []
-    @Published var worktrees: [UUID: [Worktree]] = [:] {
+    var repos: [Repo] = []
+    var worktrees: [UUID: [Worktree]] = [:] {
         didSet {
             childrenIndexCache = nil
             allWorktreesCache = nil
@@ -112,7 +117,7 @@ final class AppState: ObservableObject {
     }
     /// Repo-less scratch spaces (`Worktree.isScratch`), surfaced separately
     /// in the sidebar's Scratch section rather than under any repo group.
-    @Published var scratchWorktrees: [Worktree] = [] {
+    var scratchWorktrees: [Worktree] = [] {
         // Only `allWorktrees` reads this — `childrenIndex()` is dict-only by
         // design (see `children(of:)`), so its cache survives scratch churn.
         didSet { allWorktreesCache = nil }
@@ -120,21 +125,37 @@ final class AppState: ObservableObject {
 
     // MARK: - Derived worktree caches
     //
-    // Both are plain stored properties, NOT `@Published`: their getters fill
-    // them lazily, and a `@Published` write from inside a SwiftUI `body`
-    // evaluation would fault with "Modifying state during view update".
-    // `AppState` is `@MainActor`, so plain storage is race-free here.
+    // Both are `@ObservationIgnored`: their getters fill them lazily, and an
+    // observed write from inside a SwiftUI `body` evaluation would fault with
+    // "Modifying state during view update" — and, because the getters are
+    // themselves called from `body`, would also close a self-invalidation
+    // loop. `AppState` is `@MainActor`, so plain storage is race-free here.
     //
     // Invalidation is the two `didSet`s above. Every mutation site in the app
     // goes through these stored properties — including in-place element writes
     // like `worktrees[key]?[idx].pinSortOrder = order`, which are a
     // get-modify-set on the stored property and therefore fire `didSet` too —
     // so there is no bypassing path.
+    //
+    // THE WARM-CACHE DEPENDENCY TRAP. Untracked storage means a cache hit
+    // reads nothing observable, and under Observation SwiftUI rebuilds a
+    // view's dependency set from what each `body` evaluation actually read.
+    // A body served entirely from a warm cache would therefore *drop* its
+    // dependency on `worktrees`, and the next write to it would not
+    // invalidate that view — the sidebar going stale until some other
+    // property it reads happens to change. Both getters below defeat this by
+    // touching their tracked source unconditionally, before consulting the
+    // cache, so every evaluation re-registers the dependency whether it hits
+    // or misses. The touch costs a retain, not a copy.
+    //
+    // `AppStateWarmCacheDependencySourceTests` pins this: it warms the cache
+    // through a re-evaluation it proves happened, then asserts a `worktrees`
+    // write still reaches the view. Delete either touch and it fails.
 
     /// Memoized parent-keyed child index; see `childrenIndex()`.
-    private var childrenIndexCache: [UUID: [Worktree]]?
+    @ObservationIgnored private var childrenIndexCache: [UUID: [Worktree]]?
     /// Memoized flattening for `allWorktrees`.
-    private var allWorktreesCache: [Worktree]?
+    @ObservationIgnored private var allWorktreesCache: [Worktree]?
 
     /// Every active/creating worktree bucketed by `parentWorktreeID`, in
     /// `sortOrder`. Backs `children(of:)`, which the sidebar calls once per
@@ -145,6 +166,9 @@ final class AppState: ObservableObject {
     /// Deliberately dict-only, never `allWorktrees`: scratch spaces can never
     /// be children (see `children(of:)`).
     func childrenIndex() -> [UUID: [Worktree]] {
+        // Re-register the `worktrees` dependency on every call, including
+        // cache hits — see "THE WARM-CACHE DEPENDENCY TRAP" above.
+        _ = worktrees
         if let cached = childrenIndexCache { return cached }
         var index: [UUID: [Worktree]] = [:]
         for rows in worktrees.values {
@@ -167,39 +191,39 @@ final class AppState: ObservableObject {
         childrenIndexCache = index
         return index
     }
-    @Published var terminals: [UUID: [Terminal]] = [:]
+    var terminals: [UUID: [Terminal]] = [:]
     /// Ordering watermark for transcript presentation snapshots whose value
     /// did not change. Kept outside `Terminal` so a two-second poll confirming
     /// the same state does not publish a different row solely because its
     /// response stamp advanced; still rejects an older overlapping response
     /// that carries a different value.
-    var terminalPresentationOrderObservedAt: [UUID: Date] = [:]
+    @ObservationIgnored var terminalPresentationOrderObservedAt: [UUID: Date] = [:]
     /// Session identity ordering is independent of the published Terminal row
     /// so a pushed SessionStart can fence an older list response even in the
     /// brief interval before its activity delta arrives.
-    var terminalSessionOrderObservedAt: [UUID: Date] = [:]
-    @Published var notes: [UUID: [Note]] = [:]
-    @Published var focusedTabCloseContext: TabCloseContext?
+    @ObservationIgnored var terminalSessionOrderObservedAt: [UUID: Date] = [:]
+    var notes: [UUID: [Note]] = [:]
+    var focusedTabCloseContext: TabCloseContext?
     /// Unread notification summaries keyed by worktree ID. The cmd-K jump
     /// menu sorts by `mostRecentAt`; the sidebar consumes `.type` for the
     /// severity dot. Worktrees the user is currently viewing are excluded
     /// from this dictionary because `refreshNotifications` auto-marks them
     /// read on every poll.
-    @Published var unreadByWorktree: [UUID: UnreadSummary] = [:]
+    var unreadByWorktree: [UUID: UnreadSummary] = [:]
     /// Unread notification summaries for remote sessions, keyed by
     /// `RemoteSessionSelection` (provider + provider-minted session id —
     /// remote sessions have no UUID). Mirrors `unreadByWorktree`: written by
     /// `handleRemoteSessionAttentionDelta` when an attention delta arrives,
     /// cleared by `selectRemoteSession`. App-local and in-memory only, same
     /// as `unreadByWorktree` — not persisted across restarts.
-    @Published var unreadByRemoteSession: [RemoteSessionSelection: UnreadSummary] = [:]
+    var unreadByRemoteSession: [RemoteSessionSelection: UnreadSummary] = [:]
     /// Terminal IDs that fired a `.responseComplete` notification while their
     /// tab was NOT the active tab of a focused worktree. Drives the bold tab
     /// label in `TabBar`, mirroring the worktree-row bold. App-local and
     /// in-memory only — cleared when the user activates the tab (or focuses the
     /// worktree on that tab); intentionally not persisted across app restarts.
-    @Published var unreadTerminals: Set<UUID> = []
-    @Published var selectedWorktreeIDs: Set<UUID> = [] {
+    var unreadTerminals: Set<UUID> = []
+    var selectedWorktreeIDs: Set<UUID> = [] {
         didSet {
             // If the List selected a repo header tag (not a worktree), treat it
             // as a repo selection and remove the ID from the worktree set.
@@ -343,7 +367,7 @@ final class AppState: ObservableObject {
     /// Persists to UserDefaults on every change (gated on `isInitialStateLoaded`) so the
     /// final, correctly-ordered value is always what gets saved — regardless of whether
     /// the change came from a user selection, back/forward navigation, or startup restore.
-    @Published var selectionOrder: [UUID] = [] {
+    var selectionOrder: [UUID] = [] {
         didSet { persistSelectionOrder() }
     }
     /// A one-shot request to reveal a specific section of a repo's detail pane.
@@ -353,10 +377,10 @@ final class AppState: ObservableObject {
         case preSessionHook(repoID: UUID)
     }
 
-    @Published var repoDetailReveal: RepoDetailReveal?
+    var repoDetailReveal: RepoDetailReveal?
 
     /// Selected repo ID — set when a repo header is clicked, shows archived worktrees in content pane.
-    @Published var selectedRepoID: UUID? = nil {
+    var selectedRepoID: UUID? = nil {
         didSet {
             if let old = oldValue, old != selectedRepoID {
                 clearRevivingArchived(repoID: old)
@@ -368,17 +392,17 @@ final class AppState: ObservableObject {
     /// When set, the next `RepoDetailView` to appear selects this tab instead
     /// of its default (`.archived`). Consumed (cleared) by the view on apply.
     /// Drives the toolbar repo-name dropdown → repo detail tab navigation.
-    @Published var pendingRepoDetailTab: RepoDetailTab?
+    var pendingRepoDetailTab: RepoDetailTab?
     /// Selected — set when the "Scratch" sidebar section header is clicked,
     /// shows `ScratchDetailView` (Archived/Instructions/Settings tabs) in the
     /// content pane. Parallel to `selectedRepoID` but with no `NavigationEntry`
     /// integration for v1 (documented scope cut — see `selectScratchSection()`).
-    @Published var selectedScratchSection: Bool = false
+    var selectedScratchSection: Bool = false
     /// Selected provider header, showing its read-only Provider Desk. This is
     /// mutually exclusive with worktree, repo, scratch, and remote-session
     /// selection, but intentionally stays out of back/forward history for the
     /// first desk slice.
-    @Published var selectedRemoteProvider: String?
+    var selectedRemoteProvider: String?
     /// Selected — set when a `RemoteSectionView` session row is clicked, shows
     /// `RemoteSessionDetailView` (Task 10) in the content pane. Parallel to
     /// `selectedScratchSection` but keyed by the provider/session composite id
@@ -388,7 +412,7 @@ final class AppState: ObservableObject {
     /// records a `.remoteSession` `NavigationEntry` — since remote sessions
     /// now sit inside a repo's own sidebar section beside local worktrees
     /// (see `selectRemoteSession`'s doc comment).
-    @Published var selectedRemoteSession: RemoteSessionSelection? = nil
+    var selectedRemoteSession: RemoteSessionSelection? = nil
     /// One-shot hint for which tab `RemoteSessionDetailView` should land on,
     /// set when a sidebar context-menu action (e.g. "View Log") jumps
     /// straight to a specific tab instead of the default. Consumed (read AND
@@ -398,7 +422,7 @@ final class AppState: ObservableObject {
     /// checked in BOTH onAppear and onChange, or a stale hint replays on an
     /// unrelated later selection. `selectRemoteSession(provider:sessionID:tab:)`
     /// sets this alongside `selectedRemoteSession`; nil means "default tab".
-    @Published var remoteSessionRequestedTab: RemoteSessionDetailTab?
+    var remoteSessionRequestedTab: RemoteSessionDetailTab?
 
     // MARK: - Navigation history (back/forward)
 
@@ -407,20 +431,20 @@ final class AppState: ObservableObject {
     /// `updateNavigationFlags()` to keep the published toolbar flags in sync.
 
     /// Published flags driving the toolbar back/forward buttons.
-    @Published private(set) var canGoBack: Bool = false
-    @Published private(set) var canGoForward: Bool = false
+    private(set) var canGoBack: Bool = false
+    private(set) var canGoForward: Bool = false
     /// Recorded navigation entries (most recent at the end).
-    var navigationEntries: [NavigationEntry] = []
+    @ObservationIgnored var navigationEntries: [NavigationEntry] = []
     /// Index into `navigationEntries` of the currently-displayed view state, or -1 if none.
-    var navigationIndex: Int = -1
+    @ObservationIgnored var navigationIndex: Int = -1
     /// True while applying a back/forward entry, to suppress recording the resulting selection change.
-    var isNavigating: Bool = false
+    @ObservationIgnored var isNavigating: Bool = false
 
-    /// Refresh the @Published `canGoBack` / `canGoForward` flags from the index.
+    /// Refresh the tracked `canGoBack` / `canGoForward` flags from the index.
     /// Usability-aware: a flag is only true when an actually-usable entry exists
     /// in that direction, so the toolbar buttons don't render enabled when
     /// back/forward would skip-walk past every remaining entry and no-op.
-    /// Lives in the same file as the @Published properties so the `private(set)`
+    /// Lives in the same file as those properties so the `private(set)`
     /// setters are reachable.
     func updateNavigationFlags() {
         let back = usableEntryIndex(from: navigationIndex - 1, step: -1) != nil
@@ -430,17 +454,17 @@ final class AppState: ObservableObject {
         if forward != canGoForward { canGoForward = forward }
     }
     /// Archived worktrees keyed by repo ID, fetched on demand.
-    @Published var archivedWorktrees: [UUID: [Worktree]] = [:]
+    var archivedWorktrees: [UUID: [Worktree]] = [:]
 
     /// Archived scratch spaces (repo-less), fetched on demand by
     /// `ScratchArchivedView`. Unlike `archivedWorktrees`, this is a flat list —
     /// scratch archive volume is expected to be low, so no pagination for v1.
-    @Published var archivedScratchWorktrees: [Worktree] = []
+    var archivedScratchWorktrees: [Worktree] = []
 
     /// Whether there are more archived worktrees to load beyond what's in `archivedWorktrees`.
-    @Published var archivedWorktreesHasMore: [UUID: Bool] = [:]
+    var archivedWorktreesHasMore: [UUID: Bool] = [:]
     /// Guards against concurrent loadMoreArchivedWorktrees calls (double-tap, race with refresh).
-    @Published var isLoadingMoreArchived: [UUID: Bool] = [:]
+    var isLoadingMoreArchived: [UUID: Bool] = [:]
 
     // MARK: Archived-worktree search
     //
@@ -459,29 +483,29 @@ final class AppState: ObservableObject {
     /// inside `ArchivedSearchResults`. Deciding what to *display* from this
     /// value would render the previous query's rows as if they were the answer
     /// for the new one during the whole in-flight window.
-    @Published var archivedSearchQuery: [UUID: String] = [:]
+    var archivedSearchQuery: [UUID: String] = [:]
     /// Daemon-side search results (page-accumulated) and the query they answer,
     /// keyed by repo ID. Absent until some response has landed.
-    @Published var archivedSearchResults: [UUID: ArchivedSearchResults] = [:]
+    var archivedSearchResults: [UUID: ArchivedSearchResults] = [:]
     /// Repos whose most recent archived-search RPC failed. Set only for the
     /// query that was in flight, cleared when the next search starts or the
     /// search is cleared. The rail reads it so a failed search degrades to a
     /// *labelled* client-side view rather than silently claiming the loaded
     /// rows are the whole answer.
-    @Published var archivedSearchFailed: [UUID: Bool] = [:]
+    var archivedSearchFailed: [UUID: Bool] = [:]
     /// Guards against concurrent `loadMoreArchivedSearchResults` calls.
-    @Published var isLoadingMoreArchivedSearch: [UUID: Bool] = [:]
+    var isLoadingMoreArchivedSearch: [UUID: Bool] = [:]
 
     /// Orphan-GC reap records (History → Reclaimed), keyed by repo ID and
     /// fetched on demand alongside `archivedWorktrees`.
-    @Published var reapRecords: [UUID: [ReapRecord]] = [:]
+    var reapRecords: [UUID: [ReapRecord]] = [:]
 
     /// Every registered remote-agent provider's negotiated contract + health,
     /// fetched by `refreshRemote()`. See `AppState+Remote.swift`.
-    @Published var remoteProviders: [RemoteProviderStatus] = []
+    var remoteProviders: [RemoteProviderStatus] = []
     /// The daemon's remote-session mirror across all providers, fetched by
     /// `refreshRemote()`. See `AppState+Remote.swift`.
-    @Published var remoteSessions: [RemoteSessionInfo] = []
+    var remoteSessions: [RemoteSessionInfo] = []
     /// TBD-owned display-name overrides for remote sessions, keyed by
     /// `AppState.remoteSessionKey(provider:sessionID:)`. Mirrors the
     /// worktree pattern (`Worktree.displayName` living in TBD's own DB
@@ -498,77 +522,77 @@ final class AppState: ObservableObject {
     /// sessionID:displayName:)` writes here first, then fires the provider
     /// push (`pushRemoteRenameIfSupported`) fire-and-forget, so a rename is
     /// never gated on — or rolled back by — whether that push lands.
-    @Published var remoteSessionDisplayNames: [String: String] = [:] {
+    var remoteSessionDisplayNames: [String: String] = [:] {
         didSet { persistRemoteSessionDisplayNames() }
     }
 
     /// Set briefly when a deep link lands on an archived worktree. The
     /// ArchivedWorktreesView observes this and scrolls/flashes the matching
     /// row, then clears the value after the flash animation completes.
-    @Published var highlightedArchivedWorktreeID: UUID?
+    var highlightedArchivedWorktreeID: UUID?
 
     // MARK: - Toast (deep-link feedback)
 
     /// The single visible in-app toast; nil when hidden. See AppState+Toast.swift.
-    @Published var activeToast: Toast?
+    var activeToast: Toast?
     /// One auto-dismiss tick. Tests shrink this to milliseconds.
-    var toastTickDuration: Duration = .seconds(1)
+    @ObservationIgnored var toastTickDuration: Duration = .seconds(1)
     /// In-flight auto-dismiss task for `activeToast`.
-    var toastDismissTask: Task<Void, Never>?
+    @ObservationIgnored var toastDismissTask: Task<Void, Never>?
 
     /// Request-generation token for archived deep-link lookups. Stamped fresh
     /// at the start of every `navigateToArchivedWorktree(_:)`; a lookup that
     /// resolves after a newer deep link superseded it is dropped. Guards
     /// out-of-order RPC resolution (deep link A then B, A resolves late).
-    var deepLinkRequestID: UUID?
+    @ObservationIgnored var deepLinkRequestID: UUID?
 
     /// Set briefly when external navigation (notification click, deep link,
     /// jump menu) lands on an active worktree. `SidebarView` observes this
     /// to scroll the worktree row into view, then clears the value.
-    @Published var pendingScrollToWorktreeID: UUID?
+    var pendingScrollToWorktreeID: UUID?
 
     /// Test seam: when set, replaces the daemon roundtrip for archived
     /// lookups in `navigateToArchivedWorktree(_:)`. Production code leaves
     /// this nil; tests assign a closure returning a deterministic worktree
     /// list — or one that throws, to exercise the RPC-failure toast branch.
-    var archivedLookupOverride: ((UUID) async throws -> [Worktree])?
+    @ObservationIgnored var archivedLookupOverride: ((UUID) async throws -> [Worktree])?
 
     /// Test seam: when set, replaces the daemon rename RPC in
     /// `renameWorktree(id:displayName:)`. Production code leaves this nil;
     /// tests assign a closure to observe the RPC path (or throw from it to
     /// exercise the rollback branch) without a live daemon.
-    var renameRPCOverride: (@MainActor (UUID, String) async throws -> Void)?
+    @ObservationIgnored var renameRPCOverride: (@MainActor (UUID, String) async throws -> Void)?
 
     /// True once `connectAndLoadInitialState()` has finished its initial
     /// `refreshAll()` and the worktree list is populated. Used by
     /// `navigateToWorktree(_:)` to detect cold-start clicks that arrive
     /// before the daemon RPC has returned.
-    @Published var isInitialStateLoaded: Bool = false
+    var isInitialStateLoaded: Bool = false
 
     /// Buffers a deep-link target UUID when `.onOpenURL` fires before the
     /// initial state load completes. Drained at the end of
     /// `connectAndLoadInitialState()`. Internal-only — never written from
     /// outside the AppState extension that consumes it.
-    var pendingDeepLinkID: UUID?
+    @ObservationIgnored var pendingDeepLinkID: UUID?
 
     /// Companion to `pendingDeepLinkID`: buffers the originating terminal so
     /// cold-start clicks land on the right tab after the drain. Drained
     /// alongside `pendingDeepLinkID` at the end of
     /// `connectAndLoadInitialState()`. Internal-only — never written from
     /// outside the AppState extension that consumes it.
-    var pendingDeepLinkTerminalID: UUID?
+    @ObservationIgnored var pendingDeepLinkTerminalID: UUID?
 
     /// Profile IDs with an "Open login session" spawn currently in flight.
     /// Guards rapid repeat clicks: the first click spawns, subsequent clicks
     /// during the RPC are dropped, and once the terminal lands in state the
     /// dedupe path in `openLoginSession` focuses it instead of spawning again.
-    var loginSessionSpawnsInFlight: Set<UUID> = []
+    @ObservationIgnored var loginSessionSpawnsInFlight: Set<UUID> = []
 
     /// Terminal IDs with a wake RPC in flight, so a rapid re-focus (or a menu
     /// "Wake" racing the auto-wake-on-focus) doesn't fire a second `terminal.wake`
     /// while the first is still respawning. The daemon singleflights too; this
     /// is the app-side first line so we don't even round-trip twice.
-    var wakeInFlight: Set<UUID> = []
+    @ObservationIgnored var wakeInFlight: Set<UUID> = []
 
     /// The first selected worktree, if any.
     var selectedWorktree: Worktree? {
@@ -668,14 +692,14 @@ final class AppState: ObservableObject {
         dockedTerminalIDs.contains(terminalID)
     }
 
-    @Published var dockRatio: CGFloat = 0.3 {
+    var dockRatio: CGFloat = 0.3 {
         didSet { userDefaults.set(Double(dockRatio), forKey: Self.dockRatioKey) }
     }
     /// "Use default without asking": when true, the plain "Claude" action
     /// spawns silently on the global default profile instead of opening the
     /// spawn-time account picker. Toggleable from the picker itself and
     /// Settings → Model Profiles. Persisted per-user.
-    @Published var skipAccountPicker: Bool = false {
+    var skipAccountPicker: Bool = false {
         didSet { userDefaults.set(skipAccountPicker, forKey: Self.skipAccountPickerKey) }
     }
     /// Pixel size of the main terminal area (the SingleWorktreeView slot
@@ -683,7 +707,7 @@ final class AppState: ObservableObject {
     /// Default matches the typical window: 1200 wide window − sidebar (~280) ≈ 920;
     /// 800 tall window − toolbar (~24) ≈ 776. Conservative fallback for the
     /// first RPC before the GeometryReader publishes a real value.
-    @Published var mainAreaSize: CGSize = CGSize(width: 1120, height: 776) {
+    var mainAreaSize: CGSize = CGSize(width: 1120, height: 776) {
         didSet {
             guard mainAreaSize != oldValue else { return }
             scheduleMainAreaSizeBroadcast()
@@ -692,40 +716,40 @@ final class AppState: ObservableObject {
     /// Debounce token for broadcasting `mainAreaSize` changes to the daemon.
     /// Cancelled and re-scheduled on every change so we send one RPC per
     /// resize gesture rather than per AppKit layout pass.
-    private var mainAreaSizeBroadcastTask: Task<Void, Never>?
-    private var lastBroadcastCols: Int = 0
-    private var lastBroadcastRows: Int = 0
-    @Published var isConnected: Bool = false
-    @Published var layouts: [UUID: LayoutNode] = [:] {
+    @ObservationIgnored private var mainAreaSizeBroadcastTask: Task<Void, Never>?
+    @ObservationIgnored private var lastBroadcastCols: Int = 0
+    @ObservationIgnored private var lastBroadcastRows: Int = 0
+    var isConnected: Bool = false
+    var layouts: [UUID: LayoutNode] = [:] {
         didSet { persistLayouts() }
     }
     /// Multi-worktree grid layouts, keyed by WORKTREE ID. Presentation-only
     /// (spec C §3.12): never persisted, never mirrored, never part of the
     /// panel surface. Kept separate from `layouts` (tab-ID-keyed) so the two
     /// keying schemes can't collide in one dictionary.
-    @Published var gridLayouts: [UUID: LayoutNode] = [:]
+    var gridLayouts: [UUID: LayoutNode] = [:]
     /// Back/forward history per viewer-class slot pane, keyed by the slot's
     /// paneID (stable across in-place content replacements).
-    @Published var paneHistories: [UUID: PaneHistory] = [:] {
+    var paneHistories: [UUID: PaneHistory] = [:] {
         didSet { persistPaneHistories() }
     }
-    @Published var tabs: [UUID: [TBDShared.Tab]] = [:]
+    var tabs: [UUID: [TBDShared.Tab]] = [:]
     /// EXPLICIT per-worktree tab selection. Absent (or out of range) means "no
     /// deliberate selection" — read it through `resolvedActiveTabIndex` rather
     /// than defaulting to 0 or clamping at the call site.
-    @Published var activeTabIndices: [UUID: Int] = [:]
-    @Published var worktreeTabOrders: [UUID: [UUID]] = [:]
+    var activeTabIndices: [UUID: Int] = [:]
+    var worktreeTabOrders: [UUID: [UUID]] = [:]
     /// Worktrees whose persisted tab order / active tab has been hydrated from
     /// the daemon with actual content. Distinct from `worktreeTabOrders[id] != nil`,
     /// which is also true for the empty response a poll gets while the daemon is
     /// still mid-create — treating that as loaded stranded the worktree without
     /// its persisted "active = agent" selection for the rest of the session.
-    var tabStateHydratedWorktreeIDs: Set<UUID> = []
+    @ObservationIgnored var tabStateHydratedWorktreeIDs: Set<UUID> = []
     /// `listTabs` fetches already spent trying to hydrate a worktree, capped at
     /// `maxTabStateHydrationAttempts`. Without a cap, a worktree whose tab state
     /// is legitimately and permanently empty re-fires the RPC on every
     /// `reconcileTabs` — which is every terminal-list change — forever.
-    var tabStateFetchAttempts: [UUID: Int] = [:]
+    @ObservationIgnored var tabStateFetchAttempts: [UUID: Int] = [:]
     /// The in-flight hydration `Task` per worktree, so overlapping reconciles
     /// can't stack `Task`s for the same worktree. Holding the handle rather than
     /// a bare `Set<UUID>` marker means the completion of that work is directly
@@ -733,40 +757,40 @@ final class AppState: ObservableObject {
     /// wall time for the flag to clear, and only the scheduler's own `Task`
     /// clears the entry, so a direct `loadTabStates(worktreeID:)` call can no
     /// longer clear an in-flight marker it does not own.
-    var tabStateFetchTasks: [UUID: Task<Void, Never>] = [:]
+    @ObservationIgnored var tabStateFetchTasks: [UUID: Task<Void, Never>] = [:]
     /// Hydration attempt budget. The gap this covers is one poll wide — the
     /// daemon persists tab order milliseconds after inserting the terminal
     /// rows — so a single retry is always enough; the extra one is slack.
     static let maxTabStateHydrationAttempts = 3
-    @Published var draggingTabID: UUID? = nil
-    @Published var repoFilter: UUID? = nil
-    @Published var pendingWorktreeIDs: Set<UUID> = []
+    var draggingTabID: UUID? = nil
+    var repoFilter: UUID? = nil
+    var pendingWorktreeIDs: Set<UUID> = []
     /// Remote lanes drawn optimistically while `remote.create` is in flight,
     /// one entry per placeholder row (whose id is also in `pendingWorktreeIDs`,
     /// so a poll landing mid-create preserves the row like any other
-    /// placeholder). Not `@Published` — no view reads it; it is the bookkeeping
+    /// placeholder). `@ObservationIgnored` — no view reads it; it is the bookkeeping
     /// `AppState+Remote`'s create path uses to retire each placeholder on the
     /// `(provider, sessionID)` pair. See `PendingRemoteLane`.
-    var pendingRemoteLanes: [PendingRemoteLane] = []
+    @ObservationIgnored var pendingRemoteLanes: [PendingRemoteLane] = []
     /// Worktree IDs optimistically removed by an archive that has not yet been
     /// confirmed by daemon data. `refreshWorktrees` filters these out so a
     /// `listWorktrees` poll issued before the daemon flipped the status cannot
     /// resurrect the row. Value is the time the tombstone was created, used for
     /// TTL-based eviction when an archive fails or stalls.
-    var recentlyArchivedWorktreeIDs: [UUID: Date] = [:]
-    @Published var suspendingTerminalIDs: Set<UUID> = []
+    @ObservationIgnored var recentlyArchivedWorktreeIDs: [UUID: Date] = [:]
+    var suspendingTerminalIDs: Set<UUID> = []
     /// Closures registered by live TerminalPanelView instances to capture a screenshot.
     /// Keyed by terminal UUID. Populated in makeNSView, cleared on view disappear.
-    var snapshotProviders: [UUID: () -> NSImage?] = [:]
+    @ObservationIgnored var snapshotProviders: [UUID: () -> NSImage?] = [:]
     /// Weak terminal views keyed by terminal UUID, used to restore AppKit first
     /// responder after worktree navigation.
-    var terminalFocusTargets: [UUID: TerminalFocusTarget] = [:]
+    @ObservationIgnored var terminalFocusTargets: [UUID: TerminalFocusTarget] = [:]
     /// Tab-close ownership keyed by terminal UUID for views that belong to a
     /// visible tab, used to resolve the currently focused closable tab.
-    var terminalTabCloseContexts: [UUID: TabCloseContext] = [:]
+    @ObservationIgnored var terminalTabCloseContexts: [UUID: TabCloseContext] = [:]
     /// Visual screenshots taken at suspend-click time, shown while daemon works.
     /// Keyed by terminal UUID. Cleared when suspend completes.
-    @Published var suspendingSnapshots: [UUID: NSImage] = [:]
+    var suspendingSnapshots: [UUID: NSImage] = [:]
 
     func setSuspendingSnapshot(_ image: NSImage, for id: UUID) {
         suspendingSnapshots[id] = image
@@ -775,36 +799,36 @@ final class AppState: ObservableObject {
     func removeSuspendingSnapshot(for id: UUID) {
         suspendingSnapshots.removeValue(forKey: id)
     }
-    @Published var editingWorktreeID: UUID? = nil
-    @Published var isRenamingWorktree = false
-    @Published var prStatuses: [UUID: PRStatus] = [:]
+    var editingWorktreeID: UUID? = nil
+    var isRenamingWorktree = false
+    var prStatuses: [UUID: PRStatus] = [:]
     /// The outcome of the daemon's last attempt to learn each worktree's PR
     /// state. Kept beside `prStatuses`, never merged into it: a worktree absent
     /// from `prStatuses` has no PR only when this says `.none`, and a worktree
     /// present in it may be showing a value the last attempt could not
     /// reconfirm. A missing key means no attempt is on record.
-    @Published var prObservations: [UUID: PRObservation] = [:]
+    var prObservations: [UUID: PRObservation] = [:]
     /// Every live PR bound to each worktree, in bind order — the multi-PR
     /// surface behind the toolbar dropdown. `prStatuses` remains the single
     /// worst-of summary the daemon writes to `Worktree.prStatus`; this is the
     /// full set, and the two are refreshed together.
-    @Published var prBindings: [UUID: [PRBinding]] = [:]
+    var prBindings: [UUID: [PRBinding]] = [:]
     /// How many of each worktree's bindings are tombstoned, for the worktrees
     /// that have any (a worktree with none is absent, not zero). Refreshed in
     /// the same call as `prBindings` and kept separately because it outlives
     /// them: detaching a worktree's last PR empties `prBindings` and leaves this
     /// non-zero, which is precisely the signal that suppresses the
     /// legacy-status fallback below.
-    @Published var prDetachedCounts: [UUID: Int] = [:]
+    var prDetachedCounts: [UUID: Int] = [:]
     /// Start order for `refreshPRBindings`: every call takes the next ticket
     /// before it fetches, so the two counters below can be compared to tell an
     /// older snapshot from a newer one.
-    private var prBindingsRefreshSeq = 0
+    @ObservationIgnored private var prBindingsRefreshSeq = 0
     /// The highest ticket that has actually PUBLISHED. Deliberately not the
     /// same fact as the one above — a call that started later and then failed
     /// put nothing on screen, so it must not silence an earlier call whose
     /// fetch succeeded. Only a publish moves this.
-    private var prBindingsPublishedSeq = 0
+    @ObservationIgnored private var prBindingsPublishedSeq = 0
     /// What every PR surface — toolbar split button, sidebar row indicator,
     /// status-bar chips — must read, so they cannot disagree about a worktree.
     /// Bindings when there are any; otherwise the legacy single `prStatuses`
@@ -823,67 +847,67 @@ final class AppState: ObservableObject {
         )
     }
 
-    @Published var modelProfiles: [ModelProfileWithUsage] = []
-    @Published var defaultProfileID: UUID? = nil
+    var modelProfiles: [ModelProfileWithUsage] = []
+    var defaultProfileID: UUID? = nil
     /// Ephemeral one-shot Codex account/usage snapshot loaded when the
     /// worktree picker opens. It is intentionally neither polled nor persisted.
-    @Published var codexUsage: CodexUsageResult?
-    @Published var isLoadingCodexUsage = false
-    @Published var primaryAgentPreference: PrimaryAgentPreference = .defaultValue
+    var codexUsage: CodexUsageResult?
+    var isLoadingCodexUsage = false
+    var primaryAgentPreference: PrimaryAgentPreference = .defaultValue
     /// Global free-form env overrides (config scope). Loaded from the daemon
     /// alongside `defaultProfileID` via `loadModelProfiles()`.
-    @Published var globalEnvOverrides: [String: String] = [:]
+    var globalEnvOverrides: [String: String] = [:]
     /// Machine-wide remote create-param defaults (config scope), keyed by the
     /// provider's own `create_params` field names. The fall-through level
     /// beneath `Repo.remoteCreateDefaults`. Loaded from the daemon alongside
     /// `globalEnvOverrides` via `loadModelProfiles()`.
-    @Published var globalRemoteCreateDefaults: [String: String] = [:]
+    var globalRemoteCreateDefaults: [String: String] = [:]
     /// Global default for auto-archive-on-PR-merge. Loaded from the daemon
     /// alongside `globalEnvOverrides` via `loadModelProfiles()`.
-    @Published var autoArchiveOnMergeDefault: Bool = false
+    var autoArchiveOnMergeDefault: Bool = false
     /// Global default for auto-hibernate-on-PR-merge. Loaded from the daemon
     /// alongside `autoArchiveOnMergeDefault` via `loadModelProfiles()`.
-    @Published var autoHibernateOnMergeDefault: Bool = false
+    var autoHibernateOnMergeDefault: Bool = false
     /// Orphan-GC master switch (Config mirror, default true to match
     /// `Config.gcEnabled`). Loaded from the daemon alongside
     /// `autoArchiveOnMergeDefault` via `loadModelProfiles()`.
-    @Published var gcEnabled: Bool = true
+    var gcEnabled: Bool = true
     /// Whether ordinary new worktrees start with an empty Notes tab. Loaded
     /// from the daemon alongside the other config-backed worktree defaults.
-    @Published var autoCreateNotesEnabled: Bool = Config.autoCreateNotesDefault
-    @Published var nightwatchMode: NightwatchMode = .off
+    var autoCreateNotesEnabled: Bool = Config.autoCreateNotesDefault
+    var nightwatchMode: NightwatchMode = .off
     /// Auto-hibernate master switch. Loaded from the daemon `Config` via
     /// `loadHibernationConfig()`.
-    @Published var autoHibernateEnabled: Bool = false
+    var autoHibernateEnabled: Bool = false
     /// Auto-hibernate idle timeout in minutes. Loaded from `Config`.
-    @Published var hibernateIdleMinutes: Int = Config.defaultHibernateIdleMinutes
+    var hibernateIdleMinutes: Int = Config.defaultHibernateIdleMinutes
     /// Supervision's fleet-wide authority switch (design 2026-07-26 §3, §7).
     /// `true` means supervision is enabled — the fleet brake is *released*,
     /// the opposite sense from the brake's own name. Shipped OFF (braked);
     /// for now inert, since the rest of the supervision subsystem is landing
     /// in the same series of changes. Loaded from the daemon `Config` via
     /// `loadSupervisionConfig()`.
-    @Published var supervisionEnabled: Bool = false
+    var supervisionEnabled: Bool = false
     /// Daemon-persisted gate for session-limit auto-resume (default OFF).
     /// Daemon-side (not @AppStorage) because the daemon must act while the
     /// app is closed.
-    @Published var autoResumeOnLimitReset: Bool = false
+    var autoResumeOnLimitReset: Bool = false
     /// Daemon-persisted gate for transient-API-error auto-continue (default
     /// OFF). Daemon-side (not @AppStorage) because the daemon must act while
     /// the app is closed.
-    @Published var autoResumeOnApiError: Bool = false
+    var autoResumeOnApiError: Bool = false
     /// Terminals where the user has dismissed the proxy-unreachable banner.
     /// Cleared on app relaunch (in-memory only — banners are advisory).
-    @Published var dismissedProxyWarnings: Set<UUID> = []
+    var dismissedProxyWarnings: Set<UUID> = []
     /// Non-nil when the connected daemon reports an executable path that
     /// doesn't belong to this app's build (another worktree's restart.sh won
     /// the shared daemon). Rendered as a persistent, non-blocking banner in
     /// ContentView. Set by `checkDaemonBuildIdentity()` on every connect, so
     /// it self-clears once a matching daemon is connected.
-    @Published var daemonBuildMismatchMessage: String?
+    var daemonBuildMismatchMessage: String?
     /// User dismissed the build-mismatch banner. In-memory only (advisory);
     /// reset whenever the mismatch message changes.
-    @Published var daemonBuildMismatchDismissed = false
+    var daemonBuildMismatchDismissed = false
     /// Panes currently rendered through a live control-mode attach, mapped to
     /// the attach GENERATION the record belongs to (`nil` when the daemon
     /// vended none). Maintained by `TerminalPanelRepresentable.Coordinator`
@@ -894,23 +918,23 @@ final class AppState: ObservableObject {
     /// landing after a fresh attach's set for the same pane under adverse
     /// MainActor scheduling — cannot drop a healthy pane's attached state
     /// (the app-side twin of the daemon's generation-checked detach).
-    @Published private(set) var controlModeAttachedPanes: [ControlModePaneKey: UInt64?] = [:]
+    private(set) var controlModeAttachedPanes: [ControlModePaneKey: UInt64?] = [:]
     /// Panes the daemon has flagged input-failing via edge-triggered
     /// `controlModeInputHealthChanged` deltas. A `healthy: true` delta or a
     /// detach clears the flag. Read through `isInputDeliveryFailing(_:)`,
     /// which applies the attached-pane gate.
-    @Published private(set) var controlModeFailingInputPanes: Set<ControlModePaneKey> = []
-    @Published var historyActiveWorktrees: Set<UUID> = []
-    @Published var historyLoadStates: [UUID: HistoryLoadState] = [:]
-    @Published var selectedSessionIDs: [UUID: String] = [:]       // worktreeID → sessionId
-    @Published var sessionTranscripts: [String: [TranscriptItem]] = [:]  // sessionId → items
-    @Published var sessionTranscriptLoading: Set<String> = []
+    private(set) var controlModeFailingInputPanes: Set<ControlModePaneKey> = []
+    var historyActiveWorktrees: Set<UUID> = []
+    var historyLoadStates: [UUID: HistoryLoadState] = [:]
+    var selectedSessionIDs: [UUID: String] = [:]       // worktreeID → sessionId
+    var sessionTranscripts: [String: [TranscriptItem]] = [:]  // sessionId → items
+    var sessionTranscriptLoading: Set<String> = []
     // Closed-terminal history (Session History → Closed Terminals).
-    @Published var closedTerminalHistories: [UUID: [TerminalHistoryEntry]] = [:]  // worktreeID → entries
-    @Published var selectedClosedTerminalIDs: [UUID: UUID] = [:]                  // worktreeID → entry id
+    var closedTerminalHistories: [UUID: [TerminalHistoryEntry]] = [:]  // worktreeID → entries
+    var selectedClosedTerminalIDs: [UUID: UUID] = [:]                  // worktreeID → entry id
     /// Captured text of the currently selected closed terminal only —
     /// deliberately a one-entry cache so large scrollbacks never accumulate.
-    @Published var closedTerminalContents: [UUID: String] = [:]                   // entry id → text
+    var closedTerminalContents: [UUID: String] = [:]                   // entry id → text
 
     /// Raw most-recent-first log of recently-visited worktrees, the recency
     /// input to the keep-alive policy. Bounded by `touchVisitedWorktree`, which
@@ -918,13 +942,13 @@ final class AppState: ObservableObject {
     /// mount set the view consumes is the computed `keepAliveWorktreeIDs`, which
     /// re-merges the live protection set; do not feed this raw log to the pager
     /// directly.
-    @Published private(set) var recentlyVisitedWorktreeIDs: [UUID] = []
+    private(set) var recentlyVisitedWorktreeIDs: [UUID] = []
 
     /// LRU of recently-selected worktrees consumed by the cmd-K jump menu.
     /// Distinct from `recentlyVisitedWorktreeIDs` (which has a much smaller
     /// cap and drives the SingleWorktreeView keep-alive cache). In-memory
     /// only — resets on app relaunch, matching Slack's "Recent" semantics.
-    @Published private(set) var recentWorktreeIDs: [UUID] = []
+    private(set) var recentWorktreeIDs: [UUID] = []
 
     private static let recentWorktreeCap = 32
 
@@ -938,7 +962,7 @@ final class AppState: ObservableObject {
     /// `attachedRemoteSelections` re-merges the current selection (protected)
     /// and eligibility/detach state on every read, so this log alone doesn't
     /// say what's actually attached right now.
-    @Published private(set) var recentlyAttachedRemoteSessions: [RemoteSessionSelection] = []
+    private(set) var recentlyAttachedRemoteSessions: [RemoteSessionSelection] = []
 
     /// Sessions whose attach terminal ended (pty exit — clean or not; the
     /// pane exiting never means the remote session died, only that the
@@ -952,7 +976,7 @@ final class AppState: ObservableObject {
     /// would spawn a fresh process every render, an unbounded respawn loop
     /// against a resource this codebase must not spam (SSM/ssh concurrency
     /// and cost — see `RemoteAttachLifecycle`'s doc comment).
-    @Published private(set) var explicitlyDetachedRemoteSessions: [RemoteSessionSelection: RemoteAttachDetachInfo] = [:]
+    private(set) var explicitlyDetachedRemoteSessions: [RemoteSessionSelection: RemoteAttachDetachInfo] = [:]
 
     /// Sessions whose attach terminal ended UNEXPECTEDLY (nonzero/unreadable
     /// exit — `RemoteAttachTerminalView.isUnexpectedExit`) — the transport's
@@ -968,7 +992,7 @@ final class AppState: ObservableObject {
     /// `dismissed` exclusion, and above all `remoteAttachKeepAliveLimit`),
     /// so a laptop waking from a long outage can't reattach more than the
     /// cap at once even with many pending entries at once.
-    @Published private(set) var pendingReconnectRemoteSessions: [RemoteSessionSelection: RemotePendingReconnect] = [:]
+    private(set) var pendingReconnectRemoteSessions: [RemoteSessionSelection: RemotePendingReconnect] = [:]
 
     /// Cap on how many WARM BACKGROUND remote sessions may keep a live
     /// attach terminal around at once. The current selection is separately
@@ -1186,7 +1210,7 @@ final class AppState: ObservableObject {
     /// Insertion/access order for `sessionTranscripts`. The most recently
     /// touched sessionID is at the END. Evict from the FRONT when the cap
     /// is exceeded.
-    private var sessionTranscriptOrder: [String] = []
+    @ObservationIgnored private var sessionTranscriptOrder: [String] = []
     private let sessionTranscriptCap = 50
 
     /// Touch a sessionID — moves it to most-recently-used, evicts the LRU
@@ -1204,7 +1228,7 @@ final class AppState: ObservableObject {
     }
 
     /// Selected archived worktree per repo (left rail of the archived view's nested master-detail).
-    @Published var selectedArchivedWorktreeIDs: [UUID: UUID] = [:]
+    var selectedArchivedWorktreeIDs: [UUID: UUID] = [:]
 
     /// Selected "Reclaimed" (orphan-GC reap record) row per repo, in the same
     /// left rail as `selectedArchivedWorktreeIDs`. The two are mutually
@@ -1212,38 +1236,38 @@ final class AppState: ObservableObject {
     /// `selectReapRecord(_:repoID:)` (AppState+Worktrees.swift) to change
     /// either, which keep that invariant instead of mutating these
     /// dictionaries directly.
-    @Published var selectedReapRecordIDs: [UUID: UUID] = [:]
+    var selectedReapRecordIDs: [UUID: UUID] = [:]
 
     /// Worktrees the user just revived from the archived view. Keeps the row
     /// visible with a status indicator until the user navigates away from the
     /// archived section. Cleared by `AppState+Navigation` when the active
     /// sidebar selection moves elsewhere.
-    @Published var revivingArchived: [UUID: ReviveState] = [:]
+    var revivingArchived: [UUID: ReviveState] = [:]
 
     /// Terminal IDs currently being recreated — prevents duplicate RPC calls.
-    var recreatingTerminalIDs: Set<UUID> = []
+    @ObservationIgnored var recreatingTerminalIDs: Set<UUID> = []
 
     /// Terminal deletions waiting for an already-dispatched recreation RPC to
     /// finish. This set is bounded by `recreatingTerminalIDs` and is cleared
     /// when the matching recreation completes.
-    var terminalDeletionsAwaitingRecreationCompletion: Set<UUID> = []
+    @ObservationIgnored var terminalDeletionsAwaitingRecreationCompletion: Set<UUID> = []
 
     /// Short-lived guard against daemon responses that were already in flight
     /// when a terminal was deleted. Pruned on every mutation and adoption.
-    var recentlyDeletedTerminalIDs: [UUID: Date] = [:]
+    @ObservationIgnored var recentlyDeletedTerminalIDs: [UUID: Date] = [:]
 
     /// App-lifetime automatic recovery attempts, keyed by stable terminal UUID.
     /// View/coordinator reconstruction must not reset this budget.
-    var terminalRecoveryBudget = TerminalRecoveryBudget()
+    @ObservationIgnored var terminalRecoveryBudget = TerminalRecoveryBudget()
 
     // Alert state for user feedback
-    @Published var alertMessage: String? = nil
-    @Published var alertIsError: Bool = false
+    var alertMessage: String? = nil
+    var alertIsError: Bool = false
 
-    @Published private(set) var tmuxExecutableResolution: TmuxExecutableResolution?
-    @Published private(set) var savedTmuxExecutablePath: String?
-    @Published private(set) var isTmuxLocationPromptPresented = false
-    private var hasCheckedTmuxAvailabilityAtStartup = false
+    private(set) var tmuxExecutableResolution: TmuxExecutableResolution?
+    private(set) var savedTmuxExecutablePath: String?
+    private(set) var isTmuxLocationPromptPresented = false
+    @ObservationIgnored private var hasCheckedTmuxAvailabilityAtStartup = false
 
     let themeStore = ThemeStore()
 
@@ -1259,21 +1283,21 @@ final class AppState: ObservableObject {
     /// derive these locally: it is launched via `open`, which drops shell env.
     /// Published so the Settings control-mode toggle re-renders after
     /// `setControlModeEnabled` refreshes it.
-    @Published var daemonCapabilities: DaemonCapabilitiesResult?
+    var daemonCapabilities: DaemonCapabilitiesResult?
     /// How `loadModelProfiles()` fetches its config-bearing response.
     /// Injectable because `DaemonClient` is concrete, matching the other
     /// settings seams below.
-    lazy var modelProfilesFetcher: @MainActor () async throws -> ModelProfileListResult =
+    @ObservationIgnored lazy var modelProfilesFetcher: @MainActor () async throws -> ModelProfileListResult =
         { [daemonClient] in try await daemonClient.listModelProfiles() }
     /// How `refreshDaemonCapabilities()` fetches — injectable because
     /// `DaemonClient` is concrete (no protocol), so state-level tests stub the
     /// RPC here. Production default asks the daemon; nil result = fetch failed.
-    lazy var daemonCapabilitiesFetcher: @MainActor () async -> DaemonCapabilitiesResult? =
+    @ObservationIgnored lazy var daemonCapabilitiesFetcher: @MainActor () async -> DaemonCapabilitiesResult? =
         { [daemonClient] in try? await daemonClient.daemonCapabilities() }
     /// How `reviveConversationOnFreshBranch` asks the daemon to create the
     /// destination worktree and resume its selected session. Injectable so
     /// AppState tests can exercise the action without a live daemon.
-    lazy var freshConversationReviver:
+    @ObservationIgnored lazy var freshConversationReviver:
         @MainActor (UUID, String, Int?, Int?) async throws
             -> WorktreeReviveConversationFreshResult = { [daemonClient] worktreeID, sessionID, cols, rows in
                 try await daemonClient.reviveConversationOnFreshBranch(
@@ -1286,32 +1310,32 @@ final class AppState: ObservableObject {
     /// How `setControlModeEnabled` persists the flag — injectable for the same
     /// reason as `daemonCapabilitiesFetcher` (`DaemonClient` is concrete, no
     /// protocol), so the Settings-toggle tests can exercise the success branch.
-    lazy var controlModeSetter: @MainActor (Bool) async throws -> Void =
+    @ObservationIgnored lazy var controlModeSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setControlMode(enabled: enabled) }
     /// How `setHibernateInputVetoEnabled` persists the flag — injectable for
     /// the same reason as `controlModeSetter`.
-    lazy var hibernateInputVetoSetter: @MainActor (Bool) async throws -> Void =
+    @ObservationIgnored lazy var hibernateInputVetoSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setHibernateInputVeto(enabled: enabled) }
     /// How `setAutoCloseSetupEnabled` persists the flag — injectable for the
     /// same reason as `controlModeSetter`.
-    lazy var autoCloseSetupSetter: @MainActor (Bool) async throws -> Void =
+    @ObservationIgnored lazy var autoCloseSetupSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setAutoCloseSetup(enabled: enabled) }
     /// How `setAutoTrustWorktrees` persists the flag — injectable for the
     /// same reason as `controlModeSetter`.
-    lazy var autoTrustWorktreesSetter: @MainActor (Bool) async throws -> Void =
+    @ObservationIgnored lazy var autoTrustWorktreesSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setAutoTrustWorktrees(enabled: enabled) }
     /// How the automatic Notes preference is persisted — injectable for the
     /// same reason as `controlModeSetter`.
-    lazy var autoCreateNotesSetter: @MainActor (Bool) async throws -> Void =
+    @ObservationIgnored lazy var autoCreateNotesSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setAutoCreateNotes(enabled: enabled) }
     /// How `setQueuedPromptEnabled` persists the queued-prompt soak flag —
     /// injectable for the same reason as `controlModeSetter`.
-    lazy var queuedPromptFlagSetter: @MainActor (Bool) async throws -> Void =
+    @ObservationIgnored lazy var queuedPromptFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setQueuedPrompt(enabled: enabled) }
     /// How `setClaudeCloudEnabled` persists the Claude cloud gate — injectable
     /// for the same reason as `controlModeSetter`, so the Settings toggle's
     /// success and failure branches are testable without a real daemon.
-    lazy var claudeCloudFlagSetter: @MainActor (Bool) async throws -> Void =
+    @ObservationIgnored lazy var claudeCloudFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setClaudeCloud(enabled: enabled) }
     /// The worktree a queued prompt is being composed for, driving
     /// `ContentView`'s `.sheet(item:)`. Non-nil only while the modal is up, and
@@ -1325,7 +1349,7 @@ final class AppState: ObservableObject {
     /// because `.sheet(item:)` writes the nil itself when the sheet closes —
     /// submit, Cancel and Escape all arrive that way and none of them can be
     /// asked to call something first.
-    @Published var queuedPromptTarget: QueuedPromptTarget? {
+    var queuedPromptTarget: QueuedPromptTarget? {
         didSet {
             if queuedPromptTarget == nil { advanceQueuedPromptBacklog() }
         }
@@ -1337,7 +1361,7 @@ final class AppState: ObservableObject {
     /// first — `.sheet(item:)` swapping a live item is unreliable on macOS, so
     /// the operator can be left typing into a modal bound to the *previous*
     /// target. They queue instead.
-    var queuedPromptBacklog: [QueuedPromptTarget] = []
+    @ObservationIgnored var queuedPromptBacklog: [QueuedPromptTarget] = []
     /// The parked prompt being read back, sharing `ContentView`'s single
     /// prompt `.sheet(item:)` with the compose modal. A prompt that could not
     /// be delivered stays in the `worktree.pending_prompt` column; this is how
@@ -1346,7 +1370,7 @@ final class AppState: ObservableObject {
     /// Closing it frees the shared sheet slot, so a creation that queued behind
     /// it can open — the same observer `queuedPromptTarget` carries, for the
     /// same reason.
-    @Published var parkedPromptReadback: ParkedPromptReadback? {
+    var parkedPromptReadback: ParkedPromptReadback? {
         didSet {
             if parkedPromptReadback == nil { advanceQueuedPromptBacklog() }
         }
@@ -1355,10 +1379,10 @@ final class AppState: ObservableObject {
     /// Parking is not idempotent from the agent's point of view — a second
     /// click parks the same text again, and the daemon delivers what it is
     /// told, so the operator's message arrives twice.
-    @Published var parkedPromptDeliveryInFlight = false
+    var parkedPromptDeliveryInFlight = false
     /// How the read-back's Copy button reaches the pasteboard. Injectable so
     /// tests never write to the developer's real pasteboard.
-    lazy var pasteboardWriter: @MainActor (String) -> Void = { text in
+    @ObservationIgnored lazy var pasteboardWriter: @MainActor (String) -> Void = { text in
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
     }
@@ -1366,7 +1390,7 @@ final class AppState: ObservableObject {
     /// same reason as `daemonCapabilitiesFetcher` (`DaemonClient` is concrete,
     /// no protocol), so the queued-prompt tests can pin the RPC ordering
     /// without a live daemon.
-    lazy var worktreeCreator: @MainActor (WorktreeCreateRequest) async throws -> Worktree =
+    @ObservationIgnored lazy var worktreeCreator: @MainActor (WorktreeCreateRequest) async throws -> Worktree =
         { [daemonClient] request in
             try await daemonClient.createWorktree(
                 repoID: request.repoID,
@@ -1388,7 +1412,7 @@ final class AppState: ObservableObject {
     /// A `nil` text unparks — the daemon clears the column and disarms any
     /// wait — which is how the composer's Discard reaches the store without a
     /// verb of its own.
-    lazy var pendingPromptSetter:
+    @ObservationIgnored lazy var pendingPromptSetter:
         @MainActor (UUID, String?, Bool) async throws -> WorktreeSetPendingPromptResult =
             { [daemonClient] worktreeID, text, submit in
                 try await daemonClient.setPendingPrompt(
@@ -1398,7 +1422,7 @@ final class AppState: ObservableObject {
     /// closing a note tab hard-deletes the note row (`closeTab` →
     /// `deleteNote`). Injectable so tests can exercise both branches without
     /// a real modal NSAlert.
-    lazy var noteCloseConfirmer: @MainActor (Note) -> Bool = { note in
+    @ObservationIgnored lazy var noteCloseConfirmer: @MainActor (Note) -> Bool = { note in
         let filePath = TBDConstants.noteContentPath(worktreeID: note.worktreeID, noteID: note.id)
             .replacingOccurrences(of: NSHomeDirectory(), with: "~")
         let alert = NSAlert()
@@ -1417,12 +1441,12 @@ final class AppState: ObservableObject {
     /// injectable for the same reason as `daemonCapabilitiesFetcher`
     /// (`DaemonClient` is concrete, no protocol), so a poll can be driven
     /// without a daemon.
-    lazy var prBindingsFetcher: @MainActor () async throws -> PRBindingsAllResult =
+    @ObservationIgnored lazy var prBindingsFetcher: @MainActor () async throws -> PRBindingsAllResult =
         { [daemonClient] in try await daemonClient.listAllPRBindings() }
     /// How `detachPR` untracks one PR — injectable for the same reason as
     /// `prBindingsFetcher`, so the status bar's untrack gesture and each of its
     /// outcomes can be driven without a daemon.
-    lazy var prDetacher: @MainActor (UUID, String?, Int) async throws -> PRDetachResult =
+    @ObservationIgnored lazy var prDetacher: @MainActor (UUID, String?, Int) async throws -> PRDetachResult =
         { [daemonClient] worktreeID, url, number in
             try await daemonClient.detachPR(worktreeID: worktreeID, url: url, number: number)
         }
@@ -1430,37 +1454,37 @@ final class AppState: ObservableObject {
     /// active tab — injectable for the same reason as `daemonCapabilitiesFetcher`
     /// (`DaemonClient` is concrete, no protocol), so hydration tests can drive
     /// the sequence of responses without a daemon.
-    lazy var tabStatesFetcher: @MainActor (UUID) async throws -> TabListResponse =
+    @ObservationIgnored lazy var tabStatesFetcher: @MainActor (UUID) async throws -> TabListResponse =
         { [daemonClient] worktreeID in try await daemonClient.listTabs(worktreeID: worktreeID) }
     /// How the one-shot legacy panel import fires its RPC — injectable for the
     /// same reason as `daemonCapabilitiesFetcher` (`DaemonClient` is concrete,
     /// no protocol), so trigger tests can record calls without a real daemon.
-    lazy var panelImportTrigger: @MainActor (PanelImportParams) async throws -> PanelImportResult =
+    @ObservationIgnored lazy var panelImportTrigger: @MainActor (PanelImportParams) async throws -> PanelImportResult =
         { [daemonClient] params in try await daemonClient.panelImportLegacy(params) }
     /// How the shadow-compare diagnostic (spec C §11.3) fetches the daemon's
     /// imported surface — injectable for the same reason as `panelImportTrigger`.
-    lazy var panelGetFetcher: @MainActor (UUID) async throws -> PanelGetResult =
+    @ObservationIgnored lazy var panelGetFetcher: @MainActor (UUID) async throws -> PanelGetResult =
         { [daemonClient] worktreeID in try await daemonClient.panelGet(worktreeID: worktreeID) }
     /// Guards the one-shot legacy panel import to at most once per launch.
     /// Deliberately NOT persisted — the daemon's create-if-absent import guard
     /// (spec C §11.2) is the real idempotence boundary; this only avoids
     /// redundant RPC fan-out as `loadTabStates` runs per worktree.
-    private var hasAttemptedPanelImport = false
+    @ObservationIgnored private var hasAttemptedPanelImport = false
     /// How `refreshRemote()` fetches the provider roster — injectable for the
     /// same reason as `daemonCapabilitiesFetcher` (`DaemonClient` is concrete,
     /// no protocol), so tests can exercise the disabled-refusal and
     /// genuine-error branches without a real daemon.
-    lazy var remoteProvidersFetcher: @MainActor () async throws -> RemoteProvidersResult =
+    @ObservationIgnored lazy var remoteProvidersFetcher: @MainActor () async throws -> RemoteProvidersResult =
         { [daemonClient] in try await daemonClient.remoteProviders() }
     /// How `refreshRemote()` fetches the session mirror — injectable for the
     /// same reason as `remoteProvidersFetcher`.
-    lazy var remoteSessionsFetcher: @MainActor () async throws -> RemoteSessionsResult =
+    @ObservationIgnored lazy var remoteSessionsFetcher: @MainActor () async throws -> RemoteSessionsResult =
         { [daemonClient] in try await daemonClient.remoteSessions() }
     /// How `pushRemoteRenameIfSupported` pushes a rename to the provider —
     /// injectable for the same reason as `remoteProvidersFetcher` (`DaemonClient`
     /// is concrete, no protocol), so tests can assert whether it fires per
     /// capability without a real daemon.
-    lazy var remoteRenamePusher: @MainActor (String, String, String) async throws -> Void =
+    @ObservationIgnored lazy var remoteRenamePusher: @MainActor (String, String, String) async throws -> Void =
         { [daemonClient] provider, sessionID, title in
             try await daemonClient.remoteRename(provider: provider, sessionID: sessionID, title: title)
         }
@@ -1468,13 +1492,13 @@ final class AppState: ObservableObject {
     /// switch — injectable for the same reason as `controlModeSetter`
     /// (`DaemonClient` is concrete, no protocol), so the Settings toggle
     /// tests can exercise the success branch without a real daemon.
-    lazy var remoteBackendsSetter: @MainActor (Bool) async throws -> Void =
+    @ObservationIgnored lazy var remoteBackendsSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setRemoteBackends(enabled: enabled) }
     /// How `setRemoteSessionPinned` pins/unpins a remote session for the
     /// sidebar dock — injectable for the same reason as `remoteRenamePusher`,
     /// so the pin action's success and failure branches are testable without
     /// a real daemon.
-    lazy var remoteSessionPinSetter: @MainActor (String, String, Bool) async throws -> Void =
+    @ObservationIgnored lazy var remoteSessionPinSetter: @MainActor (String, String, Bool) async throws -> Void =
         { [daemonClient] provider, sessionID, pinned in
             try await daemonClient.setRemoteSessionPin(
                 provider: provider, sessionID: sessionID, pinned: pinned)
@@ -1484,7 +1508,7 @@ final class AppState: ObservableObject {
     /// same reason as `remoteRenamePusher` (`DaemonClient` is concrete, no
     /// protocol), so the optimistic-placeholder paths are testable without a
     /// real daemon (tests must never touch `~/tbd`).
-    lazy var remoteSessionCreator: @MainActor (String, String, UUID?) async throws -> RemoteSessionPayload =
+    @ObservationIgnored lazy var remoteSessionCreator: @MainActor (String, String, UUID?) async throws -> RemoteSessionPayload =
         { [daemonClient] provider, paramsJSON, parentWorktreeID in
             try await daemonClient.remoteCreate(
                 provider: provider, paramsJSON: paramsJSON, parentWorktreeID: parentWorktreeID)
@@ -1493,7 +1517,7 @@ final class AppState: ObservableObject {
     /// has answered. A plain refresh in production; a seam because a test that
     /// exercises the placeholder swap must be able to decide whether the
     /// adopted row shows up, without a daemon to adopt anything.
-    lazy var remoteLaneRowsRefresher: @MainActor () async -> Void =
+    @ObservationIgnored lazy var remoteLaneRowsRefresher: @MainActor () async -> Void =
         { [weak self] in await self?.refreshWorktrees() }
 
     /// How `reportRemoteAttachExit` tells the daemon an app-spawned `attach`
@@ -1501,7 +1525,7 @@ final class AppState: ObservableObject {
     /// (`DaemonClient` is concrete, no protocol), so the auth-exit routing
     /// tests can assert the report fires without a real daemon (tests must
     /// never touch `~/tbd`).
-    lazy var remoteAttachExitReporter: @MainActor (String, String, Int32) async throws -> Void =
+    @ObservationIgnored lazy var remoteAttachExitReporter: @MainActor (String, String, Int32) async throws -> Void =
         { [daemonClient] provider, sessionID, exitCode in
             try await daemonClient.reportRemoteAttachExit(
                 provider: provider, sessionID: sessionID, exitCode: exitCode)
@@ -1518,18 +1542,18 @@ final class AppState: ObservableObject {
             daemonCapabilities = capabilities
         }
     }
-    lazy var cliInstallerCoordinator = CLIInstallerCoordinator(daemonClient: daemonClient, userDefaults: userDefaults)
-    lazy var legacyHooksCoordinator = LegacyHooksCoordinator(daemonClient: daemonClient, userDefaults: userDefaults)
-    private var pollTimer: Timer?
-    private var pollCycle = 0
+    @ObservationIgnored lazy var cliInstallerCoordinator = CLIInstallerCoordinator(daemonClient: daemonClient, userDefaults: userDefaults)
+    @ObservationIgnored lazy var legacyHooksCoordinator = LegacyHooksCoordinator(daemonClient: daemonClient, userDefaults: userDefaults)
+    @ObservationIgnored private var pollTimer: Timer?
+    @ObservationIgnored private var pollCycle = 0
     /// True while a poll refresh cycle (the list RPCs) is running. The 2s poll
     /// timer skips its refresh when this is set, so overlapping cycles can't
     /// stack into an RPC storm when the daemon is slow (Layer A guard).
-    private var pollCycleInFlight = false
+    @ObservationIgnored private var pollCycleInFlight = false
     /// Count of poll ticks skipped because a previous cycle was still in flight.
     /// Storm indicator for observability and tests.
-    private(set) var skippedPollCycles = 0
-    private var subscriptionTask: Task<Void, Never>?
+    @ObservationIgnored private(set) var skippedPollCycles = 0
+    @ObservationIgnored private var subscriptionTask: Task<Void, Never>?
     let notificationSoundPlayer = NotificationSoundPlayer()
     let macNotificationManager = MacNotificationManager()
 
@@ -1540,8 +1564,8 @@ final class AppState: ObservableObject {
     private static let skipAccountPickerKey = "com.tbd.app.accountPicker.useDefaultWithoutAsking"
     private static let remoteSessionDisplayNamesKey = "com.tbd.app.remoteSessionDisplayNames"
 
-    private var memoryPressureSource: DispatchSourceMemoryPressure?
-    private var focusObservers: [NSObjectProtocol] = []
+    @ObservationIgnored private var memoryPressureSource: DispatchSourceMemoryPressure?
+    @ObservationIgnored private var focusObservers: [NSObjectProtocol] = []
 
     /// UserDefaults domain this AppState reads instance-level preferences from.
     /// Production uses `.standard`; tests inject a per-suite `UserDefaults(suiteName:)`
@@ -2384,9 +2408,10 @@ final class AppState: ObservableObject {
             || terminal.awaitingInputObservedAt != delta.observedAt else { return }
         terminal.awaitingInputReason = delta.reason
         terminal.awaitingInputObservedAt = delta.observedAt
-        // One write-back through the `@Published` dictionary, not two: each
-        // assignment is a full copy-on-write plus an `objectWillChange`, and
-        // this delta arrives on every `Notification` hook of every class.
+        // One write-back through the tracked dictionary, not two: each
+        // assignment is a full copy-on-write plus a notification to every view
+        // that read `terminals`, and this delta arrives on every
+        // `Notification` hook of every class.
         terminals[delta.worktreeID]?[idx] = terminal
     }
 
@@ -2574,6 +2599,10 @@ final class AppState: ObservableObject {
     /// `scratchWorktrees` `didSet`s): `SidebarView` reads it twice per body
     /// evaluation, and each read was a full copy of every row.
     var allWorktrees: [Worktree] {
+        // Re-register both dependencies on every read, including cache hits —
+        // see "THE WARM-CACHE DEPENDENCY TRAP" above.
+        _ = worktrees
+        _ = scratchWorktrees
         if let cached = allWorktreesCache { return cached }
         let flattened = worktrees.values.flatMap { $0 } + scratchWorktrees
         allWorktreesCache = flattened
@@ -3377,10 +3406,11 @@ final class AppState: ObservableObject {
     /// caption shown alongside it. Non-scratch worktrees never dim here.
     ///
     /// `directoryExists` is an autoclosure so the caller's `stat()` is only
-    /// paid for un-promoted scratch rows: every sidebar row re-evaluates its
-    /// body on any AppState `@Published` change, and an eager argument would
-    /// charge every regular row a synchronous disk hit per render for a flag
-    /// this rule ignores.
+    /// paid for un-promoted scratch rows: a sidebar row re-evaluates its body
+    /// on any change to the `AppState` properties it reads — `worktrees` among
+    /// them, which every poll touches — and an eager argument would charge
+    /// every regular row a synchronous disk hit per render for a flag this
+    /// rule ignores.
     nonisolated static func scratchRowIsDimmed(
         _ worktree: Worktree,
         directoryExists: @autoclosure () -> Bool

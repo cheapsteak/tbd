@@ -31,7 +31,7 @@ struct SystemReminderRowBody: View {
 
     @State private var fullText: String? = nil
     @State private var metadata: TranscriptAttachmentMetadata? = nil
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     /// Only hook output and injected file bodies come from `attachment` rows;
     /// every other reminder kind would round-trip for a guaranteed-nil result.

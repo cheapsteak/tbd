@@ -5,7 +5,7 @@ import SwiftUI
 /// transitions and auto-dismiss timing are owned by the AppState toast state
 /// machine (AppState+Toast.swift).
 struct ToastOverlay: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     var body: some View {
         Group {

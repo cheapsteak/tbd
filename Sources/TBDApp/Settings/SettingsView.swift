@@ -35,7 +35,7 @@ struct GeneralSettingsTab: View {
         "Turn this off to skip empty Notes tabs in ordinary new worktrees. " +
         "Conversations revived on a fresh branch still receive their populated provenance note."
 
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @AppStorage("enableNotifications") private var enableNotifications: Bool = true
     @AppStorage("skipPermissions") private var skipPermissions: Bool = true
     @AppStorage(AppState.autoSuspendClaudeKey) private var autoSuspend: Bool = false
@@ -674,7 +674,7 @@ struct GeneralSettingsTab: View {
 // MARK: - Repositories Tab
 
 struct RepositoriesSettingsTab: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -703,7 +703,7 @@ struct RepositoriesSettingsTab: View {
 
 struct RepoSettingsRow: View {
     let repo: Repo
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @State private var editingName: String = ""
     @State private var isEditing: Bool = false
 

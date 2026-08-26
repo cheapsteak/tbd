@@ -60,7 +60,7 @@ enum NightwatchModePresentation {
 /// segment calls `setNightwatchMode`. Always visible so the mode is never lost
 /// in the menu bar.
 struct NightwatchModeToggle: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     var body: some View {
         HStack(spacing: 0) {

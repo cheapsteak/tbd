@@ -525,9 +525,9 @@ struct ActiveTabResolutionTests {
         }
     }
 
-    /// A retry that changes nothing must also *publish* nothing: every write to
-    /// an `@Published` dictionary fires a full `AppState.objectWillChange`, and
-    /// this path is on a repeat timer by construction.
+    /// A retry that changes nothing must also *notify* nothing: every write to
+    /// a tracked dictionary notifies every view that read it, and this path is
+    /// on a repeat timer by construction.
     @Test("a repeat fetch that changes nothing publishes nothing")
     func idempotentTabStateFetchDoesNotRepublish() async {
         await withState { state in
@@ -541,14 +541,12 @@ struct ActiveTabResolutionTests {
 
             await state.loadTabStates(worktreeID: worktreeID)
 
-            var publishes = 0
-            let token = state.objectWillChange.sink { _ in publishes += 1 }
-            defer { token.cancel() }
-
-            await state.loadTabStates(worktreeID: worktreeID)
+            let publishes = await countEmissions(of: state, duringAsync: {
+                await state.loadTabStates(worktreeID: worktreeID)
+            })
 
             #expect(publishes == 0,
-                    "an identical response must not fan out an objectWillChange")
+                    "an identical response must not notify anyone")
         }
     }
 

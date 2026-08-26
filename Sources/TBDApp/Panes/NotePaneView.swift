@@ -5,7 +5,7 @@ import TBDShared
 struct NotePaneView: View {
     let noteID: UUID
     let worktreeID: UUID
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @State private var text: String = ""
     @State private var loaded = false
     @State private var saveTask: Task<Void, Never>?

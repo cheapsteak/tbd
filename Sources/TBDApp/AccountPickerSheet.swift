@@ -13,7 +13,7 @@ import TBDShared
 /// blocking spinner). Selecting a row spawns a Claude session pinned to that
 /// profile for life.
 struct AccountPickerSheet: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @Environment(\.dismiss) private var dismiss
 
     /// Called with the chosen profile id; the caller owns the actual spawn.
@@ -26,6 +26,7 @@ struct AccountPickerSheet: View {
     }
 
     var body: some View {
+        @Bindable var appState = appState
         VStack(alignment: .leading, spacing: 12) {
             header
 

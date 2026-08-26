@@ -27,9 +27,10 @@ struct MainAreaSizeKey: PreferenceKey {
 }
 
 struct TerminalContainerView: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     var body: some View {
+        @Bindable var appState = appState
         // `dockedTerminalIDs` (on AppState) is the single source of truth for
         // which pinned terminals fall to the dock; the keep-alive pager dedups
         // against the same set so a docked terminal is never mounted twice.
@@ -87,7 +88,7 @@ struct TerminalContainerView: View {
 /// Shows the tab bar and split layout for a single selected worktree.
 struct SingleWorktreeView: View {
     let worktreeID: UUID
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     /// Spawn-time account picker (AccountPickerSheet). Opened by the plain
     /// "Claude" action (unless "Use default without asking" is on) and by the
     /// "+"-menu "Choose account…" item.
@@ -252,7 +253,7 @@ struct SingleWorktreeView: View {
                         selectLastTab()
                     }
                 }
-                .environmentObject(appState)
+                .environment(appState)
             }
             // TmuxBridge sessions are created on-demand by TerminalPanelView
             .task(id: worktreeID) {
@@ -506,7 +507,7 @@ enum QueuedPromptBannerModel {
 /// target, opening the same composer the status bar does, so editing, Copy,
 /// Discard and the send-immediately bit all live in one place.
 private struct QueuedPromptBanner: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     let worktree: Worktree
 
     @State private var isHovered = false
@@ -573,7 +574,6 @@ private struct PreSessionSetupBanner: View {
 /// Each panel displays the worktree name and its primary terminal.
 private struct MultiWorktreeView: View {
     let worktreeIDs: [UUID]
-    @EnvironmentObject var appState: AppState
 
     private var columns: Int {
         let count = worktreeIDs.count
@@ -629,7 +629,7 @@ private struct MultiWorktreeCell: View {
     /// SwiftTerm pane area (excludes the per-cell header bar + divider).
     /// All cells are equal size so a single publisher suffices.
     let isPrimary: Bool
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     private var worktree: Worktree? {
         // Routes through findWorktree so scratch spaces (which live in

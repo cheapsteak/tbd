@@ -17,7 +17,7 @@ import TBDShared
 /// consistent-looking markup here keeps both views simple and leaves the
 /// sheet's existing behavior/tests untouched.
 struct ScratchInstructionsTabView: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     @State private var renamePromptDraft: String = ""
     @State private var instructionsDraft: String = ""

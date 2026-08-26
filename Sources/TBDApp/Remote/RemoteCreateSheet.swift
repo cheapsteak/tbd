@@ -49,7 +49,7 @@ struct RemoteCreateSheet: View {
     /// sees; this one never leaves the app.
     var repoID: UUID?
 
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @Environment(\.dismiss) private var dismiss
 
     @State private var stringValues: [String: String] = [:]

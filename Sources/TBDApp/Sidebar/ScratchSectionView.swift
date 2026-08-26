@@ -7,7 +7,7 @@ import TBDShared
 /// hover `+` to create a new scratch space, followed by the scratch worktree
 /// rows when the section is expanded.
 struct ScratchSectionView: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @State private var isHeaderHovered = false
     @State private var isChevronHovered = false
     @State private var showingScratchInstructions = false
@@ -96,7 +96,7 @@ struct ScratchSectionView: View {
             }
         }
         .sheet(isPresented: $showingScratchInstructions) {
-            ScratchInstructionsView().environmentObject(appState)
+            ScratchInstructionsView().environment(appState)
         }
         .listRowInsets(EdgeInsets(top: 0, leading: SidebarHeaderMetrics.headerRowLeadingInset,
                                   bottom: 0, trailing: 0))

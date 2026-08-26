@@ -29,7 +29,7 @@ import TBDShared
 struct RemoteAttachPager: NSViewControllerRepresentable {
     let selections: [RemoteSessionSelection]
     let activeSelection: RemoteSessionSelection?
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @EnvironmentObject var appearance: AppearanceSettings
 
     func makeNSViewController(context: Context) -> NSTabViewController {
@@ -65,7 +65,7 @@ struct RemoteAttachPager: NSViewControllerRepresentable {
                         appState?.markRemoteSessionDetached(selection, exitCode: exitCode)
                     }
                 )
-                .environmentObject(appState)
+                .environment(appState)
                 .environmentObject(appearance)
             )
             let item = NSTabViewItem(viewController: host)

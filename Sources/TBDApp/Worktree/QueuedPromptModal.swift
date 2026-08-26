@@ -133,7 +133,7 @@ enum QueuedPromptComposer {
 /// running with an idle agent, exactly as before the feature existed. Follows
 /// the sheet convention of `ScratchInstructionsView`.
 struct QueuedPromptModal: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var target: QueuedPromptTarget
 

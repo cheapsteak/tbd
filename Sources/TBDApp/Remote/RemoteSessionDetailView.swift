@@ -102,7 +102,7 @@ enum RemoteSessionSendPayload {
 /// `.onChange(of: selection)`.
 struct RemoteSessionDetailView: View {
     let selection: RemoteSessionSelection
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     /// Behavior seam for `performSend`'s post-send delay (CLAUDE.md "New
     /// delays and timers take an injected clock"). Last property with a
     /// default so the synthesized memberwise init needs no call-site
@@ -609,7 +609,7 @@ private struct RemoteLogTabView: View {
     let sessionID: String
     var refreshToken: Int
 
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
     @State private var text = ""
     @State private var isLoading = false
     @State private var errorMessage: String?

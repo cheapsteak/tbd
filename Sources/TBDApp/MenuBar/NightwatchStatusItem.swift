@@ -9,7 +9,7 @@ import TBDShared
 /// The menu TITLE carries the active mode (🌙 / ◐) so "am I being watched?"
 /// is answerable at a glance without opening the menu.
 struct NightwatchStatusItem: Commands {
-    @ObservedObject var appState: AppState
+    var appState: AppState
     /// Gated behind the same Settings → Fleet Automation opt-in as the sidebar
     /// control, so the whole Nightwatch feature (both entry points) is off by
     /// default. Fail-closed to hidden when the user has never opted in.
@@ -27,17 +27,23 @@ struct NightwatchStatusItem: Commands {
         if experimentalEnabled {
             CommandMenu(title) {
                 NightwatchStatusContent()
-                    .environmentObject(appState)
+                    .environment(appState)
             }
         }
     }
 }
 
-/// Extracted into a `View` so SwiftUI re-renders the menu body when
-/// `@Published` properties on `AppState` change. `Commands` bodies do not
-/// always observe `@ObservedObject` mutations reliably for nested content.
+/// Extracted into a `View` so SwiftUI re-renders the menu body when the
+/// `AppState` properties it reads change. A `Commands` body does not reliably
+/// re-evaluate on state changes — that was true of `@ObservedObject` before and
+/// is true of Observation now — so anything whose *rendering* depends on
+/// `AppState` belongs in a nested `View` like this one.
+///
+/// The menu TITLE is the one read this cannot cover: `CommandMenu` needs the
+/// string at `Commands` level. It has therefore always been best-effort, and
+/// still is.
 private struct NightwatchStatusContent: View {
-    @EnvironmentObject var appState: AppState
+    @Environment(AppState.self) var appState
 
     var body: some View {
         modeButton("I'm back", mode: .off)

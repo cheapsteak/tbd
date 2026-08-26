@@ -35,7 +35,7 @@ struct TabBarHitAreaTests {
                     activeTabIndex: .constant(0),
                     onCloseTab: { _ in }
                 )
-                .environmentObject(appState)
+                .environment(appState)
                 .frame(width: 220, height: 30)
             )
             let labelOnlyWidth = keyViewProxyMaxWidth(
