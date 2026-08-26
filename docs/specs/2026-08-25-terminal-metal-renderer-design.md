@@ -132,40 +132,21 @@ are distinguishable: an unset key reads the shipped default, and an explicit
 
 ## Rejected alternatives
 
-**Replacing SwiftTerm with libghostty.** Ghostty's embedder API is the natural
-candidate — its own macOS app is Swift over that C API, and it is MIT licensed —
-but as of 2026-08-10 the project explicitly disclaims it for external use.
-`include/ghostty.h` describes itself as an internal API "tailored to the needs of
-the macOS app and not designed for external use", directing external embedders to
-`libghostty-vt` instead; the commit that landed that wording removed an earlier
-"(yet)". `libghostty-vt` is a VT state machine only — no renderer, no font
-handling, no pty — which is the half TBD does not need, since parsing is under 3%
-of the main thread and rendering is the measured cost.
+**Replacing the terminal engine.** Migrating to a different engine is a live
+option with three distinct shapes, real precedent, and documented hazards —
+enough that it is recorded separately in
+`docs/perf/2026-08-25-terminal-engine-options.md` rather than summarized here.
 
-Three further blockers stand independently of API status. Serious embedders fork
-Ghostty and build it themselves, taking on a pinned Zig toolchain and a rebase
-burden against an API with no tagged version. The mode TBD would require — a
-surface fed bytes with no child process, matching the tmux bridge and replay
-paths — exists but is not upstream, and no shipped consumer activates it.
-And Ghostty deliberately disables BiDi, forcing
-`kCTTypesetterOptionForcedEmbeddingLevel = 0`, where SwiftTerm's Metal path
-supports it: a migration would be a functional regression for right-to-left text.
-Estimated effort is three to five months against roughly 6,600 lines of TBD
-terminal code.
+It is not rejected; it is sequenced behind this experiment. The reason is that
+this experiment discriminates between the two readings that decide it. If
+enabling the GPU renderer closes the gap, the difficulty was a rendering defect
+in a fallback path, and an engine migration would be solving an already-solved
+problem at a cost measured in months. If it does not, the competing reading —
+that the difficulty is architectural, in how TBD drives the engine rather than in
+how the engine draws — gains real support, and a migration spike becomes
+justified by evidence rather than by analogy.
 
-The strongest argument on the other side, recorded because it is genuinely
-unresolved: another project's committed migration spec faults SwiftTerm
-specifically for "sizing and rendering issues when used without a process (the
-`feed()` path vs `LocalProcessTerminalView`)" — which is exactly the mode TBD
-operates in. If that is right, TBD's difficulty is architectural rather than a
-caching defect, and no amount of renderer tuning resolves it. This design does
-not settle that question; it makes the cheap measurement first.
-
-Two triggers to revisit: an announced but unreleased pure-Swift Metal renderer
-with `libghostty-vt` bindings, which would remove the Zig toolchain, the fork,
-and the disclaimed-API objection at once; or this experiment plus the shaped-line
-cache failing to close the gap to a standalone emulator, which would make the
-architectural reading the better explanation.
+An afternoon's work settles which of those is true, so it goes first.
 
 **Cherry-picking the row-cache fix before measuring.** Applying the upstream
 Metal row-cache patch first would avoid a possibly misleading flat scroll result.
