@@ -32,6 +32,36 @@ public actor RemoteProviderManager {
     /// §"Never silent").
     private let actuationLog: ActuationLog?
     static let pollInterval: TimeInterval = 60
+    /// How many times one provider may be enrolled post-boot before this
+    /// actor stops trying.
+    ///
+    /// This is a chosen policy, not an inherited one, so it is stated rather
+    /// than left implicit in a constant (`docs/theory-placement.md`). Boot
+    /// does not retry at all: a `describe` that fails during the boot sweep
+    /// leaves no `describes` entry until the daemon restarts. Enrollment
+    /// deliberately differs, because its trigger differs — boot runs once at
+    /// a moment nobody chose, while enrollment runs when somebody actually
+    /// addresses the provider, and answering "no describe, and never again"
+    /// to a user who just invoked a verb against a provider that has since
+    /// come back is the bug this whole path exists to remove.
+    ///
+    /// Why more than one: a describe failure is routinely transient — the
+    /// provider mid-deploy, a credential being refreshed. Why bounded at all:
+    /// nothing clears the count, and the retry is driven by traffic rather
+    /// than a timer, so an unbounded budget would spend a describe subprocess
+    /// on every `invoke` and every roster refresh, forever, for a provider
+    /// that is simply gone. Why three rather than two or ten: it is the
+    /// smallest budget that survives more than a single unlucky moment while
+    /// staying negligible if the provider never comes back. A daemon restart
+    /// resets it, as it resets every other in-memory enrollment fact.
+    ///
+    /// No spec accompanies this: the enclosing change is a bug fix, adding no
+    /// subsystem, flag, or migration, and the constant tunes a retry inside
+    /// it rather than revising TBD's theory of remote providers (root
+    /// `CLAUDE.md`, "Work starts with a brainstormed spec"). If the retry
+    /// ever grows a timer, a backoff, or a persisted count, that is a new
+    /// theory and it needs one.
+    static let maxEnrollmentAttempts = 3
 
     private var providers: [String: RemoteProviderConfig] = [:]
     private var describes: [String: ProviderDescribe] = [:]
@@ -54,6 +84,27 @@ public actor RemoteProviderManager {
     private var snapshotFreshnessUnreadable: Set<String> = []
     private var loops: [String: Task<Void, Never>] = [:]
     private var supervisors: [String: ProviderEventsSupervisor] = [:]
+    /// The most recent post-boot enrollment task per provider — see
+    /// `enrollIfNeeded`. Retained after completion so `shutdown()` can cancel
+    /// AND await it; the burst guard is `enrollmentsInFlight` and the retry
+    /// budget is `enrollmentAttempts`.
+    ///
+    /// "Enrollment" is deliberately not "adoption": in this actor adoption
+    /// already means `RemoteSessionAdopter` pulling a provider's SESSIONS
+    /// into the local mirror, which is a different thing happening to a
+    /// different noun.
+    private var enrollments: [String: Task<Void, Never>] = [:]
+    /// Names with an enrollment currently running. Separate from
+    /// `enrollments`, which retains the last task handle so `shutdown()` can
+    /// drain it: this is the burst guard, and it is cleared when the
+    /// enrollment finishes so a FAILED one can be retried.
+    private var enrollmentsInFlight: Set<String> = []
+    /// Enrollment attempts spent per provider, capped by
+    /// `maxEnrollmentAttempts`. A describe that fails leaves no `describes`
+    /// entry, so without a budget the retry would fire on every single
+    /// `invoke` and roster refresh for a provider that is simply down — a
+    /// describe subprocess per RPC, forever.
+    private var enrollmentAttempts: [String: Int] = [:]
     /// Guards `spawnPollLoops`'s compound stopAll()+startLoop() sequence
     /// against a second concurrent call to the same sequence (e.g. two
     /// overlapping `start()`s). See the comment on `spawnPollLoops` for the
@@ -77,6 +128,10 @@ public actor RemoteProviderManager {
     /// (`docs/specs/2026-08-16-remote-lane-archive-design.md` §"Stale
     /// snapshots"). Swept on every apply so it cannot grow without bound.
     private var filingDecisions: [UUID: Date] = [:]
+    /// True once `loadRegistryAndDescribe()` has swept the registry. It is
+    /// the line between "boot will describe this provider" and "nothing ever
+    /// will" — see `enrollIfNeeded`, which is a no-op before it flips.
+    private var registrySwept = false
 
     init(
         db: TBDDatabase, subscriptions: StateSubscriptionManager,
@@ -152,6 +207,7 @@ public actor RemoteProviderManager {
             await recoverLastSuccessfulSnapshotAtIfNeeded(provider: config.name, markStale: true)
             await describeProvider(config)
         }
+        registrySwept = true
         subscriptions.broadcast(delta: .remoteSessionsChanged)
     }
 
@@ -280,10 +336,27 @@ public actor RemoteProviderManager {
     /// believes is torn down. `shuttingDown` (set here, before `stopAll()`,
     /// and never cleared) makes shutdown terminal: every `spawnPollLoops()`
     /// call that resumes after this one — queued or future — is a no-op.
+    /// Enrollment is drained FIRST, and deliberately BEFORE the reconfigure
+    /// lock is taken. Cancelling an in-flight `describe` without awaiting it
+    /// orphans the child process — the interruption still runs on the
+    /// cancelled task, so the process must stay alive to finish unwinding it,
+    /// which is exactly why `Daemon.stop()` pairs `remoteStartTask?.cancel()`
+    /// with `await remoteStartTask?.value`. Draining inside the lock would
+    /// deadlock instead: `enroll` acquires that same lock to arm its poll
+    /// loop, so awaiting it while holding the lock would wait on a task that
+    /// is waiting on us. Setting `shuttingDown` before the drain (it is
+    /// actor-isolated with no `await` ahead of it, and never cleared) closes
+    /// the window: an enrollment scheduled between here and the lock is
+    /// refused by `enrollIfNeeded`, and one already past that point finds
+    /// `shuttingDown` true under the lock and arms nothing.
     func shutdown() async {
+        shuttingDown = true
+        let pending = Array(enrollments.values)
+        for task in pending { task.cancel() }
+        for task in pending { await task.value }
+
         await acquireReconfigureLock()
         defer { releaseReconfigureLock() }
-        shuttingDown = true
         await stopAll()
     }
 
@@ -945,6 +1018,36 @@ public actor RemoteProviderManager {
         }
     }
 
+    /// Test seam: whether a 60s poll loop is currently armed for `name`.
+    /// Same rationale as `hasSupervisor` — the post-boot enrollment path is
+    /// only observable through the loop it arms.
+    func hasPollLoop(named name: String) -> Bool {
+        loops[name] != nil
+    }
+
+    /// Test seam: awaits the post-boot enrollments `invoke`/`refreshRegistry`
+    /// schedule, so tests can assert on describe/poll-loop state
+    /// deterministically instead of bound-polling a fire-and-forget `Task`.
+    /// Returns immediately when nothing has been enrolled.
+    func awaitEnrollments() async {
+        for task in enrollments.values { await task.value }
+    }
+
+    /// Test seam: whether an enrollment is still running for `name` — the
+    /// only way to observe that `shutdown()` awaited what it cancelled
+    /// rather than leaving a describe subprocess unwinding behind it.
+    func hasEnrollmentInFlight(named name: String) -> Bool {
+        enrollmentsInFlight.contains(name)
+    }
+
+    /// Test seam: how many post-boot enrollments have been scheduled for
+    /// `name` — 0 or 1 by construction. Makes the "a burst of invokes must
+    /// not spawn N describes" invariant assertable at the source rather than
+    /// only through its side effects.
+    func enrollmentCount(named name: String) -> Int {
+        enrollments[name] == nil ? 0 : 1
+    }
+
     func invoke(
         providerName: String, verb: [String], stdin: Data?,
         timeout: TimeInterval
@@ -952,6 +1055,10 @@ public actor RemoteProviderManager {
         guard let config = providers[providerName] ?? loadAdHoc(named: providerName) else {
             throw RemoteProviderError.unknownProvider(providerName)
         }
+        // Synchronous, so it runs to completion before the first `await`
+        // below — that's what makes a burst of concurrent invokes schedule
+        // exactly one enrollment.
+        enrollIfNeeded(config)
         let result = try await runner.run(
             config, verb: verb, stdin: stdin, timeout: timeout,
             contractVersion: contractMajor(for: providerName))
@@ -962,13 +1069,107 @@ public actor RemoteProviderManager {
     }
 
     /// Tests (and a pre-`start()` RPC call) can address providers straight
-    /// from the registry file.
+    /// from the registry file. This is also how a provider APPENDED to the
+    /// registry while the daemon runs first reaches this actor — `invoke`
+    /// turns that into a full enrollment, see `enrollIfNeeded`.
     private func loadAdHoc(named name: String) -> RemoteProviderConfig? {
         guard let configs = try? RemoteProviderRegistry.load(from: registryURL),
             let config = configs.first(where: { $0.name == name })
         else { return nil }
         registerIfNeeded(config)
         return config
+    }
+
+    /// Gives a provider first invoked AFTER the boot sweep the same treatment
+    /// `loadRegistryAndDescribe()` + `spawnPollLoops()` give a boot-time one:
+    /// a `describe` — without which `describes[name]` stays empty,
+    /// `declaredCapabilities` returns the empty set, and every capability
+    /// gate that reads it fails closed, so the detail pane says the provider
+    /// "doesn't support attach or a log view" while the provider is answering
+    /// perfectly well — and then its 60s poll loop, without which the mirror
+    /// stays at zero sessions. Before this, a provider added to
+    /// `agent-providers.json` mid-run was reachable by direct verbs (`invoke`
+    /// falls back to `loadAdHoc`) and by nothing else until someone restarted
+    /// the daemon.
+    ///
+    /// Fire-and-forget on purpose: `invoke` calls this synchronously, and
+    /// describing inline would make an unrelated `remote.log` wait out a
+    /// describe's 10s timeout.
+    ///
+    /// Idempotent by construction, which matters because `invoke` reaches
+    /// here on EVERY call: `enrollmentsInFlight` is written with no `await`
+    /// between the check and the insert, so actor isolation makes it atomic.
+    /// A burst of invokes therefore spawns exactly one describe, and
+    /// `enroll`'s own `loops` check keeps it to at most one poll loop.
+    ///
+    /// A FAILED enrollment is retryable, which is why the burst guard is that
+    /// separate set rather than the presence of an `enrollments` entry. A
+    /// describe can fail transiently, and treating one failure as final would
+    /// strand the provider in exactly the state this method exists to
+    /// prevent — no describe, capability gates closed, no poll loop — until a
+    /// daemon restart. `enrollmentAttempts` bounds that retry.
+    ///
+    /// Three ways to be skipped, all deliberate:
+    /// - **before `registrySwept`** — `start()` hasn't finished its sweep
+    ///   yet, and it will describe every registry entry itself; enrolling
+    ///   here would just race it to the same describe.
+    /// - **a describe already on file** — boot handled this provider. Note a
+    ///   FAILED boot describe leaves none, so post-boot invokes may still
+    ///   enroll it, bounded by `maxEnrollmentAttempts`.
+    /// - **the attempt budget is spent** — see `maxEnrollmentAttempts`.
+    /// - **shutting down** — `enroll` re-checks under the reconfigure lock
+    ///   too, since it can be scheduled just before `shutdown()` runs.
+    ///
+    /// Called from `invoke` rather than from `loadAdHoc`, which would also
+    /// cover `recordAttachExit`: an attach is gated app-side on declared
+    /// capabilities, so a provider with no describe can't be attached in the
+    /// first place, and slipping a describe into that path would race the
+    /// deliberately-ordered health inheritance `recordAttachExit` and
+    /// `recordFailure` spell out at length.
+    private func enrollIfNeeded(_ config: RemoteProviderConfig) {
+        guard registrySwept, !shuttingDown,
+            !enrollmentsInFlight.contains(config.name),
+            describes[config.name] == nil,
+            (enrollmentAttempts[config.name] ?? 0) < Self.maxEnrollmentAttempts
+        else { return }
+        enrollmentsInFlight.insert(config.name)
+        enrollmentAttempts[config.name, default: 0] += 1
+        remoteLogger.debug("enrolling post-boot provider \(config.name, privacy: .public)")
+        enrollments[config.name] = Task { [weak self] in await self?.enroll(config) }
+    }
+
+    private func enroll(_ config: RemoteProviderConfig) async {
+        // Released on EVERY exit, including the failure returns below — that
+        // is what lets a later `invoke` or roster refresh retry a describe
+        // that failed, up to `maxEnrollmentAttempts`. The `enrollments` entry
+        // itself is deliberately NOT cleared: `shutdown()` drains it, and a
+        // handle removed on completion could not be awaited.
+        defer { enrollmentsInFlight.remove(config.name) }
+        guard !Task.isCancelled else { return }
+        // Same order the boot sweep uses: recover persisted freshness before
+        // the describe, so this provider's first status read reports what the
+        // mirror actually knows rather than treating it as never-refreshed.
+        await recoverLastSuccessfulSnapshotAtIfNeeded(provider: config.name, markStale: true)
+        await describeProvider(config)
+        // A failed describe already recorded (and broadcast) its health via
+        // `recordFailure`/`setHealth`; there's no contract to poll against,
+        // so stop here exactly as `spawnPollLoops` would.
+        guard describes[config.name] != nil else { return }
+        // `describeProvider` doesn't broadcast on success — boot's
+        // `loadRegistryAndDescribe` does it once for the whole batch. This is
+        // the one-provider equivalent: every capability gate reads the
+        // describe, so the app has to hear about it.
+        subscriptions.broadcast(delta: .remoteSessionsChanged)
+        // Same lock the boot path takes, for the same reason (see
+        // `spawnPollLoops`) — an unlocked `startLoop` here could interleave
+        // with a concurrent `stopAll()` and orphan a supervisor. Deliberately
+        // NOT `spawnPollLoops()`: that stops and respawns every provider's
+        // loop, so adding one provider would blip the streams of all the
+        // others.
+        await acquireReconfigureLock()
+        defer { releaseReconfigureLock() }
+        guard !shuttingDown, loops[config.name] == nil else { return }
+        await startLoop(for: config)
     }
 
     /// Registers a provider config (if not already known) and seeds a
@@ -1012,6 +1213,37 @@ public actor RemoteProviderManager {
     /// What TBD announces before it has negotiated anything — the conservative
     /// reading, and the value the runner emitted unconditionally before.
     static let fallbackContractMajor = 1
+
+    /// Picks up registry entries added since the boot sweep: registers each
+    /// one and schedules its enrollment (describe + poll loop). Called by the
+    /// `remote.providers` RPC, which is how the app asks for the roster — so
+    /// a provider appended to `agent-providers.json` becomes fully live
+    /// without anyone having to invoke a verb against it first, and without
+    /// a daemon restart.
+    ///
+    /// Cheap enough to sit on that path: a small JSON read plus a dictionary
+    /// probe per entry, and `enrollIfNeeded` is a no-op for every provider
+    /// already on file, so the repeated calls the app's delta-driven refresh
+    /// makes cost one file read each. No broadcast of its own — a landing
+    /// enrollment broadcasts, which is what pulls the app back for the roster
+    /// that now carries the new provider's capabilities.
+    ///
+    /// Reads through `loadEntries` for the same reserved-name filtering the
+    /// boot sweep gets: a registry entry that shadows a built-in provider is
+    /// skipped there and must be skipped here too, or this path would be a
+    /// way around it. Built-ins themselves need nothing — `init` seeds them.
+    ///
+    /// Deliberately additive: an entry REMOVED from the registry keeps its
+    /// poll loop until the daemon restarts. Tearing loops down from a file
+    /// read would let a half-written registry (or a momentarily unreadable
+    /// one, which reports as "no providers") kill live streams.
+    func refreshRegistry() {
+        guard let loaded = try? RemoteProviderRegistry.loadEntries(from: registryURL) else { return }
+        for config in loaded.configs {
+            registerIfNeeded(config)
+            enrollIfNeeded(config)
+        }
+    }
 
     func providerStatuses() async -> [RemoteProviderStatus] {
         for name in providers.keys {

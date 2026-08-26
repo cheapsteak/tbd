@@ -106,6 +106,93 @@ func providerOK(_ json: String) -> ProviderResult {
     ProviderResult(exitCode: 0, stdout: Data(json.utf8), stderr: "")
 }
 
+/// Provider-and-verb-keyed fake, keys shaped `"<provider>.<verb>"` (e.g.
+/// `"late.describe"`), each answering an unbounded number of calls.
+///
+/// The positional `FakeProviderInvoker` script cannot express the post-boot
+/// enrollment tests: enrollment's `describe` is deliberately fire-and-forget, so
+/// it runs CONCURRENTLY with the `invoke` that scheduled it and which of the
+/// two pops the script first is a scheduling detail. A positional script
+/// would hand the describe's JSON to the `log` call about a third of the
+/// time. Keying by provider+verb makes the assertions independent of that
+/// interleaving instead of quarantining a race.
+/// Like `VerbKeyedProviderInvoker`, but each key holds a SEQUENCE of results
+/// consumed in order (the last one repeats once exhausted). Needed for the
+/// enrollment-retry tests, where the same `<provider>.describe` key must fail
+/// first and succeed second — still keyed by verb, so it stays independent of
+/// how the concurrent describe and invoke interleave.
+final class VerbKeyedSequenceInvoker: RemoteProviderInvoking, @unchecked Sendable {
+    private let lock = NSLock()
+    private var results: [String: [ProviderResult]]
+    private var counts: [String: Int] = [:]
+
+    init(_ results: [String: [ProviderResult]]) {
+        self.results = results
+    }
+
+    func run(
+        _ config: RemoteProviderConfig, verb: [String], stdin: Data?,
+        timeout: TimeInterval, contractVersion: Int
+    ) async throws -> ProviderResult {
+        try lookup(provider: config.name, verb: verb)
+    }
+
+    private func lookup(provider: String, verb: [String]) throws -> ProviderResult {
+        lock.lock(); defer { lock.unlock() }
+        let key = "\(provider).\(verb.first ?? "?")"
+        counts[key, default: 0] += 1
+        guard var queue = results[key], let next = queue.first else {
+            preconditionFailure("VerbKeyedSequenceInvoker has no result for \(key)")
+        }
+        if queue.count > 1 {
+            queue.removeFirst()
+            results[key] = queue
+        }
+        return next
+    }
+
+    func count(_ key: String) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return counts[key] ?? 0
+    }
+}
+
+final class VerbKeyedProviderInvoker: RemoteProviderInvoking, @unchecked Sendable {
+    private let lock = NSLock()
+    private let results: [String: ProviderResult]
+    private var counts: [String: Int] = [:]
+
+    init(_ results: [String: ProviderResult]) {
+        self.results = results
+    }
+
+    func run(
+        _ config: RemoteProviderConfig, verb: [String], stdin: Data?,
+        timeout: TimeInterval, contractVersion: Int
+    ) async throws -> ProviderResult {
+        try lookup(provider: config.name, verb: verb)
+    }
+
+    /// Synchronous for the same reason `FakeProviderInvoker.popScript` is —
+    /// NSLock must not be taken from an `async` context.
+    private func lookup(provider: String, verb: [String]) throws -> ProviderResult {
+        lock.lock(); defer { lock.unlock() }
+        let key = "\(provider).\(verb.first ?? "?")"
+        counts[key, default: 0] += 1
+        guard let result = results[key] else {
+            preconditionFailure("VerbKeyedProviderInvoker has no result for \(key)")
+        }
+        return result
+    }
+
+    /// How many times `"<provider>.<verb>"` has been invoked. Locked, because
+    /// a manager's background poll `Task` may still be writing.
+    func count(_ key: String) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return counts[key] ?? 0
+    }
+}
+
 /// Thread-safe collector for broadcast StateDeltas, mirroring the pattern in
 /// `RPCRouterWorktreeCreateBroadcastTests` / `GCHandlersTests`.
 private final class BroadcastDeltas: @unchecked Sendable {
@@ -872,6 +959,355 @@ struct RemoteProviderManagerTests {
             invoker.callsSnapshot().contains(["list"]),
             "provider without events capability must still be covered by the 60s list poll; observed calls=\(invoker.callsSnapshot())"
         )
+        await m.stopAll()
+    }
+
+    // MARK: - post-boot provider enrollment
+
+    /// Rewrites the registry to hold both `fake` and `late`, mimicking a user
+    /// appending a provider to `agent-providers.json` with the daemon already
+    /// running.
+    private func addLateProviderToRegistry() throws {
+        try #"[{"name": "fake", "exec": "/nonexistent/fake"}, {"name": "late", "exec": "/nonexistent/late"}]"#
+            .write(to: registryURL, atomically: true, encoding: .utf8)
+    }
+
+    private func manager(_ invoker: VerbKeyedProviderInvoker) -> RemoteProviderManager {
+        RemoteProviderManager(db: db, subscriptions: subs, runner: invoker, registryURL: registryURL)
+    }
+
+    private func manager(_ invoker: VerbKeyedSequenceInvoker) -> RemoteProviderManager {
+        RemoteProviderManager(db: db, subscriptions: subs, runner: invoker, registryURL: registryURL)
+    }
+
+    /// The bug this path exists for: a provider added to the registry AFTER
+    /// boot used to be registered by `loadAdHoc` and nothing more. Direct
+    /// verbs worked, but `describes` stayed empty — so the app's capability
+    /// gate, which fails closed, rendered "doesn't support attach or a log
+    /// view" — and no poll loop ever ran, so the mirror stayed at zero
+    /// sessions, until someone restarted the daemon.
+    @Test func providerAddedAfterBootGetsDescribeAndPollLoop() async throws {
+        let invoker = VerbKeyedProviderInvoker([
+            "fake.describe": providerOK(#"{"contract_versions": [1], "name": "fake"}"#),
+            "fake.list": providerOK(#"{"sessions": []}"#),
+            "late.describe": providerOK(#"{"contract_versions": [1], "name": "late", "capabilities": ["log", "attach"]}"#),
+            "late.list": providerOK(#"{"sessions": []}"#),
+            "late.log": providerOK(#"{"ok": true}"#),
+        ])
+        let m = manager(invoker)
+        await m.start()
+        try addLateProviderToRegistry()
+
+        _ = try await m.invoke(providerName: "late", verb: ["log", "s1"], stdin: nil, timeout: 30)
+        await m.awaitEnrollments()
+
+        let late = await m.providerStatuses().first { $0.config.name == "late" }
+        #expect(late?.describe?.capabilities == ["log", "attach"],
+                "a post-boot provider must be described, or the app's capability gate fails closed")
+        #expect(await m.hasPollLoop(named: "late"),
+                "a post-boot provider must get the same 60s poll loop a boot-time one gets")
+        await m.stopAll()
+    }
+
+    /// Enrollment arms one provider's loop rather than going through
+    /// `spawnPollLoops()`, which stops and respawns every provider's loop and
+    /// supervisor — adding one provider must not blip the others' streams.
+    @Test func enrollmentLeavesExistingProviderLoopsAlone() async throws {
+        let invoker = VerbKeyedProviderInvoker([
+            "fake.describe": providerOK(#"{"contract_versions": [1], "name": "fake", "capabilities": ["events"]}"#),
+            "fake.list": providerOK(#"{"sessions": []}"#),
+            "late.describe": providerOK(#"{"contract_versions": [1], "name": "late"}"#),
+            "late.list": providerOK(#"{"sessions": []}"#),
+            "late.log": providerOK(#"{"ok": true}"#),
+        ])
+        let m = manager(invoker)
+        await m.start()
+        #expect(await m.hasSupervisor(named: "fake"))
+        try addLateProviderToRegistry()
+
+        _ = try await m.invoke(providerName: "late", verb: ["log", "s1"], stdin: nil, timeout: 30)
+        await m.awaitEnrollments()
+
+        #expect(await m.hasSupervisor(named: "fake"),
+                "enrolling a provider must not tear down an existing one's events supervisor")
+        #expect(await m.hasPollLoop(named: "fake"),
+                "enrolling a provider must not tear down an existing one's poll loop")
+        await m.stopAll()
+    }
+
+    /// `invoke` reaches `loadAdHoc` on every call for a provider that isn't in
+    /// `providers` yet, so without the `enrollments` record a burst of invokes
+    /// would spawn one describe each — and, worse, race N poll loops onto the
+    /// same provider.
+    @Test func repeatedInvokesEnrollOnlyOnce() async throws {
+        let invoker = VerbKeyedProviderInvoker([
+            "fake.describe": providerOK(#"{"contract_versions": [1], "name": "fake"}"#),
+            "fake.list": providerOK(#"{"sessions": []}"#),
+            "late.describe": providerOK(#"{"contract_versions": [1], "name": "late"}"#),
+            "late.list": providerOK(#"{"sessions": []}"#),
+            "late.log": providerOK(#"{"ok": true}"#),
+        ])
+        let m = manager(invoker)
+        await m.start()
+        try addLateProviderToRegistry()
+
+        // CONCURRENT on purpose. Awaiting five invokes one at a time would
+        // pass even if the `enrollmentsInFlight` insert sat behind an
+        // `await` — the very regression the burst guard exists to prevent.
+        // Firing them together is what puts five calls inside `invoke`
+        // before any enrollment completes.
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<5 {
+                group.addTask {
+                    _ = try? await m.invoke(
+                        providerName: "late", verb: ["log", "s1"], stdin: nil, timeout: 30)
+                }
+            }
+        }
+        await m.awaitEnrollments()
+
+        #expect(await m.enrollmentCount(named: "late") == 1)
+        #expect(invoker.count("late.describe") == 1,
+                "five invokes must share one describe; observed \(invoker.count("late.describe"))")
+        #expect(await m.hasPollLoop(named: "late"))
+        await m.stopAll()
+    }
+
+    /// The enrollment path's mirror of `versionMismatchNeverPolls`: a post-boot
+    /// provider that negotiates no usable contract gets its health surfaced
+    /// and no poll loop. `[3]` for the same reason that test uses it — it is
+    /// outside `supportedContractMajors`, which covers both 1 and 2.
+    @Test func enrollmentOfVersionMismatchedProviderArmsNoLoop() async throws {
+        let invoker = VerbKeyedProviderInvoker([
+            "fake.describe": providerOK(#"{"contract_versions": [1], "name": "fake"}"#),
+            "fake.list": providerOK(#"{"sessions": []}"#),
+            "late.describe": providerOK(#"{"contract_versions": [3], "name": "late"}"#),
+            "late.log": providerOK(#"{"ok": true}"#),
+        ])
+        let m = manager(invoker)
+        await m.start()
+        try addLateProviderToRegistry()
+
+        _ = try await m.invoke(providerName: "late", verb: ["log", "s1"], stdin: nil, timeout: 30)
+        await m.awaitEnrollments()
+
+        let late = await m.providerStatuses().first { $0.config.name == "late" }
+        #expect(late?.health == .error)
+        #expect(late?.errorMessage == "no common contract version")
+        #expect(await !m.hasPollLoop(named: "late"),
+                "no negotiated contract means nothing to poll")
+        await m.stopAll()
+    }
+
+    /// A provider boot already described must not be re-described by an
+    /// `invoke` — the `describes` check in `enrollIfNeeded` is what keeps the
+    /// boot path authoritative and stops enrollment becoming a per-invoke
+    /// describe.
+    @Test func bootDescribedProviderIsNotReDescribedByInvoke() async throws {
+        let invoker = VerbKeyedProviderInvoker([
+            "fake.describe": providerOK(#"{"contract_versions": [1], "name": "fake"}"#),
+            "fake.stop": providerOK(#"{"ok": true}"#),
+        ])
+        let m = manager(invoker)
+        await m.loadRegistryAndDescribe()
+        _ = try await m.invoke(providerName: "fake", verb: ["stop", "a"], stdin: nil, timeout: 30)
+        await m.awaitEnrollments()
+        #expect(await m.enrollmentCount(named: "fake") == 0)
+        #expect(invoker.count("fake.describe") == 1)
+    }
+
+    /// Shutdown is terminal for this actor, and enrollment is no exception: an
+    /// invoke landing after `shutdown()` must not describe or arm a loop on a
+    /// manager the daemon believes it tore down.
+    @Test func enrollmentAfterShutdownArmsNothing() async throws {
+        let invoker = VerbKeyedProviderInvoker([
+            "fake.describe": providerOK(#"{"contract_versions": [1], "name": "fake"}"#),
+            "fake.list": providerOK(#"{"sessions": []}"#),
+            "late.log": providerOK(#"{"ok": true}"#),
+        ])
+        let m = manager(invoker)
+        await m.start()
+        try addLateProviderToRegistry()
+        await m.shutdown()
+
+        _ = try await m.invoke(providerName: "late", verb: ["log", "s1"], stdin: nil, timeout: 30)
+        await m.awaitEnrollments()
+
+        #expect(await m.enrollmentCount(named: "late") == 0)
+        #expect(await !m.hasPollLoop(named: "late"))
+        #expect(invoker.count("late.describe") == 0,
+                "a shut-down manager must not spawn a describe")
+    }
+
+    /// The `remote.providers` path: a provider appended to the registry must
+    /// go fully live off the app's own roster request, without anyone having
+    /// to invoke a verb against it first.
+    @Test func refreshRegistryEnrollsAProviderNobodyInvoked() async throws {
+        let invoker = VerbKeyedProviderInvoker([
+            "fake.describe": providerOK(#"{"contract_versions": [1], "name": "fake"}"#),
+            "fake.list": providerOK(#"{"sessions": []}"#),
+            "late.describe": providerOK(#"{"contract_versions": [1], "name": "late", "capabilities": ["log"]}"#),
+            "late.list": providerOK(#"{"sessions": []}"#),
+        ])
+        let m = manager(invoker)
+        await m.start()
+        #expect(await m.providerStatuses().count == 1)
+        try addLateProviderToRegistry()
+
+        await m.refreshRegistry()
+        await m.awaitEnrollments()
+
+        let late = await m.providerStatuses().first { $0.config.name == "late" }
+        #expect(late?.describe?.capabilities == ["log"])
+        #expect(await m.hasPollLoop(named: "late"))
+        await m.stopAll()
+    }
+
+    /// The app's refresh is delta-driven and fires repeatedly, so the roster
+    /// path must stay a no-op after the first enrollment rather than
+    /// re-describing every provider on every call.
+    @Test func repeatedRegistryRefreshesDescribeOnlyOnce() async throws {
+        let invoker = VerbKeyedProviderInvoker([
+            "fake.describe": providerOK(#"{"contract_versions": [1], "name": "fake"}"#),
+            "fake.list": providerOK(#"{"sessions": []}"#),
+            "late.describe": providerOK(#"{"contract_versions": [1], "name": "late"}"#),
+            "late.list": providerOK(#"{"sessions": []}"#),
+        ])
+        let m = manager(invoker)
+        await m.start()
+        try addLateProviderToRegistry()
+
+        for _ in 0..<5 {
+            await m.refreshRegistry()
+            await m.awaitEnrollments()
+        }
+
+        #expect(invoker.count("late.describe") == 1,
+                "five roster refreshes must share one describe; observed \(invoker.count("late.describe"))")
+        #expect(invoker.count("fake.describe") == 1,
+                "an already-described provider must never be re-described by a refresh")
+        await m.stopAll()
+    }
+
+    /// Removal is deliberately not handled: a momentarily unreadable or
+    /// half-written registry reads as "no providers", and tearing loops down
+    /// from that would kill live streams.
+    @Test func refreshRegistryDoesNotTearDownRemovedProviders() async throws {
+        let invoker = VerbKeyedProviderInvoker([
+            "fake.describe": providerOK(#"{"contract_versions": [1], "name": "fake"}"#),
+            "fake.list": providerOK(#"{"sessions": []}"#),
+        ])
+        let m = manager(invoker)
+        await m.start()
+        #expect(await m.hasPollLoop(named: "fake"))
+
+        try "[]".write(to: registryURL, atomically: true, encoding: .utf8)
+        await m.refreshRegistry()
+
+        #expect(await m.hasPollLoop(named: "fake"),
+                "an empty or unreadable registry must not kill a live provider's poll loop")
+        await m.stopAll()
+    }
+
+    /// Before the boot sweep has run, `start()` is still coming and will
+    /// describe every registry entry itself — an invoke landing in that
+    /// window must not race it to the same describe. (This is also what
+    /// keeps a manager that never boots, as the RPC-router tests use, free of
+    /// unscripted describes.)
+    @Test func invokeBeforeBootSweepDoesNotEnroll() async throws {
+        let invoker = VerbKeyedProviderInvoker([
+            "fake.log": providerOK(#"{"ok": true}"#),
+        ])
+        let m = manager(invoker)
+        _ = try await m.invoke(providerName: "fake", verb: ["log", "s1"], stdin: nil, timeout: 30)
+        await m.awaitEnrollments()
+        #expect(await m.enrollmentCount(named: "fake") == 0)
+        #expect(invoker.count("fake.describe") == 0,
+                "boot's own sweep describes registry entries; enrolling here would double up")
+    }
+
+    /// Regression test for the review's HIGH finding: `shutdown()` used to
+    /// cancel enrollment tasks without awaiting them. Cancelling an in-flight
+    /// describe without awaiting orphans the child process, because the
+    /// interruption runs on the cancelled task — the same hazard
+    /// `Daemon.stop()` documents for `remoteStartTask`. After `shutdown()`
+    /// returns, no enrollment may still be running.
+    @Test func shutdownDrainsAnInFlightEnrollment() async throws {
+        let invoker = VerbKeyedProviderInvoker([
+            "fake.describe": providerOK(#"{"contract_versions": [1], "name": "fake"}"#),
+            "fake.list": providerOK(#"{"sessions": []}"#),
+            "late.describe": providerOK(#"{"contract_versions": [1], "name": "late"}"#),
+            "late.list": providerOK(#"{"sessions": []}"#),
+            "late.log": providerOK(#"{"ok": true}"#),
+        ])
+        let m = manager(invoker)
+        await m.start()
+        try addLateProviderToRegistry()
+        _ = try await m.invoke(providerName: "late", verb: ["log", "s1"], stdin: nil, timeout: 30)
+
+        await m.shutdown()
+
+        #expect(await !m.hasEnrollmentInFlight(named: "late"),
+                "shutdown must await the enrollment it cancelled, not leave it running")
+        #expect(await !m.hasPollLoop(named: "late"),
+                "a shut-down manager must arm nothing")
+    }
+
+    /// Regression test for the review's MEDIUM finding: one failed describe
+    /// used to strand a provider forever, since the `enrollments` entry was
+    /// never cleared. A transient failure must be retryable — otherwise the
+    /// provider sits in exactly the state this feature exists to fix.
+    @Test func aFailedEnrollmentCanBeRetried() async throws {
+        let invoker = VerbKeyedSequenceInvoker([
+            "fake.describe": [providerOK(#"{"contract_versions": [1], "name": "fake"}"#)],
+            "fake.list": [providerOK(#"{"sessions": []}"#)],
+            "late.log": [providerOK(#"{"ok": true}"#), providerOK(#"{"ok": true}"#)],
+            "late.describe": [
+                ProviderResult(exitCode: 3, stdout: Data(), stderr: "provider mid-deploy"),
+                providerOK(#"{"contract_versions": [1], "name": "late", "capabilities": ["log"]}"#),
+            ],
+            "late.list": [providerOK(#"{"sessions": []}"#)],
+        ])
+        let m = manager(invoker)
+        await m.start()
+        try addLateProviderToRegistry()
+
+        _ = try await m.invoke(providerName: "late", verb: ["log", "s1"], stdin: nil, timeout: 30)
+        await m.awaitEnrollments()
+        #expect(await m.providerStatuses().first { $0.config.name == "late" }?.describe == nil,
+                "the first describe failed, so there is no contract on file yet")
+        #expect(await !m.hasPollLoop(named: "late"))
+
+        _ = try await m.invoke(providerName: "late", verb: ["log", "s1"], stdin: nil, timeout: 30)
+        await m.awaitEnrollments()
+
+        let late = await m.providerStatuses().first { $0.config.name == "late" }
+        #expect(late?.describe?.capabilities == ["log"],
+                "a second invoke must retry the describe rather than stay stranded")
+        #expect(await m.hasPollLoop(named: "late"))
+        await m.stopAll()
+    }
+
+    /// The retry has to stop somewhere: a provider that is simply down must
+    /// not buy a describe subprocess on every RPC for the daemon's lifetime.
+    @Test func enrollmentRetriesAreBoundedByTheAttemptBudget() async throws {
+        let invoker = VerbKeyedProviderInvoker([
+            "fake.describe": providerOK(#"{"contract_versions": [1], "name": "fake"}"#),
+            "fake.list": providerOK(#"{"sessions": []}"#),
+            "late.describe": ProviderResult(exitCode: 3, stdout: Data(), stderr: "unreachable"),
+            "late.log": providerOK(#"{"ok": true}"#),
+        ])
+        let m = manager(invoker)
+        await m.start()
+        try addLateProviderToRegistry()
+
+        for _ in 0..<8 {
+            _ = try await m.invoke(providerName: "late", verb: ["log", "s1"], stdin: nil, timeout: 30)
+            await m.awaitEnrollments()
+        }
+
+        #expect(invoker.count("late.describe") == RemoteProviderManager.maxEnrollmentAttempts,
+                "eight invokes against a down provider must spend the budget and stop; observed \(invoker.count("late.describe"))")
         await m.stopAll()
     }
 
