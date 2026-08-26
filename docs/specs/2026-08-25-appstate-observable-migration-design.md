@@ -9,15 +9,25 @@ through `@EnvironmentObject` by 106 binding sites across 69 view files. Under
 view reads the property that changed. Readership is irrelevant to invalidation —
 only writer frequency matters.
 
-The waste is measurable. Sampling the app across windows **verified to contain
-actual scrolling** — each window scored for scroll-event frames and for terminal
-draw volume, with windows failing that check discarded rather than averaged in —
-`RepoSectionView.body` accounts for 30 to 37 samples per 1,000 main-thread
-samples, against 6.6 in a quiet baseline. The sidebar re-evaluates roughly five
-times as often while a terminal scrolls, and it displays nothing new when it
-does. `WorktreeRowView`, `TabBarItem`, and `PanePlaceholder` re-evaluate
-alongside it. Across those windows the main thread runs 45% to 64% busy and
-TBDApp holds roughly 47% of a core.
+The waste is measurable, and it is the largest single consumer of the main
+thread while a terminal scrolls. Sampling the app across windows **verified to
+contain actual scrolling** — each window scored for scroll-event frames and for
+terminal draw volume, with windows failing that check discarded rather than
+averaged in — SwiftUI view-graph re-evaluation (`GraphHost.flushTransactions`)
+accounts for **25.1% and 18.1%** of main-thread samples in the two validated
+windows, against **3.7%** in a quiet baseline. Over the same windows the
+terminal's own draw subtree accounts for 20.7% and 11.6%, against 4.0% quiet.
+
+Named contributors inside that flush, as a share of the whole main thread:
+`RepoSectionView.body` at 3.7% and 3.0% (0.7% quiet), `WorktreeRowView.body` at
+1.2% and 1.7% (0.4% quiet), with `TabBarItem` and `PanePlaceholder` re-evaluating
+alongside them. None of these display anything new while a terminal scrolls. The
+main thread runs 45% to 64% busy across the windows, with TBDApp near 47% of a
+core.
+
+Counts in a `sample` call graph are inclusive of children, so a symbol and its
+own callees must never be summed together — doing so double-counts the subtree.
+The figures above are top-level subtree totals.
 
 That validation step is not incidental. An unvalidated sampling window is
 indistinguishable from a mistimed one, and a window that captured no scrolling
@@ -29,21 +39,31 @@ tracking. A view re-evaluates only when a property it actually read changes.
 
 ### What this migration does not fix
 
-**The dominant cost of terminal scrolling is not this.** In the same validated
-windows, `TerminalView.draw` accounts for 237 to 425 samples per 1,000 against
-84.6 quiet — seven to twelve times the sidebar's share. That cost is SwiftTerm
-rebuilding an `NSAttributedString` for every visible row on every redraw
-(`drawTerminalContents` → `buildAttributedString`), plus a full-grid scan for
-blink attributes (`visibleBlinkRows`) run on each display update. A scroll
-dirties every row every frame, so both are paid in full at display rate. That
-code lives in a pinned upstream dependency and is tracked separately.
+**Wheel-event amplification sits upstream of this cost and should be fixed
+first.** TBD intercepts every scroll wheel event in a local `NSEvent` monitor
+and emits `max(1, Int(abs(deltaY)))` SGR mouse reports per event
+(`Sources/TBDApp/Terminal/TerminalPanelView.swift:794-797`), with no
+momentum-phase filter and no fractional-delta accumulator, so a sub-line delta
+still sends a full report and a trackpad flick's momentum tail delivers events
+at 60-120 Hz. The inner terminal application repaints per report, and that
+output streams back through the PTY into a full-viewport redraw. Scrolling
+manufactures the output flood that both the draw path and this graph churn then
+pay for — and because the SwiftUI flush runs as a run-loop observer, its
+*frequency* scales with how often the run loop turns. Bounding the report rate
+shrinks the feed, the redraws, and the flush count together.
 
-This migration removes a real but secondary cost. It is justified on the
-structural argument — object-wide invalidation across 106 binding sites is wrong
-at any writer frequency, and the measured fivefold rise in sidebar evaluation is
-that defect made visible — and **not** as a remedy for terminal scroll latency.
-A reader looking for the fix to a slow-feeling terminal should start with the
-draw path above.
+**The terminal's own draw cost is a separate, comparable expense.** SwiftTerm
+rebuilds an `NSAttributedString` for every visible row on every redraw
+(`drawTerminalContents` → `buildAttributedString`, measured at 12.8% and 7.5% of
+the main thread — roughly two-thirds of the draw subtree). It lives in a pinned
+upstream dependency and is tracked separately.
+
+So this migration addresses the largest single main-thread consumer during
+scroll, but it is one of three independent costs and not the first one to land.
+It is justified on the structural argument — object-wide invalidation across 106
+binding sites is wrong at any writer frequency, and the measured five-to-sevenfold
+rise in graph flush is that defect made visible — rather than as the remedy for a
+slow-feeling terminal on its own.
 
 ### What this evidence does not establish
 
@@ -324,9 +344,14 @@ naive conversion, per the repo rule that plan-authored tests must discriminate:
   discriminator.
 
 **A measured gate, over validated windows.** Re-run the scroll profile and
-compare against the baseline recorded here: `RepoSectionView.body` at 30 to 37
-samples per 1,000 main-thread samples while scrolling against 6.6 quiet, with
-the main thread 45% to 64% busy and TBDApp near 47% of a core.
+compare against the baseline recorded here: `GraphHost.flushTransactions` at
+25.1% and 18.1% of main-thread samples while scrolling against 3.7% quiet, with
+`RepoSectionView.body` at 3.7% and 3.0% against 0.7%, the main thread 45% to 64%
+busy, and TBDApp near 47% of a core. The graph-flush share is the primary
+number; the named view bodies are how a regression is localized.
+
+Compare subtree totals, not summed symbol occurrences — `sample` counts are
+inclusive of children.
 
 Every window on both sides of the comparison must pass the same validation the
 baseline did — scored for scroll-event frames (`scrollWheel`, `gridPosition`)
@@ -337,13 +362,19 @@ finding. A quiet baseline must also be genuinely quiet: a session in which
 tooling is running commands streams output into the terminal and drives redraws,
 which inflates the very counters under comparison.
 
-The migration is accepted on a material reduction in the sidebar's share of
+The migration is accepted on a material reduction in the graph-flush share of
 main-thread samples. Because the driving write was never isolated, a null result
 is a real possible outcome and must be reported as one rather than absorbed —
 and the diagnostic capture above is what turns a null result into a finding
-("the firing property is one the sidebar reads") rather than a mystery. Note
-that the sidebar's share is a minority of scroll-time cost either way: a large
-proportional win here will not, on its own, make scrolling feel fast.
+("the firing property is one the sidebar reads") rather than a mystery.
+
+Interpret the result against the other two costs rather than in isolation. Graph
+flush is the largest single main-thread consumer during scroll, but the terminal
+draw subtree is comparable and the wheel-report amplification upstream drives
+both. If the amplification fix lands first, this baseline must be re-measured
+before the gate is applied: a lower report rate reduces run-loop turns, which
+reduces flush frequency on its own and would otherwise be credited to this
+migration.
 
 **The existing suite green**, with the 6 test files' injection sites updated, run
 through `scripts/test.sh`.
