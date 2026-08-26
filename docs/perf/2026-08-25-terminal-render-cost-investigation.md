@@ -350,27 +350,73 @@ threshold tunable by `TBD_HANG_THRESHOLD_MS`, and had independently captured the
 same path. It is cheaper to read than to record a trace. Note that directory held
 110,512 files — a durable resource with no named reconciler.
 
-## What this does NOT cover
+## Typing and scrolling, measured — 2026-08-26
 
-**Every window in this work was taken during ordinary operation with agents
-streaming and no user interaction.** The intervals measure terminal output
-travelling *towards* the screen. They do not measure keystroke-to-echo, and they
-do not measure scrolling.
+The earlier sections measured terminal output travelling toward the screen during
+ordinary operation, and stated that typing and scrolling had never been measured
+under a validated window. Three windows on one build now close that gap: a quiet
+baseline with no interaction, a window of continuous typing, and a window of
+continuous scrolling.
 
-**Typing has still never been measured under a validated window**, and neither
-has scrolling. The good numbers above must not be read as covering either.
+| window | chunks/s | hop p50 | hop p99 | display passes | gap p90 | gap max | poll p50 |
+|---|---|---|---|---|---|---|---|
+| quiet | 21.8 | 0.08 ms | 59.4 ms | none | — | — | 255 ms |
+| typing | 79.5 | 6.91 ms | 113.0 ms | 19.3/s | 101.4 ms | 846.5 ms | 525 ms |
+| scrolling | 634.6 | 2.49 ms | 19.8 ms | 46.7/s | 31.4 ms | 265.8 ms | 1055 ms |
 
-Two named mechanisms target exactly those cases and are untouched by the fix:
-wheel-event amplification, where every wheel event emits
-`max(1, Int(abs(deltaY)))` mouse reports with no momentum-phase filter and no
-fractional accumulator; and the 150 ms window after each keystroke during which
-`interactiveInputDisplayWindowNs` disables the frame limiter so every output
-chunk forces a synchronous redraw. If typing or scrolling still feel bad, those
-are the better suspects.
+**Typing and scrolling fail differently, and the difference matters for which fix
+helps which symptom.**
 
-Any window intending to cover them must be checked for containing the action —
-the trap that put a wrong conclusion into a committed spec earlier in this
-investigation.
+### Scrolling manufactures its own load
+
+Scrolling produces **634 chunks per second** — twenty-nine times the quiet rate
+and eight times the typing rate — while each chunk is trivially small (`feed`
+median 0.03 ms). This is wheel-event amplification measured rather than inferred:
+every wheel event emits `max(1, Int(abs(deltaY)))` mouse reports, each report
+makes the hosted application repaint, and each repaint returns as output.
+
+The render loop copes comparatively well under it: display passes run at 46.7 per
+second with a p90 gap of 31 ms. The problem is not that the work is slow, it is
+that most of the work should never have been generated.
+
+### Typing starves the render loop
+
+Typing produces a much lower chunk rate but a materially worse experience for the
+renderer: display passes fall to **19.3 per second** against a 60 per second
+budget, with a p90 gap of **101 ms**, a worst gap of **846 ms**, and 63 gaps over
+100 ms in a 32-second window.
+
+**Each pass is cheap — a median of 6.2 ms.** The render loop is starved rather
+than slow: frames are inexpensive to draw and simply do not get to run. The
+median wait for output to reach the renderer rises from 0.08 ms quiet to 6.9 ms
+typing, so this is not a tail effect — nearly every chunk waits.
+
+### A mechanism this refutes
+
+The 150 ms post-keystroke window, during which `interactiveInputDisplayWindowNs`
+disables the frame limiter so every chunk forces a synchronous redraw, was the
+leading suspect for typing lag. If it were driving the symptom, 2,545 chunks
+would have produced something approaching 2,545 display passes. They produced
+617. Coalescing is working, and the frame limiter is not being defeated.
+
+### The poll cycle degrades under both, as a symptom
+
+`rpc.pollCycle` rises from 255 ms quiet to 525 ms typing to **1,055 ms**
+scrolling. Read together with the enrichment result that already cleared it as a
+cause, this is the poll being starved by main-thread congestion rather than
+producing it. A poll cycle exceeding a second is nonetheless worth attention on
+its own terms.
+
+### Caveats
+
+The scrolling window's signpost data spans 16 seconds of a 32-second capture; at
+634 events per second the logging stream may have dropped records, so that chunk
+rate is a floor and its distributions are approximate.
+
+The instrumentation remains output-side only. There is no signpost on the
+outgoing keystroke, so none of this measures keystroke-to-echo latency directly —
+it measures whether output is delayed and whether frames are produced on
+schedule. Measuring true echo latency needs a send-side interval.
 
 ## Residual
 
