@@ -106,7 +106,7 @@ struct TranscriptBubbleGeometryTests {
             blocks: blocks, blockHeights: heights, sourceText: "hello",
             role: .assistant, peerHeader: nil, accessibilityAttribution: attribution,
             bodyWidth: bodyWidth, columnWidth: columnWidth, cachedHeight: rowHeight,
-            onLinkClicked: nil)
+            onLinkClicked: nil, onShowDelivered: nil)
         cell.layoutSubtreeIfNeeded()
 
         // Spoken, not drawn.

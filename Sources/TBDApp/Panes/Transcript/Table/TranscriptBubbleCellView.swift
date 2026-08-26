@@ -634,6 +634,13 @@ final class TranscriptBubbleCellView: NSTableCellView {
     /// scroll-reused cell never fires the previous row's closure.
     private var onLinkClicked: ((TranscriptLinkTarget) -> Void)?
 
+    /// Opens this row's detail overlay. Non-nil ONLY for a peer message — the one
+    /// bubble whose overlay shows something the bubble does not (the delivery it
+    /// arrived in). Nil for every other role, so their context menu is byte-for-
+    /// byte what it was. Reset on every `configure`, like `onLinkClicked`, so a
+    /// scroll-reused cell never offers the previous row's entry.
+    private var onShowDelivered: (() -> Void)?
+
     /// Monotonic token bumped on every (re)build of the block stack. Async syntax-
     /// highlight completions capture the value current when they were dispatched
     /// and bail if it changed (scroll-reuse / reconfigure recycled the cell onto a
@@ -710,6 +717,12 @@ final class TranscriptBubbleCellView: NSTableCellView {
     /// `headerHeight(for: .peer)` for exactly this view. It is a required argument
     /// with no default so a new call site has to say which it is, rather than
     /// silently sizing a peer row without its header.
+    ///
+    /// `onShowDelivered` is likewise non-nil only for a peer message, and it is
+    /// what puts the detail overlay within reach of a chat bubble: nothing else in
+    /// the bubble opens it. Required with no default for the same reason — a new
+    /// call site has to decide, rather than silently rendering a peer row whose
+    /// delivery nobody can see.
     func configure(
         blocks: [MessageBlock],
         blockHeights: [CGFloat],
@@ -720,13 +733,15 @@ final class TranscriptBubbleCellView: NSTableCellView {
         bodyWidth: CGFloat,
         columnWidth: CGFloat,
         cachedHeight: CGFloat,
-        onLinkClicked: ((TranscriptLinkTarget) -> Void)?
+        onLinkClicked: ((TranscriptLinkTarget) -> Void)?,
+        onShowDelivered: (() -> Void)?
     ) {
         let g = TranscriptBubbleGeometry.self
         messageSourceText = sourceText
         // Set before `rebuildBlockStack`, which re-enters `makeProseView` and
         // reads it: `configure` never reuses a prose view across rows.
         self.onLinkClicked = onLinkClicked
+        self.onShowDelivered = onShowDelivered
 
         // Pin the cell box.
         let w = max(columnWidth, 1)
@@ -987,18 +1002,42 @@ final class TranscriptBubbleCellView: NSTableCellView {
         boxLeading.constant = g.outerNear  // leading 12
     }
 
-    // MARK: - Copy message
+    // MARK: - Context menu
 
-    /// Right-click context menu offering "Copy message" (the whole message's
-    /// source text). Per-prose-block text selection still works via the text
-    /// views; this copies the entire message regardless of selection.
+    /// Title of the entry that opens a peer message's detail overlay. A constant
+    /// so the wiring test names the same string the menu draws.
+    static let showDeliveredTitle = "Show delivered message"
+
+    /// Right-click context menu. Always offers "Copy message" (the whole message's
+    /// source text — per-prose-block text selection still works via the text views;
+    /// this copies the entire message regardless of selection).
+    ///
+    /// A PEER row additionally offers `showDeliveredTitle`, which opens the row's
+    /// detail overlay — the only place the delivery a peer message arrived in
+    /// ("As delivered") is shown. It appears only where `onShowDelivered` was
+    /// supplied, i.e. for a peer bubble; a user or assistant bubble's menu is
+    /// exactly what it was.
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = NSMenu()
-        let item = NSMenuItem(
+        let copyItem = NSMenuItem(
             title: "Copy message", action: #selector(copyMessage(_:)), keyEquivalent: "")
-        item.target = self
-        menu.addItem(item)
+        copyItem.target = self
+        menu.addItem(copyItem)
+        if onShowDelivered != nil {
+            let showItem = NSMenuItem(
+                title: Self.showDeliveredTitle,
+                action: #selector(showDeliveredMessage(_:)), keyEquivalent: "")
+            showItem.target = self
+            menu.addItem(showItem)
+        }
         return menu
+    }
+
+    /// Opens this row's detail overlay. Inert on a non-peer bubble, whose
+    /// `configure` passed no closure and whose menu therefore never shows the
+    /// entry that reaches here.
+    @objc func showDeliveredMessage(_ sender: Any?) {
+        onShowDelivered?()
     }
 
     /// ⌘C copies the whole message's source text when no prose text view holds an

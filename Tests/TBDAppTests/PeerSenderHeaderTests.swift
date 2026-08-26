@@ -81,7 +81,8 @@ struct PeerSenderHeaderTests {
             bodyWidth: bodyWidth,
             columnWidth: columnWidth,
             cachedHeight: reserved,
-            onLinkClicked: nil)
+            onLinkClicked: nil,
+            onShowDelivered: nil)
         cell.layoutSubtreeIfNeeded()
         return (reserved, cell)
     }

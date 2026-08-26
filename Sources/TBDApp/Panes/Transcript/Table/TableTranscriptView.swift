@@ -689,6 +689,19 @@ struct TableTranscriptView: NSViewRepresentable {
                 for: item,
                 worktrees: context.appState?.allWorktrees ?? [],
                 navigate: navigate)
+            // A peer message is the one chat bubble whose overlay shows something
+            // the bubble does not: the delivery it arrived in, envelope and
+            // preamble included (`TranscriptOverlayView.peerBody`). Without this
+            // the overlay is unreachable from a bubble — every other row kind
+            // reaches it through `ActivityRowPresentation.openTargetID`, and
+            // `.chatBubble` has no presentation. Wired for peer rows ONLY: a user
+            // or assistant bubble has nothing extra to show, so its menu is
+            // unchanged.
+            var showDelivered: (() -> Void)?
+            if case .peerMessage = item, let openOverlay = context.openTranscriptOverlay {
+                let itemID = item.id
+                showDelivered = { openOverlay(itemID) }
+            }
             cell.configure(
                 blocks: blocks,
                 blockHeights: blockHeights,
@@ -699,7 +712,8 @@ struct TableTranscriptView: NSViewRepresentable {
                 bodyWidth: TranscriptBubbleGeometry.bodyWidth(columnWidth: width, role: role),
                 columnWidth: width,
                 cachedHeight: height,
-                onLinkClicked: context.onLinkClicked
+                onLinkClicked: context.onLinkClicked,
+                onShowDelivered: showDelivered
             )
             return cell
         }

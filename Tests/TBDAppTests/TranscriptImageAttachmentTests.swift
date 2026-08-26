@@ -526,7 +526,7 @@ struct TranscriptImageAttachmentTests {
             blocks: blocks, blockHeights: heights, sourceText: marker(path),
             role: .user, peerHeader: nil, accessibilityAttribution: "You",
             bodyWidth: bodyWidth, columnWidth: columnWidth, cachedHeight: rowHeight,
-            onLinkClicked: nil)
+            onLinkClicked: nil, onShowDelivered: nil)
         cell.layoutSubtreeIfNeeded()
         #expect(abs(cell.realizedRowHeight - rowHeight) <= 1.0,
                 "realized=\(cell.realizedRowHeight) reserved=\(rowHeight)")
