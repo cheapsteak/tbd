@@ -16,6 +16,7 @@ from pathlib import Path
 import shlex
 import signal
 import subprocess
+import sys
 import tempfile
 import textwrap
 import time
@@ -474,6 +475,112 @@ class SwiftSafeTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("TBD_SWIFT_QUEUE_YIELD_SECONDS", result.stderr)
         self.assertEqual(result.stdout, "")
+
+    # ---- the exit-status line ------------------------------------------
+    #
+    # Every failure of the wrapper ITSELF names the number `$?` would have
+    # carried.  Almost every caller runs this wrapper piped to keep compiler
+    # output out of a context window, and a pipeline's `$?` belongs to the last
+    # command, so the status is discarded and readers of the surviving text
+    # have repeatedly concluded the wrapper exits 0 on failure.  A compile
+    # failure has no such line and cannot: by then the wrapper has exec'd and
+    # the status is SwiftPM's own.
+
+    EXIT_STATUS_PREFIX = "swift-safe: exit status"
+
+    def assertNamesExitStatus(self, result, status, meaning=None):
+        """`$?`, the line naming it, and stdout still free of both."""
+        self.assertEqual(result.returncode, status, result.stderr)
+        self.assertIn(f"{self.EXIT_STATUS_PREFIX} {status}", result.stderr)
+        if meaning is not None:
+            self.assertIn(meaning, result.stderr)
+        # The docstring's standing invariant: a caller parsing SwiftPM's
+        # output sees nothing from this wrapper.
+        self.assertNotIn(self.EXIT_STATUS_PREFIX, result.stdout)
+
+    def test_the_exit_status_survives_a_pipeline_that_discards_it(self):
+        """The whole point: `$?` is `tail`'s, so the number must be in the text."""
+        piped = subprocess.run(
+            [
+                "/bin/sh",
+                "-c",
+                f"{shlex.quote(str(RUNNER))} package resolve 2>&1 | tail -5",
+            ],
+            text=True,
+            capture_output=True,
+            env=self.runner_env(),
+            check=False,
+        )
+        self.assertEqual(piped.returncode, 0, "the pipeline's own status changed")
+        self.assertIn(f"{self.EXIT_STATUS_PREFIX} 64", piped.stdout)
+
+    def test_a_refused_value_names_its_exit_status_and_still_explains(self):
+        """Validation exits through `SystemExit`, not through `main`'s return.
+
+        The status line must reach those paths too — the demonstration that
+        started this was `TBD_SWIFT_JOBS=notanumber` — and must not cost the
+        explanation, which is the half that says what to fix.
+        """
+        refusals = (
+            ({"TBD_SWIFT_JOBS": "notanumber"}, (), "must be a positive integer"),
+            ({"TBD_SWIFT_JOBS": "2"}, ("--jobs", "8"), "exceeds TBD_SWIFT_JOBS"),
+            ({"TBD_SWIFT_LOCK_TIMEOUT_SECONDS": "nan"}, (), "must be a finite number"),
+        )
+        for environment, arguments, explanation in refusals:
+            with self.subTest(environment=environment, arguments=arguments):
+                result = self.run_runner("build", *arguments, **environment)
+                self.assertNamesExitStatus(result, 1)
+                self.assertIn(explanation, result.stderr)
+                self.assertEqual(result.stdout, "")
+
+    def test_an_unsupported_subcommand_names_its_exit_status(self):
+        result = self.run_runner("package", "resolve")
+        self.assertNamesExitStatus(result, 64, "EX_USAGE")
+        self.assertIn("usage:", result.stderr)
+
+    def test_a_missing_swift_names_its_exit_status(self):
+        """No `swift` on PATH and none configured: 69, said in the output.
+
+        `PATH` is narrowed to a directory holding only this interpreter, so
+        the wrapper's own `#!/usr/bin/env python3` still resolves.
+        """
+        without_swift = Path(self.temp.name) / "path-without-swift"
+        without_swift.mkdir()
+        (without_swift / "python3").symlink_to(sys.executable)
+        result = self.run_runner("build", TBD_SWIFT_BIN="", PATH=str(without_swift))
+        self.assertNamesExitStatus(result, 69, "EX_UNAVAILABLE")
+        self.assertIn("swift executable not found", result.stderr)
+
+    def test_a_swift_that_cannot_be_execed_names_its_exit_status(self):
+        """The one failure past the lock: the slot was taken, the exec failed."""
+        self.fake_swift.chmod(0o644)
+        result = self.run_runner("build")
+        self.assertNamesExitStatus(result, 71, "EX_OSERR")
+        self.assertIn("could not exec", result.stderr)
+
+    def test_a_timed_out_wait_names_its_exit_status(self):
+        result = self._contended("build", TBD_SWIFT_LOCK_TIMEOUT_SECONDS="0.05")
+        self.assertNamesExitStatus(result, 75, "EX_TEMPFAIL")
+        self.assertIn("timed out", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_a_yielded_queue_place_names_its_exit_status(self):
+        """76 and 75 are routed on differently, so the line must tell them apart."""
+        result = self._contended(
+            "test",
+            TBD_SWIFT_QUEUE_YIELD_SECONDS="0.05",
+            TBD_SWIFT_LOCK_TIMEOUT_SECONDS="30",
+        )
+        self.assertNamesExitStatus(result, 76, "verify this run elsewhere")
+        self.assertNotIn("EX_TEMPFAIL", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_a_run_that_reaches_swiftpm_names_no_exit_status(self):
+        """Success execs SwiftPM; a line here would be this wrapper's, not its."""
+        result = self.run_runner("build")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(self.EXIT_STATUS_PREFIX, result.stderr)
+        self.assertNotIn(self.EXIT_STATUS_PREFIX, result.stdout)
 
 
 class WaitReportingTests(unittest.TestCase):
@@ -1129,6 +1236,23 @@ class OrphanedWrapperTests(unittest.TestCase):
         )
         self.assertNotIn(f"pid={self.wrapper_pid}", self.lock_path.read_text())
         self.assertIn("exited while it was queued", self.reported())
+
+    def test_an_abandoned_wait_names_its_exit_status(self):
+        """75 in the text, for the one failure path no caller can provoke.
+
+        A killed requester is invisible to whoever piped the wrapper — there is
+        no shell left to read `$?` — so the wrapper's own stderr is the only
+        place the status can be recovered from.
+        """
+        shell = self.start_queued_wrapper()
+        self.kill_the_requester(shell)
+        self.assertTrue(
+            self.until(lambda: not swift_safe._process_is_alive(self.wrapper_pid)),
+            "the orphaned wrapper kept waiting for the shared build slot",
+        )
+        self.assertIn("exited while it was queued", self.reported())
+        self.assertIn("swift-safe: exit status 75", self.reported())
+        self.assertIn("EX_TEMPFAIL", self.reported())
 
     def test_allow_orphan_keeps_a_deliberately_detached_wrapper_waiting(self):
         shell = self.start_queued_wrapper(TBD_SWIFT_ALLOW_ORPHAN="1")
