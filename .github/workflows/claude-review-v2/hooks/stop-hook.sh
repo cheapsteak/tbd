@@ -185,7 +185,8 @@ if [ "$findings_pending" -eq 1 ]; then
   case "$holds" in ''|*[!0-9]*) holds=0 ;; esac
 
   # Both bounds are tested BEFORE the wait. Waiting and then releasing would
-  # buy nothing and spend runner minutes doing it.
+  # buy nothing and spend runner minutes doing it. The deadline is tested a
+  # second time AFTER the wait as well — see there.
   if [ "$((now - started))" -ge "$hold_deadline_seconds" ] \
      || [ "$holds" -ge "$max_holds" ]; then
     exit 0   # deadline reached; validate.py fails closed with a stall report
@@ -211,6 +212,17 @@ if [ "$findings_pending" -eq 1 ]; then
   # rationed blocks on stale news, and this is the branch that ends the session
   # rather than blocking it.
   json_ready "$result_file" && exit 0
+
+  # The deadline was tested against a clock reading taken before the wait, so
+  # on its own it admits one more hold that then runs a whole window past it.
+  # Re-test it against a fresh reading, so the bound this hook, the workflow
+  # docs and the spec all state — 25 minutes — is the bound that holds, rather
+  # than 25 minutes plus one window.
+  now="$(date +%s 2>/dev/null || echo 0)"
+  if [ "$findings_pending" -eq 1 ] \
+     && [ "$((now - started))" -ge "$hold_deadline_seconds" ]; then
+    exit 0   # deadline crossed during the wait; validate.py fails closed
+  fi
 fi
 
 if [ "$findings_pending" -eq 1 ]; then

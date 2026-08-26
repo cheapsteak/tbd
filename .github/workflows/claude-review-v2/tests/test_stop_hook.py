@@ -30,6 +30,8 @@ from pathlib import Path
 
 import pytest
 
+from hook_bounds import hook_number
+
 HOOK = (
     Path(__file__).resolve().parent.parent / "hooks" / "stop-hook.sh"
 )
@@ -295,13 +297,22 @@ def test_the_production_sleep_default_needs_no_configuration() -> None:
     """90 s is the shipped default: the workflow sets no override, so the
     arithmetic in the hook's comment holds for the real job. It is the number
     that makes the harness's 8-block cap survivable — 8 x 90 s is ~12 minutes,
-    past the ~10 the specialists need."""
-    assert 'REVIEW_HOLD_SLEEP_SECONDS:-90}' in HOOK.read_text()
+    past the ~10 the specialists need.
+
+    This is the ONE place the window is restated. Every other check reads it
+    off the hook, so raising it is a one-line edit here and nowhere else."""
+    assert hook_number("window") == 90
 
 
 def test_the_stop_hook_command_outlives_its_own_sleep() -> None:
     """A hook killed at its declared timeout mid-wait would emit no block and
-    the session would end — the exact failure the hold exists to prevent."""
+    the session would end — the exact failure the hold exists to prevent.
+
+    The window is READ from the hook rather than restated, because a restated
+    copy makes this guard vacuous exactly when it is needed: raise the window
+    past the timeout and the tests that pin the window fail loudly and get
+    updated, while a hardcoded `120 > 90` here still compares two literals to
+    each other and stays green — shipping the very regression it guards."""
     settings = json.loads(SETTINGS.read_text())
     entries = [
         cmd
@@ -310,8 +321,7 @@ def test_the_stop_hook_command_outlives_its_own_sleep() -> None:
     ]
     assert entries, "no Stop hook command declared"
     for cmd in entries:
-        assert cmd["timeout"] == 120
-        assert cmd["timeout"] > 90  # strictly longer than the hold window
+        assert cmd["timeout"] > hook_number("window")
 
 
 def test_the_deadline_is_checked_before_the_hook_sleeps(
@@ -326,6 +336,73 @@ def test_the_deadline_is_checked_before_the_hook_sleeps(
     elapsed = time.monotonic() - started
     assert _decision(proc) is None
     assert elapsed < 5
+
+
+def _path_with_time_jumping_sleep(tmp_path: Path, jump: int) -> str:
+    """A PATH whose `sleep` returns at once but advances what `date` reports.
+
+    The post-wait deadline test is about a clock that moved WHILE the hook
+    waited, and the hook reads that clock through `date`. Waiting for real
+    would cost the suite the deadline itself, so the wait is instant and the
+    clock jumps instead: the stub `sleep` drops a marker, and the stub `date`
+    adds the jump once that marker exists.
+    """
+    bindir = tmp_path / "timejump-bin"
+    bindir.mkdir(exist_ok=True)
+    real_date = shutil.which("date")
+    assert real_date, "test prerequisite missing: date"
+    for tool in ("bash", "cat", "tr", "jq"):
+        found = shutil.which(tool)
+        assert found, f"test prerequisite missing: {tool}"
+        link = bindir / tool
+        if not link.exists():
+            link.symlink_to(found)
+    marker = tmp_path / "waited.marker"
+    (bindir / "sleep").write_text(f'#!/bin/sh\n: > "{marker}"\n')
+    (bindir / "sleep").chmod(0o755)
+    (bindir / "date").write_text(
+        "#!/bin/sh\n"
+        f'[ -f "{marker}" ] || exec {real_date} "$@"\n'
+        f'echo $(( $({real_date} +%s) + {jump} ))\n'
+    )
+    (bindir / "date").chmod(0o755)
+    return str(bindir)
+
+
+def test_a_deadline_crossed_during_the_wait_releases_the_session(
+    dirs: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """The deadline is re-tested against a clock read AFTER the wait.
+
+    Tested only before, it admits one last hold that then runs a whole window
+    past it — so the real ceiling would be the deadline plus 90 seconds while
+    the hook's comment, docs/pr-review-gate.md and the spec all state a flat
+    25 minutes. The overshoot is harmless to the job (timeout-minutes absorbs
+    it) and corrosive to the document: a stated bound that is not the bound is
+    how the next person's arithmetic goes wrong.
+    """
+    project, state = dirs
+    (state / START_FILE).write_text(str(int(time.time()) - 1400))
+    path = _path_with_time_jumping_sleep(tmp_path, jump=200)
+    proc = _run(project, state, sleep_seconds="90", path=path)
+    assert proc.returncode == 0
+    assert _decision(proc) is None
+    # Released for the deadline, not for the nudge budget — nothing was nudged.
+    assert _count(state) == 0
+
+
+def test_a_wait_that_stays_inside_the_deadline_still_holds(
+    dirs: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """The post-wait re-test must not release a hold that has time left, which
+    is the whole point of holding — a re-test that fired unconditionally would
+    turn every hold into a release and pass the test above."""
+    project, state = dirs
+    (state / START_FILE).write_text(str(int(time.time()) - 1400))
+    path = _path_with_time_jumping_sleep(tmp_path, jump=50)
+    proc = _run(project, state, sleep_seconds="90", path=path)
+    assert proc.returncode == 0
+    assert _decision(proc)["decision"] == "block"
 
 
 def test_the_hold_cap_is_checked_before_the_hook_sleeps(

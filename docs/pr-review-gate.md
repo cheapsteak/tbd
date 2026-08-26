@@ -95,7 +95,8 @@ split that difference; the thresholds and the reasoning behind them are in
   none of its nudge budget** doing so: a session that cannot comply yet is not a
   session refusing to. The hold is bounded by a 25-minute wall clock, past which
   the hook stands aside — measured from the session's first stop attempt, not from
-  the start of the job.
+  the start of the job, and tested on both sides of the wait below so the stated
+  bound is the real one rather than the bound plus one window.
 - **Each hold waits up to 90 seconds, watching for the files, before it blocks.**
   Blocks are what the hold is short of, not seconds: the harness overrides a Stop
   hook after **8 consecutive blocks**, ending the turn and reporting the session as

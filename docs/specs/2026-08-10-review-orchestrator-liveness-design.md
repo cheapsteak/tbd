@@ -133,7 +133,11 @@ file.
   needs and is not writing the result. This is the state the five-nudge ceiling was
   designed for, and it keeps that ceiling.
 - **Past 25 minutes** — exit 0 and let the session end. `validate.py` then fails closed.
-  The deadline is what keeps an uncounted hold from becoming an unbounded one.
+  The deadline is what keeps an uncounted hold from becoming an unbounded one. It is
+  tested on both sides of the wait: before, because waiting and then releasing buys
+  nothing; and again after, because a deadline tested only against a clock read a window
+  ago admits one last hold that runs a whole window past it, and a stated bound that is
+  not the bound is how the next reader's arithmetic goes wrong.
 
 **The hold waits, because blocks are rationed twice over.** Every hold is a block, and a
 block is spent against two separate budgets. The session's `--max-turns 100` charges one
@@ -278,11 +282,15 @@ The unit tests live beside the code they cover, in
   against a hook that conflates the two states.
 - **The wait and the bounds it interacts with.** A pending hold takes at least its
   configured window before emitting the block; a run past the deadline, and one at the hold
-  cap, each return promptly and release, proving both bounds are tested before the wait
-  rather than after it. The unit tests drive the duration to zero through an environment
-  variable so the suite stays fast, so two further assertions pin what the tests cannot
-  exercise: that the shipped default is 90 seconds with no configuration, and that
-  `settings.json` declares a hook timeout strictly greater than it.
+  cap, each return promptly and release, proving both bounds are tested before the wait.
+  A stub whose `sleep` advances what `date` reports covers the other side: a deadline
+  crossed *during* a wait releases, while one still inside it after the wait holds. The
+  unit tests drive the duration to zero through an environment variable so the suite stays
+  fast, so two further assertions pin what the tests cannot exercise: that the shipped
+  default is 90 seconds with no configuration, and that `settings.json` declares a hook
+  timeout strictly greater than it. The second reads the window out of the hook rather
+  than restating it — a restated copy compares two literals to each other and stays green
+  exactly when the window outgrows the timeout, which is the one case it exists to catch.
 - **That the wait watches.** Findings dropped onto disk partway through a window must end
   that window and change the message the block carries, from "your specialists are still
   running" to the merge instruction, charged to the nudge budget. This is the discriminating
