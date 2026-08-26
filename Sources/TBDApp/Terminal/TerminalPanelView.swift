@@ -1245,9 +1245,19 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         }
 
         func dataReceived(slice: ArraySlice<UInt8>) {
+            // TEMPORARY diagnostic instrumentation — see RenderLatencySignposts.
+            // The interval begins here, on the pty reader thread, and ends inside
+            // the block below once the main thread actually picks it up. The
+            // duration is the main-thread queueing delay for terminal output.
+            let signposter = RenderLatencySignposts.signposter
+            let hopID = signposter.makeSignpostID()
+            let hop = signposter.beginInterval("mainThreadHop", id: hopID, "bytes=\(slice.count)")
             DispatchQueue.main.async { [weak self] in
+                signposter.endInterval("mainThreadHop", hop, "bytes=\(slice.count)")
                 self?.groupedViewerDidReceiveOutput()
+                let feedState = signposter.beginInterval("feed", id: signposter.makeSignpostID(), "bytes=\(slice.count)")
                 self?.terminalView?.feed(byteArray: slice)
+                signposter.endInterval("feed", feedState)
             }
         }
 

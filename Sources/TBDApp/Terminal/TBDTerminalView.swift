@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import SwiftTerm
+import os
 
 private extension CharacterSet {
     /// Characters that require shell quoting when they appear in a file path.
@@ -144,6 +145,30 @@ class TBDTerminalView: TerminalView {
             let callback = onReady
             onReady = nil
             DispatchQueue.main.async { callback?() }
+        }
+    }
+
+    // MARK: - Render-latency instrumentation (TEMPORARY)
+
+    /// TEMPORARY diagnostic instrumentation — see `RenderLatencySignposts`.
+    ///
+    /// `TerminalView.draw(_:)` is `public`, not `open`, so it cannot be
+    /// overridden from this module (the same constraint that forces the
+    /// `NSEvent` local monitors in `TerminalPanelView`). `viewWillDraw()` *is*
+    /// `open` and AppKit calls it once per display pass, immediately before
+    /// drawing, so it is the only reachable seam.
+    ///
+    /// The interval therefore ends on the next main-queue turn rather than at
+    /// the closing brace of `draw(_:)`: it is an **upper bound** on one display
+    /// pass — the draw itself plus whatever else finishes the current run-loop
+    /// callout. The begin timestamps are exact, so inter-frame gaps derived
+    /// from them are exact regardless.
+    override func viewWillDraw() {
+        super.viewWillDraw()
+        let signposter = RenderLatencySignposts.signposter
+        let state = signposter.beginInterval("displayPass", id: signposter.makeSignpostID())
+        DispatchQueue.main.async {
+            signposter.endInterval("displayPass", state)
         }
     }
 
