@@ -5,12 +5,13 @@ import Foundation
 
 /// Tier 2: in-memory GRDB only.
 ///
-/// The live failure this pins: at 07:14Z the provider reported thirteen
-/// sessions working and one still waiting, and TBD's sidebar kept attention
-/// hands on the thirteen. Two independent defects produced that; this suite
-/// covers the mirror half — an out-of-order sighting reinstating an agent
-/// state the provider had already moved on from. The render half is
-/// `RemoteSessionRowAttentionStalenessTests` in `TBDAppTests`.
+/// The failure this pins, observed on a live fleet: a provider reported
+/// thirteen sessions working and one still waiting for input, and TBD's
+/// sidebar kept attention hands on all fourteen. Two independent defects
+/// produced that; this suite covers the mirror half — an out-of-order
+/// sighting reinstating an agent state the provider had already moved on
+/// from. The render half is `RemoteSessionRowAttentionStalenessTests` in
+/// `TBDAppTests`.
 @Suite("Remote session ordering")
 struct RemoteSessionOrderingTests {
     let db: TBDDatabase
@@ -46,18 +47,18 @@ struct RemoteSessionOrderingTests {
         // The provider asked for input, then went back to work.
         _ = try await db.remoteSessions.applySnapshot(
             provider: "p",
-            sessions: [payload("finish-pr-20974", agent: .waitingInput, at: earlier)], now: now)
+            sessions: [payload("fix-flaky-ci", agent: .waitingInput, at: earlier)], now: now)
         _ = try await db.remoteSessions.applySnapshot(
             provider: "p",
-            sessions: [payload("finish-pr-20974", agent: .working, at: later)], now: now)
+            sessions: [payload("fix-flaky-ci", agent: .working, at: later)], now: now)
 
         // A `list` response that was already in flight lands afterwards,
         // carrying the older observation.
         let outcome = try await db.remoteSessions.applySnapshot(
             provider: "p",
-            sessions: [payload("finish-pr-20974", agent: .waitingInput, at: earlier)], now: now)
+            sessions: [payload("fix-flaky-ci", agent: .waitingInput, at: earlier)], now: now)
 
-        let mirrored = try await row("finish-pr-20974")
+        let mirrored = try await row("fix-flaky-ci")
         #expect(mirrored?.agentState == "working")
         // And it must not re-notify: an edge TBD never observed going
         // forward is not an edge to raise a banner for.
@@ -71,18 +72,18 @@ struct RemoteSessionOrderingTests {
         // on a question. Nothing here may clear it.
         _ = try await db.remoteSessions.applySnapshot(
             provider: "p",
-            sessions: [payload("pdf-csv", agent: .working, at: earlier)], now: now)
+            sessions: [payload("export-report", agent: .working, at: earlier)], now: now)
         _ = try await db.remoteSessions.applySnapshot(
             provider: "p",
-            sessions: [payload("pdf-csv", agent: .waitingInput, at: later, reason: "permission_prompt")],
+            sessions: [payload("export-report", agent: .waitingInput, at: later, reason: "permission_prompt")],
             now: now)
         // A later poll that still reports waiting, with the same stamp.
         _ = try await db.remoteSessions.applySnapshot(
             provider: "p",
-            sessions: [payload("pdf-csv", agent: .waitingInput, at: later, reason: "permission_prompt")],
+            sessions: [payload("export-report", agent: .waitingInput, at: later, reason: "permission_prompt")],
             now: now)
 
-        let mirrored = try await row("pdf-csv")
+        let mirrored = try await row("export-report")
         #expect(mirrored?.agentState == "waiting_input")
     }
 
@@ -95,21 +96,21 @@ struct RemoteSessionOrderingTests {
         ]
         _ = try await db.remoteSessions.applySnapshot(
             provider: "p",
-            sessions: [payload("workload-governor", agent: .working, at: "2026-08-26T06:00:00Z")],
+            sessions: [payload("build-indexer", agent: .working, at: "2026-08-26T06:00:00Z")],
             now: now)
         _ = try await db.remoteSessions.applySnapshot(
             provider: "p",
-            sessions: [payload("workload-governor", agent: .waitingInput, at: stamps[0], reason: "quota_exhausted")],
+            sessions: [payload("build-indexer", agent: .waitingInput, at: stamps[0], reason: "quota_exhausted")],
             now: now)
         _ = try await db.remoteSessions.applySnapshot(
             provider: "p",
-            sessions: [payload("workload-governor", agent: .waitingInput, at: stamps[1], reason: "credential_rotating")],
+            sessions: [payload("build-indexer", agent: .waitingInput, at: stamps[1], reason: "credential_rotating")],
             now: now)
         let resumed = try await db.remoteSessions.applySnapshot(
             provider: "p",
-            sessions: [payload("workload-governor", agent: .working, at: stamps[2])], now: now)
+            sessions: [payload("build-indexer", agent: .working, at: stamps[2])], now: now)
 
-        let mirrored = try await row("workload-governor")
+        let mirrored = try await row("build-indexer")
         #expect(mirrored?.agentState == "working")
         #expect(resumed.changed)
         // Every step moved forward, so none of them was withheld — and the

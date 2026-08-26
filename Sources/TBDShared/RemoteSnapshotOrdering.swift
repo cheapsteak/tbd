@@ -78,8 +78,16 @@ public enum RemoteTimestamp {
 ///
 /// The contract already carries the fact needed to detect this —
 /// `agent_state_at`, the instant the agent state was determined — and TBD
-/// never read it. This is where it gets read.
+/// never read it. This is where it gets read. The rule, its conservatisms,
+/// and the alternatives weighed against it:
+/// `docs/specs/2026-08-26-remote-snapshot-ordering-design.md`.
 public enum RemoteSnapshotOrdering {
+    /// How far ahead of local time a mirrored stamp may be while still being
+    /// trusted to order sightings. Past this, the stored clock is treated as
+    /// wrong rather than merely skewed, and ordering is disabled for that
+    /// row — see `decide` for why that direction is the safe one.
+    public static let clockSkewTolerance: TimeInterval = 60
+
     public enum Decision: Equatable {
         /// Take the sighting as the session's current state.
         case apply
@@ -110,11 +118,22 @@ public enum RemoteSnapshotOrdering {
     ///   forever, freezing the row permanently — the one failure mode worse
     ///   than the bug being fixed. `tolerance` allows for ordinary skew
     ///   between the provider's clock and this machine's.
+    ///
+    /// `tolerance` is a **clock-skew allowance and nothing else**, which is
+    /// what sets its size: a minute is far more skew than an NTP-synced
+    /// machine ever shows and far less than a genuinely wrong clock, so it
+    /// separates the two without needing to be tuned. It is deliberately
+    /// NOT derived from the provider poll interval, which is also 60s today:
+    /// the two answer unrelated questions (how often TBD asks, versus how
+    /// wrong two clocks may be), and coupling them would make a change to
+    /// poll cadence silently change what counts as a broken clock. The
+    /// coincidence is worth naming precisely so nobody reads it as a
+    /// dependency.
     public static func decide(
         incomingAgentStateAt: String?,
         storedAgentStateAt: String?,
         now: Date,
-        tolerance: TimeInterval = 60
+        tolerance: TimeInterval = clockSkewTolerance
     ) -> Decision {
         guard let stored = RemoteTimestamp.parse(storedAgentStateAt),
               let incoming = RemoteTimestamp.parse(incomingAgentStateAt) else {
