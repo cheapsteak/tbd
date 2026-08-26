@@ -382,14 +382,24 @@ through `scripts/test.sh`.
 
 ## Waivers
 
-**This change ships without a feature flag.** TBD's convention is that
-wholesale-replacing a load-bearing path lands behind a default-off flag, and the
-view layer's observation mechanism qualifies. The waiver here is forced rather
-than chosen: the selection between `@EnvironmentObject` and `@Environment` is
-made at compile time, so a runtime flag would require every affected view body
-to exist twice. The revert path is the branch itself plus `scripts/restart.sh`,
-which the author exercises continuously by dogfooding the app; the stacked
-landing keeps each sibling conversion independently revertable.
+**This change ships without a feature flag, by explicit exception granted by the
+repository owner.** TBD's convention is that wholesale-replacing a load-bearing
+path lands behind a default-off flag, and the view layer's observation mechanism
+qualifies. That convention states no infeasibility exception, so this is not a
+waiver a spec can grant itself: it was put to the repository owner as a decision
+and signed off on 2026-08-26.
+
+The reason it was granted is that the waiver is forced rather than chosen. The
+selection between `@EnvironmentObject` and `@Environment` is made at compile
+time, so there is no runtime state a flag could switch — a gated version would
+require every affected view body to exist twice, which is more code and more risk
+than the migration it would be protecting against.
+
+What stands in for the flag: the revert path is the branch itself plus
+`scripts/restart.sh`, exercised continuously through dogfooding, and the stacked
+landing keeps each sibling conversion independently revertable. Those are weaker
+guarantees than a default-off flag and are recorded as such rather than presented
+as equivalent.
 
 **The assignment-site guard audit is not retired by this migration.** Observation
 fires on write, not on change (the `Equatable` suppression on newer toolchains
