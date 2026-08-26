@@ -468,16 +468,57 @@ struct RemoteSessionRowView: View {
     /// this reads `agentState` fresh every render rather than relying solely
     /// on the edge-triggered `unreadByRemoteSession` map (which clears the
     /// moment the session is selected, even if it's still waiting).
+    ///
+    /// The merge runs the unread half through `suffixContribution` first, so
+    /// the edge may only ADD what the steady axis cannot express. See that
+    /// function for what went wrong when it could also keep asserting
+    /// attention the steady axis had withdrawn.
     nonisolated static func suffixIndicator(
         agentState: RemoteAgentState, unreadType: NotificationType?
     ) -> SuffixRowIndicator? {
         let steadyType: NotificationType? = agentState == .waitingInput ? .attentionNeeded : nil
         return RowStatusIndicator.suffix(
-            notification: RemoteSessionRowView.higherSeverity(unreadType, steadyType),
+            notification: RemoteSessionRowView.higherSeverity(
+                suffixContribution(of: unreadType, agentState: agentState), steadyType),
             isWorking: agentState == .working,
             isSuspended: false,
             isHibernated: false
         )
+    }
+
+    /// What the row's unread entry may contribute to the SUFFIX slot, given
+    /// what the agent axis currently says.
+    ///
+    /// The unread map exists to add signals the steady axis cannot express —
+    /// an `.error` from a nonzero exit, a `.responseComplete`. It must never
+    /// keep asserting attention the steady axis has since withdrawn, and
+    /// `.attentionNeeded` is nothing but a restatement of `waiting_input`.
+    ///
+    /// Without this, the hand latched. `unreadByRemoteSession` is edge-
+    /// triggered and clears only when the user selects the session
+    /// (`AppState+Navigation`), while `.attentionNeeded` outranks `isWorking`
+    /// in `RowStatusIndicator.suffix` — so a session that asked for input
+    /// once, was answered elsewhere, and went back to work kept its hand
+    /// until somebody clicked it. Across a fleet that is a wall of hands over
+    /// sessions that are all working, which costs the glyph its meaning
+    /// exactly when a genuine one appears among them.
+    ///
+    /// The BOLD name is deliberately left latched: it says "you have not
+    /// looked since this happened", which stays true after the session
+    /// resumes, and it is cleared by looking. The suffix glyph says "this is
+    /// true right now", and that is the claim this function keeps honest.
+    nonisolated static func suffixContribution(
+        of unreadType: NotificationType?, agentState: RemoteAgentState
+    ) -> NotificationType? {
+        // The two types `RowStatusIndicator.suffix` renders as the hand.
+        // `.focusRequest` is not currently produced for remote rows
+        // (`AppState.remoteUnreadType` yields only `.attentionNeeded`,
+        // `.error` and `.responseComplete`), and is covered anyway so that a
+        // future edge cannot reintroduce the latch by another name.
+        guard unreadType == .attentionNeeded || unreadType == .focusRequest else {
+            return unreadType
+        }
+        return agentState == .waitingInput ? unreadType : nil
     }
 
     /// The higher-severity of two optional `NotificationType`s (nil sorts
