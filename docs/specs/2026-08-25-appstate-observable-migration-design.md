@@ -9,40 +9,47 @@ through `@EnvironmentObject` by 106 binding sites across 69 view files. Under
 view reads the property that changed. Readership is irrelevant to invalidation —
 only writer frequency matters.
 
-The cost is measurable. Sampling the running app for 20 seconds while a terminal
-is scrolled:
+The waste is measurable. Sampling the app across windows **verified to contain
+actual scrolling** — each window scored for scroll-event frames and for terminal
+draw volume, with windows failing that check discarded rather than averaged in —
+`RepoSectionView.body` accounts for 30 to 37 samples per 1,000 main-thread
+samples, against 6.6 in a quiet baseline. The sidebar re-evaluates roughly five
+times as often while a terminal scrolls, and it displays nothing new when it
+does. `WorktreeRowView`, `TabBarItem`, and `PanePlaceholder` re-evaluate
+alongside it. Across those windows the main thread runs 45% to 64% busy and
+TBDApp holds roughly 47% of a core.
 
-- **TBDApp consumes 12.29 s of CPU** — 61% of a core — against 4.35 s over an
-  equivalent quiet window.
-- **The main thread is 50.3% busy** (3,921 of 7,801 samples), against 18.7% quiet.
-- **Roughly half that busy time, 1,925 samples, is SwiftUI view-graph update** —
-  `NSHostingView.beginTransaction` → `GraphHost.flushTransactions` →
-  `AG::Subgraph::update` → `ViewBodyAccessor.updateBody`.
-
-The bodies re-evaluating are the sidebar, none of which depend on the terminal
-being scrolled: `RepoSectionView` at 420 samples, `WorktreeRowView` at 240,
-`TabBarItem` at 139, `PanePlaceholder` at 47. `TerminalView.draw` — the view that
-actually changed — accounts for 157.
-
-Normalized per 1,000 main-thread samples, `RepoSectionView.body` accounts for 6.6
-samples when quiet and 53.8 while scrolling: an eightfold increase in time spent
-re-evaluating a view whose displayed content did not change.
+That validation step is not incidental. An unvalidated sampling window is
+indistinguishable from a mistimed one, and a window that captured no scrolling
+looks like a quiet baseline with a misleading label. Every number in this
+document comes from a window that passed the check.
 
 `@Observable` replaces object-wide notification with per-property dependency
 tracking. A view re-evaluates only when a property it actually read changes.
 
+### What this migration does not fix
+
+**The dominant cost of terminal scrolling is not this.** In the same validated
+windows, `TerminalView.draw` accounts for 237 to 425 samples per 1,000 against
+84.6 quiet — seven to twelve times the sidebar's share. That cost is SwiftTerm
+rebuilding an `NSAttributedString` for every visible row on every redraw
+(`drawTerminalContents` → `buildAttributedString`), plus a full-grid scan for
+blink attributes (`visibleBlinkRows`) run on each display update. A scroll
+dirties every row every frame, so both are paid in full at display rate. That
+code lives in a pinned upstream dependency and is tracked separately.
+
+This migration removes a real but secondary cost. It is justified on the
+structural argument — object-wide invalidation across 106 binding sites is wrong
+at any writer frequency, and the measured fivefold rise in sidebar evaluation is
+that defect made visible — and **not** as a remedy for terminal scroll latency.
+A reader looking for the fix to a slow-feeling terminal should start with the
+draw path above.
+
 ### What this evidence does not establish
 
-The specific `@Published` write driving the scroll-time increase was not isolated.
-Writer-frame counts sampled during scrolling and during quiet windows are
-comparable, so the eightfold jump in `RepoSectionView.body` has no identified
-write behind it.
-
-This design therefore rests on the structural argument — object-wide invalidation
-is wrong at any writer frequency — and not on a demonstrated causal chain. The
-measured numbers above bound the size of the prize; they do not prove that
-per-property tracking captures all of it. Two specific ways the prize could
-shrink:
+The specific `@Published` write driving the scroll-time rise is not isolated, so
+the size of the available win is bounded above by the numbers here rather than
+predicted by them. Two ways it could shrink further:
 
 - **The sidebar reads terminal state.** Rows render activity dots and status
   chips from `terminals` and `notifications`. If the writes firing during a
@@ -50,16 +57,15 @@ shrink:
   sidebar, because the sidebar legitimately reads those properties. The win then
   comes only from the views that *don't* read them.
 - **The driver may not be a write-rate change at all.** One consistent
-  explanation for "same writer frequency, eight times the body time" is runloop
-  coalescing: when quiet, several `objectWillChange` fires within one runloop
-  turn collapse into one graph flush; while scrolling, the runloop spins at
-  display rate servicing scroll events, so each fire lands in its own flush. If
-  that is the mechanism, per-property tracking helps exactly to the extent the
-  firing property is one the sidebar does not read — which is unknown.
+  explanation is runloop coalescing: when quiet, several `objectWillChange` fires
+  within one runloop turn collapse into a single graph flush; while scrolling,
+  the runloop spins at display rate, so each fire lands in its own flush. If that
+  is the mechanism, per-property tracking helps exactly to the extent the firing
+  property is one the sidebar does not read.
 
-The acceptance gate below exists to settle this empirically rather than by
-assertion, and the diagnostic capture in "Acceptance" makes a null result
-interpretable instead of merely disappointing.
+The acceptance gate below settles this empirically rather than by assertion, and
+the diagnostic capture in "Acceptance" makes a null result interpretable instead
+of merely disappointing.
 
 ## Scope
 
@@ -317,14 +323,27 @@ naive conversion, per the repo rule that plan-authored tests must discriminate:
   against the broken one-shot implementation; two sequential fires are the
   discriminator.
 
-**A measured gate.** Re-run the scroll profile and compare against the baseline
-recorded here: 12.29 s of CPU per 20 s window, 50.3% main-thread busy, and
-`RepoSectionView.body` at 53.8 samples per 1,000 main-thread samples. The
-migration is accepted on a material reduction in the SwiftUI view-graph share of
-main-thread busy time. Because the driving write was never isolated, a null
-result is a real possible outcome and must be reported as one rather than
-absorbed — and the diagnostic capture above is what turns a null result into a
-finding ("the firing property is one the sidebar reads") rather than a mystery.
+**A measured gate, over validated windows.** Re-run the scroll profile and
+compare against the baseline recorded here: `RepoSectionView.body` at 30 to 37
+samples per 1,000 main-thread samples while scrolling against 6.6 quiet, with
+the main thread 45% to 64% busy and TBDApp near 47% of a core.
+
+Every window on both sides of the comparison must pass the same validation the
+baseline did — scored for scroll-event frames (`scrollWheel`, `gridPosition`)
+and for `TerminalView.draw` volume well above the quiet baseline, with failing
+windows discarded rather than averaged in. Take several short windows rather
+than one long one, so a mistimed window announces itself instead of becoming a
+finding. A quiet baseline must also be genuinely quiet: a session in which
+tooling is running commands streams output into the terminal and drives redraws,
+which inflates the very counters under comparison.
+
+The migration is accepted on a material reduction in the sidebar's share of
+main-thread samples. Because the driving write was never isolated, a null result
+is a real possible outcome and must be reported as one rather than absorbed —
+and the diagnostic capture above is what turns a null result into a finding
+("the firing property is one the sidebar reads") rather than a mystery. Note
+that the sidebar's share is a minority of scroll-time cost either way: a large
+proportional win here will not, on its own, make scrolling feel fast.
 
 **The existing suite green**, with the 6 test files' injection sites updated, run
 through `scripts/test.sh`.
