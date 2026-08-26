@@ -33,9 +33,16 @@ struct EventDrivenTestClockSelfTests {
                                   timeout: Swift.Duration = .seconds(30),
                                   sourceLocation: SourceLocation = #_sourceLocation,
                                   _ condition: () -> Bool) async {
-        let deadline = ContinuousClock.now.advanced(by: timeout)
+        let start = ContinuousClock.now
+        let deadline = start.advanced(by: timeout)
         while ContinuousClock.now < deadline {
             if condition() { return }
+            // Cancellation is not expiry, and `try?` cannot tell them apart: a
+            // cancelled `Task.sleep` throws instantly, so without this the loop
+            // stops yielding and busy-spins on `ContinuousClock.now` for the
+            // rest of its budget — burning a cooperative thread, in a process
+            // where every other test is queued behind one.
+            if Task.isCancelled { break }
             try? await Task.sleep(for: .milliseconds(5))
         }
         // The verdict must come from a *fresh* read, never from the loop's exit.
@@ -48,8 +55,13 @@ struct EventDrivenTestClockSelfTests {
         // — it is the *expected* outcome rather than a rare one. Same shape as
         // `advanceUntil` and `watchForSleeper`, which both re-read here.
         if condition() { return }
+        // A cancelled wait reports nothing: attribution belongs to whatever did
+        // the cancelling, exactly as `EventDrivenTestClock.sleeperArmed`
+        // documents for its own hang guard.
+        if Task.isCancelled { return }
         Issue.record(
-            HandshakeTimeout(what: what, timeout: timeout),
+            HandshakeTimeout(what: what, timeout: timeout,
+                             elapsed: ContinuousClock.now - start),
             sourceLocation: sourceLocation
         )
     }
@@ -76,12 +88,33 @@ struct EventDrivenTestClockSelfTests {
         var value: String { lock.withLock { text } }
     }
 
+    /// Reports **elapsed** alongside the budget, because the gap between them
+    /// is the whole diagnosis when this fires under the fast parallel pass. A
+    /// message that prints only the budget reads identically whether the wait
+    /// polled steadily for its whole 30 s or got exactly one turn and came back
+    /// 45 s later; the second is a scheduling gap, and saying so is what turns a
+    /// third-attempt investigation into a first-attempt one.
+    /// Counts how many times a condition closure was evaluated, so a test can
+    /// assert on *effort* rather than on elapsed time — the only way to pin a
+    /// busy-spin without a timing assertion of its own.
+    private final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var n = 0
+
+        func bump() { lock.withLock { n += 1 } }
+        var count: Int { lock.withLock { n } }
+    }
+
     private struct HandshakeTimeout: Error, CustomStringConvertible {
         let what: String
         let timeout: Swift.Duration
+        let elapsed: Swift.Duration
 
         var description: String {
-            "EventDrivenTestClock self-test: still not true after \(timeout) — observed: \(what)"
+            """
+            EventDrivenTestClock self-test: still not true after \(elapsed) \
+            (budget \(timeout)) — observed: \(what)
+            """
         }
     }
 
@@ -156,6 +189,43 @@ struct EventDrivenTestClockSelfTests {
         }
         #expect(recorded.value.contains("observed: a condition that never holds"),
                 "the diagnostic must carry the caller's wording — got: \(recorded.value)")
+    }
+
+    /// The companion defect, and one this repo already keeps on its flake-fix
+    /// checklist: `try? await Task.sleep` cannot distinguish expiry from
+    /// cancellation. A cancelled sleep throws at once, so the pre-fix loop
+    /// stopped suspending and spun on `ContinuousClock.now` for the rest of its
+    /// 30 s budget — pinning a cooperative thread in a process where thousands
+    /// of tests are queued behind it, and then blaming the call site for a
+    /// cancellation that came from the harness.
+    ///
+    /// Asserted on sample count rather than elapsed time on purpose: a "returns
+    /// promptly" assertion would itself be a wall-clock deadline, of exactly the
+    /// kind this file exists to stop trusting. A spin over 30 s samples the
+    /// condition millions of times; ending at the cancellation samples it twice.
+    @Test("a cancelled waitUntil stops spinning and reports nothing")
+    func waitUntilIsSilentAndPromptOnCancellation() async {
+        let samples = Counter()
+        let task = Task {
+            // Enter the wait already cancelled, so the loop cannot race the
+            // `cancel()` below — same technique as `sleepAfterCancellation`.
+            while !Task.isCancelled { try? await Task.sleep(for: .milliseconds(2)) }
+            // A budget long enough that expiry cannot be what ends this wait.
+            await Self.waitUntil("a condition that never holds", timeout: .seconds(30)) {
+                samples.bump()
+                return false
+            }
+        }
+        task.cancel()
+        await task.value
+
+        // No `withKnownIssue`: a recorded diagnostic here would be the
+        // mis-attribution this test exists to prevent.
+        #expect(samples.count <= 2,
+                """
+                a cancelled wait must stop yielding, not busy-spin its budget away — \
+                sampled \(samples.count) time(s)
+                """)
     }
 
     // MARK: Arming

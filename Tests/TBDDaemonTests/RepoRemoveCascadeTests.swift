@@ -52,12 +52,41 @@ private final class PathGate: @unchecked Sendable {
         return opened.contains(path)
     }
 
-    func wait(_ path: String, timeout: TimeInterval = 10) async {
+    /// Parks the caller until `open(path)` is called.
+    ///
+    /// The budget is a hang guard, not a synchronization step, and giving up
+    /// must be **loud**: a gate that self-releases silently hands the test a
+    /// cascade it believes is still held, and the mis-attributed failure then
+    /// lands on whatever the test asserted next. The old 10 s budget was well
+    /// inside the range the fast parallel pass routinely spends on scheduling
+    /// alone (p50 per-test latency 56-70 s in mined CI xUnit), so the silent
+    /// exit was reachable on a healthy run.
+    func wait(_ path: String, timeout: TimeInterval = 60,
+              sourceLocation: SourceLocation = #_sourceLocation) async {
         lock.withLock { entered.append(path) }
         let deadline = Date().addingTimeInterval(timeout)
         while !isOpen(path), Date() < deadline {
             try? await Task.sleep(for: .milliseconds(5))
         }
+        if isOpen(path) { return }
+        Issue.record(
+            PathGateSelfReleased(path: path, seconds: timeout),
+            sourceLocation: sourceLocation)
+    }
+}
+
+/// The gate gave up instead of being opened, so everything the test asserted
+/// after that point was measured against a cascade nobody was holding.
+private struct PathGateSelfReleased: Error, CustomStringConvertible {
+    let path: String
+    let seconds: TimeInterval
+
+    var description: String {
+        """
+        PathGate: nothing opened \(path) within \(seconds)s, so the gate released \
+        itself — the cascade it was holding ran on, and any later assertion about \
+        work being still in flight is measuring the wrong thing.
+        """
     }
 }
 

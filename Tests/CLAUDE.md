@@ -433,7 +433,7 @@ to cover it would turn a broken gate into silence.
 
 ## Assertion hygiene
 
-Four rules. Each traces to a real flake — provenance kept so the rule sticks.
+Five rules. Each traces to a real flake — provenance kept so the rule sticks.
 
 1. **Assert contracts, not incidents.** Prefer membership (`contains`) over
    `.last` or positional/ordering assertions unless ordering is the
@@ -486,6 +486,50 @@ Four rules. Each traces to a real flake — provenance kept so the rule sticks.
    Consequence for tooling: anything that reads a **CI summary** to extract
    diagnostics will not find them in the `#expect` form. (Readers of the full
    tee'd log are unaffected — the `↳` line is present there.)
+
+5. **A bounded wait's verdict must come from a probe taken *after* the
+   deadline test — never from the loop's exit.** The loop shape everyone writes
+   tests the deadline before the condition:
+
+   ```swift
+   while ContinuousClock.now < deadline {
+       if condition() { return }
+       try? await Task.sleep(for: .milliseconds(5))
+   }
+   Issue.record(Timeout(...))          // WRONG: reports a sample up to `timeout` old
+   ```
+
+   `Task.sleep` is a floor, not a ceiling. When the resumption lands past the
+   deadline the loop exits having last looked at the top — possibly before the
+   task it is waiting on ever ran — and reports "never became true" about a
+   condition that has been true the whole time. Under the fast parallel pass
+   that is the *expected* path, not an exotic one: Swift Testing starts every
+   non-serialized test in one process with no concurrency cap, and mined CI
+   xUnit puts p50 per-test latency at 56-70 s against a 123-158 s pass, so a
+   5 ms step aside routinely returns its turn tens of seconds later. Add the
+   re-read, as `advanceUntil`, `watchForSleeper` and
+   `SidecarTestSupport.waitUntil` already do:
+
+   ```swift
+   if condition() { return }
+   Issue.record(Timeout(...))
+   ```
+
+   Two corollaries the same flake earned. **Report elapsed, not just the
+   budget** — "still not true after 30.0 s" reads identically whether the wait
+   polled steadily or got one turn and came back 45 s later, and only the
+   second is a scheduling gap. And **`try?` around the poll sleep swallows
+   cancellation**, which throws instantly: without a `Task.isCancelled` check
+   the loop stops suspending and busy-spins its whole budget away on a
+   cooperative thread, then blames the call site for a harness cancellation.
+
+   (Provenance: PR #716 attempts 1 and 2, where all nine `waitUntil` call sites
+   in `EventDrivenTestClockSelfTests` recorded a 30 s timeout while every
+   downstream assertion in those same tests passed — including two 50 ms hang
+   guards that would each have recorded a second issue had the handshake
+   genuinely been missing. **That contrast is the triage rule**: when a
+   handshake genuinely misses, the assertions after it fail too; when only the
+   wait fails and the rest of the test passes, the wait is lying.)
 
 Full rationale: `docs/specs/2026-07-24-test-hardening-design.md` §6.
 
