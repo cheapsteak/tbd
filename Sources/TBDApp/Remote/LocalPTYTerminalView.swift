@@ -52,6 +52,11 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
         // down whenever `allowMouseReporting` is true (see
         // `handleClickPassthrough`), so this doesn't double-forward.
         tv.allowMouseReporting = true
+        // The GPU draw path applies to every terminal surface, not just the
+        // tmux panes. Leaving this one out would silently mix renderers inside
+        // a single A/B — a user evaluating the flag would open a remote-attach
+        // terminal, find it still stutters, and blame the renderer.
+        tv.applyMetalRendererPreference(enabled: AppState.metalTerminalRendererEnabled())
         tv.terminalDelegate = context.coordinator
         context.coordinator.terminalView = tv
         context.coordinator.onExit = onExit
