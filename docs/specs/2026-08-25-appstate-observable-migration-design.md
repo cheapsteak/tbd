@@ -3,7 +3,7 @@
 ## Why
 
 `AppState` is an `ObservableObject` carrying 109 `@Published` properties, consumed
-through `@EnvironmentObject` by 106 binding sites across 69 view files. Under
+through `@EnvironmentObject` by 88 binding sites across 56 view files. Under
 `ObservableObject`, `objectWillChange` is object-wide: a write to any one of those
 109 properties invalidates every view observing the object, whether or not that
 view reads the property that changed. Readership is irrelevant to invalidation —
@@ -60,7 +60,7 @@ upstream dependency and is tracked separately.
 
 So this migration addresses the largest single main-thread consumer during
 scroll, but it is one of three independent costs and not the first one to land.
-It is justified on the structural argument — object-wide invalidation across 106
+It is justified on the structural argument — object-wide invalidation across 88
 binding sites is wrong at any writer frequency, and the measured five-to-sevenfold
 rise in graph flush is that defect made visible — rather than as the remedy for a
 slow-feeling terminal on its own.
@@ -115,8 +115,9 @@ it subscribes to.
 - `@EnvironmentObject var appState: AppState` becomes
   `@Environment(AppState.self) var appState`. Both forms crash at runtime when
   the object was never injected, so the failure mode does not change.
-- `.environmentObject(x)` becomes `.environment(x)` — 29 sites in `Sources`, 4 in
-  `Tests`, plus the manual re-injection sites for detached and nested hosting.
+- `.environmentObject(appState)` becomes `.environment(appState)` — 21 sites in
+  `Sources`, 4 in `Tests`, plus the manual re-injection sites for detached and
+  nested hosting.
 - `@StateObject` becomes `@State` (13 sites) — carries hazard (c).
 - `@ObservedObject` becomes a plain `let` (8 sites) — two of them sit inside
   `Commands` scenes, flagged in hazard (d).
@@ -278,8 +279,8 @@ the risk is effort rather than silent breakage.
 ## Landing
 
 **PR 1 converts `AppState` alone.** This step is atomic by necessity: the class
-declaration and all 106 binding sites must flip together, spanning roughly 69
-source and 6 test files. It carries the entire measured win, the
+declaration and all 88 binding sites must flip together, spanning 56 source and
+4 test files. It carries the entire measured win, the
 `@ObservationIgnored` audit, the cache-getter dependency fix from hazard (b),
 and the acceptance gate below.
 
@@ -376,7 +377,7 @@ before the gate is applied: a lower report rate reduces run-loop turns, which
 reduces flush frequency on its own and would otherwise be credited to this
 migration.
 
-**The existing suite green**, with the 6 test files' injection sites updated, run
+**The existing suite green**, with the 4 test files' injection sites updated, run
 through `scripts/test.sh`.
 
 ## Waivers
@@ -409,7 +410,7 @@ audit, on the grounds that the migration touches every view file while cheaper
 options remained untried. The judgment recorded here is that object-wide
 invalidation is a defect in the observation model rather than a tuning
 parameter: guards shrink the number of redundant fires, but every legitimate
-fire still invalidates all 106 binding sites, so guard work alone converges on
+fire still invalidates all 88 binding sites, so guard work alone converges on
 "every write is justified and every view still pays for each one." The two
 measures also compose rather than compete — the audit stays open above — and
 deferral would leave the 79.5 ms-class memo caches permanently load-bearing
