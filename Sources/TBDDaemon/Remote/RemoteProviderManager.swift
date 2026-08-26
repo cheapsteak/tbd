@@ -33,12 +33,34 @@ public actor RemoteProviderManager {
     private let actuationLog: ActuationLog?
     static let pollInterval: TimeInterval = 60
     /// How many times one provider may be enrolled post-boot before this
-    /// actor stops trying. More than one because a describe failure is
-    /// routinely transient (the provider is mid-deploy, or a credential is
-    /// being refreshed); bounded because nothing clears the count, so an
-    /// unbounded retry would become a describe subprocess per RPC for a
-    /// provider that is permanently unreachable. A daemon restart resets it,
-    /// as it resets every other in-memory enrollment fact.
+    /// actor stops trying.
+    ///
+    /// This is a chosen policy, not an inherited one, so it is stated rather
+    /// than left implicit in a constant (`docs/theory-placement.md`). Boot
+    /// does not retry at all: a `describe` that fails during the boot sweep
+    /// leaves no `describes` entry until the daemon restarts. Enrollment
+    /// deliberately differs, because its trigger differs — boot runs once at
+    /// a moment nobody chose, while enrollment runs when somebody actually
+    /// addresses the provider, and answering "no describe, and never again"
+    /// to a user who just invoked a verb against a provider that has since
+    /// come back is the bug this whole path exists to remove.
+    ///
+    /// Why more than one: a describe failure is routinely transient — the
+    /// provider mid-deploy, a credential being refreshed. Why bounded at all:
+    /// nothing clears the count, and the retry is driven by traffic rather
+    /// than a timer, so an unbounded budget would spend a describe subprocess
+    /// on every `invoke` and every roster refresh, forever, for a provider
+    /// that is simply gone. Why three rather than two or ten: it is the
+    /// smallest budget that survives more than a single unlucky moment while
+    /// staying negligible if the provider never comes back. A daemon restart
+    /// resets it, as it resets every other in-memory enrollment fact.
+    ///
+    /// No spec accompanies this: the enclosing change is a bug fix, adding no
+    /// subsystem, flag, or migration, and the constant tunes a retry inside
+    /// it rather than revising TBD's theory of remote providers (root
+    /// `CLAUDE.md`, "Work starts with a brainstormed spec"). If the retry
+    /// ever grows a timer, a backoff, or a persisted count, that is a new
+    /// theory and it needs one.
     static let maxEnrollmentAttempts = 3
 
     private var providers: [String: RemoteProviderConfig] = [:]
