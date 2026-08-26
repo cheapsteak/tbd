@@ -247,3 +247,55 @@ latency. Answering it requires signpost instrumentation inside the render path.
   uptime. A view hierarchy that presents more work per frame would degrade first
   under that pressure — which would explain why a simpler emulator on the same
   backend stays smooth — but nothing here demonstrates it.
+
+## The stall is found: a synchronous burst inside the poll cycle — 2026-08-26
+
+Signpost instrumentation on the render path answered the question the sections
+above left open. Intervals were emitted around the main-thread hop in
+`TerminalPanelView.dataReceived` (enqueue to execute), around `feed`, and around
+the display pass; `rpc.pollCycle` was already instrumented. Collected with
+`log stream --style ndjson --signpost` over a 30-second window of ordinary
+operation, with agents streaming and no user interaction:
+
+- **`mainThreadHop` — p50 0.08 ms, p90 2.03 ms, p99 156 ms, max 162 ms.**
+- `rpc.pollCycle` — p50 231 ms, p90 539 ms, max 605 ms; about fifteen in thirty seconds.
+- `feed` — p50 0.11 ms, max 1.36 ms.
+- `displayPass` — p50 5.28 ms, max 10.6 ms.
+
+**Terminal output waits up to 162 ms to reach the renderer, while the median wait
+is 0.08 ms.** Averages cannot see this, which is why every earlier measurement
+missed it: a main thread that is idle 81% of the time still stalls terminal I/O
+for a sixth of a second at a stretch, because what matters is when work lands
+rather than how much of it there is.
+
+**Twelve of fourteen stalls over 20 ms began while a poll cycle was in flight**,
+including all eight of the worst.
+
+### What the correlation does and does not show
+
+It is not that the poll cycle holds the main thread for its whole duration.
+`runPollCycleIfIdle` awaits its body, and an await on the main actor yields, so
+the interval spans suspensions during which the main thread is free.
+
+The stalls begin at scattered points within a cycle — 5%, 46%, 50%, 82% of the
+way through — and every one ends before its cycle does. They also arrive in
+near-identical batches: four stalls of 162.2, 162.3, 162.3 and 160.1 ms all
+beginning within 0.7% of each other, which is the signature of several chunks
+queued behind a single blocking burst and released together.
+
+So one phase of the poll cycle is synchronous on the main actor and runs for
+roughly 155 to 162 ms. **Which phase is not yet identified** and needs finer
+instrumentation inside the poll body. The plausible candidate is the phase that
+applies results to `AppState`: decoding, diffing, and assigning published
+properties, each assignment invalidating every observing view.
+
+### What this reorders
+
+**Rendering is not the bottleneck.** Parse costs 0.11 ms and a display pass 5 to
+9 ms. The per-row attributed-string rebuild, the shaped-line cache, and the blink
+scan are real inefficiencies, and none of them is what stalls a keystroke.
+
+The observation-churn work is closer to the mark than the rendering work, since
+whole-object invalidation is a candidate for what makes the burst expensive — but
+that connection is inferred from the shape of the evidence rather than measured,
+and the finer instrumentation is what would settle it.
