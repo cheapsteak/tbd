@@ -52,17 +52,35 @@ private final class PathGate: @unchecked Sendable {
         return opened.contains(path)
     }
 
+    /// Parks the caller until `open(path)` is called.
+    ///
     /// The self-release cap must strictly dominate the `waitUntil` that
     /// observes this hold, or the gate opens itself mid-observation and the
     /// test measures nothing. `TestGate.deadline` is sized for exactly that
     /// relationship against `TestDeadlines.saturatedPass` — see
     /// `Tests/TestSupport/BoundedGateSupport.swift`.
-    func wait(_ path: String, timeout: Duration = TestGate.deadline) async {
+    ///
+    /// Giving up is also **loud**, because a gate that self-releases in silence
+    /// hands the test a cascade it believes is still held, and the
+    /// mis-attributed failure then lands on whatever the test asserted next.
+    /// Sizing keeps that unreachable on a healthy run; the diagnostic is what
+    /// makes it legible when the sizing is wrong.
+    func wait(_ path: String, timeout: Duration = TestGate.deadline,
+              sourceLocation: SourceLocation = #_sourceLocation) async {
         lock.withLock { entered.append(path) }
         let deadline = ContinuousClock.now.advanced(by: timeout)
         while !isOpen(path), ContinuousClock.now < deadline {
+            if Task.isCancelled { break }
             try? await Task.sleep(for: .milliseconds(5))
         }
+        if isOpen(path) { return }
+        // Cancellation is not expiry: `try?` above cannot tell them apart, so
+        // the loop breaks on it, and attribution for a cancelled test belongs
+        // to whatever did the cancelling rather than to this gate.
+        if Task.isCancelled { return }
+        Issue.record(
+            TestGateTimeout(gate: "PathGate(\(path))", after: timeout),
+            sourceLocation: sourceLocation)
     }
 }
 

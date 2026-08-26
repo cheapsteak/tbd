@@ -442,6 +442,13 @@ public extension TestClock {
             } catch {
                 return  // A sleeper is registered — that is what we were waiting for.
             }
+            // Cancellation is not expiry, and `try?` cannot tell them apart: a
+            // cancelled `Task.sleep` throws instantly, so without this the loop
+            // stops yielding and busy-spins its remaining budget on a
+            // cooperative thread — 149 call sites reach this helper through
+            // `advanceWhenSuspended`, and every other test in the process is
+            // queued behind the thread it pins.
+            if Task.isCancelled { break }
             try? await Task.sleep(for: pollInterval)
         } while ContinuousClock.now < deadline
         // One last probe, so the verdict is a fresh read rather than the loop's
@@ -457,6 +464,9 @@ public extension TestClock {
         } catch {
             return
         }
+        // A cancelled wait reports nothing: attribution belongs to whatever did
+        // the cancelling, as `EventDrivenTestClock.sleeperArmed` documents.
+        if Task.isCancelled { return }
         Issue.record(
             """
             TestClock: no task was suspended on the clock within \(timeout) — the \
