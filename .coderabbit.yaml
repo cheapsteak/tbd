@@ -94,8 +94,10 @@ reviews:
         `TBD_TEST_CODEX_HOME` to their prior values — never `unsetenv` them,
         which falls back to the developer's real directories process-wide.
 
-        A test that asserts a fix must fail against the unfixed code. Flag tests
-        that would pass either way.
+        A new branching conditional that gates behavior — a feature flag,
+        toggle, or mode switch — needs a test per branch: that the gated
+        behavior is off when the flag is off, and that ungated behavior still
+        works.
 
     - path: "docs/**/*.md"
       instructions: |
