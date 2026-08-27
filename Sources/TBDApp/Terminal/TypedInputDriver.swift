@@ -127,6 +127,11 @@ enum TypedInputDriver {
         }
     }
 
+    /// Output rate for callers outside this type — the paint log line uses it to
+    /// mark whether there was anything to draw during a gap.
+    @MainActor
+    static func chunkRate() -> Int { recentChunkRate() }
+
     @MainActor
     private static func recentChunkRate() -> Int {
         let now = ProcessInfo.processInfo.systemUptime

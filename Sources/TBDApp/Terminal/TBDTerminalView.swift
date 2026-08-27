@@ -18,6 +18,7 @@ class TBDTerminalView: TerminalView {
     /// driver address one specific terminal instead of "whichever view happens
     /// to be first responder", which typed into a live agent session by mistake.
     var diagTerminalID: UUID?
+    private static let paintLog = Logger(subsystem: "com.tbd.app", category: "paintcadence")
 
     enum PasteAction: Equatable {
         case text
@@ -170,6 +171,29 @@ class TBDTerminalView: TerminalView {
     /// from them are exact regardless.
     override func viewWillDraw() {
         super.viewWillDraw()
+        // TEMPORARY diagnostic instrumentation — see `TypedInputDriver`.
+        //
+        // A paint is recorded as an `info` LINE as well as a signpost, because
+        // signposts do not survive long enough to analyse. They live in a small
+        // in-memory ring buffer that holds roughly 900 events for this subsystem
+        // and are never persisted: `log show --last 5m` and `--last 120m` both
+        // return ~900, while info lines over the same spans scale linearly from
+        // 378 to 5893. So a signpost capture read back even an hour later is
+        // empty, from an app that was working — and an empty window is
+        // indistinguishable from a terminal that never drew.
+        //
+        // Inter-paint gaps are the metric that matters: during a reported lag
+        // episode the median gap was 101 ms and 94% of the window sat in gaps
+        // over 100 ms, while keystrokes still reached the main thread in 0.85 ms.
+        // Making this durable is what allows that to be joined against keystroke
+        // delays after the fact, on any episode, without a live capture running.
+        // The output rate rides along on every paint, because a gap between
+        // paints is only starvation if there was something to draw. An idle
+        // terminal legitimately goes seconds without painting, and reading those
+        // gaps as lag is an error this investigation has already made once and
+        // retracted.
+        Self.paintLog.info(
+            "paint term=\(self.diagTerminalID?.uuidString.prefix(8) ?? "-", privacy: .public) chunks1s=\(TypedInputDriver.chunkRate(), privacy: .public)")
         let signposter = RenderLatencySignposts.signposter
         let state = signposter.beginInterval("displayPass", id: signposter.makeSignpostID())
         DispatchQueue.main.async {
