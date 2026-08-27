@@ -1,0 +1,107 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit review configuration.
+#
+# `reviews.auto_review.base_branches` is the load-bearing key here: CodeRabbit
+# skips auto review on any base branch it does not consider the repository
+# default, and it decided this repository's default was `master`. There has
+# never been a `master` branch — GitHub reports `default_branch: main` — so
+# naming `main` explicitly makes the review run regardless of what CodeRabbit
+# believes the default to be.
+language: en-US
+
+reviews:
+  profile: chill
+  high_level_summary: true
+  poem: false
+
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - ^main$
+
+  # Build products, vendored artifacts, and lockfiles carry no review signal.
+  path_filters:
+    - "!.build/**"
+    - "!rust/comrak-ffi/target/**"
+    - "!Package.resolved"
+
+  # Conventions a general-purpose reviewer cannot infer from the code alone.
+  # These mirror the rules in CLAUDE.md; keep the two in step.
+  path_instructions:
+    - path: "Sources/**/*.swift"
+      instructions: |
+        `print()` is banned outside `Sources/TBDCLI` — diagnostics use
+        `os.Logger` with a `com.tbd.*` subsystem and an explicit `privacy:`
+        argument on dynamic interpolations.
+
+        Anything that sleeps, debounces, polls, or times out takes an injected
+        clock as its last initializer parameter, defaulted:
+        `clock: any Clock<Duration> = ContinuousClock()` — existential, not
+        generic. Timestamps that get persisted or compared use a separate date
+        seam instead: `Duration` is behavior, `Date` is data.
+
+        Never infer agent state by parsing rendered terminal output — tmux
+        `capture-pane` text, composer glyphs, placeholder or status strings.
+        Use machine interfaces: hooks, transcript JSONL, tmux control mode,
+        exit codes, or TBD's own DB/RPC state.
+
+        All `ChannelHandlerContext` access must happen on the channel's event
+        loop; wrap in `context.eventLoop.execute { ... }`.
+
+        TBDApp is an unbundled SPM executable, so APIs that require a bundle
+        identifier crash at runtime — guard them with
+        `Bundle.main.bundleIdentifier != nil`.
+
+    - path: "Sources/TBDDaemon/Database/Migrations/**"
+      instructions: |
+        Migrations are `.sql` files named `YYYYMMDDHHMMSS_lower_snake.sql`, one
+        statement kind per file. A landed migration is frozen: never modify or
+        delete one, add a new file instead.
+
+        Feature-flag columns must omit the SQL `DEFAULT` clause, so NULL stays
+        a distinct "nobody chose" state and the shipped default lives in exactly
+        one place — the `?? Config.<flag>Default` in `ConfigRecord.toModel()`.
+        `ADD COLUMN ... DEFAULT` backfills every existing row, which makes a
+        later default flip a no-op for existing installs.
+
+        A new column needs three changes in the same commit: the migration, the
+        GRDB record type, and the Codable model in `Sources/TBDShared/Models.swift`
+        (new fields optional or defaulted, so existing rows still decode).
+
+    - path: "Tests/**"
+      instructions: |
+        Tests must never touch the developer's real `~/tbd`, `~/.claude`, or
+        `~/.codex`. Prefer injection seams — an explicit environment dict, or an
+        injected directory — over `setenv`. `setenv("TBD_HOME", ...)` is allowed
+        only inside suites nested under `TBDHomeSerialized` in
+        `Tests/TBDDaemonTests`, because all test targets compile into one process
+        and suites run in parallel.
+
+        Teardown must restore `TBD_HOME`, `TBD_CLAUDE_HOST_HOME`, and
+        `TBD_TEST_CODEX_HOME` to their prior values — never `unsetenv` them,
+        which falls back to the developer's real directories process-wide.
+
+        A test that asserts a fix must fail against the unfixed code. Flag tests
+        that would pass either way.
+
+    - path: "docs/**/*.md"
+      instructions: |
+        Documents must stand alone for a first-time reader. No revision history
+        in prose — no "amended <date>" notes, no retracing of earlier drafts.
+        Rewrite superseded passages to state the current design as if it were
+        always so. Keep evidence, drop chronology.
+
+        No prose tables. Use lists with a bolded lead term, an en dash, then
+        prose. Tables are acceptable only when cells are short numeric or
+        scannable values.
+
+        This repository is public and multi-tenant: no real employer, org, repo,
+        host, account, person, or ticket names, no internal URLs, and no
+        machine-specific paths. Use `acme` placeholders.
+
+  tools:
+    swiftlint:
+      enabled: true
+      config_file: .swiftlint.yml
