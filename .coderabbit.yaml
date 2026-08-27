@@ -56,9 +56,20 @@ reviews:
 
     - path: "Sources/TBDDaemon/Database/Migrations/**"
       instructions: |
-        Migrations are `.sql` files named `YYYYMMDDHHMMSS_lower_snake.sql`, one
-        statement kind per file. A landed migration is frozen: never modify or
-        delete one, add a new file instead.
+        Migrations are `.sql` files named `YYYYMMDDHHMMSS_lower_snake.sql`,
+        whose stem is the GRDB migration identifier — one file per migration, so
+        parallel branches can neither pick the same identifier nor edit the same
+        text. A landed migration is frozen: never modify or delete one, add a
+        new file instead.
+
+        A file may hold several statements; a column add followed by a backfill
+        `UPDATE` is an established pattern. What is constrained is the form of
+        each statement, against the allowlist `scripts/lint-migrations.py`
+        enforces: `CREATE TABLE`, `CREATE [UNIQUE] INDEX`,
+        `ALTER TABLE ... ADD [COLUMN]`, `DROP TABLE`, `DROP INDEX`,
+        `INSERT OR IGNORE`, `INSERT OR REPLACE`, `UPDATE`, `DELETE FROM`.
+        Anything else is rewritten into one of those forms or takes the Swift
+        escape hatch. Do not flag a multi-statement migration on its own.
 
         Feature-flag columns must omit the SQL `DEFAULT` clause, so NULL stays
         a distinct "nobody chose" state and the shipped default lives in exactly
