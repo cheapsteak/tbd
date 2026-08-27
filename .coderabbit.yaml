@@ -27,92 +27,28 @@ reviews:
     - "!rust/comrak-ffi/target/**"
     - "!Package.resolved"
 
-  # Conventions a general-purpose reviewer cannot infer from the code alone.
-  # These mirror the rules in CLAUDE.md; keep the two in step.
-  path_instructions:
-    - path: "Sources/**/*.swift"
-      instructions: |
-        `print()` is banned outside `Sources/TBDCLI` — diagnostics use
-        `os.Logger` with a `com.tbd.*` subsystem and an explicit `privacy:`
-        argument on dynamic interpolations.
-
-        Anything that sleeps, debounces, polls, or times out takes an injected
-        clock as its last initializer parameter, defaulted:
-        `clock: any Clock<Duration> = ContinuousClock()` — existential, not
-        generic. Timestamps that get persisted or compared use a separate date
-        seam instead: `Duration` is behavior, `Date` is data.
-
-        Never infer agent state by parsing rendered terminal output — tmux
-        `capture-pane` text, composer glyphs, placeholder or status strings.
-        Use machine interfaces: hooks, transcript JSONL, tmux control mode,
-        exit codes, or TBD's own DB/RPC state.
-
-        All `ChannelHandlerContext` access must happen on the channel's event
-        loop; wrap in `context.eventLoop.execute { ... }`.
-
-        TBDApp is an unbundled SPM executable, so APIs that require a bundle
-        identifier crash at runtime — guard them with
-        `Bundle.main.bundleIdentifier != nil`.
-
-    - path: "Sources/TBDDaemon/Database/Migrations/**"
-      instructions: |
-        Migrations are `.sql` files named `YYYYMMDDHHMMSS_lower_snake.sql`,
-        whose stem is the GRDB migration identifier — one file per migration, so
-        parallel branches can neither pick the same identifier nor edit the same
-        text. A landed migration is frozen: never modify or delete one, add a
-        new file instead.
-
-        A file may hold several statements; a column add followed by a backfill
-        `UPDATE` is an established pattern. What is constrained is the form of
-        each statement, against the allowlist `scripts/lint-migrations.py`
-        enforces: `CREATE TABLE`, `CREATE [UNIQUE] INDEX`,
-        `ALTER TABLE ... ADD [COLUMN]`, `DROP TABLE`, `DROP INDEX`,
-        `INSERT OR IGNORE`, `INSERT OR REPLACE`, `UPDATE`, `DELETE FROM`.
-        Anything else is rewritten into one of those forms or takes the Swift
-        escape hatch. Do not flag a multi-statement migration on its own.
-
-        Feature-flag columns must omit the SQL `DEFAULT` clause, so NULL stays
-        a distinct "nobody chose" state and the shipped default lives in exactly
-        one place — the `?? Config.<flag>Default` in `ConfigRecord.toModel()`.
-        `ADD COLUMN ... DEFAULT` backfills every existing row, which makes a
-        later default flip a no-op for existing installs.
-
-        A new column needs three changes in the same commit: the migration, the
-        GRDB record type, and the Codable model in `Sources/TBDShared/Models.swift`
-        (new fields optional or defaulted, so existing rows still decode).
-
-    - path: "Tests/**"
-      instructions: |
-        Tests must never touch the developer's real `~/tbd`, `~/.claude`, or
-        `~/.codex`. Prefer injection seams — an explicit environment dict, or an
-        injected directory — over `setenv`. `setenv("TBD_HOME", ...)` is allowed
-        only inside suites nested under `TBDHomeSerialized` in
-        `Tests/TBDDaemonTests`, because all test targets compile into one process
-        and suites run in parallel.
-
-        Teardown must restore `TBD_HOME`, `TBD_CLAUDE_HOST_HOME`, and
-        `TBD_TEST_CODEX_HOME` to their prior values — never `unsetenv` them,
-        which falls back to the developer's real directories process-wide.
-
-        A new branching conditional that gates behavior — a feature flag,
-        toggle, or mode switch — needs a test per branch: that the gated
-        behavior is off when the flag is off, and that ungated behavior still
-        works.
-
-    - path: "docs/**/*.md"
-      instructions: |
-        Documents must stand alone for a first-time reader. No revision history
-        in prose — no "amended <date>" notes, no retracing of earlier drafts.
-        Rewrite superseded passages to state the current design as if it were
-        always so. Keep evidence, drop chronology.
-
-        No prose tables. Use lists with a bolded lead term, an en dash, then
-        prose. Tables are acceptable only when cells are short numeric or
-        scannable values.
-
-        This repository is public and multi-tenant: no real employer, org, repo,
-        host, account, person, or ticket names, no internal URLs, and no
-        machine-specific paths. Use `acme` placeholders.
+  # No `path_instructions` block on purpose, and this is the interesting part
+  # of this file.
+  #
+  # CodeRabbit's Code Guidelines feature already ingests `**/CLAUDE.md` as
+  # review criteria — on by default, no configuration needed — and scopes each
+  # file to its own directory subtree, which is exactly how this repository
+  # already organizes them: the root `CLAUDE.md` applies everywhere,
+  # `Sources/TBDDaemon/Database/CLAUDE.md` governs migrations, `Tests/CLAUDE.md`
+  # governs tests, and so on down eleven files.
+  #
+  # An earlier revision of this file hand-copied a paraphrase of those rules
+  # into `path_instructions`. That was strictly worse in three ways: it summarized
+  # ~1,300 lines of guidance into a few hundred, it would drift the moment a
+  # CLAUDE.md changed, and — the reason this comment is here rather than a
+  # shorter one — two of its lines stated rules the repository does not have.
+  # A wrong line here is not a local defect; it is a reviewer confidently
+  # enforcing a rule nobody wrote, on every future PR.
+  #
+  # So the guidance lives in exactly one place. Edit CLAUDE.md; CodeRabbit and
+  # Claude Code read the same file, and neither can fall out of step with it.
+  # Add a `path_instructions` entry only for something genuinely review-specific
+  # that does not belong in CLAUDE.md at all.
 
   # No `tools.swiftlint` block on purpose. CodeRabbit skips SwiftLint when a
   # GitHub workflow already runs it, and `.github/workflows/test.yml` runs
@@ -120,3 +56,13 @@ reviews:
   # like enforcement while adding no findings. CI owns SwiftLint. (The
   # `config_file` key would be redundant regardless: CodeRabbit auto-detects
   # `.swiftlint.yml`, and that key exists for configs named something else.)
+
+knowledge_base:
+  # Defaults to true, and its default `filePatterns` already include
+  # `**/CLAUDE.md`. Stated explicitly because it is now the whole mechanism by
+  # which CodeRabbit learns this repository's conventions — worth being loud
+  # about rather than leaving to an unstated default. Do not set `filePatterns`
+  # here without re-listing the defaults; the key replaces them rather than
+  # adding to them.
+  code_guidelines:
+    enabled: true
