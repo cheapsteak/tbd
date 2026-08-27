@@ -207,7 +207,7 @@ public enum TranscriptParser {
     /// tail path passes only the lines inside its byte window, so any such
     /// state starts empty there and the tail would emit rows the full parse
     /// suppresses.
-    private static func buildItems(
+    static func buildItems(
         rawLines: [[String: Any]],
         stableIDs: [String],
         toolResultsByID: [String: ToolResult]

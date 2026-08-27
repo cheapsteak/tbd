@@ -185,7 +185,13 @@ let package = Package(
         ),
         .testTarget(
             name: "TBDSharedTests",
-            dependencies: ["TBDShared"]
+            dependencies: ["TBDShared"],
+            // `.process`, not `.copy`: process flattens the directory's files
+            // into the bundle root, which is where
+            // `Bundle.module.url(forResource:withExtension:)` looks. `.copy`
+            // would preserve the `Fixtures/` subdirectory and every lookup
+            // would return nil.
+            resources: [.process("Fixtures")]
         ),
         .testTarget(
             name: "TBDDaemonTests",
