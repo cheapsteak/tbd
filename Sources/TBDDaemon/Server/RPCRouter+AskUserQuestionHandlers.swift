@@ -15,6 +15,14 @@ private let askUserQuestionMessageMaxLength = 120
 private let askUserQuestionFallbackMessage = "Claude is waiting for your answer"
 
 extension RPCRouter {
+    /// Publish this terminal's current pending-question set to subscribers.
+    /// See `StateSubscriptionManager.broadcastPendingQuestions` for why every
+    /// mutation of the store owes the app one of these.
+    func broadcastPendingQuestions(terminalID: UUID) async {
+        await subscriptions.broadcastPendingQuestions(
+            terminalID: terminalID, from: pendingQuestions)
+    }
+
     /// Stores the pending question payload for a terminal so the merger
     /// inside `handleTerminalTranscript` can synthesize a transcript item
     /// before the assistant `tool_use` line is flushed to the JSONL.
@@ -33,6 +41,7 @@ extension RPCRouter {
             timestamp: Date(timeIntervalSince1970: TimeInterval(p.timestampMillis) / 1000)
         )
         await pendingQuestions.set(terminalID: p.terminalID, pending)
+        await broadcastPendingQuestions(terminalID: p.terminalID)
         // §13's hook-event rate. Keyed on the claimed terminal ID rather than a
         // resolved row: this is a count of hook traffic, and traffic naming a
         // terminal that has since been deleted still happened. `retain` drops

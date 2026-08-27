@@ -36,14 +36,26 @@ public actor PendingQuestionStore {
             .sorted { $0.timestamp < $1.timestamp }
     }
 
-    /// Reap entries older than `maxAge` relative to `now`. Called once
-    /// per `handleTerminalTranscript` to keep stranded entries (e.g.
-    /// user-installed PreToolUse hook returned `decision: "block"`) from
-    /// living forever.
-    public func gcExpired(now: Date, maxAge: Duration) {
+    /// Reap entries older than `maxAge` relative to `now`, and report which
+    /// terminals lost one. An entry strands when a user-installed PreToolUse
+    /// hook returns `decision: "block"`, so no matching `tool_use_id` ever
+    /// reaches the JSONL to satisfy it.
+    ///
+    /// Driven by `PendingQuestionExpirySweep` on its own timer, and also once
+    /// per `handleTerminalTranscript` while that path is still live. The
+    /// returned terminal ids are what a caller broadcasts: a reap is a
+    /// mutation like any other, and a set reaped without a retraction leaves
+    /// the app rendering an entry the daemon no longer holds.
+    @discardableResult
+    public func gcExpired(now: Date, maxAge: Duration) -> Set<UUID> {
         let maxAgeSeconds = TimeInterval(maxAge.components.seconds)
             + TimeInterval(maxAge.components.attoseconds) / 1e18
         let cutoff = now.addingTimeInterval(-maxAgeSeconds)
-        pending = pending.filter { $0.value.timestamp >= cutoff }
+        var reaped: Set<UUID> = []
+        for (key, value) in pending where value.timestamp < cutoff {
+            pending.removeValue(forKey: key)
+            reaped.insert(key.terminalID)
+        }
+        return reaped
     }
 }

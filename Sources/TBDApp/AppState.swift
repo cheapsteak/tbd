@@ -1227,6 +1227,25 @@ final class AppState {
         }
     }
 
+    /// The pending `AskUserQuestion` captures for whichever terminal owns
+    /// `sessionID`, or an empty array.
+    ///
+    /// The poll scheduler is keyed on the Claude session id while the daemon
+    /// keys its store on terminal id, so the terminal collection is the join.
+    /// The empty store — overwhelmingly the common case — short-circuits
+    /// before any scan.
+    func pendingQuestionsForSession(_ sessionID: String) -> [PendingAskUserQuestion] {
+        guard !pendingQuestions.isEmpty else { return [] }
+        for rows in terminals.values {
+            for terminal in rows where terminal.claudeSessionID == sessionID {
+                if let entries = pendingQuestions[terminal.id], !entries.isEmpty {
+                    return entries
+                }
+            }
+        }
+        return []
+    }
+
     /// Selected archived worktree per repo (left rail of the archived view's nested master-detail).
     var selectedArchivedWorktreeIDs: [UUID: UUID] = [:]
 
@@ -1282,6 +1301,13 @@ final class AppState {
     /// `appSideTranscriptReadKey` is on. Constructed unconditionally — it costs
     /// nothing until a pane registers, and it stats no file until then.
     let transcriptSource = TranscriptSource()
+    /// In-flight `AskUserQuestion` captures by terminal, mirrored from the
+    /// daemon's `PendingQuestionStore` over `.terminalPendingQuestionsChanged`.
+    /// Merged into that terminal's session transcript so a question renders
+    /// before its `tool_use` line reaches the JSONL — the job the daemon's
+    /// `terminal.transcript` handler did before the app read transcripts
+    /// itself. Mirrored, never derived: the daemon is the only writer.
+    var pendingQuestions: [UUID: [PendingAskUserQuestion]] = [:]
     /// Drives `transcriptSource` at the cadence each registered pane declares.
     /// Lazy so the (equally inert) scheduler is not built for app launches that
     /// never open a transcript pane.
@@ -2127,6 +2153,17 @@ final class AppState {
             applyTerminalActivityDelta(d)
         case .terminalAwaitingInputChanged(let d):
             applyTerminalAwaitingInputDelta(d)
+        case .terminalPendingQuestionsChanged(let d):
+            if d.pending.isEmpty {
+                pendingQuestions.removeValue(forKey: d.terminalID)
+            } else {
+                pendingQuestions[d.terminalID] = d.pending.map {
+                    PendingAskUserQuestion(
+                        toolUseID: $0.toolUseID,
+                        inputJSON: $0.inputJSON,
+                        timestamp: $0.timestamp)
+                }
+            }
         case .terminalProfileChanged(let d):
             applyTerminalProfileDelta(d)
         case .watchDeskRolesChanged(let d):

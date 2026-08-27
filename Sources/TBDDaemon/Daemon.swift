@@ -67,6 +67,9 @@ public final class Daemon: Sendable {
     public nonisolated(unsafe) var gitFetchTask: Task<Void, Never>?
     public nonisolated(unsafe) var gitStatusTask: Task<Void, Never>?
     public nonisolated(unsafe) var reaperTask: Task<Void, Never>?
+    /// Timer that expires stranded `AskUserQuestion` captures (step
+    /// 11a-questions). `nil` in mock mode.
+    nonisolated(unsafe) var pendingQuestionExpirySweep: PendingQuestionExpirySweep?
     public nonisolated(unsafe) var hibernationSweepTask: Task<Void, Never>?
     /// Hourly orphan-maintenance task (orphan GC + scratch terminal
     /// reconciliation). `nil` in mock mode. See `orphanGC` for the actor it
@@ -904,6 +907,23 @@ public final class Daemon: Sendable {
                 }
             }
 
+            // 11a-questions. Expire stranded AskUserQuestion captures. This
+            // ran as a side effect of `terminal.transcript` until the app
+            // started reading transcripts itself; on that path the handler is
+            // never called, so the reap needs its own timer. Started AFTER the
+            // socket bind above (step 9) — the boot path already blocks that
+            // bind for minutes on a large archive set, and work added ahead of
+            // it makes a slow start indistinguishable from a dead daemon.
+            let questionSweep = PendingQuestionExpirySweep(
+                store: pendingQuestions,
+                onReap: { [weak subs, pendingQuestions] terminalID in
+                    await subs?.broadcastPendingQuestions(
+                        terminalID: terminalID, from: pendingQuestions)
+                }
+            )
+            self.pendingQuestionExpirySweep = questionSweep
+            await questionSweep.start()
+
             // 11a-gc. Orphan maintenance: reap abandoned agent worktrees + scratchpads
             // and reconcile scratch terminals against their shared tmux server
             // (event-driven cleanup already runs via `lifecycle.onWorktreeRemoved`
@@ -1255,6 +1275,10 @@ public final class Daemon: Sendable {
 
         if let resumeScheduler = limitResumeScheduler {
             await resumeScheduler.stop()
+        }
+
+        if let questionSweep = pendingQuestionExpirySweep {
+            await questionSweep.stop()
         }
 
         // Cancel the deferred remote-backends boot task BEFORE tearing down

@@ -906,6 +906,7 @@ extension RPCRouter {
             try await db.tabs.delete(tabID: params.terminalID)
         }
         await pendingQuestions.clear(terminalID: params.terminalID)
+        await broadcastPendingQuestions(terminalID: params.terminalID)
         await loginSessions.cancelPendingAutoLogin(terminalID: params.terminalID)
 
         // Reclaim the per-session fallbackModel overlay (keyed by terminal id),
@@ -1270,6 +1271,7 @@ extension RPCRouter {
                         throw StaleTerminalReplacementError()
                     }
                     await self.pendingQuestions.clear(terminalID: currentTerminal.id)
+                    await self.broadcastPendingQuestions(terminalID: currentTerminal.id)
                     return (try await self.db.terminals.get(id: currentTerminal.id), true)
                 }
             }
@@ -3769,6 +3771,9 @@ extension RPCRouter {
         let merged = AskUserQuestionMerger.merge(jsonlItems: parsed, pending: entries)
         for satisfiedID in merged.satisfiedToolUseIDs {
             await pendingQuestions.clear(terminalID: params.terminalID, toolUseID: satisfiedID)
+        }
+        if !merged.satisfiedToolUseIDs.isEmpty {
+            await broadcastPendingQuestions(terminalID: params.terminalID)
         }
         let messages = merged.items
 

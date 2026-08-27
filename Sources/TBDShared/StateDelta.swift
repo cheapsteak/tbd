@@ -52,6 +52,40 @@ public enum StateDelta: Codable, Sendable {
     /// (→ waiting_input or → exited). Banner-only: remote sessions have no
     /// worktree, so this does not ride `NotificationDelta`.
     case remoteSessionAttention(RemoteSessionAttentionDelta)
+    /// A terminal's in-flight `AskUserQuestion` capture set changed. Appended
+    /// last on purpose — `StateDelta`'s Codable synthesis keys on case name,
+    /// but the order is still the record of how the protocol grew.
+    case terminalPendingQuestionsChanged(TerminalPendingQuestionsDelta)
+}
+
+/// The complete set of in-flight `AskUserQuestion` captures for one terminal.
+///
+/// Whole-set rather than incremental on purpose: the set is tiny — one entry
+/// per question the `PreToolUse` hook saw before its `tool_use` line reached
+/// the JSONL — and a whole set cannot drift out of sync the way an add/remove
+/// stream can. An empty array is a retraction.
+public struct TerminalPendingQuestionsDelta: Codable, Sendable, Equatable {
+    public let terminalID: UUID
+    public let pending: [PendingQuestionPayload]
+    public init(terminalID: UUID, pending: [PendingQuestionPayload]) {
+        self.terminalID = terminalID
+        self.pending = pending
+    }
+}
+
+/// Wire form of one `PendingAskUserQuestion`. Separate from the in-memory type
+/// because that one is deliberately not `Codable`: it is a pure value the
+/// merger consumes, and giving it a wire encoding would invite the two to
+/// drift into one another.
+public struct PendingQuestionPayload: Codable, Sendable, Equatable {
+    public let toolUseID: String
+    public let inputJSON: String
+    public let timestamp: Date
+    public init(toolUseID: String, inputJSON: String, timestamp: Date) {
+        self.toolUseID = toolUseID
+        self.inputJSON = inputJSON
+        self.timestamp = timestamp
+    }
 }
 
 /// Delta payload for a terminal's hibernation state change (hibernate / wake)

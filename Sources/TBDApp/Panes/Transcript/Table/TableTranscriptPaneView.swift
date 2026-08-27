@@ -338,7 +338,16 @@ struct TableTranscriptPaneView: View {
 
         await scheduler.setOnChange { [weak state] sessionID in
             guard let state else { return }
-            let items = await source.items(sessionID: sessionID)
+            let raw = await source.items(sessionID: sessionID)
+            // A question the PreToolUse hook captured renders before its
+            // `tool_use` line reaches the JSONL. The daemon did this inside
+            // `terminal.transcript`; on this path nobody else will. Skipping
+            // the merge on an empty set keeps the common tick off the (cheap
+            // but non-zero) index build.
+            let pending = await MainActor.run { state.pendingQuestionsForSession(sessionID) }
+            let items = pending.isEmpty
+                ? raw
+                : AskUserQuestionMerger.merge(jsonlItems: raw, pending: pending).items
             await MainActor.run {
                 state.sessionTranscripts[sessionID] = items
                 state.touchSessionTranscript(sessionID)
@@ -351,7 +360,11 @@ struct TableTranscriptPaneView: View {
         // Publish once immediately so the pane is not blank until the first tick.
         if let path, !path.isEmpty {
             await source.refresh(sessionID: sid, path: path)
-            let items = await source.items(sessionID: sid)
+            let raw = await source.items(sessionID: sid)
+            let pending = appState.pendingQuestionsForSession(sid)
+            let items = pending.isEmpty
+                ? raw
+                : AskUserQuestionMerger.merge(jsonlItems: raw, pending: pending).items
             appState.sessionTranscripts[sid] = items
             appState.touchSessionTranscript(sid)
             if !items.isEmpty { hasShownInitialMessages = true }
