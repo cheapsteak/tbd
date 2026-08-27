@@ -1,0 +1,88 @@
+import Foundation
+import Testing
+@testable import TBDApp
+
+/// Tests for the `appSideTranscriptRead` UserDefaults flag and the single
+/// registration gate it drives.
+///
+/// Isolation matters: TBDApp ships as an unbundled SPM executable, so its
+/// `UserDefaults.standard` domain is the developer's real `TBDApp.plist` — the
+/// same domain a running production TBDApp reads via `@AppStorage`. Every test
+/// below drives the helper through a per-test `UserDefaults(suiteName:)` and
+/// tears that domain down afterwards.
+@MainActor
+@Suite("appSideTranscriptRead flag")
+struct AppSideTranscriptFlagTests {
+
+    private func withSuite(_ body: (UserDefaults) -> Void) {
+        let name = "TBDAppTests.AppSideTranscript.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        body(defaults)
+    }
+
+    @Test("defaults to off when nobody has chosen")
+    func defaultsOff() {
+        withSuite { defaults in
+            #expect(AppState.appSideTranscriptReadEnabled(defaults: defaults) == false)
+            #expect(AppState.appSideTranscriptReadDefault == false)
+        }
+    }
+
+    @Test("an explicit choice is distinguishable from never having chosen")
+    func explicitChoiceIsDistinguishable() {
+        withSuite { defaults in
+            #expect(defaults.object(forKey: AppState.appSideTranscriptReadKey) == nil,
+                    "unset must read as nil, not as false")
+            defaults.set(false, forKey: AppState.appSideTranscriptReadKey)
+            #expect(defaults.object(forKey: AppState.appSideTranscriptReadKey) as? Bool == false)
+            #expect(AppState.appSideTranscriptReadEnabled(defaults: defaults) == false)
+            defaults.set(true, forKey: AppState.appSideTranscriptReadKey)
+            #expect(AppState.appSideTranscriptReadEnabled(defaults: defaults) == true)
+        }
+    }
+
+    @Test("with the flag off nothing registers, so no file is ever read")
+    func flagOffDoesNotRegister() async {
+        let scheduler = TranscriptPollScheduler(source: TranscriptSource())
+        await TranscriptPaneRegistration.apply(
+            enabled: false, sessionID: "s1", path: "/tmp/whatever",
+            tier: .foreground, scheduler: scheduler)
+        #expect(await scheduler.registeredSessionIDs.isEmpty)
+    }
+
+    @Test("with the flag on the session registers")
+    func flagOnRegisters() async {
+        let scheduler = TranscriptPollScheduler(source: TranscriptSource())
+        await TranscriptPaneRegistration.apply(
+            enabled: true, sessionID: "s1", path: "/tmp/whatever",
+            tier: .foreground, scheduler: scheduler)
+        #expect(await scheduler.registeredSessionIDs == ["s1"])
+        await scheduler.deregister(sessionID: "s1")
+    }
+
+    @Test("a nil or empty path never registers, even with the flag on")
+    func missingPathDoesNotRegister() async {
+        let scheduler = TranscriptPollScheduler(source: TranscriptSource())
+        await TranscriptPaneRegistration.apply(
+            enabled: true, sessionID: "s1", path: nil,
+            tier: .foreground, scheduler: scheduler)
+        await TranscriptPaneRegistration.apply(
+            enabled: true, sessionID: "s2", path: "",
+            tier: .foreground, scheduler: scheduler)
+        #expect(await scheduler.registeredSessionIDs.isEmpty)
+    }
+
+    @Test("turning the flag off deregisters a pane that had registered")
+    func flagOffDeregistersAnExistingRegistration() async {
+        let scheduler = TranscriptPollScheduler(source: TranscriptSource())
+        await TranscriptPaneRegistration.apply(
+            enabled: true, sessionID: "s1", path: "/tmp/whatever",
+            tier: .foreground, scheduler: scheduler)
+        #expect(await scheduler.registeredSessionIDs == ["s1"])
+        await TranscriptPaneRegistration.apply(
+            enabled: false, sessionID: "s1", path: "/tmp/whatever",
+            tier: .foreground, scheduler: scheduler)
+        #expect(await scheduler.registeredSessionIDs.isEmpty)
+    }
+}

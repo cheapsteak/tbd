@@ -26,6 +26,11 @@ struct TableTranscriptPaneView: View {
     /// unchanged bottom via the existing `.rebuild` path.
     private let tailLimit = 60
 
+    /// Gates the app-side read path. Default spelled with the AppState
+    /// constant so this and every other read site cannot disagree.
+    @AppStorage(AppState.appSideTranscriptReadKey)
+    private var appSideTranscriptRead: Bool = AppState.appSideTranscriptReadDefault
+
     @State private var loadError: String?
     @State private var hasShownInitialMessages = false
     /// False until the full transcript has been fetched for the current session.
@@ -304,6 +309,10 @@ struct TableTranscriptPaneView: View {
     // MARK: - Polling
 
     private func pollLoop() async {
+        if appSideTranscriptRead {
+            await appSideLoop()
+            return
+        }
         var consecutiveFailures = 0
         while !Task.isCancelled {
             await pollOnce(failureCount: &consecutiveFailures)
@@ -314,6 +323,47 @@ struct TableTranscriptPaneView: View {
             // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
         }
+    }
+
+    /// Registers this pane with the poll scheduler and publishes into
+    /// `AppState.sessionTranscripts` whenever the source reports a change. The
+    /// three view consumers — this pane, the history pane and the overlay —
+    /// read that store already, so nothing downstream changes.
+    private func appSideLoop() async {
+        guard let sid = currentSessionID else { return }
+        let path = terminal?.transcriptPath
+        let scheduler = appState.transcriptPollScheduler
+        let source = appState.transcriptSource
+        let state = appState
+
+        await scheduler.setOnChange { [weak state] sessionID in
+            guard let state else { return }
+            let items = await source.items(sessionID: sessionID)
+            await MainActor.run {
+                state.sessionTranscripts[sessionID] = items
+                state.touchSessionTranscript(sessionID)
+            }
+        }
+        await TranscriptPaneRegistration.apply(
+            enabled: true, sessionID: sid, path: path,
+            tier: .foreground, scheduler: scheduler)
+
+        // Publish once immediately so the pane is not blank until the first tick.
+        if let path, !path.isEmpty {
+            await source.refresh(sessionID: sid, path: path)
+            let items = await source.items(sessionID: sid)
+            appState.sessionTranscripts[sid] = items
+            appState.touchSessionTranscript(sid)
+            if !items.isEmpty { hasShownInitialMessages = true }
+        }
+
+        // Hold the task open so `.task(id:)` teardown deregisters on disappear.
+        // `clock.sleep`, never `Task.sleep`: the latter is a lint error here.
+        let clock = ContinuousClock()
+        while !Task.isCancelled {
+            try? await clock.sleep(for: .seconds(1))
+        }
+        await scheduler.deregister(sessionID: sid)
     }
 
     private func pollOnce(failureCount: inout Int) async {

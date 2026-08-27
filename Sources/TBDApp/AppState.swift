@@ -1278,6 +1278,15 @@ final class AppState {
     /// Lives here — not on any view — so SwiftUI view destruction cannot tear
     /// down an active reader. Keyed by `FDVendHeader.routingKey`.
     let controlModeReaders = ControlModeReaderRegistry()
+    /// The app's own transcript reader, exercised only while
+    /// `appSideTranscriptReadKey` is on. Constructed unconditionally — it costs
+    /// nothing until a pane registers, and it stats no file until then.
+    let transcriptSource = TranscriptSource()
+    /// Drives `transcriptSource` at the cadence each registered pane declares.
+    /// Lazy so the (equally inert) scheduler is not built for app launches that
+    /// never open a transcript pane.
+    @ObservationIgnored lazy var transcriptPollScheduler =
+        TranscriptPollScheduler(source: transcriptSource)
     /// Feature flags fetched from the daemon at connect time. Nil until the
     /// first successful fetch — treated as "control mode off". The app cannot
     /// derive these locally: it is launched via `open`, which drops shell env.
@@ -3519,6 +3528,29 @@ final class AppState {
     /// with the helper is invisible (both compile, both "work") and silently
     /// makes the pane appear enabled to one caller and disabled to another.
     static let enableTranscriptDefault = true
+
+    /// UserDefaults key gating whether the app reads Claude transcript JSONL
+    /// itself instead of asking the daemon for a parsed copy. Default OFF: this
+    /// wholesale-replaces a load-bearing render path, so it soaks behind a flag
+    /// before graduating.
+    static let appSideTranscriptReadKey = "appSideTranscriptRead"
+
+    /// The one default for `appSideTranscriptReadKey`. Spell the default with
+    /// this constant at every read site — helper and `@AppStorage` alike. An
+    /// `@AppStorage` default that disagrees with the helper is invisible: both
+    /// compile, both "work", and two callers silently get different answers.
+    ///
+    /// Graduation is a one-line change here. Nothing writes the key on anyone's
+    /// behalf, so `object(forKey:)` stays nil for everyone who never touched the
+    /// toggle — flipping this reaches them while preserving every explicit
+    /// opt-out.
+    static let appSideTranscriptReadDefault = false
+
+    /// Read of the app-side transcript toggle for non-View callers (the View
+    /// layer uses `@AppStorage` directly).
+    static func appSideTranscriptReadEnabled(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: appSideTranscriptReadKey) as? Bool ?? appSideTranscriptReadDefault
+    }
 
     /// UserDefaults key for the usage reset-time display preference
     /// (Settings → Claude → "Usage reset times"). Stores the raw value of
