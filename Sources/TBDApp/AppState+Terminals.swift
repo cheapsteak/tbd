@@ -449,6 +449,20 @@ extension AppState {
         applyStoredOrder(worktreeID: worktreeID)
     }
 
+    /// The JSONL path for a terminal's current Claude session, found without
+    /// knowing which worktree the terminal belongs to.
+    ///
+    /// Transcript cards carry a `terminalID` and no `worktreeID`, so they
+    /// cannot index `terminals` directly; this is the one lookup that lets a
+    /// card hand `DaemonClient` the path its app-side read needs. Nil when the
+    /// terminal is gone or has no session file yet, which keeps the caller on
+    /// the RPC path.
+    func transcriptPath(forTerminal terminalID: UUID) -> String? {
+        terminals.values.flatMap { $0 }
+            .first { $0.id == terminalID }?
+            .transcriptPath
+    }
+
     // MARK: - Terminal Actions
 
     /// Treat an explicit user interrupt (Ctrl+C, or Esc for Claude) as "not

@@ -142,15 +142,17 @@ struct SystemReminderRowBody: View {
 
     private func fetchMetadata() async {
         guard carriesInjectionMetadata, metadata == nil, let terminalID else { return }
+        let path = appState.transcriptPath(forTerminal: terminalID)
         if let r = try? await appState.daemonClient.terminalTranscriptItemFullBody(
-            terminalID: terminalID, itemID: id, includeBody: false), let attachment = r.attachment {
+            terminalID: terminalID, itemID: id, includeBody: false, path: path), let attachment = r.attachment {
             await MainActor.run { metadata = attachment }
         }
     }
 
     private func fetchFull() async {
         guard let terminalID else { return }
-        if let r = try? await appState.daemonClient.terminalTranscriptItemFullBody(terminalID: terminalID, itemID: id) {
+        let path = appState.transcriptPath(forTerminal: terminalID)
+        if let r = try? await appState.daemonClient.terminalTranscriptItemFullBody(terminalID: terminalID, itemID: id, path: path) {
             await MainActor.run { fullText = r.text }
         }
     }

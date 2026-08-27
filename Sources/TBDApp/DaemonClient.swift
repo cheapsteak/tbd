@@ -1873,7 +1873,15 @@ actor DaemonClient {
     }
 
     /// Load full chat messages for a session file.
+    ///
+    /// With `appSideTranscriptRead` on this reads the JSONL here instead of
+    /// asking the daemon to parse it and ship the result back over the socket.
+    /// The RPC body below is the untouched off-path.
     func sessionMessages(filePath: String) async throws -> [TranscriptItem] {
+        if TranscriptDetailReader.shouldReadAppSide(
+            enabled: await AppState.appSideTranscriptReadEnabled(), path: filePath) {
+            return TranscriptDetailReader.messages(path: filePath)
+        }
         perfTranscriptLog.debug("client.rpc.start method=sessionMessages")
         let start = ContinuousClock.now
         let request = try RPCRequest(
@@ -1929,9 +1937,20 @@ actor DaemonClient {
     /// Fetch the un-truncated body for a single transcript item (for
     /// "Show full output" expansion). Pass `includeBody: false` to fetch only
     /// the injection metadata, leaving a potentially huge body off the wire.
+    ///
+    /// `path` is the terminal's own `transcriptPath`, and is what lets the
+    /// app-side read skip the socket entirely. It defaults to nil so no call
+    /// site is forced to change; a site that does not pass one keeps using the
+    /// RPC even with `appSideTranscriptRead` on.
     func terminalTranscriptItemFullBody(
-        terminalID: UUID, itemID: String, includeBody: Bool = true
+        terminalID: UUID, itemID: String, includeBody: Bool = true,
+        path: String? = nil
     ) async throws -> TerminalTranscriptItemFullBodyResult {
+        if let path, TranscriptDetailReader.shouldReadAppSide(
+            enabled: await AppState.appSideTranscriptReadEnabled(), path: path) {
+            return TranscriptDetailReader.fullBody(
+                path: path, itemID: itemID, includeBody: includeBody)
+        }
         return try await callAsync(
             method: RPCMethod.terminalTranscriptItemFullBody,
             params: TerminalTranscriptItemFullBodyParams(
