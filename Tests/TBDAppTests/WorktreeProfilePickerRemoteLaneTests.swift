@@ -3,13 +3,16 @@ import Foundation
 @testable import TBDApp
 import TBDShared
 
-/// Covers the `+` menu's remote-lane entry point —
-/// `WorktreeProfilePickerView.remoteLaneOffer(providers:parentWorktreeID:)`
-/// and the copy helpers that hang off its result. Every gating branch the row
-/// has (no provider / one / several, stale provider) is decided here, so it is
-/// decided in a place a test can reach without an `AppState` or a view
-/// hierarchy — including the fact that the nested `+` is no longer a gate.
-@Suite("WorktreeProfilePickerView — remote lane row")
+/// Covers the `+` menu's two create entry points — the generic remote-lane
+/// row (`WorktreeProfilePickerView.remoteLaneOffer(providers:parentWorktreeID:)`
+/// over `registryLaneProviders`) and the compiled cloud provider's own row
+/// (`cloudLaneEntry(providers:claudeCloudEnabled:parentWorktreeID:)`) — plus
+/// the copy helpers that hang off their results. Every gating branch the two
+/// rows have (no provider / one / several, the cloud flag, stale provider) is
+/// decided here, so it is decided in a place a test can reach without an
+/// `AppState` or a view hierarchy — including the fact that the nested `+` is
+/// not a gate on either.
+@Suite("WorktreeProfilePickerView — remote lane rows")
 struct WorktreeProfilePickerRemoteLaneTests {
 
     private func provider(
@@ -158,20 +161,38 @@ struct WorktreeProfilePickerRemoteLaneTests {
     // MARK: - header copy follows the row
 
     /// "New worktree with…" stops being true once the page can also start a
-    /// provider session, so the title widens exactly when the row is offered —
-    /// and stays narrow (the nested `+`, or no provider) when it is not.
-    @Test func headerNamesOnlyWorktreesWhenNoRemoteRowIsOffered() {
-        #expect(WorktreeProfilePickerView.profilesPageTitle(offer: .hidden) == "New worktree with…")
+    /// provider session, so the title widens exactly when EITHER row is
+    /// offered — and stays narrow only when neither is.
+    @Test func headerNamesOnlyWorktreesWhenNeitherRowIsOffered() {
+        #expect(WorktreeProfilePickerView.profilesPageTitle(offer: .hidden, hasCloudEntry: false)
+            == "New worktree with…")
     }
 
     @Test func headerNamesRemoteSessionsForASingleProvider() {
-        #expect(WorktreeProfilePickerView.profilesPageTitle(offer: .single(provider(name: "acme")))
+        #expect(WorktreeProfilePickerView.profilesPageTitle(
+            offer: .single(provider(name: "acme")), hasCloudEntry: false)
             == "New worktree or remote session…")
     }
 
     @Test func headerNamesRemoteSessionsForSeveralProviders() {
         #expect(WorktreeProfilePickerView.profilesPageTitle(
-            offer: .chooseProvider([provider(name: "acme"), provider(name: "acme-prod")]))
+            offer: .chooseProvider([provider(name: "acme"), provider(name: "acme-prod")]),
+            hasCloudEntry: false)
+            == "New worktree or remote session…")
+    }
+
+    /// The cloud row is not a member of the offer, so it has to widen the
+    /// title on its own — a page whose only non-worktree row is the cloud one
+    /// would otherwise be headed "New worktree with…" while offering a
+    /// provider session.
+    @Test func headerNamesRemoteSessionsForTheCloudRowAlone() {
+        #expect(WorktreeProfilePickerView.profilesPageTitle(offer: .hidden, hasCloudEntry: true)
+            == "New worktree or remote session…")
+    }
+
+    @Test func headerNamesRemoteSessionsWhenBothRowsAreOffered() {
+        #expect(WorktreeProfilePickerView.profilesPageTitle(
+            offer: .single(provider(name: "acme")), hasCloudEntry: true)
             == "New worktree or remote session…")
     }
 
@@ -242,5 +263,79 @@ struct WorktreeProfilePickerRemoteLaneTests {
             == "acme…")
         #expect(WorktreeProfilePickerView.providerRowTitle(provider(name: "acme"), opensForm: false)
             == "acme")
+    }
+
+    // MARK: - the cloud row is a sibling, never a member
+
+    /// The generic row enumerates the providers the user configured
+    /// themselves; the compiled provider has a row of its own and is never a
+    /// member of that list.
+    @Test func theCloudProviderIsNeverInTheGenericEnumeration() {
+        let mixed = [provider(name: "acme"), provider(name: ClaudeCloudProvider.name)]
+        #expect(WorktreeProfilePickerView.registryLaneProviders(mixed).map(\.config.name)
+            == ["acme"])
+    }
+
+    /// And so the one-versus-many decision counts registry providers only:
+    /// cloud plus one configured provider is still the single-provider shape.
+    @Test func theOfferCountsRegistryProvidersOnly() {
+        let mixed = [provider(name: "acme"), provider(name: ClaudeCloudProvider.name)]
+        #expect(describeOffer(WorktreeProfilePickerView.remoteLaneOffer(
+            providers: WorktreeProfilePickerView.registryLaneProviders(mixed),
+            parentWorktreeID: nil)) == ("single", ["acme"]))
+    }
+
+    @Test func theCloudRowIsOmittedWhenTheFlagIsOff() {
+        let mixed = [provider(name: "acme"), provider(name: ClaudeCloudProvider.name)]
+        #expect(WorktreeProfilePickerView.cloudLaneEntry(
+            providers: mixed, claudeCloudEnabled: false, parentWorktreeID: nil) == nil)
+    }
+
+    /// The discriminating half: with the flag on the row is offered.
+    @Test func theCloudRowIsOfferedWhenTheFlagIsOn() {
+        let mixed = [provider(name: "acme"), provider(name: ClaudeCloudProvider.name)]
+        #expect(WorktreeProfilePickerView.cloudLaneEntry(
+            providers: mixed, claudeCloudEnabled: true, parentWorktreeID: nil)?
+            .config.name == ClaudeCloudProvider.name)
+    }
+
+    /// Nesting is TBD-side filing, which the remote side neither knows nor
+    /// needs to know about — so the nested `+` offers the cloud row on exactly
+    /// the same terms as the repo header does.
+    @Test func theNestedPlusOffersTheCloudRowToo() {
+        let mixed = [provider(name: "acme"), provider(name: ClaudeCloudProvider.name)]
+        #expect(WorktreeProfilePickerView.cloudLaneEntry(
+            providers: mixed, claudeCloudEnabled: true, parentWorktreeID: UUID())?
+            .config.name == ClaudeCloudProvider.name)
+    }
+
+    /// A stale cloud provider keeps its row, which `remoteProviderRow` then
+    /// renders disabled and subtitled with its reason — the row is the menu's
+    /// statement that the capability exists, and a transient outage is no
+    /// reason to retract it.
+    @Test func aStaleCloudProviderKeepsItsRow() {
+        let stale = provider(name: ClaudeCloudProvider.name, health: .needsAuth,
+                             lastSuccessfulSnapshotAt: Date())
+        #expect(stale.hasStaleSnapshot)
+        #expect(WorktreeProfilePickerView.cloudLaneEntry(
+            providers: [provider(name: "acme"), stale],
+            claudeCloudEnabled: true, parentWorktreeID: nil)?
+            .config.name == ClaudeCloudProvider.name)
+        #expect(WorktreeProfilePickerView.providerRowSubtitle(stale)
+            == "Unavailable — inventory is stale")
+    }
+
+    // MARK: - the cloud row's ellipsis is the same promise
+
+    /// Special in placement, not in behavior: the cloud row makes the ellipsis
+    /// promise on exactly the terms every other acting row does.
+    @Test func theCloudRowKeepsItsEllipsisWhenSelectingItOpensTheForm() {
+        #expect(WorktreeProfilePickerView.cloudLaneRowTitle(opensForm: true)
+            == "New cloud session…")
+    }
+
+    @Test func theCloudRowDropsItsEllipsisWhenSelectingItCreatesOutright() {
+        #expect(WorktreeProfilePickerView.cloudLaneRowTitle(opensForm: false)
+            == "New cloud session")
     }
 }

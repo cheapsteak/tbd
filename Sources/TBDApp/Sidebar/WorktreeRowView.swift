@@ -232,66 +232,101 @@ struct WorktreeRowView: View {
         }
     }
 
-    // MARK: - Context menu: "New Remote Session…"
+    // MARK: - Context menu: "New Cloud Session…" / "New Remote Session…"
 
-    /// The providers this row's context-menu item lists — the pure, view-free
-    /// form of the decision `newRemoteSessionMenuItem` renders, so a test can
-    /// call it rather than re-deriving it. A thin, named forward to
-    /// `CloudCreateEntryPresentation.createProviders` (the same gate
-    /// `RepoSectionView.remoteSessionMenuProviders` forwards to, and the same
-    /// one `CloudCreateEntryPresentationTests`'s cross-surface parity suite
-    /// pins), plus this row's own `isMain` gate.
+    /// The providers this row's generic context-menu item lists — the pure,
+    /// view-free form of the decision `newRemoteSessionMenuItem` renders, so a
+    /// test can call it rather than re-deriving it. A thin, named forward to
+    /// `CloudCreateEntryPresentation.registryProviders` (the same enumeration
+    /// `RepoSectionView.remoteSessionMenuProviders` forwards to), plus this
+    /// row's own `isMain` gate.
     ///
     /// `isMain` is a gate here and not on the repo header because the main
     /// worktree is the repo's checkout, not a parent to nest under: the nested
     /// `+` is withheld from that row for the same reason, and this item is that
     /// button's always-opens-the-form twin. The two gates are independent —
-    /// the cloud filter answers "which providers", `isMain` answers "does this
-    /// row offer nesting at all".
+    /// the registry filter answers "which providers", `isMain` answers "does
+    /// this row offer nesting at all".
     nonisolated static func remoteSessionMenuProviders(
-        providers: [RemoteProviderStatus], claudeCloudEnabled: Bool, isMain: Bool
+        providers: [RemoteProviderStatus], isMain: Bool
     ) -> [RemoteProviderStatus] {
         guard !isMain else { return [] }
-        return CloudCreateEntryPresentation.createProviders(providers, claudeCloudEnabled: claudeCloudEnabled)
+        return CloudCreateEntryPresentation.registryProviders(providers)
     }
 
-    /// A worktree-scoped entry point into the create sheet, nested under this
-    /// row — the always-opens-the-form twin of the nested `+`'s remote-lane
-    /// row, and the exact counterpart of
-    /// `RepoSectionView.newRemoteSessionMenuItem` on the repo header.
+    /// The compiled cloud provider this row's own context-menu item offers, or
+    /// nil when there is none — the same pure, view-free treatment its generic
+    /// sibling gets, so `CloudCreateEntryPresentationTests`'s cross-surface
+    /// parity suite can call the decision this row renders. `isMain` gates it
+    /// exactly as it gates the sibling: the main row offers neither.
+    nonisolated static func cloudSessionMenuEntry(
+        providers: [RemoteProviderStatus], claudeCloudEnabled: Bool, isMain: Bool
+    ) -> RemoteProviderStatus? {
+        guard !isMain else { return nil }
+        return CloudCreateEntryPresentation.cloudEntry(
+            providers, claudeCloudEnabled: claudeCloudEnabled)
+    }
+
+    /// The pair of worktree-scoped entry points into the create sheet, nested
+    /// under this row — the always-opens-the-form twins of the nested `+`'s
+    /// two lane rows, and the exact counterparts of `RepoSectionView`'s pair
+    /// on the repo header. Cloud first, matching that pair's order.
     ///
-    /// It sets `remoteCreateSheetProvider` DIRECTLY rather than going through
+    /// Both set `remoteCreateSheetProvider` DIRECTLY rather than going through
     /// `startRemoteSession(with:)`: opening the form unconditionally is the
-    /// whole point of this item. Routing it through the launch decision would
-    /// make it one-click-create exactly when every answer is already knowable,
-    /// which is precisely the case where there is no other way to type a
-    /// prompt or choose a branch for a NESTED lane.
+    /// whole point of these items. Routing them through the launch decision
+    /// would make them one-click-create exactly when every answer is already
+    /// knowable, which is precisely the case where there is no other way to
+    /// type a prompt or choose a branch for a NESTED lane.
     ///
-    /// Same shape as the repo header's item: omitted (not disabled) when no
-    /// provider is offerable, a single provider skips the submenu, and the
-    /// fast-path count is decided AFTER the cloud filter so a hidden entry
-    /// cannot leave a two-entry submenu with a dead row in it.
+    /// The leading separator belongs to the pair rather than to either item,
+    /// so a row that offers neither leaves no dangling separator on its action
+    /// list and a row that offers both gets one separator, not two.
     @ViewBuilder
-    private var newRemoteSessionMenuItem: some View {
-        let providers = WorktreeRowView.remoteSessionMenuProviders(
+    private var remoteCreateMenuItems: some View {
+        let claudeCloudEnabled = appState.daemonCapabilities?.claudeCloudEnabled ?? false
+        let cloud = WorktreeRowView.cloudSessionMenuEntry(
             providers: appState.remoteProviders,
-            claudeCloudEnabled: appState.daemonCapabilities?.claudeCloudEnabled ?? false,
-            isMain: isMain)
-        if !providers.isEmpty {
-            // Inside the conditional so an omitted item leaves no dangling
-            // trailing separator on the row's action list.
+            claudeCloudEnabled: claudeCloudEnabled, isMain: isMain)
+        let providers = WorktreeRowView.remoteSessionMenuProviders(
+            providers: appState.remoteProviders, isMain: isMain)
+        if cloud != nil || !providers.isEmpty {
             Divider()
-            if providers.count == 1, let only = providers.first {
-                Button("New Remote Session…") { remoteCreateSheetProvider = only }
-                    .disabled(only.hasStaleSnapshot)
-            } else {
-                Menu("New Remote Session…") {
-                    ForEach(providers, id: \.config.name) { provider in
-                        Button(provider.describe?.name ?? provider.config.name) {
-                            remoteCreateSheetProvider = provider
-                        }
-                        .disabled(provider.hasStaleSnapshot)
+            newCloudSessionMenuItem(cloud)
+            newRemoteSessionMenuItem(providers)
+        }
+    }
+
+    /// The compiled cloud provider's own item, named so a user who enabled
+    /// Claude Cloud finds the word they enabled where a title goes. Omitted
+    /// when the flag is off or the daemon never registered it; a stale
+    /// snapshot keeps the item and disables it, as its sibling does for a
+    /// stale registry provider.
+    @ViewBuilder
+    private func newCloudSessionMenuItem(_ entry: RemoteProviderStatus?) -> some View {
+        if let entry {
+            Button("New Cloud Session…") { remoteCreateSheetProvider = entry }
+                .disabled(entry.hasStaleSnapshot)
+        }
+    }
+
+    /// The generic item over the providers the user configured themselves.
+    /// Same shape as the repo header's: omitted when none is offerable, and a
+    /// single provider skips the submenu. The compiled cloud provider is not a
+    /// member of this enumeration, so the one-versus-many count is a count of
+    /// registry providers only.
+    @ViewBuilder
+    private func newRemoteSessionMenuItem(_ providers: [RemoteProviderStatus]) -> some View {
+        if providers.count == 1, let only = providers.first {
+            Button("New Remote Session…") { remoteCreateSheetProvider = only }
+                .disabled(only.hasStaleSnapshot)
+        } else if !providers.isEmpty {
+            Menu("New Remote Session…") {
+                ForEach(providers, id: \.config.name) { provider in
+                    Button(provider.describe?.name ?? provider.config.name) {
+                        remoteCreateSheetProvider = provider
                     }
+                    .disabled(provider.hasStaleSnapshot)
                 }
             }
         }
@@ -658,10 +693,10 @@ struct WorktreeRowView: View {
         .contextMenu {
             SidebarContextMenu(worktree: worktree, onRename: startRename)
             // Added here rather than inside `SidebarContextMenu` because the
-            // sheet it opens is this row's state (`remoteCreateSheetProvider`,
-            // `remoteCreateSheetContent(for:)`); pushing the item down would
+            // sheet they open is this row's state (`remoteCreateSheetProvider`,
+            // `remoteCreateSheetContent(for:)`); pushing the items down would
             // mean handing that state back up through a closure for no gain.
-            newRemoteSessionMenuItem
+            remoteCreateMenuItems
         }
         .onChange(of: appState.editingWorktreeID) { _, newID in
             if newID == worktree.id {

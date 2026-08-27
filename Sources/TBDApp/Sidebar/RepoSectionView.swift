@@ -550,23 +550,34 @@ struct RepoSectionView: View {
         }
     }
 
-    // MARK: - The cloud gate — pure, view-free forms of what the two owned
-    // create surfaces render, so a test can call the exact decision each
-    // surface makes rather than re-deriving it. See
-    // `CloudCreateEntryPresentationTests`'s cross-surface parity suite,
-    // which checks this against `CloudCreateEntryPresentation.pickerProviders`
-    // (the `+` picker's gate) and `RemoteProviderHeaderRow.canCreate`
-    // (`RemoteSectionView.swift`) — the other two owned surfaces — for
-    // agreement.
+    // MARK: - The create gates — pure, view-free forms of what this section's
+    // two context-menu items render, so a test can call the exact decision
+    // each one makes rather than re-deriving it. See
+    // `CloudCreateEntryPresentationTests`'s cross-surface parity suite, which
+    // checks `cloudSessionMenuEntry` against the `+` picker's cloud row
+    // (`WorktreeProfilePickerView.cloudLaneEntry`), the worktree row's item
+    // (`WorktreeRowView.cloudSessionMenuEntry`) and the Remote section header
+    // (`RemoteProviderHeaderRow.canCreate`) for agreement.
 
-    /// The providers `newRemoteSessionMenuItem`'s context menu lists. A thin,
-    /// named forward to `CloudCreateEntryPresentation.createProviders` so the
-    /// view has no inline gate logic of its own to drift from what this
-    /// function (and its test coverage) pins.
+    /// The providers `newRemoteSessionMenuItem`'s context menu lists — the
+    /// ones the user configured themselves. A thin, named forward to
+    /// `CloudCreateEntryPresentation.registryProviders` so the view has no
+    /// inline gate logic of its own to drift from what that function (and its
+    /// test coverage) pins. The compiled cloud provider is never a member: it
+    /// gets `newCloudSessionMenuItem` instead.
     nonisolated static func remoteSessionMenuProviders(
-        providers: [RemoteProviderStatus], claudeCloudEnabled: Bool
+        providers: [RemoteProviderStatus]
     ) -> [RemoteProviderStatus] {
-        CloudCreateEntryPresentation.createProviders(providers, claudeCloudEnabled: claudeCloudEnabled)
+        CloudCreateEntryPresentation.registryProviders(providers)
+    }
+
+    /// The compiled cloud provider `newCloudSessionMenuItem` offers, or nil
+    /// when there is none. The same thin, named forward, for the same reason.
+    nonisolated static func cloudSessionMenuEntry(
+        providers: [RemoteProviderStatus], claudeCloudEnabled: Bool
+    ) -> RemoteProviderStatus? {
+        CloudCreateEntryPresentation.cloudEntry(
+            providers, claudeCloudEnabled: claudeCloudEnabled)
     }
 
 
@@ -588,6 +599,7 @@ struct RepoSectionView: View {
         Button(repo.hidden ? "Unhide" : "Hide") {
             Task { await appState.setRepoHidden(id: repo.id, hidden: !repo.hidden) }
         }
+        newCloudSessionMenuItem
         newRemoteSessionMenuItem
         Divider()
         Button("Remove from List...", role: .destructive) {
@@ -595,22 +607,47 @@ struct RepoSectionView: View {
         }
     }
 
+    /// The compiled cloud provider's own repo-scoped entry into the create
+    /// sheet, sitting beside its generic sibling rather than inside it. A user
+    /// who turned `claude_cloud_enabled` on scans this menu for the word they
+    /// enabled, in the position a title occupies — inferring it from a
+    /// submenu they have no reason to expect it behind spends their attention
+    /// to save a row.
+    ///
+    /// Omitted (not disabled) when the flag is off or the daemon never
+    /// registered the provider, mirroring how `RemoteSessionActionMenu` omits
+    /// capability-gated items. A stale snapshot instead keeps the item and
+    /// disables it, exactly as the generic item does for a stale registry
+    /// provider. Like its sibling it always opens the form — the `+` menu's
+    /// rows are the one-click path.
+    @ViewBuilder
+    private var newCloudSessionMenuItem: some View {
+        if let entry = RepoSectionView.cloudSessionMenuEntry(
+            providers: appState.remoteProviders,
+            claudeCloudEnabled: appState.daemonCapabilities?.claudeCloudEnabled ?? false) {
+            Button("New Cloud Session…") { openRemoteCreateSheet(for: entry) }
+                .disabled(entry.hasStaleSnapshot)
+        }
+    }
+
     /// A repo-scoped entry point into the create sheet, prefilled with this
-    /// repo — omitted (not disabled) when no remote provider is offerable at
+    /// repo — omitted (not disabled) when no registry provider is offerable at
     /// all, mirroring how `RemoteSessionActionMenu` omits capability-gated
     /// items rather than graying them out. A single provider skips straight
     /// to the sheet; more than one asks which provider first.
     ///
-    /// The compiled cloud provider joins this list for free once the daemon
-    /// registers it; `CloudCreateEntryPresentation` is what takes it back out
-    /// when the flag has been turned off since boot, and the fast-path count
-    /// is decided AFTER that filter so a hidden entry cannot leave a
-    /// two-entry submenu with a dead row in it.
+    /// It enumerates the providers the user wrote into
+    /// `~/tbd/agent-providers.json`, which is what earns it a generic title:
+    /// their own config file is the authority on what they are called, and
+    /// enumerating them is the whole service this item provides. The compiled
+    /// cloud provider is not one of them and has `newCloudSessionMenuItem`
+    /// above instead — surfacing it in both places would make "how many
+    /// providers are there" ambiguous at exactly the moment the count decides
+    /// whether this item is a button or a submenu.
     @ViewBuilder
     private var newRemoteSessionMenuItem: some View {
         let providers = RepoSectionView.remoteSessionMenuProviders(
-            providers: appState.remoteProviders,
-            claudeCloudEnabled: appState.daemonCapabilities?.claudeCloudEnabled ?? false)
+            providers: appState.remoteProviders)
         if !providers.isEmpty {
             if providers.count == 1, let only = providers.first {
                 Button("New Remote Session…") { openRemoteCreateSheet(for: only) }

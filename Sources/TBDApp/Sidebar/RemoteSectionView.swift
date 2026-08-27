@@ -197,17 +197,18 @@ struct RemoteProviderHeaderRow: View {
     }
 
     /// Whether this header's `+` and its `RemoteCreateSheet` may be offered
-    /// at all — the third create surface routed through
-    /// `CloudCreateEntryPresentation`, alongside `RepoSectionView`'s context
-    /// menu (`remoteSessionMenuProviders`) and `+` picker
-    /// (`cloudSessionProvider`). True for every non-cloud provider regardless
-    /// of the flag; false for the compiled cloud provider once
-    /// `claude_cloud_enabled` has been turned off, even though the daemon
+    /// at all — the fifth create entry routed through
+    /// `CloudCreateEntryPresentation`, alongside the two `+` pickers' cloud
+    /// rows (`WorktreeProfilePickerView.cloudLaneEntry`) and the two
+    /// context-menu items (`RepoSectionView.cloudSessionMenuEntry`,
+    /// `WorktreeRowView.cloudSessionMenuEntry`). True for every non-cloud
+    /// provider regardless of the flag; false for the compiled cloud provider
+    /// once `claude_cloud_enabled` has been turned off, even though the daemon
     /// booted with it on and still keeps the provider registered here — the
     /// state `remote.create` refuses with "claude cloud sessions disabled".
-    /// Omitted (not merely disabled) to match the same convention the
-    /// context menu and `+` picker already follow for this gate; staleness
-    /// stays a separate, disabled-not-omitted axis on the button below.
+    /// Omitted (not merely disabled) to match the same convention every other
+    /// entry follows for this gate; staleness stays a separate,
+    /// disabled-not-omitted axis on the button below.
     private var canCreate: Bool {
         RemoteProviderHeaderRow.canCreate(
             provider: provider,
@@ -217,14 +218,18 @@ struct RemoteProviderHeaderRow: View {
     /// Pure form of `canCreate`, over a single provider — split out so a test
     /// can call the exact decision this row renders from without an
     /// `AppState`/view hierarchy, and so a parity test can check it against
-    /// `RepoSectionView`'s two create surfaces directly (see
+    /// the four other create entries directly (see
     /// `CloudCreateEntryPresentationTests`'s cross-surface parity suite).
+    ///
+    /// This is the one surface handed a single provider rather than a list to
+    /// enumerate — `RemoteSectionView` renders one header per registered
+    /// provider — which is why it reads the per-provider verdict instead of
+    /// filtering.
     nonisolated static func canCreate(
         provider: RemoteProviderStatus, claudeCloudEnabled: Bool
     ) -> Bool {
-        !CloudCreateEntryPresentation.createProviders(
-            [provider], claudeCloudEnabled: claudeCloudEnabled
-        ).isEmpty
+        CloudCreateEntryPresentation.offersCreate(
+            provider: provider, claudeCloudEnabled: claudeCloudEnabled)
     }
 
     var body: some View {
