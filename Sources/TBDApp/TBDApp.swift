@@ -253,6 +253,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             Self.applyMainWindowChrome()
         }
 
+        // TEMPORARY diagnostic instrumentation — see `TypedInputDriver`. Started
+        // here rather than lazily from a terminal view, so that it is running
+        // even when no terminal has drawn yet: the whole point is to collect
+        // passively from ordinary use, and a monitor that installs itself only
+        // after the first display pass misses exactly the sessions where the
+        // view never becomes visible.
+        TypedInputDriver.ensureStarted()
+
         // Lifetime heartbeat — surfaces silent disappearances of windows / dock tile.
         let timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { _ in
             MainActor.assumeIsolated {
