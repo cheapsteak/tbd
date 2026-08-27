@@ -1,0 +1,73 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit review configuration.
+#
+# `reviews.auto_review.base_branches` is the load-bearing key here: CodeRabbit
+# skips auto review on any base branch it does not consider the repository
+# default, and it decided this repository's default was `master`. There has
+# never been a `master` branch — GitHub reports `default_branch: main` — so
+# naming `main` explicitly makes the review run regardless of what CodeRabbit
+# believes the default to be.
+language: en-US
+
+reviews:
+  profile: assertive
+  high_level_summary: true
+  poem: false
+
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - ^main$
+
+  # Build products, vendored artifacts, and lockfiles carry no review signal.
+  path_filters:
+    - "!.build/**"
+    - "!rust/comrak-ffi/target/**"
+    - "!Package.resolved"
+
+  # No `path_instructions` block on purpose, and this is the interesting part
+  # of this file.
+  #
+  # CodeRabbit's Code Guidelines feature already ingests `**/CLAUDE.md` as
+  # review criteria — on by default, no configuration needed — and scopes each
+  # file to its own directory subtree, which is exactly how this repository
+  # already organizes them: the root `CLAUDE.md` applies everywhere,
+  # `Sources/TBDDaemon/Database/CLAUDE.md` governs migrations, `Tests/CLAUDE.md`
+  # governs tests, and so on down eleven files.
+  #
+  # An earlier revision of this file hand-copied a paraphrase of those rules
+  # into `path_instructions`. That was strictly worse in three ways: it summarized
+  # ~1,300 lines of guidance into a few hundred, it would drift the moment a
+  # CLAUDE.md changed, and — the reason this comment is here rather than a
+  # shorter one — two of its lines stated rules the repository does not have.
+  # A wrong line here is not a local defect; it is a reviewer confidently
+  # enforcing a rule nobody wrote, on every future PR.
+  #
+  # So the guidance lives in exactly one place. Edit CLAUDE.md; CodeRabbit and
+  # Claude Code read the same file, and neither can fall out of step with it.
+  # Add a `path_instructions` entry only for something genuinely review-specific
+  # that does not belong in CLAUDE.md at all.
+
+  # No `tools.swiftlint` block on purpose. CodeRabbit skips SwiftLint when a
+  # GitHub workflow already runs it, and `.github/workflows/test.yml` runs
+  # `swiftlint --strict` in the `lint` job — so configuring it here would look
+  # like enforcement while adding no findings. CI owns SwiftLint. (The
+  # `config_file` key would be redundant regardless: CodeRabbit auto-detects
+  # `.swiftlint.yml`, and that key exists for configs named something else.)
+
+knowledge_base:
+  # Defaults to true, and its default `filePatterns` already include
+  # `**/CLAUDE.md`. Stated explicitly because it is now the whole mechanism by
+  # which CodeRabbit learns this repository's conventions — worth being loud
+  # about rather than leaving to an unstated default.
+  #
+  # `filePatterns` is additive: custom entries are applied on top of the
+  # defaults rather than replacing them, so adding one does not cost us
+  # `**/CLAUDE.md`. Only add an entry for a guideline file the defaults do not
+  # already match, or use the object form (`files` + `applyTo`) when a
+  # guideline needs to govern files outside its own directory subtree. To turn
+  # the feature off, set `enabled: false` — never clear the pattern list.
+  code_guidelines:
+    enabled: true
