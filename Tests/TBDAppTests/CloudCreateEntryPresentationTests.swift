@@ -174,22 +174,24 @@ struct CloudCreateEntryPresentationParityTests {
     }
 
     /// Whether each of the four entry-yielding surfaces offers a cloud entry,
-    /// in a fixed order so a failing `#expect` names which one diverged.
+    /// each labelled so a failing `#expect` names which one diverged. An
+    /// ordered array rather than a dictionary, so a run that fails on more
+    /// than one surface reports them in the same order every time.
     private func entriesShown(
         _ providers: [RemoteProviderStatus], claudeCloudEnabled: Bool
-    ) -> [String: Bool] {
+    ) -> [(surface: String, shown: Bool)] {
         [
-            "repo + picker": WorktreeProfilePickerView.cloudLaneEntry(
+            ("repo + picker", WorktreeProfilePickerView.cloudLaneEntry(
                 providers: providers, claudeCloudEnabled: claudeCloudEnabled,
-                parentWorktreeID: nil) != nil,
-            "nested + picker": WorktreeProfilePickerView.cloudLaneEntry(
+                parentWorktreeID: nil) != nil),
+            ("nested + picker", WorktreeProfilePickerView.cloudLaneEntry(
                 providers: providers, claudeCloudEnabled: claudeCloudEnabled,
-                parentWorktreeID: UUID()) != nil,
-            "repo context menu": RepoSectionView.cloudSessionMenuEntry(
-                providers: providers, claudeCloudEnabled: claudeCloudEnabled) != nil,
-            "worktree row context menu": WorktreeRowView.cloudSessionMenuEntry(
+                parentWorktreeID: UUID()) != nil),
+            ("repo context menu", RepoSectionView.cloudSessionMenuEntry(
+                providers: providers, claudeCloudEnabled: claudeCloudEnabled) != nil),
+            ("worktree row context menu", WorktreeRowView.cloudSessionMenuEntry(
                 providers: providers, claudeCloudEnabled: claudeCloudEnabled,
-                isMain: false) != nil,
+                isMain: false) != nil),
         ]
     }
 

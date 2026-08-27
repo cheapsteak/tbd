@@ -36,8 +36,10 @@ enum RemoteLaneOffer {
 ///  - `.branches`: the reused searchable branch list (`BranchListView`) behind
 ///    a back affordance. Selecting a branch creates a worktree on that existing
 ///    branch using the DEFAULT model (accepted tradeoff).
-///  - `.remoteProviders`: one row per registered remote provider, reached only
-///    when more than one is registered. A third page rather than a nested
+///  - `.remoteProviders`: one row per provider the user configured, reached
+///    only when more than one of those is registered — the compiled cloud
+///    provider is never a member and never lands here, because it has its own
+///    row on the page above. A third page rather than a nested
 ///    `Menu`/popover for the same reason `.branches` is one. Each row carries
 ///    its own trailing ellipsis when selecting that provider will open the
 ///    create form, since these are the rows that act.
