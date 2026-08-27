@@ -1257,6 +1257,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             let hop = signposter.beginInterval("mainThreadHop", id: hopID, "bytes=\(slice.count)")
             DispatchQueue.main.async { [weak self] in
                 signposter.endInterval("mainThreadHop", hop, "bytes=\(slice.count)")
+                // TEMPORARY diagnostic instrumentation — see `TypedInputDriver`.
+                TypedInputDriver.noteChunkArrival()
                 self?.groupedViewerDidReceiveOutput()
                 let feedState = signposter.beginInterval("feed", id: signposter.makeSignpostID(), "bytes=\(slice.count)")
                 self?.terminalView?.feed(byteArray: slice)

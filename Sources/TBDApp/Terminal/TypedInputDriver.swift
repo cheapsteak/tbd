@@ -101,12 +101,41 @@ enum TypedInputDriver {
                 let responder = NSApp.keyWindow?.firstResponder
                 let cls = responder.map { String(describing: type(of: $0)) } ?? "none"
                 keyLog.info(
-                    "keyqueue ms=\(queuedMs, format: .fixed(precision: 2), privacy: .public) responder=\(cls, privacy: .public)")
+                    "keyqueue ms=\(queuedMs, format: .fixed(precision: 2), privacy: .public) chunks1s=\(recentChunkRate(), privacy: .public) responder=\(cls, privacy: .public)")
             }
             return event
         }
     }
 
+    /// TEMPORARY. Rolling record of pty chunk arrivals, so each keystroke can be
+    /// labelled with the terminal output rate at the moment it was typed.
+    ///
+    /// This is what turns passive collection into the actual experiment. The open
+    /// question is whether typing is slow because `displayImmediately()` does a
+    /// full synchronous `updateDisplay` per chunk — in which case per-keystroke
+    /// cost rises with chunk rate — or because something waits, in which case it
+    /// is flat. Time buckets cannot separate those without knowing what the
+    /// machine was doing; chunk rate is the variable in the hypothesis, measured
+    /// directly, and it needs no signposts (which have proved unreliable here)
+    /// and no synthetic input.
+    @MainActor
+    static func noteChunkArrival() {
+        let now = ProcessInfo.processInfo.systemUptime
+        chunkTimes.append(now)
+        if chunkTimes.count > 4096 {
+            chunkTimes.removeFirst(2048)
+        }
+    }
+
+    @MainActor
+    private static func recentChunkRate() -> Int {
+        let now = ProcessInfo.processInfo.systemUptime
+        return chunkTimes.reduce(into: 0) { count, t in
+            if now - t <= 1.0 { count += 1 }
+        }
+    }
+
+    @MainActor private static var chunkTimes: [Double] = []
     @MainActor private static var keyMonitor: Any?
     private static let keyLog = Logger(subsystem: "com.tbd.app", category: "keylatency")
 

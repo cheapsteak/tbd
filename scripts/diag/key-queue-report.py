@@ -24,7 +24,7 @@ typing into a text field is a different code path and does not reach send(data:)
 import argparse, re, subprocess, sys
 from collections import defaultdict
 
-LINE = re.compile(r"(\d{2}):(\d{2}):(\d{2})\.(\d+).*keyqueue ms=([0-9.]+) responder=(\S+)")
+LINE = re.compile(r"(\d{2}):(\d{2}):(\d{2})\.(\d+).*keyqueue ms=([0-9.]+)(?: chunks1s=(\d+))? responder=(\S+)")
 
 
 def pct(v, q):
@@ -52,11 +52,13 @@ def main():
         if not m:
             continue
         t = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
-        ms, responder = float(m.group(5)), m.group(6)
+        ms = float(m.group(5))
+        chunks = int(m.group(6)) if m.group(6) else None
+        responder = m.group(7)
         if not args.all_responders and "TerminalView" not in responder:
             skipped += 1
             continue
-        rows.append((t, ms, responder))
+        rows.append((t, ms, responder, chunks))
 
     if not rows:
         print(f"No keyqueue samples in the last {args.last}.")
@@ -76,17 +78,42 @@ def main():
           f">100ms={sum(1 for v in vals if v > 100)/len(vals)*100:.1f}%")
 
     responders = defaultdict(int)
-    for _, _, r in rows:
+    for _, _, r, _c in rows:
         responders[r] += 1
     print("  responders: " + ", ".join(f"{k}={v}" for k, v in
                                        sorted(responders.items(), key=lambda x: -x[1])[:4]))
 
+    # Chunk rate is the variable in the hypothesis, so bucket by it directly.
+    # A p50 that climbs with output rate is the "displayImmediately() does a full
+    # synchronous updateDisplay per chunk" signature; a flat one across rates
+    # means the cost is not per-chunk work, whatever else it may be.
+    rated = [r for r in rows if r[3] is not None]
+    if rated:
+        edges = [(0, 0), (1, 5), (6, 20), (21, 50), (51, 200), (201, 10 ** 9)]
+        print("\n  by terminal output rate at the moment the key was typed:")
+        print("    chunks/s      n     p50      p90      max")
+        for lo, hi in edges:
+            v = [r[1] for r in rated if lo <= r[3] <= hi]
+            if not v:
+                continue
+            label = f"{lo}" if lo == hi else (f"{lo}-{hi}" if hi < 10 ** 9 else f"{lo}+")
+            print(f"    {label:>9s}  {len(v):5d}  {pct(v,.5):7.2f}  {pct(v,.9):7.2f}  {max(v):7.2f} ms")
+        idle = [r[1] for r in rated if r[3] == 0]
+        busy = [r[1] for r in rated if r[3] >= 21]
+        if len(idle) >= 20 and len(busy) >= 20:
+            print(f"\n    idle p50={pct(idle,.5):.2f} ms vs busy(>=21 chunks/s) p50={pct(busy,.5):.2f} ms"
+                  f"  -> {'RISES with output rate: per-chunk work' if pct(busy,.5) > pct(idle,.5) * 1.5 else 'FLAT across output rate: not per-chunk work'}")
+        else:
+            print(f"\n    (need >=20 samples in both the idle and busy bands to call it; "
+                  f"have idle={len(idle)} busy={len(busy)})")
+    else:
+        print("\n  (no chunks1s labels -- samples predate the output-rate instrument)")
+
     buckets = defaultdict(list)
     t0 = rows[0][0]
-    for t, ms, _ in rows:
+    for t, ms, _, _c in rows:
         buckets[(t - t0) // args.bucket].append(ms)
-    print(f"\n  per-{args.bucket}s buckets (a rising p50 under load is the "
-          f"'synchronous work per chunk' signature; a flat one is a scheduling floor):")
+    print(f"\n  per-{args.bucket}s buckets:")
     for b in sorted(buckets):
         v = buckets[b]
         print(f"    t+{b*args.bucket:5d}s  n={len(v):4d}  p50={pct(v,.5):7.2f}  "
