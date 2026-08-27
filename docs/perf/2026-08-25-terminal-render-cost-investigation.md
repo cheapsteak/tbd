@@ -577,3 +577,27 @@ exercised programmatically. Confirming any of this requires that grant, or a hum
 typing into a terminal while signposts are captured. **That is the highest-value
 outstanding measurement in this line of work**, and every keystroke number recorded
 so far is of the wrong path until it is taken.
+
+## Two instrument traps that void captures silently — 2026-08-26
+
+**Signpost emission is gated on a live listener.** Intervals stop being emitted
+the moment no `log stream` is attached, so a `log show` capture taken afterwards
+reads back empty from an application that was working perfectly. An unfiltered
+stream produced 5.2 MB in five seconds with zero lines from the app's subsystem,
+while `log show` over the same minutes returned 1,485 and 4,646 records. An empty
+capture is therefore indistinguishable from a terminal that never drew, and both
+look like a failed measurement rather than a broken instrument. The remedy is to
+keep a stream open purely as an enabler and read the data back through `log show`.
+
+**A modal dialog voids every capture and survives restarts.** With an alert panel
+up, no terminal holds first responder, nothing draws, and no signposts fire. The
+symptom presents as tabs mysteriously "going off screen" and as runs failing their
+validity guards for no visible reason. Check the first responder before trusting a
+void result.
+
+**A probe that avoids side effects may avoid the check as well.** Testing
+keystroke permission with an empty string succeeds without sending anything, and
+so never reaches the permission gate — reporting access that does not exist. The
+paired probe is the fix: run the harmless form and the real form in the same
+shell against the same frontmost application, and compare. Empty exits zero;
+a real key errors with 1002.
