@@ -133,23 +133,17 @@ enum TypedInputDriver {
             return
         }
         var rng = rng
-        guard let view = NSApp.keyWindow?.firstResponder as? TerminalView else {
+        guard let view = terminalView(withID: req.terminalID) else {
             // Aborting rather than retrying: a run that silently sent half its
             // keystrokes would still produce a plausible-looking latency table.
             // The diagnosis matters more than the failure — a key window that is
             // absent and a first responder that is the wrong class are different
             // problems, and on this machine it is reliably the former: TBD is
             // activated, holds focus for under five seconds, and loses it again.
-            let active = NSApp.isActive
-            let hasKey = NSApp.keyWindow != nil
-            let responder = NSApp.keyWindow?.firstResponder
-            let cls = responder.map { String(describing: type(of: $0)) } ?? "<no key window>"
             log.error("""
-                typed-drive: cannot send -- aborting after \(index, privacy: .public) keys. \
-                NSApp.isActive=\(active, privacy: .public) keyWindow=\(hasKey, privacy: .public) \
-                firstResponder=\(cls, privacy: .public). A typed keystroke can only be \
-                delivered to a key window, so the measurement needs TBD frontmost with the \
-                subject tab on screen for the whole run.
+                typed-drive: no terminal view with id \(req.terminalID, privacy: .public) -- \
+                aborting after \(index, privacy: .public) keys. The tab must be materialised \
+                in a window for the driver to address it.
                 """)
             return
         }
@@ -164,11 +158,36 @@ enum TypedInputDriver {
         }
     }
 
+    /// Finds the terminal view for one specific terminal, by walking the window
+    /// hierarchy. Addressing by ID rather than by first responder is deliberate
+    /// and load-bearing: an earlier version targeted
+    /// `NSApp.keyWindow?.firstResponder` and typed its alphabet into a live agent
+    /// session that happened to hold focus, because a measurement run creates its
+    /// own terminal but does not reliably own the key window. `send(txt:)` writes
+    /// to the pty through the delegate and needs no focus at all, so there is no
+    /// reason to involve the responder chain.
+    @MainActor
+    private static func terminalView(withID id: UUID) -> TerminalView? {
+        func search(_ view: NSView) -> TerminalView? {
+            if let tv = view as? TBDTerminalView, tv.diagTerminalID == id { return tv }
+            for sub in view.subviews {
+                if let found = search(sub) { return found }
+            }
+            return nil
+        }
+        for window in NSApp.windows {
+            if let root = window.contentView, let found = search(root) { return found }
+        }
+        return nil
+    }
+
     private struct Request: Decodable {
         let count: Int
         let minGap: Double
         let maxGap: Double
         let seed: UInt64
+        /// Required. There is no "whichever terminal is focused" mode by design.
+        let terminalID: UUID
     }
 
     /// Seeded so both sides of a comparison get an identical keystroke cadence;

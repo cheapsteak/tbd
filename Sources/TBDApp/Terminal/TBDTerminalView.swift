@@ -14,6 +14,11 @@ private extension CharacterSet {
 /// When enabled, macOS-native shortcuts (Cmd+Arrow, Cmd/Opt+Delete) are translated
 /// to the escape sequences that shells expect.
 class TBDTerminalView: TerminalView {
+    /// TEMPORARY diagnostic instrumentation — see `TypedInputDriver`. Lets the
+    /// driver address one specific terminal instead of "whichever view happens
+    /// to be first responder", which typed into a live agent session by mistake.
+    var diagTerminalID: UUID?
+
     enum PasteAction: Equatable {
         case text
         case codexImage

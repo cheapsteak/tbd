@@ -271,11 +271,18 @@ def main():
     end tell'''
 
     if args.input == "driven":
+        # Re-focus right before triggering. The pre-roll above (settle, signpost
+        # enabler, idle control) is long enough that TBD has usually lost the
+        # foreground again by now, and the driver can only deliver to a key window.
+        subprocess.run(["tbd", "terminal", "focus", "--terminal", term, "--activate"],
+                       capture_output=True)
+        time.sleep(1.0)
         trigger = os.path.expanduser("~/tbd/runtime/typed-drive.json")
         os.makedirs(os.path.dirname(trigger), exist_ok=True)
         with open(trigger, "w") as f:
             json.dump({"count": args.keys, "minGap": args.min_gap,
-                       "maxGap": args.max_gap, "seed": args.seed}, f)
+                       "maxGap": args.max_gap, "seed": args.seed,
+                       "terminalID": term}, f)
         expected = args.keys * (args.min_gap + args.max_gap) / 2
         print(f"==> triggered in-app driver for {args.keys} keys (~{expected:.0f}s)")
         time.sleep(expected + 6)
@@ -382,12 +389,17 @@ def main():
     ratio = hops_in_run / len(launches)
     passes_in_run = sum(1 for x in passes if run_lo <= x < run_hi)
     draw_cover = passes_in_run / len(launches)
-    ok = 0.9 <= ratio <= 1.15 and draw_cover >= 0.95
+    # A ceiling as well as a floor. Fewer draws than keys means the tab left the
+    # screen; MORE means some other view is also drawing, and then "the next
+    # display pass after my chunk" can be that other view's draw rather than the
+    # one showing this keystroke -- which UNDERSTATES latency, the direction a
+    # result is most likely to be believed.
+    ok = 0.9 <= ratio <= 1.15 and 0.95 <= draw_cover <= 1.35
     print(f"  keys sent={len(launches)} matched={len(k2p)} dropped={dropped}")
     print(f"  echo chunks per keystroke = {ratio:.2f}  "
           f"({'1:1 -- each key is anchored on its own echo' if 0.9 <= ratio <= 1.15 else 'NOT 1:1 -- keys were lost, do not report'})")
     print(f"  display passes per keystroke = {draw_cover:.2f}  "
-          f"({'every key got a draw' if draw_cover >= 0.95 else 'FEWER DRAWS THAN KEYS -- the tab went off screen mid-run, do not report'})")
+          f"({'every key got a draw, and only this view drew' if 0.95 <= draw_cover <= 1.35 else ('FEWER DRAWS THAN KEYS -- the tab went off screen mid-run, do not report' if draw_cover < 0.95 else 'MORE DRAWS THAN KEYS -- another view is drawing too, latency would be understated, do not report')})")
     print(f"  harness `tmux send-keys` spawn cost (excluded from key2paint): "
           f"p50={pct(spawn_costs,.5):.1f} p90={pct(spawn_costs,.9):.1f} ms")
     print()

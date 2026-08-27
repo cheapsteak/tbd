@@ -257,6 +257,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             appearance: appearance
         )
 
+        // TEMPORARY diagnostic instrumentation — see `TypedInputDriver`.
+        tv.diagTerminalID = terminalID
+
         // Disable mouse reporting so click-drag selects text locally
         // instead of forwarding mouse events to tmux
         tv.allowMouseReporting = false
