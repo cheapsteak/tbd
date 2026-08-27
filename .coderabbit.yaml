@@ -114,7 +114,9 @@ reviews:
         host, account, person, or ticket names, no internal URLs, and no
         machine-specific paths. Use `acme` placeholders.
 
-  tools:
-    swiftlint:
-      enabled: true
-      config_file: .swiftlint.yml
+  # No `tools.swiftlint` block on purpose. CodeRabbit skips SwiftLint when a
+  # GitHub workflow already runs it, and `.github/workflows/test.yml` runs
+  # `swiftlint --strict` in the `lint` job — so configuring it here would look
+  # like enforcement while adding no findings. CI owns SwiftLint. (The
+  # `config_file` key would be redundant regardless: CodeRabbit auto-detects
+  # `.swiftlint.yml`, and that key exists for configs named something else.)
