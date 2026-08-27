@@ -21,6 +21,22 @@ reviews:
     base_branches:
       - ^main$
 
+    # Never stop reviewing a branch part-way through. This defaults to 5,
+    # which pauses automatic review after five reviewed commits and waits for
+    # someone to ask it to resume. That ceiling assumes a human pushing a
+    # handful of commits per PR; work here routinely arrives as long runs of
+    # small agent-authored commits, so the pause would fire mid-branch on
+    # ordinary PRs and the later commits — often the ones carrying review
+    # fixes — would go unreviewed.
+    #
+    # The failure mode is what makes this worth setting rather than living
+    # with: a paused review looks exactly like a clean one. Nothing is posted,
+    # no check fails, and the PR reads as reviewed. This repository has already
+    # been bitten once by CodeRabbit silently declining to review (see the
+    # `base_branches` note above); this is the same shape of trap one setting
+    # over.
+    auto_pause_after_reviewed_commits: 0
+
   # Build products, vendored artifacts, and lockfiles carry no review signal.
   path_filters:
     - "!.build/**"
