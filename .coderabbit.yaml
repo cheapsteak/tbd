@@ -61,8 +61,13 @@ knowledge_base:
   # Defaults to true, and its default `filePatterns` already include
   # `**/CLAUDE.md`. Stated explicitly because it is now the whole mechanism by
   # which CodeRabbit learns this repository's conventions — worth being loud
-  # about rather than leaving to an unstated default. Do not set `filePatterns`
-  # here without re-listing the defaults; the key replaces them rather than
-  # adding to them.
+  # about rather than leaving to an unstated default.
+  #
+  # `filePatterns` is additive: custom entries are applied on top of the
+  # defaults rather than replacing them, so adding one does not cost us
+  # `**/CLAUDE.md`. Only add an entry for a guideline file the defaults do not
+  # already match, or use the object form (`files` + `applyTo`) when a
+  # guideline needs to govern files outside its own directory subtree. To turn
+  # the feature off, set `enabled: false` — never clear the pattern list.
   code_guidelines:
     enabled: true
