@@ -59,6 +59,10 @@ func makeLifecycle(
     subscriptions: StateSubscriptionManager? = nil,
     timeout: TimeInterval = WorktreeLifecycle.defaultPreSessionTimeout,
     windowIsDead: (@Sendable (String) -> Bool)? = nil,
+    /// The three-valued window probe, for the fixtures that need to say "the
+    /// read failed" — which `windowIsDead` cannot express. Takes precedence
+    /// over `windowIsDead` when both are given.
+    windowPresence: (@Sendable (String, String) -> TmuxResourcePresence)? = nil,
     listWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil
 ) -> WorktreeLifecycle {
     var dryRunRecorder: (@Sendable ([String]) -> Void)?
@@ -72,6 +76,7 @@ func makeLifecycle(
             dryRun: true,
             dryRunRecorder: dryRunRecorder,
             dryRunWindowIsDead: windowIsDead,
+            dryRunWindowPresence: windowPresence,
             dryRunListWindows: listWindows
         ),
         hooks: HookResolver(),

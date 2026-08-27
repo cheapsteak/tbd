@@ -39,12 +39,131 @@ struct PaneSendTargetQueryTests {
     /// `display-message -p` prints an empty line and exits 0 for a pane that is
     /// gone, so it cannot distinguish "vanished" from "healthy". `list-panes`
     /// exits non-zero with `can't find pane`. The builder must stay on
-    /// `list-panes` for the missing-pane branch to exist at all.
+    /// `list-panes` for the absent-pane branch to exist at all.
     @Test("the target query uses list-panes, not display-message")
     func queryUsesListPanes() {
         let args = TmuxManager.paneSendTargetQuery(server: "tbd-acme", paneID: "%7")
         #expect(args.contains("list-panes"))
         #expect(!args.contains("display-message"))
+    }
+
+    // MARK: - The reachability probe
+
+    /// Pinned exactly, like `paneSendTargetQuery` above and for the same
+    /// reason: this argv is the whole basis on which a failed consultation is
+    /// allowed to conclude "the pane is gone". A drift into a usage error would
+    /// make the probe fail for a reason unrelated to reachability, and every
+    /// failed consultation would silently become `.unreachable`.
+    @Test("the reachability probe asks one server-wide list-panes for pane ids")
+    func probeShape() {
+        #expect(TmuxManager.allPaneIDsQuery(server: "tbd-acme")
+            == ["-L", "tbd-acme", "list-panes", "-a", "-F", "#{pane_id}"])
+    }
+
+    /// `-a` is load-bearing: a target-scoped probe would fail for both of the
+    /// reasons this split exists to tell apart, and would prove nothing.
+    @Test("the reachability probe names no target")
+    func probeIsServerWide() {
+        let args = TmuxManager.allPaneIDsQuery(server: "tbd-acme")
+        #expect(args.contains("-a"))
+        #expect(!args.contains("-t"))
+    }
+
+    /// THE REGRESSION: a live pane must never be reported missing. The
+    /// consultation failed, but the server answered the probe and listed the
+    /// pane — so the failure was transient, and the one verdict that must not
+    /// come out of it is absence.
+    @Test("a pane the probe still lists is never reported as absent")
+    func failedConsultationWithLivePaneIsUnreachable() {
+        #expect(TmuxManager.classifyFailedConsultation(
+            paneInventory: "%1\n%265\n%9\n", paneID: "%265") == .unreachable)
+    }
+
+    /// The other half: the reconciler must still be able to reclaim. A server
+    /// that answered and does not list the pane is positive evidence of absence.
+    @Test("a pane a reachable server does not list is absent")
+    func failedConsultationWithReachableServerIsAbsent() {
+        #expect(TmuxManager.classifyFailedConsultation(
+            paneInventory: "%1\n%9\n", paneID: "%265") == .absent)
+        // A server with no panes at all still ANSWERED, so this is still
+        // absence rather than a failed read.
+        #expect(TmuxManager.classifyFailedConsultation(
+            paneInventory: "", paneID: "%265") == .absent)
+    }
+
+    /// Two failed reads in a row are still two failed reads. Nothing about the
+    /// pane has been established, so nothing may be claimed about it — this is
+    /// the "no server on that socket" case the old code called `.missing`.
+    @Test("a probe that also fails proves nothing and stays unreachable")
+    func failedProbeIsUnreachable() {
+        #expect(TmuxManager.classifyFailedConsultation(
+            paneInventory: nil, paneID: "%265") == .unreachable)
+    }
+
+    /// The inventory is matched whole, exactly as `parsePaneSendTarget` matches
+    /// its lines: `%1` listed must not answer for `%12`, or a genuinely absent
+    /// pane would be excused as unreachable forever and never reclaimed.
+    @Test("the probe's inventory is matched whole, not by prefix")
+    func probeInventoryMatchIsExact() {
+        #expect(TmuxManager.paneInventoryLists("%12\n", paneID: "%1") == false)
+        #expect(TmuxManager.paneInventoryLists("%12\n", paneID: "%12"))
+        #expect(TmuxManager.paneInventoryLists("  %12  \n", paneID: "%12"))
+        #expect(TmuxManager.classifyFailedConsultation(
+            paneInventory: "%12\n", paneID: "%1") == .absent)
+    }
+
+    // MARK: - The window probe, on the same rule
+
+    /// The window-space twin of `probeShape`/`probeIsServerWide`. It has to be
+    /// server-wide for the identical reason: a target-scoped window query fails
+    /// for both of the reasons the split exists to tell apart, so it could never
+    /// disambiguate its own failure. It also reports one formatted identity per
+    /// line and nothing else — the alternative, reading `can't find window` off
+    /// stderr, is the prose-parsing the bounded-recovery spec rejects.
+    @Test("the window reachability probe asks one server-wide list-windows for window ids")
+    func windowProbeShape() {
+        let args = TmuxManager.allWindowIDsQuery(server: "tbd-acme")
+        #expect(args == ["-L", "tbd-acme", "list-windows", "-a", "-F", "#{window_id}"])
+        #expect(args.contains("-a"))
+        #expect(!args.contains("-t"))
+    }
+
+    /// THE REGRESSION, in the window's identity space: the consultation failed,
+    /// but the server answered the probe and listed the window. A window tmux
+    /// just named must never be reported gone — that verdict parks live
+    /// sessions and deletes their rows.
+    @Test("a window the probe still lists is never reported as absent")
+    func failedWindowConsultationWithLiveWindowIsUnreachable() {
+        #expect(TmuxManager.classifyFailedWindowConsultation(
+            windowInventory: "@1\n@7\n@9\n", windowID: "@7") == .unreachable)
+    }
+
+    /// The reclaim half: a server that answered and does not list the window is
+    /// positive evidence of absence, and reconcile still acts on it.
+    @Test("a window a reachable server does not list is absent")
+    func failedWindowConsultationWithReachableServerIsAbsent() {
+        #expect(TmuxManager.classifyFailedWindowConsultation(
+            windowInventory: "@1\n@9\n", windowID: "@7") == .absent)
+        #expect(TmuxManager.classifyFailedWindowConsultation(
+            windowInventory: "", windowID: "@7") == .absent)
+    }
+
+    /// Two failed reads in a row still say nothing about the window.
+    @Test("a window probe that also fails proves nothing and stays unreachable")
+    func failedWindowProbeIsUnreachable() {
+        #expect(TmuxManager.classifyFailedWindowConsultation(
+            windowInventory: nil, windowID: "@7") == .unreachable)
+    }
+
+    /// Matched whole, so `@1` listed does not answer for `@12` — otherwise a
+    /// genuinely absent window would be excused as unreadable forever and never
+    /// reclaimed.
+    @Test("the window probe's inventory is matched whole, not by prefix")
+    func windowProbeInventoryMatchIsExact() {
+        #expect(TmuxManager.classifyFailedWindowConsultation(
+            windowInventory: "@12\n", windowID: "@1") == .absent)
+        #expect(TmuxManager.classifyFailedWindowConsultation(
+            windowInventory: "  @12  \n", windowID: "@12") == .unreachable)
     }
 
     @Test("the stamp command sets the pane-scoped option on the given target")
@@ -137,14 +256,14 @@ struct PaneSendTargetQueryTests {
     @Test("pane ids are compared whole, not by prefix")
     func parsePaneIDMatchIsExact() {
         let output = "%12\t0\tMINE\tclaude\n"
-        #expect(TmuxManager.parsePaneSendTarget(output, paneID: "%1") == .missing)
+        #expect(TmuxManager.parsePaneSendTarget(output, paneID: "%1") == .absent)
         #expect(TmuxManager.parsePaneSendTarget(output, paneID: "%12") == .live(terminalID: "MINE"))
     }
 
     /// A pane started without an explicit command — `tmux new-session -d` with
     /// no argument — reports an empty `#{pane_start_command}`, so the last
     /// field is genuinely empty rather than absent. It must still parse as four
-    /// fields, not fall through to `.missing`.
+    /// fields, not fall through to `.absent`.
     @Test("an empty trailing start command is still a complete answer")
     func parseEmptyStartCommand() {
         #expect(TmuxManager.parsePaneSendTarget("%0\t0\t\t\n", paneID: "%0")
@@ -155,9 +274,9 @@ struct PaneSendTargetQueryTests {
 
     @Test("empty or malformed output names nothing")
     func parseEmpty() {
-        #expect(TmuxManager.parsePaneSendTarget("", paneID: "%7") == .missing)
-        #expect(TmuxManager.parsePaneSendTarget("\n", paneID: "%7") == .missing)
-        #expect(TmuxManager.parsePaneSendTarget("%7\t0\tonly-three\n", paneID: "%7") == .missing)
+        #expect(TmuxManager.parsePaneSendTarget("", paneID: "%7") == .absent)
+        #expect(TmuxManager.parsePaneSendTarget("\n", paneID: "%7") == .absent)
+        #expect(TmuxManager.parsePaneSendTarget("%7\t0\tonly-three\n", paneID: "%7") == .absent)
     }
 
     // MARK: - Identity resolution

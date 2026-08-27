@@ -12,21 +12,36 @@ import Testing
 // and touches nothing outside the process.
 
 /// Reboot path (whole tmux server gone) driven end-to-end through
-/// `reconcile(repoID:)`. Proves the #284 fix: terminals are PARKED as
-/// suspended (resumable Claude) or deleted (plain shell) — NOT eagerly
-/// recreated. Recovery is the on-demand Resume button (see #285), so reconcile
-/// must leave the dead server dead.
+/// `reconcile(repoID:)`, against a real tmux. Proves the #284 fix: terminals
+/// are PARKED as suspended (resumable Claude) or deleted (plain shell) — NOT
+/// eagerly recreated. Recovery is the on-demand Resume button (see #285), so
+/// reconcile must leave the dead server dead.
 ///
 /// This needs a REAL `TmuxManager`: `TmuxManager(dryRun: true)` always reports
-/// `serverExists → true`, so it cannot model the post-reboot `serverExists →
-/// false` state this test depends on. We start a real server, capture live
-/// window/pane IDs, then kill the server to simulate the reboot.
+/// the server `.present`, so it cannot model the post-reboot state this test
+/// depends on. We start a real server, capture live window/pane IDs, then kill
+/// the server to simulate the reboot.
+///
+/// **Why the process probe is injected rather than left to run for real.**
+/// `serverPresence` may only answer `.absent` for a server that did not respond
+/// when no tmux server process exists for this uid at all — tmux itself cannot
+/// tell "gone" from "this process resolved a different socket", and the process
+/// table is the only place that distinction exists. A reboot makes that
+/// condition true; a test cannot. This suite starts real tmux servers of its
+/// own, sibling worktrees on a shared box run more, and CI runners are not
+/// guaranteed bare either, so a real probe here would answer "yes, tmux is
+/// running" for reasons that have nothing to do with the server under test and
+/// the assertion would flip with the machine's mood. `tmuxServerProcessProbe`
+/// pins it to the post-reboot fact — no tmux process anywhere — while every
+/// other step, including the kill and the `list-sessions` that fails after it,
+/// stays real. The probe's own three branches are pinned deterministically in
+/// `TBDDaemonTests/TmuxServerPresenceTests`.
 @Test func testReconcileRebootParksClaudeAndDeletesShell() async throws {
     let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
-    let realTmux = TmuxManager()
+    let realTmux = TmuxManager(tmuxServerProcessProbe: { false })
     let lifecycle = WorktreeLifecycle(
         db: db, git: GitManager(), tmux: realTmux, hooks: HookResolver()
     )
@@ -35,7 +50,7 @@ import Testing
         path: repoDir.path, displayName: "test", defaultBranch: "main"
     )
     // reconcile derives the server name from the repo path, so the worktree row
-    // must use the same name for the serverExists probe to match.
+    // must use the same name for the serverPresence probe to match.
     let serverName = TmuxManager.serverName(forRepoPath: repo.path)
 
     // A worktree whose path == the repo path is reported by `git worktree
@@ -66,10 +81,14 @@ import Testing
         tmuxWindowID: shellWindow.windowID, tmuxPaneID: shellWindow.paneID
     )
 
-    // Simulate the reboot: the whole server is gone, so serverExists → false.
+    // Simulate the reboot: the whole server is gone. `list-sessions` really
+    // fails; the pinned probe supplies the out-of-tmux half — no tmux server
+    // process exists — which is what makes the verdict `.absent` rather than
+    // the row-protecting `.unreachable`.
     try await realTmux.killServer(server: serverName)
-    let aliveAfterKill = await realTmux.serverExists(server: serverName)
-    #expect(!aliveAfterKill, "precondition: server must be gone to model a reboot")
+    let presenceAfterKill = await realTmux.serverPresence(server: serverName)
+    #expect(presenceAfterKill == .absent,
+            "precondition: a killed server with no tmux process left must read as absent")
 
     do {
         try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
@@ -81,13 +100,14 @@ import Testing
     let claudeAfter = try await db.terminals.get(id: claudeTerminal.id)
     let shellAfter = try await db.terminals.get(id: shellTerminal.id)
     // Was the dead server resurrected by an eager recreate? (The bug.)
-    let serverAliveAfter = await realTmux.serverExists(server: serverName)
+    let serverPresenceAfter = await realTmux.serverPresence(server: serverName)
     try? await realTmux.killServer(server: serverName)
 
     // Resumable Claude session: parked, not recreated, not deleted.
     #expect(claudeAfter != nil, "claude terminal must NOT be deleted on reboot")
     #expect(claudeAfter?.isParked == true, "claude terminal must be parked (resumable via wake)")
-    #expect(claudeAfter?.claudeSessionID == sessionID, "session ID must be preserved for on-demand resume")
+    #expect(claudeAfter?.claudeSessionID == sessionID,
+            "session ID must be preserved for on-demand resume")
     // The window/pane IDs must NOT have been replaced — reconcile does not spawn
     // a new window on the reboot path anymore.
     #expect(claudeAfter?.tmuxWindowID == claudeWindow.windowID,
@@ -98,7 +118,7 @@ import Testing
 
     // CRUCIAL #284 invariant: reconcile must not have bootstrapped the dead
     // server to recreate windows. No mass `claude --resume` storm on reboot.
-    #expect(!serverAliveAfter,
+    #expect(serverPresenceAfter != .present,
             "reconcile must leave the dead server dead — no eager mass-recreate (#284)")
 }
 
@@ -239,14 +259,17 @@ func testReconcileDeadWindowLiveClaudeNotParked() async throws {
     let db = try TBDDatabase(inMemory: true)
 
     // Create a TmuxManager with seams to:
-    // 1. Force windowExists to return false for the test window
+    // 1. Force the window probe to report the test window POSITIVELY absent —
+    //    tmux answered on a reachable server — which is the only verdict that
+    //    reaches the park path at all
     // 2. Return a Claude version string when paneCurrentCommand is called
-    // This simulates the safety check scenario: window reports dead, but
+    // This simulates the safety check scenario: window reports gone, but
     // Claude process is still running.
     let tmux = TmuxManager(
-        realModeWindowExistsOverride: { server, windowID in
+        realModeWindowPresenceOverride: { server, windowID in
             if windowID == "@live-claude-window" {
-                return false  // Simulate dead window
+                // Simulate a window tmux answered about and does not have.
+                return TmuxResourcePresence.absent
             }
             return nil
         },
@@ -292,7 +315,7 @@ func testReconcileDeadWindowLiveClaudeNotParked() async throws {
     try? await tmux.killServer(server: serverName)
 
     // The safety check at WorktreeLifecycle+Reconcile.swift:272-279 should detect
-    // that a Claude process is still running in the pane despite windowExists returning false.
+    // that a Claude process is still running in the pane despite the window probe reporting absence.
     // Result: the terminal should NOT be parked (the safety check skips parking).
     #expect(afterReconcile != nil, "Claude terminal must NOT be deleted or parked when live claude is detected")
     #expect(afterReconcile?.isParked == false, "Claude terminal must NOT be parked — the safety check detected live claude process")

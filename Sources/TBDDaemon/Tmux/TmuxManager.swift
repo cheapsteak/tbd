@@ -6,9 +6,27 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "TmuxManager"
 
 /// What one read-only `list-panes` consultation says about a pane that a send
 /// is aimed at. Read before anything is typed; see `paneSendTargetQuery`.
+///
+/// The two negative cases are deliberately separate facts, and conflating them
+/// was a real defect: a reachable server answering "no such pane" is positive
+/// evidence of absence, while a server that could not be reached at all is a
+/// failed READ that says nothing about the pane. The daemon spawns tmux with
+/// `environment: nil`, so its `TMUX_TMPDIR` can differ from the user's shell
+/// and `-L <name>` can resolve to a different socket file — the second case
+/// happens in the field, and reporting it as absence refuses sends to (and,
+/// worse, parks) perfectly live sessions. Affirmative evidence of absence is
+/// what `docs/specs/2026-08-11-bounded-terminal-recovery-design.md` requires;
+/// the app layer already honours it (`TmuxPreparationFailure.windowMissing`
+/// versus `.commandFailed`).
 public enum PaneSendTarget: Sendable, Equatable {
-    /// tmux cannot find the pane — it, its window, or the whole server is gone.
-    case missing
+    /// tmux answered about a reachable server and this pane is not on it — it,
+    /// or its window, is gone. Positive evidence of absence.
+    case absent
+    /// The consultation could not be completed: the server did not answer on
+    /// the socket this daemon resolved. NOT evidence about the pane, and never
+    /// to be reported as "gone" — the pane may well be alive and typed into by
+    /// a shell that resolves the same `-L` name to a different socket.
+    case unreachable
     /// The pane object exists (`remain-on-exit` kept it) but its process has
     /// exited. `send-keys` into it still exits 0 and the keys go nowhere.
     /// `terminalID` carries the same ownership stamp as a live pane so
@@ -19,6 +37,31 @@ public enum PaneSendTarget: Sendable, Equatable {
     /// answered with, or `nil` when the pane carries no identity to compare —
     /// a pane spawned before TBD stamped one, or by something outside TBD.
     case live(terminalID: String?)
+}
+
+/// What one read-only consultation says about a tmux resource a caller is
+/// about to act on: a window, or a whole server.
+///
+/// The same three-way split as `PaneSendTarget`, and for the same reason. A
+/// `Bool` probe has to spend its one bit on "yes" and then fold both "tmux
+/// answered: not here" and "tmux was never reached" into "no" — which is the
+/// conflation `docs/specs/2026-08-11-bounded-terminal-recovery-design.md`
+/// forbids, because every destructive rail in the daemon (park, delete, kill,
+/// respawn, spawn-a-replacement, revoke-a-lease, cancel-a-resume) is gated on
+/// that single bit. Making the third case a separate value is what forces each
+/// of those rails to decide, at the compiler's insistence, what a FAILED READ
+/// means for it — and the answer is always "decline and let a later pass ask
+/// again".
+public enum TmuxResourcePresence: Sendable, Equatable {
+    /// tmux answered and the resource is there.
+    case present
+    /// tmux answered on a reachable server and the resource is NOT there.
+    /// Positive evidence of absence — the only verdict that may license a
+    /// destructive or irreversible action.
+    case absent
+    /// The consultation could not be completed, so nothing is known about the
+    /// resource. Never to be reported or treated as absence.
+    case unreachable
 }
 
 /// Serializes tmux resource ownership transitions per server.
@@ -84,11 +127,33 @@ public struct TmuxManager: Sendable {
     /// have been passed to tmux. Used by spawn / swap integration tests to assert
     /// command shapes without spawning an actual tmux server.
     public let dryRunRecorder: (@Sendable ([String]) -> Void)?
-    /// Optional test hook consulted by `windowExists` in dryRun mode: return
+    /// Optional test hook consulted by `windowPresence` in dryRun mode: return
     /// `true` for a window ID to simulate that window having been killed.
     /// Without it, dryRun reports every window as alive, which makes paths
     /// like the pre-session `.paneKilled` short-circuit untestable.
+    ///
+    /// Two-state by construction, so it can only say `.present` or `.absent`:
+    /// `true` means tmux ANSWERED that the window is gone. A fixture that needs
+    /// the third fact — the read itself failed — uses `dryRunWindowPresence`,
+    /// which takes precedence over this hook when both are set.
     public let dryRunWindowIsDead: (@Sendable (String) -> Bool)?
+    /// Optional test hook consulted by `windowPresence` in dryRun mode:
+    /// `(server, windowID)` → the full three-way verdict. Consulted before
+    /// `dryRunWindowIsDead`, which stays as the two-state shorthand the
+    /// existing fixtures are written against.
+    ///
+    /// This exists because a two-state hook cannot express `.unreachable`, and
+    /// `.unreachable` is precisely the state every destructive rail must be
+    /// tested against: a fixture that can only say "alive" or "gone" leaves the
+    /// failed-read branch — the one that must NOT park, delete, kill, respawn
+    /// or revoke — with no way to be exercised, which is how the daemon shipped
+    /// a `catch { return false }` in front of the very check that was meant to
+    /// stop it.
+    public let dryRunWindowPresence: (@Sendable (String, String) -> TmuxResourcePresence)?
+    /// Optional test hook consulted by `serverPresence` in dryRun mode:
+    /// `server` → the three-way verdict. Without it, dryRun reports every
+    /// server `.present`, which is what every pre-existing fixture assumes.
+    public let dryRunServerPresence: (@Sendable (String) -> TmuxResourcePresence)?
     /// Optional test hook consulted by `capturePaneOutput` and
     /// `capturePaneWithAnsi` in dryRun mode:
     /// (server, paneID) → pane text. Without it, dryRun captures return "",
@@ -132,7 +197,10 @@ public struct TmuxManager: Sendable {
     /// Throwing, because "the consultation could not be run at all" is one of
     /// the answers: it is the wedged-tmux path the send classifies as a
     /// transport failure rather than a refusal, and a non-throwing hook would
-    /// leave that branch with no way to be exercised.
+    /// leave that branch with no way to be exercised. Returning `.unreachable`
+    /// is the neighbouring case — the consultation ran and could not reach the
+    /// server — and every consumer must treat it as "I don't know", never as
+    /// "gone".
     public let dryRunPaneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)?
     /// Optional test hook consulted by `pasteText` in dryRun mode:
     /// `(server, paneID, bytes)` — the payload that would have been written to
@@ -142,14 +210,42 @@ public struct TmuxManager: Sendable {
     /// dispatch envelope, for one — need the bytes themselves.
     public let dryRunPasteBytes: (@Sendable (String, String, Data) -> Void)?
     /// Optional test hook for real (non-dryRun) mode: override the result of
-    /// `windowExists(server:windowID:)`. Allows tests to force a window as dead
-    /// while still having a live process running in the pane (for testing the
-    /// safety check in reconcile).
-    public let realModeWindowExistsOverride: (@Sendable (String, String) -> Bool?)?
+    /// `windowPresence(server:windowID:)`. Allows tests to force a window as
+    /// positively absent while still having a live process running in the pane
+    /// (for testing the safety check in reconcile), or to force the failed-read
+    /// verdict against a real server.
+    public let realModeWindowPresenceOverride: (@Sendable (String, String) -> TmuxResourcePresence?)?
     /// Optional test hook for real (non-dryRun) mode: override the result of
     /// `paneCurrentCommand(server:paneID:)`. Allows tests to return a specific
     /// command string without relying on tmux's actual pane_current_command.
     public let realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)?
+    /// Seam for the out-of-tmux evidence `serverPresence` consults after a
+    /// `list-sessions` that did not answer: does ANY tmux server process exist
+    /// for this uid?
+    ///
+    /// Two nils, deliberately, and they mean different things:
+    /// - the **property** being nil ⇒ use the production `/bin/ps` probe.
+    /// - the closure **returning** nil ⇒ the probe itself could not be taken,
+    ///   which is never evidence of absence (see `serverPresence`).
+    ///
+    /// Consulted in real mode only; dryRun answers from `dryRunServerPresence`
+    /// long before this is reached. It exists because the condition that makes
+    /// the probe interesting — a machine with no tmux process running anywhere
+    /// — is not something a test on a shared developer box or a CI runner can
+    /// arrange, and certainly not one that starts real tmux servers of its own.
+    public let tmuxServerProcessProbe: (@Sendable () async -> Bool?)?
+    /// Collapses the production `/bin/ps` reading behind `serverPresence` onto
+    /// one in-flight call plus a seconds-long memo, because the question it
+    /// answers is machine-global and does not vary with the server name — see
+    /// `TmuxServerProcessProbeCache`. Shared by every value-copy of this
+    /// manager, the same way `resourceCoordinator` is, so the daemon's one
+    /// manager gives the whole process one probe per sweep.
+    ///
+    /// Deliberately NOT applied to `tmuxServerProcessProbe`: an injected probe
+    /// is a fixture, and a fixture that silently answered from a memo would
+    /// make a test's second call unable to see a changed answer. The memo's own
+    /// behavior is pinned directly in `TmuxServerPresenceTests`.
+    private let serverProcessProbeCache = TmuxServerProcessProbeCache()
 
     /// Whether callers should treat `paneCurrentCommand` as a meaningful
     /// process-liveness signal. Plain dry-run fixtures intentionally return a
@@ -172,13 +268,15 @@ public struct TmuxManager: Sendable {
         }
     }
 
-    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunCreateWindowError: (@Sendable (String) -> Error?)? = nil, dryRunRespawnWindowError: (@Sendable (String) -> Error?)? = nil, dryRunKillWindowError: (@Sendable (String, String) -> Error?)? = nil, dryRunPaneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil, dryRunPasteBytes: (@Sendable (String, String, Data) -> Void)? = nil, realModeWindowExistsOverride: (@Sendable (String, String) -> Bool?)? = nil, realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout) {
+    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunWindowPresence: (@Sendable (String, String) -> TmuxResourcePresence)? = nil, dryRunServerPresence: (@Sendable (String) -> TmuxResourcePresence)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunCreateWindowError: (@Sendable (String) -> Error?)? = nil, dryRunRespawnWindowError: (@Sendable (String) -> Error?)? = nil, dryRunKillWindowError: (@Sendable (String, String) -> Error?)? = nil, dryRunPaneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil, dryRunPasteBytes: (@Sendable (String, String, Data) -> Void)? = nil, realModeWindowPresenceOverride: (@Sendable (String, String) -> TmuxResourcePresence?)? = nil, realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)? = nil, tmuxServerProcessProbe: (@Sendable () async -> Bool?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout) {
         self.dryRun = dryRun
         self.subprocessTimeout = subprocessTimeout
         self.counter = Counter()
         self.resourceCoordinator = TmuxServerResourceCoordinator()
         self.dryRunRecorder = dryRunRecorder
         self.dryRunWindowIsDead = dryRunWindowIsDead
+        self.dryRunWindowPresence = dryRunWindowPresence
+        self.dryRunServerPresence = dryRunServerPresence
         self.dryRunListWindows = dryRunListWindows
         self.dryRunCapturePane = dryRunCapturePane
         self.dryRunPaneCurrentCommand = dryRunPaneCurrentCommand
@@ -187,8 +285,9 @@ public struct TmuxManager: Sendable {
         self.dryRunKillWindowError = dryRunKillWindowError
         self.dryRunPaneSendTarget = dryRunPaneSendTarget
         self.dryRunPasteBytes = dryRunPasteBytes
-        self.realModeWindowExistsOverride = realModeWindowExistsOverride
+        self.realModeWindowPresenceOverride = realModeWindowPresenceOverride
         self.realModePaneCurrentCommandOverride = realModePaneCurrentCommandOverride
+        self.tmuxServerProcessProbe = tmuxServerProcessProbe
     }
 
     /// Runs one ownership transition while exclusively holding `server`.
@@ -605,13 +704,222 @@ public struct TmuxManager: Sendable {
          + "#{pane_start_command}"]
     }
 
+    /// The reachability probe run after a failed `paneSendTargetQuery`: one
+    /// read-only, server-wide inventory of pane identities.
+    ///
+    /// Server-wide (`-a`) rather than `-t <pane>` deliberately. The whole point
+    /// is to separate "tmux answered" from "tmux could not be reached", and a
+    /// second target-scoped query would fail for BOTH reasons exactly as the
+    /// first one did. `list-panes -a` names no target, so its exit status is
+    /// about the SERVER: it exits 0 with the inventory when the server answers
+    /// and non-zero when nothing is listening on that socket.
+    ///
+    /// It reports `#{pane_id}` and nothing else — no prose, no stderr parsing.
+    /// The bounded-recovery spec rejects reading tmux's human-facing text
+    /// ("rendered and human-facing text is not a stable machine interface. Exit
+    /// status and formatted identity inventories are"), so absence is concluded
+    /// from a formatted inventory that does not contain the id, never from an
+    /// error message that says so.
+    public static func allPaneIDsQuery(server: String) -> [String] {
+        ["-L", server, "list-panes", "-a", "-F", "#{pane_id}"]
+    }
+
+    /// The reachability probe run after a failed window consultation: one
+    /// read-only, server-wide inventory of window identities.
+    ///
+    /// The window-space twin of `allPaneIDsQuery`, and server-wide (`-a`) for
+    /// the identical reason: naming no target makes its exit status a fact
+    /// about the SERVER rather than about the window that just failed, which is
+    /// the only way to tell "tmux answered" from "tmux was never reached". It
+    /// reports `#{window_id}` and nothing else — an identity inventory, never
+    /// tmux's error prose.
+    public static func allWindowIDsQuery(server: String) -> [String] {
+        ["-L", server, "list-windows", "-a", "-F", "#{window_id}"]
+    }
+
+    /// Whether a server-wide `-F` identity inventory names `id`. One line per
+    /// resource, so membership is an exact match on the trimmed line.
+    static func inventoryLists(_ output: String, id: String) -> Bool {
+        output.split(separator: "\n").contains {
+            $0.trimmingCharacters(in: .whitespaces) == id
+        }
+    }
+
+    /// Whether a server-wide `allPaneIDsQuery` inventory names `paneID`.
+    static func paneInventoryLists(_ output: String, paneID: String) -> Bool {
+        inventoryLists(output, id: paneID)
+    }
+
+    /// Turn a failed window consultation into a verdict, given what the
+    /// window-inventory reachability probe saw. Pure, so all three branches are
+    /// unit-testable without a tmux server.
+    ///
+    /// - Parameter windowInventory: `allWindowIDsQuery`'s stdout, or `nil` when
+    ///   the probe itself failed.
+    ///
+    /// The same three cases as `classifyFailedConsultation`, in the window's
+    /// identity space:
+    /// - probe failed → `.unreachable`. Two failed reads still say nothing.
+    /// - probe answered and the inventory does NOT name the window → `.absent`.
+    /// - probe answered and the inventory DOES name the window → `.unreachable`.
+    ///   Never report a window tmux just listed as gone.
+    static func classifyFailedWindowConsultation(
+        windowInventory: String?, windowID: String
+    ) -> TmuxResourcePresence {
+        guard let windowInventory else { return .unreachable }
+        return inventoryLists(windowInventory, id: windowID) ? .unreachable : .absent
+    }
+
+    /// Turn a failed `list-sessions` into a verdict, given what the process
+    /// table said about tmux servers. Pure, so all three branches are
+    /// unit-testable without a tmux server and without shelling out to `ps`.
+    ///
+    /// - Parameter tmuxServerProcessesExist: whether the process table holds at
+    ///   least one tmux server process for this uid, or `nil` when the probe
+    ///   itself could not be taken.
+    ///
+    /// The distinction tmux cannot draw — "no server is running under this
+    /// name" versus "this process resolved a socket the server is not listening
+    /// on" — is drawn from OUTSIDE tmux, where it does exist:
+    /// - probe failed → `.unreachable`. A failed probe is never evidence of
+    ///   absence; two failed reads still say nothing.
+    /// - probe answered and NO tmux server process exists → `.absent`. Nothing
+    ///   is running, so nothing can be listening on any socket, whatever
+    ///   `TMUX_TMPDIR` resolves to for whoever asks. This is the post-reboot
+    ///   case, and the reason it must reclaim: otherwise every row on every
+    ///   pre-reboot server accumulates forever.
+    /// - probe answered and a tmux server process DOES exist → `.unreachable`.
+    ///   Something is running and our socket resolution did not reach it, which
+    ///   is exactly the field bug, so the rows are protected.
+    static func classifyFailedServerConsultation(
+        tmuxServerProcessesExist: Bool?
+    ) -> TmuxResourcePresence {
+        guard let exists = tmuxServerProcessesExist else { return .unreachable }
+        return exists ? .unreachable : .absent
+    }
+
+    /// Whether a `/bin/ps` snapshot holds a tmux server process for `uid`.
+    ///
+    /// **The matching rule, and why it is deliberately name-agnostic.** A row
+    /// counts when all of these hold:
+    /// 1. `entry.uid == uid` — another user's tmux server cannot be ours and
+    ///    cannot be reached on our socket directory either.
+    /// 2. `entry.ppid != daemonPID` — this daemon's own in-flight `tmux …` CLI
+    ///    invocations are excluded. Those are clients, never servers: tmux's
+    ///    server `daemon()`s itself away from its spawning process, so a real
+    ///    server's ppid is 1 and never the daemon's.
+    /// 3. `isTmuxProcessCommand(entry.command)` — argv[0]'s basename is `tmux`,
+    ///    or the command carries the rewritten `tmux: …` process title.
+    ///
+    /// Rule 3 does NOT try to match `-L <our server name>`, and that is the
+    /// point rather than an omission. The thing under suspicion here is our own
+    /// *name → socket* resolution: the daemon spawns tmux with `environment:
+    /// nil`, so the same `-L <name>` can land on a different socket file than
+    /// the shell that started the server used. Deciding "is this our server?"
+    /// by re-reading the name from argv would assume the very resolution the
+    /// probe exists to doubt, and would miss a server that IS ours under a name
+    /// we can no longer resolve. The question asked is the weaker, sounder one:
+    /// *is any tmux server at all running for this uid?* Only "no" is used, and
+    /// only to license `.absent`.
+    ///
+    /// Rule 3 also does not try to separate servers from clients, because on
+    /// macOS it cannot: tmux rewrites its process title to `tmux: server (…)`
+    /// only where `setproctitle` is available, so elsewhere a server keeps the
+    /// original argv (`tmux -L … new-session …`) and is indistinguishable from
+    /// a client by argv alone. Matching both is sound in the direction that
+    /// matters — a tmux *client* only exists while attached to a server, so it
+    /// is evidence FOR a running server — and every remaining over-match (a
+    /// stranger's short-lived `tmux` CLI) can only produce `.unreachable`, the
+    /// verdict that protects rows. An under-match, by contrast, would produce a
+    /// wrong `.absent` and park or delete live sessions, so the matcher is
+    /// broad on purpose.
+    static func tmuxServerProcessesExist(
+        in snapshot: [ProcessSnapshotEntry], uid: uid_t, daemonPID: Int32
+    ) -> Bool {
+        snapshot.contains { entry in
+            entry.uid == uid
+                && entry.ppid != daemonPID
+                && isTmuxProcessCommand(entry.command)
+        }
+    }
+
+    /// Whether one `ps -o command=` line names a tmux process (server or
+    /// client). See `tmuxServerProcessesExist` for why both count.
+    ///
+    /// Two accepted shapes, and nothing else:
+    /// - argv[0]'s last path component is exactly `tmux`, so
+    ///   `/opt/homebrew/bin/tmux -L x new-session` matches while a path merely
+    ///   containing "tmux" (`/Users/x/tmux-notes/bin/editor`) does not — the
+    ///   same basename discipline `AgentReaper.isAgentBinary` uses.
+    /// - argv[0] begins `tmux:`, the rewritten title (`tmux: server (…)`,
+    ///   `tmux: client (…)`).
+    ///
+    /// This reads the process table, which is a machine interface — not tmux's
+    /// stderr prose, which stays forbidden.
+    static func isTmuxProcessCommand(_ command: String) -> Bool {
+        guard let arg0 = command.split(
+            whereSeparator: { $0 == " " || $0 == "\t" }
+        ).first else { return false }
+        if arg0.hasPrefix("tmux:") { return true }
+        let basename = arg0.split(separator: "/").last.map(String.init) ?? String(arg0)
+        return basename == "tmux"
+    }
+
+    /// The production out-of-tmux probe: one `/bin/ps` snapshot, classified by
+    /// `tmuxServerProcessesExist`. `nil` when the snapshot could not be taken.
+    ///
+    /// Reuses `OrphanProcessCollector.realProcessSnapshot()` rather than adding
+    /// a second way to read the process table — it already carries uid, ppid
+    /// and full argv, already bounds the subprocess, and already returns `nil`
+    /// (never a partial picture) for a timeout, a non-zero exit or non-UTF-8
+    /// output, which is precisely the "the probe itself failed" case.
+    ///
+    /// Only ever reached after a `list-sessions` that did not answer, and never
+    /// reached directly: `serverPresence` routes it through
+    /// `serverProcessProbeCache`, so concurrent askers share one reading and a
+    /// sweep over many unanswered servers pays for one `ps` rather than one per
+    /// server. The per-server `serverPresence` memos in
+    /// `reconcileTerminalsWhileLocked` and `HibernationCoordinator` are a
+    /// complement, not a substitute — they save the `list-sessions` too, but
+    /// each covers only its own pass and neither reaches the other's, nor
+    /// `liveWindowPresence`'s once-per-noncanonical-row consultation.
+    static func probeTmuxServerProcesses() async -> Bool? {
+        guard let snapshot = await OrphanProcessCollector.realProcessSnapshot() else {
+            return nil
+        }
+        return tmuxServerProcessesExist(
+            in: snapshot, uid: getuid(), daemonPID: getpid())
+    }
+
+    /// Turn a failed `paneSendTargetQuery` into a verdict, given what the
+    /// reachability probe saw. Pure, so all three branches are unit-testable
+    /// without a tmux server.
+    ///
+    /// - Parameter paneInventory: `allPaneIDsQuery`'s stdout, or `nil` when the
+    ///   probe itself failed.
+    ///
+    /// Three cases, and only one of them is evidence:
+    /// - probe failed → `.unreachable`. Two failed reads in a row still say
+    ///   nothing about the pane.
+    /// - probe answered and the inventory does NOT name the pane → `.absent`.
+    ///   The server is reachable and does not have this pane: positive absence.
+    /// - probe answered and the inventory DOES name the pane → `.unreachable`.
+    ///   The first failure was transient or anomalous, and the one thing this
+    ///   function must never do is report a pane tmux just listed as gone.
+    static func classifyFailedConsultation(
+        paneInventory: String?, paneID: String
+    ) -> PaneSendTarget {
+        guard let paneInventory else { return .unreachable }
+        return paneInventoryLists(paneInventory, paneID: paneID) ? .unreachable : .absent
+    }
+
     /// Classify `paneSendTargetQuery`'s stdout for the pane the send named.
     /// Pure, so the classification is unit-testable without a tmux server.
     ///
     /// Only the line whose `#{pane_id}` is `paneID` counts — the query returns
     /// one line per pane in the target's window. A run with no such line means
-    /// tmux answered about a window that no longer holds this pane, which is
-    /// the same fact as `can't find pane`: `.missing`.
+    /// tmux answered — exit 0, on a reachable server — about a window that no
+    /// longer holds this pane: positive evidence of absence, `.absent`.
     static func parsePaneSendTarget(_ output: String, paneID: String) -> PaneSendTarget {
         for line in output.split(separator: "\n") {
             let fields = line.split(
@@ -625,9 +933,10 @@ public struct TmuxManager: Sendable {
             }
             return .live(terminalID: terminalID)
         }
-        // rc 0 but no line for this pane (including no output at all): nothing
-        // answered for the coordinate the send named.
-        return .missing
+        // rc 0 but no line for this pane (including no output at all): the
+        // server answered, and nothing on it holds the coordinate the send
+        // named.
+        return .absent
     }
 
     /// The exact assignment shape `newWindowCommand` and `respawnWindowCommand`
@@ -1048,19 +1357,46 @@ public struct TmuxManager: Sendable {
     /// Read-only — a query, not an actuation. Throws only when the query itself
     /// could not be *run*: a wedged server tripping the subprocess timeout
     /// (`TmuxError.timedOut`) or a tmux that would not spawn at all, neither of
-    /// which this catch matches. A non-zero *exit* is read as an answer instead,
-    /// because the only way this fixed argv can exit non-zero is tmux failing to
-    /// resolve the target — `can't find pane`, or no server on that socket, both
-    /// of which mean the same thing for a send. (`paneSendTargetQuery`'s exact
-    /// argv is pinned by a unit test, so it cannot drift into a usage error that
-    /// would arrive here wearing the same clothes.)
+    /// which this catch matches.
+    ///
+    /// A non-zero *exit* is ambiguous and is NOT read as an answer on its own.
+    /// This fixed argv can exit non-zero for two unrelated reasons — the pane
+    /// could not be resolved on a server that answered, or no server answered on
+    /// that socket at all — and only the first is evidence about the pane. The
+    /// second is a failed read: the daemon spawns tmux with `environment: nil`,
+    /// so a `TMUX_TMPDIR` that differs from the user's shell puts the same
+    /// `-L <name>` on a different socket file, and a live pane then wears the
+    /// clothes of a vanished one. So a failure is disambiguated by a positive
+    /// server-reachability probe (`allPaneIDsQuery`) rather than by reading
+    /// tmux's error prose; see `classifyFailedConsultation`.
+    /// (`paneSendTargetQuery`'s exact argv is pinned by a unit test, so it
+    /// cannot drift into a usage error that would arrive here wearing the same
+    /// clothes.)
     public func paneSendTarget(server: String, paneID: String) async throws -> PaneSendTarget {
         if dryRun { return try dryRunPaneSendTarget?(server, paneID) ?? .live(terminalID: nil) }
         let args = Self.paneSendTargetQuery(server: server, paneID: paneID)
         do {
             return Self.parsePaneSendTarget(try await runTmux(args), paneID: paneID)
         } catch TmuxError.commandFailed {
-            return .missing
+            let inventory = try? await runTmux(Self.allPaneIDsQuery(server: server))
+            let verdict = Self.classifyFailedConsultation(
+                paneInventory: inventory, paneID: paneID)
+            if verdict == .unreachable {
+                // The one drift this whole split exists to make diagnosable in
+                // the field: which server name, and which pane, could not be
+                // consulted — and whether the reachability probe itself
+                // answered (transient failure) or not (socket mismatch / dead
+                // server).
+                let probeOutcome = inventory == nil
+                    ? "the reachability probe also failed"
+                    : "the reachability probe still lists the pane"
+                logger.warning("""
+                    paneSendTarget: could not establish whether pane \(paneID, privacy: .public) \
+                    exists on server \(server, privacy: .public) — the consultation failed and \
+                    \(probeOutcome, privacy: .public); reporting unreachable rather than absent
+                    """)
+            }
+            return verdict
         }
     }
 
@@ -1173,30 +1509,116 @@ public struct TmuxManager: Sendable {
             }
     }
 
-    /// Check whether a tmux window exists by querying list-panes.
-    public func windowExists(server: String, windowID: String) async -> Bool {
-        if dryRun { return !(dryRunWindowIsDead?(windowID) ?? false) }
-        if let override = realModeWindowExistsOverride?(server, windowID) {
+    /// What one read-only `list-panes -t <window>` consultation says about a
+    /// window: it is there, tmux answered that it is not, or the read failed.
+    ///
+    /// A failure is disambiguated exactly the way `paneSendTarget` does it — by
+    /// a positive, server-wide identity inventory (`allWindowIDsQuery`), never
+    /// by reading tmux's error text. `can't find window` and `no server running
+    /// on …` are the same exit status and differ only in prose, and prose is
+    /// not a machine interface; the inventory's exit status, on the other hand,
+    /// is a fact about the server, and its contents are a fact about the
+    /// window. So: probe failed → `.unreachable`; probe answered without this
+    /// window → `.absent`; probe answered WITH it → `.unreachable`, because a
+    /// window tmux just listed must never be reported gone.
+    public func windowPresence(server: String, windowID: String) async -> TmuxResourcePresence {
+        if dryRun {
+            if let hook = dryRunWindowPresence { return hook(server, windowID) }
+            return (dryRunWindowIsDead?(windowID) ?? false) ? .absent : .present
+        }
+        if let override = realModeWindowPresenceOverride?(server, windowID) {
             return override
         }
         do {
             let args = ["-L", server, "list-panes", "-t", windowID]
             _ = try await runTmux(args)
-            return true
+            return .present
         } catch {
-            return false
+            let inventory = try? await runTmux(Self.allWindowIDsQuery(server: server))
+            let verdict = Self.classifyFailedWindowConsultation(
+                windowInventory: inventory, windowID: windowID)
+            if verdict == .unreachable {
+                let probeOutcome = inventory == nil
+                    ? "the reachability probe also failed"
+                    : "the reachability probe still lists the window"
+                logger.warning("""
+                    windowPresence: could not establish whether window \
+                    \(windowID, privacy: .public) exists on server \(server, privacy: .public) — \
+                    the consultation failed and \(probeOutcome, privacy: .public); reporting \
+                    unreachable rather than absent
+                    """)
+            }
+            return verdict
         }
     }
 
-    /// Check whether a tmux server is running by querying list-sessions.
-    public func serverExists(server: String) async -> Bool {
-        if dryRun { return true }
+    /// What one read-only `list-sessions` consultation says about a tmux
+    /// server, with the failed half decided from outside tmux.
+    ///
+    /// tmux itself offers no way to tell "no server is running under this
+    /// socket name" from "this process resolved a socket path the server is not
+    /// listening on". Both exit 1 from the same command and differ only in the
+    /// prose on stderr, which the bounded-recovery spec forbids reading — and
+    /// the mismatch is not hypothetical: the daemon spawns tmux with
+    /// `environment: nil`, so a `TMUX_TMPDIR` that differs from the shell that
+    /// started the server puts the same `-L <name>` on a different socket file.
+    /// There is no positive probe inside tmux to fall back on the way
+    /// `windowPresence` has one: a server-wide inventory IS this same question,
+    /// and the only command that would answer affirmatively (`start-server`)
+    /// answers by creating the thing it was asked about.
+    ///
+    /// The **process table** is where the distinction does exist, so that is
+    /// what a failed `list-sessions` consults. If no tmux server process is
+    /// running for this uid at all, then nothing is listening on any socket —
+    /// no resolution mismatch can hide a server that does not exist — and the
+    /// verdict is `.absent`. That is the post-reboot case, and it has to
+    /// reclaim: without it every row on every pre-reboot server is parked-proof
+    /// and delete-proof forever, accumulating without bound. If tmux processes
+    /// DO exist, or if the probe could not be taken at all, the verdict is
+    /// `.unreachable` and every destructive rail declines. A failed probe is
+    /// never evidence of absence — that is the whole doctrine here.
+    ///
+    /// See `tmuxServerProcessesExist` for the matching rule and why it is
+    /// deliberately name-agnostic.
+    public func serverPresence(server: String) async -> TmuxResourcePresence {
+        if dryRun { return dryRunServerPresence?(server) ?? .present }
         do {
             let args = ["-L", server, "list-sessions"]
             _ = try await runTmux(args)
-            return true
+            return .present
         } catch {
-            return false
+            let probe: Bool?
+            if let injectedProbe = tmuxServerProcessProbe {
+                probe = await injectedProbe()
+            } else {
+                // Memoized: the reading is about the machine, not about
+                // `server`, so a sweep that finds many unanswered servers pays
+                // for one `ps` rather than one per server.
+                probe = await serverProcessProbeCache.reading {
+                    await Self.probeTmuxServerProcesses()
+                }
+            }
+            let verdict = Self.classifyFailedServerConsultation(
+                tmuxServerProcessesExist: probe)
+            switch verdict {
+            case .absent:
+                logger.info("""
+                    serverPresence: no answer from tmux server \(server, privacy: .public) and \
+                    no tmux server process is running for this uid — reporting absent
+                    """)
+            case .unreachable:
+                let reason = probe == nil
+                    ? "the process probe itself failed"
+                    : "tmux server processes are running for this uid"
+                logger.warning("""
+                    serverPresence: no answer from tmux server \(server, privacy: .public) but \
+                    \(reason, privacy: .public) — reporting unreachable rather than absent, so \
+                    nothing is parked or deleted on a read that proved nothing
+                    """)
+            case .present:
+                break
+            }
+            return verdict
         }
     }
 

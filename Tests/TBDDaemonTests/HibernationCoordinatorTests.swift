@@ -387,7 +387,7 @@ struct HibernationCoordinatorTests {
     /// live session made without ever asking tmux.
     @Test func wakeOnUnparkedRowWithMissingPaneReportsSessionGone() async throws {
         let (db, _, terminalID) = try await setup()
-        let tmux = TmuxManager(dryRun: true, dryRunPaneSendTarget: { _, _ in .missing })
+        let tmux = TmuxManager(dryRun: true, dryRunPaneSendTarget: { _, _ in .absent })
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
             actuationLog: makeTestActuationLog())
@@ -431,7 +431,7 @@ struct HibernationCoordinatorTests {
         let (db, _, terminalID) = try await setup()
         let recorded = RecordedTmuxCommands()
         let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) },
-                               dryRunPaneSendTarget: { _, _ in .missing })
+                               dryRunPaneSendTarget: { _, _ in .absent })
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
             actuationLog: makeTestActuationLog())
@@ -457,6 +457,38 @@ struct HibernationCoordinatorTests {
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
             actuationLog: makeTestActuationLog())
         #expect(await coord.wake(terminalID: terminalID) == .notHibernated)
+    }
+
+    /// A consultation that RAN and reached no tmux server is not a
+    /// disagreement: nothing answered, so nothing disagreed. Reporting
+    /// `.sessionGone` would tell the caller its live session is gone on the
+    /// strength of a failed read — the exact conflation this change removes.
+    @Test func unreachableServerIsNotReportedAsSessionGone() async throws {
+        let (db, _, terminalID) = try await setup()
+        let tmux = TmuxManager(dryRun: true, dryRunPaneSendTarget: { _, _ in .unreachable })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        let result = await coord.wake(terminalID: terminalID)
+        #expect(result == .paneUnreadable(paneID: "%0", server: "tbd-hib"))
+        // Named explicitly, because "not sessionGone" is the whole property and
+        // a future refactor could reintroduce it through a different detail.
+        if case .sessionGone = result {
+            Issue.record("an unreachable server must never be reported as sessionGone")
+        }
+        // And the row is left exactly as it was — reporting, never repairing.
+        let after = try await db.terminals.get(id: terminalID)
+        #expect(after?.isParked == false)
+        #expect(after?.tmuxPaneID == "%0")
+    }
+
+    /// The record must not claim a refusal either: nothing was decided, the
+    /// transport simply did not answer.
+    @Test func unreachableServerWakeIsRecordedAsTransportFailure() {
+        #expect(ActuationOutcome.classify(
+            WakeResult.paneUnreadable(paneID: "%0", server: "tbd-hib")) == .transportFailed)
+        #expect(ActuationOutcome.classify(
+            WakeResult.paneUnreadable(paneID: "%0", server: "tbd-hib")).reason == nil)
     }
 
     /// A live pane carrying no identity is left alone — refusal requires
@@ -490,7 +522,7 @@ struct HibernationCoordinatorTests {
         let (db, _, terminalID) = try await setup()
         try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
         let tmux = TmuxManager(dryRun: true, dryRunWindowIsDead: { _ in true },
-                               dryRunPaneSendTarget: { _, _ in .missing })
+                               dryRunPaneSendTarget: { _, _ in .absent })
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
             actuationLog: makeTestActuationLog())
@@ -559,7 +591,7 @@ struct HibernationCoordinatorTests {
     // A reboot destroys every tmux server, leaving parked rows pointing at
     // dead windows. Wake must detect the dead window and RECREATE it (server +
     // window) instead of failing "Terminal not found". Both sides of the
-    // `windowExists` gate are covered.
+    // `windowPresence` gate are covered.
 
     /// Window ALIVE (dryRun default): the existing respawn-in-place path runs
     /// unchanged — same window/pane ids, `respawn-window` issued, never
@@ -619,7 +651,7 @@ struct HibernationCoordinatorTests {
                 "expected new-window in the worktree cwd carrying claude --resume; got: \(joined)")
         #expect(!joined.contains { $0.contains("respawn-window") },
                 "a dead window must NOT be respawned into; got: \(joined)")
-        // Old-window cleanup: a transient windowExists misclassification must
+        // Old-window cleanup: a transient windowPresence misclassification must
         // not leak a live old window (usually already dead — kill no-ops).
         #expect(joined.contains { $0.contains("kill-window") && $0.contains("@0") },
                 "expected a best-effort kill of the old window; got: \(joined)")
@@ -627,14 +659,50 @@ struct HibernationCoordinatorTests {
                 "onServerCreated must fire once with the recreated server name")
     }
 
+    /// Window UNREADABLE: neither branch may run. Respawn-in-place would fire
+    /// `respawn-window -k` into a window nobody could look at — killing whatever
+    /// is running there — and the recreate branch would kill it outright and
+    /// spawn a duplicate `claude --resume` beside the live one. So wake mutates
+    /// nothing, leaves the row parked, and reports the failure so a later retry
+    /// can ask again.
+    @Test func wakeLeavesTheRowParkedWhenTheWindowCannotBeRead() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        let recorded = RecordedTmuxCommands()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: { recorded.append($0) },
+            dryRunWindowPresence: { _, windowID in windowID == "@0" ? .unreachable : .present }
+        )
+        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), actuationLog: makeTestActuationLog())
+
+        let wake = await coord.wake(terminalID: terminalID)
+        guard case .respawnFailed(let reason) = wake else {
+            Issue.record("expected .respawnFailed, got \(wake) — an unreadable window must not wake")
+            return
+        }
+        #expect(reason.contains("could not reach tmux server"))
+
+        let after = try await db.terminals.get(id: terminalID)
+        #expect(after?.isParked == true, "the row must stay parked and resumable")
+        #expect(after?.tmuxWindowID == "@0", "no coordinate may be rewritten on a failed read")
+        let joined = recorded.snapshot().map { $0.joined(separator: " ") }
+        #expect(!joined.contains { $0.contains("respawn-window") },
+                "an unreadable window must not be respawned into; got: \(joined)")
+        #expect(!joined.contains { $0.contains("new-window") },
+                "an unreadable window must not be replaced; got: \(joined)")
+        #expect(!joined.contains { $0.contains("kill-window") },
+                "an unreadable window must not be killed; got: \(joined)")
+    }
+
     // MARK: - Wake: window-id ownership (post-reboot id recycling)
     //
     // A fresh tmux server reissues window ids from @1, so a stale parked
     // row's id can equal a window ANOTHER terminal's wake just created.
-    // `windowExists` alone is not ownership — both sides of the claim gate
+    // `windowPresence` alone is not ownership — both sides of the claim gate
     // are covered.
 
-    /// Collision + windowExists true: another terminal on the same server
+    /// Collision + a present window: another terminal on the same server
     /// claims this row's window id, so respawning in place would hijack that
     /// terminal's live session. Wake must take the RECREATE branch — and must
     /// NOT kill the other terminal's window.
@@ -1029,7 +1097,7 @@ struct HibernationCoordinatorTests {
 
     /// `reconcileOnStartup` clears a stale parked timestamp for a terminal whose
     /// claude is actually still alive (daemon crashed mid-park). Uses the
-    /// paneCurrentCommand hook to report a live claude and windowExists (default
+    /// paneCurrentCommand hook to report a live claude and windowPresence (default
     /// dryRun = alive). Covers BOTH the authoritative and legacy columns via
     /// `clearHibernated` nulling both.
     @Test func reconcileOnStartupClearsStaleParkedForLiveClaude() async throws {
@@ -1426,6 +1494,35 @@ struct RPCRouterWakePromptDeliveryTests {
         #expect(try resp.decodeResult(TerminalWakeResult.self).woken == false)
         #expect(recorded.snapshot().isEmpty,
                 "a no-op wake must not touch tmux at all; got: \(recorded.snapshot())")
+    }
+
+    /// An unreachable tmux server: the RPC must report an error (the prompt
+    /// went nowhere, so `woken: false` would let an autonomous caller believe
+    /// it was merely already awake) WITHOUT claiming the session is gone. In
+    /// particular it must not carry `terminalSessionGone`, whose contract is a
+    /// pane that positively disagreed.
+    @Test func wakeOnUnreachableServerErrorsWithoutClaimingSessionGone() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxCommands()
+        let tmux = TmuxManager(
+            dryRun: true, dryRunRecorder: { recorded.append($0) },
+            dryRunPaneSendTarget: { _, _ in .unreachable })
+        let terminal = try await makeTerminal(db: db)  // NOT hibernated
+
+        let req = try RPCRequest(
+            method: RPCMethod.terminalWake,
+            params: TerminalWakeParams(terminalID: terminal.id, prompt: "must never appear"))
+        let resp = await makeRouter(db: db, tmux: tmux).handle(req)
+
+        #expect(!resp.success)
+        let error = try #require(resp.error)
+        #expect(error.contains("Could not reach tmux server"))
+        #expect(error.contains("tbd-wake-prompt"))
+        #expect(error.contains("%0"))
+        #expect(!error.contains("is gone"))
+        #expect(resp.errorCode != RPCErrorCode.terminalSessionGone.rawValue)
+        #expect(recorded.snapshot().isEmpty,
+                "a failed read must not touch tmux; got: \(recorded.snapshot())")
     }
 }
 

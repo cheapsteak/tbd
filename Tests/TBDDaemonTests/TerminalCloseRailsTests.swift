@@ -36,12 +36,14 @@ struct TerminalCloseRailsTests {
         return Fixture(db: db, worktree: wt, terminal: terminal)
     }
 
-    /// `windowIsDead: true` forces the row's window to read as gone, which is
-    /// what a crashed-mid-turn session looks like.
-    private func makeRouter(db: TBDDatabase, windowIsDead: Bool = false) -> RPCRouter {
-        var deadHook: (@Sendable (String) -> Bool)?
-        if windowIsDead { deadHook = { _ in true } }
-        let tmux = TmuxManager(dryRun: true, dryRunWindowIsDead: deadHook)
+    /// `windowPresence` scripts what the row's window probe answers. `.absent`
+    /// is what a crashed-mid-turn session looks like; `.unreachable` is a read
+    /// that never reached a server and says nothing about the window.
+    private func makeRouter(
+        db: TBDDatabase, windowPresence: TmuxResourcePresence = .present
+    ) -> RPCRouter {
+        let tmux = TmuxManager(
+            dryRun: true, dryRunWindowPresence: { _, _ in windowPresence })
         return RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
@@ -126,12 +128,34 @@ struct TerminalCloseRailsTests {
     @Test("rails on: a mid-turn terminal whose window is DEAD still closes")
     func railsOnClosesBusyTerminalWithDeadWindow() async throws {
         let fx = try await makeFixture(activityState: .working)
-        let router = makeRouter(db: fx.db, windowIsDead: true)
+        let router = makeRouter(db: fx.db, windowPresence: .absent)
 
         let resp = try await close(router, fx.terminal.id, rails: true)
 
         #expect(resp.success, "a dead-window row cannot be mid-turn")
         #expect(resp.errorCode == nil)
+        #expect(try await fx.db.terminals.get(id: fx.terminal.id) == nil)
+    }
+
+    /// The third state, and the one the qualification must NOT extend to. A
+    /// window read that reached no server has not established that the session
+    /// died, so lowering the rail on it would let a close kill an in-flight turn
+    /// the daemon merely could not see. `--force` still closes it, which is what
+    /// makes keeping the rail up the reversible choice.
+    @Test("rails on: a mid-turn terminal whose window could not be READ is still refused")
+    func railsOnRefusesBusyTerminalWithUnreadableWindow() async throws {
+        let fx = try await makeFixture(activityState: .working)
+        let router = makeRouter(db: fx.db, windowPresence: .unreachable)
+
+        let resp = try await close(router, fx.terminal.id, rails: true)
+
+        #expect(!resp.success, "a failed read must not lower the rail")
+        #expect(resp.errorCode == RPCErrorCode.terminalBusy.rawValue)
+        #expect(try await fx.db.terminals.get(id: fx.terminal.id) != nil)
+
+        // And the escape hatch still works, so the refusal is never a trap.
+        let forced = try await close(router, fx.terminal.id, rails: false)
+        #expect(forced.success)
         #expect(try await fx.db.terminals.get(id: fx.terminal.id) == nil)
     }
 

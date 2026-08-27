@@ -27,6 +27,25 @@ extension RPCRouter {
             """
     }
 
+    /// The message for a wake whose pane consultation could not reach the tmux
+    /// server. Shared by `terminal.wake` and `terminal.resume` for the same
+    /// reason `unparkedWakeMessage` is.
+    ///
+    /// Deliberately says nothing about whether the session is alive, and
+    /// carries no `terminalSessionGone` code: that code's contract is a pane
+    /// that POSITIVELY disagreed, and this is a read that never happened. The
+    /// text is retryable on purpose — the failure mode this exists to stop is a
+    /// caller reading a failed read as a dead session and giving up on live
+    /// work.
+    static func unreadablePaneWakeMessage(paneID: String, server: String) -> String {
+        """
+        Could not reach tmux server \(server) to check pane \(paneID), so nothing was woken \
+        and any prompt was NOT delivered. This is a failed read, not a missing session — the \
+        terminal may well be running. Retry; if it persists, check that the daemon and your \
+        shell resolve the same tmux socket.
+        """
+    }
+
     /// `terminal.hibernate` — manually hibernate one Claude terminal (kill its
     /// process, keep the tmux window). Honors the running/permission rails.
     func handleTerminalHibernate(
@@ -90,6 +109,12 @@ extension RPCRouter {
             return RPCResponse(
                 error: RPCRouter.unparkedWakeMessage(paneID: paneID, detail: detail),
                 code: RPCErrorCode.terminalSessionGone.rawValue)
+        case .paneUnreadable(let paneID, let server):
+            // An error, so the caller knows its prompt went nowhere — but
+            // pointedly NOT `terminalSessionGone`, which claims the session is
+            // gone. Nothing established that.
+            return RPCResponse(
+                error: RPCRouter.unreadablePaneWakeMessage(paneID: paneID, server: server))
         case .notFound:
             return RPCResponse(error: "Terminal not found")
         case .noSessionID:

@@ -316,7 +316,7 @@ struct ActuationLogWiringTests {
     /// what the daemon actually did.
     @Test("a wake at a vanished pane records not-found, not the benign no-op")
     func wakeAtMissingPaneRecordsNotFound() async throws {
-        let fixture = try makeFixture(paneTarget: { _, _ in .missing })
+        let fixture = try makeFixture(paneTarget: { _, _ in .absent })
         let worktree = try await makeWorktree(in: fixture.db)
         let terminal = try await fixture.db.terminals.create(
             worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1")

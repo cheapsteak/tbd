@@ -124,7 +124,7 @@ tmux server: tbd-<djb2-hash-of-repo-path>
 - `sendKeys` — literal text (tmux `-l`); `sendKey` — a key name like "Enter"; `sendCommand` — text + Enter
 - `capturePaneOutput` / `capturePaneWithAnsi` — plain or ANSI-escaped snapshot
 - `paneCurrentCommand` / `panePID` — used by `ClaudeStateDetector`
-- `windowExists` — reconcile check; `dryRun` mode for tests
+- `windowPresence` / `serverPresence` — reconcile checks, three-valued (`.present` / `.absent` / `.unreachable`) so a failed read is never read as absence; `dryRun` mode for tests
 
 ## Worktree Lifecycle
 

@@ -15,7 +15,9 @@ public enum HibernateResult: Equatable, Sendable {
 /// awake. Only states tmux gave a positive answer for appear here; "the probe
 /// failed" is deliberately not a case, because it is not a disagreement.
 public enum UnparkedPaneDisagreement: Equatable, Sendable {
-    /// tmux cannot find the pane — it, its window, or the whole server is gone.
+    /// tmux answered about a reachable server and the pane is not on it — it,
+    /// or its window, is gone. A server that could not be REACHED is not this
+    /// case and never becomes a disagreement; it is `WakeResult.paneUnreadable`.
     case paneMissing
     /// The pane object survives (`remain-on-exit`) but its process has exited,
     /// so the row's "awake" refers to a shell, not a session.
@@ -38,6 +40,14 @@ public enum WakeResult: Equatable, Sendable {
     /// rather than silently discarded. Nothing is respawned — see
     /// `classifyUnparkedWake` for why repair is a separate change.
     case sessionGone(paneID: String, detail: UnparkedPaneDisagreement)
+    /// The row is NOT parked and its pane could not be READ: no tmux server
+    /// answered on the socket the daemon resolved. Distinct from `.sessionGone`
+    /// because nothing disagreed — the question was never answered — and
+    /// distinct from `.notHibernated` because the caller must learn the check
+    /// failed rather than be told "already awake, nothing to do". Nothing was
+    /// woken and any `initialPrompt` was NOT delivered, so an autonomous caller
+    /// has to know it should retry rather than assume delivery.
+    case paneUnreadable(paneID: String, server: String)
     case notFound        // terminal/worktree DB row missing — NOT tmux failures
     case noSessionID
     case inFlight        // a wake for this terminal is already respawning
@@ -527,11 +537,18 @@ public actor HibernationCoordinator {
     /// primitive that would drift from it. That probe already answers both
     /// halves of the question: is a process there, and is the pane still ours.
     ///
-    /// Only a POSITIVE disagreement downgrades the answer, exactly as on the
-    /// send path. A probe that merely threw keeps the benign historical no-op:
-    /// a failed tmux call proves nothing, and tmux calls fail spuriously
-    /// precisely when the machine is loaded enough for the session to be alive.
-    /// A pane carrying no identity at all is likewise left alone.
+    /// Only a POSITIVE disagreement downgrades the answer to `.sessionGone`,
+    /// exactly as on the send path. A probe that merely threw keeps the benign
+    /// historical no-op: a failed tmux call proves nothing, and tmux calls fail
+    /// spuriously precisely when the machine is loaded enough for the session
+    /// to be alive. A pane carrying no identity at all is likewise left alone.
+    ///
+    /// A probe that ran and reached no server is the third answer,
+    /// `.paneUnreadable`: like a throw it is not a disagreement, but unlike a
+    /// throw it is a fact the caller can act on — it names the server and pane
+    /// that could not be consulted, so an autonomous caller learns its prompt
+    /// was not delivered instead of reading "already awake" off a check that
+    /// never happened.
     ///
     /// This reports; it deliberately does NOT repair. Respawning an unparked
     /// row would make tmux authoritative over the parked flag, and then one
@@ -573,10 +590,23 @@ public actor HibernationCoordinator {
                   paneTerminalID.caseInsensitiveCompare(terminal.id.uuidString) != .orderedSame
             else { return .notHibernated }
             disagreement = .paneBelongsToAnotherTerminal(actualTerminalID: paneTerminalID)
-        case .missing:
+        case .absent:
             disagreement = .paneMissing
         case .dead:
             disagreement = .processExited
+        case .unreachable:
+            // The probe ran and reached no server. That is not a
+            // disagreement — nothing answered to disagree — so it must not
+            // become `.sessionGone`, which asserts the session is gone. Report
+            // the failed read as itself so the caller knows its prompt was not
+            // delivered and a retry is the right move.
+            logger.warning("""
+                wake: could not reach tmux server \(worktree.tmuxServer, privacy: .public) to \
+                consult pane \(terminal.tmuxPaneID, privacy: .public) for unparked terminal \
+                \(terminal.id, privacy: .public) — reporting the failed read, not sessionGone
+                """)
+            return .paneUnreadable(
+                paneID: terminal.tmuxPaneID, server: worktree.tmuxServer)
         }
 
         logger.warning("""
@@ -776,7 +806,7 @@ public actor HibernationCoordinator {
         let liveServer: String
 
         // The whole decide-then-mutate tmux section (ownership check +
-        // windowExists + respawn/create/kill/persist) runs under the
+        // windowPresence + respawn/create/kill/persist) runs under the
         // per-server lock: `wakesInFlight` above only dedupes wakes for the
         // SAME terminal, while this closes the cross-terminal TOCTOU on a
         // shared server (see `TmuxManager.withWorktreeServerLock`). The lock
@@ -850,7 +880,7 @@ public actor HibernationCoordinator {
     }
 
     /// The decide-then-mutate tmux section of `wake()` — ownership check,
-    /// `windowExists`, and the in-place respawn OR recreate mutations. Must
+    /// `windowPresence`, and the in-place respawn OR recreate mutations. Must
     /// only be entered under `TmuxManager.withWorktreeServerLock` (see the call
     /// site in `wake()`), otherwise two concurrent wakes on the same server can
     /// interleave across the awaits below and hijack each other's windows.
@@ -868,7 +898,7 @@ public actor HibernationCoordinator {
     ) async -> WakeTmuxOutcome {
         // Post-reboot a fresh tmux server reissues window ids from @1 again,
         // so a stale parked row's window id can equal a window that ANOTHER
-        // terminal's wake just created on the same server. `windowExists`
+        // terminal's wake just created on the same server. `windowPresence`
         // alone is therefore not ownership: if any other terminal currently
         // claims this id, ours is necessarily the stale claim (it predates
         // the reboot) and respawning in place would hijack that terminal's
@@ -880,7 +910,25 @@ public actor HibernationCoordinator {
             logger.info("wake: window \(windowID, privacy: .public) on \(server, privacy: .public) is claimed by another terminal — recreating instead of respawning in place for terminal \(terminal.id, privacy: .public)")
         }
 
-        if !claimedByOther, await tmux.windowExists(server: server, windowID: windowID) {
+        // A failed READ here is not "the window is gone": both branches below
+        // MUTATE (one respawns over whatever is in the window, the other kills
+        // it and creates a replacement), so an unanswered question must reach
+        // neither. The row stays parked and a later wake asks again — the same
+        // contract `.respawnFailed` already carries.
+        let windowPresence = claimedByOther
+            ? TmuxResourcePresence.absent
+            : await tmux.windowPresence(server: server, windowID: windowID)
+        if windowPresence == .unreachable {
+            logger.warning("""
+                wake: could not reach tmux server \(server, privacy: .public) to check window \
+                \(windowID, privacy: .public) for terminal \(terminal.id, privacy: .public) — \
+                leaving the row parked rather than respawning or recreating on a failed read
+                """)
+            return .failed(.respawnFailed(
+                reason: "could not reach tmux server \(server) to check window \(windowID)"))
+        }
+
+        if windowPresence == .present {
             do {
                 try await tmux.respawnWindow(
                     server: server,
@@ -899,12 +947,13 @@ public actor HibernationCoordinator {
                 return .failed(.respawnFailed(reason: "failed to respawn claude in window \(windowID): \(error.localizedDescription)"))
             }
         } else {
-            // The window is GONE — killed, the whole tmux server died (a
-            // machine reboot destroys every server; `windowExists` returns
-            // false on any tmux error, covering both), or its id is owned by
-            // another terminal (see above). Recreate the window and spawn the
-            // same `claude --resume` there: transcripts live on disk, so
-            // resume works fine in a fresh window. Mirrors
+            // The window is positively GONE — tmux answered on a reachable
+            // server and this id is not on it — or its id is owned by another
+            // terminal (see above). A read that FAILED never arrives here; it
+            // returned `.respawnFailed` above, because "I could not ask" is not
+            // a licence to kill a window and spawn a replacement. Recreate the
+            // window and spawn the same `claude --resume` there: transcripts
+            // live on disk, so resume works fine in a fresh window. Mirrors
             // `handleTerminalRecreateWindow`. Tabs are keyed by terminal id,
             // so keeping the same terminal row preserves the tab.
             do {
@@ -929,7 +978,7 @@ public actor HibernationCoordinator {
                     rows: resolvedRows
                 )
                 // Clean up the old window if it somehow still exists (a
-                // transient windowExists misclassification must not leak a
+                // transient windowPresence misclassification must not leak a
                 // live window; usually it's already dead so this no-ops).
                 // Skip when another terminal owns the id — killing it would
                 // tear down THEIR live window. This must happen AFTER
@@ -1087,16 +1136,36 @@ public actor HibernationCoordinator {
     public func reconcileOnStartup() async {
         guard let allTerminals = try? await db.terminals.list() else { return }
 
+        // Cached per server name, the same way `reconcileTerminalsWhileLocked`
+        // does it: rows overwhelmingly share a handful of servers, and a server
+        // that did not answer makes `serverPresence` reach for a `/bin/ps`
+        // snapshot to tell "gone" from "unreachable". After a reboot every
+        // server is in exactly that state, so an uncached probe would pay one
+        // full process-table read per parked row.
+        var serverPresenceByName: [String: TmuxResourcePresence] = [:]
+
         for terminal in allTerminals where terminal.isParked {
             guard let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) else { continue }
             let server = worktree.tmuxServer
 
-            // Check if the window still exists AND is running claude
-            let serverAlive = await tmux.serverExists(server: server)
-            guard serverAlive else { continue }
-
-            let windowAlive = await tmux.windowExists(server: server, windowID: terminal.tmuxWindowID)
-            guard windowAlive else { continue }
+            // Check if the window still exists AND is running claude. Both
+            // probes must answer POSITIVELY: this pass clears a parked flag, so
+            // `.absent` and `.unreachable` lead to the same place — leave the
+            // row parked, which is already what it says — but for different
+            // reasons, and neither is a reason to un-park. A row whose window
+            // could not be read stays parked and resumable, and the next
+            // startup (or a wake) asks again.
+            let presence: TmuxResourcePresence
+            if let cached = serverPresenceByName[server] {
+                presence = cached
+            } else {
+                presence = await tmux.serverPresence(server: server)
+                serverPresenceByName[server] = presence
+            }
+            guard presence == .present else { continue }
+            guard await tmux.windowPresence(
+                server: server, windowID: terminal.tmuxWindowID) == .present
+            else { continue }
 
             // Verify the pane is still running a Claude process
             guard let cmd = try? await tmux.paneCurrentCommand(server: server, paneID: terminal.tmuxPaneID),

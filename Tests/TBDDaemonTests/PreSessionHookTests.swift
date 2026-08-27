@@ -374,7 +374,7 @@ struct PreSessionHookTests {
 
         let db = try TBDDatabase(inMemory: true)
         // Short injected timeout; the marker is never written. (The killed-pane
-        // short-circuit can't fire under dryRun tmux — windowExists is always
+        // short-circuit can't fire under dryRun tmux — windowPresence is always
         // true — so the timeout path covers the no-completion case here.)
         let lifecycle = makeLifecycle(db: db, timeout: 0.3)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
@@ -599,7 +599,7 @@ struct PreSessionHookTests {
         let db = try TBDDatabase(inMemory: true)
 
         // The dead-window check fires AFTER the marker check in each poll
-        // iteration. Simulate the race deterministically: the windowExists
+        // iteration. Simulate the race deterministically: the windowPresence
         // probe itself writes the marker (hook finished + pane closed between
         // the two checks) and reports the window dead. The wait must re-check
         // the marker and honor its exit code instead of returning .paneKilled.
@@ -668,6 +668,34 @@ struct PreSessionHookTests {
             preSession: spawn, tmuxServer: "tbd-test"
         )
         #expect(outcome == .paneKilled)
+    }
+
+    /// The other branch of the same probe. `.paneKilled` is a claim — the user
+    /// closed the hook terminal — that the create path acts on and notifies
+    /// about, so a window read that reached no server must not produce it. The
+    /// wait keeps polling and ends on its own deadline instead, which is the
+    /// honest outcome for a window nobody could read.
+    @Test func unreadableWindowIsTimedOutNotPaneKilled() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let db = try TBDDatabase(inMemory: true)
+
+        let worktreeID = UUID()
+        let markerPath = WorktreeLifecycle.preSessionMarkerPath(worktreeID: worktreeID)
+        // Short timeout so the poll loop reaches its deadline quickly; the
+        // point is which outcome it reports, not how long it waits.
+        let lifecycle = makeLifecycle(
+            db: db, timeout: 0.2, windowPresence: { _, _ in .unreachable })
+        let spawn = PreSessionSpawn(
+            terminalID: UUID(), tmuxServer: "test-server",
+            windowID: "@mock-0", paneID: "%mock-0",
+            markerPath: markerPath, hookPath: "/dev/null"
+        )
+        let outcome = await lifecycle.waitForPreSessionCompletion(
+            preSession: spawn, tmuxServer: "tbd-test"
+        )
+        #expect(outcome == .timedOut,
+                "an unreadable window must not be reported as a killed pane")
     }
 
     // MARK: - Killed pane (end-to-end)

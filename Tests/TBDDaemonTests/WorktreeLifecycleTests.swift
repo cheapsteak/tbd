@@ -718,13 +718,13 @@ import Testing
 // MARK: - Reconcile Tests
 
 /// Alive server + alive windows: no terminals are deleted, window IDs unchanged.
-/// (dryRun makes serverExists → true and windowExists → true, so this exercises
+/// (dryRun makes serverPresence → .present and windowPresence → .present, so this exercises
 /// the "server alive, window alive → keep terminal" branch.)
 ///
 /// This also serves as a regression guard for the dead-window deletion path: any
 /// bug that incorrectly triggers dead-window deletion would drop terminals here,
 /// because the setup is identical to what a "dead window" scenario looks like
-/// before the windowExists check. The dead-window path itself (windowExists → false)
+/// before the window probe. The positively-absent window path
 /// requires a non-dryRun integration test against a real tmux server with stale IDs.
 @Test func testReconcileAliveTerminalUntouched() async throws {
     let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
@@ -751,12 +751,12 @@ import Testing
     let terminalsAfter = try await db.terminals.list(worktreeID: wt.id)
     #expect(terminalsAfter.count == 2, "Alive terminals must not be deleted during reconcile")
 
-    // In dryRun mode, serverExists → true → windowExists path is taken.
-    // windowExists → true → terminals are kept with their original IDs.
+    // In dryRun mode, serverPresence → .present → the window probe runs.
+    // windowPresence → .present → terminals are kept with their original IDs.
     // The important invariant: terminal COUNT must not drop.
     let windowIDsAfter = Set(terminalsAfter.map { $0.tmuxWindowID })
     #expect(!windowIDsAfter.isEmpty, "Terminal window IDs must be present after reconcile")
-    // Since serverExists → true and windowExists → true, the alive-window branch
+    // Since both probes report presence, the alive-window branch
     // is taken and IDs are NOT touched (the terminal is left running as-is).
     #expect(windowIDsAfter == windowIDsBefore, "Window IDs must be unchanged when server and windows are alive")
 }
@@ -810,9 +810,311 @@ import Testing
     #expect(!recorded.snapshot().contains { $0.contains("kill-window") })
 }
 
+// MARK: - Reconcile and the three probes' two negative answers
+
+/// Both arms below share this: a main worktree on a live (dryRun) server with
+/// one live window, holding one resumable Claude terminal. The variables are
+/// what the server, window and pane probes answer.
+private func makeReconcileFixture(
+    tempDir: URL, repoDir: URL,
+    paneTarget: @escaping @Sendable (String, String) throws -> PaneSendTarget = { _, _ in
+        .live(terminalID: nil)
+    },
+    windowPresence: (@Sendable (String, String) -> TmuxResourcePresence)? = nil,
+    serverPresence: (@Sendable (String) -> TmuxResourcePresence)? = nil
+) async throws -> (TBDDatabase, WorktreeLifecycle, Repo, Terminal) {
+    let db = try TBDDatabase(inMemory: true)
+    let server = TmuxManager.serverName(forRepoPath: repoDir.path)
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: GitManager(),
+        tmux: TmuxManager(
+            dryRun: true,
+            dryRunWindowPresence: windowPresence,
+            dryRunServerPresence: serverPresence,
+            dryRunPaneSendTarget: paneTarget),
+        hooks: HookResolver())
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+    let main = try await db.worktrees.createMain(
+        repoID: repo.id, name: "main", branch: "main",
+        path: repoDir.path, tmuxServer: server)
+    let terminal = try await db.terminals.create(
+        worktreeID: main.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+        label: "claude", claudeSessionID: "sess-reconcile", kind: .claude)
+    return (db, lifecycle, repo, terminal)
+}
+
+/// Encoded with sorted keys so the comparison is over the whole row rather
+/// than the fields a reader thought to name.
+private func encodedRow(_ terminal: Terminal) throws -> Data {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    return try encoder.encode(terminal)
+}
+
+/// The destructive half of the defect. Reconcile parks resumable sessions and
+/// deletes the rest, so a consultation that reached no tmux server must leave
+/// the row alone: "I could not read the pane" is not "the pane is gone", and
+/// getting it wrong here loses a live agent's in-flight work rather than merely
+/// refusing one send.
+@Test func testReconcileLeavesRowUntouchedWhenServerIsUnreachable() async throws {
+    let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let (db, lifecycle, repo, terminal) = try await makeReconcileFixture(
+        tempDir: tempDir, repoDir: repoDir, paneTarget: { _, _ in .unreachable })
+    let before = try encodedRow(try #require(try await db.terminals.get(id: terminal.id)))
+
+    try await lifecycle.reconcile(
+        repoID: repo.id, actuationLog: makeTestActuationLog(),
+        reapSharedScratchTmuxResources: true)
+
+    let after = try #require(try await db.terminals.get(id: terminal.id))
+    let afterEncoded = try encodedRow(after)
+    #expect(afterEncoded == before,
+            "an unreachable server must leave the row byte-identical; got \(after)")
+    // Spelled out too, because these are the three specific mutations this pass
+    // makes and a reader should see them refused by name.
+    #expect(after.hibernatedAt == nil, "must not park on a failed read")
+    #expect(after.tmuxPaneID == "%1", "must not rewrite the coordinate on a failed read")
+    #expect(after.tmuxWindowID == "@1")
+}
+
+/// The over-correction guard: a reconciler that never reclaims anything is its
+/// own bug. A server that ANSWERED and does not hold the pane is positive
+/// evidence of absence, and a resumable session there is still parked.
+@Test func testReconcileStillParksWhenThePaneIsPositivelyAbsent() async throws {
+    let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let (db, lifecycle, repo, terminal) = try await makeReconcileFixture(
+        tempDir: tempDir, repoDir: repoDir, paneTarget: { _, _ in .absent })
+
+    try await lifecycle.reconcile(
+        repoID: repo.id, actuationLog: makeTestActuationLog(),
+        reapSharedScratchTmuxResources: true)
+
+    let after = try #require(try await db.terminals.get(id: terminal.id))
+    #expect(after.hibernatedAt != nil, "an absent pane must still park its resumable session")
+    #expect(after.claudeSessionID == "sess-reconcile", "the session must be preserved for wake")
+}
+
+/// The same absence on a NON-resumable row still deletes, so the two halves of
+/// the reclaim path are both proven live.
+@Test func testReconcileStillDeletesNonResumableRowWhenThePaneIsPositivelyAbsent() async throws {
+    let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let server = TmuxManager.serverName(forRepoPath: repoDir.path)
+    let lifecycle = WorktreeLifecycle(
+        db: db, git: GitManager(),
+        tmux: TmuxManager(dryRun: true, dryRunPaneSendTarget: { _, _ in .absent }),
+        hooks: HookResolver())
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+    let main = try await db.worktrees.createMain(
+        repoID: repo.id, name: "main", branch: "main",
+        path: repoDir.path, tmuxServer: server)
+    let terminal = try await db.terminals.create(
+        worktreeID: main.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+        label: "Shell", kind: .shell)
+
+    try await lifecycle.reconcile(
+        repoID: repo.id, actuationLog: makeTestActuationLog(),
+        reapSharedScratchTmuxResources: true)
+
+    let after = try await db.terminals.get(id: terminal.id)
+    #expect(after == nil, "an absent pane on a non-resumable row must still be reclaimed")
+}
+
+// MARK: - Reconcile and the window/server probes' two negative answers
+//
+// The pane consultation above is the LAST of three probes reconcile runs, and
+// for a while it was the only one that could say "I could not read this". The
+// server and window probes returned `Bool` and ended in `catch { return false }`,
+// so the socket mismatch that motivated the whole split short-circuited into
+// "gone" one and two probes EARLIER — and the destructive branches fired
+// without the fixed pane path ever being consulted. The tests below pin each
+// probe's failed read to "leave the row alone", and pair it with the positive
+// absence that must still reclaim.
+
+/// The finding this suite exists for: the server probe fails, and nothing may
+/// be parked or deleted on the strength of it.
+@Test func testReconcileLeavesRowUntouchedWhenTheServerProbeIsUnreachable() async throws {
+    let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let (db, lifecycle, repo, terminal) = try await makeReconcileFixture(
+        tempDir: tempDir, repoDir: repoDir,
+        // Reached only if the gate above it wrongly lets the pass continue.
+        paneTarget: { _, _ in .absent },
+        serverPresence: { _ in .unreachable })
+    let before = try encodedRow(try #require(try await db.terminals.get(id: terminal.id)))
+
+    try await lifecycle.reconcile(
+        repoID: repo.id, actuationLog: makeTestActuationLog(),
+        reapSharedScratchTmuxResources: true)
+
+    let after = try #require(try await db.terminals.get(id: terminal.id))
+    let afterEncoded = try encodedRow(after)
+    #expect(afterEncoded == before,
+            "an unreachable SERVER must leave the row byte-identical; got \(after)")
+    #expect(after.hibernatedAt == nil, "must not park when the server probe failed")
+}
+
+/// The same rule one probe later: the server answered, the window read did not.
+@Test func testReconcileLeavesRowUntouchedWhenTheWindowProbeIsUnreachable() async throws {
+    let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let (db, lifecycle, repo, terminal) = try await makeReconcileFixture(
+        tempDir: tempDir, repoDir: repoDir,
+        paneTarget: { _, _ in .absent },
+        windowPresence: { _, _ in .unreachable },
+        serverPresence: { _ in .present })
+    let before = try encodedRow(try #require(try await db.terminals.get(id: terminal.id)))
+
+    try await lifecycle.reconcile(
+        repoID: repo.id, actuationLog: makeTestActuationLog(),
+        reapSharedScratchTmuxResources: true)
+
+    let after = try #require(try await db.terminals.get(id: terminal.id))
+    let afterEncoded = try encodedRow(after)
+    #expect(afterEncoded == before,
+            "an unreadable WINDOW must leave the row byte-identical; got \(after)")
+    #expect(after.hibernatedAt == nil, "must not park when the window probe failed")
+}
+
+/// The over-correction guard for the window probe: tmux ANSWERED that the
+/// window is not there, so the resumable session is still parked. Without this,
+/// "never act on a failed read" could quietly become "never act".
+@Test func testReconcileStillParksWhenTheWindowIsPositivelyAbsent() async throws {
+    let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let (db, lifecycle, repo, terminal) = try await makeReconcileFixture(
+        tempDir: tempDir, repoDir: repoDir,
+        windowPresence: { _, _ in .absent },
+        serverPresence: { _ in .present })
+
+    try await lifecycle.reconcile(
+        repoID: repo.id, actuationLog: makeTestActuationLog(),
+        reapSharedScratchTmuxResources: true)
+
+    let after = try #require(try await db.terminals.get(id: terminal.id))
+    #expect(after.hibernatedAt != nil, "an absent window must still park its resumable session")
+    #expect(after.claudeSessionID == "sess-reconcile", "the session must be preserved for wake")
+}
+
+/// The over-correction guard one probe EARLIER, and the reboot contract itself:
+/// the server probe answered `.absent` — nothing at all is running, so no
+/// socket-resolution mismatch can be hiding a live server — and both halves of
+/// the reclaim must fire. Resumable Claude parks (the session survives for
+/// wake); a plain shell, which has nothing to resume, is deleted.
+///
+/// Without this, "never act on a failed read" quietly becomes "never act after
+/// a reboot", and every row on every pre-reboot server accumulates forever.
+/// `serverPresence` gets the `.absent` verdict from the process table rather
+/// than from tmux — see `TmuxServerPresenceTests` for that classification and
+/// `WorktreeLifecycleLiveTests.testReconcileRebootParksClaudeAndDeletesShell`
+/// for the same contract against a real killed tmux server.
+@Test func testReconcileReclaimsBothRowKindsWhenTheServerIsPositivelyAbsent() async throws {
+    let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let server = TmuxManager.serverName(forRepoPath: repoDir.path)
+    let lifecycle = WorktreeLifecycle(
+        db: db, git: GitManager(),
+        tmux: TmuxManager(dryRun: true, dryRunServerPresence: { _ in .absent }),
+        hooks: HookResolver())
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+    let main = try await db.worktrees.createMain(
+        repoID: repo.id, name: "main", branch: "main",
+        path: repoDir.path, tmuxServer: server)
+    let claude = try await db.terminals.create(
+        worktreeID: main.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+        label: "claude", claudeSessionID: "sess-reboot", kind: .claude)
+    let shell = try await db.terminals.create(
+        worktreeID: main.id, tmuxWindowID: "@2", tmuxPaneID: "%2",
+        label: "Shell", kind: .shell)
+
+    try await lifecycle.reconcile(
+        repoID: repo.id, actuationLog: makeTestActuationLog(),
+        reapSharedScratchTmuxResources: true)
+
+    let claudeAfter = try #require(try await db.terminals.get(id: claude.id))
+    #expect(claudeAfter.hibernatedAt != nil,
+            "an absent server must park its resumable session, not leave it live-looking")
+    #expect(claudeAfter.claudeSessionID == "sess-reboot",
+            "the session must be preserved for wake")
+    #expect(claudeAfter.tmuxWindowID == "@1",
+            "reboot must not recreate the window (no eager mass `claude --resume`, #284)")
+
+    let shellAfter = try await db.terminals.get(id: shell.id)
+    #expect(shellAfter == nil,
+            "a shell row on an absent server has nothing to resume and must be deleted")
+}
+
+/// `reconcileTmuxResources` is destructive in the other direction: it KILLS a
+/// tmux server no row references any more. A server that did not answer has not
+/// told us it is unreferenced-and-alive — and killing takes every pane on it
+/// with it — so the sweep must require a positive answer.
+///
+/// Driven through the scratch sweep because its visit set is exactly "every
+/// server a scratch row names", archived rows included, while ownership is read
+/// from live rows only: one archived scratch row is therefore a server with no
+/// live owner, which is the branch under test.
+@Test func testResourceSweepDoesNotKillAnUnreachableUnreferencedServer() async throws {
+    let db = try TBDDatabase(inMemory: true)
+    let recorded = LockedCommandRecorder()
+    let lifecycle = WorktreeLifecycle(
+        db: db, git: GitManager(),
+        tmux: TmuxManager(
+            dryRun: true,
+            dryRunRecorder: recorded.append,
+            dryRunServerPresence: { _ in .unreachable }),
+        hooks: HookResolver())
+    let scratch = try await db.worktrees.createScratch(
+        name: "s", displayName: "S", path: "/tmp/scratch-unreachable",
+        tmuxServer: "tbd-unreachable-sweep")
+    try await db.worktrees.archive(id: scratch.id)
+
+    try await lifecycle.reconcileScratchTerminals(
+        actuationLog: makeTestActuationLog(), reapOrphanTmuxResources: true)
+
+    #expect(!recorded.snapshot().contains { $0.contains("kill-server") },
+            "a server that did not answer must not be killed")
+    #expect(!recorded.snapshot().contains { $0.contains("kill-window") },
+            "nor may its windows be swept on a failed read")
+}
+
+/// The paired positive control: the same unreferenced server, answering.
+@Test func testResourceSweepStillKillsAnAnsweringUnreferencedServer() async throws {
+    let db = try TBDDatabase(inMemory: true)
+    let recorded = LockedCommandRecorder()
+    let lifecycle = WorktreeLifecycle(
+        db: db, git: GitManager(),
+        tmux: TmuxManager(
+            dryRun: true,
+            dryRunRecorder: recorded.append,
+            dryRunServerPresence: { _ in .present }),
+        hooks: HookResolver())
+    let scratch = try await db.worktrees.createScratch(
+        name: "s", displayName: "S", path: "/tmp/scratch-present",
+        tmuxServer: "tbd-present-sweep")
+    try await db.worktrees.archive(id: scratch.id)
+
+    try await lifecycle.reconcileScratchTerminals(
+        actuationLog: makeTestActuationLog(), reapOrphanTmuxResources: true)
+
+    #expect(recorded.snapshot().contains { $0.contains("kill-server") },
+            "an unreferenced server that answers is still reclaimed")
+}
+
 /// Suspended terminals must not be touched during reconcile, regardless of server/window state.
 /// dryRun mode exercises the serverAlive=true branch; suspended terminals are skipped
-/// before the windowExists check, so this works with dryRun=true.
+/// before the window probe, so this works with dryRun=true.
 @Test func testReconcileSuspendedTerminalSkippedOnReboot() async throws {
     let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
     defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -908,10 +1210,10 @@ import Testing
     #expect(codexAfter?.hibernatedAt != nil)
 }
 
-/// Server gone path (reboot): in dryRun mode serverExists → true, so this path
+/// Server gone path (reboot): in dryRun mode serverPresence → .present, so this path
 /// cannot be directly triggered. Instead, this test seeds a stale windowID and
 /// verifies that when the server IS alive (dryRun), the stale window is treated
-/// as alive (windowExists → true in dryRun) and NOT deleted.
+/// as alive (windowPresence → .present in dryRun) and NOT deleted.
 /// This is the inverse regression guard: ensures dryRun never triggers reboot recreation.
 @Test func testReconcileDryRunDoesNotTriggerRebootRecreation() async throws {
     let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
@@ -936,9 +1238,9 @@ import Testing
     let staleWindowID = "@stale-99"
     try await db.terminals.updateTmuxIDs(id: terminal.id, windowID: staleWindowID, paneID: "%stale-99")
 
-    // In dryRun mode, serverExists → true (not the reboot path).
-    // windowExists → true for any ID, so the stale window is treated as alive.
-    // Result: the terminal record must NOT be deleted (no dead-window deletion).
+    // In dryRun mode, serverPresence → .present (not the reboot path), and
+    // windowPresence → .present for any ID, so the stale window is treated as
+    // alive. Result: the terminal record must NOT be deleted.
     try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
 
     let terminalsAfter = try await db.terminals.list(worktreeID: wt.id)
@@ -949,11 +1251,11 @@ import Testing
     #expect(terminalAfter?.tmuxWindowID == staleWindowID,
             "dryRun: stale window ID must not be replaced when server reports alive")
 
-    // NOTE: The actual reboot path (serverExists → false) cannot be tested with
-    // dryRun=true. See testReconcileRebootParksClaudeAndDeletesShell in
-    // TBDDaemonLiveTests/WorktreeLifecycleLiveTests.swift, which drives it with a
-    // real tmux server and verifies terminals are parked as suspended (not
-    // recreated) when the server is gone.
+    // NOTE: a real killed server is exercised by
+    // testReconcileRebootParksClaudeAndDeletesShell in
+    // TBDDaemonLiveTests/WorktreeLifecycleLiveTests.swift, which drives it
+    // against real tmux; the server-probe verdicts themselves are injected
+    // above in `makeReconcileFixture`-based tests.
 }
 
 @Test func testCreateWorktreeTrapBugScenario() async throws {
