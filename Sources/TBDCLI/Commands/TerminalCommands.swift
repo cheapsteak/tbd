@@ -767,10 +767,12 @@ func externalAttachNestingRefusal(environment: [String: String]) -> String? {
 
 /// The process image the exec path replaces itself with.
 ///
-/// The composed script is two shell statements — an idempotent `has-session`
-/// guard and the attach — so the thing exec'd is a shell running them, not tmux
-/// directly. `sh` exits with the attach's status, which is what lets a harness
-/// tell a failed attach from an empty measurement.
+/// The composed script is shell, not a single tmux invocation — a
+/// verify-then-reuse-or-rebuild of the terminal-keyed session joined by `&&`
+/// to the attach (see `ExternalAttachCommand.script`) — so the thing exec'd is
+/// a shell running it, not tmux directly. `sh` exits with the attach's status,
+/// which is what lets a harness tell a failed attach from an empty
+/// measurement.
 ///
 /// Split out from `run()` so the argv is asserted in a test rather than only
 /// observed by a process that never returns.

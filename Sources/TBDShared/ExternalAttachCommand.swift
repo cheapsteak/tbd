@@ -28,16 +28,56 @@ import Foundation
 public enum ExternalAttachCommand {
 
     /// Prefix on every session this command mints. Terminal-keyed names bound
-    /// the population at one session per terminal, and the reconciler that
-    /// reclaims them matches on this exact prefix — so it must never collide
+    /// the population at one session per terminal — so it must never collide
     /// with `tbd-view-` (TBD's own panels) or `main` (the daemon's session).
+    ///
+    /// The prefix alone is **not** the reclamation rule: see
+    /// `isGeneratedSessionName(_:)`.
     public static let sessionPrefix = "tbd-ext-"
+
+    /// Width of the terminal-id fragment in a minted name.
+    private static let idFragmentLength = 8
+
+    /// The digits `isGeneratedSessionName(_:)` accepts. Spelled out rather
+    /// than deferring to `Character.isHexDigit`, which is also true of
+    /// full-width and other non-ASCII hex forms — the point of the predicate
+    /// is that the accepted alphabet is exactly the one `sessionName(for:)`
+    /// can emit, so it must be an explicit set.
+    private static let idFragmentDigits = Set("0123456789abcdef")
 
     /// `tbd-ext-` plus the first eight lowercase hex digits of the terminal's
     /// UUID — short enough to type, and keyed to the terminal so a second
     /// invocation reuses the session rather than minting a sibling.
     public static func sessionName(for terminalID: UUID) -> String {
-        sessionPrefix + terminalID.uuidString.prefix(8).lowercased()
+        sessionPrefix + terminalID.uuidString.prefix(idFragmentLength).lowercased()
+    }
+
+    /// Whether `name` is a session `sessionName(for:)` could have minted: the
+    /// prefix followed by exactly eight lowercase hex digits, and nothing
+    /// else.
+    ///
+    /// **This, not `hasPrefix(sessionPrefix)`, is the reclamation rule.** It
+    /// lives beside the name builder so the rule that mints names and the rule
+    /// that reaps them cannot drift apart.
+    ///
+    /// The prefix alone is not safe to reap on. `TmuxManager`'s conditional
+    /// kill hands tmux an inner command *string* that tmux re-parses, and tmux
+    /// splits a command string on `;`. A session somebody created by hand on
+    /// TBD's own server as `tbd-ext-aa ; kill-server` would therefore turn
+    /// that string into `kill-session -t tbd-ext-aa ; kill-server` and take
+    /// down the whole server — every TBD terminal for that repo with it
+    /// (reproduced on tmux 3.6a). Constraining the accepted shape here means
+    /// no such name is ever a candidate, and the single-quoting there is
+    /// second-line defense rather than the guarantee.
+    ///
+    /// It also keeps benign hand-made names — `tbd-ext-notes`, a scratch
+    /// `tbd-ext-` session somebody parked a shell in — out of the sweep,
+    /// which prefix matching alone did not.
+    public static func isGeneratedSessionName(_ name: String) -> Bool {
+        guard name.hasPrefix(sessionPrefix) else { return false }
+        let fragment = name.dropFirst(sessionPrefix.count)
+        return fragment.count == idFragmentLength
+            && fragment.allSatisfy(idFragmentDigits.contains)
     }
 
     /// The command a user pastes into another emulator, or runs through a

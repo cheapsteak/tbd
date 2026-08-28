@@ -638,10 +638,6 @@ public struct TmuxManager: Sendable {
         return Date(timeIntervalSince1970: seconds)
     }
 
-    public static func killSessionCommand(server: String, session: String) -> [String] {
-        ["-L", server, "kill-session", "-t", session]
-    }
-
     /// Sentinel `killSessionIfClientlessCommand` prints when it declined to
     /// kill — because a client is attached, or because the session is already
     /// gone and the target no longer resolves.
@@ -665,16 +661,27 @@ public struct TmuxManager: Sendable {
     /// "killed" for a session that is still running. Sentinel on stdout means
     /// spared; empty stdout means killed.
     ///
-    /// Only ever aimed at `ExternalAttachCommand.sessionPrefix` names, which
-    /// are `tbd-ext-` plus eight hex digits — the inner command is a string
-    /// tmux re-parses, and those names carry no whitespace or quoting for it to
-    /// trip on.
+    /// **The inner command is a string tmux re-parses, and tmux splits a
+    /// command string on `;`.** A session named `tbd-ext-aa ; kill-server`
+    /// would make it `kill-session -t tbd-ext-aa ; kill-server` and kill the
+    /// whole server. Two things keep that impossible, in this order:
+    ///
+    /// 1. The caller (`WorktreeLifecycle.reapExternalAttachSessions`) only
+    ///    ever reaches sessions passing
+    ///    `ExternalAttachCommand.isGeneratedSessionName`, so a name carrying
+    ///    anything but eight lowercase hex digits never gets here. That is the
+    ///    guarantee.
+    /// 2. The target is single-quoted anyway, so a future caller that reached
+    ///    past the filter would still not be handing tmux a second command.
+    ///    Note the quoting alone is not a guarantee — tmux's single quotes
+    ///    have no escape, so a name containing `'` has no faithful encoding;
+    ///    the filter is what makes such a name unreachable.
     public static func killSessionIfClientlessCommand(
         server: String, session: String
     ) -> [String] {
         ["-L", server, "if-shell", "-F", "-t", session,
          "#{==:#{session_attached},0}",
-         "kill-session -t \(session)",
+         "kill-session -t '\(session)'",
          "display-message -p \(sessionSparedSentinel)"]
     }
 
@@ -1421,19 +1428,6 @@ public struct TmuxManager: Sendable {
         let args = Self.unsetSessionOptionCommand(
             server: server, session: session,
             option: Self.externalAttachClientlessSinceOption)
-        if dryRun {
-            dryRunRecorder?(args)
-            return
-        }
-        try await runTmux(args)
-    }
-
-    /// Kill one session by name. The windows it holds survive when they are
-    /// linked from another session — which is exactly the case for the
-    /// external-attach sessions the reconciler reclaims: their single window
-    /// is `link-window`ed from `main`.
-    public func killSession(server: String, session: String) async throws {
-        let args = Self.killSessionCommand(server: server, session: session)
         if dryRun {
             dryRunRecorder?(args)
             return

@@ -25,7 +25,7 @@ struct ExternalAttachCommandTests {
         #expect(ExternalAttachCommand.sessionName(for: terminalID) == "tbd-ext-5a2b3c4d")
     }
 
-    @Test("the prefix is the one the reconciler matches on, and collides with neither TBD session kind")
+    @Test("the prefix collides with neither TBD session kind")
     func prefixIsDistinct() {
         #expect(ExternalAttachCommand.sessionPrefix == "tbd-ext-")
         // `tbd-view-` is a TBD panel's own session and `main` is the daemon's.
@@ -34,6 +34,36 @@ struct ExternalAttachCommandTests {
         #expect(!"main".hasPrefix(ExternalAttachCommand.sessionPrefix))
         #expect(ExternalAttachCommand.sessionName(for: UUID())
             .hasPrefix(ExternalAttachCommand.sessionPrefix))
+    }
+
+    /// The reclamation rule, asserted as a whitelist: what the builder emits
+    /// is a candidate, and everything else — however much of the prefix it
+    /// carries — is not. `hasPrefix` alone would accept every name below, and
+    /// the conditional kill re-parses its target as a tmux command string, so
+    /// `tbd-ext-aa ; kill-server` reaching it kills the entire server.
+    @Test("only the prefix plus exactly eight lowercase hex digits is a generated name")
+    func generatedSessionNamesAreExactlyWhatTheBuilderEmits() {
+        #expect(ExternalAttachCommand.isGeneratedSessionName(
+            ExternalAttachCommand.sessionName(for: UUID())))
+        #expect(ExternalAttachCommand.isGeneratedSessionName("tbd-ext-5a2b3c4d"))
+        #expect(ExternalAttachCommand.isGeneratedSessionName("tbd-ext-00000000"))
+
+        // A tmux command separator hiding in a hand-made name.
+        #expect(!ExternalAttachCommand.isGeneratedSessionName("tbd-ext-aa ; kill-server"))
+        // A benign hand-made name that the prefix rule accepted.
+        #expect(!ExternalAttachCommand.isGeneratedSessionName("tbd-ext-notes"))
+        // A tmux session name may contain a space; a generated one does not.
+        #expect(!ExternalAttachCommand.isGeneratedSessionName("tbd-ext-5a2b3c4d extra"))
+        // Wrong alphabet, wrong case, wrong width, no suffix at all.
+        #expect(!ExternalAttachCommand.isGeneratedSessionName("tbd-ext-5a2b3c4g"))
+        #expect(!ExternalAttachCommand.isGeneratedSessionName("tbd-ext-5A2B3C4D"))
+        #expect(!ExternalAttachCommand.isGeneratedSessionName("tbd-ext-5a2b3c4"))
+        #expect(!ExternalAttachCommand.isGeneratedSessionName("tbd-ext-5a2b3c4d5"))
+        #expect(!ExternalAttachCommand.isGeneratedSessionName("tbd-ext-"))
+        // Neither TBD session kind, and a near miss on the prefix itself.
+        #expect(!ExternalAttachCommand.isGeneratedSessionName("tbd-view-5a2b3c4d"))
+        #expect(!ExternalAttachCommand.isGeneratedSessionName("main"))
+        #expect(!ExternalAttachCommand.isGeneratedSessionName("tbd-extra-5a2b3c4d"))
     }
 
     // MARK: - The script, whole

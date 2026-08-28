@@ -671,10 +671,15 @@ extension WorktreeLifecycle {
     /// ordinary case the instant the last client leaves; this pass carries
     /// every case that option misses.
     ///
-    /// Matching is on `ExternalAttachCommand.sessionPrefix` alone, so TBD's own
-    /// panel sessions (`tbd-view-*`), the daemon's `main`, and anything a user
-    /// created by hand are never candidates. Killing the session does not
-    /// disturb the terminal: its window is `link-window`ed from `main` and
+    /// Candidates are exactly the names `ExternalAttachCommand` mints —
+    /// `isGeneratedSessionName`, the prefix followed by eight lowercase hex
+    /// digits — so TBD's own panel sessions (`tbd-view-*`), the daemon's
+    /// `main`, and any hand-made session are out of scope. The prefix alone
+    /// would not do it: a hand-made `tbd-ext-notes` matches the prefix, and a
+    /// hand-made `tbd-ext-aa ; kill-server` would be fed to the conditional
+    /// kill, whose inner command tmux re-parses and splits on `;` — see
+    /// `TmuxManager.killSessionIfClientlessCommand`. Killing a session does
+    /// not disturb the terminal: its window is `link-window`ed from `main` and
     /// survives.
     ///
     /// The 60-second grace period is the point, not a courtesy — see
@@ -692,7 +697,7 @@ extension WorktreeLifecycle {
         }
         let observedAt = now()
         for session in sessions
-        where session.name.hasPrefix(ExternalAttachCommand.sessionPrefix) {
+        where ExternalAttachCommand.isGeneratedSessionName(session.name) {
             switch ExternalAttachReclamation.decide(session: session, now: observedAt) {
             case .leaveAlone:
                 continue

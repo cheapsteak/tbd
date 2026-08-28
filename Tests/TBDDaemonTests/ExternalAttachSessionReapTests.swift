@@ -220,6 +220,17 @@ struct ExternalAttachSessionReapTests {
     /// A session that HAS been attached cannot be dated from tmux alone —
     /// `session_last_attached` records the last attach and does not move on
     /// detach — so the first sweep stamps it and only a later one may act.
+    ///
+    /// What this proves and what it does not: the timing is the assertion —
+    /// no reap on the observing sweep, none 30s later, one past 60s — plus
+    /// that the stamp is written *onto the session* rather than kept in the
+    /// daemon (the `clientlessSince` read-back, which goes through the fake's
+    /// `set-option` round trip). It does **not** discriminate a session-side
+    /// stamp from a daemon-side one on timing: a per-process tracker would
+    /// produce this same three-sweep sequence. The tests that need the clock
+    /// to live on the session are `reattachingClearsTheStamp` and
+    /// `attachBetweenSweepsInvalidatesTheStamp`, where a stamp survives an
+    /// attach that this process never observed.
     @Test("a detached session is stamped first and reaped only a grace period later")
     func detachedSessionIsStampedThenReaped() async throws {
         let date = TestDateSource()
@@ -390,8 +401,23 @@ struct ExternalAttachSessionReapTests {
         let commands = fake.recordedCommands()
         #expect(commands.contains(TmuxManager.killSessionIfClientlessCommand(
             server: server, session: externalSession)))
-        #expect(!commands.contains(TmuxManager.killSessionCommand(
-            server: server, session: externalSession)))
+        // …and nothing else kills. A bare `kill-session` would appear as its
+        // own argv element; inside the conditional the words only ever occur
+        // within `if-shell`'s single re-parsed command string, never as an
+        // element of the array. Pinned this way rather than against a named
+        // unconditional-kill builder, so the guard cannot be satisfied by a
+        // builder nothing calls.
+        #expect(!commands.contains { $0.contains("kill-session") })
+    }
+
+    /// Second-line defense for the same command string: the filter above is
+    /// what keeps a hostile name away from it, but a future caller reaching
+    /// past the filter must still not be handing tmux a second command.
+    @Test("the conditional kill single-quotes the target inside the string tmux re-parses")
+    func conditionalKillQuotesItsInnerTarget() {
+        let args = TmuxManager.killSessionIfClientlessCommand(
+            server: server, session: "tbd-ext-abcd1234")
+        #expect(args.contains("kill-session -t 'tbd-ext-abcd1234'"))
     }
 
     // MARK: - Scope
@@ -413,6 +439,43 @@ struct ExternalAttachSessionReapTests {
 
         #expect(fake.killedSessions().isEmpty)
         #expect(fake.recordedCommands().isEmpty)
+    }
+
+    /// Candidacy is `ExternalAttachCommand.isGeneratedSessionName`, not the
+    /// prefix — and this is the test that says why. The conditional kill hands
+    /// tmux an inner command *string* that tmux re-parses and splits on `;`,
+    /// so a hand-made `tbd-ext-aa ; kill-server` sitting client-less past the
+    /// grace period would make that string `kill-session -t tbd-ext-aa ;
+    /// kill-server`: the whole server dies, taking every TBD terminal for the
+    /// repo with it (reproduced on tmux 3.6a). Benign hand-made names —
+    /// `tbd-ext-notes`, a name carrying a space — are equally out of scope,
+    /// because the filter accepts only what `sessionName(for:)` can mint.
+    ///
+    /// The legitimate session is in the same listing on purpose: without it
+    /// this would pass on a sweep that reaped nothing at all.
+    @Test("hand-made tbd-ext-* names are not candidates, however long they sit client-less")
+    func handMadeExternalAttachNamesAreNotCandidates() async throws {
+        let date = TestDateSource()
+        let fake = FakeTmuxServer()
+        let lifecycle = try makeLifecycle(tmuxServer: fake, date: date)
+        let injecting = "tbd-ext-aa ; kill-server"
+        fake.set([
+            neverAttached(injecting, createdAgo: 3_600, now: date.now),
+            neverAttached("tbd-ext-notes", createdAgo: 3_600, now: date.now),
+            neverAttached("tbd-ext-5a2b3c4d extra", createdAgo: 3_600, now: date.now),
+            neverAttached("tbd-ext-5A2B3C4D", createdAgo: 3_600, now: date.now),
+            neverAttached(externalSession, createdAgo: 3_600, now: date.now),
+        ])
+
+        await lifecycle.reapExternalAttachSessions(server: server)
+        date.advance(by: 3_600)
+        await lifecycle.reapExternalAttachSessions(server: server)
+
+        // Only the generated name was reaped, and no tmux command the pass
+        // issued so much as named one of the others.
+        #expect(fake.killedSessions() == [externalSession])
+        #expect(fake.session(injecting) != nil)
+        #expect(fake.recordedCommands().allSatisfy { $0.contains(externalSession) })
     }
 
     // MARK: - The record a reap leaves
