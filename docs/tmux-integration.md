@@ -2,9 +2,11 @@
 
 How TBD integrates with tmux, what we tried, what worked, and why.
 
-## Architecture: Grouped Sessions + Direct PTY
+## Architecture: One Linked Window Per Viewer + Direct PTY
 
-Each terminal panel in TBD gets its own tmux client via a **grouped session**. SwiftTerm connects to the PTY natively — no protocol parsing needed.
+Each terminal panel in TBD gets its own tmux client attached to a **private
+session holding exactly one linked window**. SwiftTerm connects to the PTY
+natively — no protocol parsing needed.
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -16,33 +18,69 @@ Each terminal panel in TBD gets its own tmux client via a **grouped session**. S
 │    Window @3: claude code                   │
 │    Window @4: setup hook                    │
 │                                             │
-│  Session "tbd-view-abc123" (grouped)        │
-│    → shares all windows with "main"         │
-│    → independent current-window pointer     │
-│    → currently viewing @1                   │
+│  Session "tbd-view-abc123"                  │
+│    → holds @1 alone, linked from "main"     │
+│    → the same window object, not a copy     │
 │                                             │
-│  Session "tbd-view-def456" (grouped)        │
-│    → shares all windows with "main"         │
-│    → currently viewing @3                   │
+│  Session "tbd-view-def456"                  │
+│    → holds @3 alone, linked from "main"     │
 │                                             │
 └─────────────────────────────────────────────┘
 ```
 
+A window linked into two sessions is one window: same pane, same processes,
+same scrollback. Linking is what lets a panel show a window that `main` also
+holds, without copying anything and without the two viewers sharing a
+current-window pointer.
+
 ### How it works
 
 1. **Daemon** creates tmux windows in session `main` (one tmux server per repo)
-2. **App** creates a grouped session per visible terminal panel: `tmux new-session -d -t main -s tbd-view-<uuid>`
-3. **App** selects the right window: `tmux select-window -t tbd-view-<uuid>:@3`
-4. **SwiftTerm** spawns `tmux attach -t tbd-view-<uuid>` in a native PTY via `LocalProcess`
-5. **On hide**: `tmux kill-session -t tbd-view-<uuid>` — the grouped session dies, but `main` persists
-6. **On app close/reopen**: all grouped sessions die, `main` persists. App creates new grouped sessions on demand.
+2. **App** creates an isolated session per visible terminal panel:
+   `tmux new-session -d -s tbd-view-<uuid> -c /tmp`
+3. **App** links in the one window it wants and discards the throwaway window
+   the session was born with: `tmux link-window -s @3 -t tbd-view-<uuid>:`
+   then `tmux kill-window -t tbd-view-<uuid>:0`
+4. **SwiftTerm** spawns `tmux -u attach -t tbd-view-<uuid>` in a native PTY via
+   `LocalProcess`
+5. **On hide**: `tmux kill-session -t tbd-view-<uuid>` — the viewer session
+   dies; the window survives because `main` still holds it, and so does
+   `main` itself
+6. **On app close/reopen**: all viewer sessions die, `main` persists. The app
+   creates new viewer sessions on demand.
 
-### Why grouped sessions
+The command builders for each step live in `TmuxBridge`
+(`Sources/TBDApp/Terminal/TmuxBridge.swift`).
 
-- Each client has **independent current-window** — switching windows in one panel doesn't affect others
-- Each client has **independent size** — no size conflicts between panels of different dimensions
-- **Session persistence** — the `main` session survives app restarts, tmux handles all scrollback
-- **Native PTY** — SwiftTerm works exactly as designed, all input/output/resize through the terminal driver
+### Why one linked window per session
+
+- **Independent sizing.** This is the load-bearing reason, and it comes from
+  the *one window per session* part rather than from the session boundary. A
+  tmux window has exactly one size: under `window-size latest`, the most
+  recently active client among those displaying it sets its dimensions. Two
+  panels showing two different windows therefore never contend. Two clients on
+  the *same* window always do, no matter how their sessions are arranged — the
+  only escape is the per-client `ignore-size` flag.
+- **No shared pointer.** A private session means switching what a panel shows
+  cannot move any other viewer, and cannot move `main` — which matters because
+  the daemon's control-mode connection attaches to `main`.
+- **Session persistence.** `main` survives app restarts, and tmux keeps all
+  scrollback.
+- **Native PTY.** SwiftTerm works exactly as designed: input, output and resize
+  all go through the terminal driver.
+
+### Not session groups
+
+An earlier design used tmux **session groups** (`new-session -t main`), where
+the viewer shares `main`'s whole window list and keeps its own current-window
+pointer. That is a reasonable way to get an independent pointer, and it is what
+this document originally described, but it is not what the code does. Grouping
+gives a viewer every window on the repo's server — including windows belonging
+to other worktrees — where linking gives it exactly the one it should show.
+
+Some identifiers and comments in the app still say "grouped sessions" for this
+path (`AppState`, `DaemonClient`, `RPCRouter+AttachHandlers`); read them as
+"the direct-PTY viewer path, as opposed to control mode".
 
 ## What We Tried First: Control Mode (-CC)
 
@@ -94,10 +132,15 @@ Server (socket: /tmp/tmux-UID/tbd-xxx)
 tmux -L myserver new-session -s main -d     # create server + session
 tmux -L myserver kill-server                 # kill everything
 
-# Grouped sessions (share windows, independent focus)
-tmux -L myserver new-session -t main -s view1   # create grouped session
-tmux -L myserver select-window -t view1:@3      # select window in grouped session
-tmux -L myserver kill-session -t view1           # kill grouped session only
+# Viewer sessions as TBD builds them (one linked window each)
+tmux -L myserver new-session -d -s view1 -c /tmp  # isolated session
+tmux -L myserver link-window -s @3 -t view1:      # link ONE window in
+tmux -L myserver kill-window -t view1:0           # drop the throwaway window
+tmux -L myserver kill-session -t view1            # kill the viewer only
+
+# Grouped sessions (share the whole window list, independent focus).
+# Reference only — TBD does not use these.
+tmux -L myserver new-session -t main -s view1
 
 # Window management
 tmux -L myserver new-window -t main -c /path    # create window
@@ -123,7 +166,14 @@ tmux -L myserver capture-pane -p -e -t %3       # print with ANSI escapes
 - `refresh-client -C cols,rows` — sets control client size (affects ALL windows)
 - `resize-window -t @3 -x cols -y rows` — resize specific window
 - `resize-pane -t %3 -x cols -y rows` — resize specific pane
-- With grouped sessions, each client has its own size naturally via the PTY
+- A window has ONE size. Under the default `window-size latest`, the most
+  recently active client among those displaying it wins. Panels avoid
+  contention by each holding a different window, not by being in different
+  sessions.
+- `attach -f ignore-size` makes a client abstain from that calculation — but
+  only while another client is contributing a size. Measured on tmux 3.6a: a
+  normal 100x30 client and an `ignore-size` 180x45 client together hold the
+  window at 100x29; detach the normal one and the window becomes 180x44.
 
 ### Session groups
 
@@ -132,7 +182,17 @@ When you create a session with `-t existing-session`, the new session **shares a
 - Its own attached client size
 - Its own key bindings and options (if set per-session)
 
-This is the key feature that makes embedding work — multiple viewers can look at different windows simultaneously without interfering.
+TBD does **not** use session groups — see "Not session groups" above. It links
+a single window into a private session instead. The reference is kept here
+because the distinction matters when reading tmux's own documentation.
+
+### Linking windows
+
+`link-window -s <src-window> -t <dst-session>:` makes one window a member of a
+second session. It is the same window, not a copy: one pane, one process, one
+scrollback, visible from both. A window is destroyed when the last session
+holding it lets go, so a viewer session can be killed freely while `main` keeps
+the window alive.
 
 ## Resources
 
