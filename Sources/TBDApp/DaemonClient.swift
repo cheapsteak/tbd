@@ -669,6 +669,25 @@ actor DaemonClient {
             resultType: TerminalContinueInCodexResult.self)
     }
 
+    /// Compose the shell command that attaches an external terminal emulator
+    /// to one terminal's tmux window.
+    ///
+    /// The daemon is the composer, not the caller: the socket path has to come
+    /// from the environment that created the tmux server, and the pane's
+    /// `@tbd_terminal_id` is verified before the window is named, so a stale
+    /// coordinate cannot yield a command aimed at another session's window.
+    /// Throws rather than returning a partial command — a caller must not put
+    /// a half-formed script on the pasteboard.
+    func terminalAttachCommand(worktreeID: UUID, terminalID: UUID) async throws
+        -> TerminalAttachCommandResult {
+        return try await callAsync(
+            method: RPCMethod.terminalAttachCommand,
+            params: TerminalAttachCommandParams(
+                worktreeID: worktreeID, terminalID: terminalID),
+            resultType: TerminalAttachCommandResult.self
+        )
+    }
+
     /// List terminals, optionally filtered by worktree.
     func listTerminals(worktreeID: UUID? = nil) async throws -> [Terminal] {
         return try await callAsync(
