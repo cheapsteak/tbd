@@ -40,7 +40,13 @@ current-window pointer.
    `tmux new-session -d -s tbd-view-<uuid> -c /tmp`
 3. **App** links in the one window it wants and discards the throwaway window
    the session was born with: `tmux link-window -s @3 -t tbd-view-<uuid>:`
-   then `tmux kill-window -t tbd-view-<uuid>:0`
+   then `tmux kill-window -t tbd-view-<uuid>:0`. **That `:0` assumes the
+   default `base-index`.** A user running `set -g base-index 1` puts the
+   throwaway at index 1, so the kill fails with `can't find window: 0`, tmux
+   aborts the rest of the command chain, and the viewer session is left holding
+   a stray `/tmp` shell alongside the window it wanted. `kill-window -a -t
+   <session>:@<id>` — kill everything except the target — is base-index
+   independent and is what the external-attach command uses.
 4. **SwiftTerm** spawns `tmux -u attach -t tbd-view-<uuid>` in a native PTY via
    `LocalProcess`
 5. **On hide**: `tmux kill-session -t tbd-view-<uuid>` — the viewer session
@@ -135,7 +141,7 @@ tmux -L myserver kill-server                 # kill everything
 # Viewer sessions as TBD builds them (one linked window each)
 tmux -L myserver new-session -d -s view1 -c /tmp  # isolated session
 tmux -L myserver link-window -s @3 -t view1:      # link ONE window in
-tmux -L myserver kill-window -t view1:0           # drop the throwaway window
+tmux -L myserver kill-window -a -t view1:@3        # drop everything but @3
 tmux -L myserver kill-session -t view1            # kill the viewer only
 
 # Grouped sessions (share the whole window list, independent focus).

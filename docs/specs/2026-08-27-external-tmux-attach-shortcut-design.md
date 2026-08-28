@@ -155,8 +155,9 @@ somewhere plausible.
   control-mode (`-CC`) connection attached to `main`. A client attached
   straight to `main` shares that pointer, and moving it out from under the
   control-mode connection reopens the class of problem that flow control was
-  added to fix. The single-window session satisfies this by construction: there
-  is no `select-window` in the command at all.
+  added to fix. The private single-window session satisfies this by
+  construction: the one `select-window` in the command targets that session,
+  never `main`, and a pointer nothing else observes is not a shared pointer.
 - **It must address the window by its stable identifier.** `@<win>`, never a
   window index or pane coordinate. Reused numeric coordinates have already sent
   daemon keystrokes into an unrelated live session; the composer additionally
@@ -178,14 +179,16 @@ reasons:
   resolved in favour of either. The pair names a server and a window between
   them, so a mismatch would aim one repo's socket at another repo's window.
   Checked before the probe runs.
-- **The window must be verified before it is named.** The daemon already runs a
-  `paneSendTarget` probe, reading `#{pane_id}`, `#{pane_dead}` and the
-  `@tbd_terminal_id` pane option, before `terminal.send` types anything. The
-  same probe gates this composition: a missing window, a dead pane, or a pane
-  answering with a different terminal's id yields an error naming the state,
-  not a command aimed at a stranger's session. Refusal requires positive
-  disagreement — an unstamped pane composes as before, matching how send and
-  wake already behave.
+- **The window must be verified before it is named.** The daemon runs the same
+  pane probe `terminal.send` runs before it types anything, reading
+  `#{pane_id}`, `#{pane_dead}`, `#{window_id}` and the `@tbd_terminal_id` pane
+  option. Four states refuse, each naming itself rather than composing a
+  command aimed at a stranger's session: a missing window, a dead pane, a pane
+  answering with a different terminal's id, and a pane living in a different
+  window than the row records. Refusal requires positive disagreement — an
+  unstamped pane composes as before, matching how send and wake already behave.
+  This is a different check from the script's own window-id equality, which
+  runs later, on the user's machine, against the session actually built.
 
 The result carries the socket path, session name, window id, **pane id** and
 terminal id, plus the rendered script. A caller can therefore paste the script,
@@ -435,10 +438,14 @@ Small additive UI and a new CLI verb need none.
 
 The reconciler pass is the arguable part: it is a background sweep that kills
 tmux sessions, which touches two of the doctrine's triggers for a default-off
-flag. The judgment here is that it needs no flag, because it is scoped to
-sessions TBD itself mints under a `tbd-ext-` prefix and that have zero attached
-clients — the same shape as the tmux reconciliation `WorktreeLifecycle+Reconcile`
-already performs unflagged. The reasoning is written down so a reviewer can
+flag. The judgment here is that it needs no flag, because it is scoped to sessions
+TBD itself mints — names matching `tbd-ext-` plus eight hex digits exactly, not
+merely carrying the prefix — that have zero attached clients. Its precedent is
+`OrphanGC.sweep()`, which reclaims on an hourly cadence behind `gcEnabled` and
+carries no flag of its own; this pass runs on that same cadence and behind that
+same gate. The destructive window-and-server pass in
+`WorktreeLifecycle+Reconcile` is deliberately kept off the hourly timer, so it
+is the weaker analogy despite being the nearer neighbour in the source. The reasoning is written down so a reviewer can
 disagree with it explicitly rather than having to infer that the question was
 considered.
 
