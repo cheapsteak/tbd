@@ -1250,6 +1250,29 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             if let monitor = clickMonitor {
                 NSEvent.removeMonitor(monitor)
             }
+            // Reclaim the tmux view session this panel owns. `cleanup()` is
+            // the only other caller and it runs solely from
+            // `dismantleNSView`, which SwiftUI does not guarantee to run: the
+            // bridge log recorded 15 `PANEL: deinit` lines in 35 seconds with
+            // no matching `PANEL: cleanup`, each one a view session left
+            // behind. That leak is not cosmetic — a view session holding a
+            // linked window keeps that window, its pane process and the whole
+            // tmux server alive after the owning `main` session is killed,
+            // because tmux destroys a window only when its last session
+            // reference drops.
+            //
+            // Only the tmux session is reclaimed here. The pid capture, the
+            // PTY reap and the control-mode detach stay in `cleanup()`, which
+            // documents why they must happen exactly once.
+            //
+            // Safe from a non-isolated `deinit`, and idempotent, by
+            // construction: `cleanupSession` takes the bridge's own lock,
+            // removes this panel from `activeSessions` and kills from a
+            // detached task, so after a `cleanup()` there is no entry left and
+            // this call returns without issuing a second `kill-session`. That
+            // idempotence is what is relied on — NOT `isTornDown`, which is
+            // `@MainActor`-confined and must not be read from here.
+            tmuxBridge?.cleanupSession(panelID: panelID, server: tmuxServer)
         }
 
         // MARK: - LocalProcessDelegate

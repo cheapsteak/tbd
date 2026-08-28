@@ -366,7 +366,9 @@ private actor ScriptedTmuxRunner {
     }
 }
 
-private struct TmuxBridgeFixture {
+/// Internal rather than file-private so the view-session reclamation suite
+/// (`TerminalViewSessionReclamationTests`) can build its bridges the same way.
+struct TmuxBridgeFixture {
     let root: URL
     let configurationURL: URL
 

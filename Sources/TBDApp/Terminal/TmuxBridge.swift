@@ -87,6 +87,10 @@ final class TmuxBridge: @unchecked Sendable {
     private struct ActiveSession: Sendable {
         let name: String
         let tmuxExecutablePath: String
+        /// The tmux server socket this view session lives on. Recorded so a
+        /// teardown that holds no per-panel context — app termination — can
+        /// kill every tracked session on the server that actually owns it.
+        let server: String
     }
 
     private let lock = NSLock()
@@ -96,9 +100,11 @@ final class TmuxBridge: @unchecked Sendable {
     private var activeSessions: [UUID: ActiveSession] = [:]
 
     /// Serial background queue retained for any future synchronous teardown
-    /// needs. Today cleanup is fire-and-forget via `Task { ... }` invoking
+    /// needs. Per-panel cleanup is fire-and-forget via `Task { ... }` invoking
     /// the async `runTmux`, which uses `Process.terminationHandler` (no
-    /// `waitUntilExit`) so it doesn't pump the main runloop.
+    /// `waitUntilExit`) so it doesn't pump the main runloop; the one teardown
+    /// that must not return early — `cleanupAllSessionsBlocking`, on app
+    /// termination — waits on its own semaphore rather than through here.
     private let cleanupQueue = DispatchQueue(label: "com.tbd.app.tmux-cleanup", qos: .utility)
 
     /// Runs each tmux command. Defaults to the real subprocess runner.
@@ -348,7 +354,8 @@ final class TmuxBridge: @unchecked Sendable {
         lock.withLock {
             activeSessions[panelID] = ActiveSession(
                 name: sessionName,
-                tmuxExecutablePath: tmuxExecutablePath
+                tmuxExecutablePath: tmuxExecutablePath,
+                server: server
             )
         }
 
@@ -380,22 +387,72 @@ final class TmuxBridge: @unchecked Sendable {
         }
     }
 
-    /// Clean up all grouped sessions for a server.
+    /// Clean up every view session on one server.
+    ///
+    /// Fire-and-forget like `cleanupSession`. Sessions belonging to other
+    /// servers are left alone: `activeSessions` spans every server the app
+    /// currently shows a panel on.
     func cleanupAllSessions(server: String) {
-        lock.lock()
-        let sessions = activeSessions
-        activeSessions.removeAll()
-        lock.unlock()
+        let sessions = takeSessions { $0.server == server }
+        guard !sessions.isEmpty else { return }
 
         Task.detached { [self] in
-            for (_, session) in sessions {
-                let _ = await runTmux(
-                    tmuxExecutablePath: session.tmuxExecutablePath,
-                    server: server,
-                    args: Self.killSessionArgs(sessionName: session.name)
-                )
-            }
-            debugLog("CLEANUP ALL: server=\(server)")
+            await killSessions(sessions)
+            debugLog("CLEANUP ALL: server=\(server) sessions=\(sessions.count)")
+        }
+    }
+
+    /// Reclaim every tracked view session, each on the server that owns it,
+    /// blocking the caller until the kills have run.
+    ///
+    /// This is the app-termination path, and blocking is the whole point:
+    /// `cleanupAllSessions(server:)` hands its kills to a detached task, and
+    /// nothing scheduled that way outlives the process — on
+    /// `applicationWillTerminate` the task would be enqueued and then die with
+    /// the app, having killed nothing. A view session that outlives the app
+    /// keeps its linked worktree window alive (tmux destroys a window only
+    /// when the last session referencing it goes away), and with it that
+    /// window's pane process and the whole tmux server.
+    ///
+    /// Bounded rather than open-ended: a wedged tmux may delay quitting by
+    /// `timeout` at most, and one leaked session is the lesser harm.
+    ///
+    /// - Returns: the number of sessions this call took ownership of.
+    @discardableResult
+    func cleanupAllSessionsBlocking(timeout: TimeInterval = 2.0) -> Int {
+        let sessions = takeSessions { _ in true }
+        guard !sessions.isEmpty else { return 0 }
+
+        let finished = DispatchSemaphore(value: 0)
+        Task.detached { [self] in
+            await killSessions(sessions)
+            finished.signal()
+        }
+        let outcome = finished.wait(timeout: .now() + timeout)
+        debugLog("CLEANUP ALL (blocking): sessions=\(sessions.count) timedOut=\(outcome == .timedOut)")
+        return sessions.count
+    }
+
+    /// Removes the matching sessions from the tracking table and returns them,
+    /// so a caller owns exactly what it is about to kill and no second caller
+    /// can kill the same session twice.
+    private func takeSessions(matching predicate: (ActiveSession) -> Bool) -> [ActiveSession] {
+        lock.lock()
+        defer { lock.unlock() }
+        let taken = activeSessions.filter { predicate($0.value) }
+        for panelID in taken.keys {
+            activeSessions.removeValue(forKey: panelID)
+        }
+        return Array(taken.values)
+    }
+
+    private func killSessions(_ sessions: [ActiveSession]) async {
+        for session in sessions {
+            let _ = await runTmux(
+                tmuxExecutablePath: session.tmuxExecutablePath,
+                server: session.server,
+                args: Self.killSessionArgs(sessionName: session.name)
+            )
         }
     }
 
