@@ -165,6 +165,33 @@ public enum ExternalAttachCommand {
     /// how their own shell handles every later failure. Control flow is carried
     /// by `||` and `&&` instead, which is local to this script by construction.
     ///
+    /// **Every session target carries tmux's `=` exact-match prefix.** Per
+    /// tmux(1) TARGETS a bare session target is tried as an exact name, then
+    /// as *the start of* a session name, then as a glob — so with the
+    /// terminal-keyed session gone (a rebuild from a second attach,
+    /// `destroy-unattached` firing, a manual kill) `kill-session -t
+    /// tbd-ext-abcd1234` prefix-matches a person's hand-made
+    /// `tbd-ext-abcd1234-notes` and destroys it, and `list-windows` reads that
+    /// stranger's window list and can conclude "reuse, attach as-is". `=`
+    /// makes every one of those a not-found instead (measured on tmux 3.6a).
+    ///
+    /// The form differs by target kind, and the difference is not cosmetic:
+    ///
+    /// - A **target-session** (`list-windows`, `kill-session`, `attach`) takes
+    ///   `=<name>`.
+    /// - A **target-window or target-pane** (`link-window`, `select-window`,
+    ///   `kill-window`, and `set-option`, whose target is resolved down the
+    ///   same path) needs the trailing `:` — `=<name>:` — because without a
+    ///   `:` the whole word is read as a window or pane name inside the
+    ///   *current* session. Measured on 3.6a: `set-option -t '=name'` fails
+    ///   with `no such session: =name` even when `name` exists, and `if-shell
+    ///   -F -t '=name'` silently takes its else branch; `=name:` resolves
+    ///   correctly and is exact.
+    /// - `new-session -s <name>` is **not** a target — it is the name being
+    ///   minted — so it stays bare.
+    ///
+    /// Window ids (`@7`) are already unambiguous and need no `=` of their own.
+    ///
     /// Every interpolated value is single-quoted: a socket path containing a
     /// space must not produce a broken script.
     ///
@@ -175,25 +202,29 @@ public enum ExternalAttachCommand {
         windowID: String
     ) -> String {
         let socket = shellQuoted(socketPath)
-        let session = shellQuoted(sessionName)
         let window = shellQuoted(windowID)
-        // The session targets carry their `:` / `:@<id>` suffix inside the
-        // quotes: `'name:'` and `'name':` are the same word to the shell, and
-        // keeping the whole target in one quoted unit reads better.
-        let sessionTarget = shellQuoted(sessionName + ":")
-        let windowTarget = shellQuoted(sessionName + ":" + windowID)
+        // `-s` on `new-session` names the session being created; it is the one
+        // place the bare name belongs.
+        let sessionArgument = shellQuoted(sessionName)
+        // The session targets carry their `=` prefix and their `:` / `:@<id>`
+        // suffix inside the quotes: `'=name:'` and `'=name':` are the same
+        // word to the shell, and keeping the whole target in one quoted unit
+        // reads better.
+        let session = shellQuoted("=" + sessionName)
+        let sessionTarget = shellQuoted("=" + sessionName + ":")
+        let windowTarget = shellQuoted("=" + sessionName + ":" + windowID)
         return """
             [ "$(tmux -S \(socket) list-windows -t \(session) -F '#{window_id}' 2>/dev/null)" = \(window) ] || {
                 tmux -S \(socket) kill-session -t \(session) 2>/dev/null
                 tmux -S \(socket) \\
-                    new-session -d -s \(session) -c /tmp \\; \\
+                    new-session -d -s \(sessionArgument) -c /tmp \\; \\
                     link-window -s \(window) -t \(sessionTarget) \\; \\
                     kill-window -a -t \(windowTarget) \\
                     || { tmux -S \(socket) kill-session -t \(session) 2>/dev/null; false; }
             } && tmux -u -S \(socket) \\
                 select-window -t \(windowTarget) \\; \\
                 attach -t \(session) -f ignore-size \\; \\
-                set-option -t \(session) destroy-unattached on
+                set-option -t \(sessionTarget) destroy-unattached on
             """
     }
 

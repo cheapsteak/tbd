@@ -29,11 +29,17 @@ struct ExternalAttachSessionReapTests {
 
     /// A fake tmux server: it answers `list-sessions`, applies the
     /// `set-option` writes the pass makes, and honors the conditional kill.
+    ///
+    /// It also **resolves `-t` targets the way tmux does** — see
+    /// `resolveTarget(_:)`. That is not decoration: a target the production
+    /// code left un-pinned lands here where tmux would land it, on a
+    /// prefix-sibling session, rather than where the fixture wished it would.
     private final class FakeTmuxServer: @unchecked Sendable {
         private let lock = NSLock()
         private var sessions: [TmuxSessionInfo]
         private var killed: [String] = []
         private var sparedOnKill: Set<String> = []
+        private var vanishingAfterListing: Set<String> = []
         private var commands: [[String]] = []
 
         init(_ sessions: [TmuxSessionInfo] = []) {
@@ -50,12 +56,55 @@ struct ExternalAttachSessionReapTests {
             lock.withLock { _ = sparedOnKill.insert(session) }
         }
 
+        /// Remove `session` from the server the instant it has been listed.
+        ///
+        /// The sweep decides from a snapshot, and the session it chose can be
+        /// gone by the time the kill lands — rebuilt by a second attach,
+        /// collected by `destroy-unattached`, killed by hand. What the kill
+        /// then aims at is a name that no longer denotes anything, which is
+        /// precisely when tmux's prefix resolution reaches for a neighbour.
+        func vanishAfterListing(_ session: String) {
+            lock.withLock { _ = vanishingAfterListing.insert(session) }
+        }
+
         var listHook: @Sendable (String) -> [TmuxSessionInfo] {
-            { [self] _ in lock.withLock { sessions } }
+            { [self] _ in
+                lock.withLock {
+                    let listed = sessions
+                    sessions.removeAll { vanishingAfterListing.contains($0.name) }
+                    vanishingAfterListing.removeAll()
+                    return listed
+                }
+            }
         }
 
         var sparedHook: @Sendable (String, String) -> Bool {
             { [self] _, session in lock.withLock { sparedOnKill.contains(session) } }
+        }
+
+        /// Resolve one tmux `-t` session target the way tmux 3.6a does.
+        ///
+        /// - `=name` and `=name:` are **exact**: nothing else can match, and a
+        ///   missing session resolves to nothing.
+        /// - A bare `name` is tried as an exact name and then as *the start of*
+        ///   a session name. That second step is the whole defect the `=`
+        ///   prefixes exist to close, so the fake reproduces it: a reap that
+        ///   drops its `=` destroys the hand-made sibling here exactly as it
+        ///   would on a real server, and the assertions below go red.
+        ///
+        /// tmux's third step, glob matching, is not modelled — no name this
+        /// suite builds contains a glob metacharacter, and `isGeneratedSessionName`
+        /// keeps one from ever reaching the sweep.
+        private func resolveTarget(_ target: String) -> String? {
+            var name = target
+            let exactOnly = name.hasPrefix("=")
+            if exactOnly { name.removeFirst() }
+            // `=name:` — the trailing colon a target-pane or option target
+            // needs before tmux will read the `=` as a session at all.
+            if name.hasSuffix(":") { name.removeLast() }
+            if let exact = sessions.first(where: { $0.name == name }) { return exact.name }
+            guard !exactOnly else { return nil }
+            return sessions.first { $0.name.hasPrefix(name) }?.name
         }
 
         /// Applies what the pass asked tmux to do, so the next sweep observes
@@ -67,7 +116,9 @@ struct ExternalAttachSessionReapTests {
                     guard let targetIndex = command.firstIndex(of: "-t"),
                           command.index(after: targetIndex) < command.endIndex
                     else { return }
-                    let target = command[command.index(after: targetIndex)]
+                    guard let target = resolveTarget(
+                        command[command.index(after: targetIndex)])
+                    else { return }
                     if command.contains("if-shell") {
                         guard !sparedOnKill.contains(target) else { return }
                         killed.append(target)
@@ -115,9 +166,10 @@ struct ExternalAttachSessionReapTests {
     private let server = "tbd-acme"
 
     /// Composed, never hardcoded: the sweep matches on
-    /// `ExternalAttachCommand.sessionPrefix`, so a fixture that spelled the
-    /// name out by hand would keep passing if the prefix or the id width
-    /// changed underneath it.
+    /// `ExternalAttachCommand.isGeneratedSessionName`, so a fixture that
+    /// spelled the name out by hand would keep passing if the prefix or the id
+    /// width changed underneath it — and would silently stop being a candidate
+    /// at all if the accepted shape narrowed.
     private static let terminalID = UUID(uuidString: "abcd1234-0000-4000-8000-00000000feed")!
     private var externalSession: String {
         ExternalAttachCommand.sessionName(for: Self.terminalID)
@@ -417,7 +469,60 @@ struct ExternalAttachSessionReapTests {
     func conditionalKillQuotesItsInnerTarget() {
         let args = TmuxManager.killSessionIfClientlessCommand(
             server: server, session: "tbd-ext-abcd1234")
-        #expect(args.contains("kill-session -t 'tbd-ext-abcd1234'"))
+        #expect(args.contains("kill-session -t '=tbd-ext-abcd1234'"))
+    }
+
+    /// **Both targets in the conditional kill are pinned exact.**
+    ///
+    /// tmux resolves a bare session target as an exact name, then as *the
+    /// start of* a session name, then as a glob. The sweep decides from a
+    /// listing snapshot, and the session it chose can be gone by the time the
+    /// kill lands — a rebuild from a second attach, `destroy-unattached`
+    /// firing, a manual kill. The kill then prefix-matches a person's
+    /// hand-made `tbd-ext-abcd1234-notes`, destroys it, and the daemon logs
+    /// that it killed `tbd-ext-abcd1234` — naming a session it did not touch.
+    /// Measured on tmux 3.6a, and the live proof is
+    /// `Tests/TBDDaemonLiveTests/ExternalAttachCommandLiveTests.swift`.
+    ///
+    /// The two targets take different forms and both are asserted, because
+    /// getting either wrong is silent: `if-shell`'s `-t` is a target-pane, so
+    /// `=name` without the trailing `:` is read as a window or pane name and
+    /// the condition quietly takes its else branch — the reaper would then
+    /// spare everything forever.
+    @Test("the conditional kill pins both of its targets to an exact session")
+    func conditionalKillPinsBothTargetsExact() throws {
+        let args = TmuxManager.killSessionIfClientlessCommand(
+            server: server, session: "tbd-ext-abcd1234")
+
+        // `if-shell -t` is a target-pane: the trailing `:` is what makes the
+        // `=` reach session resolution at all.
+        let targetIndex = try #require(args.firstIndex(of: "-t"))
+        #expect(args[targetIndex + 1] == "=tbd-ext-abcd1234:")
+        // The inner command string is re-parsed by tmux; its `kill-session`
+        // takes a target-session, which is the `=name` form.
+        #expect(args.contains("kill-session -t '=tbd-ext-abcd1234'"))
+        // Nothing names the session bare.
+        #expect(!args.contains("tbd-ext-abcd1234"))
+    }
+
+    /// The clientless stamp is written and cleared by name too, and the same
+    /// prefix resolution applies. A misdirected stamp is not destructive, but
+    /// it writes a TBD option onto a stranger's session *and* leaves the
+    /// intended session unstamped — so it never becomes reapable, and the
+    /// grace period silently never elapses for it.
+    @Test("the clientless stamp targets an exact session in both directions")
+    func stampCommandsTargetAnExactSession() {
+        let set = TmuxManager.setSessionOptionCommand(
+            server: server, session: "tbd-ext-abcd1234",
+            option: TmuxManager.externalAttachClientlessSinceOption, value: "1234")
+        let unset = TmuxManager.unsetSessionOptionCommand(
+            server: server, session: "tbd-ext-abcd1234",
+            option: TmuxManager.externalAttachClientlessSinceOption)
+
+        for args in [set, unset] {
+            #expect(args.contains("=tbd-ext-abcd1234:"))
+            #expect(!args.contains("tbd-ext-abcd1234"))
+        }
     }
 
     // MARK: - Scope
@@ -475,7 +580,50 @@ struct ExternalAttachSessionReapTests {
         // issued so much as named one of the others.
         #expect(fake.killedSessions() == [externalSession])
         #expect(fake.session(injecting) != nil)
-        #expect(fake.recordedCommands().allSatisfy { $0.contains(externalSession) })
+        #expect(fake.recordedCommands().allSatisfy {
+            $0.contains(TmuxManager.exactPaneTarget(externalSession))
+        })
+    }
+
+    /// **The filter above cannot see that the name it approved has stopped
+    /// denoting the session it approved.**
+    ///
+    /// tmux resolves a bare session target as an exact name, then as *the
+    /// start of* a session name. So a person's hand-made
+    /// `tbd-ext-abcd1234-notes` — exactly the shape the filter exists to spare
+    /// — is destroyed by a reap aimed at `tbd-ext-abcd1234` once that session
+    /// has gone: listed and decided reapable, then rebuilt by a second attach,
+    /// collected by `destroy-unattached`, or killed by hand before the kill
+    /// lands. The daemon then logs "killed external attach session
+    /// tbd-ext-abcd1234", naming a session it did not kill.
+    ///
+    /// The fake resolves targets the way tmux does, so dropping the `=` from
+    /// `killSessionIfClientlessCommand` reds this without a tmux server. The
+    /// same fact against a real one:
+    /// `Tests/TBDDaemonLiveTests/ExternalAttachCommandLiveTests.swift`.
+    @Test("a hand-made prefix sibling survives a reap aimed at a session that has gone")
+    func aPrefixSiblingSurvivesAReapOfAVanishedSession() async throws {
+        let date = TestDateSource()
+        let fake = FakeTmuxServer()
+        let lifecycle = try makeLifecycle(tmuxServer: fake, date: date)
+        let sibling = externalSession + "-notes"
+        #expect(!ExternalAttachCommand.isGeneratedSessionName(sibling))
+
+        // Listed together, so the sweep genuinely selects the generated one…
+        fake.set([
+            neverAttached(externalSession, createdAgo: 3_600, now: date.now),
+            neverAttached(sibling, createdAgo: 3_600, now: date.now),
+        ])
+        // …and the generated one is gone by the time the kill lands, leaving
+        // only the sibling for a bare target to prefix-match onto.
+        fake.vanishAfterListing(externalSession)
+
+        await lifecycle.reapExternalAttachSessions(server: server)
+
+        #expect(
+            fake.session(sibling) != nil,
+            "the reap prefix-matched and destroyed the hand-made session \(sibling)")
+        #expect(fake.killedSessions().isEmpty)
     }
 
     // MARK: - The record a reap leaves

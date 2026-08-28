@@ -638,6 +638,34 @@ public struct TmuxManager: Sendable {
         return Date(timeIntervalSince1970: seconds)
     }
 
+    /// A **target-session** pinned to an exact name.
+    ///
+    /// Per tmux(1) TARGETS a bare session target is tried as an exact name,
+    /// then as *the start of* a session name, then as a glob. So a
+    /// `kill-session -t tbd-ext-abcd1234` issued after that session has
+    /// disappeared — a rebuild from a second attach, `destroy-unattached`
+    /// firing, a manual kill between the listing and the kill — prefix-matches
+    /// a person's hand-made `tbd-ext-abcd1234-notes` and destroys it, while
+    /// the daemon logs that it killed `tbd-ext-abcd1234`. The `=` prefix makes
+    /// that a not-found instead (measured on tmux 3.6a).
+    ///
+    /// This is a separate defense from `isGeneratedSessionName`, which decides
+    /// *which* names may be reaped: the filter cannot see that the name it
+    /// approved no longer denotes the session it approved.
+    static func exactSessionTarget(_ session: String) -> String { "=" + session }
+
+    /// The same pin for a **target-pane or target-window** slot — `if-shell
+    /// -t` and `set-option -t` both resolve down that path.
+    ///
+    /// The trailing `:` is load-bearing, not decoration. Without a `:` tmux
+    /// reads the whole word as a window or pane name inside the *current*
+    /// session, so the `=` never reaches session resolution: measured on 3.6a,
+    /// `set-option -t '=name'` fails with `no such session: =name` even when
+    /// `name` exists, and `if-shell -F -t '=name'` silently takes its else
+    /// branch — which for the reaper would mean never killing anything.
+    /// `=name:` resolves correctly and is exact.
+    static func exactPaneTarget(_ session: String) -> String { "=" + session + ":" }
+
     /// Sentinel `killSessionIfClientlessCommand` prints when it declined to
     /// kill — because a client is attached, or because the session is already
     /// gone and the target no longer resolves.
@@ -676,27 +704,39 @@ public struct TmuxManager: Sendable {
     ///    Note the quoting alone is not a guarantee — tmux's single quotes
     ///    have no escape, so a name containing `'` has no faithful encoding;
     ///    the filter is what makes such a name unreachable.
+    ///
+    /// A separate defect, closed separately: **which session the target
+    /// resolves to.** Both targets carry `=` — see `exactSessionTarget(_:)`
+    /// and `exactPaneTarget(_:)`. Neither the filter nor the quoting touches
+    /// resolution, and a name the filter approved can stop denoting the
+    /// session it approved before the kill lands.
     public static func killSessionIfClientlessCommand(
         server: String, session: String
     ) -> [String] {
-        ["-L", server, "if-shell", "-F", "-t", session,
+        ["-L", server, "if-shell", "-F", "-t", exactPaneTarget(session),
          "#{==:#{session_attached},0}",
-         "kill-session -t '\(session)'",
+         "kill-session -t '\(exactSessionTarget(session))'",
          "display-message -p \(sessionSparedSentinel)"]
     }
 
     /// Set one session user option (`@name value`).
+    ///
+    /// Exact-targeted: stamping the wrong session both litters a stranger's
+    /// session with a TBD option and leaves the intended one unstamped, so it
+    /// never becomes reapable.
     public static func setSessionOptionCommand(
         server: String, session: String, option: String, value: String
     ) -> [String] {
-        ["-L", server, "set-option", "-t", session, option, value]
+        ["-L", server, "set-option", "-t", exactPaneTarget(session), option, value]
     }
 
-    /// Clear one session user option. Exits 0 even when it was never set.
+    /// Clear one session user option. Exits 0 even when it was never set —
+    /// but non-zero when the exact session does not exist, which is the point
+    /// of the exact target.
     public static func unsetSessionOptionCommand(
         server: String, session: String, option: String
     ) -> [String] {
-        ["-L", server, "set-option", "-t", session, "-u", option]
+        ["-L", server, "set-option", "-t", exactPaneTarget(session), "-u", option]
     }
 
     public static func capturePaneCommand(server: String, paneID: String) -> [String] {

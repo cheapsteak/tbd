@@ -75,18 +75,69 @@ struct ExternalAttachCommandTests {
             sessionName: "tbd-ext-5a2b3c4d",
             windowID: "@7")
         #expect(script == """
-            [ "$(tmux -S '/tmp/tmux-501/tbd-1a2b3c4d' list-windows -t 'tbd-ext-5a2b3c4d' -F '#{window_id}' 2>/dev/null)" = '@7' ] || {
-                tmux -S '/tmp/tmux-501/tbd-1a2b3c4d' kill-session -t 'tbd-ext-5a2b3c4d' 2>/dev/null
+            [ "$(tmux -S '/tmp/tmux-501/tbd-1a2b3c4d' list-windows -t '=tbd-ext-5a2b3c4d' -F '#{window_id}' 2>/dev/null)" = '@7' ] || {
+                tmux -S '/tmp/tmux-501/tbd-1a2b3c4d' kill-session -t '=tbd-ext-5a2b3c4d' 2>/dev/null
                 tmux -S '/tmp/tmux-501/tbd-1a2b3c4d' \\
                     new-session -d -s 'tbd-ext-5a2b3c4d' -c /tmp \\; \\
-                    link-window -s '@7' -t 'tbd-ext-5a2b3c4d:' \\; \\
-                    kill-window -a -t 'tbd-ext-5a2b3c4d:@7' \\
-                    || { tmux -S '/tmp/tmux-501/tbd-1a2b3c4d' kill-session -t 'tbd-ext-5a2b3c4d' 2>/dev/null; false; }
+                    link-window -s '@7' -t '=tbd-ext-5a2b3c4d:' \\; \\
+                    kill-window -a -t '=tbd-ext-5a2b3c4d:@7' \\
+                    || { tmux -S '/tmp/tmux-501/tbd-1a2b3c4d' kill-session -t '=tbd-ext-5a2b3c4d' 2>/dev/null; false; }
             } && tmux -u -S '/tmp/tmux-501/tbd-1a2b3c4d' \\
-                select-window -t 'tbd-ext-5a2b3c4d:@7' \\; \\
-                attach -t 'tbd-ext-5a2b3c4d' -f ignore-size \\; \\
-                set-option -t 'tbd-ext-5a2b3c4d' destroy-unattached on
+                select-window -t '=tbd-ext-5a2b3c4d:@7' \\; \\
+                attach -t '=tbd-ext-5a2b3c4d' -f ignore-size \\; \\
+                set-option -t '=tbd-ext-5a2b3c4d:' destroy-unattached on
             """)
+    }
+
+    /// **Every session target is pinned exact, and the assertion is a
+    /// whitelist so a target added later cannot slip past it.**
+    ///
+    /// tmux resolves a bare session target as an exact name, then as *the
+    /// start of* a session name, then as a glob. With the terminal-keyed
+    /// session gone — a rebuild from a second attach, `destroy-unattached`
+    /// firing, a manual kill — `kill-session -t tbd-ext-5a2b3c4d`
+    /// prefix-matches a person's hand-made `tbd-ext-5a2b3c4d-notes` and
+    /// destroys it, and `list-windows` reads that stranger's window list.
+    ///
+    /// Rather than enumerate the targets that must carry `=`, this scans every
+    /// occurrence of the session name in the composed script and requires each
+    /// to be one of the three sanctioned forms — so `kill-window -a -t
+    /// 'tbd-ext-5a2b3c4d:@7'` added tomorrow reds here instead of shipping.
+    /// `new-session -s` is the sole exemption: it is the name being minted,
+    /// not a target being resolved.
+    @Test("every session target carries tmux's `=` exact-match prefix")
+    func everySessionTargetIsPinnedExact() {
+        let name = "tbd-ext-5a2b3c4d"
+        let script = ExternalAttachCommand.script(
+            socketPath: "/tmp/tmux-501/tbd-1a2b3c4d",
+            sessionName: name,
+            windowID: "@7")
+
+        // `=name` for a target-session, `=name:` for a target-window,
+        // target-pane or option target, `=name:@id` for a specific window.
+        // The bare name survives only as `new-session -s`'s argument.
+        let sanctioned = [
+            "-t '=\(name)'",
+            "-t '=\(name):'",
+            "-t '=\(name):@7'",
+            "-s '\(name)'",
+        ]
+        var remainder = script
+        for form in sanctioned {
+            remainder = remainder.replacingOccurrences(of: form, with: "")
+        }
+        #expect(
+            !remainder.contains(name),
+            """
+            an unpinned session target survives in the script — tmux would \
+            prefix-match it onto a stranger's session. Residue: \(remainder)
+            """)
+
+        // And the whitelist is not vacuous: each sanctioned form is actually
+        // present, so deleting a target could not turn this green.
+        for form in sanctioned {
+            #expect(script.contains(form), "the script no longer contains \(form)")
+        }
     }
 
     @Test("no trailing newline, so a caller decides how the script is terminated")
@@ -110,17 +161,17 @@ struct ExternalAttachCommandTests {
             sessionName: "tbd-ext-5a2b3c4d",
             windowID: "@7")
         #expect(script == """
-            [ "$(tmux -S '/tmp/tbd fence/tmux-501/tbd-1a2b3c4d' list-windows -t 'tbd-ext-5a2b3c4d' -F '#{window_id}' 2>/dev/null)" = '@7' ] || {
-                tmux -S '/tmp/tbd fence/tmux-501/tbd-1a2b3c4d' kill-session -t 'tbd-ext-5a2b3c4d' 2>/dev/null
+            [ "$(tmux -S '/tmp/tbd fence/tmux-501/tbd-1a2b3c4d' list-windows -t '=tbd-ext-5a2b3c4d' -F '#{window_id}' 2>/dev/null)" = '@7' ] || {
+                tmux -S '/tmp/tbd fence/tmux-501/tbd-1a2b3c4d' kill-session -t '=tbd-ext-5a2b3c4d' 2>/dev/null
                 tmux -S '/tmp/tbd fence/tmux-501/tbd-1a2b3c4d' \\
                     new-session -d -s 'tbd-ext-5a2b3c4d' -c /tmp \\; \\
-                    link-window -s '@7' -t 'tbd-ext-5a2b3c4d:' \\; \\
-                    kill-window -a -t 'tbd-ext-5a2b3c4d:@7' \\
-                    || { tmux -S '/tmp/tbd fence/tmux-501/tbd-1a2b3c4d' kill-session -t 'tbd-ext-5a2b3c4d' 2>/dev/null; false; }
+                    link-window -s '@7' -t '=tbd-ext-5a2b3c4d:' \\; \\
+                    kill-window -a -t '=tbd-ext-5a2b3c4d:@7' \\
+                    || { tmux -S '/tmp/tbd fence/tmux-501/tbd-1a2b3c4d' kill-session -t '=tbd-ext-5a2b3c4d' 2>/dev/null; false; }
             } && tmux -u -S '/tmp/tbd fence/tmux-501/tbd-1a2b3c4d' \\
-                select-window -t 'tbd-ext-5a2b3c4d:@7' \\; \\
-                attach -t 'tbd-ext-5a2b3c4d' -f ignore-size \\; \\
-                set-option -t 'tbd-ext-5a2b3c4d' destroy-unattached on
+                select-window -t '=tbd-ext-5a2b3c4d:@7' \\; \\
+                attach -t '=tbd-ext-5a2b3c4d' -f ignore-size \\; \\
+                set-option -t '=tbd-ext-5a2b3c4d:' destroy-unattached on
             """)
     }
 

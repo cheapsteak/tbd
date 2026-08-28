@@ -787,10 +787,10 @@ struct TerminalAttach: AsyncParsableCommand {
         discussion: """
             Puts a second client — iTerm2, Terminal.app, Ghostty — on the window a
             TBD panel is already showing, so somebody else's renderer sits next to
-            SwiftTerm's on the identical byte stream. With no flags it execs tmux,
-            replacing itself, so run it in the emulator you want attached. It
-            refuses when $TMUX is set: pass --print and run the script in the
-            target emulator instead.
+            SwiftTerm's on the identical byte stream. With no flags this command
+            replaces itself with the attached session — it does not return — so
+            run it in the emulator you want attached. It refuses when $TMUX is
+            set: pass --print and run the script in the target emulator instead.
 
             --terminal picks the terminal when the worktree has more than one. With
             one terminal it can be omitted; with several, omitting it is an error

@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import Testing
+@testable import TBDDaemonLib
 @testable import TBDShared
 
 /// Tier 3 — the external-attach command driven against a real tmux server,
@@ -430,6 +431,132 @@ struct ExternalAttachCommandLiveTests {
         #expect(server.windowIDs(inSession: session) == window)
     }
 
+    // MARK: - 2b. Target resolution: exactly this session, never a neighbour
+
+    /// **tmux resolves a bare session target by prefix, so the reap can land
+    /// on somebody else's session.**
+    ///
+    /// Per tmux(1) TARGETS a target-session is tried as an exact name, then as
+    /// *the start of* a session name, then as a glob. The failure that follows
+    /// needs no hostile name and no injection: a person parks a hand-made
+    /// `tbd-ext-<tid8>-notes` on TBD's own server, the generated
+    /// `tbd-ext-<tid8>` beside it is listed and decided reapable, and it then
+    /// disappears before the kill lands — a rebuild from a second attach,
+    /// `destroy-unattached` firing, a manual kill. `kill-session -t
+    /// tbd-ext-<tid8>` prefix-matches the notes session and destroys it, exits
+    /// zero, and the daemon logs "killed external attach session
+    /// tbd-ext-<tid8>" — naming a session it did not kill.
+    ///
+    /// `isGeneratedSessionName` cannot prevent this. It decides *which* names
+    /// may be reaped; it cannot see that the name it approved has stopped
+    /// denoting the session it approved. Only the `=` prefix closes it.
+    ///
+    /// The bare-target arm is run first as the mutation control: it is what
+    /// this test looked like before the fix, and it must destroy the sibling.
+    /// Without it a `=` that silently stopped resolving would read as green.
+    @Test("the conditional kill spares a prefix-sibling session when the exact one is gone")
+    func conditionalKillDoesNotPrefixMatchASibling() throws {
+        let server = try TmuxServer.start()
+        defer { server.tearDown() }
+
+        let generated = ExternalAttachCommand.sessionName(for: UUID())
+        let sibling = generated + "-notes"
+        try #require(
+            ExternalAttachCommand.isGeneratedSessionName(generated),
+            "the fixture must be a name the sweep would actually reach")
+        try #require(
+            !ExternalAttachCommand.isGeneratedSessionName(sibling),
+            "the sibling must be a name the sweep would decline — that is the point")
+
+        // Only the hand-made one exists: the generated session was listed and
+        // decided reapable, then vanished before the kill.
+        server.tmux(["new-session", "-d", "-s", sibling, "-c", "/tmp"])
+        try #require(server.hasSession(sibling))
+        try #require(!server.hasSession(generated))
+
+        // Control: the un-pinned form, which is the defect.
+        let bare = server.capture([
+            "if-shell", "-F", "-t", generated, "#{==:#{session_attached},0}",
+            "kill-session -t '\(generated)'",
+            "display-message -p \(TmuxManager.sessionSparedSentinel)",
+        ])
+        #expect(
+            !server.hasSession(sibling),
+            """
+            the mutation control did not reproduce the defect — a bare target no \
+            longer prefix-matches on this tmux, so the assertion below proves \
+            nothing. Control output: \(bare.output)
+            """)
+
+        // The fix: rebuild the sibling and issue the real command.
+        server.tmux(["new-session", "-d", "-s", sibling, "-c", "/tmp"])
+        try #require(server.hasSession(sibling))
+        let args = TmuxManager.killSessionIfClientlessCommand(
+            server: "unused", session: generated)
+        // `-L <server>` is replaced by the fenced `-S <socket>` the harness owns.
+        let pinned = server.capture(Array(args.dropFirst(2)))
+
+        #expect(
+            server.hasSession(sibling),
+            "the reap prefix-matched and destroyed the hand-made session \(sibling)")
+        #expect(
+            pinned.output.contains(TmuxManager.sessionSparedSentinel),
+            """
+            a missing session must report as spared, not as killed — the caller \
+            logs "killed" on empty stdout. Output: \(pinned.output)
+            """)
+        #expect(server.hasSession("main"), "the server must still be alive")
+    }
+
+    /// The same resolution defect in the pasted script, where it is worse: the
+    /// script's `kill-session` runs *unconditionally* ahead of the rebuild, so
+    /// a person whose generated session has gone loses their hand-made one
+    /// every time they re-run the attach — and `list-windows` reading the
+    /// sibling's window list could conclude "reuse, attach as-is" and land them
+    /// on a stranger's shell.
+    ///
+    /// Run without a PTY: the attach fails with "not a terminal", which is
+    /// after every target this test cares about has already been resolved.
+    @Test("the composed script leaves a prefix-sibling session alone")
+    func composedScriptDoesNotPrefixMatchASibling() throws {
+        let server = try TmuxServer.start()
+        defer { server.tearDown() }
+        let window = try server.createWindowInMain()
+
+        let generated = ExternalAttachCommand.sessionName(for: UUID())
+        let sibling = generated + "-notes"
+        server.tmux(["new-session", "-d", "-s", sibling, "-c", "/tmp"])
+        let siblingWindow = server.windowIDs(inSession: sibling)
+        try #require(!siblingWindow.isEmpty)
+        try #require(!server.hasSession(generated))
+
+        let script = ExternalAttachCommand.script(
+            socketPath: server.socketPath, sessionName: generated, windowID: window)
+        let shell = Process()
+        shell.executableURL = URL(fileURLWithPath: "/bin/sh")
+        shell.arguments = ["-c", script]
+        shell.environment = sanitizedEnvironment()
+        shell.standardOutput = FileHandle.nullDevice
+        shell.standardError = FileHandle.nullDevice
+        try shell.run()
+        shell.waitUntilExit()
+
+        #expect(
+            server.hasSession(sibling),
+            "the script's kill-session prefix-matched and destroyed \(sibling)")
+        #expect(
+            server.windowIDs(inSession: sibling) == siblingWindow,
+            """
+            the script linked into or killed windows in the hand-made session: \
+            \(server.windowIDs(inSession: sibling)), was \(siblingWindow)
+            """)
+        // The generated session was built for real, so the run exercised the
+        // rebuild rather than bailing out early somewhere harmless.
+        #expect(
+            server.windowIDs(inSession: generated) == window,
+            "the rebuild did not leave \(generated) holding \(window)")
+    }
+
     // MARK: - 3. The geometry rule the measurement guidance rests on
 
     /// The rule, stated as a rule: **an `ignore-size` client's dimensions are
@@ -645,8 +772,12 @@ private struct TmuxServer {
 
     // MARK: Observations
 
+    /// Exact-targeted, and that is not incidental: `has-session -t name`
+    /// prefix-matches exactly like every other session target, so the naive
+    /// form reports a session as present because a `name-notes` neighbour
+    /// exists — which would make the sibling tests below assert nothing.
     func hasSession(_ name: String) -> Bool {
-        capture(["has-session", "-t", name]).status == 0
+        capture(["has-session", "-t", "=" + name]).status == 0
     }
 
     func windowIDs(inSession name: String) -> String {
