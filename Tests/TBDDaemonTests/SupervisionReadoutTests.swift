@@ -25,7 +25,10 @@ struct SupervisionReadoutTests {
 
         var record: ActuationRecordReader { ActuationRecordReader(activePath: actuationPath) }
 
-        func builder() -> SupervisionReadoutBuilder {
+        func builder(
+            transcriptFingerprinter: @escaping TranscriptFingerprinter
+                = TranscriptFingerprinting.live
+        ) -> SupervisionReadoutBuilder {
             let stamp = now
             return SupervisionReadoutBuilder(
                 db: db,
@@ -33,6 +36,7 @@ struct SupervisionReadoutTests {
                 sessionCounters: counters,
                 branchTips: branchTips,
                 actuationRecord: record,
+                transcriptFingerprinter: transcriptFingerprinter,
                 now: { stamp })
         }
 
@@ -315,6 +319,82 @@ struct SupervisionReadoutTests {
             terminalID: beta.terminal.id, worktreeID: beta.worktree.id,
             transcriptPath: transcript, commitsUnchangedSince: nil, at: fixture.now))
         #expect(sampled.turnsInWindow == 3, "beta's baseline survived alpha's readout")
+    }
+
+    // MARK: - Transcript supersession
+
+    /// The readout can be the only reader on a daemon with no app attached, so
+    /// it supersedes a stale prompt on its own pass rather than reporting one.
+
+    private static let transcriptModifiedAt = Date(timeIntervalSince1970: 1_785_900_000)
+
+    private static func fingerprint(path: String, size: Int64) -> TranscriptFingerprint {
+        TranscriptFingerprint(path: path, modifiedAt: transcriptModifiedAt, size: size)
+    }
+
+    private func recordPrompt(
+        _ fixture: Fixture, terminal: UUID, fingerprint: TranscriptFingerprint
+    ) async throws {
+        _ = try await fixture.db.terminals.recordAwaitingInputReason(
+            id: terminal,
+            reason: AwaitingInputReason(
+                message: "Claude needs your permission to use Bash",
+                hookEventName: "Notification",
+                raw: "{}",
+                notificationType: "permission_prompt",
+                transcriptFingerprint: fingerprint),
+            observedAt: fixture.now)
+    }
+
+    private func isAwaitingInput(_ state: SessionState) -> Bool {
+        if case .awaitingInput = state.value { return true }
+        return false
+    }
+
+    @Test("The readout supersedes a prompt whose transcript moved")
+    func theReadoutSupersedesAPromptWhoseTranscriptMoved() async throws {
+        let fixture = try makeFixture()
+        let transcript = fixture.directory.appendingPathComponent("moved.jsonl").path
+        let seeded = try await seed(fixture, project: "acme-super", transcript: transcript)
+        try fixture.writeRecord([])
+        try await recordPrompt(
+            fixture, terminal: seeded.terminal.id,
+            fingerprint: Self.fingerprint(path: transcript, size: 10))
+
+        let facts = try await fixture.store.projectFacts(project: "acme-super", brake: .released)
+        let readout = try await fixture.builder(
+            transcriptFingerprinter: { _ in Self.fingerprint(path: transcript, size: 20) }
+        ).build(facts: facts)
+
+        let agent = try #require(readout.agents.first)
+        #expect(isAwaitingInput(agent.state) == false,
+                "the readout reported a prompt its own pass retracted")
+        let row = try #require(try await fixture.db.terminals.get(id: seeded.terminal.id))
+        #expect(row.awaitingInputReason == nil)
+        #expect(row.awaitingInputObservedAt == nil)
+    }
+
+    @Test("The readout leaves a pending prompt raised")
+    func theReadoutLeavesAPendingPromptRaised() async throws {
+        let fixture = try makeFixture()
+        let transcript = fixture.directory.appendingPathComponent("pending.jsonl").path
+        let seeded = try await seed(fixture, project: "acme-pending", transcript: transcript)
+        try fixture.writeRecord([])
+        try await recordPrompt(
+            fixture, terminal: seeded.terminal.id,
+            fingerprint: Self.fingerprint(path: transcript, size: 10))
+
+        let facts = try await fixture.store.projectFacts(project: "acme-pending", brake: .released)
+        let readout = try await fixture.builder(
+            transcriptFingerprinter: { _ in Self.fingerprint(path: transcript, size: 10) }
+        ).build(facts: facts)
+
+        let agent = try #require(readout.agents.first)
+        #expect(isAwaitingInput(agent.state))
+        let standing = try #require(
+            try await fixture.db.terminals.get(id: seeded.terminal.id)?.awaitingInputReason)
+        #expect(standing.classification == .promptOnScreen)
+        #expect(standing.transcriptFingerprint == Self.fingerprint(path: transcript, size: 10))
     }
 
     // MARK: - The bounded record walk
