@@ -46,8 +46,10 @@ struct TerminalPanelViewTests {
             arguments: ["-u", "attach"]
         )
 
-        #expect(TerminalPanelRepresentable.Coordinator.preparationAction(for: .success(prepared)) ==
-            .startViewer(prepared))
+        let preparation = TmuxSessionPreparation(session: prepared, generation: 7)
+
+        #expect(TerminalPanelRepresentable.Coordinator.preparationAction(
+            for: .success(preparation)) == .startViewer(preparation))
     }
 
     @MainActor

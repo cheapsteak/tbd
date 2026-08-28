@@ -34,7 +34,7 @@ struct TmuxBridgeViewSessionLiveTests {
             panelID: panelID,
             server: server,
             windowID: windowID
-        ).get()
+        ).get().session
 
         #expect(prepared.arguments == ["-u", "-L", server, "attach", "-t", sessionName])
         let activeWindow = runTmuxCLI(tmuxExecutablePath, [

@@ -23,33 +23,41 @@ import Testing
 ///   `cleanupSession`'s idempotence so a normal dismantle still kills once.
 /// - **App termination.** `applicationWillTerminate` has to *block* on the
 ///   kills; a detached task does not outlive the process.
+///
+/// Both per-panel paths are scoped to the generation their own
+/// `prepareSession` minted, because `panelID` alone does not identify a
+/// preparation — see `supersededCoordinatorReleaseSparesTheRebuiltViewSession`.
+/// The termination path deliberately is not: it reclaims everything tracked.
 @Suite("tmux view sessions are reclaimed on every teardown path")
 struct TerminalViewSessionReclamationTests {
     private static let panelID = UUID(uuidString: "4C4F1A61-F385-46AB-861D-42A425DB427B")!
     private static let sessionName = "tbd-view-4c4f1a61"
 
-    /// A prepared bridge plus the runner recording what it asked tmux to do.
+    /// A prepared bridge plus the runner recording what it asked tmux to do,
+    /// and the generation each preparation minted — the token its teardown has
+    /// to carry back.
     /// `prepareSession` issues a pre-emptive `kill-session` of its own, so the
     /// runner's log is cleared once preparation has finished: everything left
     /// in it afterwards was issued by a teardown.
     private func makePreparedBridge(
         fixture: TmuxBridgeFixture,
         panels: [(panelID: UUID, server: String, windowID: String)]
-    ) async throws -> (bridge: TmuxBridge, runner: RecordingTmuxRunner) {
+    ) async throws -> (bridge: TmuxBridge, runner: RecordingTmuxRunner, generations: [UInt64]) {
         let runner = RecordingTmuxRunner()
         let bridge = TmuxBridge(
             tmuxExecutableResolver: try fixture.resolvingResolver(),
             commandRunner: { _, server, args in await runner.run(server: server, args: args) }
         )
+        var generations: [UInt64] = []
         for panel in panels {
-            _ = try await bridge.prepareSession(
+            generations.append(try await bridge.prepareSession(
                 panelID: panel.panelID,
                 server: panel.server,
                 windowID: panel.windowID
-            ).get()
+            ).get().generation)
         }
         await runner.forgetInvocations()
-        return (bridge, runner)
+        return (bridge, runner, generations)
     }
 
     /// **The test that pins the bug.** Releasing the coordinator without ever
@@ -59,7 +67,7 @@ struct TerminalViewSessionReclamationTests {
     func coordinatorReleaseWithoutDismantleKillsViewSession() async throws {
         let fixture = try TmuxBridgeFixture()
         defer { fixture.remove() }
-        let (bridge, runner) = try await makePreparedBridge(
+        let (bridge, runner, generations) = try await makePreparedBridge(
             fixture: fixture,
             panels: [(Self.panelID, "tbd-repo", "@147")]
         )
@@ -70,6 +78,7 @@ struct TerminalViewSessionReclamationTests {
             coordinator?.tmuxBridge = bridge
             coordinator?.tmuxServer = "tbd-repo"
             coordinator?.panelID = Self.panelID
+            coordinator?.tmuxSessionGeneration = generations[0]
             // No `cleanup()`, no `dismantleNSView` — only ARC.
             coordinator = nil
         }
@@ -98,7 +107,7 @@ struct TerminalViewSessionReclamationTests {
     func cleanedUpCoordinatorReleaseDoesNotKillTwice() async throws {
         let fixture = try TmuxBridgeFixture()
         defer { fixture.remove() }
-        let (bridge, runner) = try await makePreparedBridge(
+        let (bridge, runner, generations) = try await makePreparedBridge(
             fixture: fixture,
             panels: [(Self.panelID, "tbd-repo", "@147")]
         )
@@ -108,6 +117,7 @@ struct TerminalViewSessionReclamationTests {
         coordinator?.tmuxBridge = bridge
         coordinator?.tmuxServer = "tbd-repo"
         coordinator?.panelID = Self.panelID
+        coordinator?.tmuxSessionGeneration = generations[0]
         await MainActor.run { [coordinator] in
             coordinator?.cleanup()
         }
@@ -138,7 +148,7 @@ struct TerminalViewSessionReclamationTests {
         let fixture = try TmuxBridgeFixture()
         defer { fixture.remove() }
         let secondPanelID = UUID(uuidString: "9B2E77C0-1111-4222-8333-444455556666")!
-        let (bridge, runner) = try await makePreparedBridge(
+        let (bridge, runner, _) = try await makePreparedBridge(
             fixture: fixture,
             panels: [
                 (Self.panelID, "tbd-repo-one", "@147"),
@@ -166,6 +176,92 @@ struct TerminalViewSessionReclamationTests {
                 server: "tbd-repo-two",
                 args: TmuxBridge.killSessionArgs(
                     sessionName: TmuxBridge.sessionName(for: secondPanelID))
+            ),
+        ])
+    }
+
+    /// **The test that pins the generation bug.** `panelID` is the *terminal's*
+    /// id and is stable across SwiftUI view rebuilds, so it does not identify a
+    /// preparation: `PanePlaceholder` keys the terminal view on
+    /// `"\(terminal.id)-\(terminal.tmuxWindowID)-\(terminal.isParked)"`, and
+    /// waking a parked terminal flips `isParked`, mints a fresh `Coordinator`
+    /// and prepares the panel again. The superseded coordinator is released
+    /// afterwards — from `deinit`, which fires later and less predictably than
+    /// `dismantleNSView` — and before the fix its teardown removed and killed
+    /// whatever `activeSessions` held for that `panelID`, which by then was the
+    /// *new* coordinator's session. Symptom: the freshly woken terminal is dead.
+    @Test("a superseded coordinator's release does not kill the rebuilt panel's view session")
+    func supersededCoordinatorReleaseSparesTheRebuiltViewSession() async throws {
+        let fixture = try TmuxBridgeFixture()
+        defer { fixture.remove() }
+        // The same panel prepared twice — exactly what the rebuild does.
+        let (bridge, runner, generations) = try await makePreparedBridge(
+            fixture: fixture,
+            panels: [
+                (Self.panelID, "tbd-repo", "@147"),
+                (Self.panelID, "tbd-repo", "@147"),
+            ]
+        )
+
+        autoreleasepool {
+            var superseded: TerminalPanelRepresentable.Coordinator? =
+                TerminalPanelRepresentable.Coordinator()
+            superseded?.tmuxBridge = bridge
+            superseded?.tmuxServer = "tbd-repo"
+            superseded?.panelID = Self.panelID
+            superseded?.tmuxSessionGeneration = generations[0]
+            superseded = nil
+        }
+
+        // One-sided negative, and sound because `cleanupSession` decides
+        // whether to kill synchronously under the bridge's lock before it
+        // returns: a teardown that wrongly matched has already spawned its kill
+        // task by now, and the settle window only has to cover that task being
+        // scheduled. A stray landing after the window still fails the exact-set
+        // assertion below, which re-reads every kill recorded.
+        let strayKills = await runner.killSessionsAfterSettling(for: .milliseconds(250))
+        #expect(strayKills == [])
+
+        // And the fresh preparation is still tracked: its own teardown still
+        // finds an entry to reclaim. (Before the fix the superseded release had
+        // already removed it, so this kill never happened.)
+        bridge.cleanupSession(
+            panelID: Self.panelID, server: "tbd-repo", generation: generations[1])
+        let kills = try await runner.awaitKillSessions(
+            atLeast: 1,
+            describedAs: "the rebuilt panel's view session on its own teardown"
+        )
+        #expect(kills == [
+            RecordingTmuxRunner.Invocation(
+                server: "tbd-repo",
+                args: TmuxBridge.killSessionArgs(sessionName: Self.sessionName)
+            ),
+        ])
+    }
+
+    /// The ordinary path, unchanged by generation scoping: a teardown carrying
+    /// the generation of the preparation it belongs to reclaims that session,
+    /// exactly once.
+    @Test("a teardown carrying its own preparation's generation kills that view session once")
+    func matchingGenerationTeardownKillsTheViewSession() async throws {
+        let fixture = try TmuxBridgeFixture()
+        defer { fixture.remove() }
+        let (bridge, runner, generations) = try await makePreparedBridge(
+            fixture: fixture,
+            panels: [(Self.panelID, "tbd-repo", "@147")]
+        )
+
+        bridge.cleanupSession(
+            panelID: Self.panelID, server: "tbd-repo", generation: generations[0])
+
+        let kills = try await runner.awaitKillSessions(
+            atLeast: 1,
+            describedAs: "the view session torn down by its own preparation's generation"
+        )
+        #expect(kills == [
+            RecordingTmuxRunner.Invocation(
+                server: "tbd-repo",
+                args: TmuxBridge.killSessionArgs(sessionName: Self.sessionName)
             ),
         ])
     }
@@ -205,6 +301,15 @@ private actor RecordingTmuxRunner {
 
     func forgetInvocations() {
         invocations.removeAll()
+    }
+
+    /// Every `kill-session` recorded once the process has been left to run for
+    /// `window` — the negative counterpart of `awaitKillSessions`, for
+    /// asserting that a teardown killed *nothing*. One-sided by construction;
+    /// pair it with a positive assertion that re-reads the full list.
+    func killSessionsAfterSettling(for window: Duration) async -> [Invocation] {
+        try? await Task.sleep(for: window)
+        return killSessions
     }
 
     /// Bounded wait for kills that teardown issues off the caller's thread

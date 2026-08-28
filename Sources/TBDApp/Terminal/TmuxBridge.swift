@@ -10,6 +10,23 @@ struct TmuxPreparedSession: Equatable, Sendable {
     let arguments: [String]
 }
 
+/// One successful `TmuxBridge.prepareSession`: how the viewer attaches, plus
+/// the generation that scopes the reclaim of the view session it created.
+///
+/// The generation exists because `panelID` alone does not identify a
+/// preparation. It is the *terminal's* id and survives SwiftUI view rebuilds,
+/// so the same panel can be prepared again — waking a parked terminal flips
+/// `isParked`, re-keying the view and minting a fresh `Coordinator` — while
+/// the previous coordinator is still alive and yet to be torn down. Handing
+/// the generation back lets each coordinator reclaim only the view session its
+/// own preparation created, so a stale teardown cannot kill a fresher session.
+/// Same shape, and same reason, as the control-mode attach generation in
+/// `TerminalPanelView`.
+struct TmuxSessionPreparation: Equatable, Sendable {
+    let session: TmuxPreparedSession
+    let generation: UInt64
+}
+
 enum TmuxPreparationStage: String, Equatable, Sendable {
     case createViewSession
     case linkWindow
@@ -91,6 +108,11 @@ final class TmuxBridge: @unchecked Sendable {
         /// teardown that holds no per-panel context — app termination — can
         /// kill every tracked session on the server that actually owns it.
         let server: String
+        /// The preparation that created this session. `cleanupSession` kills
+        /// only a session whose generation matches the one its caller was
+        /// handed, so a superseded coordinator cannot kill the entry a newer
+        /// preparation put here under the same `panelID`.
+        let generation: UInt64
     }
 
     private let lock = NSLock()
@@ -98,6 +120,11 @@ final class TmuxBridge: @unchecked Sendable {
 
     /// Tracks each grouped session with the executable snapshotted for its lifecycle.
     private var activeSessions: [UUID: ActiveSession] = [:]
+
+    /// Next generation to mint. Monotonic across the whole bridge — the values
+    /// only ever need to be compared for equality — and guarded by `lock`.
+    /// Starts at 1 so no valid generation is zero.
+    private var nextGeneration: UInt64 = 1
 
     /// Serial background queue retained for any future synchronous teardown
     /// needs. Per-panel cleanup is fire-and-forget via `Task { ... }` invoking
@@ -223,12 +250,13 @@ final class TmuxBridge: @unchecked Sendable {
     ///   - panelID: Unique ID for this terminal panel (used as session name suffix)
     ///   - server: tmux server socket name (e.g. "tbd-a1b2c3d4")
     ///   - windowID: tmux window ID to display (e.g. "@3")
-    /// - Returns: A prepared viewer attachment or a classified failure.
+    /// - Returns: A prepared viewer attachment — carrying the generation its
+    ///   caller must pass back to `cleanupSession` — or a classified failure.
     func prepareSession(
         panelID: UUID,
         server: String,
         windowID: String
-    ) async -> Result<TmuxPreparedSession, TmuxPreparationFailure> {
+    ) async -> Result<TmuxSessionPreparation, TmuxPreparationFailure> {
         let sessionName = Self.sessionName(for: panelID)
         guard let tmuxExecutablePath = tmuxExecutableResolver.resolve()?.path else {
             bridgeLogger.error(
@@ -351,30 +379,47 @@ final class TmuxBridge: @unchecked Sendable {
             )
         }
 
-        lock.withLock {
+        let generation: UInt64 = lock.withLock {
+            let generation = nextGeneration
+            nextGeneration &+= 1
             activeSessions[panelID] = ActiveSession(
                 name: sessionName,
                 tmuxExecutablePath: tmuxExecutablePath,
-                server: server
+                server: server,
+                generation: generation
             )
+            return generation
         }
 
-        debugLog("PREPARE: panelID=\(panelID.uuidString.prefix(8)) server=\(server) window=\(windowID) session=\(sessionName)")
+        debugLog("PREPARE: panelID=\(panelID.uuidString.prefix(8)) server=\(server) window=\(windowID) session=\(sessionName) generation=\(generation)")
 
-        return .success(preparedSession)
+        return .success(TmuxSessionPreparation(session: preparedSession, generation: generation))
     }
 
     /// Clean up a view session when a panel is hidden.
     ///
     /// Fire-and-forget: the kill-session call runs on a background queue so
     /// callers can return immediately. Safe to call from the main thread
-    /// during SwiftUI dismantle.
-    func cleanupSession(panelID: UUID, server: String) {
+    /// during SwiftUI dismantle, and from a non-isolated `deinit`.
+    ///
+    /// Scoped to `generation`, which the caller was handed by the
+    /// `prepareSession` whose session it is reclaiming. A teardown whose
+    /// generation no longer matches the tracked entry is a **no-op**: it
+    /// neither forgets the entry nor issues `kill-session`. That is what stops
+    /// a superseded coordinator — SwiftUI rebuilds the terminal view when a
+    /// parked terminal wakes, so a second `prepareSession` for the same
+    /// `panelID` runs while the first coordinator is still awaiting teardown —
+    /// from killing the freshly woken terminal's session.
+    ///
+    /// Still idempotent: the matching call removes the entry, so a second
+    /// teardown for the same generation finds nothing and returns.
+    func cleanupSession(panelID: UUID, server: String, generation: UInt64) {
         lock.lock()
-        guard let session = activeSessions.removeValue(forKey: panelID) else {
+        guard let session = activeSessions[panelID], session.generation == generation else {
             lock.unlock()
             return
         }
+        activeSessions.removeValue(forKey: panelID)
         lock.unlock()
 
         Task.detached { [self] in
@@ -392,6 +437,11 @@ final class TmuxBridge: @unchecked Sendable {
     /// Fire-and-forget like `cleanupSession`. Sessions belonging to other
     /// servers are left alone: `activeSessions` spans every server the app
     /// currently shows a panel on.
+    ///
+    /// Deliberately not generation-scoped. This reclaims *everything* tracked
+    /// on the server rather than one panel's preparation, so there is no
+    /// stale-teardown race to guard against — filtering by generation here
+    /// could only leave a session behind.
     func cleanupAllSessions(server: String) {
         let sessions = takeSessions { $0.server == server }
         guard !sessions.isEmpty else { return }
@@ -594,7 +644,7 @@ final class TmuxBridge: @unchecked Sendable {
         server: String,
         windowID: String,
         sessionName: String
-    ) async -> Result<TmuxPreparedSession, TmuxPreparationFailure> {
+    ) async -> Result<TmuxSessionPreparation, TmuxPreparationFailure> {
         let probeResult = await runTmux(
             tmuxExecutablePath: tmuxExecutablePath,
             server: server,

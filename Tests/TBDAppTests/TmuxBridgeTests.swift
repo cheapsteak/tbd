@@ -209,11 +209,11 @@ struct TmuxBridgeTests {
             server: "tbd-repo",
             windowID: "@147"
         )
-        let prepared = try result.get()
+        let preparation = try result.get()
 
         #expect(resolver.savedPath == secondExecutable.path)
-        #expect(prepared.executablePath == firstExecutable.path)
-        #expect(prepared.arguments == [
+        #expect(preparation.session.executablePath == firstExecutable.path)
+        #expect(preparation.session.arguments == [
             "-u", "-L", "tbd-repo", "attach", "-t", TmuxBridge.sessionName(for: panelID),
         ])
         let firstInvocationCount = fixture.lineCount(at: firstLog)
@@ -225,7 +225,8 @@ struct TmuxBridgeTests {
         #expect(afterConfirmationInvocationCount == firstInvocationCount + 1)
         #expect(fixture.lineCount(at: secondLog) == 0)
 
-        bridge.cleanupSession(panelID: panelID, server: "tbd-repo")
+        bridge.cleanupSession(
+            panelID: panelID, server: "tbd-repo", generation: preparation.generation)
         try await fixture.waitForLineCount(afterConfirmationInvocationCount + 1, at: firstLog)
 
         #expect(fixture.lineCount(at: firstLog) == afterConfirmationInvocationCount + 1)
@@ -275,7 +276,7 @@ struct TmuxBridgeTests {
             panelID: panelID,
             server: "tbd-repo",
             windowID: "@147"
-        ).get()
+        ).get().session
 
         #expect(prepared.arguments == [
             "-u", "-L", "tbd-repo", "attach", "-t", "tbd-view-4c4f1a61",
