@@ -221,8 +221,17 @@ The comparison this feature exists for has three conditions:
   already produced one wrong conclusion that way, chasing a coalescing defect
   that A/B/A testing showed was entirely load.
 - **External alone** — reachable by switching TBD's tab away from that
-  terminal, which kills its viewer client. Read the geometry caveat below
-  before comparing it against anything.
+  terminal, which kills its viewer client.
+
+Each condition bounds a different thing, and B is only interpretable with both
+of the others. A/B/A bracketing bounds what the external client costs TBD.
+Condition C bounds what TBD's client costs the external one — and there is no
+other test for it. The back-pressure mechanism below runs in both directions:
+if SwiftTerm's client drains its socket slowly, it delays the single-threaded
+tmux server's writes to every client on that window, including the external
+one. So an external client that is smooth alone and jerky alongside TBD, at the
+same geometry, is a finding in its own right, and a more actionable one than
+anything else this instrument can produce.
 
 **A second client is not a neutral observer, so runs must be A/B/A bracketed.**
 tmux writes to its attached clients from a single-threaded server, so an
@@ -249,13 +258,23 @@ attached", so its stream is cut for a different width and the two conditions
 are not directly comparable. Treat the third condition as a separate
 observation, not as the same experiment with one client removed.
 
-**Size the external window at least as large as TBD's panel.** In the
-both-attached condition the window keeps TBD's dimensions, so a smaller
-external window makes the emulator wrap or clip a stream cut for a wider
-window. That would make the external client look worse than it is and fake a
-result in TBD's favour. This is documented in the CLI's help text and here; it
-is not enforced. Enforcing it would mean the daemon reasoning about a window
-size it does not own, to protect an experiment the command cannot see.
+**Match the external window to TBD's panel dimensions exactly** whenever
+condition C is in play. The measurement above gives the reason directly: the
+window follows the `ignore-size` client's dimensions once it is the only one
+left, so an external client sized exactly like TBD's panel resizes the window
+to the size it already had, and B and C share a geometry. Both readings showed
+window rows at client rows minus one, consistently, so equal client sizes yield
+equal window sizes in both states. Larger is acceptable when running only A and
+B. **Smaller is never acceptable**: in the both-attached condition the window
+keeps TBD's dimensions, so a narrower external window makes the emulator wrap
+or clip a stream cut for a wider window, which would make the external client
+look worse than it is and fake a result in TBD's favour. Exact sizing satisfies
+that anti-clipping goal too, so it is strictly better guidance rather than a
+trade — it is merely fiddly to hit by hand, which the CLI's help text should
+say out loud.
+
+None of this is enforced. Enforcing it would mean the daemon reasoning about a
+window size it does not own, to protect an experiment the command cannot see.
 
 **Hiding a tab does not pause the session.** The third condition depends on
 this and it holds: `TmuxBridge`'s hide path only kills the panel's viewer
@@ -264,7 +283,9 @@ delay, not by panel visibility. One adjacent hazard is worth knowing rather
 than assuming: a terminal watched quietly for a long stretch is exactly the
 idle-at-rest shape the sweep looks for, so a long measurement on an idle
 session can be hibernated out from under the observer where auto-hibernate is
-enabled.
+enabled. It has been default-off since it was force-disabled in `v50`, so this
+is a hazard for someone who deliberately turned it on — which is a fair
+description of someone running a long measurement.
 
 ## Testing
 
