@@ -229,6 +229,10 @@ public final class RPCRouter: Sendable {
     /// the daemon's own environment, which is the environment the servers it
     /// spawned were created under.
     let tmuxSocketPathResolver: TmuxSocketPathResolver
+    /// How a session transcript is measured when a prompt is recorded against
+    /// it. A seam, not a clock: a file's modification time is data, so it
+    /// follows the same rule as `now` rather than the `Clock` rule.
+    let transcriptFingerprinter: TranscriptFingerprinter
 
     public init(
         db: TBDDatabase,
@@ -252,10 +256,12 @@ public final class RPCRouter: Sendable {
         prBindingRepoResolver: (@Sendable (UUID) async -> (owner: String, name: String, host: String)?)? = nil,
         now: @escaping @Sendable () -> Date = { Date() },
         tmuxSocketPathResolver: TmuxSocketPathResolver = TmuxSocketPathResolver(),
+        transcriptFingerprinter: @escaping TranscriptFingerprinter = TranscriptFingerprinting.live,
         actuationLog: ActuationLog
     ) {
         self.now = now
         self.tmuxSocketPathResolver = tmuxSocketPathResolver
+        self.transcriptFingerprinter = transcriptFingerprinter
         self.actuationLog = actuationLog
         self.db = db
         self.lifecycle = lifecycle

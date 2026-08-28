@@ -28,10 +28,21 @@ import TestSupport
     /// Shared with `activityRouter` so the retraction broadcast the activity
     /// rail emits lands in the same collector as the notification's.
     private let subscriptions: StateSubscriptionManager
+    /// Every transcript path the handler measured, so "this class pays no stat"
+    /// is asserted rather than inferred from an absent field.
+    fileprivate let fingerprints: NotificationFingerprintSpy
 
     /// Pinned through the router's date seam, so the stored observed-at is an
     /// exact assertion rather than a freshness window.
     static let observedAt = Date(timeIntervalSince1970: 1_780_000_000)
+
+    /// The transcript this suite's terminal points at once a test gives it one,
+    /// and the fingerprint the stubbed stat reports for it.
+    static let transcriptPath = "/tmp/notif-transcript.jsonl"
+    static let stubFingerprint = TranscriptFingerprint(
+        path: transcriptPath,
+        modifiedAt: Date(timeIntervalSince1970: 1_779_500_000),
+        size: 7)
 
     init() async throws {
         let db = try TBDDatabase(inMemory: true)
@@ -46,6 +57,8 @@ import TestSupport
             }
             return true
         }
+        let fingerprints = NotificationFingerprintSpy(result: Self.stubFingerprint)
+        self.fingerprints = fingerprints
         self.router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
@@ -55,6 +68,7 @@ import TestSupport
             startTime: Date(),
             subscriptions: subscriptions,
             now: { Self.observedAt },
+            transcriptFingerprinter: fingerprints.fingerprinter,
             actuationLog: makeTestActuationLog())
         let repo = try await db.repos.create(
             path: "/tmp/notif-repo-\(UUID().uuidString)", displayName: "N", defaultBranch: "main")
@@ -629,6 +643,41 @@ import TestSupport
         #expect(retraction.terminalID == terminalID)
     }
 
+    // MARK: - The transcript fingerprint
+
+    /// A prompt-on-screen reason carries the transcript as it stood when the
+    /// prompt was raised — the only thing a later reader can use to tell "still
+    /// waiting" from "answered, and the session moved on", since Claude Code
+    /// fires no hook when a human decides.
+    @Test func aPromptOnScreenReasonRecordsTheTranscriptFingerprint() async throws {
+        try await db.terminals.updateSession(
+            id: terminalID, sessionID: "s-1", transcriptPath: Self.transcriptPath)
+
+        #expect(await notify(type: "permission_prompt").success)
+
+        let reason = try #require(try await terminal().awaitingInputReason)
+        #expect(reason.classification == .promptOnScreen)
+        #expect(reason.transcriptFingerprint == Self.stubFingerprint)
+        #expect(reason.transcriptFingerprint?.size == 7)
+        #expect(fingerprints.calls == [Self.transcriptPath])
+    }
+
+    /// No other class raises a hand there would be anything to lower, so none of
+    /// them stats the transcript. The spy makes that the assertion rather than
+    /// leaving it inferred from a nil field a bug could also produce.
+    @Test(arguments: ["idle_prompt", "agent_completed"])
+    func otherClassesRecordNoFingerprint(type: String) async throws {
+        try await db.terminals.updateSession(
+            id: terminalID, sessionID: "s-1", transcriptPath: Self.transcriptPath)
+
+        #expect(await notify(type: type).success)
+
+        let reason = try #require(try await terminal().awaitingInputReason)
+        #expect(reason.classification != .promptOnScreen)
+        #expect(reason.transcriptFingerprint == nil)
+        #expect(fingerprints.calls.isEmpty)
+    }
+
     /// The router's date seam reaches BOTH stamps the resolver's rung-4 decision
     /// compares. `setActivityState` defaults `observedAt` to a bare `Date()` at
     /// the store, so a handler that omitted it would leave one end of that
@@ -642,6 +691,27 @@ import TestSupport
         let after = try await terminal()
         #expect(after.activityStateObservedAt == Self.observedAt)
         #expect(after.observedActivity?.observedAt == Self.observedAt)
+    }
+}
+
+/// Records every path the router asked it to measure, and answers with one
+/// fixed fingerprint. The call log is what lets a test assert the stat never
+/// happened at all.
+private final class NotificationFingerprintSpy: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _calls: [String] = []
+    var calls: [String] { lock.lock(); defer { lock.unlock() }; return _calls }
+    let result: TranscriptFingerprint?
+
+    init(result: TranscriptFingerprint?) { self.result = result }
+
+    var fingerprinter: TranscriptFingerprinter {
+        { [self] path in
+            lock.lock()
+            _calls.append(path)
+            lock.unlock()
+            return result
+        }
     }
 }
 
