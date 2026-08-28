@@ -160,9 +160,16 @@ worktree's only terminal; a worktree with several is an error listing the
 candidates, never a guess. With `--print` it writes the script to stdout and
 exits — which is what makes the comparison scriptable, and what lets a
 non-interactive timestamping consumer be attached in place of a human eyeballing
-two windows. Its output is safe to pipe straight into `sh` — no prompts, no
-interactive assumptions — and the exec path exits non-zero when the attach
-fails, so a harness can tell a failed attach from an empty measurement.
+two windows. It is run from a tty as `sh -c "$(tbd terminal attach <wt>
+--print)"`, or equivalently under `eval` — both keep the caller's terminal as
+stdin. **Piping the script into `sh` does not work and must not be documented
+as though it does**: `tmux attach` requires a tty on stdin, a shell reading its
+script from a pipe leaves stdin as that pipe, and the attach dies with `open
+terminal failed: not a terminal`. The setup half has already created the
+session by then, and `destroy-unattached` rides the attach that just failed, so
+a piped attempt also leaves a client-less session for the reconciler. The exec
+path exits non-zero when the attach fails, so a harness can tell a failed
+attach from an empty measurement.
 
 **`--json` emits the coordinates instead of a script**: socket path, `@window`,
 `%pane`, and terminal id. This matters more than it looks. The sharper
