@@ -20,11 +20,15 @@ enum RemoteLaneOffer {
 ///
 /// Three in-place pages (NOT nested popovers — those are fragile on macOS):
 ///  - `.profiles` (default): a fixed "Choose a branch…" drill-in row at the
-///    top, an optional "New remote session" row beneath it (see
-///    `remoteLaneOffer`; it carries a trailing ellipsis only when selecting it
-///    will itself open the create form — never when it drills into the
-///    provider list, where the chevron says so), then one row per configured
-///    model profile. Selecting a profile row one-click-creates a worktree
+///    top, then up to two "start something other than a plain local worktree"
+///    rows beneath it — an optional "New cloud session" row for the compiled
+///    cloud provider (see `cloudLaneEntry`) and an optional "New remote
+///    session" row for the providers the user configured themselves (see
+///    `remoteLaneOffer`) — then one row per configured model profile.
+///    Each of those two rows carries a trailing ellipsis only when selecting
+///    it will itself open the create form — never when it drills into the
+///    provider list, where the chevron says so.
+///    Selecting a profile row one-click-creates a worktree
 ///    pinned to that profile. (A plain click on the `+` — without opening this
 ///    menu — already creates a default worktree via repo → scratch → global
 ///    default precedence, so there is no separate "resolve automatically" row
@@ -32,8 +36,10 @@ enum RemoteLaneOffer {
 ///  - `.branches`: the reused searchable branch list (`BranchListView`) behind
 ///    a back affordance. Selecting a branch creates a worktree on that existing
 ///    branch using the DEFAULT model (accepted tradeoff).
-///  - `.remoteProviders`: one row per registered remote provider, reached only
-///    when more than one is registered. A third page rather than a nested
+///  - `.remoteProviders`: one row per provider the user configured, reached
+///    only when more than one of those is registered — the compiled cloud
+///    provider is never a member and never lands here, because it has its own
+///    row on the page above. A third page rather than a nested
 ///    `Menu`/popover for the same reason `.branches` is one. Each row carries
 ///    its own trailing ellipsis when selecting that provider will open the
 ///    create form, since these are the rows that act.
@@ -63,9 +69,12 @@ struct WorktreeProfilePickerView: View {
     /// a `FloatingPanel` that is about to be torn down. Both call sites wire
     /// it; the default exists only so a preview or a future host can omit it.
     ///
-    /// The compiled cloud provider reaches the sheet through this same hook:
-    /// it is one registered provider among the others, so it needs no row of
-    /// its own — only the gate `offerableProviders` applies to it.
+    /// The compiled cloud provider reaches the sheet through this same hook.
+    /// It has a row of its own rather than a place in the generic
+    /// enumeration — a user who enabled a feature called Claude Cloud is
+    /// looking for that name in the position a title occupies — but the row it
+    /// gets is an ordinary provider row, so what it hands back here is the
+    /// same `RemoteProviderStatus` any other row would.
     var onStartRemoteSession: (RemoteProviderStatus) -> Void = { _ in }
     @Environment(AppState.self) var appState
     @Environment(\.dismiss) private var dismiss
@@ -130,9 +139,11 @@ struct WorktreeProfilePickerView: View {
             }
             .padding(.top, 2)
 
-            // Sits with "Choose a branch…" in the top group of "start
+            // Sit with "Choose a branch…" in the top group of "start
             // something other than a plain local worktree" rows, above the
-            // profile list.
+            // profile list. Cloud first: it is the one entry a user came
+            // looking for by name.
+            cloudLaneRow
             remoteLaneRow
 
             Divider()
@@ -207,7 +218,8 @@ struct WorktreeProfilePickerView: View {
     @ViewBuilder
     private var profilesPageHeader: some View {
         HStack {
-            Text(Self.profilesPageTitle(offer: remoteLaneOffer))
+            Text(Self.profilesPageTitle(
+                offer: remoteLaneOffer, hasCloudEntry: cloudEntry != nil))
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.secondary)
             Spacer()
@@ -216,17 +228,42 @@ struct WorktreeProfilePickerView: View {
         .padding(.vertical, 8)
     }
 
-    /// The registered providers this menu may offer, after the cloud
-    /// provider's own gate. Every other provider passes through untouched.
+    /// The providers the generic "New remote session" row enumerates — the
+    /// ones the user configured themselves. The compiled cloud provider has a
+    /// row of its own (`cloudLaneRow`) and is never a member of this list.
     private var offerableProviders: [RemoteProviderStatus] {
-        CloudCreateEntryPresentation.pickerProviders(
-            appState.remoteProviders,
-            claudeCloudEnabled: appState.daemonCapabilities?.claudeCloudEnabled ?? false)
+        Self.registryLaneProviders(appState.remoteProviders)
+    }
+
+    /// The compiled cloud provider's row, or nil when there is none to offer.
+    private var cloudEntry: RemoteProviderStatus? {
+        Self.cloudLaneEntry(
+            providers: appState.remoteProviders,
+            claudeCloudEnabled: appState.daemonCapabilities?.claudeCloudEnabled ?? false,
+            parentWorktreeID: parentWorktreeID)
     }
 
     /// What this menu offers as a remote-lane entry point right now.
     private var remoteLaneOffer: RemoteLaneOffer {
         Self.remoteLaneOffer(providers: offerableProviders, parentWorktreeID: parentWorktreeID)
+    }
+
+    /// The optional "New cloud session…" row — the compiled provider's own
+    /// entry, named so a user who enabled Claude Cloud finds the word they
+    /// enabled where a title goes rather than inferring it from a subtitle.
+    /// Omitted entirely when the flag is off or the daemon never registered
+    /// it; a stale provider keeps its row, disabled, with the reason in its
+    /// subtitle (`remoteProviderRow` handles both).
+    @ViewBuilder
+    private var cloudLaneRow: some View {
+        if let entry = cloudEntry {
+            remoteProviderRow(
+                entry,
+                title: Self.cloudLaneRowTitle(opensForm: !willCreateImmediately(entry)),
+                subtitle: Self.providerRowSubtitle(entry)
+                    ?? "Runs on Anthropic's infrastructure",
+                systemImage: Self.cloudLaneSymbol)
+        }
     }
 
     /// The optional "New remote session…" row. Omitted entirely (never shown
@@ -266,12 +303,13 @@ struct WorktreeProfilePickerView: View {
     private func remoteProviderRow(
         _ provider: RemoteProviderStatus,
         title: String,
-        subtitle: String?
+        subtitle: String?,
+        systemImage: String = WorktreeProfilePickerView.remoteLaneSymbol
     ) -> some View {
         ProfilePickerRow(
             title: title,
             subtitle: subtitle,
-            systemImage: Self.remoteLaneSymbol
+            systemImage: systemImage
         ) {
             startRemoteSession(provider)
         }
@@ -352,6 +390,13 @@ struct WorktreeProfilePickerView: View {
         opensForm ? "New remote session…" : "New remote session"
     }
 
+    /// The cloud row's copy. Special in placement, not in behavior: it makes
+    /// the same ellipsis promise on the same terms as every other row that
+    /// acts, decided from the same inputs the click uses.
+    nonisolated static func cloudLaneRowTitle(opensForm: Bool) -> String {
+        opensForm ? "New cloud session…" : "New cloud session"
+    }
+
     /// The remote-lane row's title for the offer it is rendering — the form
     /// the view calls, and the one place the ellipsis rule lives.
     ///
@@ -402,6 +447,38 @@ struct WorktreeProfilePickerView: View {
     /// not this one".
     static let remoteLaneSymbol = "server.rack"
 
+    /// Leading glyph for the cloud row, which names one specific elsewhere
+    /// rather than "not this machine" in general.
+    static let cloudLaneSymbol = "cloud"
+
+    /// The providers `remoteLaneRow` enumerates — a thin, named forward to
+    /// `CloudCreateEntryPresentation.registryProviders` so this view has no
+    /// inline gate of its own to drift from what that function pins, and so
+    /// the cross-surface parity suite can call the exact list this page shows.
+    nonisolated static func registryLaneProviders(
+        _ providers: [RemoteProviderStatus]
+    ) -> [RemoteProviderStatus] {
+        CloudCreateEntryPresentation.registryProviders(providers)
+    }
+
+    /// The compiled cloud provider's row, or nil when there is none to offer —
+    /// the pure, view-free form of `cloudLaneRow`'s gate, so the cross-surface
+    /// parity suite can call the decision this page renders rather than
+    /// re-deriving it.
+    ///
+    /// `parentWorktreeID` is **not** a gate, and the parameter is kept to say
+    /// so where a test can pin it, for the same reason `remoteLaneOffer` keeps
+    /// it: nesting is TBD-side filing, and the remote side neither knows nor
+    /// needs to know about it.
+    nonisolated static func cloudLaneEntry(
+        providers: [RemoteProviderStatus],
+        claudeCloudEnabled: Bool,
+        parentWorktreeID: UUID?
+    ) -> RemoteProviderStatus? {
+        CloudCreateEntryPresentation.cloudEntry(
+            providers, claudeCloudEnabled: claudeCloudEnabled)
+    }
+
     /// What the `+` menu offers as its remote-lane entry point.
     ///
     /// One gate: **no provider registered → nothing at all.** Omitting rather
@@ -444,8 +521,14 @@ struct WorktreeProfilePickerView: View {
 
     /// The page's own header copy. "New worktree with…" stops being true once
     /// the page can also start a remote lane, which is a provider session and
-    /// not a worktree — so the title widens exactly when the row is offered.
-    nonisolated static func profilesPageTitle(offer: RemoteLaneOffer) -> String {
+    /// not a worktree — so the title widens exactly when either row is
+    /// offered. `hasCloudEntry` is passed rather than inferred because the
+    /// cloud row is not a member of `offer`: the two rows are siblings, and
+    /// either one alone is enough to make the narrow title false.
+    nonisolated static func profilesPageTitle(
+        offer: RemoteLaneOffer, hasCloudEntry: Bool
+    ) -> String {
+        if hasCloudEntry { return "New worktree or remote session…" }
         switch offer {
         case .hidden: return "New worktree with…"
         case .single, .chooseProvider: return "New worktree or remote session…"
