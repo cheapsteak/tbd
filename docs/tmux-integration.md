@@ -71,12 +71,12 @@ The command builders for each step live in `TmuxBridge`
 
 ### Not session groups
 
-An earlier design used tmux **session groups** (`new-session -t main`), where
-the viewer shares `main`'s whole window list and keeps its own current-window
-pointer. That is a reasonable way to get an independent pointer, and it is what
-this document originally described, but it is not what the code does. Grouping
-gives a viewer every window on the repo's server — including windows belonging
-to other worktrees — where linking gives it exactly the one it should show.
+tmux **session groups** (`new-session -t main`) are the other way to get a
+viewer its own current-window pointer: the new session shares the target's
+whole window list. TBD does not use them. Grouping hands a viewer every window
+on the repo's server — including windows belonging to other worktrees — where
+linking hands it exactly the one it should show. The narrower grant is worth
+more here than the shared window list, which no TBD viewer has any use for.
 
 Some identifiers and comments in the app still say "grouped sessions" for this
 path (`AppState`, `DaemonClient`, `RPCRouter+AttachHandlers`); read them as
