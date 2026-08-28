@@ -27,25 +27,37 @@ let package = Package(
         .package(url: "https://github.com/groue/GRDB.swift", from: "7.0.0"),
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
         .package(url: "https://github.com/apple/swift-nio", from: "2.65.0"),
-        // Pinned to a main-branch revision for two reasons. The `fontSmoothing`
-        // public property (PR #531) still hasn't shipped in a tagged release.
-        // And the macOS CoreGraphics draw path needs `context.clear(dirtyRect)`
-        // (upstream d5ee56e / PR #582): SwiftTerm opts into PARTIAL backing-store
-        // updates (`disableFullRedrawOnAnyChanges` + `layer.contentsFormat =
-        // .RGBA8Uint`), so AppKit erases only on a full redraw and the draw path
-        // must erase the dirty region itself. Without that clear, any region the
-        // draw does not touch keeps the previous frame's glyphs — visible as
-        // stale text in default-background cells that a window resize wipes.
-        // Switch back to `from: "1.14.x"` only once a tagged release contains
-        // BOTH #531 and #582.
+        // Pinned to a main-branch revision because no tagged release contains
+        // upstream's display-link frame scheduler. Through v1.20.0, SwiftTerm
+        // repaints via `queuePendingDisplay()`, which coalesces damage behind a
+        // fixed `DispatchQueue.main.asyncAfter(+16.67ms)` — a floor on
+        // key-to-paint latency rather than a rate limit, and one TBD measured
+        // in the field. Upstream `main` deletes that mechanism outright
+        // (`queuePendingDisplay`, `pendingDisplay`, `displayImmediately`,
+        // `scheduleDisplay(immediate:)` are all gone) in favour of a
+        // `FrameDriver` on `CADisplayLink`/`CVDisplayLink`
+        // (`Sources/SwiftTerm/Apple/FrameDriver.swift`), and moves the macOS
+        // Metal layer's rendering off the main thread. TBD runs many streaming
+        // TUI terminals at once — the load upstream issue #658 describes — so
+        // the main-thread cost of the old scheduler is ours to carry.
+        // Switch back to `from: "1.x"` once a tagged release contains the
+        // FrameDriver rewrite.
         //
-        // RE-VERIFIED for 16c5286 (2026-08-18): ChildReaper STAYS, unchanged.
-        // Upstream main still calls `waitpid` from exactly one place — the
-        // `DispatchSourceProcess` handler (`LocalProcess.swift:368`) — and both
-        // `deinit` and `terminate()` are unchanged from dae32cc, so it does NOT
-        // reap its own children on the teardown paths TBD uses. `1c3f353` only
-        // fixes lost exit events for FAST-EXITING children, which is a different
-        // population from the 67 long-lived zombies of #611.
+        // A frame loop that does not run on the main thread may never call
+        // `viewWillDraw()`, which TBD's terminal diagnostics hook. Diagnostics
+        // going quiet is expected on this revision, not a regression.
+        //
+        // RE-VERIFIED for 9c2518e (2026-08-28): ChildReaper STAYS, unchanged.
+        // `LocalProcess` was substantially rewritten on this revision (locked
+        // session state, a `TerminalIOPipeline` read path), but `waitpid` is
+        // still called from exactly one place in the whole package —
+        // `processTerminated()` at `LocalProcess.swift:384`, reachable only
+        // from the `DispatchSourceProcess` `.exit` handler
+        // (`LocalProcess.swift:589`). Neither teardown path TBD uses reaps:
+        // `deinit` (`:356`) and `terminate()` (`:604`) both take the session
+        // resources and cancel the monitor (`:358`, `:620`) with no `waitpid`,
+        // and `terminate()` now cancels *before* it sends `SIGTERM` (`:624`),
+        // so the exit event is even less likely to fire than it was.
         //
         // Re-verify again on the next bump, because the reason ChildReaper
         // exists is a property of the pinned revision: upstream reaps only
@@ -55,7 +67,7 @@ let package = Package(
         // revision reaps its own children, `ChildReaper` becomes a competing
         // waiter on a pid the OS may have recycled, which is worse than the
         // leak it fixes. Its doc comment names the exact lines to re-read.
-        .package(url: "https://github.com/migueldeicaza/SwiftTerm", revision: "16c52867763121b121f3b29a4d439052e7e76034"),
+        .package(url: "https://github.com/migueldeicaza/SwiftTerm", revision: "9c2518e21bcc6933a4fc82ce6586f926517d3045"),
         .package(url: "https://github.com/raspu/Highlightr", from: "2.2.1"),
         .package(url: "https://github.com/siteline/swiftui-introspect", from: "1.0.0"),
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.4.0"),
