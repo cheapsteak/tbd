@@ -205,18 +205,52 @@ if [ ! -f "$BUNDLE_ICON" ] || [ "$SOURCE_ICON" -nt "$BUNDLE_ICON" ]; then
     cp "$SOURCE_ICON" "$BUNDLE_ICON"
 fi
 
-# Copy the TBD_TBDApp.bundle (resource bundle with localized strings and assets).
-# SPM produces it in .build/arm64-apple-macosx/debug; it must be in the .app bundle
-# or app launch fails with "could not load resource bundle".
-# NOTE: $BUILD_DIR is a symlink to arm64-apple-macosx/debug, so we reach the bundle
-# via $BUILD_DIR/TBD_TBDApp.bundle, not by composing a path with ../arm64-apple-macosx/debug.
-SOURCE_RESOURCE_BUNDLE="$BUILD_DIR/TBD_TBDApp.bundle"
-BUNDLE_RESOURCE_BUNDLE="$BUNDLE_RESOURCES/TBD_TBDApp.bundle"
-if [ -d "$SOURCE_RESOURCE_BUNDLE" ]; then
+# Copy EVERY SwiftPM resource bundle next to the built products into the .app.
+#
+# TBD_TBDApp.bundle (localized strings and assets) has always been required —
+# without it app launch fails outright with "could not load resource bundle".
+# The dependencies' bundles matter for a subtler reason, and the failure they
+# produce is silent rather than loud: a SwiftPM library's `Bundle.module`
+# accessor falls back to the absolute `.build/.../<Pkg>_<Target>.bundle` path
+# baked in at compile time, which happens to resolve on the machine that built
+# the binary — so a missing bundle looks fine here and breaks anywhere else.
+# Code that probes for its bundle by name instead (SwiftTerm's Metal renderer
+# does, deliberately, because the generated accessor `fatalError`s) looks only
+# at `Bundle.main` -- its `resourceURL` and its `bundleURL`, plus fallbacks that
+# cannot find a bundle staged nowhere either. The app binary is
+# hard-linked INTO the bundle, so `Bundle.main` is TBD.app — and
+# `SwiftTerm_SwiftTerm.bundle`, which carries `Shaders.metal`, was not there.
+# The result was `setUseMetal(true)` throwing `shaderSourceMissing` and the
+# terminal quietly staying on CoreGraphics: a GPU renderer that reports itself
+# unavailable on a machine with a GPU.
+#
+# Copying all of them is both shorter than naming two and the right invariant:
+# an .app must carry every resource bundle its executable may look up at
+# runtime. They are small, and a stale one is worse than a redundant one, so
+# the staged set is cleared first and rebuilt from what the build actually
+# produced -- otherwise a dependency that is dropped or renamed leaves its
+# bundle in the .app forever, and the next person debugging a resource lookup
+# finds two plausible candidates. (The /Applications install path already
+# self-heals: it rm -rf's the installed bundle before copying.)
+# NOTE: $BUILD_DIR is a symlink to arm64-apple-macosx/debug, so we reach the
+# bundles via $BUILD_DIR/*.bundle, not by composing a path with
+# ../arm64-apple-macosx/debug.
+rm -rf "$BUNDLE_RESOURCES"/*.bundle
+for SOURCE_RESOURCE_BUNDLE in "$BUILD_DIR"/*.bundle; do
+    [ -d "$SOURCE_RESOURCE_BUNDLE" ] || continue
+    RESOURCE_BUNDLE_NAME="$(basename "$SOURCE_RESOURCE_BUNDLE")"
+    # Test-target resource bundles are fixtures, not app resources. They can be
+    # large and they ship nothing the app reads, so keep them out of the .app.
+    case "$RESOURCE_BUNDLE_NAME" in
+        *Tests.bundle) continue ;;
+    esac
+    BUNDLE_RESOURCE_BUNDLE="$BUNDLE_RESOURCES/$RESOURCE_BUNDLE_NAME"
     rm -rf "$BUNDLE_RESOURCE_BUNDLE"
     cp -R "$SOURCE_RESOURCE_BUNDLE" "$BUNDLE_RESOURCE_BUNDLE"
-else
-    echo "warning: TBD_TBDApp.bundle not found at $SOURCE_RESOURCE_BUNDLE" >&2
+done
+# The app's own bundle is the one whose absence is fatal, so it keeps a check.
+if [ ! -d "$BUNDLE_RESOURCES/TBD_TBDApp.bundle" ]; then
+    echo "warning: TBD_TBDApp.bundle not found at $BUILD_DIR/TBD_TBDApp.bundle" >&2
 fi
 
 # Stash the source worktree path inside the bundle so the running app can

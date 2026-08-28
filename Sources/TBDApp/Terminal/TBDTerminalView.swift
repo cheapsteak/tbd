@@ -1,6 +1,9 @@
 import AppKit
 import Combine
 import SwiftTerm
+import os
+
+private let terminalViewLogger = Logger(subsystem: "com.tbd.app", category: "terminalRenderer")
 
 private extension CharacterSet {
     /// Characters that require shell quoting when they appear in a file path.
@@ -160,6 +163,19 @@ class TBDTerminalView: TerminalView {
         // SwiftTerm's `fontSmoothing = false` is what produces iTerm's
         // "Thin Strokes" rendering, so we invert the user-facing toggle.
         self.fontSmoothing = !appearanceSettings.thinStrokes
+        // Known limitation under the Metal flag, and TBD cannot close it from
+        // here. `fontSmoothing`'s setter is a bare stored-property write, so
+        // this `needsDisplay` is the only repaint — and it is a no-op under
+        // Metal, where `draw(_:)` early-returns. Forcing a Metal frame instead
+        // would not help: the renderer re-reads `fontSmoothing` every frame,
+        // but the glyph atlas is keyed on (font, size, glyph) with smoothing
+        // absent from the key, and nothing flushes it on a smoothing change.
+        // So an already-open terminal keeps the glyphs it has drawn, and only
+        // characters it has not yet rasterized pick the new setting up — a mix,
+        // not a clean deferral. Rebuilding the renderer would fix it, at the
+        // cost of a runtime shader compile per view; not worth it for a taste
+        // toggle on an experimental flag. The Settings help says what happens,
+        // and the durable fix is an upstream atlas-invalidation hook.
         self.needsDisplay = true
     }
 
@@ -187,12 +203,16 @@ class TBDTerminalView: TerminalView {
         self.installColors(scheme.ansi)
         self.nativeForegroundColor = Self.nsColor(from: scheme.foreground)
         let bg = Self.nsColor(from: scheme.background)
+        // Setting `nativeBackgroundColor` is enough: at the pinned revision its
+        // setter paints `layer.backgroundColor` itself, from
+        // `effectiveNativeBackgroundColor` (which honours reverse video and
+        // opacity) and installing `NSColor.clear` instead when Metal owns the
+        // background. TBD used to write the layer colour again here, from a
+        // time when upstream did not; that third write ignored reverse video
+        // and, under Metal, painted over the transparency the CAMetalLayer
+        // needs. `effectiveNativeBackgroundColor` is internal, so matching
+        // upstream exactly is not possible from here — deferring to it is.
         self.nativeBackgroundColor = bg
-        // SwiftTerm only paints layer.backgroundColor inside its private
-        // setupOptions(); the nativeBackgroundColor setter just updates the
-        // logical terminal.backgroundColor. Repaint the layer ourselves so live
-        // scheme changes (and the initial apply) actually show through.
-        self.layer?.backgroundColor = bg.cgColor
         self.caretColor = Self.nsColor(from: scheme.cursor)
         self.selectedTextBackgroundColor = Self.nsColor(from: scheme.selection)
 
@@ -200,6 +220,20 @@ class TBDTerminalView: TerminalView {
         // palette but does not invalidate cells already in the buffer; without
         // this, default-bg cells continue showing the bg color they were drawn
         // with at first paint (NSColor.textBackgroundColor = system gray).
+        // `installColors` above already ran SwiftTerm's `colorsChanged()`,
+        // which clears the attribute caches, calls `updateFullScreen()` and
+        // queues a display — the deferred pass that rebuilds every visible row
+        // against the new palette, on both renderers. This second
+        // `updateFullScreen()` is belt and braces for the setters that ran
+        // after it (foreground, caret, selection), which schedule nothing of
+        // their own.
+        //
+        // Deliberately NOT a synchronous Metal frame here. The Metal renderer
+        // caches per-row vertex data keyed on `BufferLine.generation`, and
+        // installing a palette does not bump it, so an immediate frame would
+        // re-emit every visible row with the OLD colours — a wasted GPU pass
+        // whose only visible effect could be one stale frame ahead of the
+        // correct deferred one.
         self.getTerminal().updateFullScreen()
         self.needsDisplay = true
     }
@@ -270,14 +304,167 @@ class TBDTerminalView: TerminalView {
         return (cellWidth, cellHeight)
     }
 
+    /// What a capture has to do about the renderer before it can read pixels.
+    enum CapturePreparation: Equatable {
+        /// CoreGraphics is already drawing into the backing store.
+        case captureDirectly
+        /// Metal owns the pixels; drop to CoreGraphics and put it back after.
+        case dropToCoreGraphicsThenRestore
+    }
+
+    /// The capture-time renderer decision, extracted so it can be asserted
+    /// without a GPU.
+    ///
+    /// It cannot be asserted *with* one under `scripts/test.sh`: SwiftTerm
+    /// resolves its shaders relative to `Bundle.main`, which in a test run is
+    /// the toolchain's xctest helper rather than the build directory, so
+    /// `setUseMetal(true)` throws `shaderSourceMissing` and the Metal branch is
+    /// unreachable in-process. Splitting the decision out is what keeps that
+    /// branch covered anyway — delete the drop-to-CoreGraphics and this goes
+    /// red, GPU or no GPU.
+    static func capturePreparation(isUsingMetalRenderer: Bool) -> CapturePreparation {
+        isUsingMetalRenderer ? .dropToCoreGraphicsThenRestore : .captureDirectly
+    }
+
+    /// Requests SwiftTerm's Metal renderer for this view when `enabled`.
+    ///
+    /// Returns whether the GPU path is actually active afterwards, which is
+    /// what tests assert on — `setUseMetal(_:)` throws on hardware without
+    /// Metal or when the pipeline cannot be built, and degrading to the
+    /// CoreGraphics path we shipped for years is always correct. The failure is
+    /// logged at `.error` once per terminal view — not once per app run — and
+    /// never retried: a per-frame retry would turn a hardware fact into a log
+    /// flood, while one line per view stays proportionate and tells you which
+    /// views degraded.
+    ///
+    /// With `enabled` false this makes no `setUseMetal` call at all, so the
+    /// default branch is byte-for-byte the path that existed before the flag.
+    @discardableResult
+    func applyMetalRendererPreference(enabled: Bool) -> Bool {
+        guard enabled else { return false }
+        // Wait for a window. Enabling Metal on a view SwiftUI has not attached
+        // yet stores `metalBoundWindow = nil`, and `viewDidMoveToWindow` then
+        // rebinds — building a SECOND MTKView, renderer, glyph atlas and
+        // pipeline set and discarding the first, synchronously on the main
+        // thread. Renderer construction runs a runtime compile of SwiftTerm's
+        // shader source (there is no `default.metallib` to short-circuit it)
+        // and `makeLibrary` has no cache, so opening a worktree with six tabs
+        // would pay twelve of those, half of them thrown away milliseconds
+        // later. That is exactly the cost this flag exists to measure, so
+        // paying it twice would contaminate the A/B it is here to inform.
+        switch Self.metalActivation(hasWindow: window != nil) {
+        case .deferUntilWindowed:
+            wantsMetalRendererOnWindow = true
+            return false
+        case .now:
+            return enableMetalRenderer()
+        }
+    }
+
+    /// When a Metal request can be honoured.
+    enum MetalActivation: Equatable {
+        case now
+        case deferUntilWindowed
+    }
+
+    /// Extracted so the deferral is assertable without a GPU — the same reason
+    /// `capturePreparation(isUsingMetalRenderer:)` is. Losing it costs one
+    /// wasted renderer build per terminal and nothing goes red, which is how
+    /// it got shipped the first time.
+    static func metalActivation(hasWindow: Bool) -> MetalActivation {
+        hasWindow ? .now : .deferUntilWindowed
+    }
+
+    /// Set when the flag was on but the view had no window yet;
+    /// `viewDidMoveToWindow` consumes it exactly once.
+    private var wantsMetalRendererOnWindow = false
+
+    private func enableMetalRenderer() -> Bool {
+        do {
+            try setUseMetal(true)
+            // Positive confirmation. During the soak the question "is the GPU
+            // path actually on?" has to be answerable from the log:
+            // `setUseMetal` degrades silently by design, so the ABSENCE of the
+            // error below is not evidence that Metal engaged — only this line
+            // is.
+            //
+            // `.notice`, not `.info`, and the difference is the whole point.
+            // `.info` lives in a memory ring buffer that `log show` loses
+            // within minutes; this line was already unreadable ~15 minutes
+            // after the launch that wrote it. `.notice` persists to disk, so
+            // somebody can answer the question the next morning. It fires once
+            // per terminal view, which is rare enough to afford that.
+            terminalViewLogger.notice("Metal terminal renderer active for this terminal view")
+            return true
+        } catch {
+            terminalViewLogger.error(
+                "Metal terminal renderer unavailable; staying on CoreGraphics: \(String(describing: error), privacy: .public)"
+            )
+            return false
+        }
+    }
+
     /// Capture the current visible terminal content as an NSImage.
     /// Returns nil if the view has no dimensions yet.
+    ///
+    /// Runs the capture with the CoreGraphics renderer temporarily reinstated —
+    /// see `withCoreGraphicsRendering(_:)` for why a Metal-backed view would
+    /// otherwise hand back a blank image.
     func captureScreenshot() -> NSImage? {
         guard bounds.width > 0 && bounds.height > 0 else { return nil }
-        guard let bitmapRep = bitmapImageRepForCachingDisplay(in: bounds) else { return nil }
-        cacheDisplay(in: bounds, to: bitmapRep)
-        guard let cgImage = bitmapRep.cgImage else { return nil }
-        return NSImage(cgImage: cgImage, size: bounds.size)
+        return withCoreGraphicsRendering {
+            guard let bitmapRep = bitmapImageRepForCachingDisplay(in: bounds) else { return nil }
+            cacheDisplay(in: bounds, to: bitmapRep)
+            guard let cgImage = bitmapRep.cgImage else { return nil }
+            return NSImage(cgImage: cgImage, size: bounds.size)
+        }
+    }
+
+    /// Runs `body` with this view on SwiftTerm's CoreGraphics draw path,
+    /// restoring the Metal renderer afterwards if it was active.
+    ///
+    /// `bitmapImageRepForCachingDisplay` + `cacheDisplay` read the view's
+    /// backing store by re-running `draw(_:)` down the subview tree. A
+    /// Metal-backed `TerminalView` renders into a `CAMetalLayer` owned by an
+    /// `MTKView` subview, which draws through its layer rather than through
+    /// `draw(_:)` — so that capture path sees no glyphs and returns a blank
+    /// image. A blank image is a *silent* regression: it still renders as an
+    /// image, so nothing downstream reports the failure.
+    ///
+    /// `setUseMetal(_:)` is togglable in both directions at runtime, so the fix
+    /// is to drop to CoreGraphics for the duration of the capture. The whole
+    /// round trip happens inside one main-thread turn, so the compositor never
+    /// commits the intermediate hierarchy and the swap is not visible; the
+    /// `drawMetalFrameNow()` on the way back is belt and braces, forcing the
+    /// freshly built `MTKView` to produce a frame synchronously rather than
+    /// leaving it blank until the next runloop turn.
+    ///
+    /// Re-enabling rebuilds the `MTKView`, its renderer and its glyph atlas,
+    /// which is not free — acceptable because captures are user-gestured and
+    /// occasional, not per-frame.
+    private func withCoreGraphicsRendering<T>(_ body: () -> T) -> T {
+        guard Self.capturePreparation(isUsingMetalRenderer: isUsingMetalRenderer)
+            == .dropToCoreGraphicsThenRestore
+        else { return body() }
+        do {
+            try setUseMetal(false)
+        } catch {
+            terminalViewLogger.error(
+                "Could not drop to CoreGraphics for capture; snapshot may be blank: \(String(describing: error), privacy: .public)"
+            )
+            return body()
+        }
+        defer {
+            do {
+                try setUseMetal(true)
+                drawMetalFrameNow()
+            } catch {
+                terminalViewLogger.error(
+                    "Could not restore the Metal renderer after capture; staying on CoreGraphics: \(String(describing: error), privacy: .public)"
+                )
+            }
+        }
+        return body()
     }
 
     /// Converts a window-coordinate point to terminal grid (col, row).
@@ -348,6 +535,14 @@ class TBDTerminalView: TerminalView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if window != nil {
+            // Deferred from `applyMetalRendererPreference`, which could not run
+            // before the view had a window without costing a second renderer
+            // build. Consumed once: a later reparent is upstream's rebind to
+            // handle, not ours to re-request.
+            if wantsMetalRendererOnWindow {
+                wantsMetalRendererOnWindow = false
+                _ = enableMetalRenderer()
+            }
             installMouseMonitor()
             registerForDraggedTypes([.fileURL])
         } else {

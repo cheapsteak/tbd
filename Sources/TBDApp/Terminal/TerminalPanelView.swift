@@ -261,6 +261,13 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         // instead of forwarding mouse events to tmux
         tv.allowMouseReporting = false
 
+        // Experimental GPU draw path (default off — Settings → Terminal →
+        // Experimental). Requested here rather than in `updateNSView` so a
+        // view never swaps renderers mid-life; flipping the toggle therefore
+        // reaches terminals opened afterwards, and an app restart moves them
+        // all. A throw leaves this view on CoreGraphics.
+        tv.applyMetalRendererPreference(enabled: appState.useMetalTerminalRenderer)
+
         // Wire up Cmd+Click file path detection
         tv.worktreePath = worktreePath
         tv.remoteURL = remoteURL
