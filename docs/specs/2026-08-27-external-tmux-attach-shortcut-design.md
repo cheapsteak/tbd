@@ -60,9 +60,9 @@ tmux -S <socket> has-session -t tbd-ext-<tid8> 2>/dev/null || \
 tmux -S <socket> \
     new-session -d -s tbd-ext-<tid8> -c /tmp \; \
     link-window -s @<win> -t tbd-ext-<tid8>: \; \
-    kill-window -t tbd-ext-<tid8>:0 \; \
+    kill-window -t tbd-ext-<tid8>:0
+tmux -u -S <socket> attach -t tbd-ext-<tid8> -f ignore-size \; \
     set-option -t tbd-ext-<tid8> destroy-unattached on
-tmux -u -S <socket> attach -t tbd-ext-<tid8> -f ignore-size
 ```
 
 `<tid8>` is the first eight hex digits of the terminal's UUID; `<win>` is its
@@ -89,8 +89,19 @@ tmux -u -S <socket> attach -t tbd-ext-<tid8> -f ignore-size
   stream cut for one geometry. Reflow is a confound the design deletes rather
   than models. The client stays writable — this is not `-r`, which would also
   make it read-only.
-- **`destroy-unattached on`.** Reclaims the session as soon as the last client
-  leaves. See "Reclamation" for why this is not the whole answer.
+- **`destroy-unattached on`, chained onto the attach and never onto the
+  setup.** It reclaims the session as soon as the last client leaves. Its
+  placement is load-bearing and must not be tidied back into the setup block:
+  setting the option while the session is still detached is by itself enough
+  for tmux to collect the session on that server tick, before the attach even
+  starts, and the attach then fails with `can't find session`. Measured against
+  tmux 3.6a, 0 of 20 attempts attached when the option was set beforehand — the
+  behavior is deterministic, not a timing race. Isolated with no client
+  involved: a created-and-linked session sits there client-less until the
+  `set-option` line, which destroys it, while a sibling session without the
+  option survives. Chaining it onto the attach attaches cleanly, leaves the
+  option set, and still self-destroys the session on detach. See "Reclamation"
+  for why the option is not the whole answer.
 - **`has-session ||`.** Makes the script idempotent by reusing a surviving
   session rather than erroring on a duplicate name or evicting whoever is
   attached to it.
@@ -119,6 +130,11 @@ reasons:
   daemon's. A CLI-side `tmux -L <server> display-message -p '#{socket_path}'`
   would answer for the wrong path — or start a new server to answer at all. The
   daemon resolves it from its own environment.
+- **The pair must agree before either is trusted.** A terminal whose own
+  `worktreeID` disagrees with the one in the params is refused rather than
+  resolved in favour of either. The pair names a server and a window between
+  them, so a mismatch would aim one repo's socket at another repo's window.
+  Checked before the probe runs.
 - **The window must be verified before it is named.** The daemon already runs a
   `paneSendTarget` probe, reading `#{pane_id}`, `#{pane_dead}` and the
   `@tbd_terminal_id` pane option, before `terminal.send` types anything. The
@@ -203,12 +219,12 @@ The first two are create-time cleanup, which the repo's doctrine treats as
 best-effort by standing policy: every unbounded leak found in the wild sat on a
 resource no sweep covered, regardless of how good its rollback path was.
 
-**Known risk, to be settled by test.** The session is created detached and only
-then attached, while tmux's unattached check runs on a server tick. In
-principle `destroy-unattached` could fire in that gap and destroy the session
-before the client arrives. A live-tmux test must attempt to provoke this. If it
-reproduces, the option moves to after the attach and the reconciler carries the
-detach case alone.
+The create-to-attach gap is why the option is chained onto the attach rather
+than set during setup — see "The command". A live-tmux test pins both halves:
+that the composed script attaches, and that setting the option on a
+still-detached session destroys it. The second test documents the mechanism, so
+an edit that moves the option back into the setup block fails rather than
+silently disabling the feature.
 
 ## Measurement guidance
 
@@ -305,7 +321,11 @@ description of someone running a long measurement.
 - **Coordinate output.** `--json` carries socket path, `@window`, `%pane` and
   terminal id, and the pane id it reports is the one the identity probe
   verified — not a separately resolved value that could disagree with it.
-- **The detach race**, live against a real tmux server, per the repo's
+- **The composed script actually attaches**, and **the create-to-attach gap**:
+  setting `destroy-unattached` on a still-detached session destroys it, which
+  is why the option rides the attach. The second is asserted directly, with no
+  client involved, so the mechanism is pinned rather than inferred from an
+  attach failure. Both live against a real tmux server, per the repo's
   live-tmux discipline: bounded deadlines, rc-free bootstraps, and a fenced
   `TMUX_TMPDIR` so the run cannot leave a socket behind. Keep the fenced
   directory directly under a short `/tmp` root, or the socket path outgrows
