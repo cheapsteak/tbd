@@ -107,6 +107,30 @@ import Testing
         #expect(decoded.classification == branch.expected)
     }
 
+    /// Claude Code emits more notification types than its published documentation
+    /// lists. Two of them raise a prompt a human must answer, and both fell to
+    /// `.unrecognized`, so they raised no hand at all.
+    @Test func undocumentedPromptTypesRaiseAHand() {
+        #expect(AwaitingInputClass(notificationType: "worker_permission_prompt") == .promptOnScreen)
+        #expect(AwaitingInputClass(notificationType: "elicitation_url_dialog") == .promptOnScreen)
+    }
+
+    @Test func theRemainingUndocumentedTypesAreInformational() {
+        for type in ["computer_use_enter", "computer_use_exit", "push_notification",
+                     "quota_auto_resume_fired", "quota_auto_resume_stale",
+                     "quota_auto_resume_disabled"] {
+            #expect(AwaitingInputClass(notificationType: type) == .informational,
+                    "\(type) should be informational")
+        }
+    }
+
+    /// The default stays a refusal to guess: no prefix match, no case folding.
+    @Test func anUnknownTypeIsStillUnrecognized() {
+        #expect(AwaitingInputClass(notificationType: "permission_prompt_v2") == .unrecognized)
+        #expect(AwaitingInputClass(notificationType: "PERMISSION_PROMPT") == .unrecognized)
+        #expect(AwaitingInputClass(notificationType: nil) == .unrecognized)
+    }
+
     /// The stored class is a convenience for outside readers, never an input:
     /// a record claiming `prompt_on_screen` for a type this build does not
     /// know is re-derived to `unrecognized` on the way in. Without that, a
@@ -188,6 +212,46 @@ import Testing
         // where it came from" check while saying nothing.
         let blank = AwaitingInputReason(message: "m", hookEventName: "")
         #expect(terminal(reason: blank, observedAt: epoch).observedAwaitingInput == nil)
+    }
+
+    // MARK: - Transcript fingerprint
+
+    @Test func awaitingInputReasonCarriesATranscriptFingerprint() throws {
+        let stamp = Date(timeIntervalSince1970: 1_700_000_000)
+        let reason = AwaitingInputReason(
+            message: "Claude needs your permission",
+            hookEventName: "Notification",
+            raw: "{}",
+            notificationType: "permission_prompt",
+            transcriptFingerprint: TranscriptFingerprint(
+                path: "/tmp/a.jsonl", modifiedAt: stamp, size: 42))
+        let round = try JSONDecoder().decode(
+            AwaitingInputReason.self, from: JSONEncoder().encode(reason))
+        #expect(round.transcriptFingerprint?.path == "/tmp/a.jsonl")
+        #expect(round.transcriptFingerprint?.modifiedAt == stamp)
+        #expect(round.transcriptFingerprint?.size == 42)
+        #expect(round.classification == .promptOnScreen)
+    }
+
+    /// A row written before fingerprints existed must still decode. This is what
+    /// makes the field migration-free: the column is JSON and the key is absent.
+    @Test func aReasonWithoutAFingerprintDecodesAsAbsent() throws {
+        let legacy = #"{"message":"m","notificationType":"permission_prompt","classification":"prompt_on_screen"}"#
+        let reason = try JSONDecoder().decode(
+            AwaitingInputReason.self, from: Data(legacy.utf8))
+        #expect(reason.transcriptFingerprint == nil)
+        #expect(reason.classification == .promptOnScreen)
+        #expect(reason.message == "m")
+    }
+
+    @Test func fingerprintsDifferOnPathMtimeOrSize() {
+        let stamp = Date(timeIntervalSince1970: 1_700_000_000)
+        let base = TranscriptFingerprint(path: "/tmp/a.jsonl", modifiedAt: stamp, size: 10)
+        #expect(base == TranscriptFingerprint(path: "/tmp/a.jsonl", modifiedAt: stamp, size: 10))
+        #expect(base != TranscriptFingerprint(path: "/tmp/b.jsonl", modifiedAt: stamp, size: 10))
+        #expect(base != TranscriptFingerprint(
+            path: "/tmp/a.jsonl", modifiedAt: stamp.addingTimeInterval(1), size: 10))
+        #expect(base != TranscriptFingerprint(path: "/tmp/a.jsonl", modifiedAt: stamp, size: 11))
     }
 
     // MARK: - FactSource

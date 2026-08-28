@@ -246,15 +246,20 @@ public enum AwaitingInputClass: String, Sendable, Equatable, Codable {
     /// File a `notification_type` under its class. Absent or unknown →
     /// `.unrecognized`.
     ///
-    /// The three groups are Claude Code's documented types, listed exhaustively
-    /// so that adding one is a visible edit rather than a silent reclassification.
+    /// The three groups are the types Claude Code emits — a wider set than its
+    /// published documentation lists — enumerated exhaustively so that adding
+    /// one is a visible edit rather than a silent reclassification.
     public init(notificationType: String?) {
         switch notificationType {
-        case "permission_prompt", "elicitation_dialog", "agent_needs_input":
+        case "permission_prompt", "elicitation_dialog", "agent_needs_input",
+             "worker_permission_prompt", "elicitation_url_dialog":
             self = .promptOnScreen
         case "idle_prompt":
             self = .doneWaiting
-        case "auth_success", "elicitation_complete", "elicitation_response", "agent_completed":
+        case "auth_success", "elicitation_complete", "elicitation_response",
+             "agent_completed", "computer_use_enter", "computer_use_exit",
+             "push_notification", "quota_auto_resume_fired",
+             "quota_auto_resume_stale", "quota_auto_resume_disabled":
             self = .informational
         default:
             // Absent, or a type this build has never heard of. It stops here:
@@ -283,6 +288,29 @@ public enum AwaitingInputClass: String, Sendable, Equatable, Codable {
     }
 }
 
+/// A session transcript as it stood when a prompt was recorded against it.
+///
+/// Identity is the file, its size, and its modification time. Comparing a
+/// stored fingerprint against a fresh one asks whether the file CHANGED since
+/// the prompt was raised — a different and more durable question than whether
+/// the file is newer than some timestamp. It depends on no ordering between
+/// Claude Code's debounced notification timer and its own transcript flush,
+/// and on no clock agreeing with another clock.
+public struct TranscriptFingerprint: Codable, Sendable, Equatable {
+    /// The transcript this was taken from. A terminal whose `transcriptPath`
+    /// no longer matches has been retargeted — a `/clear`, a compaction, a
+    /// resume — and a fingerprint cannot describe a file it was not taken from.
+    public let path: String
+    public let modifiedAt: Date
+    public let size: Int64
+
+    public init(path: String, modifiedAt: Date, size: Int64) {
+        self.path = path
+        self.modifiedAt = modifiedAt
+        self.size = size
+    }
+}
+
 /// The structured reason an agent is waiting, carried verbatim from Claude
 /// Code's `Notification` hook.
 ///
@@ -307,6 +335,11 @@ public struct AwaitingInputReason: Codable, Sendable, Equatable {
     /// carried none (an older Claude Code). Stored unmodified even when this
     /// build does not recognize it.
     public let notificationType: String?
+    /// The transcript as it stood when this reason was recorded, for a
+    /// `.promptOnScreen` class only. Absent on every other class — there is no
+    /// raised hand to take down — and absent on rows written before this
+    /// existed, which `AwaitingInputSupersession` adopts rather than acts on.
+    public let transcriptFingerprint: TranscriptFingerprint?
     /// Which class `notificationType` falls under.
     ///
     /// Derived from `notificationType` at construction and **re-derived on
@@ -322,12 +355,14 @@ public struct AwaitingInputReason: Codable, Sendable, Equatable {
         message: String,
         hookEventName: String? = nil,
         raw: String? = nil,
-        notificationType: String? = nil
+        notificationType: String? = nil,
+        transcriptFingerprint: TranscriptFingerprint? = nil
     ) {
         self.message = message
         self.hookEventName = hookEventName
         self.raw = raw
         self.notificationType = notificationType
+        self.transcriptFingerprint = transcriptFingerprint
         self.classification = AwaitingInputClass(notificationType: notificationType)
     }
 
@@ -336,6 +371,7 @@ public struct AwaitingInputReason: Codable, Sendable, Equatable {
         case hookEventName
         case raw
         case notificationType
+        case transcriptFingerprint
         case classification
     }
 
@@ -348,7 +384,9 @@ public struct AwaitingInputReason: Codable, Sendable, Equatable {
             message: try c.decode(String.self, forKey: .message),
             hookEventName: try c.decodeIfPresent(String.self, forKey: .hookEventName),
             raw: try c.decodeIfPresent(String.self, forKey: .raw),
-            notificationType: try c.decodeIfPresent(String.self, forKey: .notificationType)
+            notificationType: try c.decodeIfPresent(String.self, forKey: .notificationType),
+            transcriptFingerprint: try c.decodeIfPresent(
+                TranscriptFingerprint.self, forKey: .transcriptFingerprint)
         )
     }
 }
