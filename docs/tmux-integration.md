@@ -192,6 +192,21 @@ TBD does **not** use session groups — see "Not session groups" above. It links
 a single window into a private session instead. The reference is kept here
 because the distinction matters when reading tmux's own documentation.
 
+### Targets resolve by prefix unless you say otherwise
+
+`-t <name>` is tried as an exact name, then as **the start of** a session name,
+then as a glob. So a command aimed at a session that has just gone away can
+land on a different one whose name merely starts with the same text. Measured
+on tmux 3.6a: with no exact `tbd-ext-abcd1234` present, `kill-session -t
+tbd-ext-abcd1234` destroyed `tbd-ext-abcd1234-notes` and exited 0.
+
+Prefix the target with `=` to demand an exact match. Two target kinds need a
+trailing colon as well — `set-option` and `if-shell` take a *pane* target, so
+`'=<name>'` either errors or silently takes the wrong branch, and `'=<name>:'`
+is required. TBD's external-attach path pins every session target this way;
+`TmuxBridge`'s viewer commands do not, which is safe only because a
+`tbd-view-<8hex>` prefix collision would have to be created by hand.
+
 ### Linking windows
 
 `link-window -s <src-window> -t <dst-session>:` makes one window a member of a
