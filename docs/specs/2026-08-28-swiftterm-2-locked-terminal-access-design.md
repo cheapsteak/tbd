@@ -113,12 +113,20 @@ the configuration upstream's own `MacLocalTerminalView` ships.
 
 - **Data path**: `dataReceived` fires on the IO thread and calls `feed`
   right there. `feed` is thread-safe by design (a `Sendable` closure stored
-  in locked state; the parse itself under `terminalLock`). The coordinator
-  reaches the view through a `nonisolated(unsafe)` stash whose safety
-  argument is precisely that documented thread-safety. The panel's
-  viewer-MRU signal keeps its existing `DispatchQueue.main.async` hop. Both
-  coordinators already treated the delegate queue as unspecified and hopped
-  explicitly, so this is a small, local change.
+  in locked state; the parse itself under `terminalLock`), which covers
+  concurrent calls into the view; the *reference* is owned separately. The
+  coordinator reaches the view through a small lock-guarded holder
+  (`OSAllocatedUnfairLock<TerminalView?>`): written once before
+  `startProcess`, cleared by `cleanup()` on the main actor **before**
+  `terminate()` is called. Each `dataReceived` takes a strong local
+  reference under the lock for the duration of its `feed` call, so a batch
+  racing teardown either completes against a live view or reads nil and
+  drops — both safe, and nothing feeds a view whose session is being torn
+  down. The one unfair-lock acquisition per batch is noise at batch
+  granularity. The panel's viewer-MRU signal keeps its existing
+  `DispatchQueue.main.async` hop. Both coordinators already treated the
+  delegate queue as unspecified and hopped explicitly, so this is a small,
+  local change.
 - **Exit path**: `dispatchQueue: .main` still governs the
   `DispatchSourceProcess` exit monitor (`LocalProcess` creates it with
   `queue: dispatchQueue`, unaffected by `directDelivery`), so exit events
@@ -177,10 +185,15 @@ breaks silently on any upstream rename.
   made `installColors` invalidate existing cells itself; if so, delete the
   `updateFullScreen` workaround instead of porting it.
 - **Notifications** — replace the `notify` override with
-  `withTerminal { $0.registerOscHandler(code: 9) { … } }` at view setup,
-  routing into `onNotification` with the same not-focused guard. If OSC 9
-  turns out to bypass the handler table, the fallback is one more `open` in
-  the fork commit.
+  `Terminal.observeOscEvents(_:)`, 2.0's public token-scoped observer,
+  registered at view setup (under `withTerminal`) for **OSC 777** — the code
+  that carries `notify;title;body` and the only path that reached TBD's
+  override — routing into `onNotification` with the same not-focused guard.
+  The observer is documented to deliver copied events without changing
+  built-in or override behavior, which is why it is used rather than
+  `registerOscHandler`: user-registered handlers preempt built-ins in 2.0,
+  so re-registering a code would swallow its default handling. (OSC 9 is
+  ConEmu progress reporting, not notifications.)
 
 Lock discipline, enforced by convention and a comment block at the one place
 TBD touches the lock: bodies copy values out and return — never store the
@@ -190,28 +203,46 @@ TBD touches the lock: bodies copy values out and return — never store the
 
 The repo rule requires a default-off flag when wholesale-replacing a
 load-bearing rendering path. A dependency pin cannot be flagged — two
-SwiftTerm revisions cannot coexist in one build — so this ships unflagged,
-with that stated explicitly in the PR description per the rule's requirement
-to answer the question rather than skip it. Standing in for the soak: the
-existing `useMetalTerminalRenderer` UserDefaults flag still gates the
-Metal-versus-CoreGraphics backend choice at the new revision (verify its
-mapping to upstream's `usesMetalLayerSurface` at implementation); dogfooding
-on the development fleet is the soak; and the before/after performance
-comparison runs on the separately validated key-to-paint harness before the
-merge is judged.
+SwiftTerm revisions cannot coexist in one build — so the bump itself ships
+unflagged, with that stated explicitly in the PR description per the rule's
+requirement to answer the question rather than skip it.
+
+`directDelivery` is different: it is a boolean in TBD's own two
+`LocalProcess` constructions and therefore mechanically flaggable. It ships
+unflagged anyway, deliberately. Its off branch would still run the new
+FrameDriver, lock, and renderer — it only moves parse back to the main
+thread — so it is a partial fallback, not a soak of old-versus-new;
+upstream's `MacLocalTerminalView` ships `directDelivery: true` as its only
+local-process configuration; and the flag rule targets autonomous or
+destructive behavior and wholesale replacement, where the wholesale
+replacement here is the pin, which no TBD flag can gate. A half-switch with
+no meaningful off state is flag sprawl.
+
+Standing in for the soak: the existing `useMetalTerminalRenderer`
+UserDefaults flag still gates the Metal-versus-CoreGraphics backend choice
+at the new revision (verify its mapping to upstream's
+`usesMetalLayerSurface` at implementation) — noting that both branches of
+that flag run the new frame scheduler and lock, so it bounds rendering-
+backend risk only; dogfooding on the development fleet is the soak; and the
+before/after performance comparison runs on the separately validated
+key-to-paint harness before the merge is judged.
 
 ## Testing
 
 - Full suite via `scripts/test.sh`; everything currently green stays green.
 - New: a round-trip test feeding OSC 8 bytes through the production `feed`
   path and asserting `hasOSC8Payload`/`extractHyperlinkURL` see the payload
-  — constructed through the production path, not hand-built state — and a
-  test that `dataReceived` invoked from a non-main queue feeds without crash
-  or data loss.
+  — constructed through the production path, not hand-built state; a
+  matching round-trip test feeding OSC 777 `notify;title;body` bytes and
+  asserting `onNotification` fires (the notification path is a re-plumbing,
+  not a port, so it gets its own production-path test); and a test that
+  `dataReceived` invoked from a non-main queue feeds without crash or data
+  loss.
 - Manual live checklist in the PR (this class of bug is live-only): OSC 8
   cmd-click opens exactly one pane; plain-path click; scroll inside tmux
   mouse mode; theme switch repaints previously drawn cells; cursor style;
-  resize; session exit leaves no `<defunct>` children.
+  resize; a notification arrives from an unfocused terminal and none from a
+  focused one; session exit leaves no `<defunct>` children.
 - Out of scope: performance measurement (separate harness), and
   `viewWillDraw`-based terminal diagnostics going quiet — expected under
   off-main rendering, noted in the `Package.swift` comment block.
@@ -220,6 +251,5 @@ merge is judged.
 
 - `installColors` may now invalidate drawn cells, making the
   `updateFullScreen` workaround deletable — verify at implementation.
-- OSC 9 routing through the handler table — verify; fallback named above.
 - Upstream churn on these internals is high; until the accessor PR merges,
   each pin bump costs one fork rebase.
