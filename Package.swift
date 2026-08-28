@@ -27,21 +27,29 @@ let package = Package(
         .package(url: "https://github.com/groue/GRDB.swift", from: "7.0.0"),
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
         .package(url: "https://github.com/apple/swift-nio", from: "2.65.0"),
-        // Pinned to a main-branch revision because no tagged release contains
-        // upstream's display-link frame scheduler. Through v1.20.0, SwiftTerm
-        // repaints via `queuePendingDisplay()`, which coalesces damage behind a
-        // fixed `DispatchQueue.main.asyncAfter(+16.67ms)` — a floor on
-        // key-to-paint latency rather than a rate limit, and one TBD measured
-        // in the field. Upstream `main` deletes that mechanism outright
+        // Pinned to a TBD fork of an upstream main-branch revision. Main
+        // branch, because no tagged release contains upstream's display-link
+        // frame scheduler: through v1.20.0, SwiftTerm repaints via
+        // `queuePendingDisplay()`, which coalesces damage behind a fixed
+        // `DispatchQueue.main.asyncAfter(+16.67ms)` — a floor on key-to-paint
+        // latency rather than a rate limit, and one TBD measured in the
+        // field. Upstream `main` deletes that mechanism outright
         // (`queuePendingDisplay`, `pendingDisplay`, `displayImmediately`,
         // `scheduleDisplay(immediate:)` are all gone) in favour of a
         // `FrameDriver` on `CADisplayLink`/`CVDisplayLink`
         // (`Sources/SwiftTerm/Apple/FrameDriver.swift`), and moves the macOS
-        // Metal layer's rendering off the main thread. TBD runs many streaming
-        // TUI terminals at once — the load upstream issue #658 describes — so
-        // the main-thread cost of the old scheduler is ours to carry.
-        // Switch back to `from: "1.x"` once a tagged release contains the
-        // FrameDriver rewrite.
+        // Metal layer's rendering off the main thread. TBD runs many
+        // streaming TUI terminals at once — the load upstream issue #658
+        // describes — so the main-thread cost of the old scheduler is ours to
+        // carry. A fork, because SwiftTerm 2.0 removed `getTerminal()` from
+        // the public surface without giving view embedders any public route
+        // to the `Terminal` — `TerminalView.withTerminal(_:caller:)`, the
+        // self-locking accessor TBD needs for OSC state reads and mouse
+        // encoding, is internal upstream. The pinned revision is upstream
+        // `9c2518e` plus one commit (branch `tbd/public-with-terminal`)
+        // making `withTerminal` public. Once upstream merges an equivalent
+        // accessor, re-pin to upstream and delete the fork; once a tagged
+        // release contains both, switch back to `from:`.
         //
         // A frame loop that does not run on the main thread may never call
         // `viewWillDraw()`, which TBD's terminal diagnostics hook. Diagnostics
@@ -67,7 +75,7 @@ let package = Package(
         // revision reaps its own children, `ChildReaper` becomes a competing
         // waiter on a pid the OS may have recycled, which is worse than the
         // leak it fixes. Its doc comment names the exact lines to re-read.
-        .package(url: "https://github.com/migueldeicaza/SwiftTerm", revision: "9c2518e21bcc6933a4fc82ce6586f926517d3045"),
+        .package(url: "https://github.com/cheapsteak/SwiftTerm", revision: "62d0be6d4c9641a4b27f311c55e1489b024271c3"),
         .package(url: "https://github.com/raspu/Highlightr", from: "2.2.1"),
         .package(url: "https://github.com/siteline/swiftui-introspect", from: "1.0.0"),
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.4.0"),
