@@ -99,6 +99,11 @@ public struct TmuxManager: Sendable {
     /// dryRun reports no windows, which makes reconcile's orphan-window
     /// cleanup pass untestable.
     public let dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])?
+    /// Optional test hook consulted by `listSessions` in dryRun mode:
+    /// `server` → the session/attached-client pairs to report. Without it,
+    /// dryRun reports no sessions, which makes reconcile's external-attach
+    /// (`tbd-ext-*`) reclamation pass untestable.
+    public let dryRunListSessions: (@Sendable (String) -> [(name: String, attachedClients: Int)])?
     /// Optional test hook consulted by `paneCurrentCommand` in dryRun mode:
     /// `(server, paneID)` → the command string to report. Without it, dryRun
     /// always reports "zsh" (no claude), which makes the park path's verify-exit
@@ -172,7 +177,7 @@ public struct TmuxManager: Sendable {
         }
     }
 
-    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunCreateWindowError: (@Sendable (String) -> Error?)? = nil, dryRunRespawnWindowError: (@Sendable (String) -> Error?)? = nil, dryRunKillWindowError: (@Sendable (String, String) -> Error?)? = nil, dryRunPaneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil, dryRunPasteBytes: (@Sendable (String, String, Data) -> Void)? = nil, realModeWindowExistsOverride: (@Sendable (String, String) -> Bool?)? = nil, realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout) {
+    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunListSessions: (@Sendable (String) -> [(name: String, attachedClients: Int)])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunCreateWindowError: (@Sendable (String) -> Error?)? = nil, dryRunRespawnWindowError: (@Sendable (String) -> Error?)? = nil, dryRunKillWindowError: (@Sendable (String, String) -> Error?)? = nil, dryRunPaneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil, dryRunPasteBytes: (@Sendable (String, String, Data) -> Void)? = nil, realModeWindowExistsOverride: (@Sendable (String, String) -> Bool?)? = nil, realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout) {
         self.dryRun = dryRun
         self.subprocessTimeout = subprocessTimeout
         self.counter = Counter()
@@ -180,6 +185,7 @@ public struct TmuxManager: Sendable {
         self.dryRunRecorder = dryRunRecorder
         self.dryRunWindowIsDead = dryRunWindowIsDead
         self.dryRunListWindows = dryRunListWindows
+        self.dryRunListSessions = dryRunListSessions
         self.dryRunCapturePane = dryRunCapturePane
         self.dryRunPaneCurrentCommand = dryRunPaneCurrentCommand
         self.dryRunCreateWindowError = dryRunCreateWindowError
@@ -521,6 +527,21 @@ public struct TmuxManager: Sendable {
 
     public static func listWindowsCommand(server: String, session: String) -> [String] {
         ["-L", server, "list-windows", "-t", session, "-F", "#{window_id} #{pane_id}"]
+    }
+
+    /// Sessions on a server with each one's attached-client count.
+    ///
+    /// The count leads the name deliberately: a tmux session name may contain
+    /// a space, so the parser splits once on the first separator and takes the
+    /// whole remainder as the name. With the name first, a session called
+    /// `my session` would parse as a name of `my` and a client count of
+    /// `session`.
+    public static func listSessionsCommand(server: String) -> [String] {
+        ["-L", server, "list-sessions", "-F", "#{session_attached} #{session_name}"]
+    }
+
+    public static func killSessionCommand(server: String, session: String) -> [String] {
+        ["-L", server, "kill-session", "-t", session]
     }
 
     public static func capturePaneCommand(server: String, paneID: String) -> [String] {
@@ -1171,6 +1192,41 @@ public struct TmuxManager: Sendable {
                 guard parts.count == 2 else { return nil }
                 return (windowID: String(parts[0]), paneID: String(parts[1]))
             }
+    }
+
+    /// Every session on a server, with how many clients are attached to each.
+    ///
+    /// Throws when the server is not running (`list-sessions` fails), which is
+    /// what callers want: "no server" is not the same answer as "no sessions",
+    /// and a caller reclaiming sessions must not read a wedged server as an
+    /// empty one.
+    public func listSessions(server: String) async throws -> [(name: String, attachedClients: Int)] {
+        if dryRun { return dryRunListSessions?(server) ?? [] }
+        let args = Self.listSessionsCommand(server: server)
+        let output = try await runTmux(args)
+        return output
+            .split(separator: "\n")
+            .compactMap { line -> (name: String, attachedClients: Int)? in
+                // Split once: everything past the first space is the name.
+                guard let separator = line.firstIndex(of: " ") else { return nil }
+                guard let attached = Int(line[line.startIndex..<separator]) else { return nil }
+                let name = String(line[line.index(after: separator)...])
+                guard !name.isEmpty else { return nil }
+                return (name: name, attachedClients: attached)
+            }
+    }
+
+    /// Kill one session by name. The windows it holds survive when they are
+    /// linked from another session — which is exactly the case for the
+    /// external-attach sessions the reconciler reclaims: their single window
+    /// is `link-window`ed from `main`.
+    public func killSession(server: String, session: String) async throws {
+        let args = Self.killSessionCommand(server: server, session: session)
+        if dryRun {
+            dryRunRecorder?(args)
+            return
+        }
+        try await runTmux(args)
     }
 
     /// Check whether a tmux window exists by querying list-panes.

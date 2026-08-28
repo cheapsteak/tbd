@@ -442,6 +442,11 @@ extension WorktreeLifecycle {
     ) async throws {
         for server in servers.sorted() {
             try await tmux.withServerResourceLock(server: server) {
+                // Reclaim `tbd-ext-*` sessions before judging the server: the
+                // branch below may kill the whole server, which would take
+                // them with it, but only when nothing references it. A server
+                // that stays alive is the case this pass exists for.
+                await reapExternalAttachSessions(server: server)
                 // Ownership must be read only after acquiring the same lock a
                 // creator holds through its terminal-row commit.
                 let globalLiveRows = try await db.worktrees.listLocal(excludeArchived: true)
@@ -655,6 +660,64 @@ extension WorktreeLifecycle {
                 await pendingQuestions.clear(terminalID: terminal.id)
             }
         }
+    }
+
+    /// Reclaim the external-attach sessions on one tmux server.
+    ///
+    /// `tbd terminal attach` mints a `tbd-ext-<tid8>` session per terminal so
+    /// an external emulator can be a second client on a TBD window. Those
+    /// sessions are a durable external resource, so they get a named
+    /// reconciler, and this is it. `destroy-unattached on` reclaims the
+    /// ordinary case the instant the last client leaves; this pass carries
+    /// every case that option misses.
+    ///
+    /// Matching is on `ExternalAttachCommand.sessionPrefix` alone, so TBD's own
+    /// panel sessions (`tbd-view-*`), the daemon's `main`, and anything a user
+    /// created by hand are never candidates. Killing the session does not
+    /// disturb the terminal: its window is `link-window`ed from `main` and
+    /// survives.
+    ///
+    /// The 60-second grace period is the point, not a courtesy — see
+    /// `ExternalAttachSessionTracker.gracePeriod`.
+    func reapExternalAttachSessions(server: String) async {
+        let sessions: [(name: String, attachedClients: Int)]
+        do {
+            sessions = try await tmux.listSessions(server: server)
+        } catch {
+            // A server that will not answer is not evidence about any session
+            // on it. Leave every observation standing and retry next sweep.
+            logger.debug("reconcile: could not list sessions on \(server, privacy: .public) for external-attach reclamation: \(error, privacy: .public)")
+            return
+        }
+        let observedAt = now()
+        for session in sessions
+        where session.name.hasPrefix(ExternalAttachCommand.sessionPrefix) {
+            guard await externalAttachSessions.shouldReap(
+                server: server,
+                session: session.name,
+                attachedClients: session.attachedClients,
+                at: observedAt
+            ) else { continue }
+            do {
+                try await tmux.killSession(server: server, session: session.name)
+                // Forget before logging: a later session minted under the same
+                // terminal-keyed name must start its own clock.
+                await externalAttachSessions.forget(server: server, session: session.name)
+                logger.info("\(Self.externalAttachReapLogLine(server: server, session: session.name), privacy: .public)")
+            } catch {
+                logger.warning("reconcile: failed to kill external attach session \(session.name, privacy: .public) on \(server, privacy: .public): \(error, privacy: .public)")
+            }
+        }
+    }
+
+    /// The line `reapExternalAttachSessions` logs for each session it kills.
+    ///
+    /// Composed by a named function so a test can assert the exact text: the
+    /// spec requires the reap to be *detectable afterwards*, so that a
+    /// truncated measurement run is distinguishable from a quiet one, and a
+    /// line that stopped naming its session would defeat that silently.
+    static func externalAttachReapLogLine(server: String, session: String) -> String {
+        "reconcile: killed external attach session \(session) on tmux server \(server) — no client had been attached to it for at least \(Int(ExternalAttachSessionTracker.gracePeriod))s"
     }
 
     /// True when `server` is up AND hosts a live tmux window for at least one
