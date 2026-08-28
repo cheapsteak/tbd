@@ -390,10 +390,21 @@ jobs:
       # takes the complement of steps 1+3, the quiet pass takes
       # TBDDaemonLiveTests: no gap, no overlap, nothing to maintain.
       #
-      # Floors: `swift test --list-tests` today reports TBDDaemonTests 2194,
-      # TBDAppTests 1725, TBDSharedTests 502, TBDCLITests 127,
-      # TBDDaemonLiveTests 57 (4605 total). What actually EXECUTES is slightly
-      # lower for step 2 — 2342, not 1725+502+127=2354 — because a handful of
+      # Floors: `swift test --list-tests` on 2026-08-28 reports TBDDaemonTests
+      # 4354, TBDAppTests 2790, TBDSharedTests 858, TBDCLITests 306,
+      # TBDDaemonLiveTests 85 (8393 total). Those numbers are worth reading
+      # next to the ones this comment carried when the split landed —
+      # TBDDaemonTests 2194, 4605 total — because step 1 alone now runs more
+      # tests than the whole package did then, and step 1 is where the tail
+      # lives. Halving the in-flight population is what the split bought, and
+      # growth has since spent it: measured on the 2026-08-28 run of `main`,
+      # step 1's median test reported an 85.8 s span (p90 112.1 s, max
+      # 132.8 s) and 47% of its tests spanned longer than the 90 s
+      # `ciSafeDeadline` they are bounded by. Re-splitting step 1 is the
+      # remedy that follows from "population is the scheduler"
+      # (`Tests/CLAUDE.md`); raising the deadlines instead re-derives four
+      # coupled constants and wants a spec first. What actually EXECUTES is
+      # slightly lower for step 2 — 3876 on that run — because a handful of
       # tests are conditionally skipped at runtime. The floors are set against
       # the executed counts (the summary line these steps grep), which is the
       # only number the check can see; don't "correct" them to the listed

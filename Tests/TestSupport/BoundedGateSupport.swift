@@ -106,7 +106,8 @@ public func gateHoldingTask<Success: Sendable>(
 /// is held for as long as the test's own observation takes, and the outer
 /// observations are themselves hang-catchers sized against a loaded runner:
 /// the `TmuxControlSupervisor` teardown gates are held across a `waitUntil`
-/// bounded by `ciSafeDeadline` (90 s). A gate deadline below that would go red
+/// bounded by that suite's own `teardownWaitDeadline` (90 s, the value
+/// `ciSafeDeadline` carries). A gate deadline below that would go red
 /// on a merely slow machine, and a spuriously red CI is worse than the bug
 /// this bound exists to report. 120 s clears 90 s with margin while staying a
 /// small fraction of the 30-minute step budget, so a wedge reports in minutes
