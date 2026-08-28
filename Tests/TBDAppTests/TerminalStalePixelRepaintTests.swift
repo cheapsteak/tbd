@@ -101,7 +101,7 @@ private final class StalePixelHarness {
         view.nativeBackgroundColor = background
         view.nativeForegroundColor = foreground
         view.layer?.backgroundColor = background.cgColor
-        view.getTerminal().updateFullScreen()
+        view.withTerminal { $0.updateFullScreen() }
 
         view.resize(cols: cols, rows: rows)
 
@@ -305,16 +305,25 @@ private final class StalePixelHarness {
     /// the ones still carrying ink. Restricted to cells the scenario knows are
     /// default-background.
     func scanBlankCells(rowRange: Range<Int>, colRange: Range<Int>) -> [CellReading] {
-        let terminal = view.getTerminal()
-        var dirty: [CellReading] = []
-        for row in rowRange {
-            for col in colRange {
-                let ch = terminal.getCharacter(col: col, row: row)
-                guard ch == " " || ch == "\0" else { continue }
-                let reading = readCell(row: row, col: col)
-                if reading.offBackgroundPixels > 0 {
-                    dirty.append(reading)
+        // Copy the blank-cell coordinates out under the lock (SwiftTerm 2.0
+        // locked access); the bitmap reads below run outside it.
+        let blankCells: [(row: Int, col: Int)] = view.withTerminal { terminal in
+            var cells: [(row: Int, col: Int)] = []
+            for row in rowRange {
+                for col in colRange {
+                    let ch = terminal.getCharacter(col: col, row: row)
+                    if ch == " " || ch == "\0" {
+                        cells.append((row, col))
+                    }
                 }
+            }
+            return cells
+        }
+        var dirty: [CellReading] = []
+        for cell in blankCells {
+            let reading = readCell(row: cell.row, col: cell.col)
+            if reading.offBackgroundPixels > 0 {
+                dirty.append(reading)
             }
         }
         return dirty
@@ -323,8 +332,9 @@ private final class StalePixelHarness {
     /// Row as SwiftTerm's grid holds it — used to prove the BUFFER is clean, so
     /// any residue is pixels-only.
     func bufferRow(_ row: Int) -> String {
-        let terminal = view.getTerminal()
-        return (0..<cols).map { String(terminal.getCharacter(col: $0, row: row) ?? " ") }.joined()
+        view.withTerminal { terminal in
+            (0..<cols).map { String(terminal.getCharacter(col: $0, row: row) ?? " ") }.joined()
+        }
     }
 
     func dumpLog() -> String {
