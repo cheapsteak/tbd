@@ -94,8 +94,9 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
         /// Recorded when `LocalProcess`'s own exit monitor fires — by then it
         /// has already called `waitpid`, so `cleanup()` must NOT reap this pid
         /// (it is free, and could have been recycled for another child of this
-        /// process). Both sides are main-isolated — the callback by
-        /// `LocalProcess`'s default `dispatchQueue`, `cleanup()` by its
+        /// process). Both sides are main-isolated — the callback by the
+        /// explicit `dispatchQueue: .main` passed at construction (2.0's
+        /// default is a private background queue), `cleanup()` by its
         /// `@MainActor` below — so see `ChildExitObservation` for why the flag
         /// is lock-guarded regardless.
         private let childExitObservation = ChildExitObservation()
@@ -171,8 +172,9 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
             viewHolder.clear()
             localProcess?.terminate()
             localProcess = nil
-            // terminate() cancels `LocalProcess`'s exit monitor (via
-            // childStopped()) before the SIGTERM it just sent can land, so
+            // terminate() cancels `LocalProcess`'s exit monitor directly
+            // (`takeResourcesForShutdown()` → `cancelMonitor()`) before it
+            // even sends SIGTERM, so
             // nothing left will `waitpid` this child — that cancellation is
             // also what makes `ChildReaper` its sole waiter. Without the reap
             // it stays `<defunct>` under TBDApp forever.

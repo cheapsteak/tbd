@@ -18,13 +18,14 @@ import Testing
 /// `localProcess = nil` that makes `LocalProcess.deinit` (and thus the
 /// monitor cancellation and fd close) happen at a known moment.
 ///
-/// **Why the default `dispatchQueue` (main) and not an injected background
-/// queue.** Production passes none, so `LocalProcess` defaults to
-/// `DispatchQueue.main` for both `childMonitor` and the `DispatchIO` cleanup
-/// handler; passing a background queue here would test a configuration TBD
-/// never uses. That is only sound because this process genuinely drains the
-/// main queue (`Tests/CLAUDE.md`), so the monitor is live rather than merely
-/// idle — the child outlives the coordinator precisely because `cleanup()`
+/// **Why `dispatchQueue: .main` and not an injected background queue.**
+/// Production passes `dispatchQueue: .main, directDelivery: true` explicitly
+/// (since the SwiftTerm 2.0 pin, whose default queue is a private background
+/// serial queue, not main), putting `childMonitor` and the `DispatchIO`
+/// cleanup handler on main; `startChild` passes the same, because any other
+/// queue would test a configuration TBD never uses. That is only sound
+/// because this process genuinely drains the main queue (`Tests/CLAUDE.md`),
+/// so the monitor is live rather than merely idle — the child outlives the coordinator precisely because `cleanup()`
 /// cancels that live monitor, which is the behavior under test.
 ///
 /// **These tests are deliberately NOT `@MainActor`, and each takes exactly one
@@ -153,7 +154,9 @@ struct TerminalTeardownReapTests {
     private func startChild(
         delegate: LocalProcessDelegate, lifetime: String, assign: @MainActor (LocalProcess) -> Void
     ) -> pid_t {
-        let process = LocalProcess(delegate: delegate)
+        // Production configuration (see the suite comment): exit monitor on
+        // main, data delivered inline on the IO thread.
+        let process = LocalProcess(delegate: delegate, dispatchQueue: .main, directDelivery: true)
         process.startProcess(
             executable: "/bin/sleep", args: [lifetime], environment: nil, execName: nil)
         assign(process)
@@ -250,7 +253,8 @@ struct TerminalTeardownReapTests {
     /// The remote path *does* end its child — `cleanup()` calls
     /// `LocalProcess.terminate()`, which sends SIGTERM — so a long-lived child
     /// is production-faithful here. `terminate()` cancels the exit monitor
-    /// (via `childStopped()`) before that signal can land, so the reap is the
+    /// directly (`takeResourcesForShutdown()` → `cancelMonitor()`) before it
+    /// even sends that signal, so the reap is the
     /// only thing standing between this teardown and a permanent zombie.
     @Test("LocalPTYTerminalRepresentable teardown kills AND reaps its child")
     func localPTYCleanupReapsChild() async throws {

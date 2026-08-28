@@ -53,8 +53,9 @@ final class ChildExitObservation: Sendable {
 ///
 /// - `deinit` cancels the monitor, then closes the master fd; the child only
 ///   notices the resulting `SIGHUP` afterwards.
-/// - `terminate()` closes the fd, sends `SIGTERM`, then cancels the monitor via
-///   `childStopped()`; signal delivery and process teardown are asynchronous.
+/// - `terminate()` cancels the monitor directly (`takeResourcesForShutdown()`
+///   → `cancelMonitor()`), closes the write channel, and only then sends
+///   `SIGTERM` — the monitor is already gone before the signal can land.
 ///
 /// — so on both paths the `.exit` event never fires, `waitpid` is never called,
 /// and the child stays a zombie under TBDApp for the life of the app. Observed

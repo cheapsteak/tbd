@@ -167,10 +167,13 @@ breaks silently on any upstream rename.
 
 ## Site map
 
-- **Dimensions → `terminalDimensions`, no lock** — `TerminalPanelView`
-  parked-snapshot compose, initial `TIOCSWINSZ`, control-mode resize,
-  `getWindowSize`; `LocalPTYTerminalView` spawn-time size and
-  `getWindowSize`; `TBDTerminalView.gridPosition`.
+- **Dimensions → `terminalDimensions`, no locked closure** — the snapshot
+  is not lock-free (it takes `terminalLock` briefly inside, and the lock is
+  non-recursive, so it must never be called from within `withTerminal`) but
+  needs no closure at the call site — `TerminalPanelView` parked-snapshot
+  compose, initial `TIOCSWINSZ`, control-mode resize, `getWindowSize`;
+  `LocalPTYTerminalView` spawn-time size and `getWindowSize`;
+  `TBDTerminalView.gridPosition`.
 - **Per-cell reads → `withTerminal` copy-out** — `hasOSC8Payload`,
   `extractFilePath`, `extractHyperlinkURL`. Byte-identical behavior; the
   #113 guard reads the same cells under the same lock as SwiftTerm's click

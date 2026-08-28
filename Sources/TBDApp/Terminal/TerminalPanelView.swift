@@ -309,7 +309,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // its last rows (a notice block overwriting the frozen status-bar
             // chrome), padded to the
             // view's REAL column count — onReady fires once layout has given
-            // the terminal its true dimensions, so `tv.terminal.cols` is the
+            // the terminal its true dimensions, so `tv.terminalDimensions.cols` is the
             // same source the resize paths use. A nil snapshot still yields
             // the block alone (a capture-less parked pane used to be pitch
             // black). The live/wake path (`suspendedOnCreate == false`) feeds
@@ -1046,9 +1046,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // otherwise stuck at whatever size it had until the user first
                 // drags, so fullscreen Claude would render at the wrong width.
                 // Same debounced path as live resizes.
-                scheduleControlModeResize(
-                    cols: terminalView.terminalDimensions.cols,
-                    rows: terminalView.terminalDimensions.rows)
+                let dims = terminalView.terminalDimensions
+                scheduleControlModeResize(cols: dims.cols, rows: dims.rows)
                 // Intercept ALL pastes at the view level while attached (the
                 // paste ruling v2) and ship them as a `.paste` sidecar frame.
                 // Interception happens BEFORE SwiftTerm brackets the content,

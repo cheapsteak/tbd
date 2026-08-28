@@ -229,8 +229,10 @@ class TBDTerminalView: TerminalView {
     // copy values out of the closure and return them — never store the
     // `Terminal` reference; never call `TerminalView` APIs from inside the
     // closure (they may acquire the same lock and deadlock); never re-enter
-    // `withTerminal`. Pure cols/rows reads use the lock-free
-    // `terminalDimensions` snapshot instead.
+    // `withTerminal`. Pure cols/rows reads use the `terminalDimensions`
+    // snapshot instead — no closure to hold, but it briefly takes the same
+    // `terminalLock` internally, so it too must never be called from inside
+    // `withTerminal` (the lock is non-recursive; re-entry traps).
 
     private func applyCursor() {
         withTerminal { $0.setCursorStyle(appearanceSettings.cursorStyle) }
