@@ -56,17 +56,17 @@ measurement. A future reader must not treat it as one.
 ## The command
 
 ```sh
-[ "$(tmux -S <socket> list-windows -t tbd-ext-<tid8> -F '#{window_id}' 2>/dev/null)" = '@<win>' ] || {
-    tmux -S <socket> kill-session -t tbd-ext-<tid8> 2>/dev/null
+[ "$(tmux -S <socket> list-windows -t '=tbd-ext-<tid8>' -F '#{window_id}' 2>/dev/null)" = '@<win>' ] || {
+    tmux -S <socket> kill-session -t '=tbd-ext-<tid8>' 2>/dev/null
     tmux -S <socket> \
         new-session -d -s tbd-ext-<tid8> -c /tmp \; \
-        link-window -s @<win> -t tbd-ext-<tid8>: \; \
-        kill-window -a -t tbd-ext-<tid8>:@<win> \
-        || { tmux -S <socket> kill-session -t tbd-ext-<tid8> 2>/dev/null; false; }
+        link-window -s @<win> -t '=tbd-ext-<tid8>:' \; \
+        kill-window -a -t '=tbd-ext-<tid8>:@<win>' \
+        || { tmux -S <socket> kill-session -t '=tbd-ext-<tid8>' 2>/dev/null; false; }
 } && tmux -u -S <socket> \
-    select-window -t tbd-ext-<tid8>:@<win> \; \
-    attach -t tbd-ext-<tid8> -f ignore-size \; \
-    set-option -t tbd-ext-<tid8> destroy-unattached on
+    select-window -t '=tbd-ext-<tid8>:@<win>' \; \
+    attach -t '=tbd-ext-<tid8>' -f ignore-size \; \
+    set-option -t '=tbd-ext-<tid8>:' destroy-unattached on
 ```
 
 `<tid8>` is the first eight hex digits of the terminal's UUID; `<win>` is its
@@ -133,6 +133,20 @@ measurement. A future reader must not treat it as one.
   option survives. Chaining it onto the attach attaches cleanly, leaves the
   option set, and still self-destroys the session on detach. See "Reclamation"
   for why the option is not the whole answer.
+- **`=` on every session target.** A bare `-t <name>` resolves by exact name,
+  then by prefix, then as a glob, so any of these commands could land on a
+  different session whose name merely starts with this one's. Measured on tmux
+  3.6a: with no exact `tbd-ext-abcd1234` present, `kill-session -t
+  tbd-ext-abcd1234` destroyed a user's `tbd-ext-abcd1234-notes` and exited 0.
+  The correct form differs by target kind, and two of them are traps worth
+  knowing before anyone "simplifies" them to match their neighbours. `set-option
+  -t '=<name>'` fails with `no such session` even when the session exists, and
+  `if-shell -F -t '=<name>'` silently takes its else branch on a session that
+  exists and is unattached — which in the reclamation path would stop reclaiming
+  anything while looking like there was nothing to reclaim. Both need the
+  trailing colon, `'=<name>:'`, because their `-t` is a pane target: without the
+  colon the word is read as a window or pane in the current session and the `=`
+  never reaches session resolution.
 - **`&&` between setup and attach.** Two bare statements would attach
   regardless of whether the setup worked. With a window that died between the
   daemon's probe and the paste, that put a client on the throwaway `/tmp` shell
