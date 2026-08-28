@@ -44,7 +44,10 @@ measurement. A future reader must not treat it as one.
   `link-window`, kills the throwaway window 0, and attaches with
   `tmux -u -L <server> attach -t <session>`. Panel sizes stay independent
   because each panel holds a *different* window, not because sessions isolate
-  size.
+  size. Note that TBD's own viewer addresses the server by name (`-L`) while
+  the command below pins the socket path (`-S`). The two resolve to the same
+  socket whenever `TMUX_TMPDIR` matches, which is the ordinary case; the
+  asymmetry is deliberate and its reason is given with the command.
 - **A window has one size.** `window-size` is `latest` (verified on tmux
   3.6a), so among the clients displaying a window, the most recently active one
   sets its dimensions. No session arrangement changes this; only the per-client
@@ -125,8 +128,10 @@ reasons:
   disagreement — an unstamped pane composes as before, matching how send and
   wake already behave.
 
-The result carries the socket path, session name, window id, and the rendered
-script, so a caller can either paste the script or rebuild its own variant.
+The result carries the socket path, session name, window id, **pane id** and
+terminal id, plus the rendered script. A caller can therefore paste the script,
+rebuild its own variant, or ignore the attach entirely and drive a different
+tmux instrument with the same coordinates.
 
 ## Surfaces
 
@@ -139,7 +144,19 @@ worktree's only terminal; a worktree with several is an error listing the
 candidates, never a guess. With `--print` it writes the script to stdout and
 exits — which is what makes the comparison scriptable, and what lets a
 non-interactive timestamping consumer be attached in place of a human eyeballing
-two windows.
+two windows. Its output is safe to pipe straight into `sh` — no prompts, no
+interactive assumptions — and the exec path exits non-zero when the attach
+fails, so a harness can tell a failed attach from an empty measurement.
+
+**`--json` emits the coordinates instead of a script**: socket path, `@window`,
+`%pane`, and terminal id. This matters more than it looks. The sharper
+instrument for the byte-burst question is `tmux pipe-pane -o`, which needs a
+pane id and a socket path and never attaches a client at all — so without a
+machine-readable form, the better instrument would be the one thing this CLI
+could not drive. The daemon already resolves every one of those values on the
+way to composing the script, `paneSendTarget` reads `#{pane_id}` as it goes,
+and emitting them makes `tbd terminal attach` the general entry point for
+instrumenting a TBD terminal rather than only an attach helper.
 
 `terminal` is a thirteenth verb on an already busy noun, but every verb there
 acts on a terminal and so does this one; a new top-level word would sit
@@ -165,9 +182,22 @@ reconciler. Three mechanisms, in order of who acts first:
   even when the option does not take effect, because `has-session` reuses
   rather than mints.
 - **`WorktreeLifecycle+Reconcile`** gains a pass that kills `tbd-ext-*`
-  sessions with no attached client. This is the named reconciler for the PR
-  description. It already reconciles DB rows against tmux windows and servers,
-  so this extends an existing sweep rather than introducing a new one.
+  sessions that have had no attached client for at least 60 seconds. This is
+  the named reconciler for the PR description. It already reconciles DB rows
+  against tmux windows and servers, so this extends an existing sweep rather
+  than introducing a new one.
+
+The grace period is a measurement-integrity requirement, not a politeness. A
+sweep that reaped any client-less `tbd-ext-*` immediately could take the
+session during a momentary detach, or inside the create-to-attach gap named
+below. No work would be lost — the window is linked from `main` and survives —
+but the measurement would be silently truncated and would still emit
+plausible-looking partial data. That is this investigation's signature failure
+mode: a run that measured an idle terminal and confidently reported a healthy
+result, and sampling windows that missed the action entirely and produced a
+wrong committed spec. For the same reason the sweep logs a line naming each
+session it reaps, so a truncated run is detectable afterwards rather than
+indistinguishable from a quiet one.
 
 The first two are create-time cleanup, which the repo's doctrine treats as
 best-effort by standing policy: every unbounded leak found in the wild sat on a
@@ -189,21 +219,52 @@ The comparison this feature exists for has three conditions:
   swings wildly within minutes, and a sequential comparison would be confounded
   by exactly the variable that dominates the noise; this investigation has
   already produced one wrong conclusion that way, chasing a coalescing defect
-  that A/B/A testing showed was entirely load. Simultaneous attachment makes it
-  a within-subject comparison and controls for load by construction. A second
-  client is genuine extra per-output work for tmux, but it perturbs both
-  clients identically, and the clients are being compared against each other
-  rather than against an absolute baseline.
-- **External alone** — reachable today by switching TBD's tab away from that
-  terminal, which kills its viewer client.
+  that A/B/A testing showed was entirely load.
+- **External alone** — reachable by switching TBD's tab away from that
+  terminal, which kills its viewer client. Read the geometry caveat below
+  before comparing it against anything.
 
-**Size the external window at least as large as TBD's panel.** Under
-`ignore-size` the window keeps the dimensions it already had, so a smaller
+**A second client is not a neutral observer, so runs must be A/B/A bracketed.**
+tmux writes to its attached clients from a single-threaded server, so an
+external client that is slow to drain its socket can back-pressure the server
+and delay writes to TBD's client. The perturbation is not guaranteed
+symmetric, and the failure mode is the worst available one here: attaching the
+instrument could manufacture the very jerkiness in TBD that the instrument
+exists to detect, and the result would read as "SwiftTerm is the problem".
+Simultaneous attachment remains right for the load-confound reason above, but
+it is not sufficient alone. Every run therefore brackets — TBD alone, both
+attached, TBD alone again — and the two bracketing measurements must agree
+before the middle one is interpreted at all. If they disagree, the second
+client perturbed the system and that run is void.
+
+**`ignore-size` protects the geometry only while TBD's client is attached.**
+Measured on tmux 3.6a: with a normal 100x30 client and an `ignore-size` 180x45
+client both attached, the window holds at 100x29 — the flag works. Detach the
+normal client and the window immediately becomes 180x44. tmux honors
+`ignore-size` while another client is contributing a size and falls back to the
+ignoring client's dimensions when it is the only one left. Two consequences:
+attaching never disturbs a measurement in progress, which is what the flag was
+chosen for; but "external alone" runs at a different geometry than "both
+attached", so its stream is cut for a different width and the two conditions
+are not directly comparable. Treat the third condition as a separate
+observation, not as the same experiment with one client removed.
+
+**Size the external window at least as large as TBD's panel.** In the
+both-attached condition the window keeps TBD's dimensions, so a smaller
 external window makes the emulator wrap or clip a stream cut for a wider
 window. That would make the external client look worse than it is and fake a
 result in TBD's favour. This is documented in the CLI's help text and here; it
 is not enforced. Enforcing it would mean the daemon reasoning about a window
 size it does not own, to protect an experiment the command cannot see.
+
+**Hiding a tab does not pause the session.** The third condition depends on
+this and it holds: `TmuxBridge`'s hide path only kills the panel's viewer
+session, and auto-hibernate is driven by an idle-time window with a settle
+delay, not by panel visibility. One adjacent hazard is worth knowing rather
+than assuming: a terminal watched quietly for a long stretch is exactly the
+idle-at-rest shape the sweep looks for, so a long measurement on an idle
+session can be hibernated out from under the observer where auto-hibernate is
+enabled.
 
 ## Testing
 
@@ -216,12 +277,23 @@ size it does not own, to protect an experiment the command cannot see.
 - **Nesting guard.** With `$TMUX` set, the exec path refuses and names
   `--print`; with it unset, it execs. Both branches, per the repo's rule for
   gating conditionals.
-- **Reclamation.** The reconciler pass kills a `tbd-ext-*` session with no
-  attached client, leaves one with a client alone, and touches neither
-  `tbd-view-*` nor `main`.
+- **Reclamation.** The reconciler pass kills a `tbd-ext-*` session that has
+  been client-less past the grace period, leaves one inside the grace period
+  alone, leaves one with a client alone, and touches neither `tbd-view-*` nor
+  `main`. A reap emits its log line.
+- **Coordinate output.** `--json` carries socket path, `@window`, `%pane` and
+  terminal id, and the pane id it reports is the one the identity probe
+  verified — not a separately resolved value that could disagree with it.
 - **The detach race**, live against a real tmux server, per the repo's
   live-tmux discipline: bounded deadlines, rc-free bootstraps, and a fenced
-  `TMUX_TMPDIR` so the run cannot leave a socket behind.
+  `TMUX_TMPDIR` so the run cannot leave a socket behind. Keep the fenced
+  directory directly under a short `/tmp` root, or the socket path outgrows
+  darwin's `sun_path` limit.
+- **The geometry behavior** the measurement guidance rests on, in the same
+  live test: with both clients attached the window holds TBD's dimensions, and
+  when the normal client detaches the window takes the `ignore-size` client's
+  dimensions. Pinning it guards the guidance against a future tmux changing
+  the rule underneath it.
 
 ## No feature flag
 
@@ -244,7 +316,11 @@ condition is reachable today only as a side effect of switching tabs, because
 no "tab open, nothing attached" state. A deliberate control would need that
 state to render, persist, and recover, and to interact sanely with hibernation
 and suspend. The two conditions the comparison actually rests on both work
-without it, so it is recorded here rather than built.
+without it, so it is recorded here rather than built. Note that building it
+would not by itself make the third condition comparable to the second: the
+window resizes when TBD's client leaves regardless of how it leaves, so the
+geometry difference is a property of tmux's sizing rule and not of the missing
+affordance.
 
 **Surfacing the attach command in `tbd terminal list`.** A column or a
 `--attach-command` flag would save a second call when scripting across many
