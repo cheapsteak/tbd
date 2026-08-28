@@ -181,8 +181,11 @@ reasons:
   Checked before the probe runs.
 - **The window must be verified before it is named.** The daemon runs the same
   pane probe `terminal.send` runs before it types anything, reading
-  `#{pane_id}`, `#{pane_dead}`, `#{window_id}` and the `@tbd_terminal_id` pane
-  option. Four states refuse, each naming itself rather than composing a
+  `#{pane_id}`, `#{pane_dead}`, `#{window_id}`, the `@tbd_terminal_id` pane
+  option, and `#{pane_start_command}` — the last because a pane spawned before
+  the pane option existed carries its identity only as a `TBD_TERMINAL_ID` in
+  its start command, so dropping that field would silently downgrade those
+  panes to unidentified. Four states refuse, each naming itself rather than composing a
   command aimed at a stranger's session: a missing window, a dead pane, a pane
   answering with a different terminal's id, and a pane living in a different
   window than the row records. Refusal requires positive disagreement — an
@@ -252,8 +255,26 @@ reconciler. Three mechanisms, in order of who acts first:
   rebuilds under that name rather than minting a new one.
 - **`WorktreeLifecycle.reclaimExternalAttachSessions()`**, driven by the
   daemon's hourly orphan maintenance inside the `gcEnabled` gate, kills
-  `tbd-ext-*` sessions that have been client-less past a 60-second grace. This
-  is the named reconciler for the PR description.
+  sessions that have been client-less past a 60-second grace. This is the
+  named reconciler for the PR description.
+
+A candidate is a session whose name is one this feature could itself have
+minted: the `tbd-ext-` prefix followed by exactly eight lowercase ASCII hex
+digits, matched whole. A prefix test is not enough, and the difference is not
+cosmetic. The reap issues `kill-session` inside an `if-shell` command string
+that tmux re-tokenizes, so a hand-made session called `tbd-ext-aa ;
+kill-server` would have taken down the entire repo's tmux server and every
+terminal on it. The predicate lives beside the name builder so the rule that
+mints a name and the rule that reaps one cannot drift apart, and the alphabet
+is an explicit ASCII set rather than `Character.isHexDigit`, which also admits
+full-width forms.
+
+Every session target is additionally pinned to an exact match with tmux's `=`
+prefix. Bare `-t <name>` falls back to prefix matching: measured on tmux 3.6a,
+with no exact `tbd-ext-abcd1234` present, `kill-session -t tbd-ext-abcd1234`
+killed a user's `tbd-ext-abcd1234-notes` and exited 0, which would have had the
+daemon log a kill naming a session it did not touch. `=` makes that a "can't
+find session" error instead.
 
 It is deliberately not folded into the `reapOrphanTmuxResources` flag, which
 gates the destructive window and server pass, and it takes the per-server
@@ -402,7 +423,9 @@ description of someone running a long measurement.
 - **Reclamation.** The reconciler pass kills a `tbd-ext-*` session that has
   been client-less past the grace period, leaves one inside the grace period
   alone, leaves one with a client alone, and touches neither `tbd-view-*` nor
-  `main`. A reap emits its log line. A session recreated under the same
+  `main`. Names carrying the prefix but not the exact minted shape are not
+  candidates — including the injection case — and a prefix-sibling session
+  survives a reap aimed at an absent exact name. A reap emits its log line. A session recreated under the same
   terminal-keyed name is not reaped on its first observation. The hourly
   orphan-maintenance cadence actually reaches the pass — a test that calls
   reconcile by hand proves wiring, not cadence, and wiring without cadence is
