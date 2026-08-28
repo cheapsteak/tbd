@@ -24,6 +24,7 @@ from pathlib import Path
 
 import yaml
 
+from hook_bounds import HOOK_PATH, hook_number
 from validate import STALL_REPORT
 from workflow_steps import (
     _WORKFLOWS_DIR,
@@ -413,8 +414,6 @@ def test_validate_reads_the_specialist_set_from_that_declaration() -> None:
     assert "'correctness,conventions'" not in body
 
 
-HOOK_PATH = _WORKFLOWS_DIR / "claude-review-v2" / "hooks" / "stop-hook.sh"
-
 _HOOK_FALLBACK_RE = re.compile(
     r'^\s*specialists="\$\{REVIEW_SPECIALISTS:-(?P<fallback>[^}]*)\}"\s*$',
     re.MULTILINE,
@@ -442,6 +441,52 @@ def _hook_specialist_fallback() -> str:
         f"{sorted(set(fallbacks))}"
     )
     return fallbacks[0]
+
+
+def test_the_job_raises_the_harness_consecutive_block_cap() -> None:
+    """The harness overrides a Stop hook after N consecutive blocks.
+
+    Its default is 8, and it does not fail the run when it fires: it ends the
+    turn and reports the session as normally completed, so the whole hold is 8
+    blocks long however many turns or minutes remain. Run 33010660928 died
+    that way — both findings files on disk, no review-result.json, gate failed
+    closed 2 seconds after the second specialist landed. The cap must clear the
+    hook's OWN worst case so the hook's bounds, not the harness's, decide when
+    a waiting session is released.
+    """
+    cap = int(_review_job()["env"]["CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"])
+    assert cap > hook_number("max_holds") + hook_number("max_blocks")
+
+
+def test_the_hold_window_survives_the_harness_default_cap_alone() -> None:
+    """The raised cap is a harness knob this repository does not control.
+
+    `anthropics/claude-code-action@v1` is a floating tag, so a release could
+    drop or rename the variable with no change of ours. The window is the leg
+    that does not depend on it: at the harness's own default of 8 blocks the
+    hold must still cover the ~10 minutes the specialists need, or the failure
+    comes straight back the day the knob stops working.
+
+    One block is subtracted rather than counted as hold time. The block whose
+    window the findings land in carries the merge instruction, and the
+    orchestrator can still end a turn between reading those files and writing
+    the result — so the last of the eight has to be available for the merge,
+    not spent waiting for it.
+    """
+    HARNESS_DEFAULT_BLOCK_CAP = 8
+    SPECIALIST_SECONDS = 600  # ~10 min, measured on the PR #604 good run
+    holds = HARNESS_DEFAULT_BLOCK_CAP - 1  # one reserved for the merge itself
+    assert hook_number("window") * holds > SPECIALIST_SECONDS
+
+
+def test_the_deadline_stays_the_binding_bound_locally() -> None:
+    """The hold count is a backstop against a broken clock, not a second
+    deadline: spending every hold must take longer than the deadline, so the
+    deadline is always what releases a genuinely stalled session."""
+    assert (
+        hook_number("max_holds") * hook_number("window")
+        > hook_number("deadline")
+    )
 
 
 _PROMPT_FINDINGS_RE = re.compile(r"findings-(?P<name>[a-z][a-z0-9_-]*)\.json")

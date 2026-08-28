@@ -49,6 +49,16 @@ jobs:
       # and the validate step passes it as --expected-specialists. Two literals
       # would let the hook and the validator drift apart silently.
       REVIEW_SPECIALISTS: correctness,conventions
+      # The harness overrides a Stop hook that blocks 8 times CONSECUTIVELY —
+      # it ends the turn and reports the session as normally completed, which
+      # is how run 33010660928 finished with both findings files on disk, no
+      # review-result.json, and a gate that failed closed 2 seconds after the
+      # second specialist landed. Eight blocks is the whole hold, so the
+      # default caps it far below the 25-minute deadline the hook is built
+      # around (hooks/stop-hook.sh). Raised past the hook's own worst case —
+      # 20 holds plus 5 nudges — so those bounds, not this one, decide when a
+      # waiting session is finally released.
+      CLAUDE_CODE_STOP_HOOK_BLOCK_CAP: 100
 
     permissions:
       contents: read
