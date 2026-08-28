@@ -1245,9 +1245,30 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         }
 
         func dataReceived(slice: ArraySlice<UInt8>) {
+            // `mainThreadHop` begins here, on the pty reader thread, and ends
+            // inside the block below once the main thread actually picks it up.
+            // That duration IS the main-thread queueing delay for terminal
+            // output — the quantity average CPU utilisation cannot show, and the
+            // one that identified the SwiftUI view-graph flush as the stall.
+            // See `TerminalSignposts` for why every chunk is instrumented.
+            let signposter = TerminalSignposts.signposter
+            let hop = signposter.beginInterval(
+                TerminalSignposts.Region.mainThreadHop,
+                id: signposter.makeSignpostID(),
+                "bytes=\(slice.count)"
+            )
             DispatchQueue.main.async { [weak self] in
+                signposter.endInterval(
+                    TerminalSignposts.Region.mainThreadHop, hop, "bytes=\(slice.count)"
+                )
                 self?.groupedViewerDidReceiveOutput()
+                let feedState = signposter.beginInterval(
+                    TerminalSignposts.Region.feed,
+                    id: signposter.makeSignpostID(),
+                    "bytes=\(slice.count)"
+                )
                 self?.terminalView?.feed(byteArray: slice)
+                signposter.endInterval(TerminalSignposts.Region.feed, feedState)
             }
         }
 
