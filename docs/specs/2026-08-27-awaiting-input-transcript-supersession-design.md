@@ -125,7 +125,7 @@ does when it supersedes a reason.
 state — in a 153-terminal fleet, two rows held a standing prompt. When a file is
 growing, a bounded read of only the region appended since the previous pass, and
 the refresh means that region is what arrived in one interval rather than the
-whole file. The delta read is capped at the same order of tail window the
+whole file. The delta read is capped at 64 KiB, the same order of tail window the
 daemon's other transcript readers use; when the appended region exceeds the cap,
 only its tail is examined, which can miss a parent record buried in the
 unexamined part and therefore fails toward leaving the hand raised.
