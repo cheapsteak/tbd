@@ -2,6 +2,9 @@ import AppKit
 import SwiftUI
 import TBDShared
 import UniformTypeIdentifiers
+import os
+
+private let tabBarLogger = Logger(subsystem: "com.tbd.app", category: "tabBar")
 
 /// Transferable payload identifying a tab during drag/drop. App-only — never crosses the wire.
 struct TabDragPayload: Codable, Transferable {
@@ -536,6 +539,30 @@ enum ContinueInCodexMenu {
     }
 }
 
+// MARK: - TabTerminalTarget
+
+/// Pure resolution of the terminal a tab is backed by: the anchor for the
+/// tab's deep link, and the target of "Copy Attach Command". A pane with no
+/// terminal behind it (webview, code viewer, note) resolves to nil — its deep
+/// link falls back to the worktree alone, and it offers no attach command at
+/// all, because there is no tmux window for an external emulator to attach to.
+///
+/// Nil *is* the menu's hide condition: `contextMenuContent` gates the "Copy
+/// Attach Command" button on `if let` over this call, so there is deliberately
+/// no boolean twin — a separate `showsAttachCommand` would be a second rule
+/// the tests could hold green while the menu's own drifted away from it.
+/// Extracted from the view so each branch is unit-testable without rendering
+/// SwiftUI (same pattern as `TabParkMenuModel` and `ContinueInCodexMenu`).
+enum TabTerminalTarget {
+    static func terminalID(for content: PaneContent) -> UUID? {
+        switch content {
+        case .terminal(let terminalID): return terminalID
+        case .liveTranscript(_, let terminalID): return terminalID
+        case .webview, .codeViewer, .note: return nil
+        }
+    }
+}
+
 private struct TabBarItem: View {
     let tab: TBDShared.Tab
     let index: Int
@@ -868,11 +895,7 @@ private struct TabBarItem: View {
     /// non-terminal panes (webview, code viewer, note), whose links fall back
     /// to the worktree alone.
     private var linkTerminalID: UUID? {
-        switch tab.content {
-        case .terminal(let terminalID): return terminalID
-        case .liveTranscript(_, let terminalID): return terminalID
-        default: return nil
-        }
+        TabTerminalTarget.terminalID(for: tab.content)
     }
 
     @ViewBuilder
@@ -890,6 +913,36 @@ private struct TabBarItem: View {
                 DeepLink.makeShareableOpenURL(worktreeID, terminalID: linkTerminalID).absoluteString,
                 forType: .string
             )
+        }
+
+        // Attach an external emulator (iTerm2, Terminal.app, Ghostty) to this
+        // tab's tmux window. The daemon composes the command: only it can
+        // resolve the socket path from the environment that created the tmux
+        // server, and only it verifies the pane's identity before naming the
+        // window. Nothing reaches the pasteboard unless that whole round trip
+        // succeeds — a half-formed command pasted into another terminal fails
+        // far from its cause.
+        if let attachTerminalID = TabTerminalTarget.terminalID(for: tab.content) {
+            Button("Copy Attach Command") {
+                let targetWorktreeID = worktreeID
+                Task {
+                    do {
+                        let result = try await appState.daemonClient.terminalAttachCommand(
+                            worktreeID: targetWorktreeID,
+                            terminalID: attachTerminalID
+                        )
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(result.script, forType: .string)
+                    } catch {
+                        tabBarLogger.error(
+                            "terminal.attachCommand failed for terminal \(attachTerminalID, privacy: .public): \(error, privacy: .public)")
+                        appState.showAlert(
+                            "Couldn't copy the attach command: \(error.localizedDescription)",
+                            isError: true)
+                        appState.handleConnectionError(error)
+                    }
+                }
+            }
         }
         Divider()
 

@@ -222,6 +222,14 @@ public final class RPCRouter: Sendable {
     /// it is not a general-purpose "what time is it".
     let now: @Sendable () -> Date
 
+    /// Where a named tmux server's socket file lives. Held as an injected
+    /// collaborator rather than read ad hoc, so `terminal.attachCommand` can be
+    /// tested against a pinned `TMUX_TMPDIR` and uid without `setenv` — which
+    /// `Tests/CLAUDE.md` forbids outside `TBDHomeSerialized`. The default reads
+    /// the daemon's own environment, which is the environment the servers it
+    /// spawned were created under.
+    let tmuxSocketPathResolver: TmuxSocketPathResolver
+
     public init(
         db: TBDDatabase,
         lifecycle: WorktreeLifecycle,
@@ -243,9 +251,11 @@ public final class RPCRouter: Sendable {
         codexHomeEnsurer: (@Sendable () throws -> URL)? = nil,
         prBindingRepoResolver: (@Sendable (UUID) async -> (owner: String, name: String, host: String)?)? = nil,
         now: @escaping @Sendable () -> Date = { Date() },
+        tmuxSocketPathResolver: TmuxSocketPathResolver = TmuxSocketPathResolver(),
         actuationLog: ActuationLog
     ) {
         self.now = now
+        self.tmuxSocketPathResolver = tmuxSocketPathResolver
         self.actuationLog = actuationLog
         self.db = db
         self.lifecycle = lifecycle
@@ -406,6 +416,8 @@ public final class RPCRouter: Sendable {
                 return try await handleTerminalContinueInCodex(request.paramsData, actor: request.actor)
             case RPCMethod.terminalList:
                 return try await handleTerminalList(request.paramsData)
+            case RPCMethod.terminalAttachCommand:
+                return try await handleTerminalAttachCommand(request.paramsData)
             case RPCMethod.terminalSend:
                 return try await handleTerminalSend(request.paramsData, actor: request.actor)
             case RPCMethod.terminalDelete:

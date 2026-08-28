@@ -442,6 +442,11 @@ extension WorktreeLifecycle {
     ) async throws {
         for server in servers.sorted() {
             try await tmux.withServerResourceLock(server: server) {
+                // Reclaim `tbd-ext-*` sessions before judging the server: the
+                // branch below may kill the whole server, which would take
+                // them with it, but only when nothing references it. A server
+                // that stays alive is the case this pass exists for.
+                await reapExternalAttachSessions(server: server)
                 // Ownership must be read only after acquiring the same lock a
                 // creator holds through its terminal-row commit.
                 let globalLiveRows = try await db.worktrees.listLocal(excludeArchived: true)
@@ -653,6 +658,125 @@ extension WorktreeLifecycle {
                     logger.info("reconcile: deleted terminal \(terminal.id, privacy: .public) — window \(terminal.tmuxWindowID, privacy: .public) gone or reassigned, no session to preserve")
                 }
                 await pendingQuestions.clear(terminalID: terminal.id)
+            }
+        }
+    }
+
+    /// Reclaim the external-attach sessions on one tmux server.
+    ///
+    /// `tbd terminal attach` mints a `tbd-ext-<tid8>` session per terminal so
+    /// an external emulator can be a second client on a TBD window. Those
+    /// sessions are a durable external resource, so they get a named
+    /// reconciler, and this is it. `destroy-unattached on` reclaims the
+    /// ordinary case the instant the last client leaves; this pass carries
+    /// every case that option misses.
+    ///
+    /// Candidates are exactly the names `ExternalAttachCommand` mints —
+    /// `isGeneratedSessionName`, the prefix followed by eight lowercase hex
+    /// digits — so TBD's own panel sessions (`tbd-view-*`), the daemon's
+    /// `main`, and any hand-made session are out of scope. The prefix alone
+    /// would not do it: a hand-made `tbd-ext-notes` matches the prefix, and a
+    /// hand-made `tbd-ext-aa ; kill-server` would be fed to the conditional
+    /// kill, whose inner command tmux re-parses and splits on `;` — see
+    /// `TmuxManager.killSessionIfClientlessCommand`. Killing a session does
+    /// not disturb the terminal: its window is `link-window`ed from `main` and
+    /// survives.
+    ///
+    /// The 60-second grace period is the point, not a courtesy — see
+    /// `ExternalAttachReclamation.gracePeriod`, which also explains why the
+    /// clock lives on the tmux session rather than in this process.
+    func reapExternalAttachSessions(server: String) async {
+        let sessions: [TmuxSessionInfo]
+        do {
+            sessions = try await tmux.listSessions(server: server)
+        } catch {
+            // A server that will not answer is not evidence about any session
+            // on it. Leave every stamp standing and retry next sweep.
+            logger.debug("reconcile: could not list sessions on \(server, privacy: .public) for external-attach reclamation: \(error, privacy: .public)")
+            return
+        }
+        let observedAt = now()
+        for session in sessions
+        where ExternalAttachCommand.isGeneratedSessionName(session.name) {
+            switch ExternalAttachReclamation.decide(session: session, now: observedAt) {
+            case .leaveAlone:
+                continue
+            case .stamp(let date):
+                do {
+                    try await tmux.setExternalAttachClientlessSince(
+                        server: server, session: session.name, date: date)
+                } catch {
+                    logger.debug("reconcile: could not stamp external attach session \(session.name, privacy: .public) on \(server, privacy: .public): \(error, privacy: .public)")
+                }
+            case .clearStamp:
+                do {
+                    try await tmux.clearExternalAttachClientlessSince(
+                        server: server, session: session.name)
+                } catch {
+                    logger.debug("reconcile: could not clear the client-less stamp on external attach session \(session.name, privacy: .public) on \(server, privacy: .public): \(error, privacy: .public)")
+                }
+            case .reap:
+                do {
+                    // Conditional, decided inside tmux: a client that attached
+                    // between the listing above and this call keeps its session
+                    // rather than being disconnected mid-measurement.
+                    let killed = try await tmux.killSessionIfClientless(
+                        server: server, session: session.name)
+                    guard killed else {
+                        logger.debug("reconcile: spared external attach session \(session.name, privacy: .public) on \(server, privacy: .public) — a client attached after it was listed")
+                        continue
+                    }
+                    logger.info("\(Self.externalAttachReapLogLine(server: server, session: session.name), privacy: .public)")
+                } catch {
+                    logger.warning("reconcile: failed to kill external attach session \(session.name, privacy: .public) on \(server, privacy: .public): \(error, privacy: .public)")
+                }
+            }
+        }
+    }
+
+    /// The line `reapExternalAttachSessions` logs for each session it kills.
+    ///
+    /// Composed by a named function so a test can assert the exact text: the
+    /// spec requires the reap to be *detectable afterwards*, so that a
+    /// truncated measurement run is distinguishable from a quiet one, and a
+    /// line that stopped naming its session would defeat that silently.
+    static func externalAttachReapLogLine(server: String, session: String) -> String {
+        "reconcile: killed external attach session \(session) on tmux server \(server) — no client had been attached to it for at least \(Int(ExternalAttachReclamation.gracePeriod))s"
+    }
+
+    /// The recurring driver for external-attach reclamation, called from the
+    /// daemon's hourly orphan-maintenance cadence.
+    ///
+    /// Reclamation needs a periodic caller of its own. The other entry points
+    /// into `reapExternalAttachSessions` are startup, `repo.add`, and the
+    /// `cleanup` RPC — none of which recur — so a session abandoned by a failed
+    /// attach would sit on the server until the daemon next restarted. The
+    /// hourly cadence is defensible because this pass is a **backstop**:
+    /// `destroy-unattached on` reclaims the ordinary case the instant the last
+    /// client detaches, and a terminal-keyed name bounds the population at one
+    /// session per terminal in the meantime. Worst case is therefore about an
+    /// hour for a never-attached orphan (one observation decides it), and about
+    /// two for the rarer session that was attached, detached, and outlived its
+    /// `destroy-unattached` — that one needs a sweep to stamp and a later sweep
+    /// to act.
+    ///
+    /// Sweeps every server named by a live local worktree row: `tbd-ext-*`
+    /// sessions only ever exist on a server that hosts a TBD terminal. Takes
+    /// the same per-server resource lock the reconcile call site holds, which
+    /// is why `reapExternalAttachSessions` itself does not (the coordinator is
+    /// not reentrant).
+    public func reclaimExternalAttachSessions() async {
+        let servers: Set<String>
+        do {
+            servers = Set(try await db.worktrees.listLocal(excludeArchived: true)
+                .map(\.tmuxServer))
+        } catch {
+            logger.warning("Failed to list worktrees for external-attach reclamation: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+        for server in servers.sorted() {
+            await tmux.withServerResourceLock(server: server) {
+                await reapExternalAttachSessions(server: server)
             }
         }
     }

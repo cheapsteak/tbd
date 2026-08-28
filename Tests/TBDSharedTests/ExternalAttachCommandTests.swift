@@ -1,0 +1,191 @@
+import Foundation
+import Testing
+@testable import TBDShared
+
+/// The composer is a pure function, so its output is pinned WHOLE — one exact
+/// string comparison against the snippet in
+/// `docs/specs/2026-08-27-external-tmux-attach-shortcut-design.md`, not a
+/// scattering of substring checks. Substring checks would pass a script whose
+/// pieces are all present in the wrong order, missing a `\;`, or missing the
+/// `&&` that keeps the attach from running after a failed setup — every one of
+/// which is a broken command a user would paste into a shell, and the last of
+/// which lands them on a throwaway shell believing it is their agent.
+///
+/// What the string does when a tmux server executes it is a separate question,
+/// answered in `Tests/TBDDaemonLiveTests/ExternalAttachCommandLiveTests.swift`:
+/// these assertions would happily pin a script that is exactly wrong.
+@Suite("ExternalAttachCommand")
+struct ExternalAttachCommandTests {
+
+    // MARK: - Session naming
+
+    @Test("the session name is the prefix plus the first eight hex digits, lowercased")
+    func sessionNameIsTerminalKeyed() {
+        let terminalID = UUID(uuidString: "5A2B3C4D-1111-2222-3333-444455556666")!
+        #expect(ExternalAttachCommand.sessionName(for: terminalID) == "tbd-ext-5a2b3c4d")
+    }
+
+    @Test("the prefix collides with neither TBD session kind")
+    func prefixIsDistinct() {
+        #expect(ExternalAttachCommand.sessionPrefix == "tbd-ext-")
+        // `tbd-view-` is a TBD panel's own session and `main` is the daemon's.
+        // A sweep keyed on this prefix must never reach either.
+        #expect(!"tbd-view-5a2b3c4d".hasPrefix(ExternalAttachCommand.sessionPrefix))
+        #expect(!"main".hasPrefix(ExternalAttachCommand.sessionPrefix))
+        #expect(ExternalAttachCommand.sessionName(for: UUID())
+            .hasPrefix(ExternalAttachCommand.sessionPrefix))
+    }
+
+    /// The reclamation rule, asserted as a whitelist: what the builder emits
+    /// is a candidate, and everything else — however much of the prefix it
+    /// carries — is not. `hasPrefix` alone would accept every name below, and
+    /// the conditional kill re-parses its target as a tmux command string, so
+    /// `tbd-ext-aa ; kill-server` reaching it kills the entire server.
+    @Test("only the prefix plus exactly eight lowercase hex digits is a generated name")
+    func generatedSessionNamesAreExactlyWhatTheBuilderEmits() {
+        #expect(ExternalAttachCommand.isGeneratedSessionName(
+            ExternalAttachCommand.sessionName(for: UUID())))
+        #expect(ExternalAttachCommand.isGeneratedSessionName("tbd-ext-5a2b3c4d"))
+        #expect(ExternalAttachCommand.isGeneratedSessionName("tbd-ext-00000000"))
+
+        // A tmux command separator hiding in a hand-made name.
+        #expect(!ExternalAttachCommand.isGeneratedSessionName("tbd-ext-aa ; kill-server"))
+        // A benign hand-made name that the prefix rule accepted.
+        #expect(!ExternalAttachCommand.isGeneratedSessionName("tbd-ext-notes"))
+        // A tmux session name may contain a space; a generated one does not.
+        #expect(!ExternalAttachCommand.isGeneratedSessionName("tbd-ext-5a2b3c4d extra"))
+        // Wrong alphabet, wrong case, wrong width, no suffix at all.
+        #expect(!ExternalAttachCommand.isGeneratedSessionName("tbd-ext-5a2b3c4g"))
+        #expect(!ExternalAttachCommand.isGeneratedSessionName("tbd-ext-5A2B3C4D"))
+        #expect(!ExternalAttachCommand.isGeneratedSessionName("tbd-ext-5a2b3c4"))
+        #expect(!ExternalAttachCommand.isGeneratedSessionName("tbd-ext-5a2b3c4d5"))
+        #expect(!ExternalAttachCommand.isGeneratedSessionName("tbd-ext-"))
+        // Neither TBD session kind, and a near miss on the prefix itself.
+        #expect(!ExternalAttachCommand.isGeneratedSessionName("tbd-view-5a2b3c4d"))
+        #expect(!ExternalAttachCommand.isGeneratedSessionName("main"))
+        #expect(!ExternalAttachCommand.isGeneratedSessionName("tbd-extra-5a2b3c4d"))
+    }
+
+    // MARK: - The script, whole
+
+    @Test("the composed script is exactly the spec's snippet")
+    func scriptMatchesSpecVerbatim() {
+        let script = ExternalAttachCommand.script(
+            socketPath: "/tmp/tmux-501/tbd-1a2b3c4d",
+            sessionName: "tbd-ext-5a2b3c4d",
+            windowID: "@7")
+        #expect(script == """
+            [ "$(tmux -S '/tmp/tmux-501/tbd-1a2b3c4d' list-windows -t '=tbd-ext-5a2b3c4d' -F '#{window_id}' 2>/dev/null)" = '@7' ] || {
+                tmux -S '/tmp/tmux-501/tbd-1a2b3c4d' kill-session -t '=tbd-ext-5a2b3c4d' 2>/dev/null
+                tmux -S '/tmp/tmux-501/tbd-1a2b3c4d' \\
+                    new-session -d -s 'tbd-ext-5a2b3c4d' -c /tmp \\; \\
+                    link-window -s '@7' -t '=tbd-ext-5a2b3c4d:' \\; \\
+                    kill-window -a -t '=tbd-ext-5a2b3c4d:@7' \\
+                    || { tmux -S '/tmp/tmux-501/tbd-1a2b3c4d' kill-session -t '=tbd-ext-5a2b3c4d' 2>/dev/null; false; }
+            } && tmux -u -S '/tmp/tmux-501/tbd-1a2b3c4d' \\
+                select-window -t '=tbd-ext-5a2b3c4d:@7' \\; \\
+                attach -t '=tbd-ext-5a2b3c4d' -f ignore-size \\; \\
+                set-option -t '=tbd-ext-5a2b3c4d:' destroy-unattached on
+            """)
+    }
+
+    /// **Every session target is pinned exact, and the assertion is a
+    /// whitelist so a target added later cannot slip past it.**
+    ///
+    /// tmux resolves a bare session target as an exact name, then as *the
+    /// start of* a session name, then as a glob. With the terminal-keyed
+    /// session gone — a rebuild from a second attach, `destroy-unattached`
+    /// firing, a manual kill — `kill-session -t tbd-ext-5a2b3c4d`
+    /// prefix-matches a person's hand-made `tbd-ext-5a2b3c4d-notes` and
+    /// destroys it, and `list-windows` reads that stranger's window list.
+    ///
+    /// Rather than enumerate the targets that must carry `=`, this scans every
+    /// occurrence of the session name in the composed script and requires each
+    /// to be one of the three sanctioned forms — so `kill-window -a -t
+    /// 'tbd-ext-5a2b3c4d:@7'` added tomorrow reds here instead of shipping.
+    /// `new-session -s` is the sole exemption: it is the name being minted,
+    /// not a target being resolved.
+    @Test("every session target carries tmux's `=` exact-match prefix")
+    func everySessionTargetIsPinnedExact() {
+        let name = "tbd-ext-5a2b3c4d"
+        let script = ExternalAttachCommand.script(
+            socketPath: "/tmp/tmux-501/tbd-1a2b3c4d",
+            sessionName: name,
+            windowID: "@7")
+
+        // `=name` for a target-session, `=name:` for a target-window,
+        // target-pane or option target, `=name:@id` for a specific window.
+        // The bare name survives only as `new-session -s`'s argument.
+        let sanctioned = [
+            "-t '=\(name)'",
+            "-t '=\(name):'",
+            "-t '=\(name):@7'",
+            "-s '\(name)'",
+        ]
+        var remainder = script
+        for form in sanctioned {
+            remainder = remainder.replacingOccurrences(of: form, with: "")
+        }
+        #expect(
+            !remainder.contains(name),
+            """
+            an unpinned session target survives in the script — tmux would \
+            prefix-match it onto a stranger's session. Residue: \(remainder)
+            """)
+
+        // And the whitelist is not vacuous: each sanctioned form is actually
+        // present, so deleting a target could not turn this green.
+        for form in sanctioned {
+            #expect(script.contains(form), "the script no longer contains \(form)")
+        }
+    }
+
+    @Test("no trailing newline, so a caller decides how the script is terminated")
+    func scriptHasNoTrailingNewline() {
+        let script = ExternalAttachCommand.script(
+            socketPath: "/tmp/tmux-501/tbd-1a2b3c4d",
+            sessionName: "tbd-ext-5a2b3c4d",
+            windowID: "@7")
+        #expect(!script.hasSuffix("\n"))
+    }
+
+    // MARK: - Quoting
+
+    @Test("a socket path containing a space stays one shell word")
+    func spaceInSocketPathStaysQuoted() {
+        // A `TMUX_TMPDIR` holding a space is ordinary on macOS.
+        // Unquoted, the shell would split this into two arguments and `-S`
+        // would take only the first half.
+        let script = ExternalAttachCommand.script(
+            socketPath: "/tmp/tbd fence/tmux-501/tbd-1a2b3c4d",
+            sessionName: "tbd-ext-5a2b3c4d",
+            windowID: "@7")
+        #expect(script == """
+            [ "$(tmux -S '/tmp/tbd fence/tmux-501/tbd-1a2b3c4d' list-windows -t '=tbd-ext-5a2b3c4d' -F '#{window_id}' 2>/dev/null)" = '@7' ] || {
+                tmux -S '/tmp/tbd fence/tmux-501/tbd-1a2b3c4d' kill-session -t '=tbd-ext-5a2b3c4d' 2>/dev/null
+                tmux -S '/tmp/tbd fence/tmux-501/tbd-1a2b3c4d' \\
+                    new-session -d -s 'tbd-ext-5a2b3c4d' -c /tmp \\; \\
+                    link-window -s '@7' -t '=tbd-ext-5a2b3c4d:' \\; \\
+                    kill-window -a -t '=tbd-ext-5a2b3c4d:@7' \\
+                    || { tmux -S '/tmp/tbd fence/tmux-501/tbd-1a2b3c4d' kill-session -t '=tbd-ext-5a2b3c4d' 2>/dev/null; false; }
+            } && tmux -u -S '/tmp/tbd fence/tmux-501/tbd-1a2b3c4d' \\
+                select-window -t '=tbd-ext-5a2b3c4d:@7' \\; \\
+                attach -t '=tbd-ext-5a2b3c4d' -f ignore-size \\; \\
+                set-option -t '=tbd-ext-5a2b3c4d:' destroy-unattached on
+            """)
+    }
+
+    @Test("a socket path containing a single quote closes and reopens the quoting")
+    func singleQuoteInSocketPathIsEscaped() {
+        // The one character a single-quoted word cannot hold. Getting this
+        // wrong does not merely break the command — it ends the quoted string
+        // early and hands the rest of the path to the shell as code.
+        #expect(ExternalAttachCommand.shellQuoted("/tmp/me's tmux/sock")
+            == #"'/tmp/me'\''s tmux/sock'"#)
+    }
+
+    @Test("a dollar sign is not expanded, because single quotes interpret nothing")
+    func dollarSignSurvivesVerbatim() {
+        #expect(ExternalAttachCommand.shellQuoted("/tmp/$HOME/sock") == "'/tmp/$HOME/sock'")
+    }
+}

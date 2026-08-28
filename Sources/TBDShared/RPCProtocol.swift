@@ -143,6 +143,7 @@ public enum RPCMethod {
     public static let terminalCreate = "terminal.create"
     public static let terminalContinueInCodex = "terminal.continueInCodex"
     public static let terminalList = "terminal.list"
+    public static let terminalAttachCommand = "terminal.attachCommand"
     public static let terminalSend = "terminal.send"
     public static let terminalFocus = "terminal.focus"
     public static let terminalDelete = "terminal.delete"
@@ -1788,6 +1789,65 @@ public struct TerminalContinueInCodexResult: Codable, Sendable, Equatable {
 public struct TerminalListParams: Codable, Sendable {
     public let worktreeID: UUID?
     public init(worktreeID: UUID? = nil) { self.worktreeID = worktreeID }
+}
+
+/// Params for `terminal.attachCommand`: compose the shell command that attaches
+/// an external terminal emulator to this terminal's tmux window.
+///
+/// Both ids are required. The worktree names the tmux server, the terminal
+/// names the window — and the daemon refuses a pair that disagrees rather than
+/// composing a command aimed at a window on another repo's server.
+public struct TerminalAttachCommandParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public let terminalID: UUID
+    public init(worktreeID: UUID, terminalID: UUID) {
+        self.worktreeID = worktreeID
+        self.terminalID = terminalID
+    }
+}
+
+/// Result for `terminal.attachCommand`: the rendered script plus every
+/// coordinate that went into it.
+///
+/// The coordinates are carried alongside the script deliberately. The sharper
+/// instrument for the byte-burst question this feature serves is
+/// `tmux pipe-pane -o`, which needs a pane id and a socket path and attaches no
+/// client at all — so a caller can drive that instead of pasting the script,
+/// and neither has to re-derive values the daemon already resolved.
+public struct TerminalAttachCommandResult: Codable, Sendable, Equatable {
+    /// Absolute path to the tmux server's socket. Pinned with `-S` rather than
+    /// named with `-L` so a shell holding a different `TMUX_TMPDIR` cannot
+    /// resolve it to a fresh, empty server.
+    public let socketPath: String
+    /// The `tbd-ext-<tid8>` session the script creates or reuses.
+    public let sessionName: String
+    /// The terminal's stable `@N` tmux window id — never a window index.
+    public let windowID: String
+    /// The `%N` pane id **the identity probe answered for**, not a separately
+    /// resolved value: a second resolution that could disagree with the
+    /// verified one is how reused pane coordinates previously sent keystrokes
+    /// into an unrelated live session (issue #384).
+    public let paneID: String
+    public let terminalID: UUID
+    /// The shell snippet, with every interpolated value single-quoted. No
+    /// trailing newline — a caller printing it adds one.
+    public let script: String
+
+    public init(
+        socketPath: String,
+        sessionName: String,
+        windowID: String,
+        paneID: String,
+        terminalID: UUID,
+        script: String
+    ) {
+        self.socketPath = socketPath
+        self.sessionName = sessionName
+        self.windowID = windowID
+        self.paneID = paneID
+        self.terminalID = terminalID
+        self.script = script
+    }
 }
 
 /// Which terminals `session.states` should report on. Absent `worktreeID` means

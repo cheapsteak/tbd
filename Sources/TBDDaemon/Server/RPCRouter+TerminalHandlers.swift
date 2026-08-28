@@ -654,6 +654,124 @@ extension RPCRouter {
         return try RPCResponse(result: terminals)
     }
 
+    // MARK: - terminal.attachCommand
+
+    /// Compose the shell command that attaches an external terminal emulator to
+    /// this terminal's tmux window, so somebody else's renderer can be put next
+    /// to SwiftTerm's on the identical byte stream.
+    ///
+    /// The daemon composes rather than the CLI for two reasons, both of which
+    /// this handler is the whole of:
+    ///
+    /// - **The socket path comes from the environment that created the
+    ///   server.** A shell-side `tmux -L <name> display-message` would answer
+    ///   for the caller's `TMUX_TMPDIR`, not the daemon's — or start a new,
+    ///   empty server in order to answer at all.
+    /// - **The window is verified before it is named.** The same
+    ///   `paneSendTarget` probe `terminal.send` runs before it types gates this
+    ///   composition, so a missing window, a dead pane, or a pane answering
+    ///   with another terminal's id yields an error naming the state rather
+    ///   than a command aimed at a stranger's session. Refusal requires
+    ///   POSITIVE disagreement — an unstamped pane composes, exactly as send
+    ///   and wake already behave.
+    ///
+    /// Read-only: it starts nothing, kills nothing, and types nothing. The
+    /// caller decides whether to run what it is handed.
+    func handleTerminalAttachCommand(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalAttachCommandParams.self, from: paramsData)
+        guard let terminal = try await db.terminals.get(id: params.terminalID) else {
+            return RPCResponse(error: "No terminal with id \(params.terminalID)")
+        }
+        guard let worktree = try await db.worktrees.getLocal(id: params.worktreeID) else {
+            return RPCResponse(error: "No local worktree with id \(params.worktreeID)")
+        }
+        // A mismatched pair would name a window on one repo's server while the
+        // socket came from another's — a command that silently attaches to the
+        // wrong place, or to nothing. Refuse instead of preferring one id.
+        guard terminal.worktreeID == worktree.id else {
+            return RPCResponse(error: """
+                Terminal \(terminal.id) belongs to worktree \(terminal.worktreeID), \
+                not the requested worktree \(worktree.id)
+                """)
+        }
+
+        // The pane id used for the probe is the pane id reported in the result.
+        // ONE value, resolved once: a second resolution that could disagree
+        // with the verified one is exactly how reused tmux coordinates
+        // previously sent daemon keystrokes into an unrelated live session
+        // (issue #384).
+        let probedPaneID = terminal.tmuxPaneID
+        let server = worktree.tmuxServer
+        let probe = try await tmux.paneSendProbe(server: server, paneID: probedPaneID)
+        switch probe.target {
+        case .missing:
+            return RPCResponse(
+                error: """
+                    tmux pane \(probedPaneID) for terminal \(terminal.id) no longer exists on \
+                    server \(server) — there is no window to attach to
+                    """,
+                code: RPCErrorCode.terminalSessionGone.rawValue)
+        case .dead:
+            return RPCResponse(
+                error: """
+                    tmux pane \(probedPaneID) for terminal \(terminal.id) is dead (its process \
+                    has exited) — attaching would show a corpse; recreate the terminal's \
+                    window first
+                    """,
+                code: RPCErrorCode.terminalSessionGone.rawValue)
+        case .live(let paneTerminalID):
+            if let paneTerminalID,
+               paneTerminalID.caseInsensitiveCompare(terminal.id.uuidString) != .orderedSame {
+                return RPCResponse(
+                    error: """
+                        tmux pane \(probedPaneID) now belongs to terminal \(paneTerminalID), \
+                        not the requested terminal \(terminal.id) — no command was composed \
+                        (tmux reuses pane ids, so this coordinate is stale)
+                        """,
+                    code: RPCErrorCode.terminalSessionGone.rawValue)
+            }
+            if paneTerminalID == nil {
+                // Absence is not disagreement — a pane spawned before TBD
+                // stamped identities, or by something outside TBD, answers with
+                // nothing, and refusing on nothing would break every such pane.
+                logger.debug("""
+                    terminal.attachCommand: pane \(probedPaneID, privacy: .public) claims no \
+                    terminal identity; composing without verifying it is terminal \
+                    \(terminal.id.uuidString, privacy: .public)
+                    """)
+            }
+        }
+
+        // The window is what the composed script actually names — the script's
+        // `link-window -s @N` links the window, not the pane — so the window is
+        // verified, not emitted on the row's word. The same probe already read
+        // `#{window_id}`, so this costs no extra consultation. Positive
+        // disagreement only, matching the identity rule directly above: tmux
+        // answering with no window at all composes as before.
+        if let probedWindowID = probe.windowID, probedWindowID != terminal.tmuxWindowID {
+            return RPCResponse(
+                error: """
+                    tmux pane \(probedPaneID) for terminal \(terminal.id) now lives in window \
+                    \(probedWindowID), not the recorded window \(terminal.tmuxWindowID) — no \
+                    command was composed (attaching would link a window this terminal no \
+                    longer owns)
+                    """,
+                code: RPCErrorCode.terminalSessionGone.rawValue)
+        }
+
+        let sessionName = ExternalAttachCommand.sessionName(for: terminal.id)
+        let socketPath = tmuxSocketPathResolver.socketPath(server: server)
+        return try RPCResponse(result: TerminalAttachCommandResult(
+            socketPath: socketPath,
+            sessionName: sessionName,
+            windowID: terminal.tmuxWindowID,
+            paneID: probedPaneID,
+            terminalID: terminal.id,
+            script: ExternalAttachCommand.script(
+                socketPath: socketPath,
+                sessionName: sessionName,
+                windowID: terminal.tmuxWindowID)))
+    }
 
     func handleTerminalDelete(
         _ paramsData: Data, actor: ActuationActor? = nil
