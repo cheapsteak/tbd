@@ -155,9 +155,9 @@ private actor GitLabFake {
     /// Bounded by `ciSafeDeadline`, not by a snappier number of its own: this
     /// asserts nothing about how *fast* the recheck lands, only that it does,
     /// so the bound is a hang-catcher and a passing run never pays it. Its
-    /// previous 10 s went red on `main` at `ea27710d` while asserting nothing —
-    /// in that pass the median test's own reported span was 85.8 s, so a 10 s
-    /// wall-clock budget was an order of magnitude under the noise floor. See
+    /// previous 10 s went red on `main` while asserting nothing: in that pass
+    /// the median test's own reported span was 85.8 s, so a 10 s wall-clock
+    /// budget sat an order of magnitude under the noise floor. See
     /// `ciSafeDeadline`'s own derivation in `ControlModeTestSupport.swift`.
     func waitForRecheck(within timeout: Duration = ciSafeDeadline) async -> Bool {
         let deadline = ContinuousClock.now.advanced(by: timeout)

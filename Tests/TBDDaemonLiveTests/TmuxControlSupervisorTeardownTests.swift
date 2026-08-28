@@ -32,9 +32,9 @@ import Testing
 ///   `stop()` returned → the parked `ensureConnection` resumed → a successor
 ///   was created — passed, along with every assertion after it. The work was in
 ///   flight, not absent.
-/// - The waiter overran its own 90 s deadline by ~33 s: the issue landed at
-///   122.77 s of test time, because the poll loop could not be scheduled to
-///   observe its own expiry any sooner.
+/// - The waiter could not be scheduled to observe its own expiry: the issue
+///   landed at 122.77 s of test time, well past when a 90 s deadline armed at
+///   the top of the test could have fired.
 /// - In that pass the median test's own reported span was 85.8 s (p90 112.1,
 ///   max 132.8) and 47% of its 4359 tests spanned longer than the whole
 ///   deadline — the same figures on the green run either side of it, so the
@@ -43,7 +43,19 @@ import Testing
 /// Here the pass is `--no-parallel` on an otherwise idle machine, the
 /// handshakes settle in milliseconds, and the bound below goes back to being
 /// what it is meant to be: a hang-catcher that asserts nothing.
-@Suite("TmuxControlSupervisor teardown isolation")
+/// ## Why an explicit `.timeLimit`
+///
+/// Tier-3 suites pin their own rather than inheriting `.clockDriven`, whose
+/// value is sized for the fast parallel pass (`Tests/CLAUDE.md`). Not every
+/// wait here is bounded: the bare `await`s on the supervisor actor — the
+/// `command(server:)` probes taken while stops are held, and each closing
+/// `stopAll()` — are calls on the very actor whose wedging is the regression
+/// under test, so a real regression hangs the quiet-pass step to its
+/// 15-minute `timeout-minutes` with no test named. 4 minutes affords one full
+/// `teardownWaitDeadline` plus one full `TestGate.deadline` after it — the
+/// invariant `Tests/CLAUDE.md` derives for the other limits — and still
+/// clears the 1.97 s this suite actually takes by two orders of magnitude.
+@Suite("TmuxControlSupervisor teardown isolation", .timeLimit(.minutes(4)))
 struct TmuxControlSupervisorTeardownTests {
 
     /// Write an executable stub "tmux" that ignores its args and sleeps, so a

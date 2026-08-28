@@ -104,6 +104,16 @@ import Testing
 /// `.serialized` before a longer timeout; that advice is about a suite starving
 /// *itself* (its own tests megaYielding against each other) and does not cover
 /// this case.
+///
+/// ## Two copies live outside this target
+///
+/// `Tests/TBDDaemonLiveTests` cannot import this symbol, so
+/// `ProviderEventsSupervisorTests.saturatedWaitDeadline` and
+/// `TmuxControlSupervisorTeardownTests.teardownWaitDeadline` each carry the
+/// same 90 s as a local literal. Nothing detects divergence between the three,
+/// so re-derive them together — and note that the two copies sit in the quiet
+/// pass, which never sees the saturation this value is sized against, so they
+/// have room this one does not.
 let ciSafeDeadline: Duration = .seconds(90)
 
 /// Thread-safe, synchronous recorder of fake-client stream writes in call
