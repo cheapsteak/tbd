@@ -854,6 +854,69 @@ public struct TerminalStore: Sendable {
         }
     }
 
+    /// Retract a standing prompt whose transcript no longer matches the
+    /// fingerprint taken when it was recorded, WITHOUT asserting an activity
+    /// state — the same entitlement `clearAwaitingInputReasonIfNotNewer` has,
+    /// for the same reason: this caller knows the prompt is gone, not what the
+    /// session is doing instead.
+    ///
+    /// `expected` is re-checked inside this transaction. The stat that decided
+    /// to call happened outside the database and
+    /// `handleTerminalNotificationEvent` writes on its own connection, so a
+    /// prompt raised in that window carries a fresh fingerprint — and clearing
+    /// it would drop a prompt nobody has answered.
+    ///
+    /// A terminal that vanished between the caller's read and this write
+    /// reports `false` rather than throwing: the callers are read paths.
+    public func clearAwaitingInputReasonIfFingerprintMatches(
+        id: UUID,
+        expected: TranscriptFingerprint
+    ) async throws -> Bool {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString),
+                  let standing = FactColumnJSON.decode(
+                      AwaitingInputReason.self, from: record.awaitingInputReason),
+                  standing.transcriptFingerprint == expected else {
+                return false
+            }
+            record.awaitingInputReason = nil
+            record.awaitingInputObservedAt = nil
+            try record.update(db)
+            return true
+        }
+    }
+
+    /// Attach a fingerprint to a standing prompt that has none — a reason
+    /// recorded before fingerprints existed.
+    ///
+    /// Adoption rather than retraction, because an absent fingerprint says
+    /// nothing about whether the prompt was answered. Adopting makes the row
+    /// answerable to the transcript's next write without inventing a comparison
+    /// against a clock, and it leaves a genuinely pending prompt raised.
+    public func adoptTranscriptFingerprint(
+        id: UUID,
+        fingerprint: TranscriptFingerprint
+    ) async throws -> Bool {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString),
+                  let standing = FactColumnJSON.decode(
+                      AwaitingInputReason.self, from: record.awaitingInputReason),
+                  standing.classification == .promptOnScreen,
+                  standing.transcriptFingerprint == nil else {
+                return false
+            }
+            record.awaitingInputReason = FactColumnJSON.encode(
+                AwaitingInputReason(
+                    message: standing.message,
+                    hookEventName: standing.hookEventName,
+                    raw: standing.raw,
+                    notificationType: standing.notificationType,
+                    transcriptFingerprint: fingerprint))
+            try record.update(db)
+            return true
+        }
+    }
+
     /// Retract a standing wait reason WITHOUT asserting an activity state.
     ///
     /// The mirror of `recordAwaitingInputReason`, and it exists for the same
