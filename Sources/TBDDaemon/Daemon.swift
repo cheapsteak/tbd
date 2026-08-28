@@ -281,6 +281,16 @@ public final class Daemon: Sendable {
         } catch {
             reconcileLogger.warning("Failed to reconcile scratch terminals during orphan maintenance: \(error.localizedDescription, privacy: .public)")
         }
+        // The recurring driver for `tbd-ext-*` external-attach reclamation.
+        // Its other callers — startup, `repo.add`, the `cleanup` RPC — are all
+        // one-shot, so without this a session left behind by a failed attach
+        // would survive until the daemon restarted. Deliberately NOT folded
+        // into the `reapOrphanTmuxResources` pass above: that flag gates the
+        // destructive window/server reclamation, which hourly maintenance
+        // stays out of on purpose. This kills only sessions TBD itself minted
+        // under its own prefix, and only when tmux confirms at kill time that
+        // nobody is attached.
+        await lifecycle.reclaimExternalAttachSessions()
     }
 
     /// Wire the delivery verifier and perform the startup replay, gated on

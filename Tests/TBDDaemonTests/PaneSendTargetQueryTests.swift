@@ -18,12 +18,12 @@ struct PaneSendTargetQueryTests {
 
     // MARK: - Command builders
 
-    @Test("the target query asks one list-panes for all four facts")
+    @Test("the target query asks one list-panes for all five facts")
     func queryShape() {
         let args = TmuxManager.paneSendTargetQuery(server: "tbd-acme", paneID: "%7")
         #expect(args == [
             "-L", "tbd-acme", "list-panes", "-t", "%7", "-F",
-            "#{pane_id}\t#{pane_dead}\t#{@tbd_terminal_id}\t#{pane_start_command}",
+            "#{pane_id}\t#{window_id}\t#{pane_dead}\t#{@tbd_terminal_id}\t#{pane_start_command}",
         ])
     }
 
@@ -58,20 +58,20 @@ struct PaneSendTargetQueryTests {
 
     @Test("a live unstamped pane with no planted id resolves to no identity")
     func parseLiveUnknown() {
-        #expect(TmuxManager.parsePaneSendTarget("%7\t0\t\t/bin/zsh -ic \"sleep 300\"\n", paneID: "%7")
+        #expect(TmuxManager.parsePaneSendTarget("%7\t@3\t0\t\t/bin/zsh -ic \"sleep 300\"\n", paneID: "%7")
             == .live(terminalID: nil))
     }
 
     @Test("pane_dead=1 retains the pane ownership identity")
     func parseDead() {
         #expect(TmuxManager.parsePaneSendTarget(
-            "%7\t1\tF1A2\t/bin/zsh -ic \"claude\"\n", paneID: "%7")
+            "%7\t@3\t1\tF1A2\t/bin/zsh -ic \"claude\"\n", paneID: "%7")
             == .dead(terminalID: "F1A2"))
     }
 
     @Test("an unstamped dead pane retains identity from its start command")
     func parseDeadFallsBackToStartCommand() {
-        let line = "%7\t1\t\t/bin/zsh -ic \"export TBD_TERMINAL_ID='\(Self.plantedID)'; claude\"\n"
+        let line = "%7\t@3\t1\t\t/bin/zsh -ic \"export TBD_TERMINAL_ID='\(Self.plantedID)'; claude\"\n"
         #expect(TmuxManager.parsePaneSendTarget(line, paneID: "%7")
             == .dead(terminalID: Self.plantedID))
     }
@@ -79,19 +79,19 @@ struct PaneSendTargetQueryTests {
     @Test("a legacy dead pane with no planted id has no identity")
     func parseDeadUnknown() {
         #expect(TmuxManager.parsePaneSendTarget(
-            "%7\t1\t\t/bin/zsh -ic \"claude\"\n", paneID: "%7")
+            "%7\t@3\t1\t\t/bin/zsh -ic \"claude\"\n", paneID: "%7")
             == .dead(terminalID: nil))
     }
 
     @Test("the stamped pane option wins over the start command")
     func parseStampedWins() {
-        let line = "%7\t0\tSTAMPED\t/bin/zsh -ic \"export TBD_TERMINAL_ID='\(Self.plantedID)'; claude\"\n"
+        let line = "%7\t@3\t0\tSTAMPED\t/bin/zsh -ic \"export TBD_TERMINAL_ID='\(Self.plantedID)'; claude\"\n"
         #expect(TmuxManager.parsePaneSendTarget(line, paneID: "%7") == .live(terminalID: "STAMPED"))
     }
 
     @Test("an unstamped pane still answers from its start command")
     func parseFallsBackToStartCommand() {
-        let line = "%7\t0\t\t/bin/zsh -ic \"export TBD_TERMINAL_ID='\(Self.plantedID)'; claude\"\n"
+        let line = "%7\t@3\t0\t\t/bin/zsh -ic \"export TBD_TERMINAL_ID='\(Self.plantedID)'; claude\"\n"
         #expect(TmuxManager.parsePaneSendTarget(line, paneID: "%7")
             == .live(terminalID: Self.plantedID))
     }
@@ -100,7 +100,7 @@ struct PaneSendTargetQueryTests {
     /// inside it — the split takes the remainder rather than a fifth field.
     @Test("a tab inside the start command does not split it into a fifth field")
     func parseStartCommandWithTab() {
-        let line = "%7\t0\t\t/bin/zsh -ic \"export TBD_TERMINAL_ID='\(Self.plantedID)'; printf 'a\tb'\"\n"
+        let line = "%7\t@3\t0\t\t/bin/zsh -ic \"export TBD_TERMINAL_ID='\(Self.plantedID)'; printf 'a\tb'\"\n"
         #expect(TmuxManager.parsePaneSendTarget(line, paneID: "%7")
             == .live(terminalID: Self.plantedID))
     }
@@ -114,8 +114,8 @@ struct PaneSendTargetQueryTests {
     @Test("a split window answers for the named pane, not the first one listed")
     func parseSelectsNamedPaneInASplitWindow() {
         let output = """
-            %1\t0\tSTRANGER\t/bin/zsh -ic "vim"
-            %2\t0\tMINE\t/bin/zsh -ic "claude"
+            %1\t@3\t0\tSTRANGER\t/bin/zsh -ic "vim"
+            %2\t@3\t0\tMINE\t/bin/zsh -ic "claude"
 
             """
         #expect(TmuxManager.parsePaneSendTarget(output, paneID: "%2") == .live(terminalID: "MINE"))
@@ -127,7 +127,7 @@ struct PaneSendTargetQueryTests {
     /// target look dead, nor a live sibling make a dead target look sendable.
     @Test("a dead sibling pane does not decide the named pane's liveness")
     func parseSelectsLivenessOfNamedPane() {
-        let output = "%1\t1\t\tsh\n%2\t0\tMINE\tclaude\n"
+        let output = "%1\t@3\t1\t\tsh\n%2\t@3\t0\tMINE\tclaude\n"
         #expect(TmuxManager.parsePaneSendTarget(output, paneID: "%2") == .live(terminalID: "MINE"))
         #expect(TmuxManager.parsePaneSendTarget(output, paneID: "%1")
             == .dead(terminalID: nil))
@@ -136,20 +136,20 @@ struct PaneSendTargetQueryTests {
     /// A prefix match is not a match: `%1` must not answer for `%12`.
     @Test("pane ids are compared whole, not by prefix")
     func parsePaneIDMatchIsExact() {
-        let output = "%12\t0\tMINE\tclaude\n"
+        let output = "%12\t@3\t0\tMINE\tclaude\n"
         #expect(TmuxManager.parsePaneSendTarget(output, paneID: "%1") == .missing)
         #expect(TmuxManager.parsePaneSendTarget(output, paneID: "%12") == .live(terminalID: "MINE"))
     }
 
     /// A pane started without an explicit command — `tmux new-session -d` with
     /// no argument — reports an empty `#{pane_start_command}`, so the last
-    /// field is genuinely empty rather than absent. It must still parse as four
+    /// field is genuinely empty rather than absent. It must still parse as five
     /// fields, not fall through to `.missing`.
     @Test("an empty trailing start command is still a complete answer")
     func parseEmptyStartCommand() {
-        #expect(TmuxManager.parsePaneSendTarget("%0\t0\t\t\n", paneID: "%0")
+        #expect(TmuxManager.parsePaneSendTarget("%0\t@3\t0\t\t\n", paneID: "%0")
             == .live(terminalID: nil))
-        #expect(TmuxManager.parsePaneSendTarget("%0\t0\tMINE\t\n", paneID: "%0")
+        #expect(TmuxManager.parsePaneSendTarget("%0\t@3\t0\tMINE\t\n", paneID: "%0")
             == .live(terminalID: "MINE"))
     }
 
@@ -157,7 +157,7 @@ struct PaneSendTargetQueryTests {
     func parseEmpty() {
         #expect(TmuxManager.parsePaneSendTarget("", paneID: "%7") == .missing)
         #expect(TmuxManager.parsePaneSendTarget("\n", paneID: "%7") == .missing)
-        #expect(TmuxManager.parsePaneSendTarget("%7\t0\tonly-three\n", paneID: "%7") == .missing)
+        #expect(TmuxManager.parsePaneSendTarget("%7\t@3\t0\tonly-four\n", paneID: "%7") == .missing)
     }
 
     // MARK: - Identity resolution

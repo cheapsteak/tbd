@@ -94,12 +94,6 @@ public struct WorktreeLifecycle: Sendable {
     /// resolves for the gate above, at no extra subprocess cost. An actor
     /// reference for the same reason `conflictSweepCache` is one.
     public let branchTipTracker = BranchTipTracker()
-    /// Since when each `tbd-ext-*` external-attach tmux session has had no
-    /// attached client — the grace period behind reconcile's reclamation of
-    /// them. An actor reference for the same reason `conflictSweepCache` is
-    /// one: every value-copy of this struct must share one set of
-    /// observations, or the grace period restarts on each sweep.
-    let externalAttachSessions = ExternalAttachSessionTracker()
     /// In-flight `preSession` runs, keyed by worktree ID. An actor reference,
     /// so every copy of this struct shares one registry (same rationale as
     /// `conflictSweepCache`).

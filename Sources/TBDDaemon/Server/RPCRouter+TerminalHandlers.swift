@@ -702,7 +702,8 @@ extension RPCRouter {
         // (issue #384).
         let probedPaneID = terminal.tmuxPaneID
         let server = worktree.tmuxServer
-        switch try await tmux.paneSendTarget(server: server, paneID: probedPaneID) {
+        let probe = try await tmux.paneSendProbe(server: server, paneID: probedPaneID)
+        switch probe.target {
         case .missing:
             return RPCResponse(
                 error: """
@@ -739,6 +740,23 @@ extension RPCRouter {
                     \(terminal.id.uuidString, privacy: .public)
                     """)
             }
+        }
+
+        // The window is what the composed script actually names — the script's
+        // `link-window -s @N` links the window, not the pane — so the window is
+        // verified, not emitted on the row's word. The same probe already read
+        // `#{window_id}`, so this costs no extra consultation. Positive
+        // disagreement only, matching the identity rule directly above: tmux
+        // answering with no window at all composes as before.
+        if let probedWindowID = probe.windowID, probedWindowID != terminal.tmuxWindowID {
+            return RPCResponse(
+                error: """
+                    tmux pane \(probedPaneID) for terminal \(terminal.id) now lives in window \
+                    \(probedWindowID), not the recorded window \(terminal.tmuxWindowID) — no \
+                    command was composed (attaching would link a window this terminal no \
+                    longer owns)
+                    """,
+                code: RPCErrorCode.terminalSessionGone.rawValue)
         }
 
         let sessionName = ExternalAttachCommand.sessionName(for: terminal.id)
