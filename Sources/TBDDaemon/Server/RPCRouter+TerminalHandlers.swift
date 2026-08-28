@@ -556,14 +556,14 @@ extension RPCRouter {
         let params = try decoder.decode(TerminalListParams.self, from: paramsData)
         var terminals = try await db.terminals.list(worktreeID: params.worktreeID)
         // Transcript supersession, on the pass that is about to report these
-        // rows. A prompt reason describes a stopped session; a transcript that
-        // changed since the prompt was raised is proof it is not, and no hook
-        // will ever say so — Claude Code fires none when a human answers.
-        // Corrected in the response as well as in the database, so this pass
-        // does not report a prompt it just retracted.
+        // rows. A prompt reason describes a stopped session; a transcript the
+        // session itself wrote to since the prompt was raised is proof it is
+        // not, and no hook will ever say so — Claude Code fires none when a
+        // human answers. Corrected in the response as well as in the database,
+        // so this pass does not report a prompt it just retracted.
         // See docs/specs/2026-08-27-awaiting-input-transcript-supersession-design.md.
         let supersession = AwaitingInputSupersession(
-            db: db, fingerprint: transcriptFingerprinter)
+            db: db, fingerprint: transcriptFingerprinter, delta: transcriptDeltaInspector)
         for index in terminals.indices {
             guard await supersession.reconcile(terminal: terminals[index]) else { continue }
             terminals[index].awaitingInputReason = nil

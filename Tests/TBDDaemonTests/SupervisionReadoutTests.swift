@@ -27,7 +27,9 @@ struct SupervisionReadoutTests {
 
         func builder(
             transcriptFingerprinter: @escaping TranscriptFingerprinter
-                = TranscriptFingerprinting.live
+                = TranscriptFingerprinting.live,
+            transcriptDeltaInspector: @escaping TranscriptDeltaInspector
+                = { _, _ in .containsParentContent }
         ) -> SupervisionReadoutBuilder {
             let stamp = now
             return SupervisionReadoutBuilder(
@@ -37,6 +39,7 @@ struct SupervisionReadoutTests {
                 branchTips: branchTips,
                 actuationRecord: record,
                 transcriptFingerprinter: transcriptFingerprinter,
+                transcriptDeltaInspector: transcriptDeltaInspector,
                 now: { stamp })
         }
 
@@ -372,6 +375,30 @@ struct SupervisionReadoutTests {
         let row = try #require(try await fixture.db.terminals.get(id: seeded.terminal.id))
         #expect(row.awaitingInputReason == nil)
         #expect(row.awaitingInputObservedAt == nil)
+    }
+
+    @Test("The readout leaves the hand up when only a subagent wrote")
+    func theReadoutLeavesTheHandUpWhenOnlyASubagentWrote() async throws {
+        let fixture = try makeFixture()
+        let transcript = fixture.directory.appendingPathComponent("sidechain.jsonl").path
+        let seeded = try await seed(fixture, project: "acme-sidechain", transcript: transcript)
+        try fixture.writeRecord([])
+        try await recordPrompt(
+            fixture, terminal: seeded.terminal.id,
+            fingerprint: Self.fingerprint(path: transcript, size: 10))
+
+        let facts = try await fixture.store.projectFacts(project: "acme-sidechain", brake: .released)
+        let readout = try await fixture.builder(
+            transcriptFingerprinter: { _ in Self.fingerprint(path: transcript, size: 20) },
+            transcriptDeltaInspector: { _, _ in .sidechainOnly }
+        ).build(facts: facts)
+
+        let agent = try #require(readout.agents.first)
+        #expect(isAwaitingInput(agent.state),
+                "a nested agent's writes are not the parent answering a prompt")
+        let standing = try #require(
+            try await fixture.db.terminals.get(id: seeded.terminal.id)?.awaitingInputReason)
+        #expect(standing.transcriptFingerprint == Self.fingerprint(path: transcript, size: 20))
     }
 
     @Test("The readout leaves a pending prompt raised")

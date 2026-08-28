@@ -103,7 +103,13 @@ private final class ListBroadcastDeltas: @unchecked Sendable {
             observedAt: Self.observedAt)
     }
 
-    private func router(_ spy: ListFingerprintSpy) -> RPCRouter {
+    /// The delta these tests default to: the parent session wrote, which is
+    /// the shape that retracts. Tests about a subagent's writes pass their own.
+    private static let parentWrote: TranscriptDeltaInspector = { _, _ in .containsParentContent }
+
+    private func router(
+        _ spy: ListFingerprintSpy, delta: @escaping TranscriptDeltaInspector
+    ) -> RPCRouter {
         RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
@@ -114,15 +120,19 @@ private final class ListBroadcastDeltas: @unchecked Sendable {
             subscriptions: subscriptions,
             now: { Self.observedAt },
             transcriptFingerprinter: spy.fingerprinter,
+            transcriptDeltaInspector: delta,
             actuationLog: makeTestActuationLog())
     }
 
     /// The response rows, through the real RPC surface the app calls.
-    private func list(_ spy: ListFingerprintSpy) async throws -> [Terminal] {
+    private func list(
+        _ spy: ListFingerprintSpy,
+        delta: @escaping TranscriptDeltaInspector = TerminalListSupersessionTests.parentWrote
+    ) async throws -> [Terminal] {
         let request = try RPCRequest(
             method: RPCMethod.terminalList,
             params: TerminalListParams(worktreeID: worktreeID))
-        let response = await router(spy).handle(request)
+        let response = await router(spy, delta: delta).handle(request)
         #expect(response.success)
         return try response.decodeResult([Terminal].self)
     }
@@ -132,6 +142,25 @@ private final class ListBroadcastDeltas: @unchecked Sendable {
             if case .terminalAwaitingInputChanged(let d) = delta { return d }
             return nil
         }
+    }
+
+    /// A parallel `Task` subagent appends to the parent's JSONL while the
+    /// permission prompt is still on screen. The file moved; the session did
+    /// not. The app must hear nothing, and the row must still raise its hand.
+    @Test func terminalListLeavesTheHandUpWhenOnlyASubagentWrote() async throws {
+        try await record(type: "permission_prompt", fingerprint: Self.fingerprint(size: 10))
+        let spy = ListFingerprintSpy(result: Self.fingerprint(size: 20))
+
+        let reported = try await list(spy, delta: { _, _ in .sidechainOnly })
+        let row = try #require(reported.first { $0.id == terminalID })
+        #expect(row.hasPromptOnScreen)
+        #expect(row.awaitingInputObservedAt == Self.observedAt)
+
+        let stored = try #require(try await db.terminals.get(id: terminalID)?.awaitingInputReason)
+        #expect(stored.classification == .promptOnScreen)
+        #expect(stored.transcriptFingerprint == Self.fingerprint(size: 20),
+                "the baseline advances so the next poll is a stat again")
+        #expect(awaitingInputDeltas().isEmpty)
     }
 
     @Test func terminalListRetractsAPromptWhoseTranscriptMoved() async throws {

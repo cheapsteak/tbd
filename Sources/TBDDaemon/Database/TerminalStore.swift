@@ -917,6 +917,47 @@ public struct TerminalStore: Sendable {
         }
     }
 
+    /// Move a standing prompt's fingerprint forward to a transcript state that
+    /// only a nested agent wrote.
+    ///
+    /// Deliberately not `adoptTranscriptFingerprint`, which refuses a reason
+    /// that already carries one — a test pins that, because adoption is for a
+    /// row that has never been measured. This is the other case: a measured row
+    /// whose file grew with sidechain records alone, where the prompt still
+    /// stands and the baseline should advance so the next pass costs one stat
+    /// instead of re-reading records already attributed.
+    ///
+    /// Conditional on `expected` for the reason
+    /// `clearAwaitingInputReasonIfFingerprintMatches` is: the stat and the read
+    /// happened outside the database, and `handleTerminalNotificationEvent`
+    /// runs concurrently on its own connection, so a reason recorded in between
+    /// must not have its fingerprint overwritten by a comparison against the
+    /// row this replaced.
+    public func refreshTranscriptFingerprint(
+        id: UUID,
+        expected: TranscriptFingerprint,
+        fingerprint: TranscriptFingerprint
+    ) async throws -> Bool {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString),
+                  let standing = FactColumnJSON.decode(
+                      AwaitingInputReason.self, from: record.awaitingInputReason),
+                  standing.classification == .promptOnScreen,
+                  standing.transcriptFingerprint == expected else {
+                return false
+            }
+            record.awaitingInputReason = FactColumnJSON.encode(
+                AwaitingInputReason(
+                    message: standing.message,
+                    hookEventName: standing.hookEventName,
+                    raw: standing.raw,
+                    notificationType: standing.notificationType,
+                    transcriptFingerprint: fingerprint))
+            try record.update(db)
+            return true
+        }
+    }
+
     /// Retract a standing wait reason WITHOUT asserting an activity state.
     ///
     /// The mirror of `recordAwaitingInputReason`, and it exists for the same

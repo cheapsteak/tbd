@@ -130,6 +130,7 @@ extension RPCRouter {
             branchTips: lifecycle.branchTipTracker,
             actuationRecord: ActuationRecordReader(activePath: actuationLog.path),
             transcriptFingerprinter: transcriptFingerprinter,
+            transcriptDeltaInspector: transcriptDeltaInspector,
             now: now)
         return try RPCResponse(result: await builder.build(facts: facts))
     }

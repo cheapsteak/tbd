@@ -144,4 +144,52 @@ import Testing
         #expect(standing.classification == .doneWaiting)
         #expect(standing.transcriptFingerprint == nil)
     }
+
+    // MARK: - Refresh after a sidechain-only append
+
+    /// The sibling of adoption, and deliberately not adoption itself: this one
+    /// REPLACES a baseline the caller has just read past, so the next pass is a
+    /// stat rather than a re-read of records already attributed to a subagent.
+    @Test func refreshesTheBaselineOnTheFingerprintItWasComparedAgainst() async throws {
+        try await record(type: "permission_prompt", fingerprint: Self.fingerprint(size: 10))
+
+        let refreshed = try await db.terminals.refreshTranscriptFingerprint(
+            id: terminalID, expected: Self.fingerprint(size: 10),
+            fingerprint: Self.fingerprint(size: 20))
+
+        #expect(refreshed)
+        let standing = try #require(try await terminal().awaitingInputReason)
+        #expect(standing.transcriptFingerprint == Self.fingerprint(size: 20))
+        // The hand is still up, and the hook's own words are untouched.
+        #expect(standing.classification == .promptOnScreen)
+        #expect(standing.message == "Claude needs your permission to use Bash")
+        #expect(standing.notificationType == "permission_prompt")
+        #expect(try await terminal().awaitingInputObservedAt == Self.observedAt)
+    }
+
+    /// The same guard the conditional clear carries, for the same reason: a
+    /// prompt raised while the delta was being read must not have its
+    /// fingerprint overwritten by a measurement of the file as it stood before.
+    @Test func refreshRefusesWhenTheStandingFingerprintChangedUnderneath() async throws {
+        try await record(type: "permission_prompt", fingerprint: Self.fingerprint(size: 10))
+        try await record(
+            type: "permission_prompt", message: "A newer prompt",
+            fingerprint: Self.fingerprint(size: 30))
+
+        let refreshed = try await db.terminals.refreshTranscriptFingerprint(
+            id: terminalID, expected: Self.fingerprint(size: 10),
+            fingerprint: Self.fingerprint(size: 20))
+
+        #expect(refreshed == false)
+        let standing = try #require(try await terminal().awaitingInputReason)
+        #expect(standing.message == "A newer prompt")
+        #expect(standing.transcriptFingerprint == Self.fingerprint(size: 30))
+    }
+
+    @Test func refreshRefusesOnAMissingTerminal() async throws {
+        let refreshed = try await db.terminals.refreshTranscriptFingerprint(
+            id: UUID(), expected: Self.fingerprint(size: 10),
+            fingerprint: Self.fingerprint(size: 20))
+        #expect(refreshed == false)
+    }
 }
