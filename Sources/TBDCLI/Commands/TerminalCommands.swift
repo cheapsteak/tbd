@@ -759,8 +759,9 @@ func externalAttachNestingRefusal(environment: [String: String]) -> String? {
     return """
         Refusing to attach from inside tmux ($TMUX is set): a tmux client nested \
         in a tmux pane is not the second emulator this command exists to give you. \
-        Run it from another terminal emulator, or pass --print and pipe the script \
-        into `sh` there.
+        Run it from another terminal emulator, or run \
+        `sh -c "$(tbd terminal attach <worktree> --print)"` there. Piping --print \
+        into `sh` does not work: the attach needs a tty on stdin.
         """
 }
 
@@ -786,18 +787,29 @@ struct TerminalAttach: AsyncParsableCommand {
             TBD panel is already showing, so somebody else's renderer sits next to
             SwiftTerm's on the identical byte stream. With no flags it execs tmux,
             replacing itself, so run it in the emulator you want attached. It
-            refuses when $TMUX is set: pass --print and pipe the script into `sh`
-            in the target emulator instead.
+            refuses when $TMUX is set: pass --print and run the script in the
+            target emulator instead.
 
             --terminal picks the terminal when the worktree has more than one. With
             one terminal it can be omitted; with several, omitting it is an error
             listing the candidates rather than a guess.
 
-            --print writes the script and nothing else, so it is safe to pipe
-            straight into `sh`. --json writes the coordinates instead — socket
-            path, session name, @window, %pane, terminal id — which is what drives
-            `tmux pipe-pane -o`, an instrument that needs those values and attaches
-            no client at all. The two are mutually exclusive.
+            --print writes the script and nothing else, to be run from a tty:
+            sh -c "$(tbd terminal attach <worktree> --print)", or equivalently
+            eval "$(tbd terminal attach <worktree> --print)". Both keep the
+            caller's terminal as stdin. PIPING THE SCRIPT INTO `sh` DOES NOT WORK:
+            `tmux attach` requires a tty on stdin, and a shell reading its script
+            from a pipe leaves stdin as that pipe, so the attach dies with
+            "open terminal failed: not a terminal". The setup half of the script
+            has already created the session by then, and the reaping option rides
+            the attach that just failed, so every piped attempt also leaves a
+            client-less session behind for the daemon to reclaim. Use one of the
+            two forms above.
+
+            --json writes the coordinates instead — socket path, session name,
+            @window, %pane, terminal id — which is what drives `tmux pipe-pane -o`,
+            an instrument that needs those values and attaches no client at all.
+            --print and --json are mutually exclusive.
 
             SIZING THE EXTERNAL WINDOW. Match TBD's panel dimensions EXACTLY
             whenever you will run the external-alone condition (TBD's tab switched
@@ -809,7 +821,10 @@ struct TerminalAttach: AsyncParsableCommand {
             clients are attached the window keeps TBD's dimensions, so a narrower
             external window wraps or clips a stream cut for a wider window, which
             makes the external client look worse than it is and fakes a result in
-            TBD's favour.
+            TBD's favour. Expect exact sizing to be fiddly to hit by hand: emulator
+            windows are dragged in pixels while tmux counts character cells, so
+            landing on a given rows-by-columns geometry usually takes several
+            tries. Nothing enforces it — the size is yours to get right.
 
             WHAT THIS DOES NOT MEASURE. tmux tailors its output to each client's
             declared terminal capabilities, so two different emulators attached to
@@ -825,7 +840,7 @@ struct TerminalAttach: AsyncParsableCommand {
     @Option(name: .long, help: "Terminal ID (required when the worktree has more than one terminal)")
     var terminal: String?
 
-    @Flag(name: .customLong("print"), help: "Write the attach script to stdout and exit (safe to pipe into sh)")
+    @Flag(name: .customLong("print"), help: "Write the attach script to stdout and exit (run it as sh -c \"$(...)\"; piping into sh does not work)")
     var printScript = false
 
     @Flag(name: .long, help: "Write the coordinates (socket path, session name, window id, pane id, terminal id) as JSON")
@@ -883,7 +898,9 @@ struct TerminalAttach: AsyncParsableCommand {
 
         if printScript {
             // The script and nothing else — no banner, no trailing prose. A
-            // consumer pipes this into `sh`.
+            // consumer runs it as `sh -c "$(...)"`, which keeps their tty as
+            // stdin; piping it into `sh` leaves stdin a pipe and the attach
+            // fails for want of a terminal.
             print(result.script)
             return
         }

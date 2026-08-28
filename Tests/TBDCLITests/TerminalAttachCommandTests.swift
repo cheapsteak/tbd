@@ -84,6 +84,72 @@ struct TerminalAttachCommandTests {
         }
     }
 
+    // MARK: - The help text's own claims
+
+    /// `--help` rendered the way a user sees it, with wrapping newlines
+    /// flattened back into single spaces. The claims below are properties of
+    /// the composed help screen — discussion and flag help together — not of
+    /// any one string literal, so moving a sentence between them cannot make
+    /// the assertion vacuous.
+    private func attachHelp(columns: Int = 80) -> String {
+        TerminalAttach.helpMessage(includeHidden: false, columns: columns)
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+    }
+
+    /// The help used to say the `--print` output was safe to pipe straight
+    /// into `sh`. It never was: `tmux attach` requires a tty on stdin, and a
+    /// shell reading its script from a pipe leaves stdin as that pipe, so the
+    /// attach exits 1 with "open terminal failed: not a terminal" — after the
+    /// setup half of the script has already created the session, and with the
+    /// reaping option riding the attach that just failed. Every piped attempt
+    /// therefore also orphaned a session. Verified against tmux 3.6a.
+    @Test("the help never claims the --print output can be piped into sh")
+    func helpMakesNoPipeSafetyClaim() {
+        let help = attachHelp()
+        for claim in [
+            "safe to pipe",
+            "pipe the script into",
+            "pipe straight into",
+            "pipes into",
+            "piping the script into `sh` works"
+        ] {
+            #expect(!help.contains(claim), "help still claims pipe-safety: \(claim)")
+        }
+    }
+
+    /// Replacing a wrong incantation with nothing would leave the reader worse
+    /// off, so the help has to carry one that works — and both forms do the
+    /// same thing: they keep the caller's own terminal as stdin.
+    @Test("the help carries an incantation that actually works from a tty")
+    func helpCarriesAWorkingIncantation() {
+        let help = attachHelp(columns: 100)
+        #expect(help.contains(#"sh -c "$(tbd terminal attach <worktree> --print)""#))
+        #expect(help.contains(#"eval "$(tbd terminal attach <worktree> --print)""#))
+    }
+
+    /// A reader who has seen the old guidance will try the pipe anyway unless
+    /// the help says outright that it fails, and why — otherwise the error is
+    /// confusing and the leftover session is invisible.
+    @Test("the help says the pipe fails, and names the tty as the reason")
+    func helpExplainsWhyThePipeFails() {
+        let help = attachHelp(columns: 100)
+        #expect(help.contains("PIPING THE SCRIPT INTO `sh` DOES NOT WORK"))
+        #expect(help.contains("requires a tty on stdin"))
+        #expect(help.contains("open terminal failed: not a terminal"))
+        #expect(help.contains("client-less session behind"))
+    }
+
+    /// The spec asks the help to concede that exact sizing is fiddly to hit by
+    /// hand, so a reader expects to fight it rather than assuming they have
+    /// misread the rule.
+    @Test("the help concedes that exact sizing is fiddly by hand")
+    func helpConcedesSizingIsFiddly() {
+        let help = attachHelp(columns: 100)
+        #expect(help.contains("fiddly to hit by hand"))
+        #expect(help.contains("character cells"))
+    }
+
     // MARK: - Terminal resolution
 
     @Test("a worktree with exactly one terminal resolves to it")

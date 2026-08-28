@@ -546,6 +546,11 @@ enum ContinueInCodexMenu {
 /// terminal behind it (webview, code viewer, note) resolves to nil — its deep
 /// link falls back to the worktree alone, and it offers no attach command at
 /// all, because there is no tmux window for an external emulator to attach to.
+///
+/// Nil *is* the menu's hide condition: `contextMenuContent` gates the "Copy
+/// Attach Command" button on `if let` over this call, so there is deliberately
+/// no boolean twin — a separate `showsAttachCommand` would be a second rule
+/// the tests could hold green while the menu's own drifted away from it.
 /// Extracted from the view so each branch is unit-testable without rendering
 /// SwiftUI (same pattern as `TabParkMenuModel` and `ContinueInCodexMenu`).
 enum TabTerminalTarget {
@@ -555,11 +560,6 @@ enum TabTerminalTarget {
         case .liveTranscript(_, let terminalID): return terminalID
         case .webview, .codeViewer, .note: return nil
         }
-    }
-
-    /// Whether the tab context menu shows "Copy Attach Command".
-    static func showsAttachCommand(for content: PaneContent) -> Bool {
-        terminalID(for: content) != nil
     }
 }
 
