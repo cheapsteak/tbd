@@ -19,6 +19,13 @@ import Testing
 ///    `destroy-unattached on` onto the attach instead of setting it in the
 ///    setup block. `composedScriptAttachesToTheTerminalsWindow` is the other
 ///    half: the composed script, run for real, attaches.
+///  - **Landing on the verified window and nothing else.** Three ways the
+///    script could put a person on the throwaway `/tmp` shell instead of their
+///    agent — a non-zero `base-index` in the user's `~/.tmux.conf`, a window
+///    that died between the daemon's probe and the paste, and a surviving
+///    session built around a window that has since been replaced — each get a
+///    test, because each was a real defect and none is visible in the composed
+///    string.
 ///  - **The geometry rule** ("Measurement guidance"). The advice to size the
 ///    external window exactly like TBD's panel rests entirely on how tmux
 ///    treats an `ignore-size` client, so that behavior is pinned rather than
@@ -30,7 +37,10 @@ import Testing
 ///  - **rc-free bootstrap.** The server starts with `-f /dev/null`, so the
 ///    developer's `~/.tmux.conf` cannot change a default this suite asserts.
 ///    Config is server-side and loaded once at server start, so the clients
-///    spawned later inherit that same rc-free server.
+///    spawned later inherit that same rc-free server. The one test that needs
+///    a *configured* server passes `TmuxServer.start(config:)`, which writes
+///    the config into that server's own fenced directory — the real
+///    `~/.tmux.conf` is neither read nor written anywhere here.
 ///  - **Every wait is bounded**, and waits on a *positive* signal (a client
 ///    appears, a size converges, the shell exits) rather than sleeping a
 ///    guessed interval. A hung live test holds the shared build lock against
@@ -116,21 +126,233 @@ struct ExternalAttachCommandLiveTests {
             """)
     }
 
+    // MARK: - 1b. Nothing but the verified window, on any server
+
+    /// **`base-index` must not change where the client lands.** The daemon's
+    /// tmux servers are started by `TmuxManager`, which passes no `-f`, so they
+    /// load the user's `~/.tmux.conf` — and `set -g base-index 1` is one of the
+    /// most common lines in one. Under it the throwaway window is at index 1,
+    /// so the `kill-window -t <session>:0` this composer used to emit failed
+    /// with `can't find window: 0`, tmux abandoned the rest of the `\;` chain,
+    /// and the session kept a bare `/tmp` shell alongside the agent's window
+    /// for the client to wander into — which the spec's "the session holds one
+    /// window, so there is nowhere to wander" says must not happen.
+    ///
+    /// This is the one test in the suite that deliberately runs a server that
+    /// is *not* rc-free, so the config is written into the server's own fenced
+    /// directory. The `base-index` reading below is not decoration: without it
+    /// a config that silently failed to load would make this pass while
+    /// measuring the default server the other tests already cover.
+    @Test("a non-zero base-index still leaves the session holding only the terminal's window")
+    func composedScriptSurvivesANonZeroBaseIndex() async throws {
+        let server = try TmuxServer.start(config: "set -g base-index 1\n")
+        defer { server.tearDown() }
+        try #require(
+            server.globalOption("base-index") == "1",
+            "the fenced config did not load, so this would measure a default server")
+        let window = try server.createWindowInMain()
+
+        let session = ExternalAttachCommand.sessionName(for: UUID())
+        let client = try PTYProcess(
+            executable: "/bin/sh",
+            arguments: ["-c", ExternalAttachCommand.script(
+                socketPath: server.socketPath,
+                sessionName: session,
+                windowID: window)],
+            size: Size(columns: 100, rows: 30))
+        defer { client.terminate() }
+
+        #expect(
+            await server.awaitClient(onSession: session, orExitOf: client, within: .seconds(10)),
+            "no client attached under `base-index 1`: \(client.capturedOutput)")
+        #expect(
+            server.windowIDs(inSession: session) == window,
+            """
+            the session must hold the terminal's window and nothing else; \
+            held \(server.windowIDs(inSession: session)) — a leftover throwaway \
+            window means the index-dependent `kill-window` is back
+            """)
+        #expect(
+            server.clientWindowIDs(onSession: session) == window,
+            "the client is showing \(server.clientWindowIDs(onSession: session)), not \(window)")
+    }
+
+    // MARK: - 1c. Failing loudly rather than landing on a shell
+
+    /// **A setup that fails must not be followed by an attach.** The window can
+    /// die between the daemon's probe and the person's paste — a closed tab, a
+    /// respawn, a reconcile pass, a slow hand — and `link-window` then fails.
+    /// While setup and attach were two bare statements the attach ran anyway
+    /// and put a client on the throwaway `/tmp` shell, with one line of tmux
+    /// stderr, scrolled off by the attach's own redraw, as the only signal.
+    ///
+    /// A vanished window is simulated here with an id no window has, which
+    /// reaches `link-window` in exactly the same state a real one would.
+    ///
+    /// The session assertion is the second half and is not incidental: a
+    /// half-built session would be a client-less `tbd-ext-*` holding a bare
+    /// shell under this terminal's own name, waiting for the reconciler.
+    @Test("a window that no longer exists leaves neither a client nor a session")
+    func aVanishedWindowLeavesNeitherClientNorSession() async throws {
+        let server = try TmuxServer.start()
+        defer { server.tearDown() }
+        let liveWindow = try server.createWindowInMain()
+
+        let missingWindow = "@999999"
+        try #require(
+            !server.windowIDs(inSession: "main").contains(missingWindow),
+            "the id chosen to stand for a vanished window must not name a real one")
+
+        let session = ExternalAttachCommand.sessionName(for: UUID())
+        let client = try PTYProcess(
+            executable: "/bin/sh",
+            arguments: ["-c", ExternalAttachCommand.script(
+                socketPath: server.socketPath,
+                sessionName: session,
+                windowID: missingWindow)],
+            size: Size(columns: 100, rows: 30))
+        defer { client.terminate() }
+
+        #expect(
+            !(await server.awaitClient(onSession: session, orExitOf: client, within: .seconds(10))),
+            """
+            a client attached after `link-window` failed — it is sitting on the \
+            throwaway /tmp shell believing it is an agent session. Script output: \
+            \(client.capturedOutput)
+            """)
+        #expect(
+            !server.hasSession(session),
+            "the failed build left \(session) behind holding \(server.windowIDs(inSession: session))")
+        // Discriminates "the script declined to attach" from "the server died",
+        // which would make every assertion above vacuously true.
+        #expect(server.hasSession("main"), "the server must still be alive")
+        #expect(server.windowIDs(inSession: "main").contains(liveWindow))
+    }
+
+    // MARK: - 1d. A surviving session is reused only if it is the right one
+
+    /// **A session that already exists must never be attached to unverified.**
+    /// The terminal-keyed name outlives the window it was built around: a
+    /// terminal's window can die and be recreated under a new id, with the DB
+    /// updated and the pane re-stamped, so the daemon's probe passes cleanly
+    /// and names the *new* window. A `has-session ||` guard would then see the
+    /// old session, skip setup entirely, and attach the person to the window
+    /// nobody is using any more — with no error anywhere.
+    ///
+    /// Comparing the session's window list against the verified window instead
+    /// makes the stale case rebuild.
+    @Test("a session holding the wrong window is rebuilt, not reused")
+    func aSessionHoldingTheWrongWindowIsRebuilt() async throws {
+        let server = try TmuxServer.start()
+        defer { server.tearDown() }
+        let staleWindow = try server.createWindowInMain()
+        let currentWindow = try server.createWindowInMain()
+        #expect(staleWindow != currentWindow)
+
+        // The session as a previous attach left it: right name, dead window.
+        let session = ExternalAttachCommand.sessionName(for: UUID())
+        try server.makeLinkedSession(named: session, window: staleWindow)
+
+        let client = try PTYProcess(
+            executable: "/bin/sh",
+            arguments: ["-c", ExternalAttachCommand.script(
+                socketPath: server.socketPath,
+                sessionName: session,
+                windowID: currentWindow)],
+            size: Size(columns: 100, rows: 30))
+        defer { client.terminate() }
+
+        #expect(
+            await server.awaitClient(onSession: session, orExitOf: client, within: .seconds(10)),
+            "no client attached: \(client.capturedOutput)")
+        #expect(
+            server.windowIDs(inSession: session) == currentWindow,
+            """
+            the surviving session was reused as-is: it holds \
+            \(server.windowIDs(inSession: session)) rather than the verified \
+            window \(currentWindow)
+            """)
+        #expect(
+            server.clientWindowIDs(onSession: session) == currentWindow,
+            """
+            the client is showing \(server.clientWindowIDs(onSession: session)) — \
+            the stale window — instead of \(currentWindow)
+            """)
+    }
+
+    /// The other half of that choice, and the reason it is verify-then-rebuild
+    /// rather than the unconditional kill `TmuxBridge` performs: a session that
+    /// *does* hold the verified window is reused, so a second invocation cannot
+    /// evict an external client that is already attached and measuring.
+    @Test("a session already holding the verified window is reused, sparing its client")
+    func aSessionHoldingTheVerifiedWindowIsReused() async throws {
+        let server = try TmuxServer.start()
+        defer { server.tearDown() }
+        let window = try server.createWindowInMain()
+
+        let session = ExternalAttachCommand.sessionName(for: UUID())
+        try server.makeLinkedSession(named: session, window: window)
+
+        // Somebody is already attached — a measurement in progress.
+        let firstClient = try PTYProcess(
+            executable: "/usr/bin/env",
+            arguments: ["tmux", "-u", "-S", server.socketPath, "attach", "-t", session, "-f", "ignore-size"],
+            size: Size(columns: 100, rows: 30))
+        defer { firstClient.terminate() }
+        try #require(
+            await server.awaitClient(onSession: session, orExitOf: firstClient, within: .seconds(10)),
+            "the standing client never attached: \(firstClient.capturedOutput)")
+        let standingTTYs = Set(server.clientTTYs(onSession: session).split(separator: "\n").map(String.init))
+        try #require(standingTTYs.count == 1, "expected exactly one standing client, got \(standingTTYs)")
+
+        let secondClient = try PTYProcess(
+            executable: "/bin/sh",
+            arguments: ["-c", ExternalAttachCommand.script(
+                socketPath: server.socketPath,
+                sessionName: session,
+                windowID: window)],
+            size: Size(columns: 100, rows: 30))
+        defer { secondClient.terminate() }
+
+        let bothAttached = await server.poll(within: .seconds(10)) { () -> Bool? in
+            let ttys = Set(server.clientTTYs(onSession: session).split(separator: "\n").map(String.init))
+            return ttys.count >= 2 ? true : nil
+        } ?? false
+        #expect(bothAttached, "the second client never attached: \(secondClient.capturedOutput)")
+        #expect(
+            standingTTYs.isSubset(of: Set(server.clientTTYs(onSession: session).split(separator: "\n").map(String.init))),
+            """
+            the standing client was evicted — an unconditional rebuild would \
+            interrupt a measurement in progress. Clients now: \
+            \(server.clientTTYs(onSession: session))
+            """)
+        #expect(server.windowIDs(inSession: session) == window)
+    }
+
     // MARK: - 2. Why: the gap is not a race
 
-    /// The mechanism behind the known issue above, isolated from the composer
-    /// so it stays true and green whatever the composer does next.
-    ///
-    /// tmux collects an unattached session with `destroy-unattached on` on a
-    /// server tick, and setting the option is itself enough to schedule that
-    /// tick — no client ever has to come and go. So a session created detached
+    /// One tmux behavior, pinned on its own: **a detached session with
+    /// `destroy-unattached on` is collected before any client can reach it.**
+    /// Setting the option is itself enough to schedule the tick that collects
+    /// it — no client ever has to come and go — so a session created detached
     /// with the option already on cannot survive long enough for a separate
-    /// `tmux attach` process to reach it, and the "in principle" of the spec's
-    /// risk paragraph is in practice.
+    /// `tmux attach` process to arrive.
     ///
-    /// This deliberately builds the session with tmux directly rather than
-    /// through `ExternalAttachCommand.script`: the point is to pin one tmux
-    /// behavior, not to re-test the script the previous test drives.
+    /// **What this does and does not prove.** It builds its session with raw
+    /// tmux calls and never invokes `ExternalAttachCommand.script`, so it is
+    /// *not* a regression guard on where the composer puts the option: move
+    /// `set-option` back into the setup block and this test still passes,
+    /// unchanged. It proves only the tmux rule that makes that placement
+    /// wrong, which is why the rule is worth writing down separately — a
+    /// future tmux that stopped collecting detached sessions would make the
+    /// placement a free choice, and this is the test that would notice.
+    ///
+    /// The guards on the composer itself are elsewhere:
+    /// `scriptMatchesSpecVerbatim` in
+    /// `Tests/TBDSharedTests/ExternalAttachCommandTests.swift` pins the string
+    /// whole, and `composedScriptAttachesToTheTerminalsWindow` runs it twenty
+    /// times against a real server. A composer that set the option early would
+    /// redden both.
     @Test("destroy-unattached reaps a detached session before any client can arrive")
     func destroyUnattachedReapsBeforeAnyClientCanArrive() async throws {
         let server = try TmuxServer.start()
@@ -140,7 +362,7 @@ struct ExternalAttachCommandLiveTests {
         let session = ExternalAttachCommand.sessionName(for: UUID())
         server.tmux(["new-session", "-d", "-s", session, "-c", "/tmp"])
         server.tmux(["link-window", "-s", window, "-t", session + ":"])
-        server.tmux(["kill-window", "-t", session + ":0"])
+        server.tmux(["kill-window", "-a", "-t", session + ":" + window])
 
         // The gap the script leaves open starts here: the session exists, holds
         // the window, and has no client.
@@ -161,6 +383,51 @@ struct ExternalAttachCommandLiveTests {
             the sibling session without the option must survive, or this measured \
             a server that died rather than a session that was reaped
             """)
+    }
+
+    // MARK: - 2b. Why a `\;` chain is a guard at all
+
+    /// The tmux rule three of the guards above are built on, pinned on its own:
+    /// **a `\;` chain stops at its first failing command, and everything after
+    /// it is abandoned.** It is why a failed `link-window` cannot be followed by
+    /// a `kill-window`, why the index-dependent `kill-window -t <session>:0`
+    /// took the rest of its chain down with it, and why putting `select-window`
+    /// *ahead* of the attach turns it into the last check on the window still
+    /// being there — the residual gap between the daemon's probe and the
+    /// person's paste.
+    ///
+    /// Asserted here with no composer involved, on the shape that matters: an
+    /// attach chain whose leading `select-window` names a window the session
+    /// does not hold. If a future tmux ran the rest of a failed chain anyway,
+    /// that gap would reopen silently, and this is the test that would say so.
+    @Test("a failing select-window abandons the rest of the chain, so no client attaches")
+    func aFailingSelectWindowAbandonsTheAttachChain() async throws {
+        let server = try TmuxServer.start()
+        defer { server.tearDown() }
+        let window = try server.createWindowInMain()
+
+        let session = ExternalAttachCommand.sessionName(for: UUID())
+        try server.makeLinkedSession(named: session, window: window)
+
+        let client = try PTYProcess(
+            executable: "/usr/bin/env",
+            arguments: [
+                "tmux", "-u", "-S", server.socketPath,
+                "select-window", "-t", session + ":@999999", ";",
+                "attach", "-t", session, "-f", "ignore-size", ";",
+                "set-option", "-t", session, "destroy-unattached", "on",
+            ],
+            size: Size(columns: 100, rows: 30))
+        defer { client.terminate() }
+
+        #expect(
+            !(await server.awaitClient(onSession: session, orExitOf: client, within: .seconds(10))),
+            """
+            tmux ran an attach that followed a failed `select-window` in the same \
+            chain. Client output: \(client.capturedOutput)
+            """)
+        // The session is untouched — this pins chain abandonment, not a reap.
+        #expect(server.windowIDs(inSession: session) == window)
     }
 
     // MARK: - 3. The geometry rule the measurement guidance rests on
@@ -313,7 +580,11 @@ private struct TmuxServer {
     let directory: URL
     let socketPath: String
 
-    static func start() throws -> TmuxServer {
+    /// - Parameter config: tmux configuration to start the server with, for the
+    ///   one test that needs a *non*-default server. Written into this server's
+    ///   own fenced directory — never `~/.tmux.conf`, which this suite must
+    ///   neither read nor write. Omitted, the server is rc-free.
+    static func start(config: String? = nil) throws -> TmuxServer {
         let directory = URL(
             fileURLWithPath: "/tmp/tbd-extlive-\(UUID().uuidString.prefix(8).lowercased())",
             isDirectory: true)
@@ -324,13 +595,19 @@ private struct TmuxServer {
         let server = TmuxServer(
             directory: directory,
             socketPath: directory.appendingPathComponent("s").path)
-        // `-f /dev/null`: the developer's ~/.tmux.conf must not reach a suite
-        // that asserts tmux defaults. Config is loaded once, server-side, so
-        // every client attaching later inherits this rc-free server.
+        // `-f /dev/null` by default: the developer's ~/.tmux.conf must not
+        // reach a suite that asserts tmux defaults. Config is loaded once,
+        // server-side, so every client attaching later inherits this server.
         // `main` carries no `destroy-unattached`, which is what makes it a
         // usable control for "was the server still alive?".
+        var configPath = "/dev/null"
+        if let config {
+            let file = directory.appendingPathComponent("tmux.conf")
+            try config.write(to: file, atomically: true, encoding: .utf8)
+            configPath = file.path
+        }
         server.tmux([
-            "-f", "/dev/null",
+            "-f", configPath,
             "new-session", "-d", "-s", "main", "-x", "80", "-y", "24",
             "sleep", "600",
         ])
@@ -356,7 +633,11 @@ private struct TmuxServer {
     func makeLinkedSession(named name: String, window: String) throws {
         tmux(["new-session", "-d", "-s", name, "-c", "/tmp"])
         tmux(["link-window", "-s", window, "-t", name + ":"])
-        tmux(["kill-window", "-t", name + ":0"])
+        // `-a` — kill every window except the target — for the same reason the
+        // composer uses it: `:0` names the throwaway only when `base-index` is
+        // 0, and a fixture that quietly left a second window behind would let
+        // an assertion about "the session's window" mean something else.
+        tmux(["kill-window", "-a", "-t", name + ":" + window])
         guard windowIDs(inSession: name) == window else {
             throw Failure("session \(name) does not hold \(window): \(windowIDs(inSession: name))")
         }
@@ -374,6 +655,12 @@ private struct TmuxServer {
 
     func clientTTYs(onSession name: String) -> String {
         capture(["list-clients", "-t", name, "-F", "#{client_tty}"]).output
+    }
+
+    /// The window each client attached to `name` is currently displaying — the
+    /// only thing that answers "did the person land where they asked to land?".
+    func clientWindowIDs(onSession name: String) -> String {
+        capture(["list-clients", "-t", name, "-F", "#{window_id}"]).output
     }
 
     func clientFlags(onSession name: String) -> String {
@@ -436,7 +723,7 @@ private struct TmuxServer {
 
     /// Bounded polling loop. `probe` returns nil to keep waiting; the loop
     /// returns nil when the deadline passes, so no caller can wait forever.
-    private func poll<T>(within limit: Duration, probe: () -> T?) async -> T? {
+    func poll<T>(within limit: Duration, probe: () -> T?) async -> T? {
         let deadline = ContinuousClock.now + limit
         while ContinuousClock.now < deadline {
             if let value = probe() { return value }

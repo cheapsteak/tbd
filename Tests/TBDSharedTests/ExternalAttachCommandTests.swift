@@ -7,8 +7,13 @@ import Testing
 /// `docs/specs/2026-08-27-external-tmux-attach-shortcut-design.md`, not a
 /// scattering of substring checks. Substring checks would pass a script whose
 /// pieces are all present in the wrong order, missing a `\;`, or missing the
-/// `||` that makes the whole thing idempotent — every one of which is a broken
-/// command a user would paste into a shell.
+/// `&&` that keeps the attach from running after a failed setup — every one of
+/// which is a broken command a user would paste into a shell, and the last of
+/// which lands them on a throwaway shell believing it is their agent.
+///
+/// What the string does when a tmux server executes it is a separate question,
+/// answered in `Tests/TBDDaemonLiveTests/ExternalAttachCommandLiveTests.swift`:
+/// these assertions would happily pin a script that is exactly wrong.
 @Suite("ExternalAttachCommand")
 struct ExternalAttachCommandTests {
 
@@ -40,12 +45,16 @@ struct ExternalAttachCommandTests {
             sessionName: "tbd-ext-5a2b3c4d",
             windowID: "@7")
         #expect(script == """
-            tmux -S '/tmp/tmux-501/tbd-1a2b3c4d' has-session -t 'tbd-ext-5a2b3c4d' 2>/dev/null || \\
-            tmux -S '/tmp/tmux-501/tbd-1a2b3c4d' \\
-                new-session -d -s 'tbd-ext-5a2b3c4d' -c /tmp \\; \\
-                link-window -s '@7' -t 'tbd-ext-5a2b3c4d:' \\; \\
-                kill-window -t 'tbd-ext-5a2b3c4d:0'
-            tmux -u -S '/tmp/tmux-501/tbd-1a2b3c4d' attach -t 'tbd-ext-5a2b3c4d' -f ignore-size \\; \\
+            [ "$(tmux -S '/tmp/tmux-501/tbd-1a2b3c4d' list-windows -t 'tbd-ext-5a2b3c4d' -F '#{window_id}' 2>/dev/null)" = '@7' ] || {
+                tmux -S '/tmp/tmux-501/tbd-1a2b3c4d' kill-session -t 'tbd-ext-5a2b3c4d' 2>/dev/null
+                tmux -S '/tmp/tmux-501/tbd-1a2b3c4d' \\
+                    new-session -d -s 'tbd-ext-5a2b3c4d' -c /tmp \\; \\
+                    link-window -s '@7' -t 'tbd-ext-5a2b3c4d:' \\; \\
+                    kill-window -a -t 'tbd-ext-5a2b3c4d:@7' \\
+                    || { tmux -S '/tmp/tmux-501/tbd-1a2b3c4d' kill-session -t 'tbd-ext-5a2b3c4d' 2>/dev/null; false; }
+            } && tmux -u -S '/tmp/tmux-501/tbd-1a2b3c4d' \\
+                select-window -t 'tbd-ext-5a2b3c4d:@7' \\; \\
+                attach -t 'tbd-ext-5a2b3c4d' -f ignore-size \\; \\
                 set-option -t 'tbd-ext-5a2b3c4d' destroy-unattached on
             """)
     }
@@ -71,12 +80,16 @@ struct ExternalAttachCommandTests {
             sessionName: "tbd-ext-5a2b3c4d",
             windowID: "@7")
         #expect(script == """
-            tmux -S '/tmp/tbd fence/tmux-501/tbd-1a2b3c4d' has-session -t 'tbd-ext-5a2b3c4d' 2>/dev/null || \\
-            tmux -S '/tmp/tbd fence/tmux-501/tbd-1a2b3c4d' \\
-                new-session -d -s 'tbd-ext-5a2b3c4d' -c /tmp \\; \\
-                link-window -s '@7' -t 'tbd-ext-5a2b3c4d:' \\; \\
-                kill-window -t 'tbd-ext-5a2b3c4d:0'
-            tmux -u -S '/tmp/tbd fence/tmux-501/tbd-1a2b3c4d' attach -t 'tbd-ext-5a2b3c4d' -f ignore-size \\; \\
+            [ "$(tmux -S '/tmp/tbd fence/tmux-501/tbd-1a2b3c4d' list-windows -t 'tbd-ext-5a2b3c4d' -F '#{window_id}' 2>/dev/null)" = '@7' ] || {
+                tmux -S '/tmp/tbd fence/tmux-501/tbd-1a2b3c4d' kill-session -t 'tbd-ext-5a2b3c4d' 2>/dev/null
+                tmux -S '/tmp/tbd fence/tmux-501/tbd-1a2b3c4d' \\
+                    new-session -d -s 'tbd-ext-5a2b3c4d' -c /tmp \\; \\
+                    link-window -s '@7' -t 'tbd-ext-5a2b3c4d:' \\; \\
+                    kill-window -a -t 'tbd-ext-5a2b3c4d:@7' \\
+                    || { tmux -S '/tmp/tbd fence/tmux-501/tbd-1a2b3c4d' kill-session -t 'tbd-ext-5a2b3c4d' 2>/dev/null; false; }
+            } && tmux -u -S '/tmp/tbd fence/tmux-501/tbd-1a2b3c4d' \\
+                select-window -t 'tbd-ext-5a2b3c4d:@7' \\; \\
+                attach -t 'tbd-ext-5a2b3c4d' -f ignore-size \\; \\
                 set-option -t 'tbd-ext-5a2b3c4d' destroy-unattached on
             """)
     }
