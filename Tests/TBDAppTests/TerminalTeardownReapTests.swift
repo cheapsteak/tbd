@@ -25,8 +25,9 @@ import Testing
 /// cleanup handler on main; `startChild` passes the same, because any other
 /// queue would test a configuration TBD never uses. That is only sound
 /// because this process genuinely drains the main queue (`Tests/CLAUDE.md`),
-/// so the monitor is live rather than merely idle — the child outlives the coordinator precisely because `cleanup()`
-/// cancels that live monitor, which is the behavior under test.
+/// so the monitor is live rather than merely idle — the child outlives the
+/// coordinator precisely because `cleanup()` cancels that live monitor,
+/// which is the behavior under test.
 ///
 /// **These tests are deliberately NOT `@MainActor`, and each takes exactly one
 /// main-actor hop.** They need main only for the steps that are main-isolated
