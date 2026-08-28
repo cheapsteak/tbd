@@ -64,6 +64,10 @@ class TBDTerminalView: TerminalView {
         // Apply current values once so first render uses user settings.
         applyAll()
 
+        // Replace the pre-2.0 `notify` override with the token-scoped OSC
+        // observer (see installNotificationObserver).
+        installNotificationObserver()
+
         // Reapply on any AppearanceSettings change. `objectWillChange` fires
         // *before* the property mutation lands on the published value, so we
         // dispatch async to main — by the time the sink runs, the new value
@@ -196,11 +200,11 @@ class TBDTerminalView: TerminalView {
         self.caretColor = Self.nsColor(from: scheme.cursor)
         self.selectedTextBackgroundColor = Self.nsColor(from: scheme.selection)
 
-        // Force SwiftTerm to repaint every cell. `installColors` updates the
-        // palette but does not invalidate cells already in the buffer; without
-        // this, default-bg cells continue showing the bg color they were drawn
-        // with at first paint (NSColor.textBackgroundColor = system gray).
-        self.getTerminal().updateFullScreen()
+        // No explicit repaint needed: SwiftTerm 2.0's `installColors` runs
+        // `colorsChangedLocked()` under the terminal lock, which itself calls
+        // `terminal.updateFullScreen()` and marks the frame dirty — the
+        // invalidation the old `getTerminal().updateFullScreen()` workaround
+        // existed to force.
         self.needsDisplay = true
     }
 
@@ -215,8 +219,21 @@ class TBDTerminalView: TerminalView {
         )
     }
 
+    // MARK: - Locked terminal access
+    //
+    // SwiftTerm 2.0 parses on the PTY IO thread and renders off-main, so the
+    // `Terminal` is shared mutable state guarded by `terminalLock`. Every
+    // non-snapshot access in TBD goes through `withTerminal { ... }`, which
+    // acquires that lock for the duration of the closure. Discipline, per
+    // docs/specs/2026-08-28-swiftterm-2-locked-terminal-access-design.md:
+    // copy values out of the closure and return them — never store the
+    // `Terminal` reference; never call `TerminalView` APIs from inside the
+    // closure (they may acquire the same lock and deadlock); never re-enter
+    // `withTerminal`. Pure cols/rows reads use the lock-free
+    // `terminalDimensions` snapshot instead.
+
     private func applyCursor() {
-        self.terminal.setCursorStyle(appearanceSettings.cursorStyle)
+        withTerminal { $0.setCursorStyle(appearanceSettings.cursorStyle) }
     }
 
     // MARK: - Cell dimension calculation
@@ -283,13 +300,13 @@ class TBDTerminalView: TerminalView {
     /// Converts a window-coordinate point to terminal grid (col, row).
     func gridPosition(atWindowLocation windowPoint: CGPoint) -> (col: Int, row: Int)? {
         let localPoint = convert(windowPoint, from: nil)
-        let terminal = getTerminal()
+        let dims = terminalDimensions
         let cell = cellDimensions()
 
         let col = Int(localPoint.x / cell.width)
         let row = Int((bounds.height - localPoint.y) / cell.height)
 
-        guard row >= 0 && row < terminal.rows && col >= 0 && col < terminal.cols else {
+        guard row >= 0 && row < dims.rows && col >= 0 && col < dims.cols else {
             return nil
         }
         return (col, row)
@@ -440,24 +457,31 @@ class TBDTerminalView: TerminalView {
         // `allowMouseReporting` is true (e.g. `RemoteAttachTerminalView`),
         // SwiftTerm's native reporting is the sole forwarder and we stand
         // down via the guard above.
-        let term = getTerminal()
-        guard !didDrag && term.mouseMode != .off else { return }
+        guard !didDrag else { return }
 
+        // Cell math stays OUTSIDE the lock (view API — see lock discipline
+        // above); the mouseMode read and the send ride one locked block.
+        // `sendEvent` under the lock matches SwiftTerm's own mouseUp path;
+        // the reply is marshalled to main asynchronously, so no re-entry.
         let cell = cellDimensions()
         let col = Int(point.x / cell.width)
         let row = Int((bounds.height - point.y) / cell.height)
 
-        let pressFlags = term.encodeButton(
-            button: 0, release: false,
-            shift: false, meta: false, control: false
-        )
-        term.sendEvent(buttonFlags: pressFlags, x: col, y: row)
+        withTerminal { term in
+            guard term.mouseMode != .off else { return }
 
-        let releaseFlags = term.encodeButton(
-            button: 0, release: true,
-            shift: false, meta: false, control: false
-        )
-        term.sendEvent(buttonFlags: releaseFlags, x: col, y: row)
+            let pressFlags = term.encodeButton(
+                button: 0, release: false,
+                shift: false, meta: false, control: false
+            )
+            term.sendEvent(buttonFlags: pressFlags, x: col, y: row)
+
+            let releaseFlags = term.encodeButton(
+                button: 0, release: true,
+                shift: false, meta: false, control: false
+            )
+            term.sendEvent(buttonFlags: releaseFlags, x: col, y: row)
+        }
     }
 
     /// True if the cell at the given window point carries an OSC 8 hyperlink
@@ -470,10 +494,11 @@ class TBDTerminalView: TerminalView {
     /// (graphics) don't short-circuit our path-detection path.
     func hasOSC8Payload(atWindowLocation windowPoint: CGPoint) -> Bool {
         guard let pos = gridPosition(atWindowLocation: windowPoint) else { return false }
-        let terminal = getTerminal()
-        guard let line = terminal.getLine(row: pos.row) else { return false }
-        guard pos.col < line.count else { return false }
-        return line[pos.col].getPayload() as? String != nil
+        return withTerminal { terminal in
+            guard let line = terminal.getLine(row: pos.row) else { return false }
+            guard pos.col < line.count else { return false }
+            return line[pos.col].getPayload() as? String != nil
+        }
     }
 
     /// Extracts a file path from the terminal buffer at the given window-coordinate point.
@@ -481,10 +506,12 @@ class TBDTerminalView: TerminalView {
         guard let pos = gridPosition(atWindowLocation: windowPoint) else { return nil }
         let col = pos.col
         let row = pos.row
-        let terminal = getTerminal()
 
-        guard let bufferLine = terminal.getLine(row: row) else { return nil }
-        let lineText = bufferLine.translateToString()
+        // Copy the row text out under the lock; all the path resolution and
+        // filesystem checks below run outside it.
+        guard let lineText = withTerminal({ terminal in
+            terminal.getLine(row: row)?.translateToString()
+        }) else { return nil }
 
         guard col < lineText.count else { return nil }
 
@@ -555,16 +582,20 @@ class TBDTerminalView: TerminalView {
     func extractHyperlinkURL(atWindowLocation windowPoint: CGPoint) -> String? {
         guard let pos = gridPosition(atWindowLocation: windowPoint) else { return nil }
         let row = pos.row
-        let terminal = getTerminal()
 
-        guard let line = terminal.getLine(row: row) else { return nil }
-
-        // Build visible text from line (translateToString may return empty for status bar lines)
-        var visibleText = ""
-        for c in 0..<line.count {
-            let val = line[c].getCharacter().unicodeScalars.first?.value ?? 0
-            visibleText.append(val > 0 ? line[c].getCharacter() : " ")
-        }
+        // Build visible text from the line under the lock, copy it out, and
+        // pattern-match outside (translateToString may return empty for
+        // status bar lines, hence the per-cell walk).
+        guard let visibleText = withTerminal({ terminal -> String? in
+            guard let line = terminal.getLine(row: row) else { return nil }
+            var text = ""
+            for c in 0..<line.count {
+                let character = line[c].getCharacter()
+                let val = character.unicodeScalars.first?.value ?? 0
+                text.append(val > 0 ? character : " ")
+            }
+            return text
+        }) else { return nil }
 
         // Look for "PR #123" pattern anywhere on the line.
         // Wide/emoji chars (e.g. ▶▶) make positional matching unreliable,
@@ -665,13 +696,41 @@ class TBDTerminalView: TerminalView {
         return false
     }
 
-    func notify(source: Terminal, title: String, body: String) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            // Only notify when this terminal is not focused
-            guard self.window?.isKeyWindow != true else { return }
-            self.onNotification?(title, body)
+    // MARK: - Notifications (OSC 777)
+
+    /// Keeps the OSC event observation alive; the token cancels it on deinit.
+    private var oscObservation: TerminalOscObservation?
+
+    /// Routes OSC 777 `notify;title;body` into `onNotification`, replacing
+    /// the pre-2.0 `notify(source:title:body:)` override (2.0's delegate
+    /// conformance methods are non-open extension members, so a subclass in
+    /// another module cannot override them). `observeOscEvents` observes
+    /// without preempting SwiftTerm's built-in handling — unlike
+    /// `registerOscHandler`, whose user handlers preempt built-ins.
+    private func installNotificationObserver() {
+        oscObservation = withTerminal { terminal in
+            terminal.observeOscEvents { [weak self] event in
+                guard event.code == 777 else { return }
+                guard let (title, body) = Self.parseNotifyPayload(event.payload) else { return }
+                // Delivered on the observer's private serial queue — hop to
+                // main before touching the view.
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    // Only notify when this terminal is not focused
+                    guard self.window?.isKeyWindow != true else { return }
+                    self.onNotification?(title, body)
+                }
+            }
         }
+    }
+
+    /// Mirrors upstream's `Terminal.oscNotification` parse:
+    /// `notify;title;body` where the body may itself contain `;`.
+    nonisolated static func parseNotifyPayload(_ payload: [UInt8]) -> (title: String, body: String)? {
+        guard let text = String(bytes: payload, encoding: .utf8) else { return nil }
+        let parts = text.components(separatedBy: ";")
+        guard parts.count >= 3, parts[0] == "notify" else { return nil }
+        return (parts[1], parts[2...].joined(separator: ";"))
     }
 
 }
