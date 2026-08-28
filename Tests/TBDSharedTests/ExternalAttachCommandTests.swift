@@ -44,9 +44,9 @@ struct ExternalAttachCommandTests {
             tmux -S '/tmp/tmux-501/tbd-1a2b3c4d' \\
                 new-session -d -s 'tbd-ext-5a2b3c4d' -c /tmp \\; \\
                 link-window -s '@7' -t 'tbd-ext-5a2b3c4d:' \\; \\
-                kill-window -t 'tbd-ext-5a2b3c4d:0' \\; \\
+                kill-window -t 'tbd-ext-5a2b3c4d:0'
+            tmux -u -S '/tmp/tmux-501/tbd-1a2b3c4d' attach -t 'tbd-ext-5a2b3c4d' -f ignore-size \\; \\
                 set-option -t 'tbd-ext-5a2b3c4d' destroy-unattached on
-            tmux -u -S '/tmp/tmux-501/tbd-1a2b3c4d' attach -t 'tbd-ext-5a2b3c4d' -f ignore-size
             """)
     }
 
@@ -75,9 +75,9 @@ struct ExternalAttachCommandTests {
             tmux -S '/tmp/tbd fence/tmux-501/tbd-1a2b3c4d' \\
                 new-session -d -s 'tbd-ext-5a2b3c4d' -c /tmp \\; \\
                 link-window -s '@7' -t 'tbd-ext-5a2b3c4d:' \\; \\
-                kill-window -t 'tbd-ext-5a2b3c4d:0' \\; \\
+                kill-window -t 'tbd-ext-5a2b3c4d:0'
+            tmux -u -S '/tmp/tbd fence/tmux-501/tbd-1a2b3c4d' attach -t 'tbd-ext-5a2b3c4d' -f ignore-size \\; \\
                 set-option -t 'tbd-ext-5a2b3c4d' destroy-unattached on
-            tmux -u -S '/tmp/tbd fence/tmux-501/tbd-1a2b3c4d' attach -t 'tbd-ext-5a2b3c4d' -f ignore-size
             """)
     }
 

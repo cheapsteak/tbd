@@ -12,10 +12,13 @@ import Testing
 /// `docs/specs/2026-08-27-external-tmux-attach-shortcut-design.md` left open:
 ///
 ///  - **The create-to-attach gap** ("Reclamation" → "Known risk, to be settled
-///    by test"). The script creates the session detached, turns
-///    `destroy-unattached on`, and only then attaches. The spec calls the
-///    window in between a race. Measured here it is not a race at all — see
-///    `destroyUnattachedReapsBeforeAnyClientCanArrive`.
+///    by test"). The spec called the window between creating the session
+///    detached and attaching to it a race. Measured here it is not a race at
+///    all — `destroyUnattachedReapsBeforeAnyClientCanArrive` shows the session
+///    is reaped every time, which is why the composer now chains
+///    `destroy-unattached on` onto the attach instead of setting it in the
+///    setup block. `composedScriptAttachesToTheTerminalsWindow` is the other
+///    half: the composed script, run for real, attaches.
 ///  - **The geometry rule** ("Measurement guidance"). The advice to size the
 ///    external window exactly like TBD's panel rests entirely on how tmux
 ///    treats an `ignore-size` client, so that behavior is pinned rather than
@@ -48,19 +51,13 @@ struct ExternalAttachCommandLiveTests {
     /// attached to the terminal's `tbd-ext-*` session, and that session holds
     /// the terminal's window and nothing else.
     ///
-    /// **This does not hold today, and the failure is deterministic** — hence
-    /// `withKnownIssue`. `destroy-unattached on` is set on a session that is
-    /// still detached, tmux collects it on the same server tick, and the attach
-    /// on the next line dies with `can't find session`. The attempt is repeated
-    /// because the spec expected a *race* and a single miss would have been
-    /// ambiguous; it is not a race, it is every time.
-    ///
-    /// The fix — moving the option onto the attach command
-    /// (`attach … \; set-option … destroy-unattached on`) — changes the
-    /// committed composer, so it belongs to a follow-up rather than to this
-    /// test. When it lands, the known issue stops being recorded, this test
-    /// goes red saying so, and the `withKnownIssue` wrapper is what gets
-    /// deleted. Nothing else here changes.
+    /// The composer chains `set-option … destroy-unattached on` onto the attach
+    /// rather than setting it on the still-detached session in the setup block,
+    /// which is what makes this hold. Setting it early is not a race the attach
+    /// usually wins — tmux reaps the session on that same server tick and every
+    /// attempt dies with `can't find session` (measured: 0 of 20). The attempt
+    /// is repeated here because the spec expected a *race*, so a single pass
+    /// would not have distinguished "fixed" from "got lucky once".
     ///
     /// A green control for the harness itself lives in
     /// `ignoreSizeIsDisregardedWhileAnotherClientContributesASize`: it attaches
@@ -104,26 +101,19 @@ struct ExternalAttachCommandLiveTests {
         }
 
         let attachedCount = attempts.filter(\.attached).count
-        withKnownIssue("""
-            The create-to-attach gap the spec flagged as a risk is a certainty: \
-            `destroy-unattached on` is set while the session is still detached, \
-            so tmux reaps it before the attach on the next line runs. Remove \
-            this wrapper when the composer sets the option on the attach itself.
-            """) {
-            #expect(
-                attachedCount == attemptCount,
-                """
-                only \(attachedCount) of \(attemptCount) runs of the composed \
-                script left a client attached. First script output: \
-                \(attempts.first?.output ?? "<none>")
-                """)
-            #expect(
-                attempts.allSatisfy { $0.windows == window },
-                """
-                every session should hold exactly the linked window \(window); \
-                observed \(Set(attempts.map(\.windows)))
-                """)
-        }
+        #expect(
+            attachedCount == attemptCount,
+            """
+            only \(attachedCount) of \(attemptCount) runs of the composed \
+            script left a client attached. First script output: \
+            \(attempts.first?.output ?? "<none>")
+            """)
+        #expect(
+            attempts.allSatisfy { $0.windows == window },
+            """
+            every session should hold exactly the linked window \(window); \
+            observed \(Set(attempts.map(\.windows)))
+            """)
     }
 
     // MARK: - 2. Why: the gap is not a race
@@ -162,8 +152,8 @@ struct ExternalAttachCommandLiveTests {
         let gone = await server.awaitSessionGone(session, within: .seconds(5))
         #expect(gone, """
             tmux kept an unattached `destroy-unattached on` session alive — if this \
-            ever goes green, the composer's create-then-attach order is safe and the \
-            known issue on the previous test can be retired.
+            ever fails, setting the option before a client arrives would be safe after \
+            all, and the composer would be free to move it back into the setup block.
             """)
         // Discriminates a reap from a dead server: `main` never carries the
         // option, so it must be untouched.
@@ -573,6 +563,19 @@ private final class PTYProcess: @unchecked Sendable {
     /// SIGTERM, then SIGKILL on a bounded wait — a client that ignored the
     /// first must not park teardown, and teardown runs from `defer` on paths
     /// where the test has already failed.
+    ///
+    /// **Every wait here is bounded, the final one included, and that is what
+    /// rules out `Process.waitUntilExit()`.** That call spins the *calling*
+    /// thread's run loop until the task-death source fires on it, and a test
+    /// body runs on a cooperative thread where that source is not scheduled —
+    /// so unless Foundation happened to notice the exit already, it parks in
+    /// `mach_msg` and never returns. Nothing rescues it afterwards: the suite's
+    /// `.timeLimit` cannot cancel a blocked thread, so the whole run wedges
+    /// while holding the machine-global build lock. Measured here: a run left
+    /// sitting in that call for thirteen minutes with no child process left
+    /// alive, killed by hand. Polling `isRunning` against a deadline reaps in
+    /// the same few hundred milliseconds on the ordinary path and gives up
+    /// rather than hanging on the pathological one.
     func terminate() {
         terminationLock.lock()
         let alreadyTerminated = isTerminated
@@ -582,17 +585,25 @@ private final class PTYProcess: @unchecked Sendable {
 
         if process.isRunning {
             process.terminate()
-            let deadline = Date().addingTimeInterval(2)
-            while process.isRunning && Date() < deadline {
-                usleep(20_000)
-            }
-            if process.isRunning {
+            if !awaitExit(within: 2) {
                 kill(process.processIdentifier, SIGKILL)
+                _ = awaitExit(within: 2)
             }
         }
-        process.waitUntilExit()
         // Closing the primary ends the drain thread's blocking read.
         close(primaryFD)
+    }
+
+    /// True once the child is no longer running, false when `limit` elapses
+    /// first. Bounded by construction — see `terminate()` for why the obvious
+    /// `waitUntilExit()` is not usable here.
+    private func awaitExit(within limit: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(limit)
+        while Date() < deadline {
+            if !process.isRunning { return true }
+            usleep(20_000)
+        }
+        return !process.isRunning
     }
 
     /// Head-capped so a chatty tmux client cannot grow this without bound; the

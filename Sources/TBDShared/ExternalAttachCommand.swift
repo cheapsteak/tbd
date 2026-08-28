@@ -33,7 +33,8 @@ public enum ExternalAttachCommand {
     /// The command a user pastes into another emulator, or pipes into `sh`.
     ///
     /// Three logical lines: a `has-session` guard that makes the whole thing
-    /// idempotent, the session-creating fallback, and the attach.
+    /// idempotent, the session-creating fallback, and the attach — which
+    /// carries `set-option … destroy-unattached on` chained onto it.
     ///
     /// - `-S <socket>`, never `-L <name>`: a shell exporting a different
     ///   `TMUX_TMPDIR` would resolve the name to a path that does not exist and
@@ -48,6 +49,19 @@ public enum ExternalAttachCommand {
     ///   so the client stays writable.
     /// - `destroy-unattached on`: reclaims the session the instant the last
     ///   client leaves. The reconciler carries the cases this misses.
+    ///
+    /// **The option rides the attach, and must not be tidied back into the
+    /// setup block.** Setting it while the session is still detached is not a
+    /// race the attach usually wins — it is a session that is always already
+    /// gone. tmux collects an unattached `destroy-unattached on` session on a
+    /// server tick, and setting the option is itself enough to schedule that
+    /// tick, so the separate `tmux attach` process that follows it dies with
+    /// `can't find session:` every single time (measured: 0 of 20 attempts
+    /// attached). Chaining the `set-option` onto the attach with `\;` means the
+    /// option is not set until a client is already there, and the session then
+    /// self-destroys on detach exactly as intended. The mechanism is pinned by
+    /// `destroyUnattachedReapsBeforeAnyClientCanArrive` in
+    /// `Tests/TBDDaemonLiveTests/ExternalAttachCommandLiveTests.swift`.
     ///
     /// Every interpolated value is single-quoted: a socket path containing a
     /// space must not produce a broken script.
@@ -71,9 +85,9 @@ public enum ExternalAttachCommand {
             tmux -S \(socket) \\
                 new-session -d -s \(session) -c /tmp \\; \\
                 link-window -s \(window) -t \(sessionTarget) \\; \\
-                kill-window -t \(windowZeroTarget) \\; \\
+                kill-window -t \(windowZeroTarget)
+            tmux -u -S \(socket) attach -t \(session) -f ignore-size \\; \\
                 set-option -t \(session) destroy-unattached on
-            tmux -u -S \(socket) attach -t \(session) -f ignore-size
             """
     }
 
