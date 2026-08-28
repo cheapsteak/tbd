@@ -56,12 +56,16 @@ measurement. A future reader must not treat it as one.
 ## The command
 
 ```sh
-tmux -S <socket> has-session -t tbd-ext-<tid8> 2>/dev/null || \
-tmux -S <socket> \
-    new-session -d -s tbd-ext-<tid8> -c /tmp \; \
-    link-window -s @<win> -t tbd-ext-<tid8>: \; \
-    kill-window -t tbd-ext-<tid8>:0
-tmux -u -S <socket> attach -t tbd-ext-<tid8> -f ignore-size \; \
+[ "$(tmux -S <socket> list-windows -t tbd-ext-<tid8> -F '#{window_id}' 2>/dev/null)" = '@<win>' ] || {
+    tmux -S <socket> kill-session -t tbd-ext-<tid8> 2>/dev/null
+    tmux -S <socket> \
+        new-session -d -s tbd-ext-<tid8> -c /tmp \; \
+        link-window -s @<win> -t tbd-ext-<tid8>: \; \
+        kill-window -a -t tbd-ext-<tid8>:@<win> \
+        || { tmux -S <socket> kill-session -t tbd-ext-<tid8> 2>/dev/null; false; }
+} && tmux -u -S <socket> \
+    select-window -t tbd-ext-<tid8>:@<win> \; \
+    attach -t tbd-ext-<tid8> -f ignore-size \; \
     set-option -t tbd-ext-<tid8> destroy-unattached on
 ```
 
@@ -76,11 +80,38 @@ tmux -u -S <socket> attach -t tbd-ext-<tid8> -f ignore-size \; \
   a socket file permanently: tmux never unlinks a socket when its server exits,
   it only clears a stale one lazily when a new server claims that exact path.
   Pinning the absolute path removes both failures.
-- **Isolated session plus `link-window`.** The same recipe `TmuxBridge` uses
-  for TBD's own panels. The external client is then structurally identical to a
-  TBD panel, differing only in the emulator on the other end — which is the
-  control the comparison needs. The session holds one window, so there is
-  nowhere to wander and nothing else to disturb.
+- **Isolated session plus `link-window`.** What this shares with the recipe
+  `TmuxBridge` uses for TBD's own panels is what the comparison depends on: an
+  isolated session, exactly one linked window, selected and verified before any
+  client attaches, and no attach at all unless the session holds the requested
+  window. The external client is then structurally alike to a TBD panel,
+  differing in the emulator on the other end — which is the control the
+  comparison needs. The two deliberately differ in two respects. `TmuxBridge`
+  classifies each stage's failure separately, because a panel has error UI to
+  drive; the script has a shell's exit status. And `TmuxBridge` kills any
+  same-named session unconditionally, which a panel can afford and an external
+  measurement cannot (see the reuse bullet).
+- **`kill-window -a`, not `kill-window …:0`.** The throwaway window a new
+  session is born with does not reliably sit at index 0: a user's
+  `set -g base-index 1` puts it at 1, and `TmuxManager` never passes `-f`, so
+  daemon servers read `~/.tmux.conf`. Killing by index then fails, tmux aborts
+  the chain there, and the session is left holding both windows — which forfeits
+  the "one window, nowhere to wander" property the comparison rests on, leaks a
+  `/tmp` shell, and returns non-zero. `kill-window -a -t <session>:@<win>` kills
+  everything *except* the target and is base-index independent.
+- **`select-window` before the attach.** A partially-built session then
+  self-corrects instead of presenting whatever window happens to be current.
+  The constraint against moving a current-window pointer applies to `main`,
+  which the daemon's control-mode connection attaches to; inside a private
+  session there is no such hazard.
+- **Verify, then reuse or rebuild.** The script attaches only to a session
+  whose window list is exactly the verified window — an exact comparison, not a
+  containment test, since a session holding the target *plus* something else has
+  somewhere to wander. Anything else is torn down and rebuilt, and a rebuild
+  that fails cleans up after itself rather than leaving a half-built session for
+  the next invocation to reuse. Reuse is conditional rather than absent because
+  an unconditional kill would evict a client already attached for that terminal,
+  truncating a measurement someone is in the middle of.
 - **`-u` on the attach.** `TmuxBridge.viewerAttachCommand` passes it. UTF-8
   handling changes the byte stream, so an unmatched flag means the two clients
   are not receiving the same thing.
@@ -102,9 +133,21 @@ tmux -u -S <socket> attach -t tbd-ext-<tid8> -f ignore-size \; \
   option survives. Chaining it onto the attach attaches cleanly, leaves the
   option set, and still self-destroys the session on detach. See "Reclamation"
   for why the option is not the whole answer.
-- **`has-session ||`.** Makes the script idempotent by reusing a surviving
-  session rather than erroring on a duplicate name or evicting whoever is
-  attached to it.
+- **`&&` between setup and attach.** Two bare statements would attach
+  regardless of whether the setup worked. With a window that died between the
+  daemon's probe and the paste, that put a client on the throwaway `/tmp` shell
+  with one line of tmux stderr — immediately scrolled away by the attach's
+  redraw — as the only signal.
+
+Verification happens after the session is built and before any client attaches,
+which is the placement that matters: composing a correct command does not
+establish that the client will land on the right window. Window-id equality is
+sufficient as the check because tmux allocates window ids from a monotonic
+counter and never reuses one within a server's lifetime (measured: killing `@2`
+and creating a window yields `@3`, not `@2`). A window that died and was
+recreated therefore carries a new id, the comparison fails, and the rebuild's
+`link-window` fails against the vanished window rather than silently attaching
+somewhere plausible.
 
 ### Constraints the command must satisfy
 
@@ -151,7 +194,7 @@ tmux instrument with the same coordinates.
 
 ## Surfaces
 
-**`tbd terminal attach <worktree> [--terminal <id>] [--print]`** is the
+**`tbd terminal attach <worktree> [--terminal <id>] [--print] [--json]`** is the
 load-bearing surface. Without `--print` it execs tmux, replacing itself, so
 running it from an external emulator puts you straight into the session. It
 refuses when `$TMUX` is set, pointing at `--print`, rather than nesting a tmux
@@ -202,33 +245,64 @@ reconciler. Three mechanisms, in order of who acts first:
 - **`destroy-unattached on`** reclaims the ordinary case the instant the last
   client detaches, including a client that dies without detaching cleanly.
 - **A terminal-keyed name** bounds the population at one session per terminal
-  even when the option does not take effect, because `has-session` reuses
-  rather than mints.
-- **`WorktreeLifecycle+Reconcile`** gains a pass that kills `tbd-ext-*`
-  sessions that have had no attached client for at least 60 seconds. This is
-  the named reconciler for the PR description. It already reconciles DB rows
-  against tmux windows and servers, so this extends an existing sweep rather
-  than introducing a new one.
+  even when the option does not take effect, because the script reuses or
+  rebuilds under that name rather than minting a new one.
+- **`WorktreeLifecycle.reclaimExternalAttachSessions()`**, driven by the
+  daemon's hourly orphan maintenance inside the `gcEnabled` gate, kills
+  `tbd-ext-*` sessions that have been client-less past a 60-second grace. This
+  is the named reconciler for the PR description.
 
-The grace period is a measurement-integrity requirement, not a politeness. A
-sweep that reaped any client-less `tbd-ext-*` immediately could take the
-session during a momentary detach, or inside the create-to-attach gap named
-below. No work would be lost — the window is linked from `main` and survives —
-but the measurement would be silently truncated and would still emit
-plausible-looking partial data. That is this investigation's signature failure
-mode: a run that measured an idle terminal and confidently reported a healthy
-result, and sampling windows that missed the action entirely and produced a
-wrong committed spec. For the same reason the sweep logs a line naming each
-session it reaps, so a truncated run is detectable afterwards rather than
-indistinguishable from a quiet one.
+It is deliberately not folded into the `reapOrphanTmuxResources` flag, which
+gates the destructive window and server pass, and it takes the per-server
+resource lock of its own accord because its reconcile-path sibling runs under a
+lock the coordinator does not re-enter.
 
-The first two are create-time cleanup, which the repo's doctrine treats as
-best-effort by standing policy: every unbounded leak found in the wild sat on a
-resource no sweep covered, regardless of how good its rollback path was.
+**The grace clock lives on the tmux session, not in daemon memory.** A
+client-less session is stamped with a `@tbd_ext_clientless_since` session user
+option, read back in the same `list-sessions` format string that counts its
+clients. Daemon-side state was the obvious alternative and is wrong three ways
+at once: it is empty at every daemon start, so a restart resets every clock; it
+never learns that a session vanished by some other route, so its entries leak;
+and because session names are deterministic per terminal, a leaked expired
+stamp reaps the *next* session of the same name on its first observation, with
+no grace at all. State stored on the session dies with the session, survives a
+daemon restart, and cannot outlive what it describes.
 
-The create-to-attach gap is why the option is chained onto the attach rather
-than set during setup — see "The command". A live-tmux test pins both halves:
-that the composed script attaches, and that setting the option on a
+**A never-attached session needs no stamp.** The create-to-attach orphan — the
+one that actually leaks — has been client-less since `#{session_created}`, which
+tmux already records, so a single observation decides and no second sweep is
+needed.
+
+**`#{session_last_attached}` is not the clock**, though it is tempting as one.
+It records the last attach and does not move on detach: measured on tmux 3.6a, a
+session attached at t=591 whose client was killed at t=606 still reported its
+original attach time two seconds after the detach. Reaping off it would destroy
+a just-detached session with zero grace — worse than the gap it was meant to
+close. It is used only for the question it answers reliably: whether a client
+attached since the stamp was written, which retires a spent stamp when an
+attach and detach both happened between two sweeps.
+
+**The kill is conditional inside tmux, not in the daemon.** Listing sessions and
+then killing one as a separate subprocess is a decide-from-a-snapshot,
+act-without-re-verifying shape, and `kill-session` does not spare an attached
+session — so a user attaching between the two calls would be disconnected
+mid-measurement. The reap is issued as one queued unit,
+`if-shell -F -t <session> '#{==:#{session_attached},0}' 'kill-session …'
+'display-message -p …'`, with a sentinel on the else branch because `if-shell`
+exits 0 either way and the daemon must not log a kill that did not happen.
+
+Worst case, a never-attached orphan is reclaimed in about an hour, and one that
+was attached and then outlived its `destroy-unattached` in about two — one sweep
+to stamp, a later one to act. Hourly is defensible for a backstop when the fast
+path reclaims instantly and the population is bounded by construction. The sweep
+logs a line naming each session it reaps, so a truncated run is detectable
+afterwards rather than indistinguishable from a quiet one — this investigation's
+signature failure is a run that emits plausible-looking partial data, and a
+session reaped mid-measurement would do exactly that.
+
+The create-to-attach gap is why `destroy-unattached` is chained onto the attach
+rather than set during setup — see "The command". A live-tmux test pins both
+halves: that the composed script attaches, and that setting the option on a
 still-detached session destroys it. The second test documents the mechanism, so
 an edit that moves the option back into the setup block fails rather than
 silently disabling the feature.
@@ -316,15 +390,20 @@ description of someone running a long measurement.
   terminal id, the rendered script is asserted whole — the composed output,
   not a scattering of substrings.
 - **Identity refusal.** A window whose pane reports a different
-  `@tbd_terminal_id` yields an error naming the state; a missing window and a
-  dead pane each yield their own; an unstamped pane still composes.
+  `@tbd_terminal_id` yields an error naming the state; a missing window, a dead
+  pane, and a pane living in a different window than the row records each yield
+  their own; an unstamped pane still composes.
 - **Nesting guard.** With `$TMUX` set, the exec path refuses and names
   `--print`; with it unset, it execs. Both branches, per the repo's rule for
   gating conditionals.
 - **Reclamation.** The reconciler pass kills a `tbd-ext-*` session that has
   been client-less past the grace period, leaves one inside the grace period
   alone, leaves one with a client alone, and touches neither `tbd-view-*` nor
-  `main`. A reap emits its log line.
+  `main`. A reap emits its log line. A session recreated under the same
+  terminal-keyed name is not reaped on its first observation. The hourly
+  orphan-maintenance cadence actually reaches the pass — a test that calls
+  reconcile by hand proves wiring, not cadence, and wiring without cadence is
+  how this shipped unreclaimable the first time.
 - **Coordinate output.** `--json` carries socket path, `@window`, `%pane` and
   terminal id, and the pane id it reports is the one the identity probe
   verified — not a separately resolved value that could disagree with it.
@@ -337,6 +416,13 @@ description of someone running a long measurement.
   `TMUX_TMPDIR` so the run cannot leave a socket behind. Keep the fenced
   directory directly under a short `/tmp` root, or the socket path outgrows
   darwin's `sun_path` limit.
+- **The failure modes that produce a wrong attach**, live: a user's
+  `base-index 1`, a window that vanished between composition and paste, and a
+  surviving session holding the wrong window. Each must refuse rather than put
+  a client somewhere plausible, and the reuse control confirms a session
+  holding the *right* window is not rebuilt — which would evict a client
+  mid-measurement. A companion test pins the tmux rule three of these guards
+  rest on: a `\;` chain stops at its first failing command.
 - **The geometry behavior** the measurement guidance rests on, in the same
   live test: with both clients attached the window holds TBD's dimensions, and
   when the normal client detaches the window takes the `ignore-size` client's
