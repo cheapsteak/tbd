@@ -17,6 +17,14 @@ struct TerminalRecoveryDiagnosticContext: Equatable, Sendable {
     let worktreeID: UUID?
 }
 
+/// User-facing copy for a terminal that could not be prepared.
+enum TerminalPreparationPresentation {
+    static let commandFailedMessage =
+        "TBD couldn't attach to this terminal. The terminal was left unchanged. Check diagnostics for details or close the tab."
+    static let tmuxExecutableUnavailableMessage =
+        "TBD couldn't find tmux — it is not in PATH and no fallback path is saved. Locate the tmux executable in Settings → Terminal, then reopen this terminal."
+}
+
 enum TerminalRecoveryPresentation {
     static let failedMessage =
         "Automatic terminal recovery failed. Retry manually or close the tab."
@@ -477,11 +485,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             case .success(let prepared):
                 return .startViewer(prepared)
             case .failure(.commandFailed):
-                return .showMessage(
-                    "TBD couldn't attach to this terminal. The terminal was left unchanged. Check diagnostics for details or close the tab."
-                )
+                return .showMessage(TerminalPreparationPresentation.commandFailedMessage)
             case .failure(.windowMissing(let failedStage)):
                 return .requestAutomaticRecovery(failedStage: failedStage)
+            case .failure(.tmuxExecutableUnavailable):
+                return .showMessage(TerminalPreparationPresentation.tmuxExecutableUnavailableMessage)
             }
         }
 
@@ -617,6 +625,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             case .windowMissing(let failedStage):
                 logger.error(
                     "terminal preparation failed terminal=\(self.panelID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(failedStage.rawValue, privacy: .public) category=windowMissing"
+                )
+            case .tmuxExecutableUnavailable:
+                logger.error(
+                    "terminal preparation failed terminal=\(self.panelID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(TmuxPreparationStage.createViewSession.rawValue, privacy: .public) category=tmuxExecutableUnavailable"
                 )
             case .commandFailed(let stage, let output):
                 logger.error(

@@ -119,6 +119,10 @@ struct LocalizedErrorPayloadTests {
                 TmuxPreparationFailure.commandFailed(stage: .verifySelection, output: "can't find window @91")
             ),
             (
+                "TmuxPreparationFailure.tmuxExecutableUnavailable",
+                TmuxPreparationFailure.tmuxExecutableUnavailable
+            ),
+            (
                 "UserTerminalTheme.ValidationError.wrongAnsiCount",
                 UserTerminalTheme.ValidationError.wrongAnsiCount(9)
             ),

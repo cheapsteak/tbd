@@ -215,6 +215,9 @@ let package = Package(
                 "TBDDaemonLib",
                 "TBDShared",
                 "TestSupport",
+                // TmuxBridge (app side) drives a real tmux server in
+                // TmuxBridgeViewSessionLiveTests, which makes it tier 3.
+                "TBDApp",
                 .product(name: "Clocks", package: "swift-clocks"),
             ]
         ),

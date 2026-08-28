@@ -44,6 +44,9 @@ struct TmuxBridgeTests {
         #expect(TmuxBridge.killSessionArgs(sessionName: sessionName) == [
             "kill-session", "-t", sessionName,
         ])
+        #expect(TmuxBridge.hasSessionArgs(sessionName: sessionName) == [
+            "has-session", "-t", sessionName,
+        ])
     }
 
     @Test func commandsObserveSavedFallbackAfterInitializationAndPathStillWins() throws {
@@ -230,6 +233,137 @@ struct TmuxBridgeTests {
         #expect(bridge.tmuxCommand(server: "tbd-repo", args: ["list-windows"])?.first
             == secondExecutable.path)
     }
+
+    @Test func unresolvableTmuxExecutableIsItsOwnFailure() async throws {
+        let fixture = try TmuxBridgeFixture()
+        defer { fixture.remove() }
+        let resolver = TmuxExecutableResolver(
+            environment: ["PATH": ""],
+            configurationURL: fixture.root.appendingPathComponent("no-such-saved-path")
+        )
+        let bridge = TmuxBridge(tmuxExecutableResolver: resolver)
+
+        let result = await bridge.prepareSession(
+            panelID: UUID(),
+            server: "tbd-repo",
+            windowID: "@147"
+        )
+
+        guard case .failure(let failure) = result else {
+            Issue.record("preparation should fail when no tmux executable resolves")
+            return
+        }
+        #expect(failure == .tmuxExecutableUnavailable)
+    }
+
+    @Test func duplicateSessionCreateFailureIsRetriedAfterKillingTheLeftover() async throws {
+        let fixture = try TmuxBridgeFixture()
+        defer { fixture.remove() }
+        let resolver = try fixture.resolvingResolver()
+        let runner = ScriptedTmuxRunner(
+            newSessionFailures: 1,
+            failureOutput: "duplicate session: tbd-view-4c4f1a61",
+            leftoverSessionExists: true
+        )
+        let bridge = TmuxBridge(
+            tmuxExecutableResolver: resolver,
+            commandRunner: { _, _, args in await runner.run(args) }
+        )
+        let panelID = UUID(uuidString: "4C4F1A61-F385-46AB-861D-42A425DB427B")!
+
+        let prepared = try await bridge.prepareSession(
+            panelID: panelID,
+            server: "tbd-repo",
+            windowID: "@147"
+        ).get()
+
+        #expect(prepared.arguments == [
+            "-u", "-L", "tbd-repo", "attach", "-t", "tbd-view-4c4f1a61",
+        ])
+        #expect(await runner.verbs == [
+            "kill-session",
+            "new-session",
+            "has-session",
+            "kill-session",
+            "new-session",
+            "link-window",
+            "kill-window",
+            "select-window",
+            "set-option",
+            "set-option",
+            "display-message",
+        ])
+    }
+
+    @Test func createFailureWithoutALeftoverSessionIsNotRetried() async throws {
+        let fixture = try TmuxBridgeFixture()
+        defer { fixture.remove() }
+        let resolver = try fixture.resolvingResolver()
+        let runner = ScriptedTmuxRunner(
+            newSessionFailures: 1,
+            failureOutput: "no space left on device",
+            leftoverSessionExists: false
+        )
+        let bridge = TmuxBridge(
+            tmuxExecutableResolver: resolver,
+            commandRunner: { _, _, args in await runner.run(args) }
+        )
+
+        let result = await bridge.prepareSession(
+            panelID: UUID(uuidString: "4C4F1A61-F385-46AB-861D-42A425DB427B")!,
+            server: "tbd-repo",
+            windowID: "@147"
+        )
+
+        guard case .failure(let failure) = result else {
+            Issue.record("preparation should fail when the view session cannot be created")
+            return
+        }
+        #expect(failure == .commandFailed(
+            stage: .createViewSession,
+            output: "no space left on device"
+        ))
+        #expect(await runner.verbs == ["kill-session", "new-session", "has-session"])
+    }
+}
+
+/// Replies to tmux invocations from a script, so a test can drive a sequence a
+/// live server cannot be made to produce on demand — a `new-session` that
+/// fails once with `duplicate session:` and succeeds on the retry.
+private actor ScriptedTmuxRunner {
+    private var invocations: [[String]] = []
+    private var remainingNewSessionFailures: Int
+    private let failureOutput: String
+    private let leftoverSessionExists: Bool
+
+    init(newSessionFailures: Int, failureOutput: String, leftoverSessionExists: Bool) {
+        self.remainingNewSessionFailures = newSessionFailures
+        self.failureOutput = failureOutput
+        self.leftoverSessionExists = leftoverSessionExists
+    }
+
+    var verbs: [String] { invocations.compactMap(\.first) }
+
+    func run(_ args: [String]) -> TmuxCommandOutcome {
+        invocations.append(args)
+        switch args.first {
+        case "new-session":
+            guard remainingNewSessionFailures > 0 else {
+                return TmuxCommandOutcome(success: true, output: "")
+            }
+            remainingNewSessionFailures -= 1
+            return TmuxCommandOutcome(success: false, output: failureOutput)
+        case "has-session":
+            return TmuxCommandOutcome(
+                success: leftoverSessionExists,
+                output: leftoverSessionExists ? "" : "can't find session"
+            )
+        case "display-message":
+            return TmuxCommandOutcome(success: true, output: "@147")
+        default:
+            return TmuxCommandOutcome(success: true, output: "")
+        }
+    }
 }
 
 private struct TmuxBridgeFixture {
@@ -292,6 +426,17 @@ private struct TmuxBridgeFixture {
             ofItemAtPath: executable.path
         )
         return executable
+    }
+
+    /// A resolver that resolves to a stub executable the test never runs
+    /// (every command goes through an injected runner instead).
+    func resolvingResolver() throws -> TmuxExecutableResolver {
+        let resolver = TmuxExecutableResolver(
+            environment: ["PATH": ""],
+            configurationURL: configurationURL
+        )
+        try resolver.save(executable(named: "stub-tmux", in: root).path)
+        return resolver
     }
 
     func lineCount(at url: URL) -> Int {

@@ -22,6 +22,11 @@ enum TmuxPreparationStage: String, Equatable, Sendable {
 enum TmuxPreparationFailure: LocalizedError, Equatable, Sendable {
     case windowMissing(failedStage: TmuxPreparationStage)
     case commandFailed(stage: TmuxPreparationStage, output: String)
+    /// No tmux executable could be resolved, so nothing ran. This is not a
+    /// tmux failure and retrying cannot help: the remedy is to locate the
+    /// binary (Settings -> Terminal), which is why it is a case of its own
+    /// rather than a `commandFailed` carrying a synthetic output string.
+    case tmuxExecutableUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -29,9 +34,24 @@ enum TmuxPreparationFailure: LocalizedError, Equatable, Sendable {
             return "tmux window is missing (failed at stage: \(stage.rawValue))"
         case .commandFailed(let stage, let output):
             return "tmux command failed at stage \(stage.rawValue): \(output)"
+        case .tmuxExecutableUnavailable:
+            return "tmux executable unavailable: not found in PATH and no saved fallback is set"
         }
     }
 }
+
+/// Outcome of one tmux subprocess invocation.
+struct TmuxCommandOutcome: Equatable, Sendable {
+    let success: Bool
+    let output: String
+}
+
+/// Runs one tmux command: executable path, server socket name, arguments.
+///
+/// Injectable so tests can drive command sequences a live tmux server cannot
+/// be made to produce on demand — notably a `new-session` that fails once
+/// with `duplicate session:` and succeeds on the retry.
+typealias TmuxCommandRunner = @Sendable (String, String, [String]) async -> TmuxCommandOutcome
 
 /// File-based debug log for diagnostics
 func debugLog(_ msg: String) {
@@ -81,8 +101,21 @@ final class TmuxBridge: @unchecked Sendable {
     /// `waitUntilExit`) so it doesn't pump the main runloop.
     private let cleanupQueue = DispatchQueue(label: "com.tbd.app.tmux-cleanup", qos: .utility)
 
-    init(tmuxExecutableResolver: TmuxExecutableResolver = TmuxExecutableResolver()) {
+    /// Runs each tmux command. Defaults to the real subprocess runner.
+    private let commandRunner: TmuxCommandRunner
+
+    init(
+        tmuxExecutableResolver: TmuxExecutableResolver = TmuxExecutableResolver(),
+        commandRunner: TmuxCommandRunner? = nil
+    ) {
         self.tmuxExecutableResolver = tmuxExecutableResolver
+        self.commandRunner = commandRunner ?? { executablePath, server, args in
+            await TmuxBridge.runTmuxProcess(
+                tmuxExecutablePath: executablePath,
+                server: server,
+                args: args
+            )
+        }
     }
 
     static func sessionName(for panelID: UUID) -> String {
@@ -129,10 +162,14 @@ final class TmuxBridge: @unchecked Sendable {
         ["kill-session", "-t", sessionName]
     }
 
+    static func hasSessionArgs(sessionName: String) -> [String] {
+        ["has-session", "-t", sessionName]
+    }
+
     /// Complete command used for a tmux preparation subprocess.
     func tmuxCommand(server: String, args: [String]) -> [String]? {
         guard let tmuxExecutablePath = tmuxExecutableResolver.resolve()?.path else { return nil }
-        return tmuxCommand(tmuxExecutablePath: tmuxExecutablePath, server: server, args: args)
+        return Self.tmuxCommand(tmuxExecutablePath: tmuxExecutablePath, server: server, args: args)
     }
 
     /// Command used by the SwiftTerm PTY to attach its viewer client.
@@ -150,7 +187,7 @@ final class TmuxBridge: @unchecked Sendable {
         )
     }
 
-    private func tmuxCommand(
+    private static func tmuxCommand(
         tmuxExecutablePath: String,
         server: String,
         args: [String]
@@ -188,10 +225,11 @@ final class TmuxBridge: @unchecked Sendable {
     ) async -> Result<TmuxPreparedSession, TmuxPreparationFailure> {
         let sessionName = Self.sessionName(for: panelID)
         guard let tmuxExecutablePath = tmuxExecutableResolver.resolve()?.path else {
-            return .failure(.commandFailed(
-                stage: .createViewSession,
-                output: "tmux executable unavailable"
-            ))
+            bridgeLogger.error(
+                "Preparation failed: tmux executable unavailable (not in PATH, no saved fallback) session=\(sessionName, privacy: .public) server=\(server, privacy: .public)"
+            )
+            debugLog("PREPARE: tmux executable unavailable (not in PATH, no saved fallback) session=\(sessionName) server=\(server)")
+            return .failure(.tmuxExecutableUnavailable)
         }
         let preparedSession = preparedSession(
             tmuxExecutablePath: tmuxExecutablePath,
@@ -205,10 +243,10 @@ final class TmuxBridge: @unchecked Sendable {
             args: Self.killSessionArgs(sessionName: sessionName)
         )
 
-        let createResult = await runTmux(
+        let createResult = await createViewSession(
             tmuxExecutablePath: tmuxExecutablePath,
             server: server,
-            args: Self.newIsolatedSessionArgs(sessionName: sessionName)
+            sessionName: sessionName
         )
         guard createResult.success else {
             debugLog("PREPARE: failed to create view session \(sessionName) on server \(server): \(createResult.output)")
@@ -363,9 +401,60 @@ final class TmuxBridge: @unchecked Sendable {
 
     // MARK: - Helpers
 
-    private struct TmuxResult {
-        let success: Bool
-        let output: String
+    /// Create the isolated view session, replacing any same-named leftover.
+    ///
+    /// `prepareSession` kills a same-named session before creating one, but
+    /// that kill's result is advisory: it can fail transiently (a momentarily
+    /// unavailable or wedged server). `new-session` then fails with
+    /// `duplicate session:` and the panel is bricked for good, because the
+    /// session name is derived from the panel UUID and never changes. So when
+    /// the create fails, probe for the session — and only when the probe
+    /// affirms it exists, kill it and retry the create exactly once. A failed
+    /// probe is ambiguous (same reason `classifyPreparationFailure` refuses to
+    /// act on one) and does not justify a retry.
+    ///
+    /// Replacement, never adoption: `prepareSession` unconditionally runs
+    /// `kill-window -t <session>:0` after linking, and tmux's `kill-window`
+    /// destroys the window globally rather than unlinking it from one session,
+    /// so adopting a leftover session whose index 0 holds a real linked window
+    /// would destroy a live agent window.
+    private func createViewSession(
+        tmuxExecutablePath: String,
+        server: String,
+        sessionName: String
+    ) async -> TmuxCommandOutcome {
+        let createArgs = Self.newIsolatedSessionArgs(sessionName: sessionName)
+        let firstAttempt = await runTmux(
+            tmuxExecutablePath: tmuxExecutablePath,
+            server: server,
+            args: createArgs
+        )
+        guard !firstAttempt.success else { return firstAttempt }
+
+        debugLog("PREPARE: create failed for \(sessionName) on server \(server): \(firstAttempt.output)")
+        let probe = await runTmux(
+            tmuxExecutablePath: tmuxExecutablePath,
+            server: server,
+            args: Self.hasSessionArgs(sessionName: sessionName)
+        )
+        guard probe.success else {
+            debugLog("PREPARE: no leftover session \(sessionName) on server \(server); not retrying create")
+            return firstAttempt
+        }
+
+        debugLog("PREPARE: leftover session \(sessionName) still present on server \(server); killing it and retrying create")
+        let _ = await runTmux(
+            tmuxExecutablePath: tmuxExecutablePath,
+            server: server,
+            args: Self.killSessionArgs(sessionName: sessionName)
+        )
+        let retry = await runTmux(
+            tmuxExecutablePath: tmuxExecutablePath,
+            server: server,
+            args: createArgs
+        )
+        debugLog("PREPARE: create retry for \(sessionName) on server \(server) succeeded=\(retry.success) output=\(retry.output)")
+        return retry
     }
 
     func preparedSession(server: String, sessionName: String) -> TmuxPreparedSession? {
@@ -473,6 +562,15 @@ final class TmuxBridge: @unchecked Sendable {
         return .failure(failure)
     }
 
+    /// Run one tmux command through the injected runner.
+    private func runTmux(
+        tmuxExecutablePath: String,
+        server: String,
+        args: [String]
+    ) async -> TmuxCommandOutcome {
+        await commandRunner(tmuxExecutablePath, server, args)
+    }
+
     /// Run a tmux subprocess without blocking the calling thread.
     ///
     /// Uses `Process.terminationHandler` + `withCheckedContinuation` instead of
@@ -480,11 +578,11 @@ final class TmuxBridge: @unchecked Sendable {
     /// `makeNSView` for tens to hundreds of ms per panel (tmux fork+exec +
     /// new-session/select-window), starving SwiftUI's render loop so newly
     /// inserted terminal panels never displayed content.
-    private func runTmux(
+    private static func runTmuxProcess(
         tmuxExecutablePath: String,
         server: String,
         args: [String]
-    ) async -> TmuxResult {
+    ) async -> TmuxCommandOutcome {
         let command = tmuxCommand(
             tmuxExecutablePath: tmuxExecutablePath,
             server: server,
@@ -505,7 +603,7 @@ final class TmuxBridge: @unchecked Sendable {
                 let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
                 let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
                 let output = String(data: outData + errData, encoding: .utf8) ?? ""
-                continuation.resume(returning: TmuxResult(
+                continuation.resume(returning: TmuxCommandOutcome(
                     success: process.terminationStatus == 0,
                     output: output.trimmingCharacters(in: .whitespacesAndNewlines)
                 ))
@@ -514,7 +612,7 @@ final class TmuxBridge: @unchecked Sendable {
             do {
                 try process.run()
             } catch {
-                continuation.resume(returning: TmuxResult(
+                continuation.resume(returning: TmuxCommandOutcome(
                     success: false,
                     output: error.localizedDescription
                 ))
