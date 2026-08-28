@@ -555,6 +555,21 @@ extension RPCRouter {
     func handleTerminalList(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalListParams.self, from: paramsData)
         var terminals = try await db.terminals.list(worktreeID: params.worktreeID)
+        // Transcript supersession, on the pass that is about to report these
+        // rows. A prompt reason describes a stopped session; a transcript the
+        // session itself wrote to since the prompt was raised is proof it is
+        // not, and no hook will ever say so — Claude Code fires none when a
+        // human answers. Corrected in the response as well as in the database,
+        // so this pass does not report a prompt it just retracted.
+        // See docs/specs/2026-08-27-awaiting-input-transcript-supersession-design.md.
+        let supersession = AwaitingInputSupersession(
+            db: db, fingerprint: transcriptFingerprinter, delta: transcriptDeltaInspector)
+        for index in terminals.indices {
+            guard await supersession.reconcile(terminal: terminals[index]) else { continue }
+            terminals[index].awaitingInputReason = nil
+            terminals[index].awaitingInputObservedAt = nil
+            broadcastAwaitingInputRetraction(terminal: terminals[index])
+        }
         var codexTargets: [CodexTranscriptActivityTracker.Target] = []
         let observedIdentities = Dictionary(uniqueKeysWithValues: terminals
             .filter(\.isCodexTerminal)
@@ -3279,11 +3294,21 @@ extension RPCRouter {
 
         // The classification is a label on the record, computed once here from
         // the verbatim type. An unrecognized or absent type stays unrecognized.
+        let classification = AwaitingInputClass(notificationType: params.notificationType)
+        // A prompt-on-screen reason carries the transcript as it stood when the
+        // prompt was raised, so a later reader can tell "still waiting" from
+        // "answered, and the session moved on" without a hook to tell it —
+        // Claude Code fires none when a human decides. Only that class gets
+        // one: no other class raises a hand there would be anything to lower.
+        let fingerprint: TranscriptFingerprint? = classification == .promptOnScreen
+            ? terminal.transcriptPath.flatMap { $0.isEmpty ? nil : transcriptFingerprinter($0) }
+            : nil
         let reason = AwaitingInputReason(
             message: params.message,
             hookEventName: "Notification",
             raw: params.rawPayload,
-            notificationType: params.notificationType)
+            notificationType: params.notificationType,
+            transcriptFingerprint: fingerprint)
 
         // Deliberately NOT `setActivityState`: this hook reports that a prompt
         // was raised, not that the session is still sitting on one, and

@@ -40,6 +40,13 @@ struct SupervisionReadoutBuilder: Sendable {
     let sessionCounters: SessionCountersTracker
     let branchTips: BranchTipTracker
     let actuationRecord: ActuationRecordReader
+    /// How a session transcript is measured when a standing prompt is checked
+    /// against it. A seam, not a clock: a file's modification time is data.
+    let transcriptFingerprinter: TranscriptFingerprinter
+    /// How the records a transcript gained since a stored fingerprint are read
+    /// and attributed. A nested agent's sidechain writes are not the parent
+    /// session moving, so growth alone may not take a raised hand down.
+    let transcriptDeltaInspector: TranscriptDeltaInspector
     let now: @Sendable () -> Date
 
     init(
@@ -48,6 +55,9 @@ struct SupervisionReadoutBuilder: Sendable {
         sessionCounters: SessionCountersTracker,
         branchTips: BranchTipTracker,
         actuationRecord: ActuationRecordReader,
+        transcriptFingerprinter: @escaping TranscriptFingerprinter = TranscriptFingerprinting.live,
+        transcriptDeltaInspector: @escaping TranscriptDeltaInspector
+            = TranscriptDeltaInspection.live,
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.db = db
@@ -55,6 +65,8 @@ struct SupervisionReadoutBuilder: Sendable {
         self.sessionCounters = sessionCounters
         self.branchTips = branchTips
         self.actuationRecord = actuationRecord
+        self.transcriptFingerprinter = transcriptFingerprinter
+        self.transcriptDeltaInspector = transcriptDeltaInspector
         self.now = now
     }
 
@@ -81,8 +93,19 @@ struct SupervisionReadoutBuilder: Sendable {
         var entries: [SupervisionReadoutAgent] = []
         entries.reserveCapacity(agents.count)
 
+        // The readout may be the only reader on a daemon with no app attached,
+        // so it supersedes a stale prompt on its own pass rather than reporting
+        // one. No delta is broadcast from here: a readout is a pull, not a UI
+        // event, and the app's own poll re-reads the row within its interval.
+        let supersession = AwaitingInputSupersession(
+            db: db, fingerprint: transcriptFingerprinter, delta: transcriptDeltaInspector)
+
         for agent in agents {
-            guard let terminal = try await db.terminals.get(id: agent.terminal) else { continue }
+            guard var terminal = try await db.terminals.get(id: agent.terminal) else { continue }
+            if await supersession.reconcile(terminal: terminal) {
+                terminal.awaitingInputReason = nil
+                terminal.awaitingInputObservedAt = nil
+            }
             let worktree: Worktree
             if let cached = worktreeRows[agent.worktree] {
                 worktree = cached
