@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SwiftTerm
 import Testing
 @testable import TBDApp
 
@@ -23,6 +24,10 @@ import Testing
 ///   `cleanupSession`'s idempotence so a normal dismantle still kills once.
 /// - **App termination.** `applicationWillTerminate` has to *block* on the
 ///   kills; a detached task does not outlive the process.
+/// - **A preparation that lands after teardown.** `prepareSession` registers
+///   the session with the bridge before its caller records the generation, so
+///   a teardown that lands inside that window leaves an entry neither
+///   `cleanup()` nor `deinit` can name. The preparation reclaims it itself.
 ///
 /// Both per-panel paths are scoped to the generation their own
 /// `prepareSession` minted, because `panelID` alone does not identify a
@@ -308,6 +313,87 @@ struct TerminalViewSessionReclamationTests {
             ),
         ])
     }
+
+    /// **The test that pins the in-flight-preparation leak.** `cleanup()` can
+    /// run while `prepareSession` is suspended: the panel's `Task` starts the
+    /// preparation, tmux takes a while, and the user closes the tab. The
+    /// post-await torn-down guard then returns *before* the `.startViewer`
+    /// branch that records `tmuxSessionGeneration` — but `prepareSession` has
+    /// already registered the session with the bridge. Neither `cleanup()`
+    /// (already run, generation still nil) nor `deinit` (nil forever) can
+    /// name it, so nothing reclaims the view session, the linked worktree
+    /// window, or that window's pane process.
+    ///
+    /// The interleave is real rather than simulated: the injected runner holds
+    /// the preparation's last tmux command until the test has torn the
+    /// coordinator down, so the suspension the bug needs is the one under test.
+    /// It awaits rather than blocking a thread, so no cooperative-pool thread
+    /// is parked (`Tests/CLAUDE.md`, "Thread-blocking gates run off the
+    /// cooperative pool"), and every wait carries a deadline.
+    ///
+    /// Two kills are expected, not one: `prepareSession` opens with a
+    /// pre-emptive `kill-session` of any leftover session under the same name,
+    /// and that is indistinguishable from a teardown's kill by arguments
+    /// alone. Before the fix only the pre-emptive one is ever recorded.
+    @MainActor
+    @Test("a preparation that completes after teardown reclaims its own view session")
+    func preparationCompletingAfterTeardownReclaimsItsSession() async throws {
+        let fixture = try TmuxBridgeFixture()
+        defer { fixture.remove() }
+        let runner = RecordingTmuxRunner()
+        // The verification query is preparation's last command, so holding it
+        // parks the preparation with everything else already done.
+        await runner.hold(command: "display-message")
+        let bridge = TmuxBridge(
+            tmuxExecutableResolver: try fixture.resolvingResolver(),
+            commandRunner: { _, server, args in await runner.run(server: server, args: args) }
+        )
+
+        let terminalView = TBDTerminalView(
+            frame: CGRect(x: 0, y: 0, width: 640, height: 480),
+            font: TBDTerminalView.defaultMonospaceFont,
+            appearance: AppearanceSettings(
+                defaults: UserDefaults(
+                    suiteName: "TerminalViewSessionReclamationTests.inFlightPreparation")!)
+        )
+        let coordinator = TerminalPanelRepresentable.Coordinator()
+        coordinator.tmuxBridge = bridge
+        coordinator.tmuxServer = "tbd-repo"
+        coordinator.panelID = Self.panelID
+
+        let preparing = Task { @MainActor in
+            await coordinator.startTmuxClient(
+                terminalView: terminalView,
+                bridge: bridge,
+                server: "tbd-repo",
+                windowID: "@147",
+                panelID: Self.panelID
+            )
+        }
+
+        // Awaiting here hands the main actor back, which is what lets the
+        // preparation above run far enough to reach the held command.
+        try await runner.awaitHold(
+            describedAs: "the in-flight preparation this teardown has to race")
+        coordinator.cleanup()
+        await runner.release()
+        await preparing.value
+
+        let kills = try await runner.awaitKillSessions(
+            atLeast: 2,
+            describedAs: "the view session of a preparation that completed after teardown"
+        )
+        #expect(kills == [
+            RecordingTmuxRunner.Invocation(
+                server: "tbd-repo",
+                args: TmuxBridge.killSessionArgs(sessionName: Self.sessionName)
+            ),
+            RecordingTmuxRunner.Invocation(
+                server: "tbd-repo",
+                args: TmuxBridge.killSessionArgs(sessionName: Self.sessionName)
+            ),
+        ])
+    }
 }
 
 /// Records every tmux invocation with the server it targeted, and answers
@@ -322,9 +408,46 @@ private actor RecordingTmuxRunner {
     /// Window linked into each view session, learned from `link-window`, so
     /// preparation's verification query can be answered truthfully.
     private var linkedWindows: [String: String] = [:]
+    /// tmux subcommand to park on, so a test can interleave work with a
+    /// preparation that is genuinely mid-flight.
+    private var heldCommand: String?
+    private var holdWasReached = false
+    private var holdWasReleased = false
 
-    func run(server: String, args: [String]) -> TmuxCommandOutcome {
+    /// Park the next invocation of `command` until `release()`. The hold
+    /// *awaits* — actors are reentrant across suspension, so `release()` and
+    /// `awaitHold()` still run while an invocation sits here, and no thread is
+    /// blocked.
+    func hold(command: String) {
+        heldCommand = command
+    }
+
+    func release() {
+        holdWasReleased = true
+    }
+
+    /// Bounded wait for the held command to be reached. Throws a described
+    /// error rather than recording an `#expect` failure, so the diagnostic
+    /// reaches the CI summary's primary failure line.
+    func awaitHold(
+        describedAs subject: String,
+        within deadline: Duration = .seconds(10)
+    ) async throws {
+        for _ in 0..<attempts(for: deadline) {
+            if holdWasReached { return }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        throw HoldNeverReached(subject: subject, command: heldCommand, after: deadline)
+    }
+
+    func run(server: String, args: [String]) async -> TmuxCommandOutcome {
         invocations.append(Invocation(server: server, args: args))
+        if let heldCommand, args.first == heldCommand, !holdWasReleased {
+            holdWasReached = true
+            for _ in 0..<attempts(for: .seconds(10)) where !holdWasReleased {
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+        }
         switch args.first {
         case "link-window":
             // ["link-window", "-s", <windowID>, "-t", "<session>:"]
@@ -388,6 +511,25 @@ private actor RecordingTmuxRunner {
 
     private var killSessions: [Invocation] {
         invocations.filter { $0.args.first == "kill-session" }
+    }
+
+    private func attempts(for deadline: Duration) -> Int {
+        let seconds = Double(deadline.components.seconds)
+            + Double(deadline.components.attoseconds) / 1e18
+        return max(1, Int(seconds / 0.01))
+    }
+}
+
+/// Reports which command the runner was told to park on, so a hold that never
+/// fired is distinguishable from one whose command never ran.
+private struct HoldNeverReached: Error, CustomStringConvertible {
+    let subject: String
+    let command: String?
+    let after: Duration
+
+    var description: String {
+        "tmux never reached the held `\(command ?? "<none>")` command for \(subject) "
+            + "after polling up to \(after), so the teardown had nothing to interleave with"
     }
 }
 

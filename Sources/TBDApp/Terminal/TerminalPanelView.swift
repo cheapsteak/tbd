@@ -708,7 +708,22 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
 
             // Teardown may land while preparation is in flight. Do not render,
             // recover, or start a viewer for a coordinator that is no longer live.
-            guard ControlModeAttachAbort.shouldStartFallback(tornDown: isTornDown) else { return }
+            //
+            // A preparation that succeeded anyway must be reclaimed here, and
+            // this is the only place that can do it: `prepareSession` has
+            // already registered the session in the bridge, but
+            // `tmuxSessionGeneration` — the token both `cleanup()` and
+            // `deinit` reclaim by — is assigned further down, in the
+            // `.startViewer` branch we are about to skip. `cleanup()` has
+            // already run and `deinit` would find nil, so nothing else would
+            // ever kill it: a fast tab close would leak the view session and,
+            // with it, the linked worktree window and its pane process.
+            guard ControlModeAttachAbort.shouldStartFallback(tornDown: isTornDown) else {
+                if case .success(let preparation) = result {
+                    bridge.cleanupSession(panelID: panelID, generation: preparation.generation)
+                }
+                return
+            }
 
             let prepared: TmuxPreparedSession
             switch Self.preparationAction(for: result) {
