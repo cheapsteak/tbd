@@ -95,11 +95,15 @@ A `NULL` boundary means TBD cannot identify a safe historical starting point. Th
 
 A daemon actor owns transcript targets, recovery cursors, incremental offsets, partial records, reducer state, and presentation observation ordering. Serial actor access gives observations a stable order without blocking on unrelated database state.
 
-Each target includes the terminal's current session identity, effective transcript path, session generation, and durable boundary. A cold tracker starts at a known boundary and captures the transcript's current EOF as a fixed recovery target. It replays forward in the existing fixed-size chunks and under the shared request budget, preserving its cursor and reducer between polls. It publishes authoritative unknown, which presents as idle, until the cursor reaches the captured EOF with no incomplete or discarding record. It then publishes the exact reconstructed working or idle state and resumes ordinary incremental reads from the same cursor.
+Each target includes the terminal's current session identity, effective transcript path, session generation, and durable boundary. For a known-boundary cold recovery, the tracker captures the transcript's current EOF as a fixed target, then searches complete eligible JSONL records backward from that target under the shared byte, step, and round-robin budgets. It publishes authoritative unknown, which presents as idle, throughout recovery.
 
-The fixed recovery EOF prevents a continuously growing transcript from keeping recovery perpetually behind. Bytes appended after capture wait for ordinary incremental polls once recovery reaches the fixed target.
+The reverse search stops at the first of three exact anchors. A close that omits either `turn_id` or `started_at` is an unconditional idle synchronizer and seeds idle immediately. The newest valid `task_started` supplies a byte offset; from that offset, the tracker replays only the start-to-frozen-EOF suffix forward through the ordinary lifecycle reducer. If the durable boundary is reached without a valid start, any close evidence seeds idle and no lifecycle evidence yields `nil`. A start-anchored recovery remains unknown until the bounded forward suffix replay reaches the target with no incomplete or discarding record. Ordinary incremental reads then resume at the effective recovery EOF.
 
-The tracker preserves an unterminated fragment across reads, discards a record that grows beyond the record cap, and resumes at the next newline. An initial attachment whose file truncates may reset to boundary `0` and replay the replacement file from its beginning. If a later attachment's file shrinks below its boundary, the tracker fences at the new EOF in memory and waits for new lifecycle evidence; it does not reinterpret pre-boundary history or replace the durable boundary.
+The two phases keep recovery memory bounded without weakening close correlation. Reverse search retains framing for at most one capped record and a `sawClose` bit; it does not retain a set of identifiers or timestamps from fully identified closes. Exact correlation of those closes against the newest start happens during the forward suffix replay through the existing reducer. The fixed target also prevents a continuously growing transcript from keeping recovery perpetually behind. Bytes appended after capture wait for ordinary incremental polls once recovery reaches that target.
+
+If the captured EOF falls inside a JSONL record, cold recovery remains unknown until the first later newline completes that record. That newline becomes the effective recovery EOF; later records returned in the same filesystem read are not included and are read again by ordinary incremental processing. Recovery does not chase later appends while waiting for the captured record to finish.
+
+The tracker preserves an unterminated fragment across incremental reads, discards a record that grows beyond the record cap, and resumes at the next newline. An initial attachment whose file truncates restarts exact recovery from boundary `0` against the replacement file's frozen EOF. If a later attachment's file shrinks below its boundary, the tracker fences at the new EOF in memory and waits for new lifecycle evidence; it does not reinterpret pre-boundary history or replace the durable boundary.
 
 Fleet and worktree-scoped observations share a fair cyclic path order. Scoped polling cannot reset fleet progress or starve a deferred transcript. A terminal-list response revalidates terminal identity, transcript path, session generation, and durable boundary after the actor observation. If any target fact changed during the scan, the response returns the current identity with a newly ordered unknown presentation rather than stale activity from the old file.
 
@@ -155,30 +159,33 @@ Raw generic idle hooks do not defeat a valid open transcript. Raw generic workin
 
 Terminal-list polling must not decode unbounded transcript history or perform unbounded zero-byte filesystem work.
 
-- Recovery reads fixed-size chunks and retains its cursor across requests; no request scans the whole backlog.
+- Reverse search and forward suffix replay read fixed-size chunks and retain their phase and cursor across requests; no request scans the whole backlog.
 - A terminal-list observation has a shared 1 MiB byte budget across Codex transcripts.
 - Pending transcripts receive 64 KiB round-robin quanta.
 - One observation performs at most 16 filesystem steps, including caught-up and unreadable paths that consume no content bytes.
 - A single JSONL record is capped at 1 MiB. Oversized records are discarded through their newline.
-- Partial, discarding, untouched, and not-yet-caught-up paths publish unknown rather than cached working.
+- Bytes returned while completing a captured partial record count against the request budget even when bytes after its first newline are deferred to incremental processing.
+- Reverse-searching, suffix-replaying, partial, discarding, untouched, and not-yet-caught-up paths publish unknown rather than cached working.
 
-Large backlogs converge over multiple polls, regardless of how far the relevant lifecycle event lies from EOF. A continuously growing early path cannot consume every request because the cyclic cursor advances across requests and survives scoped polling and path removal.
+Large backlogs converge over multiple polls, regardless of how far the relevant lifecycle event lies from EOF or how large its forward suffix is. Reverse recovery stores no per-close collection, so the number of fully identified closes does not increase retained correlation state. A continuously growing early path cannot consume every request because the cyclic cursor advances across requests and survives scoped polling and path removal.
 
 Field measurements found lifecycle lines near 3 KiB at the 99th percentile and about 21 KiB at the observed maximum. The 1 MiB record cap leaves substantial margin while bounding memory and scan cost.
 
 ## Failure handling
 
-- **Incomplete final record** — retain the bounded fragment, publish unknown, and retry after more bytes arrive.
+- **Incomplete incremental final record** — retain the bounded fragment, publish unknown, and retry after more bytes arrive.
+- **Captured partial EOF record** — publish unknown until its first later newline, make only that completed record part of recovery, charge every byte returned by the read, and leave later records for incremental processing.
 - **Oversized record** — discard through the next newline, publish unknown while discarding, then resume normal parsing.
 - **Unreadable file** — publish unknown and retry on a later observation.
-- **Initial-attachment truncation or replacement** — discard incompatible reducer evidence and replay from boundary `0`.
+- **Initial-attachment truncation or replacement** — discard incompatible reducer evidence and restart reverse recovery from boundary `0` against the replacement's frozen EOF.
 - **Later-attachment shrink below the boundary** — fence at the new EOF in memory, publish unknown, and wait for later lifecycle evidence.
-- **Backlog beyond the request budget** — preserve incremental progress and publish unknown until caught up.
+- **Shrink during cold recovery** — discard both recovery phases and restart under the target's original known-boundary policy against the replacement file.
+- **Backlog beyond the request budget** — preserve reverse-search or forward-suffix progress and publish unknown until exact.
 - **Target changes during a scan** — discard the old result when identity, path, generation, or boundary revalidation fails, then publish an ordered unknown for the current target.
-- **Initial task precedes SessionStart** — replay from durable boundary `0`, so already-written lifecycle evidence remains eligible.
+- **Initial task precedes SessionStart** — recover from durable boundary `0`, so already-written lifecycle evidence remains eligible.
 - **Terminal list races tracker attachment** — bind both operations to the complete persisted target; same-generation work with a different boundary cannot publish.
-- **Initial rollout is temporarily unavailable** — retain boundary `0` without positive evidence, then replay from zero when the file appears.
-- **Daemon restart with a known boundary** — capture a fixed EOF, replay progressively from the durable boundary, and publish unknown until caught up.
+- **Initial rollout is temporarily unavailable** — retain boundary `0` without positive evidence, then recover from zero when the file appears.
+- **Daemon restart with a known boundary** — capture a fixed EOF, search backward for an anchor, replay only an anchored forward suffix when needed, and publish unknown until exact.
 - **Daemon restart with a `NULL` boundary** — fence at the current EOF in memory and wait for new evidence rather than guessing at historical eligibility.
 - **Delayed old-session hook with identity** — reject it before any mutation.
 - **Legacy hook without identity** — accept it for upgrade compatibility; subsequent session-bound hooks restore full protection.
@@ -221,17 +228,19 @@ Reducer tests cover:
 
 Tracker tests cover:
 
-- a fresh tracker replaying from boundary `0` when `task_started` lies more than 1 MiB before EOF;
-- early bounded observations publishing unknown, then converging to working after reaching the fixed recovery EOF;
-- completion or abort after an old start converging to idle;
-- a later-session boundary excluding an unmatched start before the boundary;
-- fixed-EOF recovery when the transcript grows during catch-up, followed by ordinary incremental reads;
-- initial-attachment replay from zero after truncation and later-attachment in-memory fencing after shrink below the boundary;
-- 64 KiB boundaries and unterminated fragments;
-- oversized-record discard and recovery;
+- a fresh tracker finding a valid start more than one request budget from EOF while every intermediate reverse-search and forward-replay observation remains unknown;
+- exact agreement between reverse-anchored recovery and ordinary forward reducer semantics for working starts, matching closes, reliable mismatches, unconditional closes, malformed records, and missing lifecycle evidence;
+- stopping reverse search at an unconditional close, at the newest valid start, or at the durable boundary without scanning ineligible older history;
+- exact reliable-close correlation during bounded forward suffix replay without retaining per-close keys during reverse search;
+- positive-boundary and crossing-record exclusion;
+- a captured partial EOF record waiting for its first later newline without chasing later records, including full filesystem-read budget accounting;
+- fixed-EOF recovery when the transcript grows during either phase, followed by ordinary incremental reads;
+- initial-attachment recovery from zero after truncation, shrink during reverse recovery, and later-attachment in-memory fencing after shrink below the boundary;
+- 64 KiB boundaries, malformed records, and unterminated fragments;
+- oversized-record discard in both reverse and forward processing;
 - unreadable-file recovery;
 - per-request byte and step limits;
-- fleet fairness, scoped polling, path removal, and reordering;
+- round-robin fairness across simultaneous reverse searches and forward suffix replays, scoped polling, path removal, and reordering;
 - target changes during suspended observation, including identity, path, generation, and boundary changes.
 
 Daemon and wire tests cover:
@@ -268,7 +277,7 @@ Verification includes focused suites for each layer, `scripts/swift-safe build`,
 - **Transcript alone** — it cannot provide immediate Ctrl+C feedback or preserve a permission prompt over an open task.
 - **Bounded tail recovery** — an open turn whose start lies before the tail window remains falsely idle after tracker state is lost.
 - **Persisting the reducer checkpoint** — storing the cursor and open-task state would require frequent database writes and crash-consistency rules, and a stale checkpoint could restore false working.
-- **Searching backward from EOF** — reverse lifecycle correlation is more complex, and a long-running open turn still requires scanning nearly the entire transcript.
+- **One-pass backward close correlation** — exact membership checks for arbitrary fully identified close records require retaining an unbounded set of identifiers or timestamps. The bounded two-phase scan instead uses constant reverse-search state and delegates exact correlation to a forward replay of only the anchored suffix.
 - **A task stack** — copied parent history and orphaned starts would be restored after the current subagent task closes, creating false working.
 - **A default-off flag** — the legacy path is the known failure and parallel modes would preserve conflicting interpretations. Conservative idle fallback bounds the replacement's risk.
 - **Terminal screen scraping** — rendered TUI text is not a stable machine interface.
