@@ -141,6 +141,23 @@ class TBDTerminalView: TerminalView {
         return .passthrough
     }
 
+    /// Instrumented only while the commit-latency diagnostic is on. With the
+    /// flag off `shared` is nil and this is `super.viewWillDraw()` plus one
+    /// branch: no timestamps, no completion block, no logging.
+    ///
+    /// `viewWillDraw` rather than `draw(_:)` because SwiftTerm's `draw(_:)` is
+    /// `public`, not `open`, and so cannot be overridden from this module. See
+    /// `TerminalCommitLatencyProbe` for how the far end of the draw is stamped
+    /// and for what the numbers do and do not cover.
+    override func viewWillDraw() {
+        super.viewWillDraw()
+        guard let probe = TerminalCommitLatencyProbe.shared else { return }
+        probe.recordDrawWillBegin(
+            at: probe.timestamp(),
+            isOnScreen: TerminalCommitLatencyProbe.isOnScreen(self)
+        )
+    }
+
     override func layout() {
         super.layout()
         if !didFireReady && bounds.width > 0 && bounds.height > 0 {

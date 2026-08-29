@@ -3536,6 +3536,26 @@ final class AppState {
         defaults.object(forKey: enableTranscriptKey) as? Bool ?? enableTranscriptDefault
     }
 
+    /// UserDefaults key gating the terminal commit-latency diagnostic
+    /// (`TerminalCommitLatencyProbe`), a temporary instrument that measures
+    /// app-draw → render-server-commit. There is deliberately no Settings
+    /// toggle: it logs at `.info` once per display cycle, so it is turned on
+    /// for a measurement session and off again —
+    /// `defaults write TBDApp enableCommitLatencyDiagnostic -bool true`,
+    /// then relaunch.
+    nonisolated static let enableCommitLatencyDiagnosticKey = "enableCommitLatencyDiagnostic"
+
+    /// The one default for `enableCommitLatencyDiagnosticKey`. OFF: per-frame
+    /// `.info` logging is far too heavy to ship on.
+    nonisolated static let enableCommitLatencyDiagnosticDefault = false
+
+    /// Read of the commit-latency diagnostic gate. Defaults to off when the
+    /// user has never set the key.
+    nonisolated static func commitLatencyDiagnosticEnabled(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: enableCommitLatencyDiagnosticKey) as? Bool
+            ?? enableCommitLatencyDiagnosticDefault
+    }
+
     /// UserDefaults key for a Claude spawn-env setting, by registry ID.
     nonisolated static func claudeEnvKey(_ settingID: String) -> String {
         "claudeEnvSetting.\(settingID)"
