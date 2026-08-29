@@ -896,6 +896,19 @@ struct CodexActivityReconciliationTests {
         #expect(try await db.terminals.get(id: terminal.id)?.codexTranscriptBoundaryOffset == nil)
     }
 
+    @Test("suspending with an unordered session identity clears the Codex boundary")
+    func setSuspendedClearsBoundary() async throws {
+        let terminal = try await makeBoundaryTerminal(tag: "set-suspended")
+        try await seedBoundary(103, terminalID: terminal.id)
+
+        try await db.terminals.setSuspended(
+            id: terminal.id,
+            sessionID: "replacement",
+            at: presentationObservedAt)
+
+        #expect(try await db.terminals.get(id: terminal.id)?.codexTranscriptBoundaryOffset == nil)
+    }
+
     @Test("shell window recreation clears the Codex boundary")
     func clearRecreatedClearsBoundary() async throws {
         let terminal = try await makeBoundaryTerminal(tag: "clear-recreated")

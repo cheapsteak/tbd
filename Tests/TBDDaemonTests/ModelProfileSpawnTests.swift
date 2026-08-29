@@ -33,6 +33,7 @@ struct ModelProfileSpawnTests {
         private var _calls: [[String]] = []
         private var blockMatch: String?
         private var _isBlocked = false
+        private var _blockedCommand: [String]?
         var calls: [[String]] {
             lock.lock(); defer { lock.unlock() }
             return _calls
@@ -46,6 +47,7 @@ struct ModelProfileSpawnTests {
                     return false
                 }
                 _isBlocked = true
+                _blockedCommand = args
                 return true
             }
             if shouldBlock {
@@ -56,15 +58,11 @@ struct ModelProfileSpawnTests {
             lock.withLock {
                 blockMatch = value
                 _isBlocked = false
+                _blockedCommand = nil
             }
         }
         var isBlocked: Bool { lock.withLock { _isBlocked } }
-        var blockedCommand: [String]? {
-            lock.withLock {
-                guard let blockMatch else { return nil }
-                return _calls.last { $0.joined(separator: " ").contains(blockMatch) }
-            }
-        }
+        var blockedCommand: [String]? { lock.withLock { _blockedCommand } }
         func release() {
             releaseGate.signal()
         }

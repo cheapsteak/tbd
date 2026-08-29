@@ -588,6 +588,7 @@ public struct TerminalStore: Sendable {
                 throw DatabaseError(message: "Terminal not found")
             }
             record.claudeSessionID = sessionID
+            record.codexTranscriptBoundaryOffset = nil
             record.suspendedAt = date
             record.suspendedSnapshot = snapshot
             try record.update(db)

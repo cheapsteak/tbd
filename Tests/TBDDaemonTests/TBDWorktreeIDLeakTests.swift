@@ -738,14 +738,16 @@ func delayedClaudeReparkRejectsProfileReplacement() async throws {
     let profileResponse = await profileTask.value
     #expect(profileResponse.success)
     let replacement = try #require(try await db.terminals.get(id: terminal.id))
-    let commandCount = recorded.snapshot().count
 
     #expect(!(await repark.value).success)
     let unchanged = try #require(try await db.terminals.get(id: terminal.id))
     #expect(unchanged == replacement)
     #expect(!unchanged.isParked)
-    #expect(recorded.snapshot().count == commandCount,
-            "the stale re-park must not kill the replacement pane")
+    let commands = recorded.snapshot().map { $0.joined(separator: " ") }
+    #expect(!commands.contains { $0.contains("kill-window") },
+            "the stale re-park must not kill the replacement pane; got: \(commands)")
+    #expect(!commands.contains { $0.contains("new-window") },
+            "the stale re-park must not recreate a window; got: \(commands)")
 }
 
 // MARK: - Fix 3: setupTerminals injects TBD_TERMINAL_ID + TBD_WORKTREE_ID on the setup tab

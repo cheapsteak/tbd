@@ -4,10 +4,6 @@ import os
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "Hibernation")
 
-private struct StaleTerminalWakeError: LocalizedError {
-    let errorDescription: String? = "Terminal changed while wake was preparing"
-}
-
 public enum HibernateResult: Equatable, Sendable {
     case ok
     case alreadyHibernated
@@ -1196,21 +1192,15 @@ public actor HibernationCoordinator {
                 if let bootstrapWindowID, !bootstrapWindowID.isEmpty {
                     try? await tmux.killWindow(server: server, windowID: bootstrapWindowID)
                 }
-                let incarnationID: UUID
-                let replacementEnv: [String: String]
+                let preparedIncarnationID: UUID?
                 do {
-                    guard let preparedIncarnationID = try await db.terminals
+                    preparedIncarnationID = try await db.terminals
                         .prepareHibernatedAgentRespawn(
                         id: terminal.id,
                         expectedState: TerminalReplacementSnapshot(terminal: terminal),
                         windowID: window.windowID,
                         paneID: window.paneID,
-                        at: now()) else {
-                        throw StaleTerminalWakeError()
-                    }
-                    incarnationID = preparedIncarnationID
-                    replacementEnv = AgentProcessEnvironment.replacement(
-                        base: env, incarnationID: incarnationID)
+                        at: now())
                 } catch {
                     // Don't leave an orphaned claude the DB doesn't know
                     // about: best-effort kill of the just-created window,
@@ -1220,6 +1210,14 @@ public actor HibernationCoordinator {
                     logger.warning("wake: created window \(window.windowID, privacy: .public) but failed to persist tmux ids for terminal \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
                     return .failed(.respawnFailed(reason: "recreated tmux window \(window.windowID), but persisting the new tmux ids failed: \(error.localizedDescription)"))
                 }
+                guard let incarnationID = preparedIncarnationID else {
+                    try? await tmux.killWindow(
+                        server: server, windowID: window.windowID)
+                    return .failed(.respawnFailed(
+                        reason: "terminal changed before wake could launch; retry"))
+                }
+                let replacementEnv = AgentProcessEnvironment.replacement(
+                    base: env, incarnationID: incarnationID)
                 do {
                     try await tmux.respawnWindow(
                         server: server,

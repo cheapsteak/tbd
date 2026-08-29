@@ -22,7 +22,7 @@ struct SessionRecaptureSchedulerTests {
             clock: clock
         )
 
-        scheduler.schedule(
+        let recapture = scheduler.schedule(
             terminalID: fixture.terminal.id,
             paneID: "%7",
             server: "tbd-recapture",
@@ -30,7 +30,7 @@ struct SessionRecaptureSchedulerTests {
         )
 
         await clock.advanceWhenSuspended(by: .seconds(5))
-        await Task.megaYield()
+        await recapture.value
         let updated = try #require(try await fixture.db.terminals.get(id: fixture.terminal.id))
         #expect(updated.claudeSessionID == detectedSessionID)
     }
@@ -45,7 +45,7 @@ struct SessionRecaptureSchedulerTests {
             clock: clock
         )
 
-        scheduler.schedule(
+        let recapture = scheduler.schedule(
             terminalID: fixture.terminal.id,
             paneID: "%7",
             server: "tbd-recapture",
@@ -53,7 +53,7 @@ struct SessionRecaptureSchedulerTests {
         )
 
         await clock.advanceWhenSuspended(by: .seconds(5))
-        await Task.megaYield()
+        await recapture.value
         let unchanged = try #require(try await fixture.db.terminals.get(id: fixture.terminal.id))
         #expect(unchanged.claudeSessionID == fixture.sourceSessionID)
     }
@@ -68,7 +68,7 @@ struct SessionRecaptureSchedulerTests {
             captureSessionID: { _, _ in capture.capture() },
             clock: clock)
 
-        scheduler.schedule(
+        let recapture = scheduler.schedule(
             terminalID: fixture.terminal.id,
             paneID: "%7",
             server: "tbd-recapture",
@@ -88,7 +88,7 @@ struct SessionRecaptureSchedulerTests {
             profileID: nil,
             at: Date(timeIntervalSinceReferenceDate: 20)))
         capture.release()
-        await Task.megaYield()
+        await recapture.value
 
         let stored = try #require(try await fixture.db.terminals.get(id: fixture.terminal.id))
         #expect(stored.sessionIncarnationID == replacementToken)

@@ -278,7 +278,8 @@ struct HibernationCoordinatorTests {
             configDirManager: isolatedConfigDirManager(),
             actuationLog: makeTestActuationLog())
 
-        recorder.arm()
+        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        recorder.arm(matching: "; \(shell)")
         let hibernate = gateHoldingTask {
             await coord.manualHibernate(terminalID: terminalID)
         }
@@ -288,6 +289,7 @@ struct HibernationCoordinatorTests {
             Issue.record("hibernate never reached the shell respawn")
             return
         }
+        #expect(recorder.blockedCommand?.last?.hasSuffix(shell) == true)
         try await db.terminals.delete(id: terminalID)
         recorder.release()
 
@@ -1784,6 +1786,40 @@ struct HibernationCoordinatorTests {
         let after = try await db.terminals.get(id: terminalID)
         #expect(after?.isParked == true, "a failed wake must leave the row parked for retry")
         #expect(after?.tmuxWindowID == "@0", "tmux ids must be unchanged on failure")
+    }
+
+    @Test func deadWindowWakeReportsStaleStateAsRetryable() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        let recorder = BlockingRespawnRecorder()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: recorder.record,
+            dryRunWindowIsDead: { $0 == "@0" })
+        let coord = HibernationCoordinator(
+            db: db,
+            tmux: tmux,
+            configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+
+        recorder.arm(matching: "new-window")
+        let wake = gateHoldingTask { await coord.wake(terminalID: terminalID) }
+        guard await waitUntil({ recorder.isBlocked }) else {
+            recorder.release()
+            _ = await wake.value
+            Issue.record("wake never reached replacement window creation")
+            return
+        }
+        try await db.terminals.updateSessionID(
+            id: terminalID, sessionID: "replacement-session")
+        recorder.release()
+
+        #expect(await wake.value == .respawnFailed(
+            reason: "terminal changed before wake could launch; retry"))
+        let unchanged = try #require(try await db.terminals.get(id: terminalID))
+        #expect(unchanged.tmuxWindowID == "@0")
+        #expect(unchanged.tmuxPaneID == "%0")
+        #expect(unchanged.isParked)
     }
 
     /// Respawn FAILS (window alive but respawn-window errors): result is
