@@ -8,6 +8,68 @@ import Testing
     private static let migrationID = "20260825060216_terminal_session_incarnation"
     private static let pendingMigrationID = "20260829210843_pending_terminal_incarnation"
 
+    @Test func factSourcePersistenceMatchUsesDecodedValue() {
+        let source = FactSource.hookEvent("UserPromptSubmit")
+
+        #expect(FactColumnJSON.matches(
+            source,
+            encoded: #"{"detail":"UserPromptSubmit","kind":"hook"}"#))
+        #expect(FactColumnJSON.matches(Optional<FactSource>.none, encoded: nil))
+        #expect(!FactColumnJSON.matches(source, encoded: "not-json"))
+        #expect(!FactColumnJSON.matches(Optional<FactSource>.none, encoded: "not-json"))
+    }
+
+    @Test func awaitingInputPersistenceMatchUsesDecodedValue() {
+        let reason = AwaitingInputReason(
+            message: "Approve?",
+            hookEventName: "Notification")
+
+        #expect(FactColumnJSON.matches(
+            reason,
+            encoded: #"{"hookEventName":"Notification","message":"Approve?"}"#))
+        #expect(FactColumnJSON.matches(Optional<AwaitingInputReason>.none, encoded: nil))
+        #expect(!FactColumnJSON.matches(reason, encoded: "not-json"))
+        #expect(!FactColumnJSON.matches(Optional<AwaitingInputReason>.none, encoded: "not-json"))
+    }
+
+    @Test func hibernationBeginMatchesPersistedFactSemantics() async throws {
+        let (database, terminal) = try await makeTerminal(kind: .claude, label: "claude")
+        let observedAt = Date(timeIntervalSinceReferenceDate: 20)
+        let reason = AwaitingInputReason(
+            message: "Approve?",
+            hookEventName: "Notification")
+        try await database.terminals.setActivityState(
+            id: terminal.id,
+            activityState: .working,
+            source: .hookEvent("UserPromptSubmit"),
+            observedAt: observedAt,
+            awaitingInputReason: reason)
+        try await database.writerForTests.write { connection in
+            try connection.execute(
+                sql: """
+                    UPDATE terminal
+                    SET activityStateSource = ?, awaitingInputReason = ?
+                    WHERE id = ?
+                    """,
+                arguments: [
+                    #"{ "detail": "UserPromptSubmit", "kind": "hook" }"#,
+                    #"{ "hookEventName": "Notification", "message": "Approve?" }"#,
+                    terminal.id.uuidString,
+                ])
+        }
+        let current = try #require(try await database.terminals.get(id: terminal.id))
+        #expect(current.activityStateSource == .hookEvent("UserPromptSubmit"))
+        #expect(current.awaitingInputReason == reason)
+
+        let preparation = try await database.terminals.beginHibernatedShellRespawn(
+            id: terminal.id,
+            expectedState: TerminalHibernationSnapshot(terminal: current),
+            reason: .manual,
+            at: Date(timeIntervalSinceReferenceDate: 30))
+
+        #expect(preparation != nil)
+    }
+
     @Test func forwardMigrationLeavesExistingIncarnationNil() throws {
         let queue = try DatabaseQueue()
         let migrator = TBDDatabase.buildMigratorForTests()

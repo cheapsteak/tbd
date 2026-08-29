@@ -150,6 +150,15 @@ enum FactColumnJSON {
         guard let json, let data = json.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(type, from: data)
     }
+
+    /// Compare a decoded fact with its persisted JSON representation. JSON
+    /// object key order is not identity, while a malformed non-NULL value must
+    /// not collapse into the same state as an absent fact.
+    static func matches<T: Decodable & Equatable>(_ expected: T?, encoded json: String?) -> Bool {
+        guard let json else { return expected == nil }
+        guard let expected else { return false }
+        return decode(T.self, from: json) == expected
+    }
 }
 
 /// What a `recordAwaitingInputReason` call did to the record.
@@ -339,10 +348,12 @@ struct TerminalHibernationSnapshot: Sendable {
         replacement.matches(record)
             && (record.keepWarm ?? false) == keepWarm
             && record.activityState == activityState.rawValue
-            && record.activityStateSource == FactColumnJSON.encode(activityStateSource)
+            && FactColumnJSON.matches(
+                activityStateSource, encoded: record.activityStateSource)
             && record.activityStateObservedAt == activityStateObservedAt
             && record.activityStateOrderObservedAt == activityStateOrderObservedAt
-            && record.awaitingInputReason == FactColumnJSON.encode(awaitingInputReason)
+            && FactColumnJSON.matches(
+                awaitingInputReason, encoded: record.awaitingInputReason)
             && record.awaitingInputObservedAt == awaitingInputObservedAt
     }
 
