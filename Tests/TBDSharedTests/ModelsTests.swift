@@ -53,6 +53,7 @@ import Testing
 
 @Test func testTerminalRoundTrip() throws {
     let sessionOrderObservedAt = Date(timeIntervalSinceReferenceDate: 30)
+    let sessionIncarnationID = UUID()
     let terminal = Terminal(
         id: UUID(),
         worktreeID: UUID(),
@@ -61,6 +62,7 @@ import Testing
         label: "editor",
         createdAt: Date(),
         sessionOrderObservedAt: sessionOrderObservedAt,
+        sessionIncarnationID: sessionIncarnationID,
         activityState: .working,
         presentationActivityState: .idle
     )
@@ -70,8 +72,24 @@ import Testing
     #expect(decoded.tmuxWindowID == "@1")
     #expect(decoded.label == "editor")
     #expect(decoded.sessionOrderObservedAt == sessionOrderObservedAt)
+    #expect(decoded.sessionIncarnationID == sessionIncarnationID)
     #expect(decoded.activityState == .working)
     #expect(decoded.presentationActivityState == .idle)
+}
+
+@Test(arguments: [Int64?.none, Int64?.some(0), Int64?.some(4_294_967_296)])
+func testTerminalCodexTranscriptBoundaryRoundTrip(_ boundary: Int64?) throws {
+    let terminal = Terminal(
+        worktreeID: UUID(),
+        tmuxWindowID: "@1",
+        tmuxPaneID: "%3",
+        codexTranscriptBoundaryOffset: boundary
+    )
+
+    let data = try JSONEncoder().encode(terminal)
+    let decoded = try JSONDecoder().decode(Terminal.self, from: data)
+
+    #expect(decoded.codexTranscriptBoundaryOffset == boundary)
 }
 
 @Test func testNotificationRoundTrip() throws {
@@ -254,6 +272,8 @@ import Testing
     #expect(decoded.activityState == .unknown)
     #expect(decoded.presentationActivityState == nil)
     #expect(decoded.sessionOrderObservedAt == nil)
+    #expect(decoded.codexTranscriptBoundaryOffset == nil)
+    #expect(decoded.sessionIncarnationID == nil)
 }
 
 // MARK: - Hibernation fields + gating helpers

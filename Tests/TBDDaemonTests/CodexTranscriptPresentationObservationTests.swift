@@ -14,9 +14,7 @@ struct CodexPresentationObservationTests {
             at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let transcript = directory.appendingPathComponent("rollout.jsonl")
-        try Data(
-            (#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"a"}}"# + "\n").utf8
-        ).write(to: transcript)
+        try Data().write(to: transcript)
 
         let firstAt = Date(timeIntervalSince1970: 1_700_000_000)
         let secondAt = firstAt.addingTimeInterval(1)
@@ -26,6 +24,13 @@ struct CodexPresentationObservationTests {
             transcriptPath: transcript.path,
             worktreeID: UUID()
         )]
+        #expect(await tracker.observe(transcripts: targets).isEmpty)
+        let initialHandle = try FileHandle(forWritingTo: transcript)
+        try initialHandle.seekToEnd()
+        try initialHandle.write(contentsOf: Data(
+            (#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"a"}}"# + "\n").utf8
+        ))
+        try initialHandle.close()
 
         // `observeStamped` is a synchronous actor method, so the gate below
         // holds the tracker actor itself. Off the cooperative pool, that costs

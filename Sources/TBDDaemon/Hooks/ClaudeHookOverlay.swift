@@ -65,7 +65,7 @@ public enum ClaudeHookOverlay {
     /// command tolerates `tbd` not being on PATH — silent failure is fine.
     /// Also initializes terminal activity to idle.
     static let sessionStartCommand =
-        #"tbd session-event 2>/dev/null || true; tbd terminal-activity idle 2>/dev/null || true"#
+        #"TBD_BIN="${TBD_CLI_PATH-tbd}"; "$TBD_BIN" session-event 2>/dev/null || true; "$TBD_BIN" terminal-activity idle 2>/dev/null || true"#
 
     /// The shell command for the Stop hook. Mirrors the legacy
     /// `setup-hooks --global` command so TBD can replace it without

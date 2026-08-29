@@ -3247,6 +3247,10 @@ public struct TerminalTranscriptItemFullBodyResult: Codable, Sendable {
 /// hook payload changes don't immediately break this bridge.
 public struct TerminalSessionEventParams: Codable, Sendable {
     public let terminalID: UUID
+    /// Process incarnation planted by TBD before a replacement agent starts.
+    /// Legacy, never-replaced terminals omit it and remain on the nil/nil
+    /// compatibility path until their first managed replacement.
+    public let sessionIncarnationID: UUID?
     public let sessionID: String
     public let transcriptPath: String?
     public let source: String?
@@ -3262,9 +3266,11 @@ public struct TerminalSessionEventParams: Codable, Sendable {
         sessionID: String,
         transcriptPath: String?,
         source: String?,
-        cwd: String? = nil
+        cwd: String? = nil,
+        sessionIncarnationID: UUID? = nil
     ) {
         self.terminalID = terminalID
+        self.sessionIncarnationID = sessionIncarnationID
         self.sessionID = sessionID
         self.transcriptPath = transcriptPath
         self.source = source

@@ -4,11 +4,25 @@ import os
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "Hibernation")
 
+private struct StaleTerminalWakeError: LocalizedError {
+    let errorDescription: String? = "Terminal changed while wake was preparing"
+}
+
 public enum HibernateResult: Equatable, Sendable {
     case ok
     case alreadyHibernated
     case notEligible(reason: String)
     case notFound
+}
+
+private enum HibernateEligibilityPolicy: Sendable {
+    case manual
+    case merge(inputVetoEnabled: Bool)
+    case automatic(
+        enabled: Bool,
+        inputVetoEnabled: Bool,
+        idleTimeout: TimeInterval,
+        idleSince: Date?)
 }
 
 /// How an unparked terminal's pane disagreed with the row that claims it is
@@ -92,7 +106,6 @@ public enum WakeResult: Equatable, Sendable {
 public actor HibernationCoordinator {
     private let db: TBDDatabase
     private let tmux: TmuxManager
-    private let detector: ClaudeStateDetector
     private let modelProfileResolver: ModelProfileResolver?
     private let subscriptions: StateSubscriptionManager?
     /// Routes ambient claude-projects-root resolution for the wake transcript
@@ -183,7 +196,6 @@ public actor HibernationCoordinator {
     ) {
         self.db = db
         self.tmux = tmux
-        self.detector = ClaudeStateDetector(tmux: tmux)
         self.modelProfileResolver = modelProfileResolver
         self.subscriptions = subscriptions
         self.configDirManager = configDirManager
@@ -253,7 +265,10 @@ public actor HibernationCoordinator {
         guard terminal.isManuallyHibernatable else {
             return .notEligible(reason: manualBlockReason(terminal))
         }
-        return await performHibernate(terminal: terminal, reason: .manual)
+        return await performHibernate(
+            terminal: terminal,
+            reason: .manual,
+            policy: .manual)
     }
 
     /// The reason a manual hibernate was refused, for the RPC error string.
@@ -312,7 +327,10 @@ public actor HibernationCoordinator {
             return .notEligible(reason: "\(error)")
         }
 
-        let result = await performHibernate(terminal: terminal, reason: .merged)
+        let result = await performHibernate(
+            terminal: terminal,
+            reason: .merged,
+            policy: .merge(inputVetoEnabled: inputVetoEnabled))
         await actuationLog.appendOutcome(
             confirms: actuationID,
             result: ActuationOutcome.classify(result),
@@ -349,14 +367,18 @@ public actor HibernationCoordinator {
     /// `reason` records WHO parked the session (`.manual` from the explicit
     /// "Hibernate now" entry points, `.auto` from the idle sweep) — persisted
     /// so the app's wake-on-focus can skip manual parks.
-    private func performHibernate(terminal: Terminal, reason: HibernateReason) async -> HibernateResult {
+    private func performHibernate(
+        terminal: Terminal,
+        reason: HibernateReason,
+        policy: HibernateEligibilityPolicy
+    ) async -> HibernateResult {
         guard !hibernatesInFlight.contains(terminal.id) else {
             return .alreadyHibernated
         }
         hibernatesInFlight.insert(terminal.id)
         defer { hibernatesInFlight.remove(terminal.id) }
 
-        guard let sessionID = terminal.claudeSessionID else {
+        guard terminal.claudeSessionID != nil else {
             return .notEligible(reason: "No session id to resume later")
         }
         guard let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) else {
@@ -364,14 +386,11 @@ public actor HibernationCoordinator {
         }
         let server = worktree.tmuxServer
         let paneID = terminal.tmuxPaneID
-        let windowID = terminal.tmuxWindowID
 
-        // Capture the ANSI pane snapshot FIRST (ported from the old Suspend
-        // feature), before any interrupt disturbs the pane. Doubles as the
-        // input for the typed-but-unsent rail below, so we capture once. If
-        // capture fails we proceed with no snapshot (the DB rails already
-        // cleared it as idle-at-rest); parked-view falls back to a blank pane.
-        let capturedSnapshot: String?
+        // Fast pre-lock rail: refuse obvious typed input before queueing for a
+        // server replacement. The authoritative capture and the snapshot that
+        // is persisted happen after the lock is acquired, because this pane
+        // can change while the operation waits.
         if let capture = try? await tmux.capturePaneWithAnsi(server: server, paneID: paneID) {
             // Rail: typed-but-unsent input. Chrome's single biggest tab-discard
             // backlash was lost typed text — never park a pane with a
@@ -380,9 +399,6 @@ public actor HibernationCoordinator {
                 logger.debug("hibernate: skipping \(terminal.id, privacy: .public) — pending typed input in prompt")
                 return .notEligible(reason: "Terminal has unsent typed input")
             }
-            capturedSnapshot = capture.isEmpty ? nil : capture
-        } else {
-            capturedSnapshot = nil
         }
 
         // Rail: transcript-tail validity. Killing mid-write can leave an
@@ -396,26 +412,193 @@ public actor HibernationCoordinator {
             return .notEligible(reason: "Transcript is mid-write; try again shortly")
         }
 
+        do {
+            return try await tmux.withWorktreeServerLock(
+                db: db,
+                worktreeID: worktree.id,
+                allowedStatuses: [worktree.status]
+            ) { currentWorktree in
+                await self.performHibernateReplacementLocked(
+                    terminal: terminal,
+                    worktree: currentWorktree,
+                    reason: reason,
+                    policy: policy)
+            }
+        } catch {
+            logger.warning("hibernate: failed to lock the current tmux server for \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            idleSince[terminal.id] = nil
+            pendingKillSince[terminal.id] = nil
+            return .notFound
+        }
+    }
+
+    /// Runs only while the worktree tmux server resource lock is held. Every
+    /// in-place process replacement on that server participates in the same
+    /// lock, while the two database transitions additionally CAS the captured
+    /// process incarnation so a request that waited cannot act on stale state.
+    private func performHibernateReplacementLocked(
+        terminal: Terminal,
+        worktree: LocalWorktree,
+        reason: HibernateReason,
+        policy: HibernateEligibilityPolicy
+    ) async -> HibernateResult {
+        guard let currentTerminal = try? await db.terminals.get(id: terminal.id) else {
+            return .notFound
+        }
+        guard TerminalReplacementSnapshot(terminal: terminal).matches(currentTerminal) else {
+            idleSince[terminal.id] = nil
+            pendingKillSince[terminal.id] = nil
+            return .notEligible(reason: "Terminal process changed before hibernation")
+        }
+        if case .automatic = policy,
+           !TerminalHibernationSnapshot(terminal: terminal).matchesActivity(currentTerminal) {
+            // A full turn may start and finish while an automatic park waits
+            // for this server lock. The fresh row can be idle again, but its
+            // old idle timer no longer proves a full quiet window. Refuse this
+            // attempt and let the next sweep seed a new idle generation.
+            idleSince[terminal.id] = nil
+            pendingKillSince[terminal.id] = nil
+            return .notEligible(reason: "Session activity changed before hibernation")
+        }
+        guard let sessionID = currentTerminal.claudeSessionID else {
+            return .notEligible(reason: "No session id to resume later")
+        }
+        if let refusal = hibernationRefusal(terminal: currentTerminal, policy: policy) {
+            idleSince[terminal.id] = nil
+            pendingKillSince[terminal.id] = nil
+            return refusal
+        }
+
+        let server = worktree.tmuxServer
+        let paneID = currentTerminal.tmuxPaneID
+        let windowID = currentTerminal.tmuxWindowID
+
+        guard await tmux.windowExists(server: server, windowID: windowID) else {
+            idleSince[terminal.id] = nil
+            pendingKillSince[terminal.id] = nil
+            return .notEligible(reason: "Terminal window is no longer live")
+        }
+        if tmux.verifiesPaneCurrentCommand {
+            guard let command = try? await tmux.paneCurrentCommand(server: server, paneID: paneID),
+                  ClaudeStateDetector.isClaudeProcess(command) else {
+                idleSince[terminal.id] = nil
+                pendingKillSince[terminal.id] = nil
+                return .notEligible(reason: "Terminal session is no longer live")
+            }
+        }
+
+        // The checks above the server lock are only a fast refusal. This fresh
+        // capture and transcript read are authoritative: a queued hibernation
+        // must not act on input or transcript state observed before another
+        // replacement or hook had its turn under the same server lock.
+        let capturedSnapshot: String?
+        if let capture = try? await tmux.capturePaneWithAnsi(server: server, paneID: paneID) {
+            if HibernationSafetyChecks.hasPendingInput(paneCapture: capture) {
+                logger.debug("hibernate: skipping \(terminal.id, privacy: .public) — pending typed input in prompt")
+                return .notEligible(reason: "Terminal has unsent typed input")
+            }
+            capturedSnapshot = capture.isEmpty ? nil : capture
+        } else {
+            capturedSnapshot = nil
+        }
+
+        if let transcriptPath = currentTerminal.transcriptPath,
+           let body = try? String(contentsOfFile: transcriptPath, encoding: .utf8),
+           !HibernationSafetyChecks.isTranscriptTailValid(jsonlBody: body) {
+            logger.warning("hibernate: skipping \(terminal.id, privacy: .public) — transcript tail not parseable, would be unresumable")
+            return .notEligible(reason: "Transcript is mid-write; try again shortly")
+        }
+
+        // Persist the park intent before touching the live process, without
+        // rotating its token. A crash or failure before tmux replaces Claude
+        // can therefore be reconciled by unparking the surviving process, whose
+        // hooks still match the row.
+        let expectedState = TerminalHibernationSnapshot(terminal: currentTerminal)
+        let inertIncarnation: TerminalSessionIncarnation
+        do {
+            guard let prepared = try await db.terminals.beginHibernatedShellRespawn(
+                id: terminal.id,
+                expectedState: expectedState,
+                snapshot: capturedSnapshot,
+                reason: reason,
+                at: now()) else {
+                idleSince[terminal.id] = nil
+                pendingKillSince[terminal.id] = nil
+                return .notEligible(reason: "Terminal process changed before hibernation")
+            }
+            inertIncarnation = prepared
+        } catch {
+            logger.warning("hibernate: failed to prepare parked state for \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            idleSince[terminal.id] = nil
+            pendingKillSince[terminal.id] = nil
+            return .notEligible(reason: "Failed to persist hibernation")
+        }
+
         // Polite park: try an in-band `/exit` first (ported from Suspend) so
         // Claude flushes its transcript, shuts down MCP children, and fires Stop
         // hooks, then poll up to ~3s for the process to actually leave. Only if
         // it's still a claude process after the poll window do we escalate to
         // the graceful-interrupt SIGTERM fallback. Either way, `respawn-window
         // -k` below guarantees termination.
-        let exited = await politeExitThenPoll(server: server, paneID: paneID, terminalID: terminal.id)
+        let exited = await politeExitThenPoll(
+            server: server, paneID: paneID, terminalID: terminal.id)
         if !exited {
             logger.debug("hibernate: /exit did not terminate \(terminal.id, privacy: .public) within poll window — falling back to graceful interrupt")
             await gracefullyInterruptPane(server: server, paneID: paneID)
         }
 
-        // Respawn the SAME window to a bare login shell: the claude process (and
-        // its RSS) is gone, but the tmux window/pane and its scrollback stay.
+        let baseEnvironment = [
+            "TBD_WORKTREE_ID": worktree.id.uuidString,
+            "TBD_TERMINAL_ID": terminal.id.uuidString,
+        ]
+
+        // First replace Claude with a controlled process that cannot emit agent
+        // hooks. Only after this succeeds is it safe to rotate the durable
+        // token and clear process-local lifecycle evidence.
         do {
             try await tmux.respawnWindow(
                 server: server,
                 windowID: windowID,
                 cwd: worktree.path,
-                shellCommand: defaultShell
+                shellCommand: "exec /usr/bin/tail -f /dev/null",
+                env: baseEnvironment
+            )
+        } catch {
+            logger.warning("hibernate: respawn-to-inert failed for terminal \(terminal.id, privacy: .public) window \(windowID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return .notEligible(reason: "Failed to replace agent")
+        }
+
+        let shellIncarnationID: UUID
+        do {
+            guard let finalized = try await db.terminals.finalizeHibernatedShellRespawn(
+                id: terminal.id,
+                expectedIncarnation: inertIncarnation,
+                at: now()) else {
+                idleSince[terminal.id] = nil
+                pendingKillSince[terminal.id] = nil
+                return .notEligible(reason: "Terminal process changed during hibernation")
+            }
+            shellIncarnationID = finalized
+        } catch {
+            logger.warning("hibernate: failed to fence replaced agent for \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            idleSince[terminal.id] = nil
+            pendingKillSince[terminal.id] = nil
+            return .notEligible(reason: "Failed to finalize hibernation")
+        }
+        let shellEnvironment = AgentProcessEnvironment.replacement(
+            base: baseEnvironment,
+            incarnationID: shellIncarnationID)
+
+        // Replace the inert process with the user-facing login shell carrying
+        // the exact token persisted by the finalization transaction. A failure
+        // leaves the inert pane parked and rejects hooks from the old agent.
+        do {
+            try await tmux.respawnWindow(
+                server: server,
+                windowID: windowID,
+                cwd: worktree.path,
+                shellCommand: defaultShell,
+                env: shellEnvironment
             )
         } catch {
             logger.warning("hibernate: respawn-to-shell failed for terminal \(terminal.id, privacy: .public) window \(windowID, privacy: .public): \(error.localizedDescription, privacy: .public)")
@@ -423,43 +606,67 @@ public actor HibernationCoordinator {
         }
 
         // Post-kill verification: the pane must now be running a shell, not
-        // claude. respawn-window -k replaces the pane's program, so this
-        // confirms the swap took and the shell (window) survived. Any leftover
-        // orphaned claude child processes (#43944, #25188) are logged but not
-        // killed in v1 — surfacing them is enough.
-        await verifyHibernationTookEffect(server: server, paneID: paneID, terminalID: terminal.id)
-
-        // Clear the recorded input timestamp for this pane. The paneID may be
-        // reused in a future respawn, so clearing prevents a stale veto from the
-        // old session's final keystrokes. (A paneID reused with residual input
-        // would only add a stale veto, never drop a real one — the safe direction
-        // — but clearing is cleaner.)
+        // claude. Any leftover orphaned descendants are logged but not killed.
+        await verifyHibernationTookEffect(
+            server: server, paneID: paneID, terminalID: terminal.id)
+        // The pane id may be reused later; do not carry an old input veto into
+        // the replacement process.
         inputActivity.forget(paneID: paneID)
 
-        do {
-            // setHibernated also cancels any scheduled auto-resume in the
-            // same write transaction (spec §Cancellation): parking kills the
-            // Claude process, so a pending "TBD types continue at ..." row
-            // must die with it. The actuator's fire-time `isParked` check is
-            // the backstop for a park that races an in-flight actuation.
-            try await db.terminals.setHibernated(
-                id: terminal.id, sessionID: sessionID, snapshot: capturedSnapshot,
-                reason: reason, at: now()
-            )
-        } catch {
-            logger.warning("hibernate: failed to mark hibernated for \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        guard let persisted = try? await db.terminals.get(id: terminal.id),
+              persisted.sessionIncarnationID == shellIncarnationID else {
+            logger.warning("hibernate: prepared row disappeared or changed during shell launch for \(terminal.id, privacy: .public)")
+            idleSince[terminal.id] = nil
+            pendingKillSince[terminal.id] = nil
+            return .notEligible(reason: "Failed to verify hibernation")
         }
         idleSince[terminal.id] = nil
         pendingKillSince[terminal.id] = nil
-        // The delta must carry the just-captured snapshot and the park reason:
-        // the app's parked view materializes on this flip reading its cached
-        // row, and wake-on-focus filters on the cached reason — the refetch
-        // that would eventually bring both lands after the view is built.
+        // The app materializes its parked view on this flip, so carry the
+        // snapshot and reason rather than waiting for a later row refresh.
         broadcastHibernation(
-            terminal: terminal, hibernated: true, keepWarm: terminal.keepWarm,
+            terminal: currentTerminal, hibernated: true, keepWarm: currentTerminal.keepWarm,
             suspendedSnapshot: capturedSnapshot, hibernateReason: reason)
         logger.info("hibernated terminal \(terminal.id, privacy: .public) (session \(sessionID, privacy: .public))")
         return .ok
+    }
+
+    private func hibernationRefusal(
+        terminal: Terminal,
+        policy: HibernateEligibilityPolicy
+    ) -> HibernateResult? {
+        switch policy {
+        case .manual:
+            guard terminal.hibernatedAt == nil else { return .alreadyHibernated }
+            guard terminal.isManuallyHibernatable else {
+                return .notEligible(reason: manualBlockReason(terminal))
+            }
+            return nil
+
+        case let .merge(inputVetoEnabled):
+            let decision = HibernationGate.decideForMerge(
+                terminal: terminal,
+                inputVetoEnabled: inputVetoEnabled,
+                lastInputAt: inputActivity.lastInput(paneID: terminal.tmuxPaneID))
+            guard decision == .eligible else {
+                return .notEligible(reason: Self.mergeBlockReason(decision))
+            }
+            return nil
+
+        case let .automatic(enabled, inputVetoEnabled, idleTimeout, idleSince):
+            let decision = HibernationGate.decide(
+                terminal: terminal,
+                autoHibernateEnabled: enabled,
+                inputVetoEnabled: inputVetoEnabled,
+                idleTimeout: idleTimeout,
+                idleSince: idleSince,
+                lastInputAt: inputActivity.lastInput(paneID: terminal.tmuxPaneID),
+                now: now())
+            guard decision == .eligible else {
+                return .notEligible(reason: Self.mergeBlockReason(decision))
+            }
+            return nil
+        }
     }
 
     /// Confirm the respawn-to-shell actually replaced claude, and log any
@@ -602,6 +809,20 @@ public actor HibernationCoordinator {
     /// the parked check below. An UNPARKED row whose session died is reported
     /// (`.sessionGone`) but not repaired — see `classifyUnparkedWake`.
     public func wake(terminalID: UUID, cols: Int? = nil, rows: Int? = nil, allowDefaultProfileFallback: Bool = false, initialPrompt: String? = nil) async -> WakeResult {
+        // Claim synchronously, before the first suspension. Otherwise two wake
+        // calls can both read the parked row, then each pass the in-flight check
+        // after actor reentrancy lets them interleave. Keep the claim across all
+        // early exits so the defer releases lookup failures and successful wakes
+        // alike.
+        // `performHibernate` is actor-reentrant while it waits for polite exit
+        // and tmux. Once its durable begin transition marks this row parked, a
+        // wake must not rotate/clear the row and let hibernation resume against
+        // the replacement process.
+        guard !hibernatesInFlight.contains(terminalID) else { return .inFlight }
+        guard !wakesInFlight.contains(terminalID) else { return .inFlight }
+        wakesInFlight.insert(terminalID)
+        defer { wakesInFlight.remove(terminalID) }
+
         guard let terminal = try? await db.terminals.get(id: terminalID) else {
             return .notFound
         }
@@ -610,7 +831,7 @@ public actor HibernationCoordinator {
         // `clearHibernated` nils both columns, so this fully un-parks either.
         guard terminal.isParked else { return await classifyUnparkedWake(terminal) }
         guard let sessionID = terminal.claudeSessionID else { return .noSessionID }
-        guard !wakesInFlight.contains(terminalID) else { return .inFlight }
+        let expectedReplacementState = TerminalReplacementSnapshot(terminal: terminal)
         guard let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) else {
             return .notFound
         }
@@ -622,13 +843,8 @@ public actor HibernationCoordinator {
             logger.error("wake: worktree path missing on disk for terminal \(terminal.id, privacy: .public): \(worktree.path, privacy: .public) — refusing respawn (would fall back to $HOME)")
             return .worktreeMissing(path: worktree.path)
         }
-
-        wakesInFlight.insert(terminalID)
-        defer { wakesInFlight.remove(terminalID) }
-
         let server = worktree.tmuxServer
         let paneID = terminal.tmuxPaneID
-        let windowID = terminal.tmuxWindowID
 
         // `claude --resume` is cwd-scoped (session lookup is per-directory).
         // Respawning inside the existing window already runs in the worktree,
@@ -774,6 +990,7 @@ public actor HibernationCoordinator {
         let livePaneID: String
         let liveWindowID: String
         let liveServer: String
+        let liveIncarnationID: UUID
 
         // The whole decide-then-mutate tmux section (ownership check +
         // windowExists + respawn/create/kill/persist) runs under the
@@ -786,12 +1003,18 @@ public actor HibernationCoordinator {
             outcome = try await tmux.withWorktreeServerLock(
                 db: db, worktreeID: worktree.id, allowedStatuses: [worktree.status]
             ) { currentWorktree in
-                await self.wakeTmuxSection(
-                    terminal: terminal,
+                guard let currentTerminal = try await self.db.terminals.get(
+                    id: terminal.id),
+                      expectedReplacementState.matches(currentTerminal) else {
+                    return .failed(.respawnFailed(
+                        reason: "terminal changed while wake was preparing; retry"))
+                }
+                return await self.wakeTmuxSection(
+                    terminal: currentTerminal,
                     worktree: currentWorktree.worktree,
                     server: currentWorktree.tmuxServer,
-                    windowID: windowID,
-                    paneID: paneID,
+                    windowID: currentTerminal.tmuxWindowID,
+                    paneID: currentTerminal.tmuxPaneID,
                     spawnCommand: spawn.command,
                     env: env,
                     sensitiveEnv: sensitiveEnv,
@@ -805,16 +1028,16 @@ public actor HibernationCoordinator {
         switch outcome {
         case .failed(let result):
             return result
-        case .respawned(let newPaneID, let newWindowID, let currentServer):
+        case .respawned(
+            let newPaneID,
+            let newWindowID,
+            let currentServer,
+            let incarnationID
+        ):
             livePaneID = newPaneID
             liveWindowID = newWindowID
             liveServer = currentServer
-        }
-
-        do {
-            try await db.terminals.clearHibernated(id: terminal.id)
-        } catch {
-            logger.warning("wake: failed to clear hibernated for \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            liveIncarnationID = incarnationID
         }
         idleSince[terminal.id] = nil
         // Carry the LIVE window/pane ids on the un-park broadcast so the app
@@ -828,16 +1051,11 @@ public actor HibernationCoordinator {
 
         // `claude --resume <id>` forks into a NEW session file; re-capture the
         // fresh id so subsequent hibernate/wake reference the live session.
-        let termID = terminal.id
-        Task {
-            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
-            try? await Task.sleep(for: .seconds(5))
-            if let newID = await self.detector.captureSessionID(
-                server: liveServer, paneID: livePaneID
-            ) {
-                try? await self.db.terminals.updateSessionID(id: termID, sessionID: newID)
-            }
-        }
+        SessionRecaptureScheduler(db: db, tmux: tmux, clock: clock).schedule(
+            terminalID: terminal.id,
+            paneID: livePaneID,
+            server: liveServer,
+            expectedIncarnationID: liveIncarnationID)
         logger.info("woke terminal \(terminal.id, privacy: .public) (resume \(sessionID, privacy: .public))")
         return .ok
     }
@@ -845,7 +1063,12 @@ public actor HibernationCoordinator {
     /// Outcome of `wakeTmuxSection`: the live pane/window ids the rest of
     /// `wake()` should reference, or the `WakeResult` to return verbatim.
     private enum WakeTmuxOutcome {
-        case respawned(paneID: String, windowID: String, server: String)
+        case respawned(
+            paneID: String,
+            windowID: String,
+            server: String,
+            incarnationID: UUID
+        )
         case failed(WakeResult)
     }
 
@@ -882,17 +1105,40 @@ public actor HibernationCoordinator {
 
         if !claimedByOther, await tmux.windowExists(server: server, windowID: windowID) {
             do {
+                guard let incarnationID = try await db.terminals.prepareHibernatedAgentRespawn(
+                    id: terminal.id,
+                    expectedState: TerminalReplacementSnapshot(terminal: terminal),
+                    at: now()) else {
+                    return .failed(.respawnFailed(
+                        reason: "terminal changed before wake could launch; retry"))
+                }
+                let replacementEnv = AgentProcessEnvironment.replacement(
+                    base: env, incarnationID: incarnationID)
                 try await tmux.respawnWindow(
                     server: server,
                     windowID: windowID,
                     cwd: worktree.localPath,
                     shellCommand: spawnCommand,
-                    env: env,
+                    env: replacementEnv,
                     sensitiveEnv: sensitiveEnv,
                     cols: cols,
                     rows: rows
                 )
-                return .respawned(paneID: paneID, windowID: windowID, server: server)
+                do {
+                    try await db.terminals.clearHibernated(id: terminal.id)
+                } catch {
+                    // Keep the live replacement parked. Startup reconciliation
+                    // detects parked+live-agent and clears this marker without
+                    // erasing a SessionStart that arrived during launch.
+                    logger.warning("wake: launched the replacement agent for terminal \(terminal.id, privacy: .public), but failed to clear its parked marker: \(error.localizedDescription, privacy: .public)")
+                    return .failed(.respawnFailed(
+                        reason: "replacement agent launched, but clearing the parked marker failed: \(error.localizedDescription)"))
+                }
+                return .respawned(
+                    paneID: paneID,
+                    windowID: windowID,
+                    server: server,
+                    incarnationID: incarnationID)
             } catch {
                 // Leave the row hibernated so the next focus/menu retry can wake it.
                 logger.warning("wake: respawn-to-claude failed for terminal \(terminal.id, privacy: .public) window \(windowID, privacy: .public): \(error.localizedDescription, privacy: .public)")
@@ -922,7 +1168,10 @@ public actor HibernationCoordinator {
                     server: server,
                     session: "main",
                     cwd: worktree.localPath,
-                    shellCommand: spawnCommand,
+                    // Stage an inert pane first. Launching Claude here would
+                    // let its SessionStart arrive before the replacement tmux
+                    // IDs and lifecycle fence commit below.
+                    shellCommand: "exec /usr/bin/tail -f /dev/null",
                     env: env,
                     sensitiveEnv: sensitiveEnv,
                     cols: resolvedCols,
@@ -947,10 +1196,21 @@ public actor HibernationCoordinator {
                 if let bootstrapWindowID, !bootstrapWindowID.isEmpty {
                     try? await tmux.killWindow(server: server, windowID: bootstrapWindowID)
                 }
+                let incarnationID: UUID
+                let replacementEnv: [String: String]
                 do {
-                    try await db.terminals.updateTmuxIDs(
-                        id: terminal.id, windowID: window.windowID, paneID: window.paneID
-                    )
+                    guard let preparedIncarnationID = try await db.terminals
+                        .prepareHibernatedAgentRespawn(
+                        id: terminal.id,
+                        expectedState: TerminalReplacementSnapshot(terminal: terminal),
+                        windowID: window.windowID,
+                        paneID: window.paneID,
+                        at: now()) else {
+                        throw StaleTerminalWakeError()
+                    }
+                    incarnationID = preparedIncarnationID
+                    replacementEnv = AgentProcessEnvironment.replacement(
+                        base: env, incarnationID: incarnationID)
                 } catch {
                     // Don't leave an orphaned claude the DB doesn't know
                     // about: best-effort kill of the just-created window,
@@ -960,9 +1220,39 @@ public actor HibernationCoordinator {
                     logger.warning("wake: created window \(window.windowID, privacy: .public) but failed to persist tmux ids for terminal \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
                     return .failed(.respawnFailed(reason: "recreated tmux window \(window.windowID), but persisting the new tmux ids failed: \(error.localizedDescription)"))
                 }
+                do {
+                    try await tmux.respawnWindow(
+                        server: server,
+                        windowID: window.windowID,
+                        cwd: worktree.localPath,
+                        shellCommand: spawnCommand,
+                        env: replacementEnv,
+                        sensitiveEnv: sensitiveEnv,
+                        cols: resolvedCols,
+                        rows: resolvedRows)
+                } catch {
+                    // The row already owns this inert replacement window and
+                    // remains parked, so startup reconciliation or a later wake
+                    // can safely recover it.
+                    logger.warning("wake: staged window \(window.windowID, privacy: .public) but failed to launch its agent for terminal \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    return .failed(.respawnFailed(
+                        reason: "recreated tmux window \(window.windowID), but launching the agent failed: \(error.localizedDescription)"))
+                }
+                do {
+                    try await db.terminals.clearHibernated(id: terminal.id)
+                } catch {
+                    // Keep the live replacement parked for startup
+                    // reconciliation; identity and process token stay intact.
+                    logger.warning("wake: launched a replacement agent in \(window.windowID, privacy: .public), but failed to clear the parked marker for terminal \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    return .failed(.respawnFailed(
+                        reason: "replacement agent launched in \(window.windowID), but clearing the parked marker failed: \(error.localizedDescription)"))
+                }
                 logger.info("wake: window \(windowID, privacy: .public) was gone for terminal \(terminal.id, privacy: .public); recreated as \(window.windowID, privacy: .public) (pane \(window.paneID, privacy: .public))")
                 return .respawned(
-                    paneID: window.paneID, windowID: window.windowID, server: server)
+                    paneID: window.paneID,
+                    windowID: window.windowID,
+                    server: server,
+                    incarnationID: incarnationID)
             } catch {
                 // Leave the row hibernated so the next focus/menu retry can wake it.
                 logger.warning("wake: recreate-window failed for terminal \(terminal.id, privacy: .public) (old window \(windowID, privacy: .public)): \(error.localizedDescription, privacy: .public)")
@@ -1039,7 +1329,14 @@ public actor HibernationCoordinator {
                         guard let actuationID = try? await actuationLog.appendRequest(row) else {
                             continue
                         }
-                        let result = await performHibernate(terminal: terminal, reason: .auto)
+                        let result = await performHibernate(
+                            terminal: terminal,
+                            reason: .auto,
+                            policy: .automatic(
+                                enabled: config.autoHibernateEnabled,
+                                inputVetoEnabled: config.hibernateInputVetoEnabled,
+                                idleTimeout: timeout,
+                                idleSince: idleSince[terminal.id]))
                         await actuationLog.appendOutcome(
                             confirms: actuationID,
                             result: ActuationOutcome.classify(result),

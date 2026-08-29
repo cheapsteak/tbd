@@ -5,7 +5,8 @@ import Testing
 
 @Suite("Codex transcript activity tracker")
 struct CodexTranscriptActivityTrackerTests {
-    private static let initialTailByteLimit = Int(CodexTranscriptActivityTracker.initialTailByteLimit)
+    private static let transcriptReadByteLimit =
+        Int(CodexTranscriptActivityTracker.transcriptReadByteLimit)
     private static let incrementalReadByteLimit =
         Int(CodexTranscriptActivityTracker.incrementalReadByteLimit)
     private static let maxBufferedRecordByteCount =
@@ -216,115 +217,43 @@ struct CodexTranscriptActivityTrackerTests {
         #expect(reducer.activityState == nil)
     }
 
-    @Test func firstObservationRebuildsPreExistingOpenTurn() async throws {
+    @Test("generationless direct observation fences current EOF")
+    func generationlessDirectObservationFencesCurrentEOF() async throws {
         let fixture = try TranscriptFixture()
         defer { fixture.remove() }
-        try fixture.write(event(type: "task_started", turnID: "a"))
-        let tracker = CodexTranscriptActivityTracker()
-
-        let state = await tracker.observe(
-            transcriptPath: fixture.path, worktreeID: UUID())
-
-        #expect(state == .working)
-    }
-
-    @Test func firstObservationDoesNotDecodeLifecycleOlderThanTailLimit() async throws {
-        let fixture = try TranscriptFixture()
-        defer { fixture.remove() }
-        let oldStart = event(type: "task_started", turnID: "old")
-        let tail = event(
-            type: "agent_message", turnID: "padding",
-            exactByteCount: Self.initialTailByteLimit)
-        try fixture.write(oldStart + tail)
-        let tracker = CodexTranscriptActivityTracker()
-
-        let state = await tracker.observe(
-            transcriptPath: fixture.path, worktreeID: UUID())
-
-        #expect(state == nil)
-    }
-
-    @Test func firstObservationReconstructsLifecycleInsideOversizedTranscriptTail() async throws {
-        let fixture = try TranscriptFixture()
-        defer { fixture.remove() }
-        let prefix = event(
-            type: "agent_message", turnID: "padding",
-            exactByteCount: Self.initialTailByteLimit + 128)
-        try fixture.write(prefix + event(type: "task_started", turnID: "latest"))
-        let tracker = CodexTranscriptActivityTracker()
-
-        let firstSlice = await tracker.observe(
-            transcriptPath: fixture.path, worktreeID: UUID())
-        let state = await tracker.observe(
-            transcriptPath: fixture.path, worktreeID: UUID())
-
-        #expect(firstSlice == nil)
-        #expect(state == .working)
-    }
-
-    @Test func tailStartingOnRecordBoundaryRetainsFirstRecord() async throws {
-        let fixture = try TranscriptFixture()
-        defer { fixture.remove() }
-        let prefix = event(type: "agent_message", turnID: "prefix")
-        let start = event(type: "task_started", turnID: "boundary")
-        let tailPadding = event(
-            type: "agent_message", turnID: "padding",
-            exactByteCount: Self.initialTailByteLimit - start.count)
-        try fixture.write(prefix + start + tailPadding)
-        let tracker = CodexTranscriptActivityTracker()
-
-        let firstSlice = await tracker.observe(
-            transcriptPath: fixture.path, worktreeID: UUID())
-        let state = await tracker.observe(
-            transcriptPath: fixture.path, worktreeID: UUID())
-
-        #expect(firstSlice == nil)
-        #expect(state == .working)
-    }
-
-    @Test func tailStartingMidRecordDiscardsOnlyLeadingPartialRecord() async throws {
-        let fixture = try TranscriptFixture()
-        defer { fixture.remove() }
-        let partialStart = event(
-            type: "task_started", turnID: "old",
-            exactByteCount: Self.initialTailByteLimit + 128)
-        try fixture.write(partialStart + event(type: "task_complete", turnID: "other"))
-        let tracker = CodexTranscriptActivityTracker()
-
-        let firstSlice = await tracker.observe(
-            transcriptPath: fixture.path, worktreeID: UUID())
-        let state = await tracker.observe(
-            transcriptPath: fixture.path, worktreeID: UUID())
-
-        #expect(firstSlice == nil)
-        #expect(state == .idle)
-    }
-
-    @Test func appendedCompletionAfterTailBootstrapDoesNotRescanHistory() async throws {
-        let fixture = try TranscriptFixture()
-        defer { fixture.remove() }
-        let prefix = event(
-            type: "agent_message", turnID: "padding",
-            exactByteCount: Self.initialTailByteLimit + 128)
-        let initialStart = event(type: "task_started", turnID: "a")
-        let replacementStart = event(type: "task_started", turnID: "b")
-        #expect(initialStart.count == replacementStart.count)
-        try fixture.write(prefix + initialStart)
+        try fixture.write(event(type: "task_started", turnID: "historical"))
         let tracker = CodexTranscriptActivityTracker()
         let worktreeID = UUID()
-        let initialSlice = await tracker.observe(
-            transcriptPath: fixture.path, worktreeID: worktreeID)
-        let initial = await tracker.observe(
-            transcriptPath: fixture.path, worktreeID: worktreeID)
 
-        try fixture.overwrite(at: UInt64(prefix.count), with: replacementStart)
-        try fixture.append(event(type: "task_complete", turnID: "a"))
-        let completed = await tracker.observe(
+        let cold = await tracker.observe(
             transcriptPath: fixture.path, worktreeID: worktreeID)
+        #expect(cold == nil)
 
-        #expect(initialSlice == nil)
-        #expect(initial == .working)
-        #expect(completed == .idle)
+        try fixture.append(event(type: "task_started", turnID: "current"))
+        let incremental = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+        #expect(incremental == .working)
+    }
+
+    @Test("generationless cold targets fence current EOF before incremental observation")
+    func generationlessColdTargetFencesCurrentEOF() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        try fixture.write(event(type: "task_started", turnID: "historical"))
+        let tracker = CodexTranscriptActivityTracker()
+        let target = CodexTranscriptActivityTracker.Target(
+            transcriptPath: fixture.path,
+            worktreeID: UUID(),
+            terminalID: nil,
+            sessionGeneration: nil,
+            transcriptBoundaryOffset: nil)
+
+        let cold = await tracker.observe(transcripts: [target])
+        #expect(cold[target.transcriptPath] == nil)
+
+        try fixture.append(event(type: "task_started", turnID: "current"))
+        let incremental = await tracker.observe(transcripts: [target])
+        #expect(incremental[target.transcriptPath] == .working)
     }
 
     @Test func secondObservationReadsAppendedCompletion() async throws {
@@ -405,9 +334,12 @@ struct CodexTranscriptActivityTrackerTests {
         let initial = event(type: "task_started", turnID: "a")
         let replacement = event(type: "task_started", turnID: "b")
         #expect(initial.count == replacement.count)
-        try fixture.write(initial)
+        try fixture.write(Data())
         let tracker = CodexTranscriptActivityTracker()
         let worktreeID = UUID()
+        _ = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+        try fixture.append(initial)
         let firstState = await tracker.observe(
             transcriptPath: fixture.path, worktreeID: worktreeID)
 
@@ -424,9 +356,12 @@ struct CodexTranscriptActivityTrackerTests {
         let fixture = try TranscriptFixture()
         defer { fixture.remove() }
         let record = event(type: "task_started", turnID: "a", terminated: false)
-        try fixture.write(record)
+        try fixture.write(Data())
         let tracker = CodexTranscriptActivityTracker()
         let worktreeID = UUID()
+        _ = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+        try fixture.append(record)
 
         let beforeNewline = await tracker.observe(
             transcriptPath: fixture.path, worktreeID: worktreeID)
@@ -441,9 +376,12 @@ struct CodexTranscriptActivityTrackerTests {
     @Test func partialLifecycleRecordAtEOFDoesNotRepublishCachedState() async throws {
         let fixture = try TranscriptFixture()
         defer { fixture.remove() }
-        try fixture.write(event(type: "task_started", turnID: "a"))
+        try fixture.write(Data())
         let tracker = CodexTranscriptActivityTracker()
         let worktreeID = UUID()
+        _ = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+        try fixture.append(event(type: "task_started", turnID: "a"))
         let working = await tracker.observe(
             transcriptPath: fixture.path, worktreeID: worktreeID)
 
@@ -529,59 +467,42 @@ struct CodexTranscriptActivityTrackerTests {
             type: "task_started", turnID: "a",
             padding: String(repeating: "x", count: 64 * 1024))
         #expect(record.count > 64 * 1024)
-        try fixture.write(record)
+        try fixture.write(Data())
         let tracker = CodexTranscriptActivityTracker()
+        let worktreeID = UUID()
+        _ = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+        try fixture.append(record)
 
         let state = await tracker.observe(
-            transcriptPath: fixture.path, worktreeID: UUID())
+            transcriptPath: fixture.path, worktreeID: worktreeID)
 
         #expect(state == .working)
     }
 
-    @Test func truncationResetsAndRebuildsFromByteZero() async throws {
+    @Test func generationlessTruncationFencesReplacementEOF() async throws {
         let fixture = try TranscriptFixture()
         defer { fixture.remove() }
-        try fixture.write(
+        try fixture.write(Data())
+        let tracker = CodexTranscriptActivityTracker()
+        let worktreeID = UUID()
+        _ = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+        try fixture.append(
             event(type: "task_started", turnID: "a")
                 + event(type: "agent_message", turnID: "padding"))
-        let tracker = CodexTranscriptActivityTracker()
-        let worktreeID = UUID()
-        let initial = await tracker.observe(
+        #expect(await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID) == .working)
+
+        try fixture.write(event(type: "task_started", turnID: "replacement"))
+        let fenced = await tracker.observe(
             transcriptPath: fixture.path, worktreeID: worktreeID)
+        #expect(fenced == nil)
 
-        try fixture.write(event(type: "task_complete", turnID: "replacement"))
-        let rebuilt = await tracker.observe(
+        try fixture.append(event(type: "task_complete", turnID: "replacement"))
+        let incremental = await tracker.observe(
             transcriptPath: fixture.path, worktreeID: worktreeID)
-
-        #expect(initial == .working)
-        #expect(rebuilt == .idle)
-    }
-
-    @Test func truncationRebuildUsesBoundedTailPolicy() async throws {
-        let fixture = try TranscriptFixture()
-        defer { fixture.remove() }
-        let initialPrefix = event(
-            type: "agent_message", turnID: "initial-padding",
-            exactByteCount: Self.initialTailByteLimit + 512)
-        try fixture.write(
-            initialPrefix
-                + event(type: "task_started", turnID: "initial")
-                + event(
-                    type: "agent_message", turnID: "more-padding",
-                    exactByteCount: Self.initialTailByteLimit + 512))
-        let tracker = CodexTranscriptActivityTracker()
-        let worktreeID = UUID()
-        _ = await tracker.observe(transcriptPath: fixture.path, worktreeID: worktreeID)
-
-        let oldStart = event(type: "task_started", turnID: "old")
-        let replacementTail = event(
-            type: "agent_message", turnID: "replacement-padding",
-            exactByteCount: Self.initialTailByteLimit)
-        try fixture.write(oldStart + replacementTail)
-        let rebuilt = await tracker.observe(
-            transcriptPath: fixture.path, worktreeID: worktreeID)
-
-        #expect(rebuilt == nil)
+        #expect(incremental == .idle)
     }
 
     @Test func transcriptPathsHaveIndependentBaselines() async throws {
@@ -591,10 +512,16 @@ struct CodexTranscriptActivityTrackerTests {
             first.remove()
             second.remove()
         }
-        try first.write(event(type: "task_started", turnID: "a"))
-        try second.write(event(type: "task_complete", turnID: "b"))
+        try first.write(Data())
+        try second.write(Data())
         let tracker = CodexTranscriptActivityTracker()
         let worktreeID = UUID()
+        _ = await tracker.observe(
+            transcriptPath: first.path, worktreeID: worktreeID)
+        _ = await tracker.observe(
+            transcriptPath: second.path, worktreeID: worktreeID)
+        try first.append(event(type: "task_started", turnID: "a"))
+        try second.append(event(type: "task_complete", turnID: "b"))
 
         let firstState = await tracker.observe(
             transcriptPath: first.path, worktreeID: worktreeID)
@@ -623,8 +550,13 @@ struct CodexTranscriptActivityTrackerTests {
         #expect(noBudget.isEmpty)
         #expect(!(await tracker.hasBaseline(transcriptPath: fixture.path)))
 
-        let caughtUp = await tracker.observe(
+        let fenced = await tracker.observe(
             transcripts: [target], totalByteLimit: UInt64(record.count))
+        #expect(fenced[fixture.path] == nil)
+        #expect(await tracker.hasBaseline(transcriptPath: fixture.path))
+
+        try fixture.append(event(type: "task_started", turnID: "current"))
+        let caughtUp = await tracker.observe(transcripts: [target])
         #expect(caughtUp[fixture.path] == .working)
     }
 
@@ -644,9 +576,10 @@ struct CodexTranscriptActivityTrackerTests {
         let tracker = CodexTranscriptActivityTracker()
         let worktreeID = UUID()
         for fixture in readable {
-            try fixture.write(event(type: "task_complete", turnID: fixture.path))
+            try fixture.write(Data())
             _ = await tracker.observe(
                 transcriptPath: fixture.path, worktreeID: worktreeID)
+            try fixture.append(event(type: "task_complete", turnID: fixture.path))
         }
         let targets = (unreadable + readable).map {
             CodexTranscriptActivityTracker.Target(
@@ -675,12 +608,15 @@ struct CodexTranscriptActivityTrackerTests {
                 transcriptPath: $0.path, worktreeID: worktreeID)
         }
         for fixture in [first, second] {
-            try fixture.write(
+            try fixture.write(Data())
+            _ = await tracker.observe(
+                transcriptPath: fixture.path, worktreeID: worktreeID)
+            try fixture.append(
                 event(type: "task_complete", turnID: fixture.path)
                     + event(
                         type: "agent_message", turnID: "backlog",
                         terminated: false,
-                        exactByteCount: Self.initialTailByteLimit))
+                        exactByteCount: Self.transcriptReadByteLimit))
         }
         let onePathBudget: UInt64 = 2
 
@@ -688,15 +624,15 @@ struct CodexTranscriptActivityTrackerTests {
         let firstAfterOne = await tracker.bufferedRecordState(transcriptPath: first.path)
         let secondAfterOne = await tracker.bufferedRecordState(transcriptPath: second.path)
         #expect([firstAfterOne?.byteCount, secondAfterOne?.byteCount].compactMap { $0 }
-            .sorted() == [Int(onePathBudget) - 1])
+            .sorted() == [0, Int(onePathBudget)])
 
         try first.append(event(type: "agent_message", turnID: "still-growing"))
         _ = await tracker.observe(transcripts: targets, totalByteLimit: onePathBudget)
         let firstAfterTwo = await tracker.bufferedRecordState(transcriptPath: first.path)
         let secondAfterTwo = await tracker.bufferedRecordState(transcriptPath: second.path)
 
-        #expect(firstAfterTwo?.byteCount == Int(onePathBudget) - 1)
-        #expect(secondAfterTwo?.byteCount == Int(onePathBudget) - 1)
+        #expect(firstAfterTwo?.byteCount == Int(onePathBudget))
+        #expect(secondAfterTwo?.byteCount == Int(onePathBudget))
     }
 
     @Test func batchCursorRecoversWhenItsSavedPathDisappearsAndInputsReorder() async throws {
@@ -715,32 +651,35 @@ struct CodexTranscriptActivityTrackerTests {
                 transcriptPath: $0.path, worktreeID: worktreeID)
         }
         for fixture in [first, removed, third] {
-            try fixture.write(
+            try fixture.write(Data())
+            _ = await tracker.observe(
+                transcriptPath: fixture.path, worktreeID: worktreeID)
+            try fixture.append(
                 event(type: "task_complete", turnID: fixture.path)
                     + event(
                         type: "agent_message", turnID: "backlog",
                         terminated: false,
-                        exactByteCount: Self.initialTailByteLimit))
+                        exactByteCount: Self.transcriptReadByteLimit))
         }
         let onePathBudget: UInt64 = 2
 
         _ = await tracker.observe(transcripts: targets, totalByteLimit: onePathBudget)
         #expect(await tracker.bufferedRecordState(transcriptPath: first.path)?.byteCount
-            == Int(onePathBudget) - 1)
+            == Int(onePathBudget))
 
         let withoutSavedPath = [targets[0], targets[2]]
         _ = await tracker.observe(
             transcripts: withoutSavedPath, totalByteLimit: onePathBudget)
         #expect(await tracker.bufferedRecordState(transcriptPath: third.path)?.byteCount
-            == Int(onePathBudget) - 1)
+            == Int(onePathBudget))
         #expect(await tracker.bufferedRecordState(transcriptPath: first.path)?.byteCount
-            == Int(onePathBudget) - 1)
+            == Int(onePathBudget))
 
         let reordered = [targets[2], targets[0]]
         _ = await tracker.observe(
             transcripts: reordered, totalByteLimit: onePathBudget)
         #expect(await tracker.bufferedRecordState(transcriptPath: first.path)?.byteCount
-            == Int(onePathBudget) * 2 - 1)
+            == Int(onePathBudget) * 2)
     }
 
     @Test func scopedPollDoesNotResetFleetBatchCursor() async throws {
@@ -758,12 +697,16 @@ struct CodexTranscriptActivityTrackerTests {
         let secondTarget = CodexTranscriptActivityTracker.Target(
             transcriptPath: second.path, worktreeID: secondWorktreeID)
         for fixture in [first, second] {
-            try fixture.write(
+            try fixture.write(Data())
+            _ = await tracker.observe(
+                transcriptPath: fixture.path,
+                worktreeID: fixture.path == first.path ? firstWorktreeID : secondWorktreeID)
+            try fixture.append(
                 event(type: "task_complete", turnID: fixture.path)
                     + event(
                         type: "agent_message", turnID: "backlog",
                         terminated: false,
-                        exactByteCount: Self.initialTailByteLimit))
+                        exactByteCount: Self.transcriptReadByteLimit))
         }
         let onePathBudget: UInt64 = 2
 
@@ -782,32 +725,39 @@ struct CodexTranscriptActivityTrackerTests {
         _ = await tracker.observe(
             transcripts: [firstTarget, secondTarget], totalByteLimit: onePathBudget)
 
-        #expect(firstAfterScopedPoll == Int(onePathBudget) * 2 - 1)
+        #expect(firstAfterScopedPoll == Int(onePathBudget) * 2)
         #expect(await tracker.bufferedRecordState(transcriptPath: first.path)?.byteCount
             == firstAfterScopedPoll)
         #expect(await tracker.bufferedRecordState(transcriptPath: second.path)?.byteCount
-            == Int(onePathBudget) - 1)
+            == Int(onePathBudget))
     }
 
     @Test func unreadablePathReturnsNilInsteadOfCachedWorking() async throws {
         let fixture = try TranscriptFixture()
         defer { fixture.remove() }
-        try fixture.write(
-            event(type: "task_started", turnID: "a", padding: String(repeating: "x", count: 256)))
+        try fixture.write(Data())
         let tracker = CodexTranscriptActivityTracker()
         let worktreeID = UUID()
+        _ = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+        try fixture.append(
+            event(type: "task_started", turnID: "a", padding: String(repeating: "x", count: 256)))
         let initial = await tracker.observe(
             transcriptPath: fixture.path, worktreeID: worktreeID)
         try fixture.replaceFileWithDirectory()
 
         let unreadable = await tracker.observe(
             transcriptPath: fixture.path, worktreeID: worktreeID)
-        try fixture.replaceDirectoryWithFile(event(type: "task_complete", turnID: "replacement"))
+        try fixture.replaceDirectoryWithFile(Data())
+        let refenced = await tracker.observe(
+            transcriptPath: fixture.path, worktreeID: worktreeID)
+        try fixture.append(event(type: "task_complete", turnID: "replacement"))
         let recovered = await tracker.observe(
             transcriptPath: fixture.path, worktreeID: worktreeID)
 
         #expect(initial == .working)
         #expect(unreadable == nil)
+        #expect(refenced == nil)
         #expect(recovered == .idle)
     }
 
@@ -873,6 +823,519 @@ struct CodexTranscriptActivityTrackerTests {
         #expect(states[target.transcriptPath] == nil)
     }
 
+    @Test("known boundary recovery advances past the request window and resumes incremental reads")
+    func knownBoundaryRecoveryIsProgressive() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        var transcript = event(type: "task_started", turnID: "current")
+        for index in 0..<320 {
+            transcript += event(
+                type: "agent_message",
+                turnID: "padding-\(index)",
+                exactByteCount: 4 * 1024)
+        }
+        #expect(transcript.count > Self.transcriptReadByteLimit)
+        try fixture.write(transcript)
+        let tracker = CodexTranscriptActivityTracker()
+        let target = CodexTranscriptActivityTracker.Target(
+            transcriptPath: fixture.path,
+            worktreeID: UUID(),
+            terminalID: UUID(),
+            sessionGeneration: Date(timeIntervalSince1970: 1_790_400_000),
+            transcriptBoundaryOffset: 0)
+        let pollBudget: UInt64 = 64 * 1024
+
+        let first = await tracker.observe(
+            transcripts: [target], totalByteLimit: pollBudget)
+        #expect(first[target.transcriptPath] == nil)
+        var recovered: TerminalActivityState?
+        for _ in 0..<48 where recovered == nil {
+            recovered = await tracker.observe(
+                transcripts: [target], totalByteLimit: pollBudget)[target.transcriptPath]
+        }
+        #expect(recovered == .working)
+
+        try fixture.append(event(type: "task_complete", turnID: "current"))
+        let completed = await tracker.observe(
+            transcripts: [target], totalByteLimit: pollBudget)
+        #expect(completed[target.transcriptPath] == .idle)
+    }
+
+    @Test("cold recovery scans backward to the newest start without reading older history")
+    func coldRecoveryStopsAtNewestStart() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        var transcript = Data()
+        for index in 0..<6 {
+            transcript += event(
+                type: "agent_message", turnID: "old-padding-\(index)",
+                exactByteCount: 512 * 1024)
+        }
+        transcript += event(type: "task_started", turnID: "current", startedAt: 200)
+        for index in 0..<3 {
+            transcript += event(
+                type: "agent_message", turnID: "new-padding-\(index)",
+                exactByteCount: 400 * 1024)
+        }
+        try fixture.write(transcript)
+        let tracker = CodexTranscriptActivityTracker()
+        let target = recoveryTarget(fixture: fixture, boundary: 0, generation: 1_790_401_000)
+
+        var observations: [TerminalActivityState?] = []
+        for _ in 0..<4 where observations.last != .working {
+            observations.append(
+                await tracker.observe(transcripts: [target])[fixture.path])
+        }
+
+        #expect(observations.prefix(2).allSatisfy { $0 == nil })
+        #expect(observations.last == .working)
+    }
+
+    @Test("reverse recovery agrees with forward lifecycle reduction")
+    func reverseRecoveryMatchesForwardLifecycleSemantics() async throws {
+        let cases: [[Data]] = [
+            [event(type: "task_started", turnID: "current", startedAt: 200)],
+            [
+                event(type: "task_started", turnID: "current", startedAt: 200),
+                event(type: "task_complete", turnID: "current", startedAt: 200),
+            ],
+            [
+                event(type: "task_started", turnID: "current", startedAt: 200),
+                event(type: "task_complete", turnID: "older", startedAt: 100),
+            ],
+            [
+                event(type: "task_started", turnID: "current", startedAt: 200),
+                event(type: "turn_aborted", turnID: nil, startedAt: 100),
+            ],
+            [
+                event(type: "task_started", turnID: "current", startedAt: 200),
+                event(type: "task_complete", turnID: "rewritten", startedAt: nil),
+            ],
+            [event(type: "task_complete", turnID: "closed", startedAt: 100)],
+            [
+                Data("not json\n".utf8),
+                Data(#"{"type":"response_item","payload":{"type":"task_started","turn_id":"ignored"}}"#.utf8)
+                    + Data([0x0A]),
+            ],
+        ]
+
+        for (index, lines) in cases.enumerated() {
+            var reducer = CodexTurnLifecycleReducer()
+            lines.forEach { reducer.consume(line: $0) }
+            let fixture = try TranscriptFixture()
+            defer { fixture.remove() }
+            try fixture.write(lines.reduce(into: Data()) { $0 += $1 })
+            let tracker = CodexTranscriptActivityTracker()
+            let target = recoveryTarget(
+                fixture: fixture, boundary: 0,
+                generation: 1_790_401_010 + Double(index))
+
+            let recovered = await tracker.observe(transcripts: [target])[fixture.path]
+
+            #expect(recovered == reducer.activityState)
+        }
+    }
+
+    @Test("reliable closes encountered backward match the newest start by ID or time")
+    func coldRecoveryCorrelatesReliableCloses() async throws {
+        let matchingID = try TranscriptFixture()
+        let matchingTime = try TranscriptFixture()
+        let mismatching = try TranscriptFixture()
+        defer {
+            matchingID.remove()
+            matchingTime.remove()
+            mismatching.remove()
+        }
+        try matchingID.write(
+            event(type: "task_started", turnID: "current", startedAt: 200)
+                + event(type: "task_complete", turnID: "current", startedAt: 999))
+        try matchingTime.write(
+            event(type: "task_started", turnID: "current", startedAt: 200)
+                + event(type: "turn_aborted", turnID: "rewritten", startedAt: 200))
+        try mismatching.write(
+            event(type: "task_started", turnID: "current", startedAt: 200)
+                + event(type: "task_complete", turnID: "older", startedAt: 100))
+        let tracker = CodexTranscriptActivityTracker()
+        let targets = [matchingID, matchingTime, mismatching].enumerated().map { index, fixture in
+            recoveryTarget(
+                fixture: fixture, boundary: 0,
+                generation: 1_790_401_100 + Double(index))
+        }
+
+        let states = await tracker.observe(transcripts: targets)
+
+        #expect(states[matchingID.path] == .idle)
+        #expect(states[matchingTime.path] == .idle)
+        #expect(states[mismatching.path] == .working)
+    }
+
+    @Test("many reliable closes transition to bounded forward replay at the newest start")
+    func coldRecoveryDoesNotRetainReliableCloseKeys() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        var transcript = event(type: "task_started", turnID: "current", startedAt: 200)
+        for index in 0..<2_000 {
+            transcript += event(
+                type: "task_complete", turnID: "older-\(index)", startedAt: index + 1_000)
+        }
+        try fixture.write(transcript)
+        let tracker = CodexTranscriptActivityTracker()
+        let target = recoveryTarget(fixture: fixture, boundary: 0, generation: 1_790_401_150)
+
+        var phase: CodexTranscriptActivityTracker.ColdRecoveryPhase?
+        for _ in 0..<16 where phase != .forwardReplay {
+            #expect(await tracker.observe(
+                transcripts: [target], totalByteLimit: 64 * 1024)[fixture.path] == nil)
+            phase = await tracker.coldRecoveryPhase(transcriptPath: fixture.path)
+        }
+
+        #expect(phase == .forwardReplay)
+        var state: TerminalActivityState?
+        for _ in 0..<16 where state == nil {
+            state = await tracker.observe(
+                transcripts: [target], totalByteLimit: 64 * 1024)[fixture.path]
+        }
+        #expect(state == .working)
+    }
+
+    @Test("an unreliable close synchronizes idle without scanning older history")
+    func coldRecoveryStopsAtUnconditionalClose() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        var transcript = Data()
+        for index in 0..<6 {
+            transcript += event(
+                type: "agent_message", turnID: "padding-\(index)",
+                exactByteCount: 512 * 1024)
+        }
+        transcript += event(type: "task_complete", turnID: "rewritten", startedAt: nil)
+        try fixture.write(transcript)
+        let tracker = CodexTranscriptActivityTracker()
+        let target = recoveryTarget(fixture: fixture, boundary: 0, generation: 1_790_401_200)
+
+        let states = await tracker.observe(
+            transcripts: [target], totalByteLimit: 64 * 1024)
+
+        #expect(states[fixture.path] == .idle)
+    }
+
+    @Test("recovery reaches the boundary before publishing no lifecycle evidence")
+    func coldRecoveryWithNoAnchorScansToBoundary() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        var transcript = Data()
+        for index in 0..<3 {
+            transcript += event(
+                type: "agent_message", turnID: "padding-\(index)",
+                exactByteCount: 512 * 1024)
+        }
+        try fixture.write(transcript)
+        let tracker = CodexTranscriptActivityTracker()
+        let target = recoveryTarget(fixture: fixture, boundary: 0, generation: 1_790_401_300)
+
+        #expect(await tracker.observe(transcripts: [target])[fixture.path] == nil)
+        try fixture.append(event(type: "task_started", turnID: "appended"))
+        #expect(await tracker.observe(transcripts: [target])[fixture.path] == nil)
+        #expect(await tracker.observe(transcripts: [target])[fixture.path] == .working)
+    }
+
+    @Test("a record crossing a positive recovery boundary is excluded")
+    func coldRecoveryExcludesRecordCrossingPositiveBoundary() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        let crossing = event(
+            type: "task_started", turnID: "crossing", startedAt: 100,
+            exactByteCount: 128 * 1024)
+        let boundary = crossing.count / 2
+        try fixture.write(crossing + event(type: "agent_message", turnID: "after"))
+        let tracker = CodexTranscriptActivityTracker()
+        let target = recoveryTarget(
+            fixture: fixture, boundary: Int64(boundary), generation: 1_790_401_400)
+
+        #expect(await tracker.observe(transcripts: [target])[fixture.path] == nil)
+        try fixture.append(event(type: "task_started", turnID: "current"))
+        #expect(await tracker.observe(transcripts: [target])[fixture.path] == .working)
+    }
+
+    @Test("a captured partial record remains unknown and recovery stops at its newline")
+    func coldRecoveryWaitsForCapturedPartialRecord() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        try fixture.write(event(
+            type: "task_started", turnID: "current", startedAt: 200,
+            terminated: false))
+        let tracker = CodexTranscriptActivityTracker()
+        let target = recoveryTarget(fixture: fixture, boundary: 0, generation: 1_790_401_500)
+
+        #expect(await tracker.observe(transcripts: [target])[fixture.path] == nil)
+        try fixture.append(
+            Data([0x0A]) + event(type: "task_complete", turnID: "current", startedAt: 200))
+        #expect(await tracker.observe(transcripts: [target])[fixture.path] == .working)
+        #expect(await tracker.observe(transcripts: [target])[fixture.path] == .idle)
+    }
+
+    @Test("partial completion charges bytes read beyond its first newline")
+    func capturedPartialCompletionExhaustsItsReadBudget() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        try fixture.write(event(
+            type: "task_started", turnID: "current", startedAt: 200,
+            terminated: false))
+        let tracker = CodexTranscriptActivityTracker()
+        let target = recoveryTarget(fixture: fixture, boundary: 0, generation: 1_790_401_550)
+        let budget = 64 * 1024
+
+        #expect(await tracker.observe(
+            transcripts: [target], totalByteLimit: UInt64(budget))[fixture.path] == nil)
+        try fixture.append(
+            Data([0x0A])
+                + event(
+                    type: "agent_message", turnID: "later-padding",
+                    exactByteCount: budget))
+
+        #expect(await tracker.observe(
+            transcripts: [target], totalByteLimit: UInt64(budget))[fixture.path] == nil)
+        #expect(await tracker.coldRecoveryPhase(transcriptPath: fixture.path) == .reverseSearch)
+        #expect(await tracker.observe(
+            transcripts: [target], totalByteLimit: UInt64(budget))[fixture.path] == .working)
+    }
+
+    @Test("shrinking during reverse recovery restarts from the known boundary")
+    func shrinkDuringReverseRecoveryRestartsExactly() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        var transcript = event(type: "task_started", turnID: "old", startedAt: 100)
+        for index in 0..<4 {
+            transcript += event(
+                type: "agent_message", turnID: "padding-\(index)",
+                exactByteCount: 256 * 1024)
+        }
+        try fixture.write(transcript)
+        let tracker = CodexTranscriptActivityTracker()
+        let target = recoveryTarget(fixture: fixture, boundary: 0, generation: 1_790_401_575)
+
+        #expect(await tracker.observe(
+            transcripts: [target], totalByteLimit: 64 * 1024)[fixture.path] == nil)
+        #expect(await tracker.coldRecoveryPhase(transcriptPath: fixture.path) == .reverseSearch)
+
+        try fixture.write(event(type: "task_started", turnID: "replacement", startedAt: 300))
+
+        #expect(await tracker.observe(
+            transcripts: [target], totalByteLimit: 64 * 1024)[fixture.path] == .working)
+        try fixture.append(event(
+            type: "task_complete", turnID: "replacement", startedAt: 300))
+        #expect(await tracker.observe(
+            transcripts: [target], totalByteLimit: 64 * 1024)[fixture.path] == .idle)
+    }
+
+    @Test("malformed and oversized reverse records do not become lifecycle evidence")
+    func coldRecoveryIgnoresMalformedAndOversizedRecords() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        try fixture.write(
+            event(type: "task_complete", turnID: "seed", startedAt: nil)
+                + Data("not json\n".utf8)
+                + event(
+                    type: "task_started", turnID: "oversized",
+                    exactByteCount: Self.maxBufferedRecordByteCount + 128))
+        let tracker = CodexTranscriptActivityTracker()
+        let target = recoveryTarget(fixture: fixture, boundary: 0, generation: 1_790_401_600)
+
+        var state: TerminalActivityState?
+        for _ in 0..<4 where state == nil {
+            state = await tracker.observe(transcripts: [target])[fixture.path]
+        }
+
+        #expect(state == .idle)
+    }
+
+    @Test("positive durable boundaries exclude prior lifecycle evidence after restart")
+    func positiveBoundaryExcludesPriorLifecycleEvidence() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        let orphan = event(type: "task_started", turnID: "orphan")
+        try fixture.write(
+            orphan + event(type: "agent_message", turnID: "later-session"))
+        let target = CodexTranscriptActivityTracker.Target(
+            transcriptPath: fixture.path,
+            worktreeID: UUID(),
+            terminalID: UUID(),
+            sessionGeneration: Date(timeIntervalSince1970: 1_790_400_100),
+            transcriptBoundaryOffset: Int64(orphan.count))
+
+        let tracker = CodexTranscriptActivityTracker()
+        #expect(await tracker.observe(transcripts: [target])[fixture.path] == nil)
+        let restartedTracker = CodexTranscriptActivityTracker()
+        #expect(await restartedTracker.observe(transcripts: [target])[fixture.path] == nil)
+
+        try fixture.append(event(type: "task_started", turnID: "current"))
+        #expect(await restartedTracker.observe(transcripts: [target])[fixture.path] == .working)
+    }
+
+    @Test("unknown durable boundary fences at current EOF")
+    func unknownBoundaryRetainsConservativeFence() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        try fixture.write(event(type: "task_started", turnID: "historical"))
+        let tracker = CodexTranscriptActivityTracker()
+        let target = CodexTranscriptActivityTracker.Target(
+            transcriptPath: fixture.path,
+            worktreeID: UUID(),
+            terminalID: UUID(),
+            sessionGeneration: Date(timeIntervalSince1970: 1_790_400_200),
+            transcriptBoundaryOffset: nil)
+
+        #expect(await tracker.observe(transcripts: [target])[fixture.path] == nil)
+        try fixture.append(event(type: "task_complete", turnID: "later"))
+        #expect(await tracker.observe(transcripts: [target])[fixture.path] == .idle)
+    }
+
+    @Test("recovery finishes its captured record without chasing later records")
+    func recoveryExtendsOnlyThroughCapturedRecord() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        try fixture.write(event(
+            type: "task_started", turnID: "current", terminated: false))
+        let tracker = CodexTranscriptActivityTracker()
+        let target = CodexTranscriptActivityTracker.Target(
+            transcriptPath: fixture.path,
+            worktreeID: UUID(),
+            terminalID: UUID(),
+            sessionGeneration: Date(timeIntervalSince1970: 1_790_400_300),
+            transcriptBoundaryOffset: 0)
+
+        #expect(await tracker.observe(transcripts: [target])[fixture.path] == nil)
+        try fixture.append(
+            Data([0x0A]) + event(type: "task_complete", turnID: "current"))
+        #expect(await tracker.observe(transcripts: [target])[fixture.path] == .working)
+        #expect(await tracker.observe(transcripts: [target])[fixture.path] == .idle)
+    }
+
+    @Test("initial durable boundary replays a truncated replacement from zero")
+    func initialBoundaryReplaysAfterTruncation() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        try fixture.write(
+            event(type: "task_started", turnID: "initial")
+                + event(type: "agent_message", turnID: "padding"))
+        let tracker = CodexTranscriptActivityTracker()
+        let target = CodexTranscriptActivityTracker.Target(
+            transcriptPath: fixture.path,
+            worktreeID: UUID(),
+            terminalID: UUID(),
+            sessionGeneration: Date(timeIntervalSince1970: 1_790_400_400),
+            transcriptBoundaryOffset: 0)
+
+        #expect(await tracker.observe(transcripts: [target])[fixture.path] == .working)
+        try fixture.write(event(type: "task_complete", turnID: "replacement"))
+        #expect(await tracker.observe(transcripts: [target])[fixture.path] == .idle)
+    }
+
+    @Test("positive durable boundary fences when the transcript shrinks below it")
+    func positiveBoundaryFencesAfterShrink() async throws {
+        let fixture = try TranscriptFixture()
+        defer { fixture.remove() }
+        let prefix = event(
+            type: "agent_message", turnID: "prefix", exactByteCount: 4 * 1024)
+        try fixture.write(prefix + event(type: "task_started", turnID: "current"))
+        let tracker = CodexTranscriptActivityTracker()
+        let target = CodexTranscriptActivityTracker.Target(
+            transcriptPath: fixture.path,
+            worktreeID: UUID(),
+            terminalID: UUID(),
+            sessionGeneration: Date(timeIntervalSince1970: 1_790_400_500),
+            transcriptBoundaryOffset: Int64(prefix.count))
+
+        #expect(await tracker.observe(transcripts: [target])[fixture.path] == .working)
+        try fixture.write(event(type: "task_started", turnID: "pre-fence"))
+        #expect(await tracker.observe(transcripts: [target])[fixture.path] == nil)
+        try fixture.append(event(type: "task_started", turnID: "post-fence"))
+        #expect(await tracker.observe(transcripts: [target])[fixture.path] == .working)
+    }
+
+    @Test("cold boundary preparation obeys the shared filesystem step limit")
+    func coldBoundaryPreparationIsStepBounded() async throws {
+        let fixtures = try (0...16).map { _ in try TranscriptFixture() }
+        defer { fixtures.forEach { $0.remove() } }
+        for fixture in fixtures {
+            try fixture.write(Data())
+        }
+        let tracker = CodexTranscriptActivityTracker()
+        let worktreeID = UUID()
+        let generation = Date(timeIntervalSince1970: 1_790_400_700)
+        let targets = fixtures.map {
+            CodexTranscriptActivityTracker.Target(
+                transcriptPath: $0.path,
+                worktreeID: worktreeID,
+                terminalID: UUID(),
+                sessionGeneration: generation,
+                transcriptBoundaryOffset: 0)
+        }
+
+        _ = await tracker.observe(transcripts: targets)
+        #expect(await tracker.baselineCount == 16)
+
+        _ = await tracker.observe(transcripts: targets)
+        #expect(await tracker.baselineCount == 17)
+    }
+
+    @Test("progressive recoveries share request bytes in round-robin order")
+    func progressiveRecoveriesRemainFair() async throws {
+        let first = try TranscriptFixture()
+        let second = try TranscriptFixture()
+        defer {
+            first.remove()
+            second.remove()
+        }
+        let recoveryBytes = 2 * 64 * 1024
+        for (index, fixture) in [first, second].enumerated() {
+            try fixture.write(
+                event(type: "task_started", turnID: "turn-\(index)")
+                    + event(
+                        type: "agent_message",
+                        turnID: "padding-\(index)",
+                        exactByteCount: recoveryBytes))
+        }
+        let tracker = CodexTranscriptActivityTracker()
+        let worktreeID = UUID()
+        let generation = Date(timeIntervalSince1970: 1_790_400_800)
+        let targets = [first, second].map {
+            CodexTranscriptActivityTracker.Target(
+                transcriptPath: $0.path,
+                worktreeID: worktreeID,
+                terminalID: UUID(),
+                sessionGeneration: generation,
+                transcriptBoundaryOffset: 0)
+        }
+        let oneQuantum: UInt64 = 64 * 1024
+
+        var completionPoll: [String: Int] = [:]
+        for poll in 1...16 where completionPoll.count < targets.count {
+            let states = await tracker.observe(
+                transcripts: targets, totalByteLimit: oneQuantum)
+            #expect(states.isEmpty || Set(states.keys) == Set(targets.map(\.transcriptPath)))
+            for (path, state) in states {
+                #expect(state == .working)
+                completionPoll[path] = poll
+            }
+
+            if poll.isMultiple(of: 2) {
+                let firstPhase = await tracker.coldRecoveryPhase(
+                    transcriptPath: first.path)
+                let secondPhase = await tracker.coldRecoveryPhase(
+                    transcriptPath: second.path)
+                #expect(firstPhase == secondPhase)
+            }
+        }
+
+        #expect(Set(completionPoll.keys) == Set(targets.map(\.transcriptPath)))
+        if let firstPoll = completionPoll[first.path],
+           let secondPoll = completionPoll[second.path]
+        {
+            #expect(firstPoll == secondPoll)
+        }
+    }
+
     private func event(
         type: String,
         turnID: String?,
@@ -900,6 +1363,19 @@ struct CodexTranscriptActivityTrackerTests {
         precondition(exactByteCount >= emptyPadded.count)
         let exactPadding = String(repeating: "x", count: exactByteCount - emptyPadded.count)
         return encoded(padding: exactPadding)
+    }
+
+    private func recoveryTarget(
+        fixture: TranscriptFixture,
+        boundary: Int64,
+        generation: Double
+    ) -> CodexTranscriptActivityTracker.Target {
+        CodexTranscriptActivityTracker.Target(
+            transcriptPath: fixture.path,
+            worktreeID: UUID(),
+            terminalID: UUID(),
+            sessionGeneration: Date(timeIntervalSince1970: generation),
+            transcriptBoundaryOffset: boundary)
     }
 }
 

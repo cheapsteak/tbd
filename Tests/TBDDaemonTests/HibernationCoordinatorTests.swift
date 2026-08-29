@@ -77,6 +77,389 @@ struct HibernationCoordinatorTests {
         #expect(after?.isHibernated == true)
     }
 
+    @Test func hibernateRespawnRejectsPreReplacementSessionStart() async throws {
+        let (db, _, terminalID) = try await setup(activityState: .idle)
+        let recorded = RecordedTmuxCommands()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: recorded.append)
+        try await db.terminals.updateSession(
+            id: terminalID,
+            sessionID: "sess-1",
+            transcriptPath: "/tmp/hibernation-old-session.jsonl")
+        let before = try #require(try await db.terminals.get(id: terminalID))
+
+        let coord = HibernationCoordinator(
+            db: db,
+            tmux: tmux,
+            configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        #expect(await coord.manualHibernate(terminalID: terminalID) == .ok)
+        let parked = try #require(try await db.terminals.get(id: terminalID))
+        #expect(parked.sessionIncarnationID != before.sessionIncarnationID)
+        #expect(parked.tmuxWindowID == before.tmuxWindowID)
+        #expect(parked.tmuxPaneID == before.tmuxPaneID)
+        #expect(parked.label == before.label)
+        #expect(parked.claudeSessionID == "sess-1")
+        #expect(parked.transcriptPath == "/tmp/hibernation-old-session.jsonl")
+        #expect(parked.sessionOrderObservedAt == nil)
+        #expect(parked.codexTranscriptBoundaryOffset == nil)
+        let parkedToken = try #require(parked.sessionIncarnationID)
+        let matchedCLIPath = try #require(AgentProcessEnvironment.cliPath)
+        let shellRespawn = try #require(recorded.snapshot().last { call in
+            call.contains("respawn-window")
+        }?.last)
+        #expect(shellRespawn.contains(
+            "TBD_TERMINAL_INCARNATION_ID='\(parkedToken.uuidString)'"))
+        #expect(shellRespawn.contains(
+            "TBD_CLI_PATH=\(SystemPromptBuilder.shellEscape(matchedCLIPath))"))
+
+        let staleApplication = try await db.terminals.applySessionStart(
+            id: terminalID,
+            expectedIncarnation: TerminalSessionIncarnation(terminal: before),
+            sessionID: "stale-session",
+            transcriptPath: "/tmp/stale-hibernation-session.jsonl",
+            observedAt: Date(timeIntervalSinceReferenceDate: 20))
+        #expect(staleApplication == nil)
+        let unchanged = try #require(try await db.terminals.get(id: terminalID))
+        #expect(unchanged.claudeSessionID == parked.claudeSessionID)
+        #expect(unchanged.transcriptPath == parked.transcriptPath)
+        #expect(unchanged.sessionIncarnationID == parked.sessionIncarnationID)
+        #expect(unchanged.isHibernated)
+    }
+
+    @Test func staleHibernateCannotParkAProfileReplacement() async throws {
+        let (db, _, terminalID) = try await setup(activityState: .idle)
+        try await db.terminals.updateSession(
+            id: terminalID,
+            sessionID: "profile-source-session",
+            transcriptPath: "/tmp/profile-source-session.jsonl")
+        let replacementProfile = try await db.modelProfiles.create(
+            name: "Replacement", kind: .oauth)
+        let captureGate = BlockingCapturePane()
+        let commands = RecordedTmuxCommands()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: commands.append,
+            dryRunCapturePane: captureGate.capture)
+        let deltas = RecordedHibernationDeltas()
+        let coordinator = HibernationCoordinator(
+            db: db,
+            tmux: tmux,
+            subscriptions: deltas.subscriptions(),
+            configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                configDirManager: isolatedConfigDirManager()),
+            tmux: tmux,
+            configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+
+        let hibernate = gateHoldingTask {
+            await coordinator.manualHibernate(terminalID: terminalID)
+        }
+        guard await waitUntil({ captureGate.isBlocked }) else {
+            captureGate.release()
+            _ = await hibernate.value
+            Issue.record("hibernate never reached its pre-lock capture")
+            return
+        }
+
+        let profileResponse = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(
+                terminalID: terminalID,
+                newProfileID: replacementProfile.id,
+                mode: .inPlace)))
+        #expect(profileResponse.success)
+        let replacement = try #require(try await db.terminals.get(id: terminalID))
+        let respawnsAfterProfile = commands.snapshot().filter { $0.contains("respawn-window") }.count
+        #expect(respawnsAfterProfile == 1)
+
+        captureGate.release()
+        #expect(await hibernate.value != .ok)
+
+        let unchanged = try #require(try await db.terminals.get(id: terminalID))
+        #expect(unchanged.sessionIncarnationID == replacement.sessionIncarnationID)
+        #expect(unchanged.tmuxWindowID == replacement.tmuxWindowID)
+        #expect(unchanged.tmuxPaneID == replacement.tmuxPaneID)
+        #expect(unchanged.profileID == replacement.profileID)
+        #expect(unchanged.claudeSessionID == replacement.claudeSessionID)
+        #expect(unchanged.transcriptPath == replacement.transcriptPath)
+        #expect(unchanged.activityState == replacement.activityState)
+        #expect(unchanged.activityStateSource == replacement.activityStateSource)
+        #expect(unchanged.activityStateObservedAt == replacement.activityStateObservedAt)
+        #expect(unchanged.activityStateOrderObservedAt
+                == replacement.activityStateOrderObservedAt)
+        #expect(!unchanged.isParked)
+        #expect(commands.snapshot().filter { $0.contains("respawn-window") }.count
+                == respawnsAfterProfile)
+        #expect(deltas.snapshot().isEmpty)
+    }
+
+    @Test func profileReplacementRevalidatesAfterHibernationWinsServerLock() async throws {
+        let (db, _, terminalID) = try await setup(activityState: .idle)
+        try await db.terminals.updateSession(
+            id: terminalID,
+            sessionID: "profile-source-session",
+            transcriptPath: "/tmp/profile-source-session.jsonl")
+        let replacementProfile = try await db.modelProfiles.create(
+            name: "Replacement", kind: .apiKey)
+        let keychainGate = BlockingKeychainLookup()
+        let resolver = ModelProfileResolver(
+            profiles: db.modelProfiles,
+            repos: db.repos,
+            config: db.config,
+            keychain: keychainGate.load)
+        let commands = RecordedTmuxCommands()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: commands.append)
+        let coordinator = HibernationCoordinator(
+            db: db,
+            tmux: tmux,
+            configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                configDirManager: isolatedConfigDirManager()),
+            tmux: tmux,
+            modelProfileResolver: resolver,
+            configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+
+        let swapRequest = try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(
+                terminalID: terminalID,
+                newProfileID: replacementProfile.id,
+                mode: .inPlace))
+        let swap = gateHoldingTask { await router.handle(swapRequest) }
+        guard await waitUntil({ keychainGate.isBlocked }) else {
+            keychainGate.release()
+            _ = await swap.value
+            Issue.record("profile replacement never reached credential resolution")
+            return
+        }
+
+        #expect(await coordinator.manualHibernate(terminalID: terminalID) == .ok)
+        let hibernated = try #require(try await db.terminals.get(id: terminalID))
+        let respawnsAfterHibernate = commands.snapshot()
+            .filter { $0.contains("respawn-window") }.count
+        #expect(respawnsAfterHibernate == 2)
+
+        keychainGate.release()
+        #expect(!(await swap.value).success)
+
+        let unchanged = try #require(try await db.terminals.get(id: terminalID))
+        #expect(unchanged.sessionIncarnationID == hibernated.sessionIncarnationID)
+        #expect(unchanged.tmuxWindowID == hibernated.tmuxWindowID)
+        #expect(unchanged.tmuxPaneID == hibernated.tmuxPaneID)
+        #expect(unchanged.profileID == hibernated.profileID)
+        #expect(unchanged.claudeSessionID == hibernated.claudeSessionID)
+        #expect(unchanged.transcriptPath == hibernated.transcriptPath)
+        #expect(unchanged.activityState == hibernated.activityState)
+        #expect(unchanged.activityStateSource == hibernated.activityStateSource)
+        #expect(unchanged.isParked)
+        #expect(commands.snapshot().filter { $0.contains("respawn-window") }.count
+                == respawnsAfterHibernate)
+    }
+
+    @Test func hibernateDoesNotReportSuccessWhenPostShellCommitFails() async throws {
+        let (db, _, terminalID) = try await setup(activityState: .idle)
+        let recorder = BlockingRespawnRecorder()
+        let deltas = RecordedHibernationDeltas()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: recorder.record)
+        let coord = HibernationCoordinator(
+            db: db,
+            tmux: tmux,
+            subscriptions: deltas.subscriptions(),
+            configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+
+        recorder.arm()
+        let hibernate = gateHoldingTask {
+            await coord.manualHibernate(terminalID: terminalID)
+        }
+        guard await waitUntil({ recorder.isBlocked }) else {
+            recorder.release()
+            _ = await hibernate.value
+            Issue.record("hibernate never reached the shell respawn")
+            return
+        }
+        try await db.terminals.delete(id: terminalID)
+        recorder.release()
+
+        let result = await hibernate.value
+        #expect(result != .ok)
+        #expect(deltas.snapshot().isEmpty,
+                "a failed durable park must not broadcast hibernated=true")
+    }
+
+    @Test func firstHibernateRespawnFailureKeepsOldTokenForStartupRecovery() async throws {
+        let (db, _, terminalID) = try await setup(activityState: .idle)
+        try await db.terminals.updateSession(
+            id: terminalID,
+            sessionID: "sess-1",
+            transcriptPath: "/tmp/hibernate-first-respawn.jsonl")
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        let parkedForToken = try #require(try await db.terminals.get(id: terminalID))
+        let oldToken = try #require(try await db.terminals.prepareHibernatedAgentRespawn(
+            id: terminalID,
+            expectedState: TerminalReplacementSnapshot(terminal: parkedForToken),
+            at: Date(timeIntervalSinceReferenceDate: 1)))
+        try await db.terminals.clearHibernated(id: terminalID)
+        try await db.terminals.setActivityState(
+            id: terminalID, activityState: .idle, source: .derived)
+        let oldProcess = try #require(try await db.terminals.get(id: terminalID))
+        let failures = FailRespawnOnAttempt(1)
+        let deltas = RecordedHibernationDeltas()
+        let failingTmux = TmuxManager(
+            dryRun: true,
+            dryRunRespawnWindowError: failures.error)
+        let coordinator = HibernationCoordinator(
+            db: db,
+            tmux: failingTmux,
+            subscriptions: deltas.subscriptions(),
+            configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+
+        #expect(await coordinator.manualHibernate(terminalID: terminalID) != .ok)
+        let failed = try #require(try await db.terminals.get(id: terminalID))
+        #expect(failed.isParked)
+        #expect(failed.sessionIncarnationID == oldToken)
+        #expect(failed.claudeSessionID == "sess-1")
+        #expect(failed.transcriptPath == "/tmp/hibernate-first-respawn.jsonl")
+        #expect(failed.activityState == oldProcess.activityState)
+        #expect(failed.activityStateSource == oldProcess.activityStateSource)
+        #expect(failed.activityStateObservedAt == oldProcess.activityStateObservedAt)
+        #expect(failed.activityStateOrderObservedAt == oldProcess.activityStateOrderObservedAt)
+        #expect(deltas.snapshot().isEmpty)
+
+        let liveTmux = TmuxManager(
+            dryRun: true,
+            dryRunPaneCurrentCommand: { _, _ in "1.2.3" })
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: liveTmux, hooks: HookResolver(),
+                configDirManager: isolatedConfigDirManager()),
+            tmux: liveTmux,
+            configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        await router.hibernationCoordinator.reconcileOnStartup()
+        #expect(try await db.terminals.get(id: terminalID)?.isParked == false)
+
+        let oldProcessHook = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminalID,
+                sessionID: "still-live-session",
+                transcriptPath: "/tmp/still-live-session.jsonl",
+                source: "startup",
+                sessionIncarnationID: oldToken))
+        #expect((await router.handle(oldProcessHook)).success)
+        let recovered = try #require(try await db.terminals.get(id: terminalID))
+        #expect(recovered.claudeSessionID == "still-live-session")
+        #expect(recovered.transcriptPath == "/tmp/still-live-session.jsonl")
+        #expect(recovered.sessionIncarnationID == oldToken)
+    }
+
+    @Test func secondHibernateRespawnFailureLeavesInertPaneWithNewToken() async throws {
+        let (db, _, terminalID) = try await setup(activityState: .idle)
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        let parkedForToken = try #require(try await db.terminals.get(id: terminalID))
+        let oldToken = try #require(try await db.terminals.prepareHibernatedAgentRespawn(
+            id: terminalID,
+            expectedState: TerminalReplacementSnapshot(terminal: parkedForToken),
+            at: Date(timeIntervalSinceReferenceDate: 1)))
+        try await db.terminals.clearHibernated(id: terminalID)
+        try await db.terminals.setActivityState(
+            id: terminalID, activityState: .idle, source: .derived)
+        let oldProcess = try #require(try await db.terminals.get(id: terminalID))
+        let failures = FailRespawnOnAttempt(2)
+        let recorded = RecordedTmuxCommands()
+        let deltas = RecordedHibernationDeltas()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: recorded.append,
+            dryRunRespawnWindowError: failures.error)
+        let coordinator = HibernationCoordinator(
+            db: db,
+            tmux: tmux,
+            subscriptions: deltas.subscriptions(),
+            configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+
+        #expect(await coordinator.manualHibernate(terminalID: terminalID) != .ok)
+        let failed = try #require(try await db.terminals.get(id: terminalID))
+        let newToken = try #require(failed.sessionIncarnationID)
+        #expect(failed.isParked)
+        #expect(newToken != oldToken)
+        #expect(deltas.snapshot().isEmpty)
+        let respawns = recorded.snapshot()
+            .filter { $0.contains("respawn-window") }
+            .compactMap(\.last)
+        #expect(respawns.count == 2)
+        #expect(respawns.first?.contains("exec /usr/bin/tail -f /dev/null") == true)
+        #expect(respawns.last?.contains(
+            "TBD_TERMINAL_INCARNATION_ID='\(newToken.uuidString)'") == true)
+
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                configDirManager: isolatedConfigDirManager()),
+            tmux: tmux,
+            configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        let staleHook = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminalID,
+                sessionID: "stale-session",
+                transcriptPath: "/tmp/stale-session.jsonl",
+                source: "startup",
+                sessionIncarnationID: oldProcess.sessionIncarnationID))
+        #expect((await router.handle(staleHook)).success)
+        let unchanged = try #require(try await db.terminals.get(id: terminalID))
+        #expect(unchanged.sessionIncarnationID == newToken)
+        #expect(unchanged.claudeSessionID == failed.claudeSessionID)
+        #expect(unchanged.transcriptPath == failed.transcriptPath)
+    }
+
+    @Test func wakeCannotOvertakeStagedHibernation() async throws {
+        let (db, _, terminalID) = try await setup(activityState: .idle)
+        let recorded = RecordedTmuxCommands()
+        let clock = TestClock<Duration>()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: recorded.append,
+            dryRunPaneCurrentCommand: { _, _ in "1.2.3" })
+        let coordinator = HibernationCoordinator(
+            db: db,
+            tmux: tmux,
+            configDirManager: isolatedConfigDirManager(),
+            exitPollAttempts: 1,
+            exitPollInterval: .milliseconds(200),
+            clock: clock,
+            actuationLog: makeTestActuationLog())
+
+        let hibernate = Task {
+            await coordinator.manualHibernate(terminalID: terminalID)
+        }
+        await clock.waitForSuspension()
+        #expect(try await db.terminals.get(id: terminalID)?.isParked == true)
+
+        #expect(await coordinator.wake(terminalID: terminalID) == .inFlight)
+        await clock.advanceWhenSuspended(by: .milliseconds(200))
+        #expect(await hibernate.value == .ok)
+        #expect(try await db.terminals.get(id: terminalID)?.isParked == true)
+        let respawns = recorded.snapshot().filter { $0.contains("respawn-window") }
+        #expect(respawns.count == 2)
+    }
+
     @Test func manualHibernateRefusesRunningTurn() async throws {
         let (db, _, terminalID) = try await setup(activityState: .working)
         let result = await coordinator(db).manualHibernate(terminalID: terminalID)
@@ -95,6 +478,240 @@ struct HibernationCoordinatorTests {
             return
         }
         #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt == nil)
+    }
+
+    @Test func queuedHibernateRefusesActivityThatStartsWhileWaitingForServerLock() async throws {
+        let (db, _, terminalID) = try await setup(activityState: .idle)
+        let capture = MutableHibernationCapture()
+        let commands = RecordedTmuxCommands()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: commands.append,
+            dryRunCapturePane: capture.capture)
+        let deltas = RecordedHibernationDeltas()
+        let coord = HibernationCoordinator(
+            db: db,
+            tmux: tmux,
+            subscriptions: deltas.subscriptions(),
+            configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        let serverLock = HibernationServerLockGate()
+        let holder = serverLock.hold(tmux, server: "tbd-hib")
+        await serverLock.waitUntilHeld()
+        defer { serverLock.release() }
+
+        let hibernate = gateHoldingTask {
+            await coord.manualHibernate(terminalID: terminalID)
+        }
+        await capture.waitForFirstCapture()
+        await Task.megaYield()
+        let workingAt = Date(timeIntervalSinceReferenceDate: 50)
+        try await db.terminals.setActivityState(
+            id: terminalID,
+            activityState: .working,
+            source: .hookEvent("task_started"),
+            observedAt: workingAt)
+        let working = try #require(try await db.terminals.get(id: terminalID))
+        let commandCount = commands.snapshot().count
+        serverLock.release()
+        _ = await holder.value
+
+        #expect(await hibernate.value != .ok)
+        let unchanged = try #require(try await db.terminals.get(id: terminalID))
+        #expect(unchanged == working)
+        #expect(commands.snapshot().count == commandCount)
+        #expect(deltas.snapshot().isEmpty)
+    }
+
+    @Test func queuedAutomaticHibernateRestartsIdleWindowAfterCompletedTurn() async throws {
+        let (db, _, terminalID) = try await setup(activityState: .idle)
+        try await db.config.setAutoHibernate(enabled: true, idleMinutes: 1)
+        let capture = MutableHibernationCapture()
+        let commands = RecordedTmuxCommands()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: commands.append,
+            dryRunCapturePane: capture.capture)
+        let deltas = RecordedHibernationDeltas()
+        let dates = TestDateSource()
+        let originallyIdle = try #require(try await db.terminals.get(id: terminalID))
+        let coord = HibernationCoordinator(
+            db: db,
+            tmux: tmux,
+            subscriptions: deltas.subscriptions(),
+            configDirManager: isolatedConfigDirManager(),
+            now: dates.provider,
+            exitPollAttempts: 1,
+            exitPollInterval: .milliseconds(1),
+            actuationLog: ActuationLog(path: try sweepLogPath()))
+
+        await coord.sweep()
+        dates.advance(by: 61)
+        await coord.sweep()
+        dates.advance(by: HibernationCoordinator.killDebounce + 1)
+
+        let serverLock = HibernationServerLockGate()
+        let holder = serverLock.hold(tmux, server: "tbd-hib")
+        await serverLock.waitUntilHeld()
+        defer { serverLock.release() }
+        let sweep = gateHoldingTask { await coord.sweep() }
+        await capture.waitForFirstCapture()
+        await Task.megaYield()
+
+        dates.advance(by: 1)
+        try await db.terminals.setActivityState(
+            id: terminalID,
+            activityState: .working,
+            source: .hookEvent("task_started"),
+            observedAt: dates.now)
+        dates.advance(by: 1)
+        try await db.terminals.setActivityState(
+            id: terminalID,
+            activityState: .idle,
+            source: .hookEvent("stop"),
+            observedAt: dates.now)
+        let newlyIdle = try #require(try await db.terminals.get(id: terminalID))
+        #expect(TerminalReplacementSnapshot(terminal: originallyIdle).matches(newlyIdle))
+        let commandCount = commands.snapshot().count
+        serverLock.release()
+        _ = await holder.value
+        _ = await sweep.value
+
+        let unchanged = try #require(try await db.terminals.get(id: terminalID))
+        #expect(unchanged == newlyIdle)
+        #expect(!unchanged.isParked)
+        #expect(commands.snapshot().count == commandCount)
+        #expect(deltas.snapshot().isEmpty)
+    }
+
+    @Test func queuedHibernateRecapturesPendingInputAfterServerLock() async throws {
+        let (db, _, terminalID) = try await setup(activityState: .idle)
+        let capture = MutableHibernationCapture()
+        let commands = RecordedTmuxCommands()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: commands.append,
+            dryRunCapturePane: capture.capture)
+        let deltas = RecordedHibernationDeltas()
+        let coord = HibernationCoordinator(
+            db: db,
+            tmux: tmux,
+            subscriptions: deltas.subscriptions(),
+            configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        let serverLock = HibernationServerLockGate()
+        let holder = serverLock.hold(tmux, server: "tbd-hib")
+        await serverLock.waitUntilHeld()
+        defer { serverLock.release() }
+
+        let before = try #require(try await db.terminals.get(id: terminalID))
+        let hibernate = gateHoldingTask {
+            await coord.manualHibernate(terminalID: terminalID)
+        }
+        await capture.waitForFirstCapture()
+        capture.setPendingInput()
+        await Task.megaYield()
+        let commandCount = commands.snapshot().count
+        serverLock.release()
+        _ = await holder.value
+
+        #expect(await hibernate.value == .notEligible(
+            reason: "Terminal has unsent typed input"))
+        let unchanged = try #require(try await db.terminals.get(id: terminalID))
+        #expect(unchanged == before)
+        #expect(capture.count >= 2)
+        #expect(commands.snapshot().count == commandCount)
+        #expect(deltas.snapshot().isEmpty)
+    }
+
+    @Test func queuedMergeHibernateRechecksInputTrackerAfterServerLock() async throws {
+        let (db, _, terminalID) = try await setup(activityState: .idle)
+        let capture = MutableHibernationCapture()
+        let commands = RecordedTmuxCommands()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: commands.append,
+            dryRunCapturePane: capture.capture)
+        let deltas = RecordedHibernationDeltas()
+        let inputActivity = InputActivityTracker()
+        let coord = HibernationCoordinator(
+            db: db,
+            tmux: tmux,
+            subscriptions: deltas.subscriptions(),
+            configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        await coord.setInputActivity(inputActivity)
+        let serverLock = HibernationServerLockGate()
+        let holder = serverLock.hold(tmux, server: "tbd-hib")
+        await serverLock.waitUntilHeld()
+        defer { serverLock.release() }
+
+        let before = try #require(try await db.terminals.get(id: terminalID))
+        let hibernate = gateHoldingTask {
+            await coord.hibernateForMerge(
+                terminalID: terminalID,
+                inputVetoEnabled: true)
+        }
+        await capture.waitForFirstCapture()
+        inputActivity.recordInput(paneID: before.tmuxPaneID)
+        await Task.megaYield()
+        let commandCount = commands.snapshot().count
+        serverLock.release()
+        _ = await holder.value
+
+        #expect(await hibernate.value == .notEligible(
+            reason: "Terminal has unsent typed input"))
+        let unchanged = try #require(try await db.terminals.get(id: terminalID))
+        #expect(unchanged == before)
+        #expect(commands.snapshot().count == commandCount)
+        #expect(deltas.snapshot().isEmpty)
+    }
+
+    @Test func queuedHibernateRevalidatesTranscriptTailAfterServerLock() async throws {
+        let (db, _, terminalID) = try await setup(activityState: .idle)
+        let transcript = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-hibernate-tail-\(UUID().uuidString).jsonl")
+        try Data("{\"type\":\"result\"}\n".utf8).write(to: transcript)
+        defer { try? FileManager.default.removeItem(at: transcript) }
+        try await db.terminals.updateSession(
+            id: terminalID,
+            sessionID: "sess-1",
+            transcriptPath: transcript.path)
+        let capture = MutableHibernationCapture()
+        let commands = RecordedTmuxCommands()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: commands.append,
+            dryRunCapturePane: capture.capture)
+        let deltas = RecordedHibernationDeltas()
+        let coord = HibernationCoordinator(
+            db: db,
+            tmux: tmux,
+            subscriptions: deltas.subscriptions(),
+            configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        let serverLock = HibernationServerLockGate()
+        let holder = serverLock.hold(tmux, server: "tbd-hib")
+        await serverLock.waitUntilHeld()
+        defer { serverLock.release() }
+
+        let before = try #require(try await db.terminals.get(id: terminalID))
+        let hibernate = gateHoldingTask {
+            await coord.manualHibernate(terminalID: terminalID)
+        }
+        await capture.waitForFirstCapture()
+        await Task.megaYield()
+        try Data("{\"type\":\"assistant\"".utf8).write(to: transcript)
+        let commandCount = commands.snapshot().count
+        serverLock.release()
+        _ = await holder.value
+
+        #expect(await hibernate.value == .notEligible(
+            reason: "Transcript is mid-write; try again shortly"))
+        let unchanged = try #require(try await db.terminals.get(id: terminalID))
+        #expect(unchanged == before)
+        #expect(commands.snapshot().count == commandCount)
+        #expect(deltas.snapshot().isEmpty)
     }
 
     @Test func manualHibernateIgnoresKeepWarm() async throws {
@@ -368,6 +985,43 @@ struct HibernationCoordinatorTests {
                 "expected a respawn-window carrying claude --resume; got: \(joined)")
     }
 
+    @Test func wakeRespawnPreservesRetryIdentityAndRejectsParkedIncarnation() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.updateSession(
+            id: terminalID,
+            sessionID: "sess-1",
+            transcriptPath: "/tmp/hibernation-wake-old-session.jsonl")
+        let coord = coordinator(db)
+        #expect(await coord.manualHibernate(terminalID: terminalID) == .ok)
+        let parked = try #require(try await db.terminals.get(id: terminalID))
+
+        #expect(await coord.wake(terminalID: terminalID) == .ok)
+        let awake = try #require(try await db.terminals.get(id: terminalID))
+        #expect(awake.sessionIncarnationID != parked.sessionIncarnationID)
+        #expect(awake.tmuxWindowID == parked.tmuxWindowID)
+        #expect(awake.tmuxPaneID == parked.tmuxPaneID)
+        #expect(awake.label == parked.label)
+        #expect(awake.claudeSessionID == "sess-1")
+        #expect(awake.transcriptPath == "/tmp/hibernation-wake-old-session.jsonl")
+        #expect(awake.sessionOrderObservedAt == nil)
+        #expect(awake.codexTranscriptBoundaryOffset == nil)
+        #expect(awake.activityState == .unknown)
+        #expect(!awake.isParked)
+
+        let staleApplication = try await db.terminals.applySessionStart(
+            id: terminalID,
+            expectedIncarnation: TerminalSessionIncarnation(terminal: parked),
+            sessionID: "stale-parked-session",
+            transcriptPath: "/tmp/stale-parked-session.jsonl",
+            observedAt: Date(timeIntervalSinceReferenceDate: 30))
+        #expect(staleApplication == nil)
+        let unchanged = try #require(try await db.terminals.get(id: terminalID))
+        #expect(unchanged.claudeSessionID == "sess-1")
+        #expect(unchanged.transcriptPath == "/tmp/hibernation-wake-old-session.jsonl")
+        #expect(unchanged.sessionIncarnationID == awake.sessionIncarnationID)
+        #expect(!unchanged.isParked)
+    }
+
     @Test func wakeOnNonHibernatedIsIdempotentNoOp() async throws {
         let (db, _, terminalID) = try await setup()
         let recorded = RecordedTmuxCommands()
@@ -590,10 +1244,9 @@ struct HibernationCoordinatorTests {
     }
 
     /// Window DEAD (post-reboot / killed): wake recreates the server + window,
-    /// persists the NEW window/pane ids, un-parks the row, and spawns the same
-    /// `claude --resume` via `new-window -c <worktree path>` — no
-    /// `respawn-window` into the dead window. The server hook fires so a
-    /// recreated server gets its gated control-mode connection.
+    /// persists the NEW window/pane ids, stages an inert `new-window`, then
+    /// respawns the same `claude --resume` into that replacement. The
+    /// server hook fires so a recreated server gets its control-mode connection.
     @Test func wakeRecreatesDeadWindowAndPersistsNewIDs() async throws {
         let (db, _, terminalID) = try await setup()
         try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
@@ -615,9 +1268,11 @@ struct HibernationCoordinatorTests {
         #expect(after?.tmuxPaneID == "%mock-0", "recreate must persist the new pane id")
 
         let joined = recorded.snapshot().map { $0.joined(separator: " ") }
-        #expect(joined.contains { $0.contains("new-window") && $0.contains("-c /tmp/hib-repo") && $0.contains("--resume sess-1") },
-                "expected new-window in the worktree cwd carrying claude --resume; got: \(joined)")
-        #expect(!joined.contains { $0.contains("respawn-window") },
+        #expect(joined.contains { $0.contains("new-window") && $0.contains("-c /tmp/hib-repo") && $0.contains("tail -f /dev/null") },
+                "expected an inert staged new-window in the worktree cwd; got: \(joined)")
+        #expect(joined.contains { $0.contains("respawn-window") && $0.contains("@mock-0") && $0.contains("--resume sess-1") },
+                "expected a respawn into the replacement window; got: \(joined)")
+        #expect(!joined.contains { $0.contains("respawn-window") && $0.contains("-t @0") },
                 "a dead window must NOT be respawned into; got: \(joined)")
         // Old-window cleanup: a transient windowExists misclassification must
         // not leak a live old window (usually already dead — kill no-ops).
@@ -625,6 +1280,172 @@ struct HibernationCoordinatorTests {
                 "expected a best-effort kill of the old window; got: \(joined)")
         #expect(serverHookCalls.snapshot() == [["tbd-hib"]],
                 "onServerCreated must fire once with the recreated server name")
+    }
+
+    @Test func deadWindowWakePersistsReplacementTokenBeforeAgentLaunch() async throws {
+        let (db, _, terminalID) = try await setup()
+        // Dry-run recreation returns these same coordinates, exercising the
+        // ABA shape where tmux IDs and the label cannot distinguish processes.
+        try await db.terminals.updateTmuxIDs(
+            id: terminalID, windowID: "@mock-0", paneID: "%mock-0")
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        let recorder = BlockingRespawnRecorder()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: recorder.record,
+            dryRunWindowIsDead: { $0 == "@mock-0" })
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                configDirManager: isolatedConfigDirManager()),
+            tmux: tmux,
+            configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+
+        recorder.arm(matching: "claude --resume sess-1")
+        let wake = gateHoldingTask {
+            await router.hibernationCoordinator.wake(terminalID: terminalID)
+        }
+        guard await waitUntil({ recorder.isBlocked }) else {
+            recorder.release()
+            _ = await wake.value
+            Issue.record("wake never reached the replacement agent launch")
+            return
+        }
+
+        let staged = try #require(try await db.terminals.get(id: terminalID))
+        #expect(staged.tmuxWindowID == "@mock-0")
+        #expect(staged.tmuxPaneID == "%mock-0")
+        #expect(staged.label == "claude")
+        #expect(staged.isParked)
+        let replacementToken = try #require(staged.sessionIncarnationID)
+        #expect(recorder.blockedCommand?.last?.contains(
+            "TBD_TERMINAL_INCARNATION_ID='\(replacementToken.uuidString)'") == true)
+        let matchedCLIPath = try #require(AgentProcessEnvironment.cliPath)
+        #expect(recorder.blockedCommand?.last?.contains(
+            "TBD_CLI_PATH=\(SystemPromptBuilder.shellEscape(matchedCLIPath))") == true)
+
+        let staleHook = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminalID,
+                sessionID: "stale-session",
+                transcriptPath: "/tmp/stale-session.jsonl",
+                source: "startup"))
+        #expect((await router.handle(staleHook)).success)
+        #expect(try await db.terminals.get(id: terminalID)?.claudeSessionID == "sess-1")
+        recorder.release()
+        #expect(await wake.value == .ok)
+
+        let replacementHook = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminalID,
+                sessionID: "replacement-session",
+                transcriptPath: "/tmp/replacement-session.jsonl",
+                source: "startup",
+                sessionIncarnationID: replacementToken))
+        #expect((await router.handle(replacementHook)).success)
+        let attached = try #require(try await db.terminals.get(id: terminalID))
+        #expect(attached.claudeSessionID == "replacement-session")
+        #expect(attached.transcriptPath == "/tmp/replacement-session.jsonl")
+    }
+
+    @Test func liveWindowWakeFencesSessionStartHandledDuringRespawnGap() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        let recorder = BlockingRespawnRecorder()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: recorder.record)
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                configDirManager: isolatedConfigDirManager()),
+            tmux: tmux,
+            configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+
+        recorder.arm(matching: "claude --resume sess-1")
+        let wake = gateHoldingTask {
+            await router.hibernationCoordinator.wake(terminalID: terminalID)
+        }
+        guard await waitUntil({ recorder.isBlocked }) else {
+            recorder.release()
+            _ = await wake.value
+            Issue.record("wake never reached the in-place respawn")
+            return
+        }
+        let staged = try #require(try await db.terminals.get(id: terminalID))
+        let replacementToken = try #require(staged.sessionIncarnationID)
+        #expect(recorder.blockedCommand?.last?.contains(
+            "TBD_TERMINAL_INCARNATION_ID='\(replacementToken.uuidString)'") == true)
+        let matchedCLIPath = try #require(AgentProcessEnvironment.cliPath)
+        #expect(recorder.blockedCommand?.last?.contains(
+            "TBD_CLI_PATH=\(SystemPromptBuilder.shellEscape(matchedCLIPath))") == true)
+
+        let gapEvent = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminalID,
+                sessionID: "old-process-gap-session",
+                transcriptPath: "/tmp/old-process-gap-session.jsonl",
+                source: "startup"))
+        #expect((await router.handle(gapEvent)).success)
+        #expect(try await db.terminals.get(id: terminalID)?.claudeSessionID == "sess-1")
+
+        recorder.release()
+        #expect(await wake.value == .ok)
+        let finalized = try #require(try await db.terminals.get(id: terminalID))
+        #expect(!finalized.isParked)
+        #expect(finalized.claudeSessionID == "sess-1")
+        #expect(finalized.transcriptPath == nil)
+
+        let replacementEvent = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminalID,
+                sessionID: "replacement-session",
+                transcriptPath: "/tmp/replacement-session.jsonl",
+                source: "startup",
+                sessionIncarnationID: replacementToken))
+        #expect((await router.handle(replacementEvent)).success)
+        #expect(try await db.terminals.get(id: terminalID)?.claudeSessionID
+                == "replacement-session")
+    }
+
+    @Test func wakeDoesNotReportSuccessWhenPostLaunchMarkerClearFails() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        let recorder = BlockingRespawnRecorder()
+        let deltas = RecordedHibernationDeltas()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: recorder.record)
+        let coord = HibernationCoordinator(
+            db: db,
+            tmux: tmux,
+            subscriptions: deltas.subscriptions(),
+            configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+
+        recorder.arm(matching: "claude --resume sess-1")
+        let wake = gateHoldingTask {
+            await coord.wake(terminalID: terminalID)
+        }
+        guard await waitUntil({ recorder.isBlocked }) else {
+            recorder.release()
+            _ = await wake.value
+            Issue.record("wake never reached the replacement launch")
+            return
+        }
+        try await db.terminals.delete(id: terminalID)
+        recorder.release()
+
+        #expect(await wake.value != .ok)
+        #expect(deltas.snapshot().isEmpty,
+                "a wake whose final durable marker clear failed must not broadcast success")
+        let joined = recorder.snapshot().map { $0.joined(separator: " ") }
+        #expect(joined.filter { $0.contains("respawn-window") }.count == 1,
+                "marker failure must not erase an already-running replacement")
     }
 
     // MARK: - Wake: window-id ownership (post-reboot id recycling)
@@ -662,7 +1483,9 @@ struct HibernationCoordinatorTests {
         let joined = recorded.snapshot().map { $0.joined(separator: " ") }
         #expect(joined.contains { $0.contains("new-window") },
                 "expected the recreate branch (new-window); got: \(joined)")
-        #expect(!joined.contains { $0.contains("respawn-window") },
+        #expect(joined.contains { $0.contains("respawn-window") && $0.contains("@mock-0") },
+                "the replacement window must receive the agent; got: \(joined)")
+        #expect(!joined.contains { $0.contains("respawn-window") && $0.contains("-t @0") },
                 "must never respawn into a window another terminal owns; got: \(joined)")
         #expect(!joined.contains { $0.contains("kill-window") && $0.contains("@0") },
                 "must never kill the other terminal's live window; got: \(joined)")
@@ -702,6 +1525,86 @@ struct HibernationCoordinatorTests {
     // the same terminal. Both branches of the lock gate are covered: same
     // server serializes (and loses no wake), different servers don't.
 
+    @Test func concurrentWakesForSameTerminalClaimBeforeDatabaseLookup() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        let parked = try #require(try await db.terminals.get(id: terminalID))
+        let recorded = RecordedTmuxCommands()
+        let deltas = RecordedHibernationDeltas()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: recorded.append)
+        let coordinator = HibernationCoordinator(
+            db: db,
+            tmux: tmux,
+            subscriptions: deltas.subscriptions(),
+            configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        let databaseGate = BlockingDatabaseWriter()
+        let heldWriter = databaseGate.hold(db)
+        guard await waitUntil({ databaseGate.isHolding }) else {
+            databaseGate.release()
+            await heldWriter.value
+            Issue.record("database writer gate was never acquired")
+            return
+        }
+
+        let earlyResults = RecordedWakeResults()
+        let first = Task {
+            let result = await coordinator.wake(
+                terminalID: terminalID,
+                initialPrompt: "deliver exactly once")
+            earlyResults.append(result)
+            return result
+        }
+        let second = Task {
+            let result = await coordinator.wake(
+                terminalID: terminalID,
+                initialPrompt: "deliver exactly once")
+            earlyResults.append(result)
+            return result
+        }
+        let duplicateWasRejectedBeforeDatabaseRelease = await waitUntil {
+            earlyResults.snapshot().contains(.inFlight)
+        }
+        databaseGate.release()
+        await heldWriter.value
+
+        let results = await [first.value, second.value]
+        #expect(duplicateWasRejectedBeforeDatabaseRelease)
+        #expect(results.filter { $0 == .ok }.count == 1)
+        #expect(results.filter { $0 == .inFlight }.count == 1)
+        let after = try #require(try await db.terminals.get(id: terminalID))
+        #expect(after.sessionIncarnationID != parked.sessionIncarnationID)
+        #expect(!after.isParked)
+        let replacementCommands = recorded.snapshot().filter { command in
+            let body = command.joined(separator: " ")
+            return body.contains("respawn-window")
+                && body.contains("claude --resume sess-1")
+                && body.contains("deliver exactly once")
+        }
+        #expect(replacementCommands.count == 1)
+        #expect(deltas.snapshot().filter { !$0.hibernated }.count == 1)
+    }
+
+    @Test func terminalLookupFailureReleasesSameTerminalClaim() async throws {
+        let (db, worktreeID, _) = try await setup()
+        let terminalID = UUID()
+        let subject = coordinator(db)
+
+        #expect(await subject.wake(terminalID: terminalID) == .notFound)
+
+        _ = try await db.terminals.create(
+            id: terminalID,
+            worktreeID: worktreeID,
+            tmuxWindowID: "@retry",
+            tmuxPaneID: "%retry",
+            label: "claude",
+            claudeSessionID: "sess-retry",
+            kind: .claude)
+        try await db.terminals.setHibernated(
+            id: terminalID, sessionID: "sess-retry")
+        #expect(await subject.wake(terminalID: terminalID) == .ok)
+    }
+
     /// Two concurrent wakes, two parked terminals, SAME server, both windows
     /// dead: both must succeed with DISTINCT fresh window ids and exactly two
     /// new-window commands — no lost wake, no hijack, no deadlock.
@@ -740,8 +1643,12 @@ struct HibernationCoordinatorTests {
         let newWindowCount = joined.filter { $0.contains("new-window") }.count
         #expect(newWindowCount == 2,
                 "expected exactly two new-window commands (one per wake); got \(newWindowCount) in: \(joined)")
-        #expect(!joined.contains { $0.contains("respawn-window") },
-                "dead windows must never be respawned into; got: \(joined)")
+        #expect(joined.filter { $0.contains("respawn-window") && $0.contains("@mock-") }.count == 2,
+                "each replacement must receive one respawn; got: \(joined)")
+        #expect(!joined.contains { command in
+            command.contains("respawn-window")
+                && (command.contains("-t @0") || command.contains("-t @1"))
+        }, "dead windows must never be respawned into; got: \(joined)")
     }
 
     /// Two concurrent wakes on DIFFERENT servers: the per-server lock must
@@ -901,6 +1808,84 @@ struct HibernationCoordinatorTests {
         #expect(after?.isParked == true, "a failed wake must leave the row parked for retry")
     }
 
+    @Test func liveWindowLaunchFailurePreservesResumeIdentityForRetry() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.updateSession(
+            id: terminalID,
+            sessionID: "sess-1",
+            transcriptPath: "/tmp/live-wake-retry.jsonl")
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        let failures = FailFirstRespawn()
+        let recorded = RecordedTmuxCommands()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: recorded.append,
+            dryRunRespawnWindowError: failures.error)
+        let coord = HibernationCoordinator(
+            db: db,
+            tmux: tmux,
+            configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+
+        guard case .respawnFailed = await coord.wake(terminalID: terminalID) else {
+            Issue.record("first live-window wake must expose the launch failure")
+            return
+        }
+        let failed = try #require(try await db.terminals.get(id: terminalID))
+        #expect(failed.isParked)
+        #expect(failed.claudeSessionID == "sess-1")
+        #expect(failed.transcriptPath == "/tmp/live-wake-retry.jsonl")
+
+        #expect(await coord.wake(terminalID: terminalID) == .ok)
+        let retried = try #require(try await db.terminals.get(id: terminalID))
+        #expect(!retried.isParked)
+        #expect(retried.claudeSessionID == "sess-1")
+        #expect(retried.transcriptPath == "/tmp/live-wake-retry.jsonl")
+        #expect(recorded.snapshot().filter {
+            $0.contains("respawn-window") && $0.last?.contains("--resume sess-1") == true
+        }.count == 2)
+    }
+
+    @Test func deadWindowLaunchFailurePreservesResumeIdentityForRetry() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.updateSession(
+            id: terminalID,
+            sessionID: "sess-1",
+            transcriptPath: "/tmp/dead-wake-retry.jsonl")
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        let failures = FailFirstRespawn()
+        let recorded = RecordedTmuxCommands()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: recorded.append,
+            dryRunWindowIsDead: { $0 == "@0" },
+            dryRunRespawnWindowError: failures.error)
+        let coord = HibernationCoordinator(
+            db: db,
+            tmux: tmux,
+            configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+
+        guard case .respawnFailed = await coord.wake(terminalID: terminalID) else {
+            Issue.record("first dead-window wake must expose the launch failure")
+            return
+        }
+        let failed = try #require(try await db.terminals.get(id: terminalID))
+        #expect(failed.isParked)
+        #expect(failed.tmuxWindowID == "@mock-0")
+        #expect(failed.claudeSessionID == "sess-1")
+        #expect(failed.transcriptPath == "/tmp/dead-wake-retry.jsonl")
+
+        #expect(await coord.wake(terminalID: terminalID) == .ok)
+        let retried = try #require(try await db.terminals.get(id: terminalID))
+        #expect(!retried.isParked)
+        #expect(retried.claudeSessionID == "sess-1")
+        #expect(retried.transcriptPath == "/tmp/dead-wake-retry.jsonl")
+        #expect(recorded.snapshot().filter {
+            $0.contains("respawn-window") && $0.last?.contains("--resume sess-1") == true
+        }.count == 2)
+    }
+
     /// The wake transcript sync must resolve the ambient (nil-profile)
     /// projects root through the INJECTED `configDirManager` — the seam this
     /// suite relies on to stay out of the real `~/.claude`. A transcript
@@ -1007,6 +1992,138 @@ struct HibernationCoordinatorTests {
         #expect(after?.hibernatedAt == nil, "row must be un-parked")
     }
 
+    @Test func coldProfileSwapWinsBeforeWakeLaunch() async throws {
+        let (db, _, terminalID) = try await setup()
+        let oldProfile = try await db.modelProfiles.create(name: "Old", kind: .apiKey)
+        let newProfile = try await db.modelProfiles.create(name: "New", kind: .oauth)
+        try await db.terminals.setProfileID(id: terminalID, profileID: oldProfile.id)
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        let keychainGate = BlockingKeychainLookup()
+        let wakeResolver = ModelProfileResolver(
+            profiles: db.modelProfiles,
+            repos: db.repos,
+            config: db.config,
+            keychain: keychainGate.load)
+        let configDirs = isolatedConfigDirManager()
+        let commands = RecordedTmuxCommands()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: commands.append)
+        let deltas = RecordedStateDeltas()
+        let subscriptions = deltas.subscriptions()
+        let coordinator = HibernationCoordinator(
+            db: db,
+            tmux: tmux,
+            modelProfileResolver: wakeResolver,
+            subscriptions: subscriptions,
+            configDirManager: configDirs,
+            actuationLog: makeTestActuationLog())
+        let swapRouter = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                configDirManager: configDirs),
+            tmux: tmux,
+            subscriptions: subscriptions,
+            configDirManager: configDirs,
+            actuationLog: makeTestActuationLog())
+
+        let wake = gateHoldingTask { await coordinator.wake(terminalID: terminalID) }
+        guard await waitUntil({ keychainGate.isBlocked }) else {
+            keychainGate.release()
+            _ = await wake.value
+            Issue.record("wake never reached old-profile resolution")
+            return
+        }
+        let swapResponse = await swapRouter.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(
+                terminalID: terminalID, newProfileID: newProfile.id, mode: .inPlace)))
+        #expect(swapResponse.success)
+        let swapped = try #require(try await db.terminals.get(id: terminalID))
+        #expect(swapped.isParked)
+        #expect(swapped.profileID == newProfile.id)
+        let commandCount = commands.snapshot().count
+        keychainGate.release()
+
+        #expect(await wake.value != .ok)
+        let unchanged = try #require(try await db.terminals.get(id: terminalID))
+        #expect(unchanged == swapped)
+        #expect(commands.snapshot().count == commandCount,
+                "a wake prepared for the old profile must not launch")
+        #expect(deltas.snapshot().filter { delta in
+            if case .terminalHibernationChanged = delta { return true }
+            return false
+        }.isEmpty, "the rejected wake must not broadcast an unpark")
+    }
+
+    @Test func wakeWinsBeforeColdProfileSwapCommit() async throws {
+        let (db, _, terminalID) = try await setup()
+        let oldProfile = try await db.modelProfiles.create(name: "Old", kind: .oauth)
+        let newProfile = try await db.modelProfiles.create(name: "New", kind: .apiKey)
+        try await db.terminals.setProfileID(id: terminalID, profileID: oldProfile.id)
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        let keychainGate = BlockingKeychainLookup()
+        let swapResolver = ModelProfileResolver(
+            profiles: db.modelProfiles,
+            repos: db.repos,
+            config: db.config,
+            keychain: keychainGate.load)
+        let wakeResolver = ModelProfileResolver(
+            profiles: db.modelProfiles,
+            repos: db.repos,
+            config: db.config,
+            keychain: { _ in nil })
+        let configDirs = isolatedConfigDirManager()
+        let commands = RecordedTmuxCommands()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: commands.append)
+        let deltas = RecordedStateDeltas()
+        let subscriptions = deltas.subscriptions()
+        let coordinator = HibernationCoordinator(
+            db: db,
+            tmux: tmux,
+            modelProfileResolver: wakeResolver,
+            subscriptions: subscriptions,
+            configDirManager: configDirs,
+            actuationLog: makeTestActuationLog())
+        let swapRouter = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                configDirManager: configDirs),
+            tmux: tmux,
+            subscriptions: subscriptions,
+            modelProfileResolver: swapResolver,
+            configDirManager: configDirs,
+            actuationLog: makeTestActuationLog())
+
+        let swapRequest = try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(
+                terminalID: terminalID, newProfileID: newProfile.id, mode: .inPlace))
+        let swap = gateHoldingTask { await swapRouter.handle(swapRequest) }
+        guard await waitUntil({ keychainGate.isBlocked }) else {
+            keychainGate.release()
+            _ = await swap.value
+            Issue.record("cold swap never reached new-profile resolution")
+            return
+        }
+
+        #expect(await coordinator.wake(terminalID: terminalID) == .ok)
+        let woken = try #require(try await db.terminals.get(id: terminalID))
+        #expect(!woken.isParked)
+        #expect(woken.profileID == oldProfile.id)
+        let commandCount = commands.snapshot().count
+        keychainGate.release()
+
+        #expect(!(await swap.value).success)
+        let unchanged = try #require(try await db.terminals.get(id: terminalID))
+        #expect(unchanged == woken)
+        #expect(commands.snapshot().count == commandCount)
+        #expect(deltas.snapshot().filter { delta in
+            if case .terminalProfileChanged = delta { return true }
+            return false
+        }.isEmpty, "the rejected cold swap must not broadcast a profile change")
+    }
+
     /// When no resolver is injected, the profile check doesn't fire — even if a
     /// profileID is pinned. This pins that the plain `coordinator(db)` (used by
     /// other tests) is unaffected.
@@ -1035,7 +2152,8 @@ struct HibernationCoordinatorTests {
     @Test func reconcileOnStartupClearsStaleParkedForLiveClaude() async throws {
         let (db, _, terminalID) = try await setup()
         try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
-        #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt != nil)
+        let parked = try #require(try await db.terminals.get(id: terminalID))
+        #expect(parked.hibernatedAt != nil)
 
         // Pane still runs claude (reported as its version string) → the parked
         // state is stale and must be cleared.
@@ -1043,8 +2161,58 @@ struct HibernationCoordinatorTests {
         let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), actuationLog: makeTestActuationLog())
         await coord.reconcileOnStartup()
 
-        #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt == nil,
+        let reconciled = try #require(try await db.terminals.get(id: terminalID))
+        #expect(reconciled.hibernatedAt == nil,
                 "a still-running claude must have its stale parked timestamp cleared")
+        #expect(reconciled.claudeSessionID == parked.claudeSessionID)
+        #expect(reconciled.transcriptPath == parked.transcriptPath)
+        #expect(reconciled.sessionIncarnationID == parked.sessionIncarnationID)
+    }
+
+    @Test func reconcileOnStartupPreservesSessionStartAcceptedWhileReplacementStayedParked() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        let parkedBeforeReplacement = try #require(
+            try await db.terminals.get(id: terminalID))
+        let replacementToken = try #require(
+            try await db.terminals.prepareHibernatedAgentRespawn(
+                id: terminalID,
+                expectedState: TerminalReplacementSnapshot(
+                    terminal: parkedBeforeReplacement),
+                at: Date(timeIntervalSinceReferenceDate: 10)))
+        let staged = try #require(try await db.terminals.get(id: terminalID))
+        #expect(staged.isParked)
+        #expect(staged.sessionIncarnationID == replacementToken)
+
+        let tmux = TmuxManager(dryRun: true, dryRunPaneCurrentCommand: { _, _ in "1.2.3" })
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                configDirManager: isolatedConfigDirManager()),
+            tmux: tmux,
+            configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        let replacementHook = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminalID,
+                sessionID: "replacement-session",
+                transcriptPath: "/tmp/replacement-session.jsonl",
+                source: "startup",
+                sessionIncarnationID: replacementToken))
+        #expect((await router.handle(replacementHook)).success)
+
+        let attachedWhileParked = try #require(try await db.terminals.get(id: terminalID))
+        #expect(attachedWhileParked.isParked)
+        #expect(attachedWhileParked.claudeSessionID == "replacement-session")
+        await router.hibernationCoordinator.reconcileOnStartup()
+
+        let reconciled = try #require(try await db.terminals.get(id: terminalID))
+        #expect(!reconciled.isParked)
+        #expect(reconciled.claudeSessionID == "replacement-session")
+        #expect(reconciled.transcriptPath == "/tmp/replacement-session.jsonl")
+        #expect(reconciled.sessionIncarnationID == replacementToken)
     }
 
     /// The inverse: a genuinely parked terminal (pane running a bare shell, not
@@ -1461,6 +2629,93 @@ private final class RecordedHibernationDeltas: @unchecked Sendable {
     }
 }
 
+private final class HibernationServerLockGate: @unchecked Sendable {
+    private let entered: AsyncStream<Void>
+    private let enteredContinuation: AsyncStream<Void>.Continuation
+    private let releaseStream: AsyncStream<Void>
+    private let releaseContinuation: AsyncStream<Void>.Continuation
+
+    init() {
+        (entered, enteredContinuation) = AsyncStream.makeStream(of: Void.self)
+        (releaseStream, releaseContinuation) = AsyncStream.makeStream(of: Void.self)
+    }
+
+    func hold(_ tmux: TmuxManager, server: String) -> Task<Void, Never> {
+        Task {
+            await tmux.withServerResourceLock(server: server) { [self] in
+                enteredContinuation.yield()
+                var iterator = releaseStream.makeAsyncIterator()
+                _ = await iterator.next()
+            }
+        }
+    }
+
+    func waitUntilHeld() async {
+        var iterator = entered.makeAsyncIterator()
+        _ = await iterator.next()
+    }
+
+    func release() {
+        releaseContinuation.yield()
+    }
+}
+
+private final class MutableHibernationCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private let firstCapture: AsyncStream<Void>
+    private let firstCaptureContinuation: AsyncStream<Void>.Continuation
+    private var captures = 0
+    private var pendingInput = false
+
+    init() {
+        (firstCapture, firstCaptureContinuation) = AsyncStream.makeStream(of: Void.self)
+    }
+
+    var count: Int { lock.withLock { captures } }
+
+    var capture: @Sendable (String, String) -> String {
+        { [self] _, _ in
+            lock.withLock {
+                captures += 1
+                if captures == 1 {
+                    firstCaptureContinuation.yield()
+                }
+                return pendingInput ? "> preserve this typed prompt" : ""
+            }
+        }
+    }
+
+    func waitForFirstCapture() async {
+        var iterator = firstCapture.makeAsyncIterator()
+        _ = await iterator.next()
+    }
+
+    func setPendingInput() {
+        lock.withLock { pendingInput = true }
+    }
+}
+
+private final class RecordedStateDeltas: @unchecked Sendable {
+    private let lock = NSLock()
+    private var deltas: [StateDelta] = []
+
+    func subscriptions() -> StateSubscriptionManager {
+        let manager = StateSubscriptionManager()
+        manager.addSubscriber { [weak self] data in
+            guard let delta = try? JSONDecoder().decode(StateDelta.self, from: data) else {
+                return true
+            }
+            self?.lock.withLock { self?.deltas.append(delta) }
+            return true
+        }
+        return manager
+    }
+
+    func snapshot() -> [StateDelta] {
+        lock.withLock { deltas }
+    }
+}
+
 /// Thread-safe collector for TmuxManager dryRun recorded args.
 private final class RecordedTmuxCommands: @unchecked Sendable {
     private let lock = NSLock()
@@ -1472,5 +2727,164 @@ private final class RecordedTmuxCommands: @unchecked Sendable {
     func snapshot() -> [[String]] {
         lock.lock(); defer { lock.unlock() }
         return commands
+    }
+}
+
+private final class FailFirstRespawn: @unchecked Sendable {
+    private let lock = NSLock()
+    private var hasFailed = false
+
+    var error: @Sendable (String) -> Error? {
+        { [self] _ in
+            lock.withLock {
+                guard !hasFailed else { return nil }
+                hasFailed = true
+                return TmuxError.unexpectedOutput("first replacement launch failed")
+            }
+        }
+    }
+}
+
+private final class FailRespawnOnAttempt: @unchecked Sendable {
+    private let lock = NSLock()
+    private let failingAttempt: Int
+    private var attempt = 0
+
+    init(_ failingAttempt: Int) {
+        self.failingAttempt = failingAttempt
+    }
+
+    var error: @Sendable (String) -> Error? {
+        { [self] _ in
+            lock.withLock {
+                attempt += 1
+                guard attempt == failingAttempt else { return nil }
+                return TmuxError.unexpectedOutput(
+                    "replacement attempt \(failingAttempt) failed")
+            }
+        }
+    }
+}
+
+private final class BlockingDatabaseWriter: @unchecked Sendable {
+    private let lock = NSLock()
+    private let releaseGate = DispatchSemaphore(value: 0)
+    private var holding = false
+
+    var isHolding: Bool { lock.withLock { holding } }
+
+    func hold(_ db: TBDDatabase) -> Task<Void, Never> {
+        gateHoldingTask { [self] in
+            try? await db.writerForTests.writeWithoutTransaction { _ in
+                lock.withLock { holding = true }
+                releaseGate.waitForGate("same-terminal wake database writer")
+            }
+        }
+    }
+
+    func release() {
+        releaseGate.signal()
+    }
+}
+
+private final class RecordedWakeResults: @unchecked Sendable {
+    private let lock = NSLock()
+    private var results: [WakeResult] = []
+
+    func append(_ result: WakeResult) {
+        lock.withLock { results.append(result) }
+    }
+
+    func snapshot() -> [WakeResult] {
+        lock.withLock { results }
+    }
+}
+
+private final class BlockingCapturePane: @unchecked Sendable {
+    private let lock = NSLock()
+    private let releaseGate = DispatchSemaphore(value: 0)
+    private var blocked = false
+
+    var isBlocked: Bool { lock.withLock { blocked } }
+
+    var capture: @Sendable (String, String) -> String {
+        { [self] _, _ in
+            lock.withLock { blocked = true }
+            releaseGate.waitForGate("pre-hibernation capture")
+            return ""
+        }
+    }
+
+    func release() {
+        releaseGate.signal()
+    }
+}
+
+private final class BlockingKeychainLookup: @unchecked Sendable {
+    private let lock = NSLock()
+    private let releaseGate = DispatchSemaphore(value: 0)
+    private var blocked = false
+
+    var isBlocked: Bool { lock.withLock { blocked } }
+
+    var load: @Sendable (String) throws -> String? {
+        { [self] _ in
+            lock.withLock { blocked = true }
+            releaseGate.waitForGate("profile credential lookup")
+            return "replacement-secret"
+        }
+    }
+
+    func release() {
+        releaseGate.signal()
+    }
+}
+
+private final class BlockingRespawnRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private let releaseGate = DispatchSemaphore(value: 0)
+    private var armed = false
+    private var blocked = false
+    private var match = "respawn-window"
+    private var blockedValue: [String]?
+    private var commands: [[String]] = []
+
+    var isBlocked: Bool { lock.withLock { blocked } }
+    var blockedCommand: [String]? { lock.withLock { blockedValue } }
+
+    var record: @Sendable ([String]) -> Void {
+        { [self] command in
+            let shouldBlock = lock.withLock { () -> Bool in
+                commands.append(command)
+                guard armed,
+                      !blocked,
+                      command.joined(separator: " ").contains(match) else {
+                    return false
+                }
+                blocked = true
+                blockedValue = command
+                return true
+            }
+            if shouldBlock {
+                releaseGate.waitForGate("hibernation respawn")
+            }
+        }
+    }
+
+    func arm(matching match: String = "respawn-window") {
+        lock.withLock {
+            armed = true
+            blocked = false
+            self.match = match
+            blockedValue = nil
+        }
+    }
+
+    func release() {
+        releaseGate.signal()
+    }
+
+    func snapshot() -> [[String]] {
+        lock.withLock { commands }
     }
 }

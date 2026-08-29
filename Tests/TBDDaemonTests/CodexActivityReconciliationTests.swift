@@ -45,6 +45,31 @@ struct CodexActivityReconciliationTests {
             actuationLog: makeTestActuationLog())
     }
 
+    private func makeBoundaryTerminal(
+        tag: String,
+        kind: TerminalKind = .codex
+    ) async throws -> Terminal {
+        let repo = try await db.repos.create(
+            path: "/tmp/car-boundary-\(tag)-repo-\(UUID().uuidString)",
+            displayName: "car-boundary-\(tag)", defaultBranch: "main")
+        let worktree = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "main",
+            path: "/tmp/car-boundary-\(tag)-wt-\(UUID().uuidString)",
+            tmuxServer: "tbd-car-boundary-\(tag)")
+        return try await db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: kind == .codex ? TerminalLabel.codex : kind.rawValue,
+            kind: kind)
+    }
+
+    private func seedBoundary(_ offset: Int64, terminalID: UUID) async throws {
+        try await db.writerForTests.write { database in
+            try database.execute(
+                sql: "UPDATE terminal SET codexTranscriptBoundaryOffset = ? WHERE id = ?",
+                arguments: [offset, terminalID.uuidString])
+        }
+    }
+
     private func makeCodexRecreateFixture(
         tag: String,
         tmux: TmuxManager,
@@ -112,11 +137,12 @@ struct CodexActivityReconciliationTests {
             label: "Codex",
             kind: .codex
         )
-        try await db.terminals.updateSession(
+        _ = try #require(try await db.terminals.applySessionStart(
             id: terminal.id,
+            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
             sessionID: "codex-session",
-            transcriptPath: transcriptPath.path
-        )
+            transcriptPath: transcriptPath.path,
+            observedAt: Date(timeIntervalSince1970: 1_779_999_999)))
         let observedAt = Date(timeIntervalSince1970: 1_780_000_000)
         try await db.terminals.setActivityState(
             id: terminal.id, activityState: .idle,
@@ -167,10 +193,12 @@ struct CodexActivityReconciliationTests {
             tmuxPaneID: "%1",
             label: "Codex",
             kind: .codex)
-        try await db.terminals.updateSession(
+        _ = try #require(try await db.terminals.applySessionStart(
             id: terminal.id,
+            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
             sessionID: "current-session",
-            transcriptPath: transcript.path)
+            transcriptPath: transcript.path,
+            observedAt: Date(timeIntervalSince1970: 1_790_000_009)))
         let initialActivityAt = Date(timeIntervalSince1970: 1_790_000_010)
         try await db.terminals.setActivityState(
             id: terminal.id,
@@ -246,6 +274,15 @@ struct CodexActivityReconciliationTests {
         let before = await router.handle(list)
         #expect(before.success)
         #expect(try before.decodeResult([Terminal].self).first?
+            .presentationActivityState == nil)
+
+        try append(
+            Data((#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"current"}}"#
+                + "\n").utf8),
+            to: transcript)
+        let current = await router.handle(list)
+        #expect(current.success)
+        #expect(try current.decodeResult([Terminal].self).first?
             .presentationActivityState == .working)
 
         let sessionStart = try RPCRequest(
@@ -346,8 +383,10 @@ struct CodexActivityReconciliationTests {
             tmuxServer: "tbd-codex-recreate")
         let terminal = try await db.terminals.create(
             worktreeID: wt.id,
-            tmuxWindowID: "@old",
-            tmuxPaneID: "%old",
+            // Dry-run window creation deliberately reuses these coordinates,
+            // proving the process token closes the tmux-ID/label ABA case.
+            tmuxWindowID: "@mock-0",
+            tmuxPaneID: "%mock-0",
             label: "Codex Recovery",
             kind: .codex)
         let oldSessionAt = Date(timeIntervalSince1970: 1_790_000_100)
@@ -401,9 +440,40 @@ struct CodexActivityReconciliationTests {
             return
         }
 
-        // Exercise the real race: the new process can report SessionStart as
-        // soon as tmux launches it. The handler must already have durably
-        // cleared the dead process before this hook is accepted.
+        // Exercise the real race: a delayed hook from the dead process reaches
+        // the handler after the prelaunch process token commits. Its legacy
+        // nil token must be rejected while the replacement launch is paused.
+        dates.advance(by: 1)
+        let gapSessionStart = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "old-session",
+                transcriptPath: oldTranscript.path,
+                source: "startup"))
+        #expect((await recreateRouter.handle(gapSessionStart)).success)
+        let staged = try #require(try await db.terminals.get(id: terminal.id))
+        let replacementToken = try #require(staged.sessionIncarnationID)
+        #expect(staged.tmuxWindowID == terminal.tmuxWindowID)
+        #expect(staged.tmuxPaneID == terminal.tmuxPaneID)
+        #expect(staged.label == terminal.label)
+        #expect(staged.claudeSessionID == nil)
+        #expect(launchRecorder.blockedCommand?.last?.contains(
+            "TBD_TERMINAL_INCARNATION_ID='\(replacementToken.uuidString)'") == true)
+        let matchedCLIPath = try #require(AgentProcessEnvironment.cliPath)
+        #expect(launchRecorder.blockedCommand?.last?.contains(
+            "TBD_CLI_PATH=\(SystemPromptBuilder.shellEscape(matchedCLIPath))") == true)
+        launchRecorder.releaseCodexLaunch()
+
+        let recreateResponse = await recreateTask.value
+        #expect(recreateResponse.success, "recreate failed: \(recreateResponse.error ?? "nil")")
+        let finalized = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(finalized.claudeSessionID == nil)
+        #expect(finalized.transcriptPath == nil)
+        #expect(finalized.sessionOrderObservedAt == nil)
+
+        // The replacement process echoes its environment token and can attach
+        // immediately; no post-launch writer can erase the accepted hook.
         dates.advance(by: 1)
         let sessionStart = try RPCRequest(
             method: RPCMethod.terminalSessionEvent,
@@ -411,12 +481,9 @@ struct CodexActivityReconciliationTests {
                 terminalID: terminal.id,
                 sessionID: "new-session",
                 transcriptPath: transcript.path,
-                source: "startup"))
+                source: "startup",
+                sessionIncarnationID: replacementToken))
         #expect((await recreateRouter.handle(sessionStart)).success)
-        launchRecorder.releaseCodexLaunch()
-
-        let recreateResponse = await recreateTask.value
-        #expect(recreateResponse.success, "recreate failed: \(recreateResponse.error ?? "nil")")
 
         let recreated = try #require(try await db.terminals.get(id: terminal.id))
         #expect(recreated.label == "Codex Recovery")
@@ -606,6 +673,8 @@ struct CodexActivityReconciliationTests {
         #expect(response.success)
         #expect(try response.decodeResult([Terminal].self).first?
             .presentationActivityState == nil)
+        #expect(try await db.terminals.get(id: terminal.id)?.codexTranscriptBoundaryOffset
+            == Int64(try Data(contentsOf: transcript).count))
     }
 
     @Test("a stored session-order watermark makes a nil-identity SessionStart later")
@@ -644,6 +713,291 @@ struct CodexActivityReconciliationTests {
         #expect(response.success)
         #expect(try response.decodeResult([Terminal].self).first?
             .presentationActivityState == nil)
+        #expect(try await db.terminals.get(id: terminal.id)?.codexTranscriptBoundaryOffset
+            == Int64(try Data(contentsOf: transcript).count))
+    }
+
+    @Test("a stored identity makes a SessionStart a later attachment")
+    func storedIdentityFencesNextSessionStart() async throws {
+        let terminal = try await makeBoundaryTerminal(tag: "partial-identity")
+        let transcript = try makeTranscript(
+            #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"old"}}"#
+                + "\n")
+        defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
+        try await db.writerForTests.write { database in
+            try database.execute(
+                sql: "UPDATE terminal SET claudeSessionID = ? WHERE id = ?",
+                arguments: ["prior-session", terminal.id.uuidString])
+        }
+
+        let application = try #require(try await db.terminals.applySessionStart(
+            id: terminal.id,
+            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
+            sessionID: "next-session",
+            transcriptPath: transcript.path,
+            observedTranscriptBoundary: ObservedTranscriptBoundary(
+                path: transcript.path,
+                eof: Int64(try Data(contentsOf: transcript).count)),
+            observedAt: presentationObservedAt))
+
+        #expect(!application.isInitialAttachment)
+        #expect(application.transcriptBoundaryOffset
+            == Int64(try Data(contentsOf: transcript).count))
+        #expect(try await db.terminals.get(id: terminal.id)?.codexTranscriptBoundaryOffset
+            == application.transcriptBoundaryOffset)
+    }
+
+    @Test("a stored boundary makes an otherwise empty SessionStart a later attachment")
+    func storedBoundaryFencesNextSessionStart() async throws {
+        let terminal = try await makeBoundaryTerminal(tag: "partial-boundary")
+        let transcript = try makeTranscript(
+            #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"old"}}"#
+                + "\n")
+        defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
+        try await seedBoundary(7, terminalID: terminal.id)
+        let eof = Int64(try Data(contentsOf: transcript).count)
+
+        let application = try #require(try await db.terminals.applySessionStart(
+            id: terminal.id,
+            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
+            sessionID: "next-session",
+            transcriptPath: transcript.path,
+            observedTranscriptBoundary: ObservedTranscriptBoundary(
+                path: transcript.path,
+                eof: eof),
+            observedAt: presentationObservedAt))
+
+        #expect(!application.isInitialAttachment)
+        #expect(application.transcriptBoundaryOffset == eof)
+        #expect(try await db.terminals.get(id: terminal.id)?.codexTranscriptBoundaryOffset == eof)
+    }
+
+    @Test("an initial Codex attachment stores zero regardless of observed EOF")
+    func initialAttachmentStoresZeroBoundary() async throws {
+        let terminal = try await makeBoundaryTerminal(tag: "initial")
+
+        let application = try #require(try await db.terminals.applySessionStart(
+            id: terminal.id,
+            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
+            sessionID: "initial-session",
+            transcriptPath: "/tmp/car-boundary-initial.jsonl",
+            observedTranscriptBoundary: ObservedTranscriptBoundary(
+                path: "/tmp/car-boundary-initial.jsonl",
+                eof: 4_096),
+            observedAt: presentationObservedAt))
+
+        #expect(application.isInitialAttachment)
+        #expect(application.transcriptBoundaryOffset == 0)
+        #expect(try await db.terminals.get(id: terminal.id)?.codexTranscriptBoundaryOffset == 0)
+    }
+
+    @Test("stale and equal-stamped SessionStarts cannot move an accepted boundary")
+    func rejectedSessionStartsPreserveAcceptedBoundary() async throws {
+        let terminal = try await makeBoundaryTerminal(tag: "rejected")
+        _ = try #require(try await db.terminals.applySessionStart(
+            id: terminal.id,
+            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
+            sessionID: "initial-session",
+            transcriptPath: "/tmp/car-boundary-rejected.jsonl",
+            observedTranscriptBoundary: ObservedTranscriptBoundary(
+                path: "/tmp/car-boundary-rejected.jsonl",
+                eof: 10),
+            observedAt: presentationObservedAt))
+        let acceptedAt = presentationObservedAt.addingTimeInterval(1)
+        let accepted = try #require(try await db.terminals.applySessionStart(
+            id: terminal.id,
+            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
+            sessionID: "accepted-session",
+            transcriptPath: "/tmp/car-boundary-rejected.jsonl",
+            observedTranscriptBoundary: ObservedTranscriptBoundary(
+                path: "/tmp/car-boundary-rejected.jsonl",
+                eof: 111),
+            observedAt: acceptedAt))
+        #expect(accepted.transcriptBoundaryOffset == 111)
+
+        #expect(try await db.terminals.applySessionStart(
+            id: terminal.id,
+            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
+            sessionID: "stale-session",
+            transcriptPath: "/tmp/car-boundary-stale.jsonl",
+            observedTranscriptBoundary: ObservedTranscriptBoundary(
+                path: "/tmp/car-boundary-stale.jsonl",
+                eof: 222),
+            observedAt: presentationObservedAt) == nil)
+        #expect(try await db.terminals.applySessionStart(
+            id: terminal.id,
+            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
+            sessionID: "accepted-session",
+            transcriptPath: "/tmp/car-boundary-rejected.jsonl",
+            observedTranscriptBoundary: ObservedTranscriptBoundary(
+                path: "/tmp/car-boundary-rejected.jsonl",
+                eof: 333),
+            observedAt: acceptedAt) == nil)
+
+        let stored = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(stored.claudeSessionID == "accepted-session")
+        #expect(stored.transcriptPath == "/tmp/car-boundary-rejected.jsonl")
+        #expect(stored.codexTranscriptBoundaryOffset == 111)
+    }
+
+    @Test("a retained path mismatch cannot persist an EOF observed for another transcript")
+    func retainedPathMismatchRejectsObservedEOF() async throws {
+        let terminal = try await makeBoundaryTerminal(tag: "retained-path-race")
+        let observedPath = "/tmp/car-boundary-observed.jsonl"
+        let transactionPath = "/tmp/car-boundary-transaction.jsonl"
+        try await db.writerForTests.write { database in
+            try database.execute(
+                sql: """
+                    UPDATE terminal
+                    SET claudeSessionID = ?, transcriptPath = ?
+                    WHERE id = ?
+                    """,
+                arguments: ["prior-session", transactionPath, terminal.id.uuidString])
+        }
+
+        let application = try #require(try await db.terminals.applySessionStart(
+            id: terminal.id,
+            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
+            sessionID: "next-session",
+            transcriptPath: nil,
+            observedTranscriptBoundary: ObservedTranscriptBoundary(
+                path: observedPath,
+                eof: 12_345),
+            observedAt: presentationObservedAt))
+
+        #expect(!application.isInitialAttachment)
+        #expect(application.transcriptPath == transactionPath)
+        #expect(application.transcriptBoundaryOffset == nil)
+        let stored = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(stored.transcriptPath == transactionPath)
+        #expect(stored.codexTranscriptBoundaryOffset == nil)
+    }
+
+    @Test("unordered session replacement clears the Codex boundary")
+    func updateSessionClearsBoundary() async throws {
+        let terminal = try await makeBoundaryTerminal(tag: "update-session")
+        try await seedBoundary(101, terminalID: terminal.id)
+
+        try await db.terminals.updateSession(
+            id: terminal.id,
+            sessionID: "replacement",
+            transcriptPath: "/tmp/car-boundary-replacement.jsonl")
+
+        #expect(try await db.terminals.get(id: terminal.id)?.codexTranscriptBoundaryOffset == nil)
+    }
+
+    @Test("in-place session identity replacement clears the Codex boundary")
+    func updateSessionIDClearsBoundary() async throws {
+        let terminal = try await makeBoundaryTerminal(tag: "update-session-id")
+        try await seedBoundary(102, terminalID: terminal.id)
+
+        try await db.terminals.updateSessionID(id: terminal.id, sessionID: "replacement")
+
+        #expect(try await db.terminals.get(id: terminal.id)?.codexTranscriptBoundaryOffset == nil)
+    }
+
+    @Test("shell window recreation clears the Codex boundary")
+    func clearRecreatedClearsBoundary() async throws {
+        let terminal = try await makeBoundaryTerminal(tag: "clear-recreated")
+        try await seedBoundary(103, terminalID: terminal.id)
+
+        try await db.terminals.clearRecreated(id: terminal.id)
+
+        #expect(try await db.terminals.get(id: terminal.id)?.codexTranscriptBoundaryOffset == nil)
+    }
+
+    @Test("in-place Codex window replacement clears the old process boundary")
+    func replaceRecreatedCodexWindowClearsBoundary() async throws {
+        let terminal = try await makeBoundaryTerminal(tag: "replace-recreated")
+        try await seedBoundary(104, terminalID: terminal.id)
+
+        _ = try await db.terminals.replaceRecreatedCodexWindow(
+            id: terminal.id,
+            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
+            windowID: "@new",
+            paneID: "%new",
+            at: presentationObservedAt)
+
+        let stored = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(stored.tmuxWindowID == "@new")
+        #expect(stored.tmuxPaneID == "%new")
+        #expect(stored.codexTranscriptBoundaryOffset == nil)
+    }
+
+    @Test("a delayed SessionStart cannot repopulate a terminal cleared during recreation")
+    func clearRecreatedRejectsPriorIncarnationSessionStart() async throws {
+        let terminal = try await makeBoundaryTerminal(tag: "stale-clear-recreated")
+        let expectedIncarnation = TerminalSessionIncarnation(terminal: terminal)
+        try await seedSessionStateForRecreation(terminalID: terminal.id)
+
+        try await db.terminals.clearRecreated(
+            id: terminal.id,
+            at: presentationObservedAt.addingTimeInterval(1))
+        let application = try await db.terminals.applySessionStart(
+            id: terminal.id,
+            expectedIncarnation: expectedIncarnation,
+            sessionID: "dead-session",
+            transcriptPath: "/tmp/car-dead-clear-recreated.jsonl",
+            observedTranscriptBoundary: ObservedTranscriptBoundary(
+                path: "/tmp/car-dead-clear-recreated.jsonl",
+                eof: 999),
+            observedAt: presentationObservedAt.addingTimeInterval(2))
+
+        #expect(application == nil)
+        let stored = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(stored.kind == .shell)
+        #expect(stored.claudeSessionID == nil)
+        #expect(stored.transcriptPath == nil)
+        #expect(stored.sessionOrderObservedAt == nil)
+        #expect(stored.codexTranscriptBoundaryOffset == nil)
+    }
+
+    @Test("a delayed SessionStart cannot repopulate a replacement Codex window")
+    func replaceRecreatedRejectsPriorIncarnationSessionStart() async throws {
+        let terminal = try await makeBoundaryTerminal(tag: "stale-replace-recreated")
+        let expectedIncarnation = TerminalSessionIncarnation(terminal: terminal)
+        try await seedSessionStateForRecreation(terminalID: terminal.id)
+
+        _ = try await db.terminals.replaceRecreatedCodexWindow(
+            id: terminal.id,
+            expectedIncarnation: expectedIncarnation,
+            windowID: "@replacement",
+            paneID: "%replacement",
+            at: presentationObservedAt.addingTimeInterval(1))
+        let application = try await db.terminals.applySessionStart(
+            id: terminal.id,
+            expectedIncarnation: expectedIncarnation,
+            sessionID: "dead-session",
+            transcriptPath: "/tmp/car-dead-replace-recreated.jsonl",
+            observedTranscriptBoundary: ObservedTranscriptBoundary(
+                path: "/tmp/car-dead-replace-recreated.jsonl",
+                eof: 999),
+            observedAt: presentationObservedAt.addingTimeInterval(2))
+
+        #expect(application == nil)
+        let stored = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(stored.tmuxWindowID == "@replacement")
+        #expect(stored.tmuxPaneID == "%replacement")
+        #expect(stored.claudeSessionID == nil)
+        #expect(stored.transcriptPath == nil)
+        #expect(stored.sessionOrderObservedAt == nil)
+        #expect(stored.codexTranscriptBoundaryOffset == nil)
+    }
+
+    private func seedSessionStateForRecreation(terminalID: UUID) async throws {
+        try await db.writerForTests.write { database in
+            try database.execute(
+                sql: """
+                    UPDATE terminal
+                    SET claudeSessionID = ?, transcriptPath = ?,
+                        sessionOrderObservedAt = ?, codexTranscriptBoundaryOffset = ?
+                    WHERE id = ?
+                    """,
+                arguments: [
+                    "live-session", "/tmp/car-live-before-recreate.jsonl",
+                    presentationObservedAt, 123, terminalID.uuidString,
+                ])
+        }
     }
 
     @Test("concurrent SessionStarts classify exactly one accepted transaction as initial")
@@ -665,13 +1019,17 @@ struct CodexActivityReconciliationTests {
         let first = Task {
             await gate.waitForRelease()
             return try await db.terminals.applySessionStart(
-                id: terminal.id, sessionID: "first-session",
+                id: terminal.id,
+                expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
+                sessionID: "first-session",
                 transcriptPath: "/tmp/car-atomic-first.jsonl", observedAt: firstAt)
         }
         let second = Task {
             await gate.waitForRelease()
             return try await db.terminals.applySessionStart(
-                id: terminal.id, sessionID: "second-session",
+                id: terminal.id,
+                expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
+                sessionID: "second-session",
                 transcriptPath: "/tmp/car-atomic-second.jsonl", observedAt: secondAt)
         }
         await gate.releaseAll()
@@ -707,10 +1065,14 @@ struct CodexActivityReconciliationTests {
         let secondAt = Date(timeIntervalSince1970: 1_790_000_000.123_4)
 
         let first = try #require(try await db.terminals.applySessionStart(
-            id: terminal.id, sessionID: "first-session",
+            id: terminal.id,
+            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
+            sessionID: "first-session",
             transcriptPath: transcript.path, observedAt: firstAt))
         let second = try #require(try await db.terminals.applySessionStart(
-            id: terminal.id, sessionID: "second-session",
+            id: terminal.id,
+            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
+            sessionID: "second-session",
             transcriptPath: transcript.path, observedAt: secondAt))
         let firstGeneration = try #require(first.orderObservedAt)
         let secondGeneration = try #require(second.orderObservedAt)
@@ -729,7 +1091,8 @@ struct CodexActivityReconciliationTests {
             transcriptPath: transcript.path,
             worktreeID: wt.id,
             terminalID: terminal.id,
-            generation: secondGeneration)
+            generation: secondGeneration,
+            boundaryOffset: second.transcriptBoundaryOffset)
         #expect(await router.codexActivityTracker.observe(
             transcriptPath: transcript.path, worktreeID: wt.id) == nil)
     }
@@ -764,11 +1127,15 @@ struct CodexActivityReconciliationTests {
 
         #expect(try await db.terminals.get(id: terminal.id)?.sessionOrderObservedAt == legacyAt)
         #expect(try await db.terminals.applySessionStart(
-            id: terminal.id, sessionID: "stale-session", transcriptPath: nil,
+            id: terminal.id,
+            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
+            sessionID: "stale-session", transcriptPath: nil,
             observedAt: legacyAt.addingTimeInterval(-0.000_1)) == nil)
         let laterAt = legacyAt.addingTimeInterval(0.000_1)
         let later = try #require(try await db.terminals.applySessionStart(
-            id: terminal.id, sessionID: "later-session", transcriptPath: nil,
+            id: terminal.id,
+            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
+            sessionID: "later-session", transcriptPath: nil,
             observedAt: laterAt))
         let laterGeneration = try #require(later.orderObservedAt)
         #expect(laterGeneration > legacyAt)
@@ -777,8 +1144,8 @@ struct CodexActivityReconciliationTests {
             == laterGeneration)
     }
 
-    @Test("initial adoption supersedes same-generation list reconstruction")
-    func initialAdoptionWinsAfterPersistedSessionListRace() async throws {
+    @Test("initial durable boundary recovers during list reconstruction")
+    func initialBoundaryRecoversAcrossPersistedSessionListRace() async throws {
         let repo = try await db.repos.create(
             path: "/tmp/car-adoption-race-repo-\(UUID().uuidString)",
             displayName: "car-adoption-race-repo", defaultBranch: "main")
@@ -797,7 +1164,9 @@ struct CodexActivityReconciliationTests {
 
         let observedAt = Date(timeIntervalSince1970: 1_790_000_000.123_6)
         let application = try #require(try await db.terminals.applySessionStart(
-            id: terminal.id, sessionID: "initial-session",
+            id: terminal.id,
+            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
+            sessionID: "initial-session",
             transcriptPath: transcript.path, observedAt: observedAt))
         #expect(application.isInitialAttachment)
         let stored = try #require(try await db.terminals.get(id: terminal.id))
@@ -810,7 +1179,7 @@ struct CodexActivityReconciliationTests {
         let racedList = await router.handle(list)
         #expect(racedList.success)
         #expect(try racedList.decodeResult([Terminal].self).first?
-            .presentationActivityState == nil)
+            .presentationActivityState == .working)
 
         await router.codexActivityTracker.adoptInitialSession(
             transcriptPath: transcript.path,
@@ -821,6 +1190,112 @@ struct CodexActivityReconciliationTests {
         #expect(afterAdoption.success)
         #expect(try afterAdoption.decodeResult([Terminal].self).first?
             .presentationActivityState == .working)
+    }
+
+    @Test("a fresh router progressively recovers activity older than the transcript tail")
+    func freshRouterRecoversInitialSessionBeyondOneMiB() async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/car-cold-recovery-repo-\(UUID().uuidString)",
+            displayName: "car-cold-recovery-repo", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "main",
+            path: "/tmp/car-cold-recovery-wt-\(UUID().uuidString)",
+            tmuxServer: "tbd-car-cold-recovery")
+        let transcript = try makeTranscript(String(decoding: lifecycleEvent(
+            type: "task_started", turnID: "current"), as: UTF8.self))
+        defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
+        for index in 0..<17 {
+            try append(lifecycleEvent(
+                type: "agent_message",
+                turnID: "padding-\(index)",
+                exactByteCount: 64 * 1024), to: transcript)
+        }
+        #expect(try Data(contentsOf: transcript).count > 1024 * 1024)
+
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: "Codex", kind: .codex)
+        let sessionStart = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "initial-session",
+                transcriptPath: transcript.path,
+                source: "SessionStart"))
+        #expect((await router.handle(sessionStart)).success)
+        #expect(try await db.terminals.get(id: terminal.id)?
+            .codexTranscriptBoundaryOffset == 0)
+
+        let restartedRouter = makeRouter(now: { presentationObservedAt })
+        let list = try RPCRequest(
+            method: RPCMethod.terminalList,
+            params: TerminalListParams(worktreeID: wt.id))
+        let firstResponse = await restartedRouter.handle(list)
+        #expect(firstResponse.success)
+        #expect(try firstResponse.decodeResult([Terminal].self).first?
+            .presentationActivityState == nil)
+
+        var recoveredState: TerminalActivityState?
+        for _ in 0..<3 where recoveredState == nil {
+            let response = await restartedRouter.handle(list)
+            #expect(response.success)
+            recoveredState = try response.decodeResult([Terminal].self).first?
+                .presentationActivityState
+        }
+        #expect(recoveredState == .working)
+        #expect(try await db.terminals.get(id: terminal.id)?
+            .codexTranscriptBoundaryOffset == 0)
+
+        try append(lifecycleEvent(
+            type: "task_complete", turnID: "current"), to: transcript)
+        var completedState = recoveredState
+        for _ in 0..<2 where completedState != .idle {
+            let response = await restartedRouter.handle(list)
+            #expect(response.success)
+            completedState = try response.decodeResult([Terminal].self).first?
+                .presentationActivityState
+        }
+        #expect(completedState == .idle)
+    }
+
+    @Test("durable boundary supersedes same-generation provisional EOF but not newer state")
+    func durableBoundaryWinsAfterListReconstructionRace() async throws {
+        let tracker = CodexTranscriptActivityTracker()
+        let transcript = try makeTranscript(
+            #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"current"}}"#
+                + "\n")
+        defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
+        let worktreeID = UUID()
+        let terminalID = UUID()
+        let generation = Date(timeIntervalSince1970: 1_790_300_000)
+
+        let provisionalTarget = CodexTranscriptActivityTracker.Target(
+            transcriptPath: transcript.path,
+            worktreeID: worktreeID,
+            terminalID: terminalID,
+            sessionGeneration: generation)
+        await tracker.establishSessionBoundariesIfAbsent(
+            transcripts: [provisionalTarget])
+        #expect(await tracker.observe(
+            transcriptPath: transcript.path,
+            worktreeID: worktreeID) == nil)
+
+        await tracker.establishSessionBoundary(
+            transcriptPath: transcript.path,
+            worktreeID: worktreeID,
+            terminalID: terminalID,
+            generation: generation,
+            boundaryOffset: 0)
+        await tracker.establishSessionBoundary(
+            transcriptPath: transcript.path,
+            worktreeID: worktreeID,
+            terminalID: terminalID,
+            generation: generation.addingTimeInterval(-1),
+            boundaryOffset: Int64(try Data(contentsOf: transcript).count))
+
+        #expect(await tracker.observe(
+            transcriptPath: transcript.path,
+            worktreeID: worktreeID) == .working)
     }
 
     @Test("an unavailable initial rollout remains eligible for later bootstrap")
@@ -861,8 +1336,8 @@ struct CodexActivityReconciliationTests {
             .presentationActivityState == .working)
     }
 
-    @Test("a fresh tracker keeps an unavailable persisted generation conservative")
-    func unavailablePersistedSessionFencesWhenRolloutAppears() async throws {
+    @Test("a fresh tracker replays an unavailable initial rollout when it appears")
+    func unavailableInitialBoundaryReplaysWhenRolloutAppears() async throws {
         let repo = try await db.repos.create(
             path: "/tmp/car-unavailable-restart-repo-\(UUID().uuidString)",
             displayName: "car-unavailable-restart-repo", defaultBranch: "main")
@@ -879,7 +1354,9 @@ struct CodexActivityReconciliationTests {
             worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
             label: "Codex", kind: .codex)
         _ = try #require(try await db.terminals.applySessionStart(
-            id: terminal.id, sessionID: "persisted-session",
+            id: terminal.id,
+            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
+            sessionID: "persisted-session",
             transcriptPath: transcript.path, observedAt: presentationObservedAt))
         let restartedRouter = makeRouter(now: { presentationObservedAt })
         let list = try RPCRequest(
@@ -896,7 +1373,7 @@ struct CodexActivityReconciliationTests {
         let afterFileAppears = await restartedRouter.handle(list)
         #expect(afterFileAppears.success)
         #expect(try afterFileAppears.decodeResult([Terminal].self).first?
-            .presentationActivityState == nil)
+            .presentationActivityState == .working)
     }
 
     @Test("sub-millisecond later boundary remains pending across database reload")
@@ -917,7 +1394,9 @@ struct CodexActivityReconciliationTests {
             worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
             label: "Codex", kind: .codex)
         _ = try #require(try await db.terminals.applySessionStart(
-            id: terminal.id, sessionID: "initial-session",
+            id: terminal.id,
+            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
+            sessionID: "initial-session",
             transcriptPath: "/tmp/car-submillisecond-initial.jsonl",
             observedAt: Date(timeIntervalSince1970: 1_790_000_000)))
         let observedAt = Date(timeIntervalSince1970: 1_790_000_001.123_4)
@@ -976,7 +1455,8 @@ struct CodexActivityReconciliationTests {
             transcriptPath: laterTranscript.path,
             worktreeID: worktreeID,
             terminalID: terminalID,
-            generation: laterGeneration)
+            generation: laterGeneration,
+            boundaryOffset: nil)
         await router.codexActivityTracker.adoptInitialSession(
             transcriptPath: initialTranscript.path,
             worktreeID: worktreeID,
@@ -1001,7 +1481,8 @@ struct CodexActivityReconciliationTests {
             transcriptPath: transcript.path,
             worktreeID: worktreeID,
             terminalID: terminalID,
-            generation: laterGeneration)
+            generation: laterGeneration,
+            boundaryOffset: nil)
         await router.codexActivityTracker.retain(
             transcriptPaths: [], scope: worktreeID)
         await router.codexActivityTracker.adoptInitialSession(
@@ -1013,7 +1494,8 @@ struct CodexActivityReconciliationTests {
             transcriptPath: transcript.path,
             worktreeID: worktreeID,
             terminalID: terminalID,
-            generation: initialGeneration.addingTimeInterval(0.5))
+            generation: initialGeneration.addingTimeInterval(0.5),
+            boundaryOffset: nil)
 
         #expect(await router.codexActivityTracker.observe(
             transcriptPath: transcript.path, worktreeID: worktreeID) == nil)
@@ -1122,11 +1604,12 @@ struct CodexActivityReconciliationTests {
             label: "Codex",
             kind: .codex
         )
-        try await db.terminals.updateSession(
+        _ = try #require(try await db.terminals.applySessionStart(
             id: terminal.id,
+            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
             sessionID: "codex-session",
-            transcriptPath: transcriptPath.path
-        )
+            transcriptPath: transcriptPath.path,
+            observedAt: Date(timeIntervalSince1970: 1_779_999_999)))
         try await db.terminals.setActivityState(
             id: terminal.id, activityState: .working, source: .hookEvent("TurnStart"),
             observedAt: Date(timeIntervalSince1970: 1_780_000_000))
@@ -1229,10 +1712,12 @@ struct CodexActivityReconciliationTests {
         let terminal = try await db.terminals.create(
             worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
             label: "Codex", kind: .codex)
-        try await db.terminals.updateSession(
+        _ = try #require(try await db.terminals.applySessionStart(
             id: terminal.id,
+            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
             sessionID: "old-session",
-            transcriptPath: oldTranscript.path)
+            transcriptPath: oldTranscript.path,
+            observedAt: Date(timeIntervalSince1970: 1_790_000_099)))
 
         let firstAt = Date(timeIntervalSince1970: 1_790_000_100)
         let currentAt = firstAt.addingTimeInterval(1)
@@ -1386,6 +1871,60 @@ struct CodexActivityReconciliationTests {
         #expect(staleTerminal.transcriptPath == transcript.path)
         #expect(staleTerminal.presentationActivityState == nil)
         #expect(staleTerminal.presentationActivityObservedAt == listAt)
+    }
+
+    @Test("terminal.list revalidates the durable transcript boundary")
+    func terminalListRejectsPresentationFromChangedBoundary() async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/car-boundary-identity-repo-\(UUID().uuidString)",
+            displayName: "car-boundary-identity-repo", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "main",
+            path: "/tmp/car-boundary-identity-wt-\(UUID().uuidString)",
+            tmuxServer: "tbd-car-boundary-identity")
+        let transcript = try makeTranscript(
+            #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"current"}}"#
+                + "\n")
+        defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: "Codex", kind: .codex)
+        let generation = Date(timeIntervalSince1970: 1_790_400_600)
+        _ = try #require(try await db.terminals.applySessionStart(
+            id: terminal.id,
+            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
+            sessionID: "current-session",
+            transcriptPath: transcript.path, observedAt: generation))
+        let dates = BlockingListDates(
+            first: presentationObservedAt,
+            subsequent: presentationObservedAt.addingTimeInterval(1))
+        let raceRouter = makeRouter(now: dates.provider)
+        let list = try RPCRequest(
+            method: RPCMethod.terminalList,
+            params: TerminalListParams(worktreeID: wt.id))
+
+        let inFlightList = gateHoldingTask { await raceRouter.handle(list) }
+        guard await waitUntil(
+            { dates.firstCallIsBlocked }, timeout: Self.raceRendezvousTimeout
+        ) else {
+            dates.releaseFirstCall()
+            _ = await inFlightList.value
+            Issue.record("terminal.list never reached its transcript stamp")
+            return
+        }
+        try await db.writerForTests.write { database in
+            try database.execute(
+                sql: "UPDATE terminal SET codexTranscriptBoundaryOffset = ? WHERE id = ?",
+                arguments: [Int64(1), terminal.id.uuidString])
+        }
+        dates.releaseFirstCall()
+
+        let response = await inFlightList.value
+        #expect(response.success)
+        let listed = try #require(
+            response.decodeResult([Terminal].self).first(where: { $0.id == terminal.id }))
+        #expect(listed.presentationActivityState == nil)
+        #expect(listed.presentationActivityObservedAt == presentationObservedAt)
     }
 
     @Test("terminal.list retention respects worktree and fleet scopes")
@@ -1732,6 +2271,10 @@ private final class BlockingCodexLaunchRecorder: @unchecked Sendable {
 
     var codexLaunchIsBlocked: Bool {
         lock.withLock { blocked }
+    }
+
+    var blockedCommand: [String]? {
+        lock.withLock { commands.last(where: { $0.last?.contains(" --profile") == true }) }
     }
 
     var recorder: @Sendable ([String]) -> Void {

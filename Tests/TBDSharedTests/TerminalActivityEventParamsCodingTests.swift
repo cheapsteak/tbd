@@ -30,3 +30,35 @@ import Testing
         #expect(decoded.sessionID == "session-current")
     }
 }
+
+@Suite struct TerminalSessionEventParamsCodingTests {
+    @Test("legacy session payload without process incarnation still decodes")
+    func legacyPayloadStillDecodes() throws {
+        let terminalID = UUID()
+        let data = Data(
+            #"{"terminalID":"\#(terminalID.uuidString)","sessionID":"session-current","transcriptPath":null,"source":"startup"}"#.utf8)
+
+        let decoded = try JSONDecoder().decode(TerminalSessionEventParams.self, from: data)
+
+        #expect(decoded.terminalID == terminalID)
+        #expect(decoded.sessionID == "session-current")
+        #expect(decoded.sessionIncarnationID == nil)
+    }
+
+    @Test("session payload carries optional process incarnation")
+    func processIncarnationRoundTrips() throws {
+        let incarnationID = UUID()
+        let params = TerminalSessionEventParams(
+            terminalID: UUID(),
+            sessionID: "session-current",
+            transcriptPath: "/tmp/session-current.jsonl",
+            source: "startup",
+            sessionIncarnationID: incarnationID)
+
+        let decoded = try JSONDecoder().decode(
+            TerminalSessionEventParams.self,
+            from: JSONEncoder().encode(params))
+
+        #expect(decoded.sessionIncarnationID == incarnationID)
+    }
+}

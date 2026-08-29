@@ -5,6 +5,26 @@ import TBDShared
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "terminalHandlers")
 private let perfTranscriptLog = Logger(subsystem: "com.tbd.daemon", category: "perf-transcript")
 
+private struct StaleTerminalReplacementError: LocalizedError {
+    let errorDescription: String? = "Terminal changed while waiting for replacement"
+}
+
+/// Observe a rollout's byte boundary before SessionStart enters its database
+/// transaction. `seekToEnd` returns an unsigned size, so negative values cannot
+/// enter the model; values that cannot fit the durable signed column are
+/// rejected instead of narrowing or wrapping.
+private func observedTranscriptBoundary(atAbsolutePath path: String?) -> ObservedTranscriptBoundary? {
+    guard let path, path.hasPrefix("/") else { return nil }
+    guard let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: path)) else {
+        return nil
+    }
+    defer { try? handle.close() }
+    guard let size = try? handle.seekToEnd(), size <= UInt64(Int64.max) else {
+        return nil
+    }
+    return ObservedTranscriptBoundary(path: path, eof: Int64(size))
+}
+
 // MARK: - Transcript parse cache
 
 private struct TranscriptParseCacheEntry {
@@ -17,6 +37,7 @@ private struct CodexPresentationIdentity: Equatable {
     let sessionID: String?
     let transcriptPath: String?
     let sessionOrderObservedAt: Date?
+    let transcriptBoundaryOffset: Int64?
 }
 
 /// Caches the last `TranscriptParser.parse` result per session file path.
@@ -577,7 +598,8 @@ extension RPCRouter {
                 ($0.id, CodexPresentationIdentity(
                     sessionID: $0.claudeSessionID,
                     transcriptPath: $0.transcriptPath,
-                    sessionOrderObservedAt: $0.sessionOrderObservedAt))
+                    sessionOrderObservedAt: $0.sessionOrderObservedAt,
+                    transcriptBoundaryOffset: $0.codexTranscriptBoundaryOffset))
             })
 
         for index in terminals.indices where terminals[index].isCodexTerminal {
@@ -587,16 +609,15 @@ extension RPCRouter {
                 transcriptPath: transcriptPath,
                 worktreeID: terminals[index].worktreeID,
                 terminalID: terminals[index].id,
-                sessionGeneration: terminals[index].sessionOrderObservedAt)
+                sessionGeneration: terminals[index].sessionOrderObservedAt,
+                transcriptBoundaryOffset: terminals[index].codexTranscriptBoundaryOffset)
             codexTargets.append(target)
         }
 
-        // SessionStart's persisted session generation is the restart-safe boundary
-        // cue. On a fresh tracker, start at the path's current EOF rather than
-        // replaying an orphan task_started from before that lifecycle event. The
-        // tracker prepares or retries that boundary in the same actor turn as
-        // observation, so a temporarily missing file cannot bootstrap between
-        // the two operations.
+        // The persisted generation and transcript offset form the restart-safe
+        // recovery target. The tracker prepares or retries that boundary in the
+        // same actor turn as observation, so a temporarily missing file cannot
+        // bootstrap between the two operations.
         let codexObservation = await codexActivityTracker.observeStamped(
             transcripts: codexTargets,
             now: now)
@@ -617,7 +638,8 @@ extension RPCRouter {
             let currentIdentity = CodexPresentationIdentity(
                 sessionID: terminals[index].claudeSessionID,
                 transcriptPath: transcriptPath,
-                sessionOrderObservedAt: terminals[index].sessionOrderObservedAt)
+                sessionOrderObservedAt: terminals[index].sessionOrderObservedAt,
+                transcriptBoundaryOffset: terminals[index].codexTranscriptBoundaryOffset)
             guard observedIdentities[terminals[index].id] == currentIdentity else {
                 terminals[index].presentationActivityState = nil
                 terminals[index].presentationActivityObservedAt = codexObservation.observedAt
@@ -1185,6 +1207,7 @@ extension RPCRouter {
         guard let worktree = try await db.worktrees.getLocal(id: terminal.worktreeID) else {
             return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
         }
+        let expectedReplacementState = TerminalReplacementSnapshot(terminal: terminal)
 
         // A Claude-resumable terminal whose window died must NOT be recreated as a
         // plain shell — that silently turns the tab into a shell and discards the
@@ -1195,41 +1218,69 @@ extension RPCRouter {
         // ID on demand, so this is non-destructive even if the window were somehow
         // still alive.
         if terminal.isClaudeResumable, let sessionID = terminal.claudeSessionID {
-            // Stale-caller gate: if the row's CURRENT window is actually
-            // alive, the caller acted on stale state — e.g. the app's
-            // dead-window path racing a wake that just RECREATED the window
-            // and updated the row's ids. Killing it here would tear down the
-            // freshly-spawned claude and re-park the row (wake flap). Leave
-            // the row untouched.
-            if await tmux.windowExists(server: worktree.tmuxServer, windowID: terminal.tmuxWindowID) {
-                logger.info("recreateWindow: window \(terminal.tmuxWindowID, privacy: .public) for claude terminal \(terminal.id, privacy: .public) is alive — ignoring stale recreate request")
-                return try RPCResponse(result: terminal)
-            }
-            // This branch actuates too, and differently: it kills a window the
-            // check above read as gone — a read that can be stale — and parks
-            // the session. That is the same act reconcile's recovery park
-            // performs, so it carries kind `hibernate` through this surface's
-            // own door (`ActuationBranch.recreateWindowRepark`). The row goes in
-            // ahead of the kill, fail-closed: an unrecordable park refuses the
-            // RPC with the window and the row untouched.
+            // Record the request before waiting on the shared server lock. The
+            // row is not mutated until the post-lock snapshot check below.
             let reparkID = try await beginActuation(
                 .recreateWindowRepark, actor: actor,
                 target: .local(worktree: worktree.id, terminal: terminal.id))
+            let repark = try await actuating(reparkID) {
+                try await tmux.withWorktreeServerLock(
+                    db: db, worktreeID: worktree.id,
+                    allowedStatuses: [worktree.status]
+                ) { currentWorktree -> (terminal: Terminal?, didPark: Bool) in
+                    guard let currentTerminal = try await self.db.terminals.get(
+                        id: terminal.id),
+                          expectedReplacementState.matches(currentTerminal),
+                          currentTerminal.isClaudeResumable,
+                          currentTerminal.claudeSessionID == sessionID else {
+                        throw StaleTerminalReplacementError()
+                    }
 
-            // Clean up any lingering (almost always already-dead) window to avoid orphans.
-            try? await tmux.killWindow(server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
-            let parked = try await actuating(reparkID) { () -> Terminal? in
-                // Authoritative `hibernatedAt` column so the unified `wake()` can resume it.
-                try await db.terminals.setHibernated(id: terminal.id, sessionID: sessionID)
-                // Drop any stale pending-question entry — the window the question
-                // belonged to is gone. Mirrors reconcile()/handleTerminalDelete.
-                await pendingQuestions.clear(terminalID: terminal.id)
-                return try await db.terminals.get(id: params.terminalID)
+                    // The liveness decision and every following process mutation
+                    // share the server lock with wake and profile replacement.
+                    // A queued stale re-park therefore cannot kill their new pane.
+                    if await self.tmux.windowExists(
+                        server: currentWorktree.tmuxServer,
+                        windowID: currentTerminal.tmuxWindowID
+                    ) {
+                        logger.info("recreateWindow: window \(currentTerminal.tmuxWindowID, privacy: .public) for claude terminal \(currentTerminal.id, privacy: .public) is alive — ignoring stale recreate request")
+                        return (currentTerminal, false)
+                    }
+
+                    let currentState = TerminalHibernationSnapshot(terminal: currentTerminal)
+                    guard let inertIncarnation = try await self.db.terminals
+                        .beginHibernatedShellRespawn(
+                            id: currentTerminal.id,
+                            expectedState: currentState,
+                            at: self.now()) else {
+                        throw StaleTerminalReplacementError()
+                    }
+
+                    // The durable park intent above preserves the old token.
+                    // Once the dead pane is eliminated, rotate the token and
+                    // clear its process-local facts before exposing the park.
+                    try? await self.tmux.killWindow(
+                        server: currentWorktree.tmuxServer,
+                        windowID: currentTerminal.tmuxWindowID)
+                    guard try await self.db.terminals.finalizeHibernatedShellRespawn(
+                        id: currentTerminal.id,
+                        expectedIncarnation: inertIncarnation,
+                        at: self.now()) != nil else {
+                        throw StaleTerminalReplacementError()
+                    }
+                    await self.pendingQuestions.clear(terminalID: currentTerminal.id)
+                    return (try await self.db.terminals.get(id: currentTerminal.id), true)
+                }
             }
-            guard let updated = parked else {
+            guard let updated = repark.terminal else {
                 await finishActuation(
                     reparkID, .refused(.notFound), error: "Terminal not found after suspend")
                 return RPCResponse(error: "Terminal not found after suspend")
+            }
+            guard repark.didPark else {
+                await finishActuation(
+                    reparkID, .refused(.notEligible), error: "Terminal window is alive")
+                return try RPCResponse(result: updated)
             }
             await finishActuation(reparkID, .dispatched)
             logger.info("recreateWindow: parked claude terminal \(terminal.id, privacy: .public) as suspended — window \(terminal.tmuxWindowID, privacy: .public) gone, session \(sessionID, privacy: .public) preserved")
@@ -1273,14 +1324,15 @@ extension RPCRouter {
                 await finishActuation(actuationID, .refused(.notEligible), error: message)
                 return RPCResponse(error: message)
             }
-            var codexEnv: [String: String] = [:]
-            codexEnv["TBD_WORKTREE_ID"] = worktree.id.uuidString
-            codexEnv["TBD_TERMINAL_ID"] = terminal.id.uuidString
-            // Explicitly export the global Codex home. This is intentional —
-            // the design's allowed "set the global path" option — not leftover
-            // per-repo isolation: it pins deterministic behavior and lets the
-            // TBD_TEST_CODEX_HOME test-isolation override flow through.
-            codexEnv["CODEX_HOME"] = codexPreparation.codexHome.path
+            let codexEnv: [String: String] = [
+                "TBD_WORKTREE_ID": worktree.id.uuidString,
+                "TBD_TERMINAL_ID": terminal.id.uuidString,
+                // Explicitly export the global Codex home. This is intentional —
+                // the design's allowed "set the global path" option — not leftover
+                // per-repo isolation: it pins deterministic behavior and lets the
+                // TBD_TEST_CODEX_HOME test-isolation override flow through.
+                "CODEX_HOME": codexPreparation.codexHome.path,
+            ]
 
             // Codex: re-apply the merged free-form overrides (global < repo) so a
             // recreated Codex pane keeps them, plus omz-update suppression via
@@ -1299,17 +1351,27 @@ extension RPCRouter {
                 repo: recreateRepo?.envOverrides,
                 profile: nil
             ).merging(["DISABLE_AUTO_UPDATE": "true"]) { _, forced in forced }
-            let codexRecreateEnv = codexEnv
             let updatedTerminal = try await actuating(actuationID) {
                 try await tmux.withWorktreeServerLock(
                     db: db, worktreeID: worktree.id,
                     allowedStatuses: [worktree.status]
                 ) { currentWorktree in
+                    guard let currentTerminal = try await self.db.terminals.get(
+                        id: terminal.id),
+                          expectedReplacementState.matches(currentTerminal),
+                          currentTerminal.kind == .codex
+                            || currentTerminal.label == TerminalLabel.codex,
+                          !currentTerminal.isParked else {
+                        throw StaleTerminalReplacementError()
+                    }
+                    let expectedIncarnation = TerminalSessionIncarnation(
+                        terminal: currentTerminal)
+                    var replacementEnv = codexEnv
                     // Kill the old window and rebuild the server while holding
                     // the same lock reconciliation uses for ownership reads.
                     try? await tmux.killWindow(
                         server: currentWorktree.tmuxServer,
-                        windowID: terminal.tmuxWindowID)
+                        windowID: currentTerminal.tmuxWindowID)
                     _ = try await tmux.ensureServer(
                         server: currentWorktree.tmuxServer,
                         session: "main",
@@ -1326,7 +1388,7 @@ extension RPCRouter {
                         session: "main",
                         cwd: currentWorktree.path,
                         shellCommand: "exec /usr/bin/tail -f /dev/null",
-                        env: codexRecreateEnv,
+                        env: replacementEnv,
                         cols: resolvedCols,
                         rows: resolvedRows
                     )
@@ -1334,11 +1396,16 @@ extension RPCRouter {
                     do {
                         // The new Codex process does not exist yet. Reset the
                         // dead process lifecycle before launching Codex.
-                        try await db.terminals.replaceRecreatedCodexWindow(
+                        guard let incarnationID = try await db.terminals.replaceRecreatedCodexWindow(
                             id: params.terminalID,
+                            expectedIncarnation: expectedIncarnation,
                             windowID: window.windowID,
                             paneID: window.paneID,
-                            at: now())
+                            at: now()) else {
+                            throw StaleTerminalReplacementError()
+                        }
+                        replacementEnv = AgentProcessEnvironment.replacement(
+                            base: replacementEnv, incarnationID: incarnationID)
                     } catch {
                         try? await tmux.killWindow(
                             server: currentWorktree.tmuxServer,
@@ -1353,7 +1420,7 @@ extension RPCRouter {
                             cwd: currentWorktree.path,
                             shellCommand: CodexSpawnCommandBuilder.command(
                                 executablePath: codexPreparation.executablePath),
-                            env: codexRecreateEnv,
+                            env: replacementEnv,
                             sensitiveEnv: codexEnvOverrides,
                             cols: resolvedCols,
                             rows: resolvedRows)
@@ -1402,9 +1469,21 @@ extension RPCRouter {
                     db: db, worktreeID: worktree.id,
                     allowedStatuses: [worktree.status]
                 ) { currentWorktree in
+                    guard let currentTerminal = try await self.db.terminals.get(
+                        id: terminal.id),
+                          expectedReplacementState.matches(currentTerminal),
+                          currentTerminal.kind != .codex,
+                          currentTerminal.label != TerminalLabel.codex,
+                          !currentTerminal.isClaudeResumable,
+                          !currentTerminal.isParked else {
+                        throw StaleTerminalReplacementError()
+                    }
+                    let expectedIncarnation = TerminalSessionIncarnation(
+                        terminal: currentTerminal)
+                    var replacementEnv = env
                     try? await tmux.killWindow(
                         server: currentWorktree.tmuxServer,
-                        windowID: terminal.tmuxWindowID)
+                        windowID: currentTerminal.tmuxWindowID)
                     _ = try await tmux.ensureServer(
                         server: currentWorktree.tmuxServer,
                         session: "main",
@@ -1417,28 +1496,48 @@ extension RPCRouter {
                         server: currentWorktree.tmuxServer,
                         session: "main",
                         cwd: currentWorktree.path,
-                        shellCommand: shell,
-                        env: env,
+                        shellCommand: "exec /usr/bin/tail -f /dev/null",
+                        env: replacementEnv,
                         cols: resolvedCols,
                         rows: resolvedRows
                     )
 
                     do {
-                        // Update the row while the window cannot be mistaken
-                        // for an orphan by reconciliation.
-                        try await db.terminals.updateTmuxIDs(
+                        // Bind the staged window and its process token before
+                        // the shell can launch a hook-emitting agent.
+                        guard let incarnationID = try await db.terminals.replaceRecreatedShellWindow(
                             id: params.terminalID,
+                            expectedIncarnation: expectedIncarnation,
                             windowID: window.windowID,
-                            paneID: window.paneID
-                        )
-                        try await db.terminals.clearRecreated(id: params.terminalID)
-                        return try await db.terminals.get(id: params.terminalID)
+                            paneID: window.paneID,
+                            at: now()) else {
+                            throw StaleTerminalReplacementError()
+                        }
+                        replacementEnv = AgentProcessEnvironment.replacement(
+                            base: replacementEnv, incarnationID: incarnationID)
                     } catch {
                         try? await tmux.killWindow(
                             server: currentWorktree.tmuxServer,
                             windowID: window.windowID)
                         throw error
                     }
+
+                    do {
+                        try await tmux.respawnWindow(
+                            server: currentWorktree.tmuxServer,
+                            windowID: window.windowID,
+                            cwd: currentWorktree.path,
+                            shellCommand: shell,
+                            env: replacementEnv,
+                            cols: resolvedCols,
+                            rows: resolvedRows)
+                    } catch {
+                        try? await tmux.killWindow(
+                            server: currentWorktree.tmuxServer,
+                            windowID: window.windowID)
+                        throw error
+                    }
+                    return try await db.terminals.get(id: params.terminalID)
                 }
             }
 
@@ -1697,6 +1796,7 @@ extension RPCRouter {
         guard let worktree = try await db.worktrees.getLocal(id: oldTerminal.worktreeID) else {
             return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
         }
+        let expectedReplacementState = TerminalReplacementSnapshot(terminal: oldTerminal)
 
         // Resolve the requested profile (nil = no override; keychain login).
         // We do NOT touch the old terminal — both tabs coexist after the swap.
@@ -1761,17 +1861,23 @@ extension RPCRouter {
             }
 
             let destProfileID: UUID? = resolved?.profileID
-            try await db.terminals.setProfileID(id: oldTerminal.id, profileID: destProfileID)
+            let updated = try await tmux.withWorktreeServerLock(
+                db: db, worktreeID: worktree.id, allowedStatuses: [worktree.status]
+            ) { _ in
+                guard let updated = try await self.db.terminals.setParkedProfileID(
+                    id: oldTerminal.id,
+                    expectedState: expectedReplacementState,
+                    profileID: destProfileID) else {
+                    throw StaleTerminalReplacementError()
+                }
+                return updated
+            }
             subscriptions.broadcast(delta: .terminalProfileChanged(TerminalProfileDelta(
-                terminalID: oldTerminal.id,
-                worktreeID: worktree.id,
+                terminalID: updated.id,
+                worktreeID: updated.worktreeID,
                 newProfileID: destProfileID
             )))
             logger.info("cold swap: re-homed parked terminal \(oldTerminal.id, privacy: .public) to profile \(destProfileID?.uuidString ?? "ambient", privacy: .public) — not woken")
-
-            guard let updated = try await db.terminals.get(id: oldTerminal.id) else {
-                return RPCResponse(error: "Terminal vanished after cold swap")
-            }
             return try RPCResponse(result: updated)
         }
 
@@ -2010,18 +2116,33 @@ extension RPCRouter {
                 )
 
             case .inPlace:
-                let outcome = try await inPlaceSwapRespawn(
-                    oldTerminal: oldTerminal,
-                    worktree: worktree.worktree,
-                    spawnCommand: spawn.command,
-                    env: env,
-                    sensitiveEnv: sensitiveEnv,
-                    storedSessionID: storedSessionID,
-                    newProfileID: resolved?.profileID,
-                    scheduleRecapture: scheduleRecapture,
-                    cols: resolvedCols,
-                    rows: resolvedRows
-                )
+                let expectedIncarnation = TerminalSessionIncarnation(terminal: oldTerminal)
+                let replacementBaseEnv = env
+                let outcome = try await tmux.withWorktreeServerLock(
+                    db: db,
+                    worktreeID: worktree.id,
+                    allowedStatuses: [worktree.status]
+                ) { currentWorktree in
+                    guard let currentTerminal = try await self.db.terminals.get(id: oldTerminal.id),
+                          expectedIncarnation.matches(currentTerminal),
+                          currentTerminal.claudeSessionID == oldTerminal.claudeSessionID,
+                          currentTerminal.transcriptPath == oldTerminal.transcriptPath,
+                          !currentTerminal.isParked else {
+                        throw StaleTerminalReplacementError()
+                    }
+                    return try await self.inPlaceSwapRespawn(
+                        oldTerminal: currentTerminal,
+                        worktree: currentWorktree.worktree,
+                        spawnCommand: spawn.command,
+                        env: replacementBaseEnv,
+                        sensitiveEnv: sensitiveEnv,
+                        storedSessionID: storedSessionID,
+                        newProfileID: resolved?.profileID,
+                        scheduleRecapture: scheduleRecapture,
+                        cols: resolvedCols,
+                        rows: resolvedRows
+                    )
+                }
                 response = outcome.response
                 respawnFailure = outcome.respawnError
             }
@@ -2104,7 +2225,10 @@ extension RPCRouter {
 
         if scheduleRecapture {
             scheduleSessionRecapture(
-                terminalID: newTerminal.id, paneID: window.paneID, server: currentServer
+                terminalID: newTerminal.id,
+                paneID: window.paneID,
+                server: currentServer,
+                expectedIncarnationID: newTerminal.sessionIncarnationID
             )
         }
 
@@ -2127,7 +2251,8 @@ extension RPCRouter {
     /// A failed respawn is therefore invisible in the returned response — by
     /// design, and unchanged here. `respawnError` reports it out of band so the
     /// caller's actuation row can say `transport-failed` instead of inheriting
-    /// the response's success.
+    /// the response's success. Callers must hold the worktree tmux-server lock
+    /// across this whole helper.
     private func inPlaceSwapRespawn(
         oldTerminal: Terminal,
         worktree: Worktree,
@@ -2151,10 +2276,22 @@ extension RPCRouter {
         //    in-flight generation. Best-effort — never blocks the swap.
         await gracefullyInterruptPane(server: server, paneID: paneID)
 
-        // 2. Update the terminal row to the new profile + session up front, so a
-        //    later respawn failure still leaves the row on the new account.
-        try await db.terminals.setProfileID(id: oldTerminal.id, profileID: newProfileID)
-        try await db.terminals.updateSessionID(id: oldTerminal.id, sessionID: storedSessionID)
+        // 2. Commit the replacement identity and process token before launch,
+        //    so old-process hooks are stale and new-process hooks can attach
+        //    immediately without a launch gate.
+        let replacementObservedAt = now()
+        guard let incarnationID = try await db.terminals.prepareProfileAgentRespawn(
+            id: oldTerminal.id,
+            expectedState: TerminalReplacementSnapshot(terminal: oldTerminal),
+            sessionID: storedSessionID,
+            transcriptPath: oldTerminal.transcriptPath,
+            profileID: newProfileID,
+            at: replacementObservedAt) else {
+            throw StaleTerminalReplacementError()
+        }
+        guard let prepared = try await db.terminals.get(id: oldTerminal.id) else {
+            return (RPCResponse(error: "Terminal vanished before swap"), nil)
+        }
         // Step 1 killed the process any recorded prompt was raised on, and this
         // row survives the swap — so a `permission_prompt` standing here now
         // describes a dead pane. `SessionStateResolver`'s rung 4 would keep
@@ -2164,8 +2301,17 @@ extension RPCRouter {
         // from TBD's own act rather than waiting for the respawned session's
         // hooks to arrive — they may be seconds away, or lost to a stale `tbd`
         // on the pane's PATH.
-        try await db.terminals.clearAwaitingInputReason(id: oldTerminal.id)
         broadcastAwaitingInputRetraction(terminal: oldTerminal)
+        subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
+            terminalID: prepared.id,
+            worktreeID: prepared.worktreeID,
+            activityState: prepared.activityState,
+            activityStateSource: prepared.activityStateSource,
+            activityStateObservedAt: prepared.activityStateObservedAt,
+            activityStateOrderObservedAt: prepared.activityStateOrderObservedAt
+        )))
+        let replacementEnv = AgentProcessEnvironment.replacement(
+            base: env, incarnationID: incarnationID)
 
         // 3. Respawn IN PLACE — same window id / pane id → the tab and terminal
         //    row survive.
@@ -2175,7 +2321,7 @@ extension RPCRouter {
                 windowID: windowID,
                 cwd: worktree.localPath,
                 shellCommand: spawnCommand,
-                env: env,
+                env: replacementEnv,
                 sensitiveEnv: sensitiveEnv,
                 cols: cols,
                 rows: rows
@@ -2185,32 +2331,38 @@ extension RPCRouter {
             // retried); the pane surfaces the error. Log clearly and still
             // return the updated row so the app reflects the new account — but
             // hand the failure back so the record classifies it truthfully.
-            logger.warning("inPlace swap: respawn failed for terminal \(oldTerminal.id, privacy: .public) window \(windowID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            logger.warning("inPlace swap: respawn or lifecycle finalization failed for terminal \(oldTerminal.id, privacy: .public) window \(windowID, privacy: .public): \(error.localizedDescription, privacy: .public)")
             respawnError = "\(error)"
-        }
-
-        subscriptions.broadcast(delta: .terminalSessionUpdated(TerminalSessionDelta(
-            terminalID: oldTerminal.id,
-            worktreeID: worktree.id,
-            sessionID: storedSessionID,
-            transcriptPath: oldTerminal.transcriptPath
-        )))
-        // Update the row's account chip in place — same terminal id, new profile.
-        subscriptions.broadcast(delta: .terminalProfileChanged(TerminalProfileDelta(
-            terminalID: oldTerminal.id,
-            worktreeID: worktree.id,
-            newProfileID: newProfileID
-        )))
-
-        if scheduleRecapture {
-            scheduleSessionRecapture(
-                terminalID: oldTerminal.id, paneID: paneID, server: server
-            )
         }
 
         guard let updated = try await db.terminals.get(id: oldTerminal.id) else {
             return (RPCResponse(error: "Terminal vanished after swap"), respawnError)
         }
+        if let currentSessionID = updated.claudeSessionID {
+            subscriptions.broadcast(delta: .terminalSessionUpdated(TerminalSessionDelta(
+                terminalID: updated.id,
+                worktreeID: updated.worktreeID,
+                sessionID: currentSessionID,
+                transcriptPath: updated.transcriptPath,
+                sessionOrderObservedAt: updated.sessionOrderObservedAt
+            )))
+        }
+        // Update the row's account chip in place — same terminal id, new profile.
+        subscriptions.broadcast(delta: .terminalProfileChanged(TerminalProfileDelta(
+            terminalID: updated.id,
+            worktreeID: updated.worktreeID,
+            newProfileID: updated.profileID
+        )))
+
+        if scheduleRecapture, respawnError == nil {
+            scheduleSessionRecapture(
+                terminalID: oldTerminal.id,
+                paneID: paneID,
+                server: server,
+                expectedIncarnationID: incarnationID
+            )
+        }
+
         logger.info("inPlace swap: terminal \(oldTerminal.id, privacy: .public) switched to profile \(newProfileID?.uuidString ?? "ambient", privacy: .public) in window \(windowID, privacy: .public)")
         return (try RPCResponse(result: updated), respawnError)
     }
@@ -2254,11 +2406,17 @@ extension RPCRouter {
     /// for Claude to settle, then capture the new id from the pane and persist it
     /// against `terminalID`. (On the `.inPlace` path there is no `--fork-session`,
     /// so the id is unchanged and the recapture is a harmless no-op.)
-    private func scheduleSessionRecapture(terminalID: UUID, paneID: String, server: String) {
+    private func scheduleSessionRecapture(
+        terminalID: UUID,
+        paneID: String,
+        server: String,
+        expectedIncarnationID: UUID?
+    ) {
         SessionRecaptureScheduler(db: db, tmux: tmux).schedule(
             terminalID: terminalID,
             paneID: paneID,
-            server: server
+            server: server,
+            expectedIncarnationID: expectedIncarnationID
         )
     }
 
@@ -3154,6 +3312,7 @@ extension RPCRouter {
             logger.debug("sessionEvent: unknown terminalID=\(params.terminalID.uuidString, privacy: .public) — ignoring")
             return .ok()
         }
+        let expectedIncarnation = TerminalSessionIncarnation(terminal: terminal)
         await sessionCounters.recordHookEvent(terminalID: terminal.id, at: observedAt)
 
         // `cwd` is optional for backward compatibility — when absent we cannot
@@ -3174,6 +3333,10 @@ extension RPCRouter {
             }
             return p
         }()
+        let effectiveTranscriptPath = cleanedPath ?? terminal.transcriptPath
+        let observedTranscriptBoundary = terminal.isCodexTerminal
+            ? observedTranscriptBoundary(atAbsolutePath: effectiveTranscriptPath)
+            : nil
 
         // Codex session identity, prompt retraction, and the idle fact are
         // reconciled atomically on independent ordering rails. Other agent
@@ -3181,8 +3344,11 @@ extension RPCRouter {
         // in the same transaction.
         guard let sessionApplication = try await db.terminals.applySessionStart(
             id: terminal.id,
+            expectedIncarnation: expectedIncarnation,
+            reportedIncarnationID: params.sessionIncarnationID,
             sessionID: params.sessionID,
             transcriptPath: cleanedPath,
+            observedTranscriptBoundary: observedTranscriptBoundary,
             observedAt: observedAt
         ) else { return .ok() }
 
@@ -3196,17 +3362,21 @@ extension RPCRouter {
            !transcriptPath.isEmpty,
            let sessionGeneration = sessionApplication.orderObservedAt {
             if sessionApplication.isInitialAttachment {
-                await codexActivityTracker.adoptInitialSession(
-                    transcriptPath: transcriptPath,
-                    worktreeID: terminal.worktreeID,
-                    terminalID: terminal.id,
-                    generation: sessionGeneration)
+                if let boundaryOffset = sessionApplication.transcriptBoundaryOffset {
+                    await codexActivityTracker.adoptInitialSession(
+                        transcriptPath: transcriptPath,
+                        worktreeID: terminal.worktreeID,
+                        terminalID: terminal.id,
+                        generation: sessionGeneration,
+                        boundaryOffset: boundaryOffset)
+                }
             } else {
                 await codexActivityTracker.establishSessionBoundary(
                     transcriptPath: transcriptPath,
                     worktreeID: terminal.worktreeID,
                     terminalID: terminal.id,
-                    generation: sessionGeneration)
+                    generation: sessionGeneration,
+                    boundaryOffset: sessionApplication.transcriptBoundaryOffset)
             }
         }
 

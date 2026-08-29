@@ -488,6 +488,8 @@ import Testing
             "20260816122608_worktree_remote_parent_assigned",
             "20260816181509_remote_create_defaults",
             "20260824214437_auto_create_notes_setting",
+            "20260825024814_codex_transcript_boundary",
+            "20260825060216_terminal_session_incarnation",
         ]
         let found = try SQLMigrationLoader.bundled.get()
         #expect(found.files.map(\.identifier) == expected)

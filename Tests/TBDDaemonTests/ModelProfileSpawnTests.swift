@@ -29,14 +29,44 @@ struct ModelProfileSpawnTests {
     /// Recorder for tmux argv lists invoked during dryRun.
     final class TmuxRecorder: @unchecked Sendable {
         private let lock = NSLock()
+        private let releaseGate = DispatchSemaphore(value: 0)
         private var _calls: [[String]] = []
+        private var blockMatch: String?
+        private var _isBlocked = false
         var calls: [[String]] {
             lock.lock(); defer { lock.unlock() }
             return _calls
         }
         func record(_ args: [String]) {
-            lock.lock(); defer { lock.unlock() }
-            _calls.append(args)
+            let shouldBlock = lock.withLock { () -> Bool in
+                _calls.append(args)
+                guard let blockMatch,
+                      !_isBlocked,
+                      args.joined(separator: " ").contains(blockMatch) else {
+                    return false
+                }
+                _isBlocked = true
+                return true
+            }
+            if shouldBlock {
+                releaseGate.waitForGate("profile respawn")
+            }
+        }
+        func arm(matching value: String) {
+            lock.withLock {
+                blockMatch = value
+                _isBlocked = false
+            }
+        }
+        var isBlocked: Bool { lock.withLock { _isBlocked } }
+        var blockedCommand: [String]? {
+            lock.withLock {
+                guard let blockMatch else { return nil }
+                return _calls.last { $0.joined(separator: " ").contains(blockMatch) }
+            }
+        }
+        func release() {
+            releaseGate.signal()
         }
         var joinedAll: String { calls.map { $0.joined(separator: " ") }.joined(separator: "\n") }
         /// Concatenation of just the shell-command bodies (last argv element of
@@ -47,9 +77,34 @@ struct ModelProfileSpawnTests {
         }
     }
 
-    private func makeFixture() -> (RPCRouter, TBDDatabase, TmuxRecorder) {
+    final class StateDeltaRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [StateDelta] = []
+
+        func subscribe(to router: RPCRouter) {
+            router.subscriptions.addSubscriber { [weak self] data in
+                guard let delta = try? JSONDecoder().decode(StateDelta.self, from: data) else {
+                    return true
+                }
+                guard let self else { return false }
+                self.lock.withLock { self.values.append(delta) }
+                return true
+            }
+        }
+
+        func snapshot() -> [StateDelta] {
+            lock.withLock { values }
+        }
+    }
+
+    private func makeFixture(
+        respawnWindowError: (@Sendable (String) -> Error?)? = nil
+    ) -> (RPCRouter, TBDDatabase, TmuxRecorder) {
         let recorder = TmuxRecorder()
-        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in recorder.record(args) })
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: { args in recorder.record(args) },
+            dryRunRespawnWindowError: respawnWindowError)
         let db = try! TBDDatabase(inMemory: true)
         let lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
@@ -741,17 +796,136 @@ struct ModelProfileSpawnTests {
         #expect(joined.contains("CLAUDE_CONFIG_DIR="))
     }
 
+    @Test("in-place swap: handler event from the respawn gap is fenced")
+    func inPlaceSwapFencesSessionStartHandledDuringRespawnGap() async throws {
+        let (router, db, recorder) = makeFixture()
+        let deltas = StateDeltaRecorder()
+        deltas.subscribe(to: router)
+        defer { Task { await cleanup(db) } }
+        let (_, worktree) = try await seedRepoAndWorktree(db)
+        let profileA = try await seedOAuthProfile(db, name: "A")
+        let profileB = try await seedOAuthProfile(db, name: "B")
+        try await db.config.setDefaultProfileID(profileA.id)
+
+        let createResponse = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: worktree.id, type: .claude)))
+        let terminal = try createResponse.decodeResult(Terminal.self)
+
+        let swapRequest = try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(
+                terminalID: terminal.id,
+                newProfileID: profileB.id,
+                mode: .inPlace))
+        recorder.arm(matching: "respawn-window")
+        let swap = gateHoldingTask {
+            await router.handle(swapRequest)
+        }
+        guard await waitUntil({ recorder.isBlocked }) else {
+            recorder.release()
+            _ = await swap.value
+            Issue.record("profile swap never reached the respawn")
+            return
+        }
+        let staged = try #require(try await db.terminals.get(id: terminal.id))
+        let intendedSessionID = try #require(staged.claudeSessionID)
+        let replacementToken = try #require(staged.sessionIncarnationID)
+        #expect(recorder.blockedCommand?.last?.contains(
+            "TBD_TERMINAL_INCARNATION_ID='\(replacementToken.uuidString)'") == true)
+        let matchedCLIPath = try #require(AgentProcessEnvironment.cliPath)
+        #expect(recorder.blockedCommand?.last?.contains(
+            "TBD_CLI_PATH=\(SystemPromptBuilder.shellEscape(matchedCLIPath))") == true)
+
+        let gapEvent = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "old-process-gap-session",
+                transcriptPath: "/tmp/old-process-gap-session.jsonl",
+                source: "startup"))
+        #expect((await router.handle(gapEvent)).success)
+        #expect(try await db.terminals.get(id: terminal.id)?.claudeSessionID
+                == intendedSessionID)
+
+        let replacementEvent = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "replacement-session",
+                transcriptPath: "/tmp/replacement-session.jsonl",
+                source: "startup",
+                sessionIncarnationID: replacementToken))
+        #expect((await router.handle(replacementEvent)).success)
+        #expect(try await db.terminals.get(id: terminal.id)?.claudeSessionID
+                == "replacement-session")
+
+        recorder.release()
+        #expect((await swap.value).success)
+        let finalized = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(finalized.profileID == profileB.id)
+        #expect(finalized.claudeSessionID == "replacement-session")
+        #expect(finalized.transcriptPath == "/tmp/replacement-session.jsonl")
+
+        let sessionDeltas = deltas.snapshot().compactMap { delta -> TerminalSessionDelta? in
+            guard case .terminalSessionUpdated(let session) = delta else { return nil }
+            return session
+        }
+        #expect(sessionDeltas.last?.sessionID == "replacement-session")
+        #expect(sessionDeltas.last?.transcriptPath == "/tmp/replacement-session.jsonl")
+    }
+
+    @Test("in-place swap: launch failure broadcasts the derived unknown reset")
+    func inPlaceSwapLaunchFailureBroadcastsActivityReset() async throws {
+        let (router, db, _) = makeFixture(respawnWindowError: { _ in
+            TmuxError.unexpectedOutput("replacement launch failed")
+        })
+        defer { Task { await cleanup(db) } }
+        let (_, worktree) = try await seedRepoAndWorktree(db)
+        let profileA = try await seedOAuthProfile(db, name: "A")
+        let profileB = try await seedOAuthProfile(db, name: "B")
+        try await db.config.setDefaultProfileID(profileA.id)
+        let createResponse = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: worktree.id, type: .claude)))
+        let terminal = try createResponse.decodeResult(Terminal.self)
+        try await db.terminals.setActivityState(
+            id: terminal.id,
+            activityState: .working,
+            source: .hookEvent("UserPromptSubmit"),
+            observedAt: Date(timeIntervalSinceReferenceDate: 5))
+        let deltas = StateDeltaRecorder()
+        deltas.subscribe(to: router)
+
+        _ = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(
+                terminalID: terminal.id,
+                newProfileID: profileB.id,
+                mode: .inPlace)))
+
+        let stored = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(stored.activityState == .unknown)
+        #expect(stored.activityStateSource == .derived)
+        let activityDeltas = deltas.snapshot().compactMap { delta -> TerminalActivityDelta? in
+            guard case .terminalActivityUpdated(let activity) = delta else { return nil }
+            return activity
+        }
+        let reset = try #require(activityDeltas.last)
+        #expect(reset.activityState == stored.activityState)
+        #expect(reset.activityStateSource == stored.activityStateSource)
+        #expect(reset.activityStateObservedAt == stored.activityStateObservedAt)
+        #expect(reset.activityStateOrderObservedAt == stored.activityStateOrderObservedAt)
+    }
+
     /// An in-place swap kills the pane's Claude and respawns it, keeping the
     /// SAME terminal row — so a permission prompt that was on screen when the
     /// user switched account died with the old process while its recorded
     /// reason stayed on the row.
     ///
-    /// Nothing on the row's own rails retracts it: the swap writes only
-    /// `profile_id` and the session id, `transcriptPath` is unchanged so the
-    /// resolver's growth comparison still says "no growth since the prompt",
-    /// and the respawned session's `tbd terminal-activity idle` is a separate
-    /// best-effort CLI invocation seconds away at best. So the swap retracts it
-    /// itself, from its own act.
+    /// The post-respawn lifecycle transition retracts the prompt and replaces
+    /// old-process activity with derived unknown. The resumed process's hooks
+    /// establish its new activity after that durable fence.
     @Test("in-place swap: retracts a prompt recorded against the process it killed")
     func inPlaceSwapRetractsAStandingWaitReason() async throws {
         let (router, db, _) = makeFixture()
@@ -791,14 +965,13 @@ struct ModelProfileSpawnTests {
         #expect(after.profileID == b.id)
         #expect(after.awaitingInputReason == nil)
         #expect(after.awaitingInputObservedAt == nil)
-        // The dead prompt is gone from the composed answer — and with no
-        // growth fact at all, which is the shape that used to pin it.
+        // The dead prompt and activity are gone from the composed answer.
         let state = SessionStateResolver().resolve(SessionStateFacts(terminal: after))
-        #expect(state.value == .working)
-        // The activity columns are untouched: the swap knows the old prompt is
-        // gone, not what the respawned session is doing.
-        #expect(after.activityState == .working)
-        #expect(after.activityStateObservedAt == workingAt)
+        #expect(state.value == .unknown(
+            why: "the activity rail recorded state 'unknown' for this session"))
+        #expect(after.activityState == .unknown)
+        #expect(after.activityStateSource == .derived)
+        #expect(after.activityStateObservedAt != workingAt)
     }
 
     // MARK: - Swap over a NON-BLANK session: resume + --fork-session flag

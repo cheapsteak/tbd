@@ -14,6 +14,7 @@ The central safety policy is that false thinking is worse than false idle. Ambig
 
 - Derive Codex working and idle presentation from rollout lifecycle events.
 - Clear stale working indicators after interruption, restart, resumed sessions, and rewritten lifecycle identifiers.
+- Recover an open Codex turn after daemon state loss even when its start lies outside the transcript tail.
 - Preserve explicit user-attention states and immediate Ctrl+C feedback.
 - Reject delayed activity hooks from an older Codex session.
 - Handle root sessions and spawned subagents without treating copied parent history as nested active work.
@@ -25,7 +26,6 @@ The central safety policy is that false thinking is worse than false idle. Ambig
 
 - Inferring state from rendered terminal text or TUI glyphs.
 - Reporting the internal progress of every nested tool or process inside a turn.
-- Reconstructing lifecycle history older than the bounded transcript window when no current evidence exists.
 - Changing Claude hooks, shell activity, hibernation policy, or notification policy.
 - Introducing a general event-sourcing framework for terminal state.
 
@@ -50,6 +50,7 @@ This path is the shipped default for every Codex terminal and has no feature fla
 - Ctrl+C clears working immediately and remains authoritative until a valid later current-session event supersedes it.
 - A current permission wait defeats transcript working.
 - SessionStart applies identity and its eligible prompt/activity effects atomically; an event rejected by one ordering rail cannot partially roll identity backward.
+- Session identity, ordering watermark, transcript path, and transcript boundary describe one accepted SessionStart and change atomically.
 - Session identity, raw activity, attention state, and transcript presentation are ordered by the timestamps that describe those specific facts.
 - Claude and shell terminals do not enter Codex reconciliation or acquire its ordering behavior.
 
@@ -74,29 +75,33 @@ Already-running installations may still send activity events without a session i
 
 ### SessionStart and durable boundaries
 
-An accepted `SessionStart` establishes the current session identity and transcript path. Session identity has its own persisted observation order, separate from activity and attention timestamps. This prevents a delayed event from one rail from incorrectly ordering another rail.
+An accepted `SessionStart` establishes the current session identity, transcript path, session-order watermark, and durable transcript boundary. The boundary is a byte offset: lifecycle records before it belong to an earlier process or session, and records at or after it are eligible evidence for the accepted session. Session identity has its own persisted observation order, separate from activity and attention timestamps. This prevents a delayed event from one rail from incorrectly ordering another rail.
 
-The first accepted Codex start attaches the terminal to its initial rollout; there is no earlier terminal session to fence. The database classifies that attachment inside the same transaction that accepts the start. It is initial only when the stored row has no session identity, transcript path, or session-order watermark. A partial legacy or damaged row with any of those history fields is a later attachment and fences conservatively.
+The first accepted Codex start attaches the terminal to its initial rollout; there is no earlier terminal session to fence. The database classifies that attachment inside the same transaction that accepts the start. It is initial only when the stored row has no session identity, transcript path, session-order watermark, or transcript boundary. An initial attachment stores boundary `0`, even when the transcript does not exist yet, so lifecycle records written before the hook arrived remain eligible. A partial legacy or damaged row with any history field is a later attachment and fences conservatively.
 
-A recreated Codex window is a deliberate fresh-process boundary, not a partial-history row. TBD first creates an inert replacement pane, then atomically stores its new tmux coordinates, clears the dead process's session identity, transcript path, session-order watermark, attention, and activity facts, and retains the tab's Codex label and kind. Only after that write commits does TBD respawn the pane with Codex, so the replacement process cannot send SessionStart against the dead process's history. Its first SessionStart is an initial attachment and may adopt lifecycle records it wrote before its hook arrived. Until that start arrives, session-bound activity hooks from the dead process mismatch the cleared identity and change nothing.
+Every later accepted Codex start, including a same-path resume, records the effective transcript's current EOF as its boundary. If the effective path is absent or unreadable, the start records `NULL`. The database persists this choice atomically with the accepted identity, path, and session-order watermark. Rejected or stale starts change none of those facts. Equal-time competing starts are first-wins so completion order cannot roll identity backward.
+
+Any path that clears or replaces Codex session identity without accepting an ordered `SessionStart` also clears the durable boundary. This rule prevents a new process from inheriting an offset chosen for a dead identity. A permission fact observed at the same time as, or after, SessionStart survives it; only a strictly older permission fact is retracted.
+
+A recreated Codex window is a deliberate fresh-process boundary, not a partial-history row. TBD first creates an inert replacement pane, then atomically stores its new tmux coordinates, clears the dead process's session identity, transcript path, session-order watermark, transcript boundary, attention, and activity facts, and retains the tab's Codex label and kind. Only after that write commits does TBD respawn the pane with Codex, so the replacement process cannot send SessionStart against the dead process's history. Its first SessionStart is an initial attachment and may adopt lifecycle records it wrote before its hook arrived. Until that start arrives, session-bound activity hooks from the dead process mismatch the cleared identity and change nothing.
 
 Failure before the durable reset leaves the old row unchanged and removes any inert replacement pane on a best-effort basis; the normal worktree and tmux reconciler reclaims the unmatched pane if cleanup fails. Failure while launching Codex after the reset leaves the row cleared and retryable and also removes the inert pane on a best-effort basis. If that cleanup fails, the row still names the replacement window, so the same reconciler continues to own it rather than leaving an untracked resource.
 
-Codex can write `session_meta` and `task_started` before the first SessionStart hook reaches TBD, so the tracker retains an existing baseline or performs its ordinary bounded tail bootstrap. Those already-written lifecycle records are eligible to present the initial prompt as working, and a later matching close advances that baseline to idle. If the rollout is temporarily unavailable, the tracker remembers that the live generation is initial and a later poll bootstraps when the file appears.
+Session-order watermarks use numeric epoch storage so distinct starts within one millisecond remain distinct; the decoder also accepts legacy datetime text rows. Tracker targets carry the identity, effective path, watermark, and boundary read back from the updated database row, so the live handler and later terminal-list reload identify the same durable generation. A later generation defeats an older delayed tracker operation.
 
-Every later accepted Codex start establishes a lifecycle boundary at the transcript's current end, including a same-path resume. Events before that boundary do not become current work in the new session. Session-order watermarks use numeric epoch storage so distinct starts within one millisecond remain distinct; the decoder also accepts legacy datetime text rows. Tracker session operations carry the watermark read back from the updated database row, so the live handler and later terminal-list reload use the same durable generation. A later generation defeats an older delayed tracker operation. Within the same generation, live initial-attachment knowledge defeats a conservative boundary reconstructed by a terminal-list call that raced ahead after database persistence.
-
-The persisted SessionStart fact lets a tracker with no in-memory generation state, such as after daemon restart, reconstruct the boundary conservatively at the current end. Boundary preparation or retry and stamped transcript observation happen in one tracker actor operation. If the file is unavailable, that reconstructed boundary remains pending and makes the transcript ineligible for ordinary bootstrap until a later poll captures its EOF. In-memory generation state is transient, terminal-keyed, and pruned with transcript baselines during worktree- or fleet-scoped retention.
-
-Rejected or stale SessionStart events do not change identity, transcript path, attention state, activity, or tracker boundaries. Equal-time competing starts are first-wins so completion order cannot roll identity backward. A permission fact observed at the same time as, or after, SessionStart survives it; only a strictly older permission fact is retracted.
+A `NULL` boundary means TBD cannot identify a safe historical starting point. The tracker captures the transcript's current EOF once for that target, uses it as an in-memory fence, and waits for later lifecycle evidence. This applies to pre-migration terminals and later attachments whose transcript was unavailable when SessionStart arrived. The database retains `NULL` until a later accepted SessionStart supplies a new boundary; tracker recovery never guesses or backfills one.
 
 ### Transcript tracker
 
-A daemon actor owns transcript baselines, incremental offsets, partial records, reducer state, and presentation observation ordering. Serial actor access gives observations a stable order without blocking on unrelated database state.
+A daemon actor owns transcript targets, recovery cursors, incremental offsets, partial records, reducer state, and presentation observation ordering. Serial actor access gives observations a stable order without blocking on unrelated database state.
 
-The tracker reads appended JSONL incrementally. Initial observation and truncation recovery inspect only a bounded tail. It preserves an unterminated fragment across reads, discards a record that grows beyond the record cap, and resumes at the next newline.
+Each target includes the terminal's current session identity, effective transcript path, session generation, and durable boundary. A cold tracker starts at a known boundary and captures the transcript's current EOF as a fixed recovery target. It replays forward in the existing fixed-size chunks and under the shared request budget, preserving its cursor and reducer between polls. It publishes authoritative unknown, which presents as idle, until the cursor reaches the captured EOF with no incomplete or discarding record. It then publishes the exact reconstructed working or idle state and resumes ordinary incremental reads from the same cursor.
 
-Fleet and worktree-scoped observations share a fair cyclic path order. Scoped polling cannot reset fleet progress or starve a deferred transcript. A terminal-list response revalidates terminal identity, transcript path, and session generation after the actor observation. If the transcript changed during the scan, the response returns the current identity with a newly ordered unknown presentation rather than stale activity from the old file.
+The fixed recovery EOF prevents a continuously growing transcript from keeping recovery perpetually behind. Bytes appended after capture wait for ordinary incremental polls once recovery reaches the fixed target.
+
+The tracker preserves an unterminated fragment across reads, discards a record that grows beyond the record cap, and resumes at the next newline. An initial attachment whose file truncates may reset to boundary `0` and replay the replacement file from its beginning. If a later attachment's file shrinks below its boundary, the tracker fences at the new EOF in memory and waits for new lifecycle evidence; it does not reinterpret pre-boundary history or replace the durable boundary.
+
+Fleet and worktree-scoped observations share a fair cyclic path order. Scoped polling cannot reset fleet progress or starve a deferred transcript. A terminal-list response revalidates terminal identity, transcript path, session generation, and durable boundary after the actor observation. If any target fact changed during the scan, the response returns the current identity with a newly ordered unknown presentation rather than stale activity from the old file.
 
 ### Lifecycle reducer
 
@@ -150,14 +155,14 @@ Raw generic idle hooks do not defeat a valid open transcript. Raw generic workin
 
 Terminal-list polling must not decode unbounded transcript history or perform unbounded zero-byte filesystem work.
 
-- An initial or truncation bootstrap reads at most 1 MiB of transcript content, plus the bounded boundary check.
+- Recovery reads fixed-size chunks and retains its cursor across requests; no request scans the whole backlog.
 - A terminal-list observation has a shared 1 MiB byte budget across Codex transcripts.
 - Pending transcripts receive 64 KiB round-robin quanta.
 - One observation performs at most 16 filesystem steps, including caught-up and unreadable paths that consume no content bytes.
 - A single JSONL record is capped at 1 MiB. Oversized records are discarded through their newline.
 - Partial, discarding, untouched, and not-yet-caught-up paths publish unknown rather than cached working.
 
-Large backlogs converge over multiple polls. A continuously growing early path cannot consume every request because the cyclic cursor advances across requests and survives scoped polling and path removal.
+Large backlogs converge over multiple polls, regardless of how far the relevant lifecycle event lies from EOF. A continuously growing early path cannot consume every request because the cyclic cursor advances across requests and survives scoped polling and path removal.
 
 Field measurements found lifecycle lines near 3 KiB at the 99th percentile and about 21 KiB at the observed maximum. The 1 MiB record cap leaves substantial margin while bounding memory and scan cost.
 
@@ -166,13 +171,15 @@ Field measurements found lifecycle lines near 3 KiB at the 99th percentile and a
 - **Incomplete final record** — retain the bounded fragment, publish unknown, and retry after more bytes arrive.
 - **Oversized record** — discard through the next newline, publish unknown while discarding, then resume normal parsing.
 - **Unreadable file** — publish unknown and retry on a later observation.
-- **Truncation or replacement** — rebuild from the bounded tail and do not reuse incompatible reducer evidence.
+- **Initial-attachment truncation or replacement** — discard incompatible reducer evidence and replay from boundary `0`.
+- **Later-attachment shrink below the boundary** — fence at the new EOF in memory, publish unknown, and wait for later lifecycle evidence.
 - **Backlog beyond the request budget** — preserve incremental progress and publish unknown until caught up.
-- **Transcript identity changes during a scan** — discard the old-path result and publish an ordered unknown for the current identity.
-- **Initial task precedes SessionStart** — bootstrap or retain the first session's bounded baseline so already-written lifecycle evidence remains eligible.
-- **Terminal list races initial tracker attachment** — order both operations by the persisted session generation; same-generation initial knowledge replaces the speculative restart boundary.
-- **Initial rollout is temporarily unavailable** — retain the initial-generation mode without positive evidence, then use the ordinary bounded bootstrap when the file appears.
-- **Daemon restart after SessionStart** — reconstruct the boundary conservatively at the current end so an orphaned historical start cannot restore working.
+- **Target changes during a scan** — discard the old result when identity, path, generation, or boundary revalidation fails, then publish an ordered unknown for the current target.
+- **Initial task precedes SessionStart** — replay from durable boundary `0`, so already-written lifecycle evidence remains eligible.
+- **Terminal list races tracker attachment** — bind both operations to the complete persisted target; same-generation work with a different boundary cannot publish.
+- **Initial rollout is temporarily unavailable** — retain boundary `0` without positive evidence, then replay from zero when the file appears.
+- **Daemon restart with a known boundary** — capture a fixed EOF, replay progressively from the durable boundary, and publish unknown until caught up.
+- **Daemon restart with a `NULL` boundary** — fence at the current EOF in memory and wait for new evidence rather than guessing at historical eligibility.
 - **Delayed old-session hook with identity** — reject it before any mutation.
 - **Legacy hook without identity** — accept it for upgrade compatibility; subsequent session-bound hooks restore full protection.
 
@@ -192,9 +199,11 @@ The design uses aggregate counts and schema behavior only. No rollout content or
 
 ## Persistence and compatibility
 
-New shared-model and RPC fields are optional so older JSON continues to decode. Database ordering fields are nullable so pre-migration rows retain an explicit unknown state and fall back to their existing semantic timestamps where required.
+The `terminal` table gains `codexTranscriptBoundaryOffset INTEGER` with no SQL default. Its GRDB record and shared `Terminal` model expose the value as `Int64?`. The shared model decodes the field with `decodeIfPresent`, so older JSON remains valid. Pre-migration rows read `NULL`, not `0`; `NULL` preserves the distinction between a known initial boundary and an unknown safe boundary.
 
-Session identity order is persisted independently from activity order. Presentation order is transient because it describes observations produced by the live transcript tracker rather than a durable user or hook fact.
+The migration file, GRDB record, and shared model change together. The Swift migration escape hatch also omits a default if it must add the missing column. Existing RPC payloads remain compatible because the new field is optional.
+
+Session identity order and the transcript boundary are persisted independently from activity order but atomically with each other. Presentation order, recovery cursors, captured recovery EOFs, and reducer state remain transient because they describe observations produced by the live transcript tracker rather than durable user or hook facts.
 
 Generated hook configuration is refreshed through the existing plugin installation path. Mixed-version clients remain usable because identity-free activity events are accepted and new wire fields are optional.
 
@@ -212,26 +221,35 @@ Reducer tests cover:
 
 Tracker tests cover:
 
-- initial tail bootstrap, truncation, and incremental reads;
+- a fresh tracker replaying from boundary `0` when `task_started` lies more than 1 MiB before EOF;
+- early bounded observations publishing unknown, then converging to working after reaching the fixed recovery EOF;
+- completion or abort after an old start converging to idle;
+- a later-session boundary excluding an unmatched start before the boundary;
+- fixed-EOF recovery when the transcript grows during catch-up, followed by ordinary incremental reads;
+- initial-attachment replay from zero after truncation and later-attachment in-memory fencing after shrink below the boundary;
 - 64 KiB boundaries and unterminated fragments;
 - oversized-record discard and recovery;
 - unreadable-file recovery;
 - per-request byte and step limits;
 - fleet fairness, scoped polling, path removal, and reordering;
-- atomic first-attachment classification, including partial-history rows, concurrent starts, sub-millisecond ordering, and legacy datetime rows;
-- same-generation list/adoption races, pending-boundary observation, unavailable initial rollouts, later-generation precedence, and generation-state retention;
-- later SessionStart boundaries, daemon reconstruction, and same-path invalidation;
-- transcript identity rollover during concurrent list calls.
+- target changes during suspended observation, including identity, path, generation, and boundary changes.
 
 Daemon and wire tests cover:
 
+- migration of pre-existing rows to a `NULL` boundary and model round trips for `0`, positive offsets, and `NULL`;
+- backward-compatible shared-model decoding when the boundary field is absent;
+- initial attachment storing `0`, including when the transcript is not yet readable;
+- later attachment storing the effective transcript EOF or `NULL` when the file is unavailable;
+- atomic first-attachment classification, including partial-history rows, concurrent starts, sub-millisecond ordering, and legacy datetime rows;
+- stale and retried SessionStart events leaving the accepted boundary unchanged;
+- identity-clearing and identity-replacement paths clearing the boundary;
 - current-session hook acceptance and stale-session rejection;
 - legacy identity-free hook compatibility;
 - atomic ordering of session, activity, and attention facts;
 - equal-time precedence;
 - Ctrl+C persistence and later supersession;
 - bounded hook-payload parsing and JSON round trips;
-- migration of nullable ordering fields.
+- a terminal-list integration path that loads a database-backed terminal into a fresh tracker and recovers activity after daemon-state loss.
 
 App and sidebar tests cover:
 
@@ -248,12 +266,15 @@ Verification includes focused suites for each layer, `scripts/swift-safe build`,
 
 - **Hooks alone** — hooks do not reliably close every interrupted or resumed turn and can arrive after session rollover.
 - **Transcript alone** — it cannot provide immediate Ctrl+C feedback or preserve a permission prompt over an open task.
+- **Bounded tail recovery** — an open turn whose start lies before the tail window remains falsely idle after tracker state is lost.
+- **Persisting the reducer checkpoint** — storing the cursor and open-task state would require frequent database writes and crash-consistency rules, and a stale checkpoint could restore false working.
+- **Searching backward from EOF** — reverse lifecycle correlation is more complex, and a long-running open turn still requires scanning nearly the entire transcript.
 - **A task stack** — copied parent history and orphaned starts would be restored after the current subagent task closes, creating false working.
 - **A default-off flag** — the legacy path is the known failure and parallel modes would preserve conflicting interpretations. Conservative idle fallback bounds the replacement's risk.
 - **Terminal screen scraping** — rendered TUI text is not a stable machine interface.
 
 ## Operational impact
 
-The design adds no new durable external resource and requires no new reconciler. It reads existing rollout files, persists ordering metadata in the existing terminal record, and uses existing RPC and hook installation paths.
+The design adds no new durable external resource and requires no new reconciler. It reads existing rollout files, persists ordering metadata and the transcript boundary in the existing terminal record, and uses existing RPC and hook installation paths.
 
 No automatic process control, input injection, deletion, or background actuation is introduced. The change affects only Codex activity observation and presentation.
