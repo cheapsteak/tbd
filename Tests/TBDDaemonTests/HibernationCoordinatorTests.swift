@@ -1375,7 +1375,7 @@ struct HibernationCoordinatorTests {
         let wake = gateHoldingTask {
             await router.hibernationCoordinator.wake(terminalID: terminalID)
         }
-        guard await waitUntil({ recorder.isBlocked }) else {
+        guard await waitUntil({ recorder.isBlocked }, timeout: ciSafeDeadline) else {
             recorder.release()
             _ = await wake.value
             Issue.record("wake never reached the in-place respawn")
@@ -1436,7 +1436,7 @@ struct HibernationCoordinatorTests {
         let wake = gateHoldingTask {
             await coord.wake(terminalID: terminalID)
         }
-        guard await waitUntil({ recorder.isBlocked }) else {
+        guard await waitUntil({ recorder.isBlocked }, timeout: ciSafeDeadline) else {
             recorder.release()
             _ = await wake.value
             Issue.record("wake never reached the replacement launch")
@@ -1807,7 +1807,7 @@ struct HibernationCoordinatorTests {
 
         recorder.arm(matching: "new-window")
         let wake = gateHoldingTask { await coord.wake(terminalID: terminalID) }
-        guard await waitUntil({ recorder.isBlocked }) else {
+        guard await waitUntil({ recorder.isBlocked }, timeout: ciSafeDeadline) else {
             recorder.release()
             _ = await wake.value
             Issue.record("wake never reached replacement window creation")

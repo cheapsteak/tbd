@@ -813,7 +813,7 @@ struct TerminalActivityEventHandlerTests {
         )
 
         let earlier = gateHoldingTask { await router.handle(interrupt) }
-        guard await waitUntil({ dates.firstCallIsBlocked }) else {
+        guard await waitUntil({ dates.firstCallIsBlocked }, timeout: ciSafeDeadline) else {
             dates.releaseFirstCall()
             _ = await earlier.value
             Issue.record("earlier interrupt never reached the date seam")
