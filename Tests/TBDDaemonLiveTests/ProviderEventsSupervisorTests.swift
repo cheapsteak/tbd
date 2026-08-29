@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
 
@@ -38,8 +39,10 @@ struct ProviderEventsSupervisorTests {
     /// per-test duration is ~1/3 of total wall time). 90s matches the
     /// `ciSafeDeadline` re-derivation for this same contention class; that
     /// constant lives in `Tests/TBDDaemonTests` and is not importable from this
-    /// target, hence the local literal rather than a shared symbol.
-    private static let saturatedWaitDeadline: TimeInterval = 90
+    /// target, so both take the same value from `TestSupport` rather than
+    /// repeating the literal.
+    private static let saturatedWaitDeadline: TimeInterval =
+        TestDeadlines.saturatedPassSeconds
 
     /// Hang guard for the "no leaked children" waits, which are cheaper than
     /// the ones above but not free: SIGKILL delivery is kernel-immediate, yet

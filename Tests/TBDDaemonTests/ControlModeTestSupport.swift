@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 
 @testable import TBDDaemonLib
@@ -105,16 +106,16 @@ import Testing
 /// *itself* (its own tests megaYielding against each other) and does not cover
 /// this case.
 ///
-/// ## Two copies live outside this target
+/// ## The value is shared; this is where its derivation lives
 ///
-/// `Tests/TBDDaemonLiveTests` cannot import this symbol, so
-/// `ProviderEventsSupervisorTests.saturatedWaitDeadline` and
-/// `TmuxControlSupervisorTeardownTests.teardownWaitDeadline` each carry the
-/// same 90 s as a local literal. Nothing detects divergence between the three,
-/// so re-derive them together — and note that the two copies sit in the quiet
-/// pass, which never sees the saturation this value is sized against, so they
-/// have room this one does not.
-let ciSafeDeadline: Duration = .seconds(90)
+/// The number itself is `TestDeadlines.saturatedPass`
+/// (`Tests/TestSupport/BoundedGateSupport.swift`), because
+/// `Tests/TBDDaemonLiveTests` cannot import this symbol and two waits there
+/// need the same budget. Keeping one literal is what stops the three from
+/// drifting apart unnoticed; the reasoning above is what re-derives it, and it
+/// stays here. Re-derive it together with `TestGate.deadline`, which must
+/// dominate it, and with `waitForSuspension` / `.clockDriven`.
+let ciSafeDeadline: Duration = TestDeadlines.saturatedPass
 
 /// Thread-safe, synchronous recorder of fake-client stream writes in call
 /// order.
