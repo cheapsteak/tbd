@@ -407,16 +407,19 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         var tmuxBridge: TmuxBridge?
         var tmuxServer: String = ""
         var panelID: UUID = UUID()
-        /// Generation of this coordinator's own `prepareSession`, `nil` until
-        /// one succeeds (and forever for a control-mode panel, which has no
-        /// tmux view session). Both teardown paths pass it back so a stale
-        /// teardown cannot kill a session a *newer* coordinator prepared for
-        /// the same `panelID`: `panelID` is the terminal's id and survives the
-        /// SwiftUI view rebuild that waking a parked terminal triggers, which
-        /// mints a fresh `Coordinator` for it. Written from the `@MainActor`
-        /// preparation path and read from the non-isolated `deinit`, exactly
-        /// like `tmuxBridge`/`panelID`/`tmuxServer` beside it.
-        var tmuxSessionGeneration: UInt64?
+        /// This coordinator's own successful `prepareSession` — the bridge that
+        /// tracks the view session and the generation naming that preparation
+        /// — empty until one succeeds (and forever for a control-mode panel,
+        /// which has no tmux view session). Both teardown paths reclaim
+        /// through it, so a stale teardown cannot kill a session a *newer*
+        /// coordinator prepared for the same `panelID`: `panelID` is the
+        /// terminal's id and survives the SwiftUI view rebuild that waking a
+        /// parked terminal triggers, which mints a fresh `Coordinator` for it.
+        ///
+        /// A lock-guarded holder rather than plain properties because the
+        /// write is `@MainActor` and `deinit`'s read is not isolated at all —
+        /// see `ViewSessionReclaim`.
+        let viewSessionReclaim = ViewSessionReclaim()
         var tabCloseContext: TabCloseContext?
         var onMissingWindow: (@MainActor () async -> AutomaticTerminalRecreationOutcome)?
         var onRecoveryGuidance: (@MainActor (String) -> Void)?
@@ -755,7 +758,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // Scope this coordinator's teardown to the preparation it just
                 // made, so `cleanup()`/`deinit` can only reclaim the view
                 // session this coordinator owns — see `cleanupSession`.
-                tmuxSessionGeneration = value.generation
+                // Published under a lock because `deinit` reads it off the
+                // main actor — see `ViewSessionReclaim`.
+                viewSessionReclaim.publish(bridge: bridge, generation: value.generation)
             }
 
             let tmuxPath = prepared.executablePath
@@ -962,8 +967,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 NSEvent.removeMonitor(monitor)
                 clickMonitor = nil
             }
-            if let generation = tmuxSessionGeneration {
-                tmuxBridge?.cleanupSession(panelID: panelID, generation: generation)
+            if let preparation = viewSessionReclaim.published {
+                preparation.bridge.cleanupSession(
+                    panelID: panelID, generation: preparation.generation)
             }
             resizeDebounceTask?.cancel()
             resizeDebounceTask = nil
@@ -1304,14 +1310,22 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // idempotence is what is relied on — NOT `isTornDown`, which is
             // `@MainActor`-confined and must not be read from here.
             //
+            // The same reasoning covers the facts this reclamation needs. They
+            // are written from the `@MainActor` preparation path and read here
+            // on whatever thread drops the last strong reference, so they are
+            // published through `viewSessionReclaim`, which guards them with a
+            // lock. Nothing here relies on SwiftUI releasing coordinators on
+            // the main thread; a stale read would silently skip the kill.
+            //
             // Generation-scoped, like `cleanup()`'s call: `deinit` fires
             // strictly later and less predictably than `dismantleNSView`, so a
             // superseded coordinator's release can land well after a rebuild
             // has prepared a new session under the same `panelID`. Passing
             // this coordinator's own generation makes that a no-op instead of
             // killing the fresh session.
-            if let generation = tmuxSessionGeneration {
-                tmuxBridge?.cleanupSession(panelID: panelID, generation: generation)
+            if let preparation = viewSessionReclaim.published {
+                preparation.bridge.cleanupSession(
+                    panelID: panelID, generation: preparation.generation)
             }
         }
 

@@ -83,7 +83,7 @@ struct TerminalViewSessionReclamationTests {
             coordinator?.tmuxBridge = bridge
             coordinator?.tmuxServer = "tbd-repo"
             coordinator?.panelID = Self.panelID
-            coordinator?.tmuxSessionGeneration = generations[0]
+            coordinator?.viewSessionReclaim.publish(bridge: bridge, generation: generations[0])
             // No `cleanup()`, no `dismantleNSView` — only ARC.
             coordinator = nil
         }
@@ -122,7 +122,7 @@ struct TerminalViewSessionReclamationTests {
         coordinator?.tmuxBridge = bridge
         coordinator?.tmuxServer = "tbd-repo"
         coordinator?.panelID = Self.panelID
-        coordinator?.tmuxSessionGeneration = generations[0]
+        coordinator?.viewSessionReclaim.publish(bridge: bridge, generation: generations[0])
         await MainActor.run { [coordinator] in
             coordinator?.cleanup()
         }
@@ -214,7 +214,7 @@ struct TerminalViewSessionReclamationTests {
             superseded?.tmuxBridge = bridge
             superseded?.tmuxServer = "tbd-repo"
             superseded?.panelID = Self.panelID
-            superseded?.tmuxSessionGeneration = generations[0]
+            superseded?.viewSessionReclaim.publish(bridge: bridge, generation: generations[0])
             superseded = nil
         }
 
@@ -298,7 +298,7 @@ struct TerminalViewSessionReclamationTests {
             // Disagrees with the server the session was prepared on.
             coordinator?.tmuxServer = "tbd-repo-stale"
             coordinator?.panelID = Self.panelID
-            coordinator?.tmuxSessionGeneration = generations[0]
+            coordinator?.viewSessionReclaim.publish(bridge: bridge, generation: generations[0])
             coordinator = nil
         }
 
@@ -318,7 +318,7 @@ struct TerminalViewSessionReclamationTests {
     /// run while `prepareSession` is suspended: the panel's `Task` starts the
     /// preparation, tmux takes a while, and the user closes the tab. The
     /// post-await torn-down guard then returns *before* the `.startViewer`
-    /// branch that records `tmuxSessionGeneration` — but `prepareSession` has
+    /// branch that publishes the generation — but `prepareSession` has
     /// already registered the session with the bridge. Neither `cleanup()`
     /// (already run, generation still nil) nor `deinit` (nil forever) can
     /// name it, so nothing reclaims the view session, the linked worktree
@@ -393,6 +393,36 @@ struct TerminalViewSessionReclamationTests {
                 args: TmuxBridge.killSessionArgs(sessionName: Self.sessionName)
             ),
         ])
+    }
+
+    /// The holder exists so that what the `@MainActor` preparation publishes is
+    /// visible to a `deinit` running on whatever thread drops the last strong
+    /// reference. Publish from the main actor, read from a plain dispatch
+    /// queue — never from a cooperative-pool thread, which this must not park
+    /// (`Tests/CLAUDE.md`, "Thread-blocking gates run off the cooperative
+    /// pool").
+    ///
+    /// A stale read here is the silent failure the lock rules out: `deinit`
+    /// would see `nil`, skip `cleanupSession`, and leak the view session with
+    /// no diagnostic anywhere.
+    @Test("a preparation published on the main actor is readable from another thread")
+    func publishedPreparationIsReadableOffTheMainThread() async throws {
+        let fixture = try TmuxBridgeFixture()
+        defer { fixture.remove() }
+        let bridge = TmuxBridge(
+            tmuxExecutableResolver: try fixture.resolvingResolver(),
+            commandRunner: { _, _, _ in TmuxCommandOutcome(success: true, output: "") }
+        )
+        let reclaim = ViewSessionReclaim()
+
+        await MainActor.run { reclaim.publish(bridge: bridge, generation: 7) }
+
+        let observed: UInt64? = await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                continuation.resume(returning: reclaim.published?.generation)
+            }
+        }
+        #expect(observed == 7)
     }
 }
 
