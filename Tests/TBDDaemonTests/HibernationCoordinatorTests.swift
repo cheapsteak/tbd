@@ -314,7 +314,6 @@ struct HibernationCoordinatorTests {
         try await db.terminals.clearHibernated(id: terminalID)
         try await db.terminals.setActivityState(
             id: terminalID, activityState: .idle, source: .derived)
-        let oldProcess = try #require(try await db.terminals.get(id: terminalID))
         let failures = FailRespawnOnAttempt(1)
         let deltas = RecordedHibernationDeltas()
         let failingTmux = TmuxManager(
@@ -331,12 +330,13 @@ struct HibernationCoordinatorTests {
         let failed = try #require(try await db.terminals.get(id: terminalID))
         #expect(failed.isParked)
         #expect(failed.sessionIncarnationID == oldToken)
+        #expect(failed.pendingSessionIncarnationID != nil)
         #expect(failed.claudeSessionID == "sess-1")
         #expect(failed.transcriptPath == "/tmp/hibernate-first-respawn.jsonl")
-        #expect(failed.activityState == oldProcess.activityState)
-        #expect(failed.activityStateSource == oldProcess.activityStateSource)
-        #expect(failed.activityStateObservedAt == oldProcess.activityStateObservedAt)
-        #expect(failed.activityStateOrderObservedAt == oldProcess.activityStateOrderObservedAt)
+        #expect(failed.activityState == .idle)
+        #expect(failed.activityStateSource == .database)
+        #expect(failed.activityStateObservedAt != nil)
+        #expect(failed.activityStateOrderObservedAt == failed.activityStateObservedAt)
         #expect(deltas.snapshot().isEmpty)
 
         let liveTmux = TmuxManager(
@@ -351,7 +351,10 @@ struct HibernationCoordinatorTests {
             configDirManager: isolatedConfigDirManager(),
             actuationLog: makeTestActuationLog())
         await router.hibernationCoordinator.reconcileOnStartup()
-        #expect(try await db.terminals.get(id: terminalID)?.isParked == false)
+        let unparked = try #require(try await db.terminals.get(id: terminalID))
+        #expect(!unparked.isParked)
+        #expect(unparked.sessionIncarnationID == oldToken)
+        #expect(unparked.pendingSessionIncarnationID == nil)
 
         let oldProcessHook = try RPCRequest(
             method: RPCMethod.terminalSessionEvent,

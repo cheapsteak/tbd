@@ -3622,89 +3622,14 @@ extension RPCRouter {
         // Hook callers are bridged through `tbd terminal-activity`; the params
         // do not yet carry WHICH hook event fired, so the RPC surface stands in
         // as their source name. The app's explicit interrupt declares its
-        // origin separately and is persisted as a user action instead.
+        // origin separately, bypasses process identity, and uses user-action
+        // provenance for Codex; Claude retains its legacy hook provenance.
         // `observedAt` from the router's date seam, never the store's default
         // `Date()`. The resolver's rung-4 decision is an ordering comparison
         // between exactly this stamp and the one `recordAwaitingInputReason`
         // writes above, so a test that cannot pin both ends cannot pin the
         // decision at all.
-        guard terminal.isCodexTerminal else {
-            // Claude and shell hooks retain their established last-writer
-            // behavior. Their persisted activity is a hibernation input, not
-            // Codex transcript presentation, so this fix must not impose the
-            // new ordering and tie-precedence policy on them.
-            // UserPromptSubmit reaches the daemon as activity=working. If a
-            // session-limit auto-resume is pending, the user just continued
-            // manually — cancel it even when the legacy activity value is
-            // unchanged, preserving the established non-Codex behavior.
-            if params.activityState == .working, terminal.pendingResumeAt != nil {
-                if (try? await db.scheduledResumes.cancelPending(
-                    terminalID: terminal.id)) == true {
-                    await limitResumeScheduler?.wake()
-                }
-            }
-            // Marked BEFORE the unchanged-state guard below, deliberately. A
-            // background agent's completion wakes the parent, which runs a
-            // turn and ends it — a second `idle` with no `working` between.
-            // Marking below the guard would drop that boundary and latch the
-            // previous turn's count. Sampling itself is deferred to
-            // `terminal.list`: Claude Code writes the turn's `turn_duration`
-            // record a couple of milliseconds AFTER these hooks return, so a
-            // read here would observe the previous turn.
-            //
-            // An explicit interrupt CLEARS instead of marking. An interrupted
-            // turn frequently writes no `turn_duration`, so sampling after one
-            // would re-read the PRE-interrupt record and relight the indicator
-            // with nothing running — the false-thinking direction this rail is
-            // never allowed to fail toward.
-            if params.origin == .userInterrupt {
-                await claudeDelegationTracker.clear(terminalID: terminal.id)
-            } else if params.activityState == .idle {
-                await claudeDelegationTracker.mark(terminalID: terminal.id)
-            }
-            guard terminal.activityState != params.activityState else {
-                // Previously a pure no-op. A same-state observation still
-                // supersedes a not-newer wait reason: this is the only rail
-                // that speaks when an activity value repeats, and the reason
-                // column moves independently of the activity stamp.
-                //
-                // Deliberately NOT gated on `terminal`'s reason columns. That
-                // row was read before an unbounded stretch of async work (a
-                // counter actor hop, a worktree read, and on an idle event a
-                // transcript file copy), and `handleTerminalNotificationEvent`
-                // runs concurrently on its own connection — a prompt recorded
-                // inside that window is invisible here, and skipping the call
-                // would leave the database holding a reason older than the
-                // newest activity observation, which is the one state the
-                // ordering rule exists to prevent. The store re-reads inside
-                // its own transaction and returns false without writing when
-                // there is nothing to retract, and a repeated activity value
-                // is a rare event on this rail (a queued prompt mid-turn, a
-                // second Stop), so the saved write was worth little anyway.
-                if try await db.terminals.clearAwaitingInputReasonIfNotNewer(
-                    id: terminal.id, observedAt: observedAt) {
-                    broadcastAwaitingInputRetraction(terminal: terminal)
-                }
-                return .ok()
-            }
-            // `setActivityState` nils the reason columns unconditionally — it
-            // IS the superseding rail — and reports whether a standing reason
-            // went with them, so the retraction is announced from what the
-            // write actually did rather than from the row read before it.
-            let retracted = try await db.terminals.setActivityState(
-                id: terminal.id,
-                activityState: params.activityState,
-                source: .hookEvent(RPCMethod.terminalActivityEvent),
-                observedAt: observedAt)
-            subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
-                terminalID: terminal.id,
-                worktreeID: terminal.worktreeID,
-                activityState: params.activityState
-            )))
-            if retracted { broadcastAwaitingInputRetraction(terminal: terminal) }
-            return .ok()
-        }
-        let source: FactSource = params.origin == .userInterrupt
+        let source: FactSource = params.origin == .userInterrupt && terminal.isCodexTerminal
             ? .terminalInterrupt
             : .hookEvent(RPCMethod.terminalActivityEvent)
         let activityApplication = try await db.terminals.applyActivityObservation(
@@ -3714,8 +3639,19 @@ extension RPCRouter {
             observedAt: observedAt,
             sessionID: params.sessionID,
             sessionIncarnationID: params.sessionIncarnationID,
+            processBound: params.origin != .userInterrupt,
             replaceSameValue: params.origin == .userInterrupt)
         guard let activityApplication else { return .ok() }
+        if !terminal.isCodexTerminal {
+            // Keep Claude's delegation boundary bookkeeping behind the same
+            // atomic identity decision as its durable activity. A delayed
+            // outgoing-process hook must not advance this in-memory rail.
+            if params.origin == .userInterrupt {
+                await claudeDelegationTracker.clear(terminalID: terminal.id)
+            } else if params.activityState == .idle {
+                await claudeDelegationTracker.mark(terminalID: terminal.id)
+            }
+        }
         // The transactional identity check above must accept a Codex working
         // hook before it can cancel state belonging to the current session.
         // The actuator's own "continue" also lands here; by then verification
@@ -3726,14 +3662,24 @@ extension RPCRouter {
                 await limitResumeScheduler?.wake()
             }
         }
-        subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
-            terminalID: terminal.id,
-            worktreeID: terminal.worktreeID,
-            activityState: activityApplication.activityState,
-            activityStateSource: activityApplication.source,
-            activityStateObservedAt: activityApplication.observedAt,
-            activityStateOrderObservedAt: activityApplication.orderObservedAt
-        )))
+        if activityApplication.activityStateChanged {
+            if terminal.isCodexTerminal {
+                subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
+                    terminalID: terminal.id,
+                    worktreeID: terminal.worktreeID,
+                    activityState: activityApplication.activityState,
+                    activityStateSource: activityApplication.source,
+                    activityStateObservedAt: activityApplication.observedAt,
+                    activityStateOrderObservedAt: activityApplication.orderObservedAt
+                )))
+            } else {
+                subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
+                    terminalID: terminal.id,
+                    worktreeID: terminal.worktreeID,
+                    activityState: activityApplication.activityState
+                )))
+            }
+        }
         if activityApplication.clearedAwaitingInput {
             broadcastAwaitingInputRetraction(terminal: terminal)
         }

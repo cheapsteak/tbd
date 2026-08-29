@@ -350,6 +350,54 @@ struct TerminalActivityEventHandlerTests {
         #expect(updated.awaitingInputObservedAt == nil)
     }
 
+    @Test("outgoing Claude activity is inert during hibernation replacement")
+    func outgoingClaudeActivityIsInertDuringHibernationReplacement() async throws {
+        let terminal = try await makeTerminal(kind: .claude, label: "Claude")
+        let oldToken = try #require(try await db.terminals.prepareProfileAgentRespawn(
+            id: terminal.id,
+            expectedState: TerminalReplacementSnapshot(terminal: terminal),
+            sessionID: "current-session",
+            transcriptPath: nil,
+            profileID: nil,
+            at: Date(timeIntervalSinceReferenceDate: 10)))
+        let current = try #require(await db.terminals.get(id: terminal.id))
+        _ = try #require(try await db.terminals.beginHibernatedShellRespawn(
+            id: terminal.id,
+            expectedState: TerminalHibernationSnapshot(terminal: current),
+            reason: .manual,
+            at: Date(timeIntervalSinceReferenceDate: 20)))
+        let prompt = AwaitingInputReason(
+            message: "Keep current attention",
+            hookEventName: "Notification",
+            notificationType: "permission_prompt")
+        try await db.terminals.recordAwaitingInputReason(
+            id: terminal.id,
+            reason: prompt,
+            observedAt: Date(timeIntervalSinceReferenceDate: 30))
+        _ = try await db.scheduledResumes.insertPending(ScheduledResume(
+            terminalID: terminal.id,
+            worktreeID: terminal.worktreeID,
+            resetsAt: Date(timeIntervalSinceReferenceDate: 100),
+            fireAt: Date(timeIntervalSinceReferenceDate: 110),
+            limitType: "session",
+            rawMessage: "limit"))
+
+        let stale = try RPCRequest(
+            method: RPCMethod.terminalActivityEvent,
+            params: TerminalActivityEventParams(
+                terminalID: terminal.id,
+                activityState: .working,
+                sessionID: "current-session",
+                sessionIncarnationID: oldToken))
+        #expect((await router.handle(stale)).success)
+
+        let stored = try #require(await db.terminals.get(id: terminal.id))
+        #expect(stored.activityState == .idle)
+        #expect(stored.activityStateSource == .database)
+        #expect(stored.awaitingInputReason == prompt)
+        #expect(try await db.scheduledResumes.pending(terminalID: terminal.id) != nil)
+    }
+
     @Test("Claude user-interrupt origin retains legacy unordered persistence")
     func claudeUserInterruptRetainsLegacyUnorderedPersistence() async throws {
         let terminal = try await makeTerminal(kind: .claude, label: "Claude")

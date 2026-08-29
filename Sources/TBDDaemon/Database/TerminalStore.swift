@@ -36,6 +36,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var sessionOrderObservedAt: Date?
     var codexTranscriptBoundaryOffset: Int64?
     var sessionIncarnationID: String?
+    var pendingSessionIncarnationID: String?
     var kind: String?
     var activityState: String?
     var hibernatedAt: Date?
@@ -70,6 +71,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.sessionOrderObservedAt = terminal.sessionOrderObservedAt
         self.codexTranscriptBoundaryOffset = terminal.codexTranscriptBoundaryOffset
         self.sessionIncarnationID = terminal.sessionIncarnationID?.uuidString
+        self.pendingSessionIncarnationID = terminal.pendingSessionIncarnationID?.uuidString
         self.kind = terminal.kind?.rawValue
         self.activityState = terminal.activityState.rawValue
         self.hibernatedAt = terminal.hibernatedAt
@@ -112,6 +114,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             sessionOrderObservedAt: sessionOrderObservedAt,
             codexTranscriptBoundaryOffset: codexTranscriptBoundaryOffset,
             sessionIncarnationID: sessionIncarnationID.flatMap(UUID.init(uuidString:)),
+            pendingSessionIncarnationID: pendingSessionIncarnationID.flatMap(UUID.init(uuidString:)),
             kind: kind.flatMap(TerminalKind.init(rawValue:)),
             activityState: activityState.flatMap(TerminalActivityState.init(rawValue:)) ?? .unknown,
             hibernatedAt: hibernatedAt,
@@ -165,6 +168,10 @@ public struct AppliedTerminalActivityObservation: Sendable {
     public let source: FactSource
     public let observedAt: Date
     public let orderObservedAt: Date
+    /// Whether the durable activity value changed. Legacy non-Codex hooks
+    /// still return an accepted observation when only an awaiting-input reason
+    /// was cleared or the value was already current.
+    public let activityStateChanged: Bool
     /// True when applying this observation retracted a standing awaiting-input
     /// reason, so the caller knows there is a retraction worth broadcasting.
     public let clearedAwaitingInput: Bool
@@ -174,12 +181,14 @@ public struct AppliedTerminalActivityObservation: Sendable {
         source: FactSource,
         observedAt: Date,
         orderObservedAt: Date,
+        activityStateChanged: Bool = true,
         clearedAwaitingInput: Bool = false
     ) {
         self.activityState = activityState
         self.source = source
         self.observedAt = observedAt
         self.orderObservedAt = orderObservedAt
+        self.activityStateChanged = activityStateChanged
         self.clearedAwaitingInput = clearedAwaitingInput
     }
 }
@@ -211,12 +220,14 @@ struct TerminalSessionIncarnation: Sendable {
     let tmuxPaneID: String
     let label: String?
     let sessionIncarnationID: UUID?
+    let pendingSessionIncarnationID: UUID?
 
     init(terminal: Terminal) {
         self.tmuxWindowID = terminal.tmuxWindowID
         self.tmuxPaneID = terminal.tmuxPaneID
         self.label = terminal.label
         self.sessionIncarnationID = terminal.sessionIncarnationID
+        self.pendingSessionIncarnationID = terminal.pendingSessionIncarnationID
     }
 
     fileprivate init(record: TerminalRecord) {
@@ -224,6 +235,8 @@ struct TerminalSessionIncarnation: Sendable {
         self.tmuxPaneID = record.tmuxPaneID
         self.label = record.label
         self.sessionIncarnationID = record.sessionIncarnationID.flatMap(UUID.init(uuidString:))
+        self.pendingSessionIncarnationID = record.pendingSessionIncarnationID.flatMap(
+            UUID.init(uuidString:))
     }
 
     fileprivate func matches(_ record: TerminalRecord) -> Bool {
@@ -231,6 +244,7 @@ struct TerminalSessionIncarnation: Sendable {
             && record.tmuxPaneID == tmuxPaneID
             && record.label == label
             && record.sessionIncarnationID == sessionIncarnationID?.uuidString
+            && record.pendingSessionIncarnationID == pendingSessionIncarnationID?.uuidString
     }
 
     func matches(_ terminal: Terminal) -> Bool {
@@ -238,6 +252,7 @@ struct TerminalSessionIncarnation: Sendable {
             && terminal.tmuxPaneID == tmuxPaneID
             && terminal.label == label
             && terminal.sessionIncarnationID == sessionIncarnationID
+            && terminal.pendingSessionIncarnationID == pendingSessionIncarnationID
     }
 }
 
@@ -354,6 +369,7 @@ private func resetAgentProcessLifecycle(
     record.sessionOrderObservedAt = nil
     record.codexTranscriptBoundaryOffset = nil
     record.sessionIncarnationID = incarnationID.uuidString
+    record.pendingSessionIncarnationID = nil
     record.activityState = TerminalActivityState.unknown.rawValue
     record.activityStateSource = FactColumnJSON.encode(FactSource.derived)
     record.activityStateObservedAt = date
@@ -706,6 +722,7 @@ public struct TerminalStore: Sendable {
             // no process token on either side. Once TBD rotates a row to a
             // durable token, every replacement-process SessionStart must echo
             // that exact value; nil and mismatches are stale by construction.
+            guard record.pendingSessionIncarnationID == nil else { return nil }
             guard record.sessionIncarnationID == reportedIncarnationID?.uuidString else {
                 return nil
             }
@@ -856,6 +873,7 @@ public struct TerminalStore: Sendable {
             record.tmuxPaneID = paneID
             let incarnationID = UUID()
             record.sessionIncarnationID = incarnationID.uuidString
+            record.pendingSessionIncarnationID = nil
             record.claudeSessionID = nil
             record.transcriptPath = nil
             record.sessionOrderObservedAt = nil
@@ -944,6 +962,7 @@ public struct TerminalStore: Sendable {
             record.tmuxWindowID = windowID
             record.tmuxPaneID = paneID
             record.sessionIncarnationID = UUID().uuidString
+            record.pendingSessionIncarnationID = nil
             try record.update(db)
         }
     }
@@ -1000,8 +1019,9 @@ public struct TerminalStore: Sendable {
         }
     }
 
-    /// Apply a Codex or explicit-interrupt activity fact only when it is not
-    /// older than the ordering watermark already stored for the terminal.
+    /// Apply an activity fact after validating process identity in the same
+    /// writer transaction. Codex and explicit-interrupt facts additionally
+    /// obey the durable ordering watermark.
     ///
     /// The ordering comparison and write share one database-writer
     /// transaction. Callers may therefore do
@@ -1019,7 +1039,8 @@ public struct TerminalStore: Sendable {
     /// waits are preserved, while ambiguous working/non-working ties resolve
     /// toward non-working; the next strictly newer hook advances order. Other
     /// agent hooks retain their established changed-value replacement and
-    /// same-value no-op behavior.
+    /// same-value no-op behavior. `processBound` is false only for app actions
+    /// such as the explicit user interrupt; hook callers must leave it true.
     public func applyActivityObservation(
         id: UUID,
         activityState: TerminalActivityState,
@@ -1027,6 +1048,7 @@ public struct TerminalStore: Sendable {
         observedAt: Date,
         sessionID: String? = nil,
         sessionIncarnationID: UUID? = nil,
+        processBound: Bool = true,
         replaceSameValue: Bool = false
     ) async throws -> AppliedTerminalActivityObservation? {
         try await writer.write { db in
@@ -1036,12 +1058,37 @@ public struct TerminalStore: Sendable {
             let usesOrderedCodexActivity = record.kind == TerminalKind.codex.rawValue
                 || record.label == TerminalLabel.codex
                 || source == .terminalInterrupt
+            // Hook observations name a running process. During the staged
+            // hibernation replacement there intentionally is no process
+            // entitled to mutate the row: the outgoing token remains current
+            // only for rollback, and the staged token has not launched yet.
+            // Non-process-bound app actions remain valid throughout.
+            if processBound {
+                guard record.pendingSessionIncarnationID == nil,
+                      record.sessionIncarnationID == sessionIncarnationID?.uuidString else {
+                    return nil
+                }
+                if let sessionID, sessionID != record.claudeSessionID {
+                    return nil
+                }
+            }
             guard usesOrderedCodexActivity else {
                 // This API is public to the daemon module, so keep the scope
                 // boundary here as well as at the RPC router. An accidental
                 // non-Codex caller must retain the pre-existing changed-value
                 // replacement and same-value no-op behavior.
-                guard record.activityState != activityState.rawValue else { return nil }
+                guard record.activityState != activityState.rawValue else {
+                    let cleared = clearAwaitingInputIfNotNewer(
+                        record: &record, than: observedAt)
+                    if cleared { try record.update(db) }
+                    return AppliedTerminalActivityObservation(
+                        activityState: activityState,
+                        source: source,
+                        observedAt: observedAt,
+                        orderObservedAt: observedAt,
+                        activityStateChanged: false,
+                        clearedAwaitingInput: cleared)
+                }
                 let hadReason = record.awaitingInputReason != nil
                     || record.awaitingInputObservedAt != nil
                 record.activityState = activityState.rawValue
@@ -1057,20 +1104,6 @@ public struct TerminalStore: Sendable {
                     observedAt: observedAt,
                     orderObservedAt: observedAt,
                     clearedAwaitingInput: hadReason)
-            }
-            // Validate hook identity in this transaction, rather than against
-            // the terminal loaded by the router, so a delayed old-process
-            // event cannot race an accepted SessionStart. Legacy nil tokens
-            // match only rows that have never entered managed replacement;
-            // explicit app interrupts are user actions, not process-bound hook
-            // observations, and remain accepted without hook identity.
-            if source != .terminalInterrupt {
-                guard record.sessionIncarnationID == sessionIncarnationID?.uuidString else {
-                    return nil
-                }
-                if let sessionID, sessionID != record.claudeSessionID {
-                    return nil
-                }
             }
             guard let application = applyActivityObservationToRecord(
                 to: &record,
@@ -1354,10 +1387,12 @@ public struct TerminalStore: Sendable {
     }
 
     /// Record the hibernation intent before replacing the live agent. The
-    /// current process token and ordering fences remain intact until tmux has
-    /// replaced that process with an inert pane, so startup reconciliation can
-    /// safely unpark a still-running agent after a crash or failed respawn. A
-    /// process-incarnation mismatch rejects without writing and returns nil.
+    /// current process token remains intact until tmux has replaced that
+    /// process with an inert pane, so startup reconciliation can safely unpark
+    /// a still-running agent after a crash or failed respawn. A pending token
+    /// makes process-bound hook writes inert during this interval; finalize
+    /// promotes it once replacement is confirmed. A process-incarnation
+    /// mismatch rejects without writing and returns nil.
     func beginHibernatedShellRespawn(
         id: UUID,
         expectedState: TerminalHibernationSnapshot,
@@ -1370,11 +1405,18 @@ public struct TerminalStore: Sendable {
                 throw DatabaseError(message: "Terminal not found")
             }
             guard expectedState.matches(record) else { return nil }
+            record.pendingSessionIncarnationID = UUID().uuidString
             record.hibernatedAt = date
             record.hibernateReason = reason?.rawValue
             if let snapshot {
                 record.suspendedSnapshot = snapshot
             }
+            record.activityState = TerminalActivityState.idle.rawValue
+            record.activityStateSource = FactColumnJSON.encode(FactSource.database)
+            record.activityStateObservedAt = date
+            record.activityStateOrderObservedAt = date
+            record.awaitingInputReason = nil
+            record.awaitingInputObservedAt = nil
             try record.update(db)
             try ScheduledResumeStore.cancelPendingInTransaction(db, terminalID: id.uuidString)
             return TerminalSessionIncarnation(record: record)
@@ -1398,10 +1440,14 @@ public struct TerminalStore: Sendable {
             guard record.hibernatedAt != nil || record.suspendedAt != nil else {
                 throw DatabaseError(message: "Terminal is not parked")
             }
+            guard let pendingIncarnationID = record.pendingSessionIncarnationID,
+                  let incarnationID = UUID(uuidString: pendingIncarnationID) else {
+                return nil
+            }
             record.sessionOrderObservedAt = nil
             record.codexTranscriptBoundaryOffset = nil
-            let incarnationID = UUID()
-            record.sessionIncarnationID = incarnationID.uuidString
+            record.sessionIncarnationID = pendingIncarnationID
+            record.pendingSessionIncarnationID = nil
             record.activityState = TerminalActivityState.idle.rawValue
             record.activityStateSource = FactColumnJSON.encode(FactSource.database)
             record.activityStateObservedAt = date
@@ -1433,6 +1479,7 @@ public struct TerminalStore: Sendable {
             record.codexTranscriptBoundaryOffset = nil
             let incarnationID = UUID()
             record.sessionIncarnationID = incarnationID.uuidString
+            record.pendingSessionIncarnationID = nil
             record.hibernatedAt = date
             record.hibernateReason = reason?.rawValue
             if let snapshot {
@@ -1461,7 +1508,8 @@ public struct TerminalStore: Sendable {
     /// recorded process is still alive, or after a replacement agent launches.
     /// Nils both the authoritative `hibernatedAt` and
     /// legacy `suspendedAt`, while preserving the live process's identity and
-    /// incarnation. A real wake first uses
+    /// current incarnation. Any abandoned pending replacement is rolled back.
+    /// A real wake first uses
     /// `prepareHibernatedAgentRespawn` below before launching the process.
     public func clearHibernated(id: UUID) async throws {
         try await writer.write { db in
@@ -1471,6 +1519,7 @@ public struct TerminalStore: Sendable {
             record.hibernatedAt = nil
             record.suspendedAt = nil
             record.hibernateReason = nil
+            record.pendingSessionIncarnationID = nil
             try record.update(db)
         }
     }

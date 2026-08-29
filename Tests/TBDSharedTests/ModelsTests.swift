@@ -54,6 +54,7 @@ import Testing
 @Test func testTerminalRoundTrip() throws {
     let sessionOrderObservedAt = Date(timeIntervalSinceReferenceDate: 30)
     let sessionIncarnationID = UUID()
+    let pendingSessionIncarnationID = UUID()
     let terminal = Terminal(
         id: UUID(),
         worktreeID: UUID(),
@@ -63,6 +64,7 @@ import Testing
         createdAt: Date(),
         sessionOrderObservedAt: sessionOrderObservedAt,
         sessionIncarnationID: sessionIncarnationID,
+        pendingSessionIncarnationID: pendingSessionIncarnationID,
         activityState: .working,
         presentationActivityState: .idle
     )
@@ -73,6 +75,7 @@ import Testing
     #expect(decoded.label == "editor")
     #expect(decoded.sessionOrderObservedAt == sessionOrderObservedAt)
     #expect(decoded.sessionIncarnationID == sessionIncarnationID)
+    #expect(decoded.pendingSessionIncarnationID == pendingSessionIncarnationID)
     #expect(decoded.activityState == .working)
     #expect(decoded.presentationActivityState == .idle)
 }
@@ -274,6 +277,7 @@ func testTerminalCodexTranscriptBoundaryRoundTrip(_ boundary: Int64?) throws {
     #expect(decoded.sessionOrderObservedAt == nil)
     #expect(decoded.codexTranscriptBoundaryOffset == nil)
     #expect(decoded.sessionIncarnationID == nil)
+    #expect(decoded.pendingSessionIncarnationID == nil)
 }
 
 // MARK: - Hibernation fields + gating helpers

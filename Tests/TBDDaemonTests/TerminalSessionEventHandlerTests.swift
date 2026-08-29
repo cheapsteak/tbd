@@ -855,7 +855,10 @@ struct TerminalSessionEventHandlerTests {
                 sessionID: "dead-session",
                 transcriptPath: transcript.path,
                 source: "resume"))
-        let handlerTask = Task { await isolatedRouter.handle(request) }
+        // The handler blocks behind the writer transaction held by
+        // `resetTask`; keep both sides off Swift's cooperative pool so a
+        // heavily parallel test run cannot starve this rendezvous.
+        let handlerTask = gateHoldingTask { await isolatedRouter.handle(request) }
         let passedTerminalFetch = await waitForHookEvent(
             router: isolatedRouter,
             terminal: terminal,
@@ -895,17 +898,17 @@ struct TerminalSessionEventHandlerTests {
         transcriptPath: String
     ) async -> Bool {
         let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(5))
-        while clock.now < deadline {
+        let deadline = clock.now.advanced(by: ciSafeDeadline)
+        while true {
             let counters = await router.sessionCounters.sample(
                 terminalID: terminal.id,
                 worktreeID: terminal.worktreeID,
                 transcriptPath: transcriptPath,
                 commitsUnchangedSince: nil)
             if counters?.hookEventsInWindow == 1 { return true }
+            guard clock.now < deadline else { return false }
             await Task.yield()
         }
-        return false
     }
 }
 

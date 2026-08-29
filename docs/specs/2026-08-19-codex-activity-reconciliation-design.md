@@ -26,7 +26,10 @@ The central safety policy is that false thinking is worse than false idle. Ambig
 
 - Inferring state from rendered terminal text or TUI glyphs.
 - Reporting the internal progress of every nested tool or process inside a turn.
-- Changing Claude hooks, shell activity, hibernation policy, or notification policy.
+- Changing Claude or shell activity interpretation, user-visible hibernation
+  policy, or notification policy. The shared replacement fence used by their
+  existing process lifecycle is specified in
+  [Terminal Process Incarnation Design](2026-08-29-terminal-process-incarnation-design.md).
 - Introducing a general event-sourcing framework for terminal state.
 
 ## Product semantics
@@ -71,7 +74,7 @@ The generated Codex hook overlay forwards hook JSON from standard input to TBD. 
 
 The CLI accepts a dedicated hook-payload mode rather than consuming standard input for ordinary commands. Input is bounded to 1 MiB and decoded into an optional, backward-compatible session identity on the terminal activity RPC. The CLI also forwards the process-incarnation token that TBD plants in the spawned process environment. Payload reuse must preserve the same JSON for commands that perform more than one actuation.
 
-Legacy terminals whose durable process-incarnation token is `NULL` accept activity events without a token, preserving compatibility with processes launched before TBD managed replacements. Once a row carries a managed token, every process-bound activity event must report that exact token; a missing or mismatched token is stale even when its session ID matches the current Codex session. The daemon validates both identities transactionally before mutating activity, attention state, ordering watermarks, or scheduled-resume state. Explicit app-originated interrupts are user actions rather than process-bound hook observations and remain accepted without either identity.
+Legacy terminals whose durable process-incarnation token is `NULL` accept activity events without a token, preserving compatibility with processes launched before TBD managed replacements. Once a row carries a managed token, every process-bound activity event must report that exact token; a missing or mismatched token is stale even when its session ID matches the current Codex session. A staged replacement token temporarily makes both the outgoing and not-yet-launched processes ineligible to write hook facts. The daemon validates these identities transactionally before mutating activity, attention state, ordering watermarks, or scheduled-resume state. Explicit app-originated interrupts are user actions rather than process-bound hook observations and remain accepted without either identity. The shared token lifecycle, including hibernate and wake recovery, is defined in [Terminal Process Incarnation Design](2026-08-29-terminal-process-incarnation-design.md).
 
 ### SessionStart and durable boundaries
 
@@ -286,4 +289,9 @@ Verification includes focused suites for each layer, `scripts/swift-safe build`,
 
 The design adds no new durable external resource and requires no new reconciler. It reads existing rollout files, persists ordering metadata and the transcript boundary in the existing terminal record, and uses existing RPC and hook installation paths.
 
-No automatic process control, input injection, deletion, or background actuation is introduced. The change affects only Codex activity observation and presentation.
+Codex reconciliation introduces no automatic process control, input injection,
+deletion, or background actuation. It changes only Codex activity observation
+and presentation. The shared incarnation fence hardens the existing terminal
+replacement, hibernate, and wake paths described in
+[Terminal Process Incarnation Design](2026-08-29-terminal-process-incarnation-design.md);
+it does not expand when those paths actuate.

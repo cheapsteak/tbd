@@ -6,6 +6,7 @@ import Testing
 
 @Suite struct TerminalSessionIncarnationMigrationTests {
     private static let migrationID = "20260825060216_terminal_session_incarnation"
+    private static let pendingMigrationID = "20260829210843_pending_terminal_incarnation"
 
     @Test func forwardMigrationLeavesExistingIncarnationNil() throws {
         let queue = try DatabaseQueue()
@@ -65,21 +66,72 @@ import Testing
             path: "/tmp/session-incarnation-record-wt-\(UUID().uuidString)",
             tmuxServer: "tbd-incarnation-record")
         let incarnationID = UUID()
+        let pendingIncarnationID = UUID()
         let terminal = Terminal(
             worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            sessionIncarnationID: incarnationID)
+            sessionIncarnationID: incarnationID,
+            pendingSessionIncarnationID: pendingIncarnationID)
         try await database.writerForTests.write { connection in
             try TerminalRecord(from: terminal).insert(connection)
         }
-        let raw = try await database.writerForTests.read { connection in
-            try String.fetchOne(
+        let raw = try database.writerForTests.read { connection in
+            return try Row.fetchOne(
                 connection,
-                sql: "SELECT sessionIncarnationID FROM terminal WHERE id = ?",
+                sql: """
+                    SELECT sessionIncarnationID, pendingSessionIncarnationID
+                    FROM terminal WHERE id = ?
+                    """,
                 arguments: [terminal.id.uuidString])
         }
-        #expect(raw == incarnationID.uuidString)
-        #expect(try await database.terminals.get(id: terminal.id)?.sessionIncarnationID
-                == incarnationID)
+        #expect(raw?["sessionIncarnationID"] as String? == incarnationID.uuidString)
+        #expect(raw?["pendingSessionIncarnationID"] as String? == pendingIncarnationID.uuidString)
+        let decoded = try await database.terminals.get(id: terminal.id)
+        #expect(decoded?.sessionIncarnationID == incarnationID)
+        #expect(decoded?.pendingSessionIncarnationID == pendingIncarnationID)
+    }
+
+    @Test func forwardMigrationLeavesExistingPendingIncarnationNil() throws {
+        let queue = try DatabaseQueue()
+        let migrator = TBDDatabase.buildMigratorForTests()
+        try migrator.migrate(queue, upTo: Self.migrationID)
+        let epoch = Date(timeIntervalSince1970: 1_700_000_000)
+        let repoID = UUID().uuidString
+        let worktreeID = UUID().uuidString
+        let terminalID = UUID().uuidString
+        try queue.write { database in
+            try database.execute(
+                sql: """
+                    INSERT INTO repo (id, path, displayName, defaultBranch, createdAt)
+                    VALUES (?, '/tmp/pending-incarnation-repo', 'Incarnation', 'main', ?)
+                    """, arguments: [repoID, epoch])
+            try database.execute(
+                sql: """
+                    INSERT INTO worktree
+                        (id, repoID, name, displayName, branch, path, status, createdAt, tmuxServer)
+                    VALUES (?, ?, 'w', 'w', 'main', '/tmp/pending-incarnation-wt',
+                            'active', ?, 'tbd-pending-incarnation')
+                    """, arguments: [worktreeID, repoID, epoch])
+            try database.execute(
+                sql: """
+                    INSERT INTO terminal
+                        (id, worktreeID, tmuxWindowID, tmuxPaneID, createdAt,
+                         sessionIncarnationID)
+                    VALUES (?, ?, '@1', '%1', ?, ?)
+                    """, arguments: [terminalID, worktreeID, epoch, UUID().uuidString])
+        }
+
+        try migrator.migrate(queue, upTo: Self.pendingMigrationID)
+        let result = try queue.read { database in
+            let columns = try Row.fetchAll(database, sql: "PRAGMA table_info(terminal)")
+                .compactMap { $0["name"] as String? }
+            let value = try String.fetchOne(
+                database,
+                sql: "SELECT pendingSessionIncarnationID FROM terminal WHERE id = ?",
+                arguments: [terminalID])
+            return (columns, value)
+        }
+        #expect(result.0.contains("pendingSessionIncarnationID"))
+        #expect(result.1 == nil)
     }
 
     @Test func legacyNilSessionStartStillAttachesToLegacyRow() async throws {
@@ -421,6 +473,13 @@ import Testing
             sessionID: "replacement-session",
             transcriptPath: "/tmp/replacement-session.jsonl",
             observedAt: Date(timeIntervalSinceReferenceDate: 30)))
+        _ = try #require(try await database.terminals.applyActivityObservation(
+            id: terminal.id,
+            activityState: .working,
+            source: .hookEvent("UserPromptSubmit"),
+            observedAt: Date(timeIntervalSinceReferenceDate: 31),
+            sessionID: "replacement-session",
+            sessionIncarnationID: token))
         try await database.terminals.clearHibernated(id: terminal.id)
 
         let released = try #require(try await database.terminals.get(id: terminal.id))
@@ -428,6 +487,7 @@ import Testing
         #expect(released.sessionIncarnationID == prepared.sessionIncarnationID)
         #expect(released.claudeSessionID == "replacement-session")
         #expect(released.transcriptPath == "/tmp/replacement-session.jsonl")
+        #expect(released.activityState == .working)
     }
 
     @Test func hibernationBeginRejectsAReplacedProcessWithoutMutation() async throws {
@@ -489,6 +549,125 @@ import Testing
         #expect(preparation == nil)
         let unchanged = try #require(try await database.terminals.get(id: terminal.id))
         assertReplacementState(unchanged, equals: working)
+    }
+
+    @Test func hibernationBeginMakesOutgoingActivityInertBeforeProcessReplacement() async throws {
+        let (database, terminal) = try await makeTerminal(kind: .claude, label: "claude")
+        let oldToken = try #require(try await database.terminals.prepareProfileAgentRespawn(
+            id: terminal.id,
+            expectedState: TerminalReplacementSnapshot(terminal: terminal),
+            sessionID: "resume-session",
+            transcriptPath: "/tmp/resume-session.jsonl",
+            profileID: nil,
+            at: Date(timeIntervalSinceReferenceDate: 10)))
+        try await database.terminals.setActivityState(
+            id: terminal.id,
+            activityState: .working,
+            source: .hookEvent("UserPromptSubmit"),
+            observedAt: Date(timeIntervalSinceReferenceDate: 20))
+        let working = try #require(try await database.terminals.get(id: terminal.id))
+
+        let inertStage = try #require(
+            try await database.terminals.beginHibernatedShellRespawn(
+                id: terminal.id,
+                expectedState: TerminalHibernationSnapshot(terminal: working),
+                reason: .manual,
+                at: Date(timeIntervalSinceReferenceDate: 30)))
+
+        let prepared = try #require(try await database.terminals.get(id: terminal.id))
+        #expect(prepared.isParked)
+        #expect(prepared.sessionIncarnationID == oldToken)
+        let pendingToken = try #require(prepared.pendingSessionIncarnationID)
+        #expect(pendingToken != oldToken)
+        #expect(prepared.activityState == .idle)
+        #expect(prepared.activityStateSource == .database)
+
+        let staleActivity = try await database.terminals.applyActivityObservation(
+            id: terminal.id,
+            activityState: .working,
+            source: .hookEvent("UserPromptSubmit"),
+            observedAt: Date(timeIntervalSinceReferenceDate: 40),
+            sessionID: "resume-session",
+            sessionIncarnationID: oldToken)
+        #expect(staleActivity == nil)
+        #expect(try await database.terminals.get(id: terminal.id)?.activityState == .idle)
+        let staleStart = try await database.terminals.applySessionStart(
+            id: terminal.id,
+            expectedIncarnation: TerminalSessionIncarnation(terminal: prepared),
+            reportedIncarnationID: oldToken,
+            sessionID: "stale-session",
+            transcriptPath: "/tmp/stale-session.jsonl",
+            observedAt: Date(timeIntervalSinceReferenceDate: 41))
+        #expect(staleStart == nil)
+        #expect(try await database.terminals.get(id: terminal.id)?.claudeSessionID
+            == "resume-session")
+
+        let shellToken = try #require(
+            try await database.terminals.finalizeHibernatedShellRespawn(
+                id: terminal.id,
+                expectedIncarnation: inertStage,
+                at: Date(timeIntervalSinceReferenceDate: 50)))
+        #expect(shellToken == pendingToken)
+        let finalized = try #require(try await database.terminals.get(id: terminal.id))
+        #expect(finalized.sessionIncarnationID == pendingToken)
+        #expect(finalized.pendingSessionIncarnationID == nil)
+    }
+
+    @Test func clearingInterruptedHibernationPreparationRestoresCurrentProcess() async throws {
+        let (database, terminal) = try await makeTerminal(kind: .claude, label: "claude")
+        let oldToken = try #require(try await database.terminals.prepareProfileAgentRespawn(
+            id: terminal.id,
+            expectedState: TerminalReplacementSnapshot(terminal: terminal),
+            sessionID: "current-session",
+            transcriptPath: "/tmp/current-session.jsonl",
+            profileID: nil,
+            at: Date(timeIntervalSinceReferenceDate: 10)))
+        let current = try #require(try await database.terminals.get(id: terminal.id))
+        _ = try #require(try await database.terminals.beginHibernatedShellRespawn(
+            id: terminal.id,
+            expectedState: TerminalHibernationSnapshot(terminal: current),
+            reason: .manual,
+            at: Date(timeIntervalSinceReferenceDate: 20)))
+        #expect(try await database.terminals.get(id: terminal.id)?
+            .pendingSessionIncarnationID != nil)
+
+        try await database.terminals.clearHibernated(id: terminal.id)
+
+        let restored = try #require(try await database.terminals.get(id: terminal.id))
+        #expect(!restored.isParked)
+        #expect(restored.sessionIncarnationID == oldToken)
+        #expect(restored.pendingSessionIncarnationID == nil)
+    }
+
+    @Test func wakePreparationReplacesAnInterruptedHibernationStage() async throws {
+        let (database, terminal) = try await makeTerminal(kind: .claude, label: "claude")
+        let oldToken = try #require(try await database.terminals.prepareProfileAgentRespawn(
+            id: terminal.id,
+            expectedState: TerminalReplacementSnapshot(terminal: terminal),
+            sessionID: "resume-session",
+            transcriptPath: "/tmp/resume-session.jsonl",
+            profileID: nil,
+            at: Date(timeIntervalSinceReferenceDate: 10)))
+        let current = try #require(try await database.terminals.get(id: terminal.id))
+        _ = try #require(try await database.terminals.beginHibernatedShellRespawn(
+            id: terminal.id,
+            expectedState: TerminalHibernationSnapshot(terminal: current),
+            reason: .manual,
+            at: Date(timeIntervalSinceReferenceDate: 20)))
+        let interrupted = try #require(try await database.terminals.get(id: terminal.id))
+        let stagedToken = try #require(interrupted.pendingSessionIncarnationID)
+
+        let wakeToken = try #require(try await database.terminals.prepareHibernatedAgentRespawn(
+            id: terminal.id,
+            expectedState: TerminalReplacementSnapshot(terminal: interrupted),
+            at: Date(timeIntervalSinceReferenceDate: 30)))
+
+        let prepared = try #require(try await database.terminals.get(id: terminal.id))
+        #expect(prepared.isParked)
+        #expect(wakeToken != oldToken)
+        #expect(wakeToken != stagedToken)
+        #expect(prepared.sessionIncarnationID == wakeToken)
+        #expect(prepared.pendingSessionIncarnationID == nil)
     }
 
     @Test func hibernationFinalizeRejectsAReplacedInertStageWithoutMutation() async throws {
@@ -628,6 +807,7 @@ import Testing
 
     private func assertReplacementState(_ actual: Terminal, equals expected: Terminal) {
         #expect(actual.sessionIncarnationID == expected.sessionIncarnationID)
+        #expect(actual.pendingSessionIncarnationID == expected.pendingSessionIncarnationID)
         #expect(actual.tmuxWindowID == expected.tmuxWindowID)
         #expect(actual.tmuxPaneID == expected.tmuxPaneID)
         #expect(actual.label == expected.label)
