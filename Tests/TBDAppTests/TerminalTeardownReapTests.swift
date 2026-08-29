@@ -18,14 +18,16 @@ import Testing
 /// `localProcess = nil` that makes `LocalProcess.deinit` (and thus the
 /// monitor cancellation and fd close) happen at a known moment.
 ///
-/// **Why the default `dispatchQueue` (main) and not an injected background
-/// queue.** Production passes none, so `LocalProcess` defaults to
-/// `DispatchQueue.main` for both `childMonitor` and the `DispatchIO` cleanup
-/// handler; passing a background queue here would test a configuration TBD
-/// never uses. That is only sound because this process genuinely drains the
-/// main queue (`Tests/CLAUDE.md`), so the monitor is live rather than merely
-/// idle — the child outlives the coordinator precisely because `cleanup()`
-/// cancels that live monitor, which is the behavior under test.
+/// **Why `dispatchQueue: .main` and not an injected background queue.**
+/// Production passes `dispatchQueue: .main, directDelivery: true` explicitly
+/// (since the SwiftTerm 2.0 pin, whose default queue is a private background
+/// serial queue, not main), putting `childMonitor` and the `DispatchIO`
+/// cleanup handler on main; `startChild` passes the same, because any other
+/// queue would test a configuration TBD never uses. That is only sound
+/// because this process genuinely drains the main queue (`Tests/CLAUDE.md`),
+/// so the monitor is live rather than merely idle — the child outlives the
+/// coordinator precisely because `cleanup()` cancels that live monitor,
+/// which is the behavior under test.
 ///
 /// **These tests are deliberately NOT `@MainActor`, and each takes exactly one
 /// main-actor hop.** They need main only for the steps that are main-isolated
@@ -151,9 +153,11 @@ struct TerminalTeardownReapTests {
     /// context, so this matches it; only the waiting below happens off main.
     @MainActor
     private func startChild(
-        delegate: LocalProcessDelegate, lifetime: String, assign: (LocalProcess) -> Void
+        delegate: LocalProcessDelegate, lifetime: String, assign: @MainActor (LocalProcess) -> Void
     ) -> pid_t {
-        let process = LocalProcess(delegate: delegate)
+        // Production configuration (see the suite comment): exit monitor on
+        // main, data delivered inline on the IO thread.
+        let process = LocalProcess(delegate: delegate, dispatchQueue: .main, directDelivery: true)
         process.startProcess(
             executable: "/bin/sleep", args: [lifetime], environment: nil, execName: nil)
         assign(process)
@@ -179,9 +183,12 @@ struct TerminalTeardownReapTests {
     /// is the part under test.
     @Test("an exiting PTY child is reaped by TerminalPanelView teardown, not left <defunct>")
     func panelCleanupReapsChild() async throws {
-        let coordinator = TerminalPanelRepresentable.Coordinator()
-        // Every main-isolated step in one hop — see the suite comment.
+        // Every main-isolated step in one hop — see the suite comment. The
+        // coordinator is constructed inside it too: since the SwiftTerm 2.0
+        // migration, `TerminalViewDelegate` is `@MainActor` and the
+        // coordinator class inherits that isolation.
         let pid = await MainActor.run { () -> pid_t in
+            let coordinator = TerminalPanelRepresentable.Coordinator()
             // Outlives cleanup(), then exits on its own — see the doc comment.
             let pid = startChild(delegate: coordinator, lifetime: "0.4") {
                 coordinator.localProcess = $0
@@ -228,16 +235,17 @@ struct TerminalTeardownReapTests {
         throw ChildSurvivedTeardown(pid: pid, state: state)
     }
 
-    /// Drops the coordinator's reference to a probe child's `LocalProcess`
-    /// (whose deinit cancels its exit monitor, making us the sole waiter), then
-    /// kills and reaps it. Probe children are `sleep 120` and nothing in the
-    /// production path under test ends them, so every test that starts one must
-    /// call this — before any assertion that could throw first.
+    /// Kills and reaps a probe child whose `LocalProcess` the test already
+    /// released inside its main hop (that deinit cancels the exit monitor,
+    /// making us the sole waiter — `localProcess` is MainActor state since
+    /// the SwiftTerm 2.0 migration, so the release cannot happen here off
+    /// main). Probe children are `sleep 120` and nothing in the production
+    /// path under test ends them, so every test that starts one must call
+    /// this — before any assertion that could throw first.
     ///
     /// The `pid > 0` guard is load-bearing, not defensive: `kill(0, SIGKILL)`
     /// signals the caller's entire process group, i.e. the whole test process.
-    private func disposeProbe(pid: pid_t, release: () -> Void) {
-        release()
+    private func disposeProbe(pid: pid_t) {
         guard pid > 0 else { return }
         kill(pid, SIGKILL)
         ChildReaper.reapBlocking(pid: pid)
@@ -246,12 +254,16 @@ struct TerminalTeardownReapTests {
     /// The remote path *does* end its child — `cleanup()` calls
     /// `LocalProcess.terminate()`, which sends SIGTERM — so a long-lived child
     /// is production-faithful here. `terminate()` cancels the exit monitor
-    /// (via `childStopped()`) before that signal can land, so the reap is the
+    /// directly (`takeResourcesForShutdown()` → `cancelMonitor()`) before it
+    /// even sends that signal, so the reap is the
     /// only thing standing between this teardown and a permanent zombie.
     @Test("LocalPTYTerminalRepresentable teardown kills AND reaps its child")
     func localPTYCleanupReapsChild() async throws {
-        let coordinator = LocalPTYTerminalRepresentable.Coordinator()
+        // Coordinator constructed inside the single main hop — MainActor
+        // isolation inherited from `TerminalViewDelegate` since the SwiftTerm
+        // 2.0 migration.
         let pid = await MainActor.run { () -> pid_t in
+            let coordinator = LocalPTYTerminalRepresentable.Coordinator()
             let pid = startChild(delegate: coordinator, lifetime: "120") {
                 coordinator.localProcess = $0
             }
@@ -283,8 +295,11 @@ struct TerminalTeardownReapTests {
 
     @Test("a second TerminalPanelView cleanup() tears nothing down")
     func panelCleanupIsOneShot() async throws {
-        let coordinator = TerminalPanelRepresentable.Coordinator()
         let run = await MainActor.run { () -> OneShotRun in
+            // Coordinator constructed in the single main hop — MainActor
+            // isolation inherited from `TerminalViewDelegate` since the
+            // SwiftTerm 2.0 migration.
+            let coordinator = TerminalPanelRepresentable.Coordinator()
             let first = startChild(delegate: coordinator, lifetime: "0.4") {
                 coordinator.localProcess = $0
             }
@@ -294,14 +309,21 @@ struct TerminalTeardownReapTests {
                 coordinator.localProcess = $0
             }
             coordinator.cleanup()
-            return OneShotRun(first: first, probe: probe, stillHeld: coordinator.localProcess != nil)
+            let stillHeld = coordinator.localProcess != nil
+            // Release the probe's `LocalProcess` here, in the same hop —
+            // `localProcess` is MainActor state now, and its deinit does not
+            // end the child (no SIGTERM; the pending read swallows the
+            // SIGHUP — see the suite comment), so `probeAlive` below still
+            // observes only what the second cleanup() did.
+            coordinator.localProcess = nil
+            return OneShotRun(first: first, probe: probe, stillHeld: stillHeld)
         }
         // Observe, then dispose, then assert — in that order, with nothing that
         // can throw in between. See the suite comment: a `defer` registered
         // after a throwing `#require` never runs, and the probe is a `sleep 120`.
         let drain = await drainPendingReaps()
         let probeAlive = processExists(run.probe)
-        disposeProbe(pid: run.probe) { coordinator.localProcess = nil }
+        disposeProbe(pid: run.probe)
         try requireDrained(drain, teardownChild: run.first)
 
         try #require(run.first > 0 && run.probe > 0, "forkpty must have produced both pids")
@@ -316,8 +338,10 @@ struct TerminalTeardownReapTests {
 
     @Test("a second LocalPTYTerminalRepresentable cleanup() tears nothing down")
     func localPTYCleanupIsOneShot() async throws {
-        let coordinator = LocalPTYTerminalRepresentable.Coordinator()
         let run = await MainActor.run { () -> OneShotRun in
+            // Constructed and released in the single main hop — see the
+            // sibling test above for both rationales.
+            let coordinator = LocalPTYTerminalRepresentable.Coordinator()
             let first = startChild(delegate: coordinator, lifetime: "120") {
                 coordinator.localProcess = $0
             }
@@ -326,12 +350,14 @@ struct TerminalTeardownReapTests {
                 coordinator.localProcess = $0
             }
             coordinator.cleanup()
-            return OneShotRun(first: first, probe: probe, stillHeld: coordinator.localProcess != nil)
+            let stillHeld = coordinator.localProcess != nil
+            coordinator.localProcess = nil
+            return OneShotRun(first: first, probe: probe, stillHeld: stillHeld)
         }
         // Observe, then dispose, then assert — see the sibling test above.
         let drain = await drainPendingReaps()
         let probeAlive = processExists(run.probe)
-        disposeProbe(pid: run.probe) { coordinator.localProcess = nil }
+        disposeProbe(pid: run.probe)
         try requireDrained(drain, teardownChild: run.first)
 
         try #require(run.first > 0 && run.probe > 0, "forkpty must have produced both pids")

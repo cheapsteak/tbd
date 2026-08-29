@@ -12,9 +12,11 @@ private let reaperLogger = Logger(subsystem: "com.tbd.app", category: "childReap
 /// teardown reap, both on the main queue and again on the reaper thread.
 ///
 /// Serialization note. The *writer* side runs on main for TWO independent
-/// reasons, and both must be kept in mind. First: `LocalProcess.init` defaults
-/// its `dispatchQueue` to `DispatchQueue.main`, neither TBD call site passes
-/// one, and the `DispatchSourceProcess` is created with `queue: dispatchQueue`.
+/// reasons, and both must be kept in mind. First: both TBD call sites pass
+/// `dispatchQueue: .main` explicitly — keep it that way — and the
+/// `DispatchSourceProcess` is created with `queue: dispatchQueue`
+/// (`directDelivery` moves only data delivery onto the IO thread; it does not
+/// affect the exit monitor's queue).
 /// Second, since upstream `1c3f353`: `setEventHandler` is now armed BEFORE
 /// `activate()`, and upstream documents that `activate()` can invoke the
 /// handler SYNCHRONOUSLY for an already-exited child — on that path the handler
@@ -51,8 +53,9 @@ final class ChildExitObservation: Sendable {
 ///
 /// - `deinit` cancels the monitor, then closes the master fd; the child only
 ///   notices the resulting `SIGHUP` afterwards.
-/// - `terminate()` closes the fd, sends `SIGTERM`, then cancels the monitor via
-///   `childStopped()`; signal delivery and process teardown are asynchronous.
+/// - `terminate()` cancels the monitor directly (`takeResourcesForShutdown()`
+///   → `cancelMonitor()`), closes the write channel, and only then sends
+///   `SIGTERM` — the monitor is already gone before the signal can land.
 ///
 /// — so on both paths the `.exit` event never fires, `waitpid` is never called,
 /// and the child stays a zombie under TBDApp for the life of the app. Observed

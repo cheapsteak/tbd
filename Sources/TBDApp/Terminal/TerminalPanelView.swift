@@ -309,7 +309,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // its last rows (a notice block overwriting the frozen status-bar
             // chrome), padded to the
             // view's REAL column count — onReady fires once layout has given
-            // the terminal its true dimensions, so `tv.terminal.cols` is the
+            // the terminal its true dimensions, so `tv.terminalDimensions.cols` is the
             // same source the resize paths use. A nil snapshot still yields
             // the block alone (a capture-less parked pane used to be pitch
             // black). The live/wake path (`suspendedOnCreate == false`) feeds
@@ -317,7 +317,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             let feedText: String?
             if suspendedOnCreate, let parkedMessage {
                 feedText = ParkedSnapshotComposer.compose(
-                    snapshot: snapshot, message: parkedMessage, columns: tv.terminal.cols)
+                    snapshot: snapshot, message: parkedMessage, columns: tv.terminalDimensions.cols)
             } else {
                 feedText = snapshot
             }
@@ -411,6 +411,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// headlessly — the reap wiring is otherwise unreachable from a test,
         /// since everything else about this type needs a live `NSView`.
         var localProcess: LocalProcess?
+        /// The IO-thread feed path (`dataReceived` → `feed`) reaches the view
+        /// through this lock-guarded holder rather than the main-confined
+        /// `terminalView` weak var. Written before `startProcess`, cleared by
+        /// `cleanup()` before the `LocalProcess` is released.
+        private let viewHolder = TerminalViewHolder()
         private var groupedViewerProcessRunning = false
         private var groupedViewerProcessGeneration: UInt64 = 0
         private var groupedViewerConfirmationStarted = false
@@ -424,8 +429,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// revision; see `ChildExitObservation` for why it is lock-guarded
         /// anyway and for the reaper thread that also reads it.
         private let childExitObservation = ChildExitObservation()
-        private var scrollMonitor: Any?
-        private var clickMonitor: Any?
+        // `nonisolated(unsafe)`: same pattern as `TBDTerminalView.mouseMonitor`
+        // — set and removed on main, but `deinit` is nonisolated and must be
+        // able to remove a monitor the main-actor teardown missed.
+        nonisolated(unsafe) private var scrollMonitor: Any?
+        nonisolated(unsafe) private var clickMonitor: Any?
         private var fedPreparationMessages: Set<String> = []
         /// Set while this panel renders through the control-mode path (Phase 2
         /// FD vending). `cleanup()` uses these to pair the teardown correctly:
@@ -718,8 +726,17 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             let env = TerminalPanelView.makeViewerEnvironment(base: ProcessInfo.processInfo.environment)
             let envPairs = env.map { "\($0.key)=\($0.value)" }
 
-            let process = LocalProcess(delegate: self)
+            // `dispatchQueue: .main` keeps the exit monitor on main (see the
+            // serialization note in ChildReaper.swift); `directDelivery: true`
+            // delivers `dataReceived` inline on the IO thread, where `feed`
+            // parses off-main — the configuration upstream's own
+            // `MacLocalTerminalView` ships.
+            let process = LocalProcess(delegate: self, dispatchQueue: .main, directDelivery: true)
             self.localProcess = process
+            // Written before startProcess; the IO thread reads it from
+            // `dataReceived`. Cleared by `cleanup()` before the process is
+            // released.
+            viewHolder.set(terminalView)
 
             process.startProcess(
                 executable: tmuxPath,
@@ -734,8 +751,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // The enclosing function is `@MainActor async`, so we're already
             // main-isolated here — no `assumeIsolated` wrapper needed.
             do {
-                let cols = terminalView.terminal.cols
-                let rows = terminalView.terminal.rows
+                let dims = terminalView.terminalDimensions
+                let cols = dims.cols
+                let rows = dims.rows
                 if cols > 0 && rows > 0 && process.childfd >= 0 {
                     var size = winsize(ws_row: UInt16(rows), ws_col: UInt16(cols), ws_xpixel: 0, ws_ypixel: 0)
                     _ = ioctl(process.childfd, TIOCSWINSZ, &size)
@@ -781,21 +799,27 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     if self.shouldSuppressEvents() { return false }
                     let point = tv.convert(location, from: nil)
                     guard tv.bounds.contains(point) else { return false }
-                    guard tv.terminal.mouseMode != .off else { return false }
 
-                    // Use actual scroll position so tmux routes to the correct pane
+                    // Use actual scroll position so tmux routes to the correct pane.
+                    // Grid math runs OUTSIDE the lock (view API); the mouseMode
+                    // guard and the sends ride one `withTerminal` block — the
+                    // same calls, under the same lock, as SwiftTerm's own
+                    // native mouse-reporting path.
                     guard let (col, row) = tv.gridPosition(atWindowLocation: location) else { return false }
 
                     let isUp = deltaY > 0
-                    let buttonFlags = tv.terminal.encodeButton(
-                        button: isUp ? 4 : 5,
-                        release: false, shift: false, meta: false, control: false
-                    )
                     let lines = max(1, Int(abs(deltaY)))
-                    for _ in 0..<lines {
-                        tv.terminal.sendEvent(buttonFlags: buttonFlags, x: col, y: row)
+                    return tv.withTerminal { term -> Bool in
+                        guard term.mouseMode != .off else { return false }
+                        let buttonFlags = term.encodeButton(
+                            button: isUp ? 4 : 5,
+                            release: false, shift: false, meta: false, control: false
+                        )
+                        for _ in 0..<lines {
+                            term.sendEvent(buttonFlags: buttonFlags, x: col, y: row)
+                        }
+                        return true
                     }
-                    return true
                 }
                 return consumed ? nil : event
             }
@@ -943,6 +967,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             //
             // Control-mode panels have no `LocalProcess` at all, so
             // `ptyChildPid` is 0 for them and `shouldReap` rejects it.
+            //
+            // Clear the holder BEFORE releasing the process: a late IO batch
+            // then reads nil and drops instead of feeding a view whose
+            // session is being torn down.
+            viewHolder.clear()
             localProcess = nil
             ChildReaper.reap(pid: ptyChildPid, unless: childExitObservation)
         }
@@ -1017,8 +1046,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // otherwise stuck at whatever size it had until the user first
                 // drags, so fullscreen Claude would render at the wrong width.
                 // Same debounced path as live resizes.
-                scheduleControlModeResize(
-                    cols: terminalView.terminal.cols, rows: terminalView.terminal.rows)
+                let dims = terminalView.terminalDimensions
+                scheduleControlModeResize(cols: dims.cols, rows: dims.rows)
                 // Intercept ALL pastes at the view level while attached (the
                 // paste ruling v2) and ship them as a `.paste` sidecar frame.
                 // Interception happens BEFORE SwiftTerm brackets the content,
@@ -1212,8 +1241,16 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         }
 
         // MARK: - LocalProcessDelegate
+        //
+        // `nonisolated`: the Coordinator's `TerminalViewDelegate` conformance
+        // makes the class MainActor-isolated, but `LocalProcess` calls
+        // `dataReceived` inline on the IO thread (`directDelivery: true`) and
+        // the exit monitor's callback contract is queue-, not actor-based.
 
-        func processTerminated(_ source: LocalProcess, exitCode: Int32?) {
+        nonisolated func processTerminated(_ source: LocalProcess, exitCode: Int32?) {
+            // Arrives on main already (`dispatchQueue: .main` governs the
+            // exit monitor regardless of `directDelivery`), but the method is
+            // nonisolated, so hop explicitly before touching actor state.
             debugLog("PANEL: process terminated, exitCode=\(exitCode ?? -1)")
             // `LocalProcess.processTerminated()` calls `waitpid` before it
             // calls us, so this child is already reaped and its pid is free to
@@ -1244,22 +1281,31 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             }
         }
 
-        func dataReceived(slice: ArraySlice<UInt8>) {
+        nonisolated func dataReceived(slice: ArraySlice<UInt8>) {
+            // Feed synchronously on the calling (IO) thread — this is the
+            // off-main parse the 2.0 bump exists for; `feed` is thread-safe
+            // (the parse runs under SwiftTerm's terminal lock) and the view
+            // reference is owned by the holder, so a batch racing teardown
+            // either completes against a live view or reads nil and drops.
+            viewHolder.withView { $0.feed(byteArray: slice) }
+            // The viewer-MRU signal keeps its main hop.
             DispatchQueue.main.async { [weak self] in
                 self?.groupedViewerDidReceiveOutput()
-                self?.terminalView?.feed(byteArray: slice)
             }
         }
 
-        func getWindowSize() -> winsize {
+        nonisolated func getWindowSize() -> winsize {
             // Use SwiftTerm's own dimensions — they account for scroller width
-            // and actual cell metrics computed from the font
+            // and actual cell metrics computed from the font.
+            // `assumeIsolated` is sound: the only callers are `LocalProcess`'s
+            // `startProcess` paths, which TBD invokes from main.
             return MainActor.assumeIsolated {
-                if let tv = terminalView, tv.terminal.cols > 0 && tv.terminal.rows > 0 {
-                    let cols = tv.terminal.cols
-                    let rows = tv.terminal.rows
-                    debugLog("PANEL: getWindowSize \(cols)x\(rows)")
-                    return winsize(ws_row: UInt16(rows), ws_col: UInt16(cols), ws_xpixel: 0, ws_ypixel: 0)
+                let dims = terminalView?.terminalDimensions
+                if let dims, dims.cols > 0 && dims.rows > 0 {
+                    debugLog("PANEL: getWindowSize \(dims.cols)x\(dims.rows)")
+                    return winsize(
+                        ws_row: UInt16(dims.rows), ws_col: UInt16(dims.cols),
+                        ws_xpixel: 0, ws_ypixel: 0)
                 }
                 debugLog("PANEL: getWindowSize fallback 80x24")
                 return winsize(ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0)

@@ -84,13 +84,19 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
         /// headlessly — the reap wiring is otherwise unreachable from a test,
         /// since `start()` needs a live `TerminalView`.
         var localProcess: LocalProcess?
+        /// The IO-thread feed path (`dataReceived` → `feed`) reaches the view
+        /// through this lock-guarded holder rather than the main-confined
+        /// `terminalView` weak var. Written before `startProcess`, cleared by
+        /// `cleanup()` before `terminate()`.
+        private let viewHolder = TerminalViewHolder()
         private var started = false
         private var tornDown = false
         /// Recorded when `LocalProcess`'s own exit monitor fires — by then it
         /// has already called `waitpid`, so `cleanup()` must NOT reap this pid
         /// (it is free, and could have been recycled for another child of this
-        /// process). Both sides are main-isolated — the callback by
-        /// `LocalProcess`'s default `dispatchQueue`, `cleanup()` by its
+        /// process). Both sides are main-isolated — the callback by the
+        /// explicit `dispatchQueue: .main` passed at construction (2.0's
+        /// default is a private background queue), `cleanup()` by its
         /// `@MainActor` below — so see `ChildExitObservation` for why the flag
         /// is lock-guarded regardless.
         private let childExitObservation = ChildExitObservation()
@@ -107,12 +113,21 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
             let args = Array(argv.dropFirst())
             let envPairs = environment.map { "\($0.key)=\($0.value)" }
 
-            let process = LocalProcess(delegate: self)
+            // `dispatchQueue: .main` keeps the exit monitor on main (see the
+            // serialization note in ChildReaper.swift); `directDelivery: true`
+            // delivers `dataReceived` inline on the IO thread, where `feed`
+            // parses off-main — the configuration upstream's own
+            // `MacLocalTerminalView` ships.
+            let process = LocalProcess(delegate: self, dispatchQueue: .main, directDelivery: true)
             self.localProcess = process
+            // Written before startProcess; the IO thread reads it from
+            // `dataReceived`. Cleared by `cleanup()` before `terminate()`.
+            viewHolder.set(terminalView)
             process.startProcess(executable: executable, args: args, environment: envPairs, execName: nil)
 
-            let cols = terminalView.terminal.cols
-            let rows = terminalView.terminal.rows
+            let dims = terminalView.terminalDimensions
+            let cols = dims.cols
+            let rows = dims.rows
             if cols > 0, rows > 0, process.childfd >= 0 {
                 var size = winsize(ws_row: UInt16(rows), ws_col: UInt16(cols), ws_xpixel: 0, ws_ypixel: 0)
                 _ = ioctl(process.childfd, TIOCSWINSZ, &size)
@@ -150,10 +165,16 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
             // a provider `attach`: terminate() only kills the LOCAL viewer
             // process running the verb — the remote session itself is
             // unaffected (docs/remote-provider-contract.md § attach).
+            //
+            // Clear the holder BEFORE terminate(): a late IO batch then reads
+            // nil and drops instead of feeding a view whose session is being
+            // torn down.
+            viewHolder.clear()
             localProcess?.terminate()
             localProcess = nil
-            // terminate() cancels `LocalProcess`'s exit monitor (via
-            // childStopped()) before the SIGTERM it just sent can land, so
+            // terminate() cancels `LocalProcess`'s exit monitor directly
+            // (`takeResourcesForShutdown()` → `cancelMonitor()`) before it
+            // even sends SIGTERM, so
             // nothing left will `waitpid` this child — that cancellation is
             // also what makes `ChildReaper` its sole waiter. Without the reap
             // it stays `<defunct>` under TBDApp forever.
@@ -161,8 +182,13 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
         }
 
         // MARK: - LocalProcessDelegate
+        //
+        // `nonisolated`: the Coordinator's `TerminalViewDelegate` conformance
+        // makes the class MainActor-isolated, but `LocalProcess` calls
+        // `dataReceived` inline on the IO thread (`directDelivery: true`) and
+        // the exit monitor's callback contract is queue-, not actor-based.
 
-        func processTerminated(_ source: LocalProcess, exitCode: Int32?) {
+        nonisolated func processTerminated(_ source: LocalProcess, exitCode: Int32?) {
             // `LocalProcess.processTerminated()` calls `waitpid` before it
             // calls us, so this child is already reaped and its pid is free to
             // be recycled — a later `cleanup()` must not wait on it, and the
@@ -182,17 +208,23 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
             }
         }
 
-        func dataReceived(slice: ArraySlice<UInt8>) {
-            DispatchQueue.main.async { [weak self] in
-                self?.terminalView?.feed(byteArray: slice)
-            }
+        nonisolated func dataReceived(slice: ArraySlice<UInt8>) {
+            // Feed synchronously on the calling (IO) thread — this is the
+            // off-main parse the 2.0 bump exists for; `feed` is thread-safe
+            // (the parse runs under SwiftTerm's terminal lock) and the view
+            // reference is owned by the holder, so a batch racing teardown
+            // either completes against a live view or reads nil and drops.
+            viewHolder.withView { $0.feed(byteArray: slice) }
         }
 
-        func getWindowSize() -> winsize {
+        nonisolated func getWindowSize() -> winsize {
+            // `assumeIsolated` is sound: the only callers are `LocalProcess`'s
+            // `startProcess` paths, which TBD invokes from main.
             MainActor.assumeIsolated {
-                if let tv = terminalView, tv.terminal.cols > 0, tv.terminal.rows > 0 {
+                let dims = terminalView?.terminalDimensions
+                if let dims, dims.cols > 0, dims.rows > 0 {
                     return winsize(
-                        ws_row: UInt16(tv.terminal.rows), ws_col: UInt16(tv.terminal.cols),
+                        ws_row: UInt16(dims.rows), ws_col: UInt16(dims.cols),
                         ws_xpixel: 0, ws_ypixel: 0)
                 }
                 return winsize(ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0)
