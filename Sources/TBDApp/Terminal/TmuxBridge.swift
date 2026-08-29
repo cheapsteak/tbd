@@ -126,14 +126,6 @@ final class TmuxBridge: @unchecked Sendable {
     /// Starts at 1 so no valid generation is zero.
     private var nextGeneration: UInt64 = 1
 
-    /// Serial background queue retained for any future synchronous teardown
-    /// needs. Per-panel cleanup is fire-and-forget via `Task { ... }` invoking
-    /// the async `runTmux`, which uses `Process.terminationHandler` (no
-    /// `waitUntilExit`) so it doesn't pump the main runloop; the one teardown
-    /// that must not return early — `cleanupAllSessionsBlocking`, on app
-    /// termination — waits on its own semaphore rather than through here.
-    private let cleanupQueue = DispatchQueue(label: "com.tbd.app.tmux-cleanup", qos: .utility)
-
     /// Runs each tmux command. Defaults to the real subprocess runner.
     private let commandRunner: TmuxCommandRunner
 
