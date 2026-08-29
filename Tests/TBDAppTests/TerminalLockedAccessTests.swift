@@ -130,6 +130,65 @@ struct TerminalLockedAccessTests {
         #expect(text.contains("MARKER-7f3a9"))
     }
 
+    // MARK: - installColors invalidation pin (the deleted updateFullScreen workaround)
+
+    /// Pins the upstream premise the migration deleted a workaround on:
+    /// `applyScheme()` used to call `getTerminal().updateFullScreen()` after
+    /// `installColors(_:)` to force a repaint of already-drawn cells, and the
+    /// migration removed it because SwiftTerm 2.0's `installColors` runs
+    /// `colorsChangedLocked()`, which itself ends in `terminal.updateFullScreen()`
+    /// (Apple/AppleTerminalView.swift). Nothing else in the diff exercised that
+    /// premise, so this test does: quiesce the terminal's pending-update range,
+    /// call the production `installColors(_:)` — the exact call the deleted
+    /// workaround followed; `applyScheme()` itself is private and only reachable
+    /// through an async Combine sink — and assert the full screen is dirty again
+    /// with no manual `updateFullScreen()` anywhere in the test.
+    ///
+    /// Discrimination: the `#require(quiesced == nil)` arm IS the
+    /// no-invalidation baseline — it proves the observable reads nil right up
+    /// until `installColors` runs, so if upstream stops invalidating, the final
+    /// `#require` fails on a nil range rather than passing on residue from the
+    /// feed. (Verified by mutation: with the `installColors` line removed, the
+    /// test fails there.)
+    @Test("installColors alone re-dirties the full screen — no manual updateFullScreen needed")
+    func installColorsInvalidatesFullScreen() throws {
+        try withView { view in
+            // Real content through the production parse path, so the update
+            // range we clear below was genuinely populated first.
+            view.feed(byteArray: [UInt8]("some already-rendered text\r\n".utf8)[...])
+
+            // Quiesce: consume the feed's dirty range the way a UI toolkit
+            // does after drawing. Copy-out only, per the lock discipline.
+            view.withTerminal { $0.clearUpdateRange() }
+            let quiesced = view.withTerminal { $0.getUpdateRange() }
+            try #require(
+                quiesced == nil,
+                "baseline broken: update range non-nil after clearUpdateRange — the final assertion could not attribute dirtiness to installColors")
+
+            view.installColors(Self.pinPalette)
+
+            // Read the range and the row count under one lock acquisition.
+            let observed = view.withTerminal { terminal -> (startY: Int, endY: Int, rows: Int)? in
+                guard let range = terminal.getUpdateRange() else { return nil }
+                return (range.startY, range.endY, terminal.rows)
+            }
+            let range = try #require(
+                observed,
+                "installColors dirtied nothing: upstream no longer invalidates on palette install — applyScheme needs its explicit updateFullScreen back")
+            #expect(range.startY == 0 && range.endY == range.rows,
+                    "installColors dirtied rows \(range.startY)..\(range.endY) of \(range.rows) — a partial range, not the full screen updateFullScreen() sets")
+        }
+    }
+
+    /// 16 entries, as `installPalette` requires — with fewer it silently does
+    /// nothing and the test above would fail on a nil range for the wrong reason.
+    private static let pinPalette: [SwiftTerm.Color] = {
+        (0..<16).map { i in
+            SwiftTerm.Color(
+                red: UInt16(i) * 4369, green: UInt16(15 - i) * 4369, blue: 32768)
+        }
+    }()
+
     // MARK: - Holder teardown
 
     @Test("holder: set → withView sees the view; clear → withView returns nil")

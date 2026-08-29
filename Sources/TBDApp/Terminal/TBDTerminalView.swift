@@ -204,7 +204,9 @@ class TBDTerminalView: TerminalView {
         // `colorsChangedLocked()` under the terminal lock, which itself calls
         // `terminal.updateFullScreen()` and marks the frame dirty — the
         // invalidation the old `getTerminal().updateFullScreen()` workaround
-        // existed to force.
+        // existed to force. Pinned by
+        // TerminalLockedAccessTests.installColorsInvalidatesFullScreen(),
+        // which fails if upstream stops invalidating on palette install.
         self.needsDisplay = true
     }
 
