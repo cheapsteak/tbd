@@ -25,14 +25,16 @@ struct BoundedGateWaitTests {
         let gate = DispatchSemaphore(value: 0)
         let released = NSLock()
         nonisolated(unsafe) var didRelease = false
-        DispatchQueue.global().async {
+        let releaseThread = Thread {
             released.withLock { didRelease = true }
             gate.signal()
         }
+        releaseThread.name = "com.tbd.tests.gate-release"
+        releaseThread.start()
         // Default deadline, not a snappier number of its own: this is a
-        // hang-catcher on a `DispatchQueue.global()` hop, and 30 s was not
-        // enough for one on a saturated 3-core runner — it went red there
-        // while asserting nothing about time.
+        // hang-catcher on a dedicated thread hop. A dispatch queue is not a
+        // dedicated thread and cannot be the reference here: saturated gate
+        // work used to starve the queue for the entire deadline.
         #expect(gate.waitForGate("self-test: cross-thread"))
         #expect(released.withLock { didRelease }, "the wait must not return before the signal")
     }
@@ -86,6 +88,41 @@ struct BoundedGateWaitTests {
         for task in tasks where await task.value { released += 1 }
         #expect(released == holders, "every holder must be released, not expire")
         #expect(parked.value == holders, "every holder must have reached its gate")
+    }
+
+    @Test("gate holders leave the dispatch worker pool free")
+    func gateHoldersDoNotStarveDispatchWorkers() async throws {
+        // 64 is the smallest stress count that reproduced the old executor's
+        // dispatch-worker ceiling on the development host, and it exceeds the
+        // 25 gate holders added by this PR when the 3-core CI runner starved.
+        // The count is deliberately fixed: this stresses a shared worker limit,
+        // which is not the same as active CPU width.
+        let holders = 64
+        let gate = DispatchSemaphore(value: 0)
+        let parked = Counter()
+        let tasks = (0..<holders).map { index in
+            gateHoldingTask {
+                parked.increment()
+                return gate.waitForGate("self-test: dispatch-starvation holder \(index)")
+            }
+        }
+        defer { for _ in 0..<holders { gate.signal() } }
+
+        guard await waitUntil({ parked.value == holders }, timeout: ciSafeDeadline) else {
+            for _ in 0..<holders { gate.signal() }
+            for task in tasks { _ = await task.value }
+            Issue.record("every stress holder must reach its gate")
+            return
+        }
+
+        let dispatched = Counter()
+        DispatchQueue.global(qos: .userInitiated).async { dispatched.increment() }
+        let dispatchRan = await waitUntil(
+            { dispatched.value == 1 }, timeout: ciSafeDeadline)
+
+        for _ in 0..<holders { gate.signal() }
+        for task in tasks { _ = await task.value }
+        #expect(dispatchRan, "gate holders must not consume the workers needed by unrelated dispatch work")
     }
 
     @Test("the timeout diagnostic names the gate and the deadline")
