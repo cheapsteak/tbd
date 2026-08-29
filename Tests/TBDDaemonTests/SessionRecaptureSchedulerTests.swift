@@ -96,6 +96,44 @@ struct SessionRecaptureSchedulerTests {
         #expect(stored.transcriptPath == "/tmp/replacement-session.jsonl")
     }
 
+    @Test func ignoresCaptureWhileHibernationReplacementIsPending() async throws {
+        let fixture = try await makeFixture()
+        let clock = TestClock<Duration>()
+        let capture = BlockingSessionCapture(result: "stale-captured-session")
+        let scheduler = SessionRecaptureScheduler(
+            db: fixture.db,
+            tmux: TmuxManager(dryRun: true),
+            captureSessionID: { _, _ in capture.capture() },
+            clock: clock)
+
+        let recapture = scheduler.schedule(
+            terminalID: fixture.terminal.id,
+            paneID: "%7",
+            server: "tbd-recapture",
+            expectedIncarnationID: fixture.terminal.sessionIncarnationID)
+
+        await clock.advanceWhenSuspended(by: .seconds(5))
+        guard await waitUntil({ capture.isBlocked }) else {
+            capture.release()
+            await recapture.value
+            Issue.record("recapture did not reach the detector")
+            return
+        }
+        let current = try #require(try await fixture.db.terminals.get(
+            id: fixture.terminal.id))
+        _ = try #require(try await fixture.db.terminals.beginHibernatedShellRespawn(
+            id: fixture.terminal.id,
+            expectedState: TerminalHibernationSnapshot(terminal: current),
+            reason: .manual,
+            at: Date(timeIntervalSinceReferenceDate: 20)))
+        capture.release()
+        await recapture.value
+
+        let stored = try #require(try await fixture.db.terminals.get(id: fixture.terminal.id))
+        #expect(stored.pendingSessionIncarnationID != nil)
+        #expect(stored.claudeSessionID == fixture.sourceSessionID)
+    }
+
     private func makeFixture() async throws -> (
         db: TBDDatabase,
         terminal: Terminal,

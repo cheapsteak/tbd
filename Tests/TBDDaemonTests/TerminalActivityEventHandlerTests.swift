@@ -159,6 +159,51 @@ struct TerminalActivityEventHandlerTests {
         #expect(try await db.scheduledResumes.pending(terminalID: terminal.id) != nil)
     }
 
+    @Test("replacement after accepted working activity keeps its own pending resume")
+    func replacementAfterAcceptedWorkingKeepsItsPendingResume() async throws {
+        let terminal = try await makeTerminal()
+        _ = try await db.scheduledResumes.insertPending(ScheduledResume(
+            terminalID: terminal.id,
+            worktreeID: terminal.worktreeID,
+            resetsAt: Date().addingTimeInterval(3_600),
+            fireAt: Date().addingTimeInterval(3_660),
+            limitType: "session",
+            rawMessage: "rate limit"))
+
+        let application = try #require(try await db.terminals.applyActivityObservation(
+            id: terminal.id,
+            activityState: .working,
+            source: .hookEvent(RPCMethod.terminalActivityEvent),
+            observedAt: Date()))
+
+        #expect(application.cancelledPendingResume)
+        #expect(try await db.scheduledResumes.pending(terminalID: terminal.id) == nil)
+        #expect(try await db.terminals.get(id: terminal.id)?.pendingResumeAt == nil)
+
+        // A replacement can begin immediately after the accepted activity
+        // transaction returns. There must be no deferred router-side cancel
+        // left that could consume this successor-owned schedule.
+        try await db.terminals.updateTmuxIDs(
+            id: terminal.id,
+            windowID: "@replacement",
+            paneID: "%replacement")
+        let replacementResume = ScheduledResume(
+            terminalID: terminal.id,
+            worktreeID: terminal.worktreeID,
+            resetsAt: Date().addingTimeInterval(7_200),
+            fireAt: Date().addingTimeInterval(7_260),
+            limitType: "session",
+            rawMessage: "replacement rate limit")
+        let inserted = try await db.scheduledResumes.insertPending(replacementResume)
+
+        #expect(inserted?.id == replacementResume.id)
+        let persistedResume = try #require(
+            try await db.scheduledResumes.pending(terminalID: terminal.id))
+        #expect(persistedResume.id == replacementResume.id)
+        #expect(try await db.terminals.get(id: terminal.id)?.pendingResumeAt
+            == persistedResume.fireAt)
+    }
+
     @Test("old-process Codex activity cannot mutate a replacement with the same session ID")
     func oldProcessActivityCannotMutateSameSessionReplacement() async throws {
         let terminal = try await makeTerminal()
@@ -454,6 +499,43 @@ struct TerminalActivityEventHandlerTests {
         #expect((await router.handle(request)).success)
 
         #expect(await router.claudeDelegationTracker.isMarked(terminalID: terminal.id))
+    }
+
+    @Test("an old-process SessionEnd cannot clear a replacement's Claude delegation mark")
+    func oldProcessSessionEndCannotClearReplacementDelegation() async throws {
+        let terminal = try await makeTerminal(kind: .claude, label: "Claude")
+        try await db.terminals.updateTmuxIDs(
+            id: terminal.id,
+            windowID: "@old",
+            paneID: "%old")
+        let oldIncarnationID = try #require(
+            try await db.terminals.get(id: terminal.id)?.sessionIncarnationID)
+        try await db.terminals.updateTmuxIDs(
+            id: terminal.id,
+            windowID: "@replacement",
+            paneID: "%replacement")
+        let replacementIncarnationID = try #require(
+            try await db.terminals.get(id: terminal.id)?.sessionIncarnationID)
+        #expect(replacementIncarnationID != oldIncarnationID)
+        await router.claudeDelegationTracker.mark(
+            terminalID: terminal.id,
+            sessionIncarnationID: replacementIncarnationID)
+
+        let staleEnd = try RPCRequest(
+            method: RPCMethod.terminalSessionEnded,
+            params: TerminalSessionEndedParams(
+                terminalID: terminal.id,
+                sessionIncarnationID: oldIncarnationID))
+        #expect((await router.handle(staleEnd)).success)
+        #expect(await router.claudeDelegationTracker.isMarked(terminalID: terminal.id))
+
+        let currentEnd = try RPCRequest(
+            method: RPCMethod.terminalSessionEnded,
+            params: TerminalSessionEndedParams(
+                terminalID: terminal.id,
+                sessionIncarnationID: replacementIncarnationID))
+        #expect((await router.handle(currentEnd)).success)
+        #expect(await router.claudeDelegationTracker.isMarked(terminalID: terminal.id) == false)
     }
 
     /// The interrupt leg of the delegation rail, driven through the handler

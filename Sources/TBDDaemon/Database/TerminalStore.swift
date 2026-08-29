@@ -172,6 +172,9 @@ public struct AppliedTerminalActivityObservation: Sendable {
     /// still return an accepted observation when only an awaiting-input reason
     /// was cleared or the value was already current.
     public let activityStateChanged: Bool
+    /// Whether this accepted working observation atomically cancelled a
+    /// scheduled resume for the same terminal incarnation.
+    public let cancelledPendingResume: Bool
     /// True when applying this observation retracted a standing awaiting-input
     /// reason, so the caller knows there is a retraction worth broadcasting.
     public let clearedAwaitingInput: Bool
@@ -182,6 +185,7 @@ public struct AppliedTerminalActivityObservation: Sendable {
         observedAt: Date,
         orderObservedAt: Date,
         activityStateChanged: Bool = true,
+        cancelledPendingResume: Bool = false,
         clearedAwaitingInput: Bool = false
     ) {
         self.activityState = activityState
@@ -189,6 +193,7 @@ public struct AppliedTerminalActivityObservation: Sendable {
         self.observedAt = observedAt
         self.orderObservedAt = orderObservedAt
         self.activityStateChanged = activityStateChanged
+        self.cancelledPendingResume = cancelledPendingResume
         self.clearedAwaitingInput = clearedAwaitingInput
     }
 }
@@ -482,6 +487,27 @@ private func applyActivityObservationToRecord(
     )
 }
 
+private func finishActivityObservation(
+    _ application: AppliedTerminalActivityObservation,
+    activityState: TerminalActivityState,
+    terminalID: String,
+    in db: Database
+) throws -> AppliedTerminalActivityObservation {
+    guard activityState == .working,
+          try ScheduledResumeStore.cancelPendingInTransaction(
+              db, terminalID: terminalID) else {
+        return application
+    }
+    return AppliedTerminalActivityObservation(
+        activityState: application.activityState,
+        source: application.source,
+        observedAt: application.observedAt,
+        orderObservedAt: application.orderObservedAt,
+        activityStateChanged: application.activityStateChanged,
+        cancelledPendingResume: true,
+        clearedAwaitingInput: application.clearedAwaitingInput)
+}
+
 /// Provides CRUD operations for terminals.
 public struct TerminalStore: Sendable {
     let writer: any DatabaseWriter
@@ -640,8 +666,9 @@ public struct TerminalStore: Sendable {
     }
 
     /// Persist a same-process session recapture only while the process token
-    /// observed before capture still names the current terminal incarnation.
-    /// A replacement that lands during the detector await wins atomically.
+    /// observed before capture still names the current terminal incarnation
+    /// and no replacement is being staged. A replacement that lands during
+    /// the detector await wins atomically.
     @discardableResult
     func updateSessionIDIfIncarnationMatches(
         id: UUID,
@@ -652,7 +679,8 @@ public struct TerminalStore: Sendable {
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Terminal not found")
             }
-            guard record.sessionIncarnationID == expectedIncarnationID?.uuidString else {
+            guard record.pendingSessionIncarnationID == nil,
+                  record.sessionIncarnationID == expectedIncarnationID?.uuidString else {
                 return false
             }
             record.claudeSessionID = sessionID
@@ -1081,13 +1109,18 @@ public struct TerminalStore: Sendable {
                     let cleared = clearAwaitingInputIfNotNewer(
                         record: &record, than: observedAt)
                     if cleared { try record.update(db) }
-                    return AppliedTerminalActivityObservation(
+                    let application = AppliedTerminalActivityObservation(
                         activityState: activityState,
                         source: source,
                         observedAt: observedAt,
                         orderObservedAt: observedAt,
                         activityStateChanged: false,
                         clearedAwaitingInput: cleared)
+                    return try finishActivityObservation(
+                        application,
+                        activityState: activityState,
+                        terminalID: id.uuidString,
+                        in: db)
                 }
                 let hadReason = record.awaitingInputReason != nil
                     || record.awaitingInputObservedAt != nil
@@ -1098,12 +1131,17 @@ public struct TerminalStore: Sendable {
                 record.awaitingInputReason = nil
                 record.awaitingInputObservedAt = nil
                 try record.update(db)
-                return AppliedTerminalActivityObservation(
+                let application = AppliedTerminalActivityObservation(
                     activityState: activityState,
                     source: source,
                     observedAt: observedAt,
                     orderObservedAt: observedAt,
                     clearedAwaitingInput: hadReason)
+                return try finishActivityObservation(
+                    application,
+                    activityState: activityState,
+                    terminalID: id.uuidString,
+                    in: db)
             }
             guard let application = applyActivityObservationToRecord(
                 to: &record,
@@ -1113,7 +1151,11 @@ public struct TerminalStore: Sendable {
                 replaceSameValue: replaceSameValue
             ) else { return nil }
             try record.update(db)
-            return application
+            return try finishActivityObservation(
+                application,
+                activityState: activityState,
+                terminalID: id.uuidString,
+                in: db)
         }
     }
 

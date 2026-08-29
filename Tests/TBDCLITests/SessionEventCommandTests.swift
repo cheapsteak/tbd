@@ -22,4 +22,17 @@ import Testing
             "TBD_TERMINAL_INCARNATION_ID": "not-a-uuid",
         ]) == nil)
     }
+
+    @Test("SessionEnd forwards the same process incarnation environment")
+    func sessionEndIncarnation() {
+        let incarnationID = UUID()
+
+        #expect(SessionEndCommand.sessionIncarnationID(environment: [
+            "TBD_TERMINAL_INCARNATION_ID": incarnationID.uuidString,
+        ]) == incarnationID)
+        #expect(SessionEndCommand.sessionIncarnationID(environment: [:]) == nil)
+        #expect(SessionEndCommand.sessionIncarnationID(environment: [
+            "TBD_TERMINAL_INCARNATION_ID": "not-a-uuid",
+        ]) == nil)
+    }
 }

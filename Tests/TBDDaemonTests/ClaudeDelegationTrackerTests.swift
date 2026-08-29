@@ -66,6 +66,33 @@ import Testing
             targets: [ClaudeDelegationTarget(terminalID: id, transcriptPath: new)])[id] == nil)
     }
 
+    @Test func anOldProcessMarkCannotSampleOrReplaceASuccessorClaim() async throws {
+        let tracker = ClaudeDelegationTracker()
+        let path = try write(record(pending: 2) + "\n")
+        let id = UUID()
+        let oldIncarnationID = UUID()
+        let replacementIncarnationID = UUID()
+        let replacementTarget = ClaudeDelegationTarget(
+            terminalID: id,
+            transcriptPath: path,
+            sessionIncarnationID: replacementIncarnationID)
+
+        await tracker.mark(
+            terminalID: id,
+            sessionIncarnationID: oldIncarnationID)
+        #expect(await tracker.sample(targets: [replacementTarget])[id] == nil)
+        #expect(await tracker.isMarked(terminalID: id) == false)
+
+        await tracker.mark(
+            terminalID: id,
+            sessionIncarnationID: replacementIncarnationID)
+        #expect(await tracker.sample(targets: [replacementTarget])[id] == 2)
+        await tracker.mark(
+            terminalID: id,
+            sessionIncarnationID: oldIncarnationID)
+        #expect(await tracker.sample(targets: [replacementTarget])[id] == 2)
+    }
+
     @Test func clearDropsALiveClaim() async throws {
         let tracker = ClaudeDelegationTracker()
         let path = try write(record(pending: 1) + "\n")

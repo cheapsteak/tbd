@@ -3321,7 +3321,13 @@ public struct TerminalActivityEventParams: Codable, Sendable {
 /// to a running daemon, so that skew is real.
 public struct TerminalSessionEndedParams: Codable, Sendable, Equatable {
     public let terminalID: UUID
-    public init(terminalID: UUID) { self.terminalID = terminalID }
+    /// Process incarnation planted by TBD before a managed replacement starts.
+    /// Optional so older clients' payloads continue to decode unchanged.
+    public let sessionIncarnationID: UUID?
+    public init(terminalID: UUID, sessionIncarnationID: UUID? = nil) {
+        self.terminalID = terminalID
+        self.sessionIncarnationID = sessionIncarnationID
+    }
 }
 
 /// Params for `terminal.notificationEvent` — sent by `tbd hooks notification`

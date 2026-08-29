@@ -17,8 +17,13 @@ struct SessionEndCommand: AsyncParsableCommand {
         shouldDisplay: false
     )
 
+    static func sessionIncarnationID(environment: [String: String]) -> UUID? {
+        environment["TBD_TERMINAL_INCARNATION_ID"].flatMap(UUID.init(uuidString:))
+    }
+
     mutating func run() async throws {
-        guard let terminalIDString = ProcessInfo.processInfo.environment["TBD_TERMINAL_ID"],
+        let environment = ProcessInfo.processInfo.environment
+        guard let terminalIDString = environment["TBD_TERMINAL_ID"],
               let terminalID = UUID(uuidString: terminalIDString) else {
             sessionEndLogger.debug("suppressed reason=noTerminalID")
             return
@@ -33,7 +38,9 @@ struct SessionEndCommand: AsyncParsableCommand {
         do {
             try client.callVoid(
                 method: RPCMethod.terminalSessionEnded,
-                params: TerminalSessionEndedParams(terminalID: terminalID)
+                params: TerminalSessionEndedParams(
+                    terminalID: terminalID,
+                    sessionIncarnationID: Self.sessionIncarnationID(environment: environment))
             )
         } catch {
             sessionEndLogger.debug(

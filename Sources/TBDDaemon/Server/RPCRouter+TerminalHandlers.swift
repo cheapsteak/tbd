@@ -662,7 +662,8 @@ extension RPCRouter {
             .filter { !terminals[$0].isCodexTerminal }
             .map { ClaudeDelegationTarget(
                 terminalID: terminals[$0].id,
-                transcriptPath: terminals[$0].transcriptPath) }
+                transcriptPath: terminals[$0].transcriptPath,
+                sessionIncarnationID: terminals[$0].sessionIncarnationID) }
         let delegationClaims = await claudeDelegationTracker.sample(
             targets: delegationTargets)
         for index in terminals.indices where !terminals[index].isCodexTerminal {
@@ -3562,7 +3563,9 @@ extension RPCRouter {
     /// arrives to retract it.
     func handleTerminalSessionEnded(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalSessionEndedParams.self, from: paramsData)
-        await claudeDelegationTracker.clear(terminalID: params.terminalID)
+        await claudeDelegationTracker.clear(
+            terminalID: params.terminalID,
+            sessionIncarnationID: params.sessionIncarnationID)
         return .ok()
     }
 
@@ -3649,18 +3652,16 @@ extension RPCRouter {
             if params.origin == .userInterrupt {
                 await claudeDelegationTracker.clear(terminalID: terminal.id)
             } else if params.activityState == .idle {
-                await claudeDelegationTracker.mark(terminalID: terminal.id)
+                await claudeDelegationTracker.mark(
+                    terminalID: terminal.id,
+                    sessionIncarnationID: params.sessionIncarnationID)
             }
         }
-        // The transactional identity check above must accept a Codex working
-        // hook before it can cancel state belonging to the current session.
-        // The actuator's own "continue" also lands here; by then verification
-        // usually already moved the row out of pending, and a cancel-vs-sent
-        // race affects only audit status, never causes a second send.
-        if params.activityState == .working, terminal.pendingResumeAt != nil {
-            if (try? await db.scheduledResumes.cancelPending(terminalID: terminal.id)) == true {
-                await limitResumeScheduler?.wake()
-            }
+        // Accepted working hooks cancel their pending resume in the same
+        // writer transaction as identity validation. Wake the scheduler only
+        // when that atomic transition actually cancelled a row.
+        if activityApplication.cancelledPendingResume {
+            await limitResumeScheduler?.wake()
         }
         if activityApplication.activityStateChanged {
             if terminal.isCodexTerminal {

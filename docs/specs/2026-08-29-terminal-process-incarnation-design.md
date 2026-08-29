@@ -17,7 +17,8 @@ and replacement shells.
 
 ## Goals
 
-- Reject SessionStart and activity hooks from replaced processes.
+- Reject SessionStart, activity, SessionEnd delegation changes, and delayed
+  session recapture from replaced processes.
 - Make replacement safe when tmux coordinates or agent session IDs are reused.
 - Represent the prepare interval of a two-step hibernation replacement without
   claiming either the outgoing or future process owns the row.
@@ -31,6 +32,8 @@ and replacement shells.
 - Changing activity interpretation for any terminal kind.
 - Changing when terminals hibernate, wake, or recreate.
 - Making notification hooks or arbitrary agent protocols incarnation-aware.
+- Ordering client delta delivery for an observation that committed before a
+  later replacement.
 - Making tmux process replacement transactional with the database.
 - Introducing a general event-sourcing or process-leasing framework.
 
@@ -54,20 +57,28 @@ stale operation fail rather than overwrite the winner.
 
 ## Core invariants
 
-- A process-bound SessionStart or activity event is accepted only when the
-  pending token is `NULL` and the reported optional token exactly equals the
-  current optional token.
+- A process-bound SessionStart, activity event, or session recapture is accepted
+  only when the pending token is `NULL` and its expected optional token exactly
+  equals the current optional token.
 - Exact optional equality preserves legacy behavior: a missing token matches
   only a legacy row whose current token is also `NULL`.
 - Once a row has a managed current token, a missing or different token is
   stale.
-- While a pending token exists, no process-bound SessionStart or activity event
-  is accepted. The current token is retained only as rollback identity, and the
-  pending token does not belong to a launched process yet.
+- While a pending token exists, no process-bound SessionStart, activity event,
+  or session recapture is accepted. The current token is retained only as
+  rollback identity, and the pending token does not belong to a launched
+  process yet.
 - App-originated user interrupts are actions against the selected terminal, not
   process hooks. They bypass process identity validation and remain accepted.
 - Token validation and the resulting terminal mutation happen in one database
   writer transaction.
+- An accepted working hook cancels its scheduled resume in that same writer
+  transaction, so a replacement cannot interleave and lose its own later
+  schedule.
+- Deferred Claude delegation marks, claims, and SessionEnd clears carry their
+  process token. Sampling and process-derived clearing discard mismatched
+  tokens, while an app-originated user interrupt still clears the selected
+  terminal across incarnations.
 - Every one-step process reset clears any pending token as it installs its new
   current token.
 
@@ -144,8 +155,9 @@ token is the smallest durable state that distinguishes prepare from wake.
   parked with a pending token, so no old hook can mutate it. A later wake
   preparation replaces the pending token with a fresh current token before
   launching an agent.
-- **Failure after finalize** — the inert replacement owns the promoted current
-  token and the row remains parked. Wake follows the normal one-step reset.
+- **Failure after finalize** — the row holds the token intended for the
+  replacement shell, while the hook-silent inert process remains in the pane
+  and the row stays parked. Wake follows the normal one-step reset.
 - **Failure after wake preparation but before launch confirmation** — the row
   remains parked with the new current token and no pending token. A matching
   early hook is valid; a retry compares the full replacement snapshot and
@@ -160,8 +172,10 @@ creates no new external durable resource.
 
 ## Terminal-kind behavior
 
-- **Claude** — SessionStart and activity hooks report and validate the process
-  token. Activity keeps its existing last-writer and same-value behavior after
+- **Claude** — SessionStart, activity, and SessionEnd hooks report the process
+  token. SessionStart and activity validate it transactionally; deferred
+  delegation marks, claims, and clears retain it through their actor hops.
+  Activity keeps its existing last-writer and same-value behavior after
   identity acceptance.
 - **Codex** — SessionStart and activity hooks use the same process fence before
   Codex-specific ordering, transcript boundary, and presentation reconciliation.
@@ -173,11 +187,11 @@ creates no new external durable resource.
 
 The pending database column has no SQL default. Existing rows migrate to
 `NULL`, and older encoded `Terminal` values decode it as `nil`. The hook RPC
-token remains optional, allowing mixed-version clients to decode while exact
+tokens remain optional, allowing mixed-version clients to decode while exact
 optional equality prevents an old client from mutating a managed row.
 
-Rejected hook events are idempotent no-ops. They do not change session,
-activity, prompt, ordering, or scheduled-resume state and do not broadcast a
-terminal activity transition. No new autonomous actuation, timer, or feature
-flag is introduced; this fence hardens process replacements TBD already
-performs.
+Rejected hook events and session recaptures are idempotent no-ops. They do not
+change session, activity, prompt, ordering, or scheduled-resume state and do
+not broadcast a terminal activity transition. No new autonomous actuation,
+timer, or feature flag is introduced; this fence hardens process replacements
+TBD already performs.
