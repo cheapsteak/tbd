@@ -221,14 +221,16 @@ destructive behavior and wholesale replacement, where the wholesale
 replacement here is the pin, which no TBD flag can gate. A half-switch with
 no meaningful off state is flag sprawl.
 
-Standing in for the soak: the existing `useMetalTerminalRenderer`
-UserDefaults flag still gates the Metal-versus-CoreGraphics backend choice
-at the new revision (verify its mapping to upstream's
-`usesMetalLayerSurface` at implementation) — noting that both branches of
-that flag run the new frame scheduler and lock, so it bounds rendering-
-backend risk only; dogfooding on the development fleet is the soak; and the
-before/after performance comparison runs on the separately validated
-key-to-paint harness before the merge is judged.
+Standing in for the soak: dogfooding on the development fleet, and the
+before/after performance comparison on the separately validated
+key-to-paint harness before the merge is judged. (The
+`useMetalTerminalRenderer` UserDefaults flag lives on the unmerged
+`tbd/metal-terminal-renderer` branch, not this tree; when that branch
+rebases, its `setUseMetal(_:)` call survives unchanged at the new revision,
+and upstream's `usesMetalLayerSurface` is a separate additional
+surface-selection toggle, not a rename. Either way both branches of any
+rendering-backend flag run the new frame scheduler and lock, so such a flag
+bounds rendering-backend risk only.)
 
 ## Testing
 
