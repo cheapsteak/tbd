@@ -9,16 +9,6 @@ import TBDShared
 /// Code may be partial during live polling; we tolerate that.
 enum TranscriptParser {
     private static let perfLog = Logger(subsystem: "com.tbd.daemon", category: "perf-transcript")
-    /// Shared ISO8601 formatter that accepts Claude Code's fractional-seconds
-    /// timestamps (e.g. `2026-05-05T03:06:16.813Z`). Without
-    /// `.withFractionalSeconds`, every such timestamp silently fails to parse.
-    /// `ISO8601DateFormatter` is documented as thread-safe for read-only use.
-    nonisolated(unsafe) private static let iso8601: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f
-    }()
-
     /// Parse a top-level Claude session JSONL into transcript items in file order.
     ///
     /// Only the PARENT file is read. Task/Agent tool calls render as ordinary
@@ -214,6 +204,24 @@ enum TranscriptParser {
         toolResultsByID: [String: ToolResult]
     ) -> [TranscriptItem] {
         var items: [TranscriptItem] = []
+
+        // Local, not shared: `TranscriptParser` is a `nonisolated enum` and
+        // `parse`/`parseTail` are called straight from concurrent daemon RPC
+        // handlers (`RPCRouter+SessionHandlers`, `RPCRouter+TerminalHandlers`),
+        // so nothing serializes two transcript parses. A shared formatter would
+        // need a lock — `ISO8601DateFormatter`'s `Sendable` conformance is
+        // explicitly unavailable, so `nonisolated(unsafe)` would be asserting a
+        // guarantee the platform withholds — and that lock would then serialize
+        // the ICU parse itself across concurrent parses. `buildItems` is the
+        // single funnel every timestamp flows through, so one formatter per call
+        // amortizes its construction over every line in the window and shares
+        // nothing.
+        //
+        // `.withFractionalSeconds` is required: Claude Code emits
+        // `2026-05-05T03:06:16.813Z`, and without it every such timestamp
+        // silently fails to parse.
+        let iso8601 = ISO8601DateFormatter()
+        iso8601.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 
         for (i, json) in rawLines.enumerated() {
             // Subagent (sidechain) lines belong to a nested agent's own
