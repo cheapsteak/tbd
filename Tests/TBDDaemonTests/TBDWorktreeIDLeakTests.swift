@@ -711,7 +711,7 @@ func delayedClaudeReparkRejectsProfileReplacement() async throws {
         params: TerminalSwapProfileParams(
             terminalID: terminal.id, newProfileID: profile.id, mode: .inPlace))
     let profileTask = gateHoldingTask { await router.handle(profileRequest) }
-    guard await waitUntil({ profileInterrupt.isBlocked }) else {
+    guard await waitUntil({ profileInterrupt.isBlocked }, timeout: ciSafeDeadline) else {
         profileInterrupt.release()
         _ = await profileTask.value
         Issue.record("profile replacement never reached the respawn")
@@ -726,7 +726,7 @@ func delayedClaudeReparkRejectsProfileReplacement() async throws {
         (try? actuationRows(at: actuationLogPath).contains {
             $0["method"] as? String == RPCMethod.terminalRecreateWindow
         }) == true
-    }) else {
+    }, timeout: ciSafeDeadline) else {
         profileInterrupt.release()
         _ = await profileTask.value
         _ = await repark.value

@@ -1312,7 +1312,7 @@ struct HibernationCoordinatorTests {
         let wake = gateHoldingTask {
             await router.hibernationCoordinator.wake(terminalID: terminalID)
         }
-        guard await waitUntil({ recorder.isBlocked }) else {
+        guard await waitUntil({ recorder.isBlocked }, timeout: ciSafeDeadline) else {
             recorder.release()
             _ = await wake.value
             Issue.record("wake never reached the replacement agent launch")
