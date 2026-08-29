@@ -14,20 +14,24 @@ import Testing
         #expect(decoded.terminalID == terminalID)
         #expect(decoded.activityState == .working)
         #expect(decoded.sessionID == nil)
+        #expect(decoded.sessionIncarnationID == nil)
     }
 
-    @Test("activity payload carries optional Codex session identity")
-    func sessionIdentityRoundTrips() throws {
+    @Test("activity payload carries optional Codex session and process identity")
+    func sessionAndProcessIdentityRoundTrips() throws {
+        let incarnationID = UUID()
         let params = TerminalActivityEventParams(
             terminalID: UUID(),
             activityState: .waitingForUser,
-            sessionID: "session-current")
+            sessionID: "session-current",
+            sessionIncarnationID: incarnationID)
 
         let decoded = try JSONDecoder().decode(
             TerminalActivityEventParams.self,
             from: JSONEncoder().encode(params))
 
         #expect(decoded.sessionID == "session-current")
+        #expect(decoded.sessionIncarnationID == incarnationID)
     }
 }
 

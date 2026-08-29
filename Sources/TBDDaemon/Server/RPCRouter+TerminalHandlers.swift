@@ -3713,6 +3713,7 @@ extension RPCRouter {
             source: source,
             observedAt: observedAt,
             sessionID: params.sessionID,
+            sessionIncarnationID: params.sessionIncarnationID,
             replaceSameValue: params.origin == .userInterrupt)
         guard let activityApplication else { return .ok() }
         // The transactional identity check above must accept a Codex working

@@ -1026,6 +1026,7 @@ public struct TerminalStore: Sendable {
         source: FactSource,
         observedAt: Date,
         sessionID: String? = nil,
+        sessionIncarnationID: UUID? = nil,
         replaceSameValue: Bool = false
     ) async throws -> AppliedTerminalActivityObservation? {
         try await writer.write { db in
@@ -1057,14 +1058,19 @@ public struct TerminalStore: Sendable {
                     orderObservedAt: observedAt,
                     clearedAwaitingInput: hadReason)
             }
-            // Codex writes session identity into every supported hook payload.
-            // Check it in this transaction, rather than against the terminal
-            // loaded by the router, so a delayed old-session event cannot race
-            // an accepted SessionStart. Identity-free callers retain legacy
-            // behavior for already-running sessions with an older hook overlay
-            // and for the app's explicit interrupt.
-            if let sessionID, sessionID != record.claudeSessionID {
-                return nil
+            // Validate hook identity in this transaction, rather than against
+            // the terminal loaded by the router, so a delayed old-process
+            // event cannot race an accepted SessionStart. Legacy nil tokens
+            // match only rows that have never entered managed replacement;
+            // explicit app interrupts are user actions, not process-bound hook
+            // observations, and remain accepted without hook identity.
+            if source != .terminalInterrupt {
+                guard record.sessionIncarnationID == sessionIncarnationID?.uuidString else {
+                    return nil
+                }
+                if let sessionID, sessionID != record.claudeSessionID {
+                    return nil
+                }
             }
             guard let application = applyActivityObservationToRecord(
                 to: &record,

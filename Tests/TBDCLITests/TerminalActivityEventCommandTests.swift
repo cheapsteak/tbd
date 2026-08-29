@@ -26,6 +26,22 @@ import Testing
         #expect(TerminalActivityEventCommand.sessionID(fromHookPayload: oversized) == nil)
     }
 
+    @Test("process incarnation parser accepts only a valid environment UUID")
+    func parsesProcessIncarnationIdentity() {
+        let incarnationID = UUID()
+
+        #expect(TerminalActivityEventCommand.sessionIncarnationID(environment: [
+            "TBD_TERMINAL_INCARNATION_ID": incarnationID.uuidString,
+        ]) == incarnationID)
+        #expect(TerminalActivityEventCommand.sessionIncarnationID(environment: [:]) == nil)
+        #expect(TerminalActivityEventCommand.sessionIncarnationID(environment: [
+            "TBD_TERMINAL_INCARNATION_ID": "",
+        ]) == nil)
+        #expect(TerminalActivityEventCommand.sessionIncarnationID(environment: [
+            "TBD_TERMINAL_INCARNATION_ID": "not-a-uuid",
+        ]) == nil)
+    }
+
     @Test("hook stdin parsing is explicit")
     func hookStdinParsingIsExplicit() throws {
         let command = try TerminalActivityEventCommand.parse([

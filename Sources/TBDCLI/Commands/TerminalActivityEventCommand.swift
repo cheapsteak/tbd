@@ -67,8 +67,13 @@ struct TerminalActivityEventCommand: AsyncParsableCommand {
         return sessionID
     }
 
+    static func sessionIncarnationID(environment: [String: String]) -> UUID? {
+        environment["TBD_TERMINAL_INCARNATION_ID"].flatMap(UUID.init(uuidString:))
+    }
+
     mutating func run() async throws {
-        guard let terminalIDString = ProcessInfo.processInfo.environment["TBD_TERMINAL_ID"],
+        let environment = ProcessInfo.processInfo.environment
+        guard let terminalIDString = environment["TBD_TERMINAL_ID"],
               let terminalID = UUID(uuidString: terminalIDString) else {
             activityLogger.debug("suppressed reason=noTerminalID")
             return
@@ -90,7 +95,8 @@ struct TerminalActivityEventCommand: AsyncParsableCommand {
                 params: TerminalActivityEventParams(
                     terminalID: terminalID,
                     activityState: state.activityState,
-                    sessionID: sessionID
+                    sessionID: sessionID,
+                    sessionIncarnationID: Self.sessionIncarnationID(environment: environment)
                 )
             )
         } catch {

@@ -159,6 +159,78 @@ struct TerminalActivityEventHandlerTests {
         #expect(try await db.scheduledResumes.pending(terminalID: terminal.id) != nil)
     }
 
+    @Test("old-process Codex activity cannot mutate a replacement with the same session ID")
+    func oldProcessActivityCannotMutateSameSessionReplacement() async throws {
+        let terminal = try await makeTerminal()
+        let sessionID = "session-reused"
+        let oldIncarnationID = UUID()
+        try await db.writerForTests.write { database in
+            try database.execute(
+                sql: """
+                    UPDATE terminal
+                    SET sessionIncarnationID = ?, claudeSessionID = ?
+                    WHERE id = ?
+                    """,
+                arguments: [
+                    oldIncarnationID.uuidString,
+                    sessionID,
+                    terminal.id.uuidString,
+                ])
+        }
+        try await db.terminals.updateTmuxIDs(
+            id: terminal.id,
+            windowID: "@replacement",
+            paneID: "%replacement")
+        let replacement = try #require(await db.terminals.get(id: terminal.id))
+        let replacementIncarnationID = try #require(replacement.sessionIncarnationID)
+        #expect(replacementIncarnationID != oldIncarnationID)
+
+        let sessionStart = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: sessionID,
+                transcriptPath: nil,
+                source: "resume",
+                sessionIncarnationID: replacementIncarnationID))
+        #expect((await router.handle(sessionStart)).success)
+
+        let currentPrompt = AwaitingInputReason(
+            message: "Replacement needs permission",
+            hookEventName: "Notification",
+            notificationType: "permission_prompt")
+        try await db.terminals.recordAwaitingInputReason(
+            id: terminal.id,
+            reason: currentPrompt,
+            observedAt: Date())
+        _ = try await db.scheduledResumes.insertPending(ScheduledResume(
+            terminalID: terminal.id,
+            worktreeID: terminal.worktreeID,
+            resetsAt: Date().addingTimeInterval(3_600),
+            fireAt: Date().addingTimeInterval(3_660),
+            limitType: "session",
+            rawMessage: "rate limit"))
+
+        // Raw JSON makes the wire-level regression fail before the shared
+        // params type knows about the process-incarnation field.
+        let delayedOldProcessActivity = RPCRequest(
+            method: RPCMethod.terminalActivityEvent,
+            params: """
+                {"terminalID":"\(terminal.id.uuidString)","activityState":"working",\
+                "sessionID":"\(sessionID)",\
+                "sessionIncarnationID":"\(oldIncarnationID.uuidString)"}
+                """)
+        #expect((await router.handle(delayedOldProcessActivity)).success)
+
+        let unchanged = try #require(await db.terminals.get(id: terminal.id))
+        #expect(unchanged.sessionIncarnationID == replacementIncarnationID)
+        #expect(unchanged.claudeSessionID == sessionID)
+        #expect(unchanged.activityState == .idle)
+        #expect(unchanged.activityStateSource == .hookEvent("SessionStart"))
+        #expect(unchanged.awaitingInputReason == currentPrompt)
+        #expect(try await db.scheduledResumes.pending(terminalID: terminal.id) != nil)
+    }
+
     @Test(
         "same-session Codex activity supersedes SessionStart",
         arguments: [TerminalActivityState.working, .waitingForUser]
@@ -210,6 +282,38 @@ struct TerminalActivityEventHandlerTests {
 
         let updated = try #require(await db.terminals.get(id: terminal.id))
         #expect(updated.activityState == .waitingForUser)
+    }
+
+    @Test("identity-free Codex activity is rejected after managed replacement")
+    func identityFreeActivityIsRejectedAfterManagedReplacement() async throws {
+        let terminal = try await makeTerminal()
+        try await db.terminals.updateTmuxIDs(
+            id: terminal.id,
+            windowID: "@replacement",
+            paneID: "%replacement")
+        let replacement = try #require(await db.terminals.get(id: terminal.id))
+        let replacementIncarnationID = try #require(replacement.sessionIncarnationID)
+        let sessionStart = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "session-current",
+                transcriptPath: nil,
+                source: "resume",
+                sessionIncarnationID: replacementIncarnationID))
+        #expect((await router.handle(sessionStart)).success)
+
+        let identityFreeActivity = try RPCRequest(
+            method: RPCMethod.terminalActivityEvent,
+            params: TerminalActivityEventParams(
+                terminalID: terminal.id,
+                activityState: .working,
+                sessionID: "session-current"))
+        #expect((await router.handle(identityFreeActivity)).success)
+
+        let unchanged = try #require(await db.terminals.get(id: terminal.id))
+        #expect(unchanged.activityState == .idle)
+        #expect(unchanged.activityStateSource == .hookEvent("SessionStart"))
     }
 
     @Test("Claude activity hooks retain legacy unordered replacement semantics")
@@ -371,9 +475,13 @@ struct TerminalActivityEventHandlerTests {
         #expect(response.error == nil)
     }
 
-    @Test("user interrupt persists distinct provenance from working state")
+    @Test("user interrupt remains accepted without hook identity after managed replacement")
     func userInterruptPersistsProvenanceFromWorking() async throws {
         let terminal = try await makeTerminal()
+        try await db.terminals.updateTmuxIDs(
+            id: terminal.id,
+            windowID: "@replacement",
+            paneID: "%replacement")
         try await db.terminals.setActivityState(
             id: terminal.id,
             activityState: .working,

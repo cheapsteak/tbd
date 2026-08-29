@@ -3289,6 +3289,9 @@ public struct TerminalActivityEventParams: Codable, Sendable {
     /// Codex hook session identity when the caller consumed hook stdin.
     /// Optional for older hook overlays and non-hook callers.
     public let sessionID: String?
+    /// Process incarnation planted by TBD before a managed replacement starts.
+    /// Optional for older hook overlays and non-hook callers.
+    public let sessionIncarnationID: UUID?
     /// Absent for the existing agent-hook bridge. Optional so older clients'
     /// payloads continue to decode unchanged.
     public let origin: TerminalActivityEventOrigin?
@@ -3296,11 +3299,13 @@ public struct TerminalActivityEventParams: Codable, Sendable {
         terminalID: UUID,
         activityState: TerminalActivityState,
         sessionID: String? = nil,
+        sessionIncarnationID: UUID? = nil,
         origin: TerminalActivityEventOrigin? = nil
     ) {
         self.terminalID = terminalID
         self.activityState = activityState
         self.sessionID = sessionID
+        self.sessionIncarnationID = sessionIncarnationID
         self.origin = origin
     }
 }

@@ -16,7 +16,7 @@ The central safety policy is that false thinking is worse than false idle. Ambig
 - Clear stale working indicators after interruption, restart, resumed sessions, and rewritten lifecycle identifiers.
 - Recover an open Codex turn after daemon state loss even when its start lies outside the transcript tail.
 - Preserve explicit user-attention states and immediate Ctrl+C feedback.
-- Reject delayed activity hooks from an older Codex session.
+- Reject delayed activity hooks from an older Codex process, including when a replacement reuses the same session ID.
 - Handle root sessions and spawned subagents without treating copied parent history as nested active work.
 - Keep terminal-list polling bounded and fair across a fleet.
 - Preserve wire and database compatibility during upgrades.
@@ -46,7 +46,7 @@ This path is the shipped default for every Codex terminal and has no feature fla
 
 - A Codex terminal presents working only from complete lifecycle evidence associated with its current transcript identity and session generation.
 - Unknown transcript evidence never reuses cached working evidence.
-- A session-bound hook from an older Codex session changes no terminal fact and does not cancel current-session scheduled work.
+- A session-bound hook from an older Codex process changes no terminal fact and does not cancel current-process scheduled work, even when the replacement reuses the same session ID.
 - Ctrl+C clears working immediately and remains authoritative until a valid later current-session event supersedes it.
 - A current permission wait defeats transcript working.
 - SessionStart applies identity and its eligible prompt/activity effects atomically; an event rejected by one ordering rail cannot partially roll identity backward.
@@ -69,9 +69,9 @@ Rendered terminal content is not an input. TBD does not parse prompts, status te
 
 The generated Codex hook overlay forwards hook JSON from standard input to TBD. `SessionStart`, `UserPromptSubmit`, `PermissionRequest`, and `Stop` payloads include the Codex `session_id`; their `transcript_path` may be absent.
 
-The CLI accepts a dedicated hook-payload mode rather than consuming standard input for ordinary commands. Input is bounded to 1 MiB and decoded into an optional, backward-compatible session identity on the terminal activity RPC. Payload reuse must preserve the same JSON for commands that perform more than one actuation.
+The CLI accepts a dedicated hook-payload mode rather than consuming standard input for ordinary commands. Input is bounded to 1 MiB and decoded into an optional, backward-compatible session identity on the terminal activity RPC. The CLI also forwards the process-incarnation token that TBD plants in the spawned process environment. Payload reuse must preserve the same JSON for commands that perform more than one actuation.
 
-Already-running installations may still send activity events without a session identity until their generated overlay is refreshed. Identity-free events remain accepted during this upgrade window. Events that do carry an identity are validated transactionally against the terminal's current Codex session before they mutate activity, attention state, ordering watermarks, or scheduled-resume state.
+Legacy terminals whose durable process-incarnation token is `NULL` accept activity events without a token, preserving compatibility with processes launched before TBD managed replacements. Once a row carries a managed token, every process-bound activity event must report that exact token; a missing or mismatched token is stale even when its session ID matches the current Codex session. The daemon validates both identities transactionally before mutating activity, attention state, ordering watermarks, or scheduled-resume state. Explicit app-originated interrupts are user actions rather than process-bound hook observations and remain accepted without either identity.
 
 ### SessionStart and durable boundaries
 
@@ -187,8 +187,8 @@ Field measurements found lifecycle lines near 3 KiB at the 99th percentile and a
 - **Initial rollout is temporarily unavailable** — retain boundary `0` without positive evidence, then recover from zero when the file appears.
 - **Daemon restart with a known boundary** — capture a fixed EOF, search backward for an anchor, replay only an anchored forward suffix when needed, and publish unknown until exact.
 - **Daemon restart with a `NULL` boundary** — fence at the current EOF in memory and wait for new evidence rather than guessing at historical eligibility.
-- **Delayed old-session hook with identity** — reject it before any mutation.
-- **Legacy hook without identity** — accept it for upgrade compatibility; subsequent session-bound hooks restore full protection.
+- **Delayed old-process hook with identity** — reject it before any mutation, including when its session ID matches a replacement process.
+- **Legacy hook without process identity** — accept it only while the durable row also has no process-incarnation token; a managed row requires an exact token match.
 
 These cases intentionally favor temporary idle over stale working.
 
@@ -212,7 +212,7 @@ The migration file, GRDB record, and shared model change together. The Swift mig
 
 Session identity order and the transcript boundary are persisted independently from activity order but atomically with each other. Presentation order, recovery cursors, captured recovery EOFs, and reducer state remain transient because they describe observations produced by the live transcript tracker rather than durable user or hook facts.
 
-Generated hook configuration is refreshed through the existing plugin installation path. Mixed-version clients remain usable because identity-free activity events are accepted and new wire fields are optional.
+Generated hook configuration is refreshed through the existing plugin installation path. The new wire field is optional, so mixed-version payloads still decode. Identity-free activity remains usable for legacy nil-token rows, while managed replacement rows reject clients that cannot prove the current process incarnation.
 
 ## Testing strategy
 
@@ -252,8 +252,8 @@ Daemon and wire tests cover:
 - atomic first-attachment classification, including partial-history rows, concurrent starts, sub-millisecond ordering, and legacy datetime rows;
 - stale and retried SessionStart events leaving the accepted boundary unchanged;
 - identity-clearing and identity-replacement paths clearing the boundary;
-- current-session hook acceptance and stale-session rejection;
-- legacy identity-free hook compatibility;
+- current-process hook acceptance and stale-process rejection when session IDs differ or are reused;
+- legacy identity-free hook compatibility on nil-token rows and rejection on managed-token rows;
 - atomic ordering of session, activity, and attention facts;
 - equal-time precedence;
 - Ctrl+C persistence and later supersession;
