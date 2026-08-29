@@ -3,7 +3,11 @@
 ## The gap this closes
 
 The terminal-lag investigation has settled everything upstream of the process
-boundary with numbers:
+boundary with numbers. They were measured during that investigation against a
+running fleet and are recorded here because they are the reason this instrument
+exists; the raw sample output is not in this tree, so treat the figures as the
+investigation's findings rather than as something a reader can re-derive from
+the repository:
 
 - **TBD's client was slower than other emulators on the identical tmux window.**
   PR #750 fixed it; TBD now measures at parity with an attached iTerm2 or
@@ -72,9 +76,27 @@ was always measured from the first draw of the cycle.
 
 **Per-transaction, not per-view.** Several terminal views can draw in one
 display cycle and they all land in the same `CATransaction`. The probe stamps
-`t0` at the *first* terminal draw of a cycle, counts later draws into that same
-cycle, and logs exactly one line when the completion block fires. Registering a
-block per view would overwrite the previous one and measure nonsense.
+`t0` at the *first* terminal draw of a transaction, folds later draws in the
+same transaction into that cycle, and logs exactly one line when the completion
+block fires. Registering a block per view would overwrite the previous one and
+measure nonsense.
+
+**Transaction identity comes from the transaction, not from a stopwatch.** This
+is the load-bearing decision. `CATransaction.setValue(_:forKey:)` is a
+per-transaction store *with a getter* — unlike `setCompletionBlock` — so the
+probe stamps its cycle id there and reads it back on the next draw: the same
+mark means the same transaction, no mark means a new one.
+
+An elapsed-time boundary cannot do this job, and its failure is not a rounding
+error. AppKit's cadence is ~16.67ms, so any window wide enough to tolerate a
+slow commit is also wide enough to swallow the entire next cycle. Draws from
+the following transaction would be counted into a frame that had already been
+committed, that transaction would get no completion block of its own, and the
+frame would vanish from the output — counted neither as a sample nor as a
+drop. The bias would grow precisely with the latency the instrument exists to
+characterize, and the `draws=1` versus `draws>1` split would partition on
+"draws within the window" rather than "draws in one transaction". A diagnostic
+that degrades in the presence of the phenomenon it measures is worse than none.
 
 **`setCompletionBlock` has no getter and replaces any incumbent block.** There
 is no way to read what is already set and chain to it. Two consequences are
@@ -82,13 +104,24 @@ accepted, and are the reason this cannot ship on: a block someone else set
 earlier in the cycle is discarded by us, and a block someone else sets later
 discards ours. The second case is why a cycle can go unreported.
 
-**A lost block must not wedge the instrument.** If a draw arrives more than
-`staleCycleSeconds` (0.5s) after an open cycle's `t0` with no completion having
-fired, that cycle is abandoned and a running `commitdrop cycles=<n>` counter is
-logged. Each cycle also carries an id, so a completion block from an abandoned
-cycle arriving late cannot close the current one. The reader reports the drop
-rate and warns above 20%, because a high rate means the percentiles describe a
-biased sample.
+**A lost cycle is reported, promptly and exactly.** When a draw arrives in a
+different transaction while a cycle is still open, that cycle's completion
+block demonstrably never fired, so it is emitted as `commitdrop draws=<n>` —
+one line per lost cycle, carrying the draws that went with it. One line rather
+than a running total, so a reader working over a `log show` window counts the
+drops inside its window instead of inheriting a process-lifetime counter. Each
+cycle also carries an id, so a completion block from an abandoned cycle
+arriving late cannot close the current one. The reader reports the drop rate
+and warns at 20% or above, because a high rate means the percentiles describe a
+biased sample. The one loss that goes uncounted is a final open cycle at the
+end of a session with no draw after it.
+
+**A draw that paints nothing is distinguishable.** SwiftTerm's `draw` has early
+returns before its frame-presented hook, so a view can be asked to draw and
+paint nothing; `drawms` is then 0.000 for a reason that has nothing to do with
+paint speed. The line carries `paints=<n>` alongside `draws=<n>` so the two
+cases are separable, and the reader excludes unpainted cycles from the paint
+percentiles rather than dragging them toward zero.
 
 **Clock.** `ProcessInfo.processInfo.systemUptime`, injected as a closure.
 `Duration` is behaviour, `Date` is data, and this is behaviour — so monotonic
@@ -110,17 +143,27 @@ One `.info` line per instrumented display cycle, subsystem `com.tbd.app`,
 category `commitlatency`:
 
 ```
-commit draws=<n> drawms=<f> commitms=<f> vis=<0|1>
+commit draws=<n> paints=<n> drawms=<f> commitms=<f> vis=<0|1>
 ```
 
 - `draws` — terminal views that drew in this transaction
+- `paints` — how many of those reached the end of `draw`
 - `drawms` — first terminal view about to draw → last terminal draw returned
   (the app-side paint span)
 - `commitms` — first draw's start → render server committed
 - `vis` — 1 if at least one of those views was genuinely on screen
 
-`.info` rather than `.debug` so the lines persist and can be read back after an
-episode with `log show`. The key=value shape matches the other diagnostics'
+`.info` rather than `.debug` because of how the two are retained.
+[`docs/diagnostics-strategy.md`](../diagnostics-strategy.md) assigns per-event
+traces to `.debug`, which this is, and this deviates deliberately: `.debug`
+lives in an in-memory ring buffer that `log show` does not return for past
+events unless someone raised the subsystem's persistence with `sudo log config`
+*before* the episode. The whole workflow here is "reproduce, then ask the system
+for the recent past", which only `.info` and above satisfy without that
+prior step. The cost is real and worth knowing when reading a capture: `.info`
+is retained briefly rather than persisted, and at roughly a line per frame a
+long session can lose its earlier minutes, biasing a capture toward its end.
+Take short captures. The key=value shape matches the other diagnostics'
 convention. `scripts/diag/commit-latency-report.py` reports p50/p90/p99/max for
 `commitms`, split by `draws=1` versus `draws>1` and by on-screen versus not,
 plus an optional split by machine load when a sidecar load log is supplied.
@@ -132,15 +175,25 @@ overhead; the reader joins on the `log show` timestamp instead.
 Default OFF behind the UserDefaults key `enableCommitLatencyDiagnostic`
 (`AppState.enableCommitLatencyDiagnosticKey`, default
 `enableCommitLatencyDiagnosticDefault = false`). App-only behaviour, so a
-UserDefaults key is the right seam — precedent `enableTranscript`. Per-frame
-`.info` logging is far too heavy to ship on, and registering a completion block
-on a transaction the app does not own is not acceptable outside a measurement
-session.
+UserDefaults key is the right seam — precedent `enableTranscript`.
+
+**This departs from the diagnostics doctrine, and the departure is the point.**
+[`docs/diagnostics-strategy.md`](../diagnostics-strategy.md) says a diagnostic
+should need "no env var, no defaults key, no debug build … the activation
+mechanism is the OS, not the app", and sibling instruments in this same
+investigation ship with no flag at all. That rule is about *verbosity*: where
+the only thing a flag would control is whether a line is emitted, os_log's
+level filter already does the job better. This instrument is not only verbosity.
+Turning it on **changes behaviour**: it stamps a value on, and claims the single
+completion-block slot of, a `CATransaction` the whole app shares, discarding
+whatever block was there. No subscriber-side level filter can express that, so
+the activation mechanism has to be in the app. Per-frame `.info` logging being
+too heavy to ship on is the lesser half of the argument.
 
 `nil` is the whole gate: with the flag off the static resolves to no probe,
 `viewWillDraw()`'s `guard let` returns straight after `super.viewWillDraw()`,
 and the frame-presented hook is never installed — nothing timed, nothing
-logged, no completion block registered. Both branches are
+logged, no transaction marked, no completion block registered. Both branches are
 covered by `TerminalCommitLatencyProbeTests`, driven through a per-test
 `UserDefaults(suiteName:)` because `UserDefaults.standard` on this unbundled
 executable is the developer's live `TBDApp.plist`.
@@ -156,6 +209,19 @@ defaults write TBDApp enableCommitLatencyDiagnostic -bool false
 The gate is resolved once, on the first terminal draw, so flipping the key
 takes effect at the next launch — which a measurement session begins with
 anyway.
+
+## The assumption that would make it lie
+
+`Package.swift` carries a standing warning from the #750 SwiftTerm bump: a
+frame loop that does not run on the main thread may never call
+`viewWillDraw()`, and TBD's terminal diagnostics hook it. It does not bite
+today — SwiftTerm takes its render-loop path only when the Metal layer surface
+is enabled, TBD enables it nowhere in `Sources/`, and `frameTick` therefore
+falls through to `setNeedsDisplay` and an ordinary AppKit display pass. It is
+written down because the failure is silent and reads as good news: **an
+instrument that logs nothing looks exactly like a machine with no lag.** If a
+capture comes back empty, check that assumption before concluding anything
+about latency.
 
 ## Lifetime
 

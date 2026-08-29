@@ -50,9 +50,11 @@ DROPPED CYCLES
 --------------
 `CATransaction.setCompletionBlock` has no getter and replaces any incumbent
 block. When AppKit or SwiftUI sets its own block on a transaction after the
-probe set one, the probe's block never fires and that cycle is abandoned. The
-probe emits a running `commitdrop cycles=<n>` counter; this script reports it,
-because a high drop rate means the percentiles describe a biased sample.
+probe set one, the probe's block never fires and that cycle is lost. The probe
+emits one `commitdrop draws=<n>` line per lost cycle -- one line each, not a
+running total, so a windowed read of the log counts the drops in its own window
+instead of inheriting a process-lifetime counter. A high drop rate means the
+percentiles describe a biased sample, so it is reported alongside them.
 
 USAGE
 -----
@@ -81,6 +83,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import math
 import re
 import sys
 from dataclasses import dataclass
@@ -89,9 +92,11 @@ from datetime import datetime
 # `log show` prefixes each line with e.g. "2026-08-29 10:11:12.345678-0400".
 TIMESTAMP_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+[+-]\d{4})")
 COMMIT_RE = re.compile(
-    r"\bcommit draws=(\d+) drawms=([\d.]+) commitms=([\d.]+) vis=([01])\b"
+    r"\bcommit draws=(\d+) paints=(\d+) drawms=([\d.]+) commitms=([\d.]+) vis=([01])\b"
 )
-DROP_RE = re.compile(r"\bcommitdrop cycles=(\d+)\b")
+# One line per lost cycle, so drops are counted within the window being read
+# rather than inherited from a process-lifetime counter.
+DROP_RE = re.compile(r"\bcommitdrop draws=(\d+)\b")
 
 # Load bands, as (label, upper bound exclusive). The last band is open-ended.
 LOAD_BANDS = [("load<2", 2.0), ("load 2-8", 8.0), ("load 8-32", 32.0), ("load>=32", None)]
@@ -103,6 +108,7 @@ class Sample:
 
     epoch: float | None
     draws: int
+    paints: int
     drawms: float
     commitms: float
     visible: bool
@@ -128,16 +134,15 @@ def parse(stream) -> tuple[list[Sample], int]:
                 Sample(
                     epoch=parse_epoch(line),
                     draws=int(commit.group(1)),
-                    drawms=float(commit.group(2)),
-                    commitms=float(commit.group(3)),
-                    visible=commit.group(4) == "1",
+                    paints=int(commit.group(2)),
+                    drawms=float(commit.group(3)),
+                    commitms=float(commit.group(4)),
+                    visible=commit.group(5) == "1",
                 )
             )
             continue
-        drop = DROP_RE.search(line)
-        if drop:
-            # The counter is cumulative, so the largest value seen is the total.
-            drops = max(drops, int(drop.group(1)))
+        if DROP_RE.search(line):
+            drops += 1
     return samples, drops
 
 
@@ -177,10 +182,15 @@ def band_for(load: float | None) -> str:
 
 
 def percentile(values: list[float], fraction: float) -> float:
-    """Nearest-rank percentile. `values` must be sorted."""
+    """Nearest-rank percentile, rank = ceil(p*n), clamped. `values` must be sorted.
+
+    `ceil`, not `round(p*n + 0.5)`: Python rounds half to even, so that form
+    overshoots — at n=100 it puts p99 on rank 100, reporting the maximum. This
+    matches InputLatencyRecorder.percentile in the daemon.
+    """
     if not values:
         return float("nan")
-    rank = max(1, min(len(values), int(round(fraction * len(values) + 0.5))))
+    rank = max(1, min(len(values), math.ceil(fraction * len(values))))
     return values[rank - 1]
 
 
@@ -189,14 +199,25 @@ def report_group(label: str, samples: list[Sample]) -> None:
         print(f"  {label:<16} (no samples)")
         return
     commit = sorted(s.commitms for s in samples)
-    draw = sorted(s.drawms for s in samples)
+    # A cycle with paints=0 was asked to draw and painted nothing, so its
+    # drawms is 0.000 for a reason that has nothing to do with paint speed.
+    # Folding those in would drag the paint figures toward zero.
+    draw = sorted(s.drawms for s in samples if s.paints > 0)
+    unpainted = len(samples) - len(draw)
+    paint = (
+        f"   (drawms p50={percentile(draw, 0.50):.2f} max={draw[-1]:.2f})"
+        if draw
+        else "   (no painted cycles)"
+    )
+    if unpainted:
+        paint += f" [{unpainted} painted nothing]"
     print(
         f"  {label:<16} n={len(commit):<7}"
         f" p50={percentile(commit, 0.50):8.2f}"
         f" p90={percentile(commit, 0.90):8.2f}"
         f" p99={percentile(commit, 0.99):8.2f}"
         f" max={commit[-1]:8.2f}"
-        f"   (drawms p50={percentile(draw, 0.50):.2f} max={draw[-1]:.2f})"
+        f"{paint}"
     )
 
 
@@ -248,7 +269,7 @@ def main() -> int:
     print()
     print(f"cycles reported: {len(samples)}   dropped (completion block lost): {drops}"
           f" ({drop_pct:.1f}%)")
-    if drop_pct > 20:
+    if drop_pct >= 20:
         print("  WARNING: a fifth or more of cycles were dropped; this sample is biased.")
     print(f"on screen: {len(samples) - len(offscreen)}   off screen: {len(offscreen)}")
     print()

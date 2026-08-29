@@ -39,6 +39,15 @@ import os
 ///   draw, on the main thread, inside the display cycle's transaction, which
 ///   is what makes the completion-block registration land on the right
 ///   transaction.
+///   `Package.swift` carries a standing warning from the #750 bump that a frame
+///   loop not running on the main thread may never call `viewWillDraw()`, so
+///   TBD's terminal diagnostics can go quiet. It does not bite here: SwiftTerm
+///   takes the render-loop path only when the Metal layer surface is enabled,
+///   TBD never enables it, and `frameTick` therefore falls through to
+///   `setNeedsDisplay` and an ordinary AppKit display pass. **If this
+///   instrument ever logs nothing at all, suspect that assumption before
+///   concluding there is no lag** — silence here is indistinguishable from a
+///   fast frame.
 /// - **`TerminalView.onFramePresented`** — the end of the app's drawing.
 ///   SwiftTerm's fork provides it as a diagnostics hook and calls it at the
 ///   end of `draw` on the main thread (the Core Graphics path; TBD does not
@@ -51,32 +60,53 @@ import os
 /// of per-view draw bodies. The span is the more useful of the two anyway: it
 /// includes whatever AppKit does between the terminal draws.
 ///
-/// ## Per-transaction, not per-view
+/// ## Per-transaction, not per-view — and the boundary is exact
 ///
-/// Several terminal views can draw in one display cycle, and they all land in
+/// Several terminal views can draw in one display cycle and they all land in
 /// the same `CATransaction`. The probe therefore keys its state on the
-/// *cycle*, not the view: `t0` is stamped at the first terminal draw of a
-/// cycle, later draws only add to the count, and exactly one line is logged
-/// when the completion block fires. Registering a block per view would
-/// overwrite the previous one (see `defaultRegisterCommitCompletion`) and
-/// measure nonsense.
+/// *transaction*: `t0` is stamped at the first terminal draw in a transaction,
+/// later draws in the same one fold into it — raising `draws`, and `vis` if
+/// any of them was on screen — and exactly one line is
+/// logged when the completion block fires. Registering a block per view would
+/// overwrite the previous one (see `TransactionSeam`) and measure nonsense.
+///
+/// **Transaction identity comes from the transaction itself, not from a
+/// stopwatch.** `CATransaction.setValue(_:forKey:)` is a per-transaction store
+/// with a getter, so the probe stamps its cycle id there and reads it back on
+/// the next draw: same mark means same transaction, no mark means a new one.
+/// An elapsed-time heuristic cannot do this job — AppKit's cadence is ~16.67ms,
+/// so any window wide enough to tolerate a slow commit is also wide enough to
+/// swallow the following cycle whole. That failure would grow with exactly the
+/// latency this instrument exists to characterize, silently merging frames and
+/// leaving later transactions with no completion block at all.
 ///
 /// ## Reading the output
 ///
 /// One `.info` line per instrumented display cycle, on subsystem
 /// `com.tbd.app`, category `commitlatency`:
 ///
-///     commit draws=<n> drawms=<f> commitms=<f> vis=<0|1>
+///     commit draws=<n> paints=<n> drawms=<f> commitms=<f> vis=<0|1>
 ///
 /// - `draws` — terminal views that drew in this transaction
+/// - `paints` — terminal draws that actually reached the end of `draw`. Less
+///   than `draws` means a view bailed before painting, and `drawms` is
+///   meaningless for that cycle; `paints=0` makes a `drawms=0.000` that means
+///   "nothing painted" distinguishable from one that means "painted instantly".
 /// - `drawms` — first terminal view about to draw → last terminal draw
 ///   returned (the app-side paint span)
 /// - `commitms` — first draw's start → render server committed (the missing leg)
 /// - `vis` — 1 if at least one of those views was genuinely on screen
 ///
-/// Plus, when a cycle is abandoned (see `staleCycleSeconds`):
+/// Plus, one line per cycle whose completion block never fired:
 ///
-///     commitdrop cycles=<cumulative count>
+///     commitdrop draws=<n>
+///
+/// One line per lost cycle rather than a running total, so a reader working
+/// over a time window counts the drops in that window rather than inheriting a
+/// process-lifetime counter. A cycle is declared lost the moment a draw arrives
+/// in a different transaction — promptly and exactly, not on a timer. The one
+/// loss that goes uncounted is a final cycle at the end of a session with no
+/// draw after it.
 ///
 /// `scripts/diag/commit-latency-report.py` parses both.
 ///
@@ -92,50 +122,81 @@ final class TerminalCommitLatencyProbe {
     /// log-store round trip.
     typealias Emit = @MainActor (String) -> Void
 
-    /// Registers a block to run once the render server has committed the
-    /// transaction currently in flight.
-    typealias RegisterCommitCompletion = @MainActor (@escaping @Sendable () -> Void) -> Void
+    /// The per-transaction seam: reads back the mark the probe left on the
+    /// `CATransaction` currently in flight, and stamps a new one together with
+    /// the completion block that closes it. Injected so tests can open and
+    /// commit transactions by hand.
+    struct TransactionSeam {
+        /// The cycle id the probe stamped on the transaction currently in
+        /// flight, or nil if it has not marked this one — which is exactly how
+        /// "a new transaction has begun" is detected.
+        var mark: @MainActor () -> UInt64?
+
+        /// Stamps `cycleID` on the transaction currently in flight and
+        /// registers `onCommitted` to run once the render server has committed
+        /// it.
+        var begin: @MainActor (_ cycleID: UInt64, _ onCommitted: @escaping @Sendable () -> Void) -> Void
+
+        /// Key for the probe's per-transaction mark. Namespaced because the
+        /// transaction's value store is shared with everything else drawing
+        /// in this process.
+        static let markKey = "com.tbd.app.commitLatency.cycle"
+
+        /// The real seam.
+        ///
+        /// **`CATransaction.setCompletionBlock` has no getter and
+        /// unconditionally replaces any block already set on this
+        /// transaction.** There is no way to read the incumbent and chain to
+        /// it. Two consequences we accept because this is a default-off
+        /// diagnostic and for no other reason: a block someone else set
+        /// earlier in this cycle is discarded by us, and a block someone else
+        /// sets later discards ours — that cycle then reports nothing and is
+        /// counted by the drop line at the next transaction. Setting one per
+        /// view instead of one per transaction would make the second case the
+        /// common case.
+        static let coreAnimation = TransactionSeam(
+            mark: { (CATransaction.value(forKey: markKey) as? NSNumber)?.uint64Value },
+            begin: { cycleID, onCommitted in
+                CATransaction.setValue(NSNumber(value: cycleID), forKey: markKey)
+                CATransaction.setCompletionBlock(onCommitted)
+            }
+        )
+    }
 
     nonisolated static let logger = Logger(subsystem: "com.tbd.app", category: "commitlatency")
-
-    /// A cycle whose completion block has not fired this long after its first
-    /// draw is assumed lost and abandoned, so one swallowed block cannot wedge
-    /// the instrument for the rest of the session. A block is lost whenever
-    /// AppKit or SwiftUI sets its own completion block on the same transaction
-    /// after we set ours — `setCompletionBlock` replaces, it does not chain.
-    nonisolated static let staleCycleSeconds: Double = 0.5
 
     /// Monotonic seconds. `Duration` is behaviour, `Date` is data, and this is
     /// behaviour — so uptime, not wall clock, and never a `Date` difference.
     private let now: @MainActor () -> Double
-    private let registerCommitCompletion: RegisterCommitCompletion
+    private let transaction: TransactionSeam
     private let emit: Emit
 
     private struct Cycle {
         let id: UInt64
         let startedAt: Double
         var draws: Int
-        /// When the last terminal draw in this cycle returned. Nil until the
-        /// first `onFramePresented`; a cycle can in principle be invalidated
-        /// without any view actually drawing, and then `drawms` is 0.
+        /// Terminal draws in this cycle that reached the end of `draw`.
+        var paints: Int
+        /// When the last terminal draw in this cycle returned. Nil while
+        /// `paints` is 0 — SwiftTerm's `draw` has early returns before its
+        /// frame-presented hook, so a view can be asked to draw and paint
+        /// nothing.
         var lastPresentedAt: Double?
         var anyOnScreen: Bool
     }
 
     private var cycle: Cycle?
     private var nextCycleID: UInt64 = 0
-    private var droppedCycles = 0
 
     init(
         now: @escaping @MainActor () -> Double = { ProcessInfo.processInfo.systemUptime },
-        registerCommitCompletion: @escaping RegisterCommitCompletion
-            = TerminalCommitLatencyProbe.defaultRegisterCommitCompletion,
+        transaction: TransactionSeam = .coreAnimation,
         emit: @escaping Emit = { line in
             TerminalCommitLatencyProbe.logger.info("\(line, privacy: .public)")
         }
     ) {
         self.now = now
-        self.registerCommitCompletion = registerCommitCompletion
+        self.transaction = transaction
         self.emit = emit
     }
 
@@ -147,23 +208,25 @@ final class TerminalCommitLatencyProbe {
 
     /// Called from `TBDTerminalView.viewWillDraw()`, which AppKit sends on the
     /// main thread inside the transaction it is building for this display
-    /// cycle — that is what makes the completion-block registration land on
+    /// cycle — that is what makes the mark and the completion block land on
     /// the right transaction.
     func recordDrawWillBegin(at startedAt: Double, isOnScreen: Bool) {
+        let mark = transaction.mark()
+
         if var open = cycle {
-            if startedAt - open.startedAt > Self.staleCycleSeconds {
-                // The completion block for that cycle never arrived. Drop it
-                // and start fresh rather than counting draws into a cycle that
-                // will never be reported.
-                droppedCycles += 1
-                emit("commitdrop cycles=\(droppedCycles)")
-                cycle = nil
-            } else {
+            if mark == open.id {
                 open.draws += 1
                 open.anyOnScreen = open.anyOnScreen || isOnScreen
                 cycle = open
                 return
             }
+            // A different transaction is in flight while our cycle is still
+            // open, so that cycle's completion block never fired — somebody
+            // replaced it. Report it lost, with the draws that went with it,
+            // instead of folding this transaction's draws into a frame that
+            // will never be reported.
+            emit("commitdrop draws=\(open.draws)")
+            cycle = nil
         }
 
         nextCycleID += 1
@@ -172,10 +235,11 @@ final class TerminalCommitLatencyProbe {
             id: id,
             startedAt: startedAt,
             draws: 1,
+            paints: 0,
             lastPresentedAt: nil,
             anyOnScreen: isOnScreen
         )
-        registerCommitCompletion { [weak self] in
+        transaction.begin(id) { [weak self] in
             // CoreAnimation runs the completion block on the thread that
             // committed the transaction, which for an AppKit display cycle is
             // the main thread. Hopping via `DispatchQueue.main.async` instead
@@ -190,8 +254,10 @@ final class TerminalCommitLatencyProbe {
     /// draw. Only moves the end of the app-side paint span; a frame presented
     /// with no cycle open (nothing of ours drew) is ignored.
     func recordFramePresented(at presentedAt: Double) {
-        guard cycle != nil else { return }
-        cycle?.lastPresentedAt = presentedAt
+        guard var open = cycle else { return }
+        open.paints += 1
+        open.lastPresentedAt = presentedAt
+        cycle = open
     }
 
     private func completeCycle(id: UInt64) {
@@ -203,6 +269,7 @@ final class TerminalCommitLatencyProbe {
         let drawSeconds = (open.lastPresentedAt ?? open.startedAt) - open.startedAt
         emit(
             "commit draws=\(open.draws)"
+                + " paints=\(open.paints)"
                 + " drawms=\(Self.millis(drawSeconds))"
                 + " commitms=\(Self.millis(committedAt - open.startedAt))"
                 + " vis=\(open.anyOnScreen ? 1 : 0)"
@@ -211,23 +278,6 @@ final class TerminalCommitLatencyProbe {
 
     nonisolated private static func millis(_ seconds: Double) -> String {
         String(format: "%.3f", seconds * 1000)
-    }
-
-    // MARK: - CoreAnimation seam
-
-    /// Registers `block` on the `CATransaction` currently in flight.
-    ///
-    /// **`CATransaction.setCompletionBlock` has no getter and unconditionally
-    /// replaces any block already set on this transaction.** There is no way
-    /// to read the incumbent and chain to it. Two consequences we accept
-    /// because this is a default-off diagnostic and for no other reason:
-    /// a block someone else set earlier in this cycle is discarded by us, and
-    /// a block someone else sets later discards ours (that cycle then reports
-    /// nothing and is eventually counted by the stale-cycle drop). Setting one
-    /// per view instead of one per cycle would make the second case the common
-    /// case.
-    static func defaultRegisterCommitCompletion(_ block: @escaping @Sendable () -> Void) {
-        CATransaction.setCompletionBlock(block)
     }
 
     /// Points SwiftTerm's frame-presented diagnostics hook at this probe.
@@ -274,9 +324,10 @@ final class TerminalCommitLatencyProbe {
     private static var sharedStorage: TerminalCommitLatencyProbe?
 
     /// The process-wide probe, or `nil` when the diagnostic is off — which is
-    /// the default. `nil` is the whole gate: the draw call site's `guard let`
-    /// falls straight through to `super.draw`, so nothing is timed, nothing is
-    /// logged, and no completion block is registered.
+    /// the default. `nil` is the whole gate: `TBDTerminalView.viewWillDraw()`
+    /// returns right after its `super.viewWillDraw()` call, so nothing is
+    /// timed, nothing is logged, no transaction is marked, and no completion
+    /// block is registered.
     ///
     /// Resolved once, on the first terminal draw. Flipping the flag takes
     /// effect on the next launch; a measurement session starts with a relaunch
