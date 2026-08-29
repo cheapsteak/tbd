@@ -948,8 +948,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 clickMonitor = nil
             }
             if let generation = tmuxSessionGeneration {
-                tmuxBridge?.cleanupSession(
-                    panelID: panelID, server: tmuxServer, generation: generation)
+                tmuxBridge?.cleanupSession(panelID: panelID, generation: generation)
             }
             resizeDebounceTask?.cancel()
             resizeDebounceTask = nil
@@ -1297,8 +1296,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // this coordinator's own generation makes that a no-op instead of
             // killing the fresh session.
             if let generation = tmuxSessionGeneration {
-                tmuxBridge?.cleanupSession(
-                    panelID: panelID, server: tmuxServer, generation: generation)
+                tmuxBridge?.cleanupSession(panelID: panelID, generation: generation)
             }
         }
 

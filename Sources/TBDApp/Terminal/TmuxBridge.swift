@@ -413,7 +413,14 @@ final class TmuxBridge: @unchecked Sendable {
     ///
     /// Still idempotent: the matching call removes the entry, so a second
     /// teardown for the same generation finds nothing and returns.
-    func cleanupSession(panelID: UUID, server: String, generation: UInt64) {
+    ///
+    /// Takes no server: the tracked `ActiveSession` is the authority on which
+    /// socket its session lives on. A caller-supplied server could disagree
+    /// with the entry it just removed — a panel whose coordinator recorded one
+    /// server while the preparation ran against another — and the kill would
+    /// then go to a socket that has no such session, leaking the tracked one
+    /// with no path left to reclaim it.
+    func cleanupSession(panelID: UUID, generation: UInt64) {
         lock.lock()
         guard let session = activeSessions[panelID], session.generation == generation else {
             lock.unlock()
@@ -425,7 +432,7 @@ final class TmuxBridge: @unchecked Sendable {
         Task.detached { [self] in
             let _ = await runTmux(
                 tmuxExecutablePath: session.tmuxExecutablePath,
-                server: server,
+                server: session.server,
                 args: Self.killSessionArgs(sessionName: session.name)
             )
             debugLog("CLEANUP: panelID=\(panelID.uuidString.prefix(8)) session=\(session.name)")

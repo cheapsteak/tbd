@@ -133,8 +133,8 @@ struct TerminalViewSessionReclamationTests {
 
     /// The terminate path, end to end through the delegate method the app
     /// actually implements — and across two servers, because `activeSessions`
-    /// spans every server the app has a panel on while `cleanupSession` learns
-    /// the server from its caller.
+    /// spans every server the app has a panel on while each kill has to reach
+    /// the socket its own session lives on.
     ///
     /// `applicationWillTerminate` blocks while the kills run, and it is
     /// `@MainActor`-isolated, so this test blocks the main thread exactly as
@@ -225,8 +225,7 @@ struct TerminalViewSessionReclamationTests {
         // And the fresh preparation is still tracked: its own teardown still
         // finds an entry to reclaim. (Before the fix the superseded release had
         // already removed it, so this kill never happened.)
-        bridge.cleanupSession(
-            panelID: Self.panelID, server: "tbd-repo", generation: generations[1])
+        bridge.cleanupSession(panelID: Self.panelID, generation: generations[1])
         let kills = try await runner.awaitKillSessions(
             atLeast: 1,
             describedAs: "the rebuilt panel's view session on its own teardown"
@@ -251,8 +250,7 @@ struct TerminalViewSessionReclamationTests {
             panels: [(Self.panelID, "tbd-repo", "@147")]
         )
 
-        bridge.cleanupSession(
-            panelID: Self.panelID, server: "tbd-repo", generation: generations[0])
+        bridge.cleanupSession(panelID: Self.panelID, generation: generations[0])
 
         let kills = try await runner.awaitKillSessions(
             atLeast: 1,
@@ -261,6 +259,51 @@ struct TerminalViewSessionReclamationTests {
         #expect(kills == [
             RecordingTmuxRunner.Invocation(
                 server: "tbd-repo",
+                args: TmuxBridge.killSessionArgs(sessionName: Self.sessionName)
+            ),
+        ])
+    }
+
+    /// **The test that pins the wrong-socket bug.** A tmux session exists on
+    /// exactly one server socket, and the bridge already records which one when
+    /// it prepares the session. A teardown that carried its caller's idea of
+    /// the server instead would remove the tracked entry — the only handle
+    /// anything has on that session — and then send `kill-session` to a socket
+    /// that has no such session: the view session survives with nothing left
+    /// able to reclaim it, holding its linked worktree window, that window's
+    /// pane process and the whole tmux server alive.
+    ///
+    /// A coordinator whose `tmuxServer` disagrees with the preparation is the
+    /// reachable shape: the field is assigned when SwiftUI makes the view,
+    /// while the server the preparation actually ran against is the one the
+    /// bridge recorded.
+    @Test("a teardown kills on the session's own server, not the one its caller holds")
+    func teardownKillsOnThePreparationsServerNotTheCallers() async throws {
+        let fixture = try TmuxBridgeFixture()
+        defer { fixture.remove() }
+        let (bridge, runner, generations) = try await makePreparedBridge(
+            fixture: fixture,
+            panels: [(Self.panelID, "tbd-repo-actual", "@147")]
+        )
+
+        autoreleasepool {
+            var coordinator: TerminalPanelRepresentable.Coordinator? =
+                TerminalPanelRepresentable.Coordinator()
+            coordinator?.tmuxBridge = bridge
+            // Disagrees with the server the session was prepared on.
+            coordinator?.tmuxServer = "tbd-repo-stale"
+            coordinator?.panelID = Self.panelID
+            coordinator?.tmuxSessionGeneration = generations[0]
+            coordinator = nil
+        }
+
+        let kills = try await runner.awaitKillSessions(
+            atLeast: 1,
+            describedAs: "the view session of a coordinator holding a stale server name"
+        )
+        #expect(kills == [
+            RecordingTmuxRunner.Invocation(
+                server: "tbd-repo-actual",
                 args: TmuxBridge.killSessionArgs(sessionName: Self.sessionName)
             ),
         ])

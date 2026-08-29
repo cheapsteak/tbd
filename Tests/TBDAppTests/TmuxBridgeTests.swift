@@ -225,8 +225,7 @@ struct TmuxBridgeTests {
         #expect(afterConfirmationInvocationCount == firstInvocationCount + 1)
         #expect(fixture.lineCount(at: secondLog) == 0)
 
-        bridge.cleanupSession(
-            panelID: panelID, server: "tbd-repo", generation: preparation.generation)
+        bridge.cleanupSession(panelID: panelID, generation: preparation.generation)
         try await fixture.waitForLineCount(afterConfirmationInvocationCount + 1, at: firstLog)
 
         #expect(fixture.lineCount(at: firstLog) == afterConfirmationInvocationCount + 1)
