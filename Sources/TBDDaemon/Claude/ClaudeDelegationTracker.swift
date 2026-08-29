@@ -7,6 +7,17 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claude-deleg
 struct ClaudeDelegationTarget: Sendable, Equatable {
     let terminalID: UUID
     let transcriptPath: String?
+    let sessionIncarnationID: UUID?
+
+    init(
+        terminalID: UUID,
+        transcriptPath: String?,
+        sessionIncarnationID: UUID? = nil
+    ) {
+        self.terminalID = terminalID
+        self.transcriptPath = transcriptPath
+        self.sessionIncarnationID = sessionIncarnationID
+    }
 }
 
 /// Owns which Claude terminals owe a delegation sample and what the last
@@ -29,25 +40,48 @@ actor ClaudeDelegationTracker {
     /// rail already reports working and this rail is not needed.
     private static let tailByteLimit = 64 * 1024
 
+    private struct Incarnation: Hashable {
+        let id: UUID?
+    }
+
     private struct Claim {
         let transcriptPath: String
+        let incarnation: Incarnation
         let count: Int
     }
 
-    private var marked: Set<UUID> = []
+    private var marked: [UUID: Set<Incarnation>] = [:]
     private var claims: [UUID: Claim] = [:]
 
-    func mark(terminalID: UUID) {
-        marked.insert(terminalID)
+    func mark(terminalID: UUID, sessionIncarnationID: UUID? = nil) {
+        marked[terminalID, default: []].insert(Incarnation(id: sessionIncarnationID))
     }
 
     /// Whether a terminal currently owes a sample. Exists so a test can pin
     /// the mark independently of any filesystem evidence.
-    func isMarked(terminalID: UUID) -> Bool { marked.contains(terminalID) }
+    func isMarked(terminalID: UUID) -> Bool { marked[terminalID]?.isEmpty == false }
 
+    /// User actions target the selected terminal rather than one process, so
+    /// their clear deliberately removes every incarnation's transient state.
     func clear(terminalID: UUID) {
-        marked.remove(terminalID)
+        marked.removeValue(forKey: terminalID)
         claims.removeValue(forKey: terminalID)
+    }
+
+    /// Process-derived clears affect only state produced by that process.
+    func clear(terminalID: UUID, sessionIncarnationID: UUID?) {
+        let incarnation = Incarnation(id: sessionIncarnationID)
+        if var marks = marked[terminalID] {
+            marks.remove(incarnation)
+            if marks.isEmpty {
+                marked.removeValue(forKey: terminalID)
+            } else {
+                marked[terminalID] = marks
+            }
+        }
+        if claims[terminalID]?.incarnation == incarnation {
+            claims.removeValue(forKey: terminalID)
+        }
     }
 
     /// Re-reads every marked target, keeps standing claims for the rest, and
@@ -56,17 +90,25 @@ actor ClaudeDelegationTracker {
         var result: [UUID: Int] = [:]
         for target in targets {
             let id = target.terminalID
+            let incarnation = Incarnation(id: target.sessionIncarnationID)
             // A retargeted terminal's old count cannot describe its new
-            // transcript, so drop it whether or not a fresh mark arrived.
-            if let claim = claims[id], claim.transcriptPath != target.transcriptPath {
+            // transcript or process, so drop it whether or not a fresh mark
+            // arrived.
+            if let claim = claims[id],
+               claim.transcriptPath != target.transcriptPath
+                   || claim.incarnation != incarnation {
                 claims.removeValue(forKey: id)
             }
-            if marked.remove(id) != nil {
+            let marks = marked.removeValue(forKey: id)
+            if marks?.contains(incarnation) == true {
                 claims.removeValue(forKey: id)
                 if let path = target.transcriptPath, !path.isEmpty,
                    let tail = Self.readTail(path: path),
                    let count = ClaudeDelegationSample.pendingCount(inTail: tail) {
-                    claims[id] = Claim(transcriptPath: path, count: count)
+                    claims[id] = Claim(
+                        transcriptPath: path,
+                        incarnation: incarnation,
+                        count: count)
                 }
             }
             if let claim = claims[id] { result[id] = claim.count }
@@ -76,7 +118,7 @@ actor ClaudeDelegationTracker {
 
     /// Drops state for terminals that no longer exist.
     func retain(terminalIDs: Set<UUID>) {
-        marked.formIntersection(terminalIDs)
+        marked = marked.filter { terminalIDs.contains($0.key) }
         claims = claims.filter { terminalIDs.contains($0.key) }
     }
 

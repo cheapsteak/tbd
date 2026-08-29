@@ -234,6 +234,7 @@ import Testing
             source: .hookEvent("UserPromptSubmit"), observedAt: epoch)
         _ = try await db.terminals.applySessionStart(
             id: terminal.id,
+            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
             sessionID: "session-before-recreation",
             transcriptPath: "/tmp/session-before-recreation.jsonl",
             observedAt: epoch.addingTimeInterval(10))

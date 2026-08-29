@@ -56,7 +56,7 @@ enum CodexHookOverlay {
     static let relativePath = "hooks/hooks.json"
 
     static let sessionStartCommand =
-        #"PAYLOAD=$(cat); printf '%s' "$PAYLOAD" | tbd session-event 2>/dev/null || true; printf '%s' "$PAYLOAD" | tbd terminal-activity idle --read-hook-payload 2>/dev/null || true"#
+        #"TBD_BIN="${TBD_CLI_PATH-tbd}"; PAYLOAD=$(cat); printf '%s' "$PAYLOAD" | "$TBD_BIN" session-event 2>/dev/null || true; printf '%s' "$PAYLOAD" | "$TBD_BIN" terminal-activity idle --read-hook-payload 2>/dev/null || true"#
 
     // Only an active goal can cross a Stop hook into autonomous continuation.
     // Paused and limited goals have stopped the current run, so they publish idle.

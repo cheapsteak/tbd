@@ -30,6 +30,10 @@ struct SessionEventCommand: AsyncParsableCommand {
         let cwd: String?
     }
 
+    static func sessionIncarnationID(environment: [String: String]) -> UUID? {
+        environment["TBD_TERMINAL_INCARNATION_ID"].flatMap(UUID.init(uuidString:))
+    }
+
     mutating func run() async throws {
         // 1. Resolve terminal ID from env. Without this, we can't route the
         //    event — silent exit (the hook is also configured globally and
@@ -59,6 +63,7 @@ struct SessionEventCommand: AsyncParsableCommand {
 
         // 4. Fire the RPC. Ignore the response — hook is best-effort.
         do {
+            let environment = ProcessInfo.processInfo.environment
             try client.callVoid(
                 method: RPCMethod.terminalSessionEvent,
                 params: TerminalSessionEventParams(
@@ -66,7 +71,8 @@ struct SessionEventCommand: AsyncParsableCommand {
                     sessionID: sessionID,
                     transcriptPath: payload.transcript_path,
                     source: payload.source,
-                    cwd: payload.cwd
+                    cwd: payload.cwd,
+                    sessionIncarnationID: Self.sessionIncarnationID(environment: environment)
                 )
             )
         } catch {

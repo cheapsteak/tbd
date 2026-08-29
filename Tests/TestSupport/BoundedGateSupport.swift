@@ -39,12 +39,13 @@ import Testing
 // gate with `gateHoldingTask`, which pins it (and every default-actor hop it
 // makes) to threads these tests own.
 //
-// Gates reached from a dedicated `Thread` or a `DispatchQueue` never had the
-// problem and need nothing: `FDVendingServer` delivers to its sinks from a
-// dedicated receive `Thread`, `WorktreeDeletionQueue`'s gate sits on its own
-// `drainQueue`, and `TmuxControlSupervisor` runs `stopConnection` on
-// `DispatchQueue.global(qos:.utility)` precisely so a blocking stop stays off
-// the actor. Those three keep a plain bounded `waitForGate` and no executor.
+// Gates reached from a dedicated `Thread` never had the problem and need
+// nothing: `FDVendingServer` delivers to its sinks from a dedicated receive
+// thread. `WorktreeDeletionQueue` and `TmuxControlSupervisor` reach their gates
+// from dispatch queues, which keeps them off the cooperative pool but does NOT
+// give them dedicated threads. Their small fixed counts keep a plain bounded
+// `waitForGate`; the executor below cannot share libdispatch workers with them,
+// because many simultaneous gate tasks can consume every such worker.
 //
 // ## 2. Bound every wait anyway — `waitForGate`
 //
@@ -66,24 +67,29 @@ import Testing
 /// anywhere in `Sources/`, so there is no actor along these paths that would
 /// pull the job back onto the pool.
 ///
-/// The queue is concurrent: gates are held one per task, and a blocked worker
-/// must not stall an unrelated job that happens to be queued behind it.
+/// Every enqueued task job gets a real `Thread`, not a concurrent dispatch
+/// queue. Dispatch queues do not own threads; enough blocking jobs on one can
+/// consume libdispatch's workers and starve unrelated queue work. A task job is
+/// one synchronous continuation: its thread exits when that continuation
+/// completes or suspends, and the next continuation gets another thread. Gate
+/// tasks follow finite test-only RPC paths, so this bounded resumption churn is
+/// preferable to sharing either of the process-wide worker pools they test.
 public final class GateExecutor: TaskExecutor, @unchecked Sendable {
     /// One per process. The executor holds no state; the shared instance
     /// exists so `gateHoldingTask` does not mint a queue per call site.
     public static let shared = GateExecutor()
-
-    private let queue = DispatchQueue(
-        label: "com.tbd.tests.gate-executor",
-        qos: .userInitiated,
-        attributes: .concurrent)
 
     private init() {}
 
     public func enqueue(_ job: consuming ExecutorJob) {
         let job = UnownedJob(job)
         let executor = asUnownedTaskExecutor()
-        queue.async { job.runSynchronously(on: executor) }
+        let thread = Thread {
+            job.runSynchronously(on: executor)
+        }
+        thread.name = "com.tbd.tests.gate-executor"
+        thread.qualityOfService = .userInitiated
+        thread.start()
     }
 }
 

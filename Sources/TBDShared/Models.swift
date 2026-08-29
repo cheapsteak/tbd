@@ -636,6 +636,17 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     /// Independent from activity and prompt timestamps because either hook
     /// can arrive late while describing the previous session.
     public var sessionOrderObservedAt: Date?
+    /// Safe byte offset from which Codex transcript lifecycle recovery may
+    /// begin. Nil means no durable boundary is known for this session.
+    public var codexTranscriptBoundaryOffset: Int64?
+    /// Durable process-incarnation nonce used to reject delayed SessionStart
+    /// hooks after a terminal is recreated. Nil identifies legacy and newly
+    /// created rows until their first process replacement.
+    public var sessionIncarnationID: UUID?
+    /// Replacement token staged while the current process is being made
+    /// inert. Process-bound hooks are rejected while this is non-nil; tmux
+    /// replacement confirmation promotes it to `sessionIncarnationID`.
+    public var pendingSessionIncarnationID: UUID?
     public var kind: TerminalKind?
     public var activityState: TerminalActivityState
     /// Activity reconstructed for display from the current agent transcript.
@@ -731,6 +742,9 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
                 profileID: UUID? = nil,
                 transcriptPath: String? = nil,
                 sessionOrderObservedAt: Date? = nil,
+                codexTranscriptBoundaryOffset: Int64? = nil,
+                sessionIncarnationID: UUID? = nil,
+                pendingSessionIncarnationID: UUID? = nil,
                 kind: TerminalKind? = nil,
                 activityState: TerminalActivityState = .unknown,
                 presentationActivityState: TerminalActivityState? = nil,
@@ -758,6 +772,9 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         self.profileID = profileID
         self.transcriptPath = transcriptPath
         self.sessionOrderObservedAt = sessionOrderObservedAt
+        self.codexTranscriptBoundaryOffset = codexTranscriptBoundaryOffset
+        self.sessionIncarnationID = sessionIncarnationID
+        self.pendingSessionIncarnationID = pendingSessionIncarnationID
         self.kind = kind
         self.activityState = activityState
         self.presentationActivityState = presentationActivityState
@@ -777,7 +794,8 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     enum CodingKeys: String, CodingKey {
         case id, worktreeID, tmuxWindowID, tmuxPaneID, label, createdAt
         case pinnedAt, claudeSessionID, suspendedAt, suspendedSnapshot, profileID, transcriptPath
-        case sessionOrderObservedAt, kind
+        case sessionOrderObservedAt, codexTranscriptBoundaryOffset, sessionIncarnationID
+        case pendingSessionIncarnationID, kind
         case activityState, presentationActivityState, presentationActivityObservedAt
         case hibernatedAt, hibernateReason, keepWarm, pendingResumeAt, watchDeskRole
         case activityStateSource, activityStateObservedAt, activityStateOrderObservedAt
@@ -799,6 +817,11 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         profileID = try c.decodeIfPresent(UUID.self, forKey: .profileID)
         transcriptPath = try c.decodeIfPresent(String.self, forKey: .transcriptPath)
         sessionOrderObservedAt = try c.decodeIfPresent(Date.self, forKey: .sessionOrderObservedAt)
+        codexTranscriptBoundaryOffset = try c.decodeIfPresent(
+            Int64.self, forKey: .codexTranscriptBoundaryOffset)
+        sessionIncarnationID = try c.decodeIfPresent(UUID.self, forKey: .sessionIncarnationID)
+        pendingSessionIncarnationID = try c.decodeIfPresent(
+            UUID.self, forKey: .pendingSessionIncarnationID)
         kind = try c.decodeIfPresent(TerminalKind.self, forKey: .kind)
         activityState = try c.decodeIfPresent(TerminalActivityState.self, forKey: .activityState) ?? .unknown
         presentationActivityState = try c.decodeIfPresent(

@@ -32,11 +32,20 @@ struct SessionRecaptureScheduler: Sendable {
         self.captureSessionID = captureSessionID
     }
 
-    func schedule(terminalID: UUID, paneID: String, server: String) {
+    @discardableResult
+    func schedule(
+        terminalID: UUID,
+        paneID: String,
+        server: String,
+        expectedIncarnationID: UUID?
+    ) -> Task<Void, Never> {
         Task {
             guard (try? await clock.sleep(for: .seconds(5))) != nil else { return }
             if let sessionID = await captureSessionID(server, paneID) {
-                try? await db.terminals.updateSessionID(id: terminalID, sessionID: sessionID)
+                _ = try? await db.terminals.updateSessionIDIfIncarnationMatches(
+                    id: terminalID,
+                    expectedIncarnationID: expectedIncarnationID,
+                    sessionID: sessionID)
             }
         }
     }

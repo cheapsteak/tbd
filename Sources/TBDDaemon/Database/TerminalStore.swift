@@ -34,6 +34,9 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var profile_id: String?
     var transcriptPath: String?
     var sessionOrderObservedAt: Date?
+    var codexTranscriptBoundaryOffset: Int64?
+    var sessionIncarnationID: String?
+    var pendingSessionIncarnationID: String?
     var kind: String?
     var activityState: String?
     var hibernatedAt: Date?
@@ -66,6 +69,9 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.profile_id = terminal.profileID?.uuidString
         self.transcriptPath = terminal.transcriptPath
         self.sessionOrderObservedAt = terminal.sessionOrderObservedAt
+        self.codexTranscriptBoundaryOffset = terminal.codexTranscriptBoundaryOffset
+        self.sessionIncarnationID = terminal.sessionIncarnationID?.uuidString
+        self.pendingSessionIncarnationID = terminal.pendingSessionIncarnationID?.uuidString
         self.kind = terminal.kind?.rawValue
         self.activityState = terminal.activityState.rawValue
         self.hibernatedAt = terminal.hibernatedAt
@@ -106,6 +112,9 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             profileID: profile_id.flatMap(UUID.init(uuidString:)),
             transcriptPath: transcriptPath,
             sessionOrderObservedAt: sessionOrderObservedAt,
+            codexTranscriptBoundaryOffset: codexTranscriptBoundaryOffset,
+            sessionIncarnationID: sessionIncarnationID.flatMap(UUID.init(uuidString:)),
+            pendingSessionIncarnationID: pendingSessionIncarnationID.flatMap(UUID.init(uuidString:)),
             kind: kind.flatMap(TerminalKind.init(rawValue:)),
             activityState: activityState.flatMap(TerminalActivityState.init(rawValue:)) ?? .unknown,
             hibernatedAt: hibernatedAt,
@@ -141,6 +150,15 @@ enum FactColumnJSON {
         guard let json, let data = json.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(type, from: data)
     }
+
+    /// Compare a decoded fact with its persisted JSON representation. JSON
+    /// object key order is not identity, while a malformed non-NULL value must
+    /// not collapse into the same state as an absent fact.
+    static func matches<T: Decodable & Equatable>(_ expected: T?, encoded json: String?) -> Bool {
+        guard let json else { return expected == nil }
+        guard let expected else { return false }
+        return decode(T.self, from: json) == expected
+    }
 }
 
 /// What a `recordAwaitingInputReason` call did to the record.
@@ -159,6 +177,13 @@ public struct AppliedTerminalActivityObservation: Sendable {
     public let source: FactSource
     public let observedAt: Date
     public let orderObservedAt: Date
+    /// Whether the durable activity value changed. Legacy non-Codex hooks
+    /// still return an accepted observation when only an awaiting-input reason
+    /// was cleared or the value was already current.
+    public let activityStateChanged: Bool
+    /// Whether this accepted working observation atomically cancelled a
+    /// scheduled resume for the same terminal incarnation.
+    public let cancelledPendingResume: Bool
     /// True when applying this observation retracted a standing awaiting-input
     /// reason, so the caller knows there is a retraction worth broadcasting.
     public let clearedAwaitingInput: Bool
@@ -168,12 +193,16 @@ public struct AppliedTerminalActivityObservation: Sendable {
         source: FactSource,
         observedAt: Date,
         orderObservedAt: Date,
+        activityStateChanged: Bool = true,
+        cancelledPendingResume: Bool = false,
         clearedAwaitingInput: Bool = false
     ) {
         self.activityState = activityState
         self.source = source
         self.observedAt = observedAt
         self.orderObservedAt = orderObservedAt
+        self.activityStateChanged = activityStateChanged
+        self.cancelledPendingResume = cancelledPendingResume
         self.clearedAwaitingInput = clearedAwaitingInput
     }
 }
@@ -182,6 +211,7 @@ struct AppliedTerminalSessionStart: Sendable {
     let sessionID: String
     let transcriptPath: String?
     let orderObservedAt: Date?
+    let transcriptBoundaryOffset: Int64?
     let isInitialAttachment: Bool
     let activityObservation: AppliedTerminalActivityObservation?
     /// True when applying this SessionStart retracted a standing awaiting-input
@@ -189,6 +219,198 @@ struct AppliedTerminalSessionStart: Sendable {
     /// Claude/shell branch retracts one while returning no activity observation
     /// at all — a retraction read off that field alone would be missed there.
     let clearedAwaitingInput: Bool
+}
+
+struct ObservedTranscriptBoundary: Sendable {
+    let path: String
+    let eof: Int64
+}
+
+/// The durable process incarnation and launch-owned coordinates observed
+/// before a SessionStart handler suspends. The nonce is authoritative across
+/// tmux ABA reuse; coordinates and label remain additional rejection rails.
+struct TerminalSessionIncarnation: Sendable {
+    let tmuxWindowID: String
+    let tmuxPaneID: String
+    let label: String?
+    let sessionIncarnationID: UUID?
+    let pendingSessionIncarnationID: UUID?
+
+    init(terminal: Terminal) {
+        self.tmuxWindowID = terminal.tmuxWindowID
+        self.tmuxPaneID = terminal.tmuxPaneID
+        self.label = terminal.label
+        self.sessionIncarnationID = terminal.sessionIncarnationID
+        self.pendingSessionIncarnationID = terminal.pendingSessionIncarnationID
+    }
+
+    fileprivate init(record: TerminalRecord) {
+        self.tmuxWindowID = record.tmuxWindowID
+        self.tmuxPaneID = record.tmuxPaneID
+        self.label = record.label
+        self.sessionIncarnationID = record.sessionIncarnationID.flatMap(UUID.init(uuidString:))
+        self.pendingSessionIncarnationID = record.pendingSessionIncarnationID.flatMap(
+            UUID.init(uuidString:))
+    }
+
+    fileprivate func matches(_ record: TerminalRecord) -> Bool {
+        record.tmuxWindowID == tmuxWindowID
+            && record.tmuxPaneID == tmuxPaneID
+            && record.label == label
+            && record.sessionIncarnationID == sessionIncarnationID?.uuidString
+            && record.pendingSessionIncarnationID == pendingSessionIncarnationID?.uuidString
+    }
+
+    func matches(_ terminal: Terminal) -> Bool {
+        terminal.tmuxWindowID == tmuxWindowID
+            && terminal.tmuxPaneID == tmuxPaneID
+            && terminal.label == label
+            && terminal.sessionIncarnationID == sessionIncarnationID
+            && terminal.pendingSessionIncarnationID == pendingSessionIncarnationID
+    }
+}
+
+/// The launch-relevant terminal state observed before an operation suspends.
+/// Process replacement callers compare this inside the writer transaction so
+/// a command prepared for one session/profile/park state cannot commit against
+/// another. Activity facts are deliberately excluded: hooks from the same
+/// process may advance them without changing which process a replacement owns.
+struct TerminalReplacementSnapshot: Sendable {
+    let incarnation: TerminalSessionIncarnation
+    let worktreeID: UUID
+    let kind: TerminalKind?
+    let claudeSessionID: String?
+    let transcriptPath: String?
+    let profileID: UUID?
+    let suspendedAt: Date?
+    let hibernatedAt: Date?
+
+    init(terminal: Terminal) {
+        incarnation = TerminalSessionIncarnation(terminal: terminal)
+        worktreeID = terminal.worktreeID
+        kind = terminal.kind
+        claudeSessionID = terminal.claudeSessionID
+        transcriptPath = terminal.transcriptPath
+        profileID = terminal.profileID
+        suspendedAt = terminal.suspendedAt
+        hibernatedAt = terminal.hibernatedAt
+    }
+
+    fileprivate func matches(_ record: TerminalRecord) -> Bool {
+        incarnation.matches(record)
+            && record.worktreeID == worktreeID.uuidString
+            && record.kind == kind?.rawValue
+            && record.claudeSessionID == claudeSessionID
+            && record.transcriptPath == transcriptPath
+            && record.profile_id == profileID?.uuidString
+            && record.suspendedAt == suspendedAt
+            && record.hibernatedAt == hibernatedAt
+    }
+
+    func matches(_ terminal: Terminal) -> Bool {
+        incarnation.matches(terminal)
+            && terminal.worktreeID == worktreeID
+            && terminal.kind == kind
+            && terminal.claudeSessionID == claudeSessionID
+            && terminal.transcriptPath == transcriptPath
+            && terminal.profileID == profileID
+            && terminal.suspendedAt == suspendedAt
+            && terminal.hibernatedAt == hibernatedAt
+    }
+}
+
+/// The complete safety state that authorizes hibernating a live process.
+/// Unlike general replacement snapshots, this includes the activity and
+/// keep-warm rails so a hook or preference change between the final read and
+/// the park transaction rejects without writing.
+struct TerminalHibernationSnapshot: Sendable {
+    let replacement: TerminalReplacementSnapshot
+    let keepWarm: Bool
+    let activityState: TerminalActivityState
+    let activityStateSource: FactSource?
+    let activityStateObservedAt: Date?
+    let activityStateOrderObservedAt: Date?
+    let awaitingInputReason: AwaitingInputReason?
+    let awaitingInputObservedAt: Date?
+
+    init(terminal: Terminal) {
+        replacement = TerminalReplacementSnapshot(terminal: terminal)
+        keepWarm = terminal.keepWarm
+        activityState = terminal.activityState
+        activityStateSource = terminal.activityStateSource
+        activityStateObservedAt = terminal.activityStateObservedAt
+        activityStateOrderObservedAt = terminal.activityStateOrderObservedAt
+        awaitingInputReason = terminal.awaitingInputReason
+        awaitingInputObservedAt = terminal.awaitingInputObservedAt
+    }
+
+    fileprivate func matches(_ record: TerminalRecord) -> Bool {
+        replacement.matches(record)
+            && (record.keepWarm ?? false) == keepWarm
+            && record.activityState == activityState.rawValue
+            && FactColumnJSON.matches(
+                activityStateSource, encoded: record.activityStateSource)
+            && record.activityStateObservedAt == activityStateObservedAt
+            && record.activityStateOrderObservedAt == activityStateOrderObservedAt
+            && FactColumnJSON.matches(
+                awaitingInputReason, encoded: record.awaitingInputReason)
+            && record.awaitingInputObservedAt == awaitingInputObservedAt
+    }
+
+    func matchesActivity(_ terminal: Terminal) -> Bool {
+        terminal.activityState == activityState
+            && terminal.activityStateSource == activityStateSource
+            && terminal.activityStateObservedAt == activityStateObservedAt
+            && terminal.activityStateOrderObservedAt == activityStateOrderObservedAt
+            && terminal.awaitingInputReason == awaitingInputReason
+            && terminal.awaitingInputObservedAt == awaitingInputObservedAt
+    }
+}
+
+private enum HibernatedTranscriptPathUpdate {
+    case preserve
+    case replace(String?)
+}
+
+@discardableResult
+private func resetAgentProcessLifecycle(
+    record: inout TerminalRecord,
+    sessionID: String?,
+    transcriptPath: String?,
+    at date: Date
+) -> UUID {
+    let incarnationID = UUID()
+    record.claudeSessionID = sessionID
+    record.transcriptPath = transcriptPath
+    record.sessionOrderObservedAt = nil
+    record.codexTranscriptBoundaryOffset = nil
+    record.sessionIncarnationID = incarnationID.uuidString
+    record.pendingSessionIncarnationID = nil
+    record.activityState = TerminalActivityState.unknown.rawValue
+    record.activityStateSource = FactColumnJSON.encode(FactSource.derived)
+    record.activityStateObservedAt = date
+    record.activityStateOrderObservedAt = date
+    record.awaitingInputReason = nil
+    record.awaitingInputObservedAt = nil
+    return incarnationID
+}
+
+private func resetRecreatedShellLifecycle(
+    record: inout TerminalRecord,
+    at date: Date
+) -> UUID {
+    let incarnationID = resetAgentProcessLifecycle(
+        record: &record,
+        sessionID: nil,
+        transcriptPath: nil,
+        at: date)
+    record.suspendedAt = nil
+    record.suspendedSnapshot = nil
+    record.hibernatedAt = nil
+    record.hibernateReason = nil
+    record.label = TerminalLabel.shell
+    record.kind = TerminalKind.shell.rawValue
+    return incarnationID
 }
 
 private func preservesStoredActivityAtEqualOrder(
@@ -274,6 +496,27 @@ private func applyActivityObservationToRecord(
         orderObservedAt: observedAt,
         clearedAwaitingInput: cleared
     )
+}
+
+private func finishActivityObservation(
+    _ application: AppliedTerminalActivityObservation,
+    activityState: TerminalActivityState,
+    terminalID: String,
+    in db: Database
+) throws -> AppliedTerminalActivityObservation {
+    guard activityState == .working,
+          try ScheduledResumeStore.cancelPendingInTransaction(
+              db, terminalID: terminalID) else {
+        return application
+    }
+    return AppliedTerminalActivityObservation(
+        activityState: application.activityState,
+        source: application.source,
+        observedAt: application.observedAt,
+        orderObservedAt: application.orderObservedAt,
+        activityStateChanged: application.activityStateChanged,
+        cancelledPendingResume: true,
+        clearedAwaitingInput: application.clearedAwaitingInput)
 }
 
 /// Provides CRUD operations for terminals.
@@ -398,6 +641,7 @@ public struct TerminalStore: Sendable {
                 throw DatabaseError(message: "Terminal not found")
             }
             record.claudeSessionID = sessionID
+            record.codexTranscriptBoundaryOffset = nil
             record.suspendedAt = date
             record.suspendedSnapshot = snapshot
             try record.update(db)
@@ -417,27 +661,60 @@ public struct TerminalStore: Sendable {
         }
     }
 
-    /// Update the Claude session ID for a terminal.
+    /// Replace a terminal session identity without an ordered SessionStart.
+    /// Any Codex boundary belongs to the replaced process and is cleared in the
+    /// same write; Claude terminals have no boundary, so their behavior is
+    /// unchanged.
     public func updateSessionID(id: UUID, sessionID: String) async throws {
         try await writer.write { db in
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Terminal not found")
             }
             record.claudeSessionID = sessionID
+            record.codexTranscriptBoundaryOffset = nil
             try record.update(db)
         }
     }
 
-    /// Update the Claude session ID and the absolute JSONL transcript path for
-    /// a terminal in one write. Direct lifecycle callers use this when they do
-    /// not have a SessionStart observation to order; the hook bridge uses
-    /// `applySessionStart` below.
+    /// Persist a same-process session recapture only while the process token
+    /// observed before capture still names the current terminal incarnation
+    /// and no replacement is being staged. A replacement that lands during
+    /// the detector await wins atomically.
+    @discardableResult
+    func updateSessionIDIfIncarnationMatches(
+        id: UUID,
+        expectedIncarnationID: UUID?,
+        sessionID: String
+    ) async throws -> Bool {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            guard record.pendingSessionIncarnationID == nil,
+                  record.sessionIncarnationID == expectedIncarnationID?.uuidString else {
+                return false
+            }
+            record.claudeSessionID = sessionID
+            record.codexTranscriptBoundaryOffset = nil
+            try record.update(db)
+            return true
+        }
+    }
+
+    /// Update the session ID and absolute JSONL transcript path in one write.
+    /// Direct lifecycle callers use this when they do not have a SessionStart
+    /// observation to order, so the same write clears any Codex boundary. The
+    /// hook bridge uses `applySessionStart` below to establish one instead.
     public func updateSession(id: UUID, sessionID: String, transcriptPath: String?) async throws {
         try await writer.write { db in
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Terminal not found")
             }
             record.claudeSessionID = sessionID
+            // This writer has no ordered SessionStart observation with which
+            // to choose a safe lifecycle fence. A replacement identity must
+            // not inherit the prior Codex process's durable boundary.
+            record.codexTranscriptBoundaryOffset = nil
             // Only overwrite when the caller supplied a path. A SessionStart
             // payload that omits `transcript_path` (theoretical — Claude
             // currently always sends it) shouldn't clobber a previously
@@ -464,16 +741,31 @@ public struct TerminalStore: Sendable {
     /// idempotent no-op and therefore cannot move a transcript boundary. The
     /// same transaction classifies an initial attachment from the complete
     /// prior session history so callers never decide from a stale row snapshot.
+    /// A handler's durable incarnation snapshot must still match, preventing
+    /// a delayed hook from attaching to a recreated terminal even when tmux
+    /// reuses the same launch coordinates.
     func applySessionStart(
         id: UUID,
+        expectedIncarnation: TerminalSessionIncarnation,
+        reportedIncarnationID: UUID? = nil,
         sessionID: String,
         transcriptPath: String?,
+        observedTranscriptBoundary: ObservedTranscriptBoundary? = nil,
         observedAt: Date
     ) async throws -> AppliedTerminalSessionStart? {
         try await writer.write { db in
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Terminal not found")
             }
+            // Legacy terminals have never had a managed replacement and carry
+            // no process token on either side. Once TBD rotates a row to a
+            // durable token, every replacement-process SessionStart must echo
+            // that exact value; nil and mismatches are stale by construction.
+            guard record.pendingSessionIncarnationID == nil else { return nil }
+            guard record.sessionIncarnationID == reportedIncarnationID?.uuidString else {
+                return nil
+            }
+            guard expectedIncarnation.matches(record) else { return nil }
             let isCodex = record.kind == TerminalKind.codex.rawValue
                 || record.label == TerminalLabel.codex
             guard isCodex else {
@@ -495,6 +787,7 @@ public struct TerminalStore: Sendable {
                     sessionID: sessionID,
                     transcriptPath: record.transcriptPath,
                     orderObservedAt: nil,
+                    transcriptBoundaryOffset: record.codexTranscriptBoundaryOffset,
                     isInitialAttachment: false,
                     activityObservation: nil,
                     clearedAwaitingInput: hadReason)
@@ -502,6 +795,7 @@ public struct TerminalStore: Sendable {
             let isInitialAttachment = record.claudeSessionID == nil
                 && record.transcriptPath == nil
                 && record.sessionOrderObservedAt == nil
+                && record.codexTranscriptBoundaryOffset == nil
             if let storedSessionOrder = record.sessionOrderObservedAt,
                storedSessionOrder >= observedAt {
                 return nil
@@ -516,9 +810,24 @@ public struct TerminalStore: Sendable {
                 replaceSameValue: true
             )
 
+            let effectiveTranscriptPath = transcriptPath ?? record.transcriptPath
             record.claudeSessionID = sessionID
             if let transcriptPath {
                 record.transcriptPath = transcriptPath
+            }
+            // The initial Codex process owns the rollout from byte zero, even
+            // when its hook arrives after the file starts growing. Every later
+            // accepted process is fenced at the caller-observed EOF only while
+            // that observation still names the transaction's effective path;
+            // nil means no safe matching offset was available when accepted.
+            if isInitialAttachment {
+                record.codexTranscriptBoundaryOffset = 0
+            } else if let observedTranscriptBoundary,
+                      observedTranscriptBoundary.path == effectiveTranscriptPath,
+                      observedTranscriptBoundary.eof >= 0 {
+                record.codexTranscriptBoundaryOffset = observedTranscriptBoundary.eof
+            } else {
+                record.codexTranscriptBoundaryOffset = nil
             }
             // The activity helper performs this when it accepts Codex's idle
             // fact. Keep the independent call so a rejected stale activity
@@ -536,6 +845,7 @@ public struct TerminalStore: Sendable {
                 // The tracker must use the exact durable generation a later
                 // terminal-list read will reload.
                 orderObservedAt: persistedRecord.sessionOrderObservedAt,
+                transcriptBoundaryOffset: persistedRecord.codexTranscriptBoundaryOffset,
                 isInitialAttachment: isInitialAttachment,
                 activityObservation: activityObservation,
                 clearedAwaitingInput: clearedHere
@@ -554,22 +864,31 @@ public struct TerminalStore: Sendable {
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Terminal not found")
             }
-            record.claudeSessionID = nil
-            record.transcriptPath = nil
-            record.sessionOrderObservedAt = nil
-            record.suspendedAt = nil
-            record.suspendedSnapshot = nil
-            record.hibernatedAt = nil
-            record.hibernateReason = nil
-            record.label = TerminalLabel.shell
-            record.kind = TerminalKind.shell.rawValue
-            record.activityState = TerminalActivityState.unknown.rawValue
-            record.activityStateSource = FactColumnJSON.encode(FactSource.derived)
-            record.activityStateObservedAt = date
-            record.activityStateOrderObservedAt = date
-            record.awaitingInputReason = nil
-            record.awaitingInputObservedAt = nil
+            _ = resetRecreatedShellLifecycle(record: &record, at: date)
             try record.update(db)
+        }
+    }
+
+    /// Bind a newly staged shell window to its terminal row before launching
+    /// the interactive shell. The returned token must be injected into that
+    /// shell so a manually launched agent can identify this incarnation.
+    func replaceRecreatedShellWindow(
+        id: UUID,
+        expectedIncarnation: TerminalSessionIncarnation,
+        windowID: String,
+        paneID: String,
+        at date: Date
+    ) async throws -> UUID? {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            guard expectedIncarnation.matches(record) else { return nil }
+            record.tmuxWindowID = windowID
+            record.tmuxPaneID = paneID
+            let incarnationID = resetRecreatedShellLifecycle(record: &record, at: date)
+            try record.update(db)
+            return incarnationID
         }
     }
 
@@ -579,19 +898,25 @@ public struct TerminalStore: Sendable {
     /// look like a resume of the dead process.
     func replaceRecreatedCodexWindow(
         id: UUID,
+        expectedIncarnation: TerminalSessionIncarnation,
         windowID: String,
         paneID: String,
         at date: Date
-    ) async throws {
+    ) async throws -> UUID? {
         try await writer.write { db in
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Terminal not found")
             }
+            guard expectedIncarnation.matches(record) else { return nil }
             record.tmuxWindowID = windowID
             record.tmuxPaneID = paneID
+            let incarnationID = UUID()
+            record.sessionIncarnationID = incarnationID.uuidString
+            record.pendingSessionIncarnationID = nil
             record.claudeSessionID = nil
             record.transcriptPath = nil
             record.sessionOrderObservedAt = nil
+            record.codexTranscriptBoundaryOffset = nil
             record.suspendedAt = nil
             record.suspendedSnapshot = nil
             record.hibernatedAt = nil
@@ -603,6 +928,34 @@ public struct TerminalStore: Sendable {
             record.awaitingInputReason = nil
             record.awaitingInputObservedAt = nil
             try record.update(db)
+            return incarnationID
+        }
+    }
+
+    /// Commit the complete intended state for an in-place profile replacement
+    /// before tmux starts the new Claude process. The returned token is the
+    /// exact value the caller must inject into that process environment.
+    func prepareProfileAgentRespawn(
+        id: UUID,
+        expectedState: TerminalReplacementSnapshot,
+        sessionID: String,
+        transcriptPath: String?,
+        profileID: UUID?,
+        at date: Date
+    ) async throws -> UUID? {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            guard expectedState.matches(record) else { return nil }
+            record.profile_id = profileID?.uuidString
+            let incarnationID = resetAgentProcessLifecycle(
+                record: &record,
+                sessionID: sessionID,
+                transcriptPath: transcriptPath,
+                at: date)
+            try record.update(db)
+            return incarnationID
         }
     }
 
@@ -616,6 +969,29 @@ public struct TerminalStore: Sendable {
         }
     }
 
+    /// Re-home a parked session only while the complete launch state observed
+    /// by the caller is still current. A wake or replacement that wins first
+    /// rejects this write atomically instead of leaving the row's profile out
+    /// of sync with the process that was launched.
+    func setParkedProfileID(
+        id: UUID,
+        expectedState: TerminalReplacementSnapshot,
+        profileID: UUID?
+    ) async throws -> Terminal? {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            guard expectedState.matches(record),
+                  record.hibernatedAt != nil || record.suspendedAt != nil else {
+                return nil
+            }
+            record.profile_id = profileID?.uuidString
+            try record.update(db)
+            return record.toModel()
+        }
+    }
+
     /// Update the tmux window and pane IDs for a terminal.
     public func updateTmuxIDs(id: UUID, windowID: String, paneID: String) async throws {
         try await writer.write { db in
@@ -624,6 +1000,8 @@ public struct TerminalStore: Sendable {
             }
             record.tmuxWindowID = windowID
             record.tmuxPaneID = paneID
+            record.sessionIncarnationID = UUID().uuidString
+            record.pendingSessionIncarnationID = nil
             try record.update(db)
         }
     }
@@ -680,8 +1058,9 @@ public struct TerminalStore: Sendable {
         }
     }
 
-    /// Apply a Codex or explicit-interrupt activity fact only when it is not
-    /// older than the ordering watermark already stored for the terminal.
+    /// Apply an activity fact after validating process identity in the same
+    /// writer transaction. Codex and explicit-interrupt facts additionally
+    /// obey the durable ordering watermark.
     ///
     /// The ordering comparison and write share one database-writer
     /// transaction. Callers may therefore do
@@ -699,13 +1078,16 @@ public struct TerminalStore: Sendable {
     /// waits are preserved, while ambiguous working/non-working ties resolve
     /// toward non-working; the next strictly newer hook advances order. Other
     /// agent hooks retain their established changed-value replacement and
-    /// same-value no-op behavior.
+    /// same-value no-op behavior. `processBound` is false only for app actions
+    /// such as the explicit user interrupt; hook callers must leave it true.
     public func applyActivityObservation(
         id: UUID,
         activityState: TerminalActivityState,
         source: FactSource,
         observedAt: Date,
         sessionID: String? = nil,
+        sessionIncarnationID: UUID? = nil,
+        processBound: Bool = true,
         replaceSameValue: Bool = false
     ) async throws -> AppliedTerminalActivityObservation? {
         try await writer.write { db in
@@ -715,12 +1097,42 @@ public struct TerminalStore: Sendable {
             let usesOrderedCodexActivity = record.kind == TerminalKind.codex.rawValue
                 || record.label == TerminalLabel.codex
                 || source == .terminalInterrupt
+            // Hook observations name a running process. During the staged
+            // hibernation replacement there intentionally is no process
+            // entitled to mutate the row: the outgoing token remains current
+            // only for rollback, and the staged token has not launched yet.
+            // Non-process-bound app actions remain valid throughout.
+            if processBound {
+                guard record.pendingSessionIncarnationID == nil,
+                      record.sessionIncarnationID == sessionIncarnationID?.uuidString else {
+                    return nil
+                }
+                if let sessionID, sessionID != record.claudeSessionID {
+                    return nil
+                }
+            }
             guard usesOrderedCodexActivity else {
                 // This API is public to the daemon module, so keep the scope
                 // boundary here as well as at the RPC router. An accidental
                 // non-Codex caller must retain the pre-existing changed-value
                 // replacement and same-value no-op behavior.
-                guard record.activityState != activityState.rawValue else { return nil }
+                guard record.activityState != activityState.rawValue else {
+                    let cleared = clearAwaitingInputIfNotNewer(
+                        record: &record, than: observedAt)
+                    if cleared { try record.update(db) }
+                    let application = AppliedTerminalActivityObservation(
+                        activityState: activityState,
+                        source: source,
+                        observedAt: observedAt,
+                        orderObservedAt: observedAt,
+                        activityStateChanged: false,
+                        clearedAwaitingInput: cleared)
+                    return try finishActivityObservation(
+                        application,
+                        activityState: activityState,
+                        terminalID: id.uuidString,
+                        in: db)
+                }
                 let hadReason = record.awaitingInputReason != nil
                     || record.awaitingInputObservedAt != nil
                 record.activityState = activityState.rawValue
@@ -730,21 +1142,17 @@ public struct TerminalStore: Sendable {
                 record.awaitingInputReason = nil
                 record.awaitingInputObservedAt = nil
                 try record.update(db)
-                return AppliedTerminalActivityObservation(
+                let application = AppliedTerminalActivityObservation(
                     activityState: activityState,
                     source: source,
                     observedAt: observedAt,
                     orderObservedAt: observedAt,
                     clearedAwaitingInput: hadReason)
-            }
-            // Codex writes session identity into every supported hook payload.
-            // Check it in this transaction, rather than against the terminal
-            // loaded by the router, so a delayed old-session event cannot race
-            // an accepted SessionStart. Identity-free callers retain legacy
-            // behavior for already-running sessions with an older hook overlay
-            // and for the app's explicit interrupt.
-            if let sessionID, sessionID != record.claudeSessionID {
-                return nil
+                return try finishActivityObservation(
+                    application,
+                    activityState: activityState,
+                    terminalID: id.uuidString,
+                    in: db)
             }
             guard let application = applyActivityObservationToRecord(
                 to: &record,
@@ -754,7 +1162,11 @@ public struct TerminalStore: Sendable {
                 replaceSameValue: replaceSameValue
             ) else { return nil }
             try record.update(db)
-            return application
+            return try finishActivityObservation(
+                application,
+                activityState: activityState,
+                terminalID: id.uuidString,
+                in: db)
         }
     }
 
@@ -1009,20 +1421,118 @@ public struct TerminalStore: Sendable {
     /// unconditionally (a re-park overwrites any stale reason); `nil` keeps
     /// legacy semantics (the row is still eligible for wake-on-focus).
     ///
-    /// This is the choke point EVERY park site flows through
-    /// (`HibernationCoordinator.performHibernate`, the reconcile recovery park,
-    /// and `handleTerminalRecreateWindow`'s dead-window park), so it also
-    /// cancels any scheduled auto-resume in the same write transaction: a
-    /// parked session's Claude process is dead — a resume firing later would
-    /// type "continue" into a bare shell — and `pendingResumeAt` must not
-    /// keep advertising a resume that will never happen. Wake
-    /// (`clearHibernated`) deliberately does NOT resurrect the cancelled row.
+    /// Park sites whose process is already replaced use this complete
+    /// transition. `HibernationCoordinator.performHibernate` instead uses the
+    /// staged begin/finalize pair below so a failed first tmux replacement can
+    /// retain a still-running agent's token. Both paths cancel any scheduled
+    /// auto-resume atomically with their park intent: while a row is parked, a
+    /// resume must not type into either the outgoing agent or its replacement
+    /// shell. Wake (`clearHibernated`) deliberately does not resurrect the
+    /// cancelled row.
     public func setHibernated(id: UUID, sessionID: String, snapshot: String? = nil, reason: HibernateReason? = nil, at date: Date = Date()) async throws {
+        _ = try await persistHibernatedState(
+            id: id,
+            sessionID: sessionID,
+            transcriptPathUpdate: .preserve,
+            snapshot: snapshot,
+            reason: reason,
+            at: date)
+    }
+
+    /// Record the hibernation intent before replacing the live agent. The
+    /// current process token remains intact until tmux has replaced that
+    /// process with an inert pane, so startup reconciliation can safely unpark
+    /// a still-running agent after a crash or failed respawn. A pending token
+    /// makes process-bound hook writes inert during this interval; finalize
+    /// promotes it once replacement is confirmed. A process-incarnation
+    /// mismatch rejects without writing and returns nil.
+    func beginHibernatedShellRespawn(
+        id: UUID,
+        expectedState: TerminalHibernationSnapshot,
+        snapshot: String? = nil,
+        reason: HibernateReason? = nil,
+        at date: Date = Date()
+    ) async throws -> TerminalSessionIncarnation? {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            guard expectedState.matches(record) else { return nil }
+            record.pendingSessionIncarnationID = UUID().uuidString
+            record.hibernatedAt = date
+            record.hibernateReason = reason?.rawValue
+            if let snapshot {
+                record.suspendedSnapshot = snapshot
+            }
+            record.activityState = TerminalActivityState.idle.rawValue
+            record.activityStateSource = FactColumnJSON.encode(FactSource.database)
+            record.activityStateObservedAt = date
+            record.activityStateOrderObservedAt = date
+            record.awaitingInputReason = nil
+            record.awaitingInputObservedAt = nil
+            try record.update(db)
+            try ScheduledResumeStore.cancelPendingInTransaction(db, terminalID: id.uuidString)
+            return TerminalSessionIncarnation(record: record)
+        }
+    }
+
+    /// Fence the process that tmux has already replaced with an inert pane.
+    /// The returned token belongs to the hibernated shell launched next; all
+    /// ordering and activity evidence from the former agent clears atomically.
+    /// A process-incarnation mismatch rejects without writing and returns nil.
+    func finalizeHibernatedShellRespawn(
+        id: UUID,
+        expectedIncarnation: TerminalSessionIncarnation,
+        at date: Date = Date()
+    ) async throws -> UUID? {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            guard expectedIncarnation.matches(record) else { return nil }
+            guard record.hibernatedAt != nil || record.suspendedAt != nil else {
+                throw DatabaseError(message: "Terminal is not parked")
+            }
+            guard let pendingIncarnationID = record.pendingSessionIncarnationID,
+                  let incarnationID = UUID(uuidString: pendingIncarnationID) else {
+                return nil
+            }
+            record.sessionOrderObservedAt = nil
+            record.codexTranscriptBoundaryOffset = nil
+            record.sessionIncarnationID = pendingIncarnationID
+            record.pendingSessionIncarnationID = nil
+            record.activityState = TerminalActivityState.idle.rawValue
+            record.activityStateSource = FactColumnJSON.encode(FactSource.database)
+            record.activityStateObservedAt = date
+            record.activityStateOrderObservedAt = date
+            record.awaitingInputReason = nil
+            record.awaitingInputObservedAt = nil
+            try record.update(db)
+            return incarnationID
+        }
+    }
+
+    private func persistHibernatedState(
+        id: UUID,
+        sessionID: String,
+        transcriptPathUpdate: HibernatedTranscriptPathUpdate,
+        snapshot: String?,
+        reason: HibernateReason?,
+        at date: Date
+    ) async throws -> UUID {
         try await writer.write { db in
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Terminal not found")
             }
             record.claudeSessionID = sessionID
+            if case .replace(let transcriptPath) = transcriptPathUpdate {
+                record.transcriptPath = transcriptPath
+            }
+            record.sessionOrderObservedAt = nil
+            record.codexTranscriptBoundaryOffset = nil
+            let incarnationID = UUID()
+            record.sessionIncarnationID = incarnationID.uuidString
+            record.pendingSessionIncarnationID = nil
             record.hibernatedAt = date
             record.hibernateReason = reason?.rawValue
             if let snapshot {
@@ -1043,16 +1553,17 @@ public struct TerminalStore: Sendable {
             // SQL, and an update of the (stale-fetched) record afterward
             // would write the old value back.
             try ScheduledResumeStore.cancelPendingInTransaction(db, terminalID: id.uuidString)
+            return incarnationID
         }
     }
 
-    /// Clear a terminal's parked state (on wake). Nils BOTH the authoritative
-    /// `hibernatedAt` AND the legacy `suspendedAt` so a row parked by either the
-    /// unified path or the pre-merge Suspend feature fully un-parks. Leaves
-    /// `claudeSessionID` intact — the wake respawn re-captures a fresh id
-    /// afterward — and keeps `suspendedSnapshot` so the app can feed it into the
-    /// terminal view as initial content while the live tmux client reconnects
-    /// (matches the old Suspend behavior; overwritten on the next park).
+    /// Clear a stale parked marker when startup reconciliation proves the
+    /// recorded process is still alive, or after a replacement agent launches.
+    /// Nils both the authoritative `hibernatedAt` and
+    /// legacy `suspendedAt`, while preserving the live process's identity and
+    /// current incarnation. Any abandoned pending replacement is rolled back.
+    /// A real wake first uses
+    /// `prepareHibernatedAgentRespawn` below before launching the process.
     public func clearHibernated(id: UUID) async throws {
         try await writer.write { db in
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
@@ -1061,7 +1572,44 @@ public struct TerminalStore: Sendable {
             record.hibernatedAt = nil
             record.suspendedAt = nil
             record.hibernateReason = nil
+            record.pendingSessionIncarnationID = nil
             try record.update(db)
+        }
+    }
+
+    /// Prepare a parked shell for a fresh agent before launch. Preserve the
+    /// captured session identity and transcript needed for a failed launch to
+    /// retry, while clearing process-local ordering/activity and rotating the
+    /// durable incarnation atomically. The parked marker remains until tmux
+    /// confirms launch; `clearHibernated` then removes only that marker.
+    func prepareHibernatedAgentRespawn(
+        id: UUID,
+        expectedState: TerminalReplacementSnapshot,
+        windowID: String? = nil,
+        paneID: String? = nil,
+        at date: Date = Date()
+    ) async throws -> UUID? {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            guard expectedState.matches(record),
+                  record.hibernatedAt != nil || record.suspendedAt != nil else {
+                return nil
+            }
+            if let windowID, let paneID {
+                record.tmuxWindowID = windowID
+                record.tmuxPaneID = paneID
+            }
+            let resumeSessionID = record.claudeSessionID
+            let resumeTranscriptPath = record.transcriptPath
+            let incarnationID = resetAgentProcessLifecycle(
+                record: &record,
+                sessionID: resumeSessionID,
+                transcriptPath: resumeTranscriptPath,
+                at: date)
+            try record.update(db)
+            return incarnationID
         }
     }
 

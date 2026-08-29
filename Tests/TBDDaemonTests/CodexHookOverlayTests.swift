@@ -138,7 +138,8 @@ import TBDShared
         #expect(sessionStart?.first?["matcher"] as? String == "startup|resume|clear")
         let sessionHooks = sessionStart?.first?["hooks"] as? [[String: Any]]
         let sessionCommand = sessionHooks?.first?["command"] as? String
-        #expect(sessionCommand?.contains("tbd session-event") == true)
+        #expect(sessionCommand?.contains("TBD_CLI_PATH-tbd") == true)
+        #expect(sessionCommand?.contains("session-event") == true)
 
         let stop = hooks?["Stop"] as? [[String: Any]]
         #expect(stop?.count == 1)
@@ -176,7 +177,8 @@ import TBDShared
             .appendingPathComponent("tbd-codex-session-hook-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let tbdPath = directory.appendingPathComponent("tbd")
+        let tbdPath = directory.appendingPathComponent("matched tbd cli")
+        let fallbackPath = directory.appendingPathComponent("tbd")
         try """
         #!/bin/sh
         if [ "$1" = session-event ]; then
@@ -189,6 +191,10 @@ import TBDShared
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o755],
             ofItemAtPath: tbdPath.path)
+        try "#!/bin/sh\nexit 91\n".write(to: fallbackPath, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: fallbackPath.path)
         let sessionInput = directory.appendingPathComponent("session-input")
         let activityInput = directory.appendingPathComponent("activity-input")
         let activityArgs = directory.appendingPathComponent("activity-args")
@@ -200,6 +206,7 @@ import TBDShared
         process.currentDirectoryURL = directory
         var environment = ProcessInfo.processInfo.environment
         environment["PATH"] = "\(directory.path):/usr/bin:/bin"
+        environment["TBD_CLI_PATH"] = tbdPath.path
         environment["TBD_SESSION_STDIN"] = sessionInput.path
         environment["TBD_ACTIVITY_STDIN"] = activityInput.path
         environment["TBD_ACTIVITY_ARGS"] = activityArgs.path
@@ -220,6 +227,37 @@ import TBDShared
             == "terminal-activity idle --read-hook-payload\n")
         #expect(!FileManager.default.fileExists(
             atPath: directory.appendingPathComponent("should-not-run").path))
+    }
+
+    @Test func sessionStartFallsBackToPathWhenMatchedCLIIsAbsent() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-codex-session-hook-fallback-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fallback = directory.appendingPathComponent("tbd")
+        try "#!/bin/sh\nprintf '%s' \"$1\" > \"$TBD_FALLBACK_MARKER\"\n"
+            .write(to: fallback, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fallback.path)
+        let marker = directory.appendingPathComponent("marker")
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", CodexHookOverlay.sessionStartCommand]
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = "\(directory.path):/usr/bin:/bin"
+        environment.removeValue(forKey: "TBD_CLI_PATH")
+        environment["TBD_FALLBACK_MARKER"] = marker.path
+        process.environment = environment
+        let input = Pipe()
+        process.standardInput = input
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try process.run()
+        try input.fileHandleForWriting.close()
+        process.waitUntilExit()
+
+        #expect(process.terminationStatus == 0)
+        #expect(try String(contentsOf: marker, encoding: .utf8) == "terminal-activity")
     }
 
     @Test func stopHookGatesIdleBehindRenameCheck() throws {

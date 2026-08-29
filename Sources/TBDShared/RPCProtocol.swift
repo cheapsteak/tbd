@@ -3247,6 +3247,10 @@ public struct TerminalTranscriptItemFullBodyResult: Codable, Sendable {
 /// hook payload changes don't immediately break this bridge.
 public struct TerminalSessionEventParams: Codable, Sendable {
     public let terminalID: UUID
+    /// Process incarnation planted by TBD before a replacement agent starts.
+    /// Legacy, never-replaced terminals omit it and remain on the nil/nil
+    /// compatibility path until their first managed replacement.
+    public let sessionIncarnationID: UUID?
     public let sessionID: String
     public let transcriptPath: String?
     public let source: String?
@@ -3262,9 +3266,11 @@ public struct TerminalSessionEventParams: Codable, Sendable {
         sessionID: String,
         transcriptPath: String?,
         source: String?,
-        cwd: String? = nil
+        cwd: String? = nil,
+        sessionIncarnationID: UUID? = nil
     ) {
         self.terminalID = terminalID
+        self.sessionIncarnationID = sessionIncarnationID
         self.sessionID = sessionID
         self.transcriptPath = transcriptPath
         self.source = source
@@ -3283,6 +3289,9 @@ public struct TerminalActivityEventParams: Codable, Sendable {
     /// Codex hook session identity when the caller consumed hook stdin.
     /// Optional for older hook overlays and non-hook callers.
     public let sessionID: String?
+    /// Process incarnation planted by TBD before a managed replacement starts.
+    /// Optional for older hook overlays and non-hook callers.
+    public let sessionIncarnationID: UUID?
     /// Absent for the existing agent-hook bridge. Optional so older clients'
     /// payloads continue to decode unchanged.
     public let origin: TerminalActivityEventOrigin?
@@ -3290,11 +3299,13 @@ public struct TerminalActivityEventParams: Codable, Sendable {
         terminalID: UUID,
         activityState: TerminalActivityState,
         sessionID: String? = nil,
+        sessionIncarnationID: UUID? = nil,
         origin: TerminalActivityEventOrigin? = nil
     ) {
         self.terminalID = terminalID
         self.activityState = activityState
         self.sessionID = sessionID
+        self.sessionIncarnationID = sessionIncarnationID
         self.origin = origin
     }
 }
@@ -3310,7 +3321,13 @@ public struct TerminalActivityEventParams: Codable, Sendable {
 /// to a running daemon, so that skew is real.
 public struct TerminalSessionEndedParams: Codable, Sendable, Equatable {
     public let terminalID: UUID
-    public init(terminalID: UUID) { self.terminalID = terminalID }
+    /// Process incarnation planted by TBD before a managed replacement starts.
+    /// Optional so older clients' payloads continue to decode unchanged.
+    public let sessionIncarnationID: UUID?
+    public init(terminalID: UUID, sessionIncarnationID: UUID? = nil) {
+        self.terminalID = terminalID
+        self.sessionIncarnationID = sessionIncarnationID
+    }
 }
 
 /// Params for `terminal.notificationEvent` — sent by `tbd hooks notification`

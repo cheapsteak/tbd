@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -68,6 +69,16 @@ struct TerminalSessionEventHandlerTests {
             kind: kind
         )
         return (terminal, wt)
+    }
+
+    private func makeTranscript(_ contents: String, tag: String) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-session-boundary-\(tag)-\(UUID().uuidString)",
+                                    isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let transcript = directory.appendingPathComponent("rollout.jsonl")
+        try Data(contents.utf8).write(to: transcript)
+        return transcript
     }
 
     /// Creates a second, independent worktree (different path) so we can
@@ -156,6 +167,112 @@ struct TerminalSessionEventHandlerTests {
         let updated = try await db.terminals.get(id: terminal.id)
         #expect(updated?.claudeSessionID == "s")
         #expect(updated?.transcriptPath == nil)
+    }
+
+    @Test("initial Codex SessionStart persists a zero boundary")
+    func initialCodexSessionPersistsZeroBoundary() async throws {
+        let transcript = try makeTranscript("already written\n", tag: "initial")
+        defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
+        let (terminal, _) = try await makeTerminal(label: TerminalLabel.codex, kind: .codex)
+        let request = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "initial-session",
+                transcriptPath: transcript.path,
+                source: "startup"))
+
+        #expect((await router.handle(request)).success)
+
+        let stored = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(stored.codexTranscriptBoundaryOffset == 0)
+    }
+
+    @Test("later Codex SessionStarts persist EOF for supplied and retained paths")
+    func laterCodexSessionsPersistEffectivePathEOF() async throws {
+        let initial = try makeTranscript("initial\n", tag: "later-initial")
+        let later = try makeTranscript("later transcript bytes\n", tag: "later-effective")
+        defer {
+            try? FileManager.default.removeItem(at: initial.deletingLastPathComponent())
+            try? FileManager.default.removeItem(at: later.deletingLastPathComponent())
+        }
+        let (terminal, _) = try await makeTerminal(label: TerminalLabel.codex, kind: .codex)
+        let baseline = Date(timeIntervalSince1970: 1_790_100_000)
+        let initialRouter = makeRouter(now: { baseline })
+        let suppliedRouter = makeRouter(now: { baseline.addingTimeInterval(1) })
+        let retainedRouter = makeRouter(now: { baseline.addingTimeInterval(2) })
+
+        #expect((await initialRouter.handle(try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id, sessionID: "initial-session",
+                transcriptPath: initial.path, source: "startup")))).success)
+        #expect((await suppliedRouter.handle(try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id, sessionID: "supplied-session",
+                transcriptPath: later.path, source: "resume")))).success)
+        let suppliedEOF = Int64(try Data(contentsOf: later).count)
+        #expect(try await db.terminals.get(id: terminal.id)?.codexTranscriptBoundaryOffset
+            == suppliedEOF)
+
+        let handle = try FileHandle(forWritingTo: later)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("appended\n".utf8))
+        try handle.close()
+        #expect((await retainedRouter.handle(try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id, sessionID: "retained-session",
+                transcriptPath: nil, source: "resume")))).success)
+
+        let retainedEOF = Int64(try Data(contentsOf: later).count)
+        let stored = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(stored.transcriptPath == later.path)
+        #expect(stored.codexTranscriptBoundaryOffset == retainedEOF)
+    }
+
+    @Test("later Codex SessionStart persists nil when its effective transcript is unavailable")
+    func laterCodexSessionPersistsNilForUnavailableEOF() async throws {
+        let transcript = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-session-boundary-missing-\(UUID().uuidString).jsonl")
+        let (terminal, _) = try await makeTerminal(label: TerminalLabel.codex, kind: .codex)
+        let baseline = Date(timeIntervalSince1970: 1_790_200_000)
+
+        #expect((await makeRouter(now: { baseline }).handle(try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id, sessionID: "initial-session",
+                transcriptPath: transcript.path, source: "startup")))).success)
+        #expect(try await db.terminals.get(id: terminal.id)?.codexTranscriptBoundaryOffset == 0)
+
+        #expect((await makeRouter(now: { baseline.addingTimeInterval(1) }).handle(try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id, sessionID: "later-session",
+                transcriptPath: nil, source: "resume")))).success)
+        #expect(try await db.terminals.get(id: terminal.id)?.codexTranscriptBoundaryOffset == nil)
+    }
+
+    @Test(
+        "non-Codex SessionStart does not acquire a transcript boundary",
+        arguments: [TerminalKind.claude, .shell]
+    )
+    func nonCodexSessionDoesNotAcquireBoundary(kind: TerminalKind) async throws {
+        let transcript = try makeTranscript("available\n", tag: kind.rawValue)
+        defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
+        let (terminal, _) = try await makeTerminal(label: kind.rawValue, kind: kind)
+        let request = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "session",
+                transcriptPath: transcript.path,
+                source: "startup"))
+
+        #expect((await router.handle(request)).success)
+
+        #expect(try await db.terminals.get(id: terminal.id)?.codexTranscriptBoundaryOffset == nil)
     }
 
     @Test("nil/rejected transcriptPath preserves a previously-stored path")
@@ -257,6 +374,7 @@ struct TerminalSessionEventHandlerTests {
         let newerSessionAt = olderSessionAt.addingTimeInterval(1)
         _ = try await db.terminals.applySessionStart(
             id: terminal.id,
+            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
             sessionID: "newer-session",
             transcriptPath: "/tmp/newer-session.jsonl",
             observedAt: newerSessionAt)
@@ -345,8 +463,7 @@ struct TerminalSessionEventHandlerTests {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let transcript = directory.appendingPathComponent("current.jsonl")
-        try (#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"current"}}"#
-            + "\n").write(to: transcript, atomically: true, encoding: .utf8)
+        try Data().write(to: transcript)
         try await db.terminals.updateSession(
             id: terminal.id,
             sessionID: "initial-session",
@@ -362,6 +479,14 @@ struct TerminalSessionEventHandlerTests {
             observedAt: baseline)
         let dates = BlockingSessionDates(first: earlierSessionAt, subsequent: laterPromptAt)
         let raceRouter = makeRouter(now: dates.provider)
+        #expect(await raceRouter.codexActivityTracker.observe(
+            transcriptPath: transcript.path,
+            worktreeID: worktree.id) == nil)
+        let initialHandle = try FileHandle(forWritingTo: transcript)
+        try initialHandle.write(contentsOf: Data(
+            (#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"current"}}"#
+                + "\n").utf8))
+        try initialHandle.close()
         #expect(await raceRouter.codexActivityTracker.observe(
             transcriptPath: transcript.path,
             worktreeID: worktree.id) == .working)
@@ -625,6 +750,203 @@ struct TerminalSessionEventHandlerTests {
         let result = try resp.decodeResult(TerminalTranscriptResult.self)
         #expect(result.sessionID == "logical-session-id")
         #expect(!result.messages.isEmpty)
+    }
+
+    @Test(
+        "an in-flight SessionStart cannot attach after terminal recreation",
+        arguments: SessionEventRecreationShape.allCases)
+    func inFlightSessionStartRejectsRecreatedTerminal(
+        shape: SessionEventRecreationShape
+    ) async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-session-incarnation-\(UUID().uuidString)",
+                                    isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let isolatedDB = try TBDDatabase(path: directory.appendingPathComponent("state.db").path)
+        let isolatedRouter = RPCRouter(
+            db: isolatedDB,
+            lifecycle: WorktreeLifecycle(
+                db: isolatedDB,
+                git: GitManager(),
+                tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()),
+            tmux: TmuxManager(dryRun: true),
+            startTime: Date(),
+            actuationLog: makeTestActuationLog())
+        let repo = try await isolatedDB.repos.create(
+            path: directory.appendingPathComponent("repo").path,
+            displayName: "session-incarnation",
+            defaultBranch: "main")
+        let worktree = try await isolatedDB.worktrees.create(
+            repoID: repo.id,
+            name: "worktree",
+            branch: "main",
+            path: directory.appendingPathComponent("worktree").path,
+            tmuxServer: "tbd-session-incarnation")
+        let terminal = try await isolatedDB.terminals.create(
+            worktreeID: worktree.id,
+            tmuxWindowID: "@old",
+            tmuxPaneID: "%old",
+            label: "Codex",
+            kind: .codex)
+        let transcript = directory.appendingPathComponent("rollout.jsonl")
+        try Data(#"{"type":"event_msg","payload":{"type":"task_started"}}"#.utf8)
+            .write(to: transcript)
+        _ = try #require(try await isolatedDB.terminals.applySessionStart(
+            id: terminal.id,
+            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
+            sessionID: "live-session",
+            transcriptPath: transcript.path,
+            observedAt: Date(timeIntervalSinceReferenceDate: 10)))
+        _ = await isolatedRouter.sessionCounters.sample(
+            terminalID: terminal.id,
+            worktreeID: worktree.id,
+            transcriptPath: transcript.path,
+            commitsUnchangedSince: nil,
+            at: Date(timeIntervalSinceReferenceDate: 11))
+
+        let updateGate = BlockingTerminalUpdateTrigger()
+        let pauseUpdate = DatabaseFunction(
+            "tbd_test_pause_terminal_update", argumentCount: 0
+        ) { _ in
+            updateGate.pauseFirstCall()
+            return nil
+        }
+        try await isolatedDB.writerForTests.write { database in
+            database.add(function: pauseUpdate)
+            try database.execute(sql: """
+                CREATE TEMP TRIGGER pause_terminal_recreation
+                AFTER UPDATE ON terminal
+                WHEN NEW.id = '\(terminal.id.uuidString)'
+                BEGIN
+                    SELECT tbd_test_pause_terminal_update();
+                END
+                """)
+        }
+
+        let resetTask = Task(executorPreference: GateExecutor.shared) {
+            switch shape {
+            case .clearRecreated:
+                try await isolatedDB.terminals.clearRecreated(
+                    id: terminal.id, at: Date(timeIntervalSinceReferenceDate: 20))
+            case .replaceCodexWindow:
+                _ = try await isolatedDB.terminals.replaceRecreatedCodexWindow(
+                    id: terminal.id,
+                    expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
+                    windowID: "@old",
+                    paneID: "%old",
+                    at: Date(timeIntervalSinceReferenceDate: 20))
+            }
+        }
+        defer { updateGate.release() }
+        let entered = gateHoldingTask { updateGate.waitUntilPaused() }
+        #expect(await entered.value)
+
+        let captured = SessionDeltaCapture()
+        isolatedRouter.subscriptions.addSubscriber { data in
+            captured.append(data)
+            return true
+        }
+        let request = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "dead-session",
+                transcriptPath: transcript.path,
+                source: "resume"))
+        // The handler blocks behind the writer transaction held by
+        // `resetTask`; keep both sides off Swift's cooperative pool so a
+        // heavily parallel test run cannot starve this rendezvous.
+        let handlerTask = gateHoldingTask { await isolatedRouter.handle(request) }
+        let passedTerminalFetch = await waitForHookEvent(
+            router: isolatedRouter,
+            terminal: terminal,
+            transcriptPath: transcript.path)
+        #expect(passedTerminalFetch,
+                "SessionStart never passed its terminal fetch while recreation was paused")
+
+        updateGate.release()
+        try await resetTask.value
+        #expect((await handlerTask.value).success)
+
+        let stored = try #require(try await isolatedDB.terminals.get(id: terminal.id))
+        #expect(stored.claudeSessionID == nil)
+        #expect(stored.transcriptPath == nil)
+        #expect(stored.sessionOrderObservedAt == nil)
+        #expect(stored.codexTranscriptBoundaryOffset == nil)
+        #expect(stored.sessionIncarnationID != terminal.sessionIncarnationID)
+        #expect(stored.activityState == .unknown)
+        switch shape {
+        case .clearRecreated:
+            #expect(stored.tmuxWindowID == "@old")
+            #expect(stored.tmuxPaneID == "%old")
+            #expect(stored.kind == .shell)
+        case .replaceCodexWindow:
+            #expect(stored.tmuxWindowID == "@old")
+            #expect(stored.tmuxPaneID == "%old")
+            #expect(stored.kind == .codex)
+        }
+        #expect(captured.values.isEmpty)
+        #expect(!(await isolatedRouter.codexActivityTracker.hasBaseline(
+            transcriptPath: transcript.path)))
+    }
+
+    private func waitForHookEvent(
+        router: RPCRouter,
+        terminal: Terminal,
+        transcriptPath: String
+    ) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: ciSafeDeadline)
+        while true {
+            let counters = await router.sessionCounters.sample(
+                terminalID: terminal.id,
+                worktreeID: terminal.worktreeID,
+                transcriptPath: transcriptPath,
+                commitsUnchangedSince: nil)
+            if counters?.hookEventsInWindow == 1 { return true }
+            guard clock.now < deadline else { return false }
+            await Task.yield()
+        }
+    }
+}
+
+enum SessionEventRecreationShape: CaseIterable, Sendable,
+    CustomTestStringConvertible {
+    case clearRecreated
+    case replaceCodexWindow
+
+    var testDescription: String {
+        switch self {
+        case .clearRecreated: "clearRecreated"
+        case .replaceCodexWindow: "replaceRecreatedCodexWindow"
+        }
+    }
+}
+
+private final class BlockingTerminalUpdateTrigger: @unchecked Sendable {
+    private let lock = NSLock()
+    private let entered = DispatchSemaphore(value: 0)
+    private let releaseGate = DispatchSemaphore(value: 0)
+    private var callCount = 0
+
+    func pauseFirstCall() {
+        let shouldPause = lock.withLock { () -> Bool in
+            defer { callCount += 1 }
+            return callCount == 0
+        }
+        guard shouldPause else { return }
+        entered.signal()
+        releaseGate.waitForGate("terminal recreation transaction")
+    }
+
+    func waitUntilPaused() -> Bool {
+        entered.waitForGate("terminal recreation trigger entry")
+    }
+
+    func release() {
+        releaseGate.signal()
     }
 }
 

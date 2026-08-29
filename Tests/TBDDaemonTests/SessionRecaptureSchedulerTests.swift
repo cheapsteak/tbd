@@ -22,14 +22,15 @@ struct SessionRecaptureSchedulerTests {
             clock: clock
         )
 
-        scheduler.schedule(
+        let recapture = scheduler.schedule(
             terminalID: fixture.terminal.id,
             paneID: "%7",
-            server: "tbd-recapture"
+            server: "tbd-recapture",
+            expectedIncarnationID: fixture.terminal.sessionIncarnationID
         )
 
         await clock.advanceWhenSuspended(by: .seconds(5))
-        await Task.megaYield()
+        await recapture.value
         let updated = try #require(try await fixture.db.terminals.get(id: fixture.terminal.id))
         #expect(updated.claudeSessionID == detectedSessionID)
     }
@@ -44,16 +45,93 @@ struct SessionRecaptureSchedulerTests {
             clock: clock
         )
 
-        scheduler.schedule(
+        let recapture = scheduler.schedule(
             terminalID: fixture.terminal.id,
             paneID: "%7",
-            server: "tbd-recapture"
+            server: "tbd-recapture",
+            expectedIncarnationID: fixture.terminal.sessionIncarnationID
         )
 
         await clock.advanceWhenSuspended(by: .seconds(5))
-        await Task.megaYield()
+        await recapture.value
         let unchanged = try #require(try await fixture.db.terminals.get(id: fixture.terminal.id))
         #expect(unchanged.claudeSessionID == fixture.sourceSessionID)
+    }
+
+    @Test func ignoresCaptureFromAProcessReplacedBeforePersistence() async throws {
+        let fixture = try await makeFixture()
+        let clock = TestClock<Duration>()
+        let capture = BlockingSessionCapture(result: "stale-captured-session")
+        let scheduler = SessionRecaptureScheduler(
+            db: fixture.db,
+            tmux: TmuxManager(dryRun: true),
+            captureSessionID: { _, _ in capture.capture() },
+            clock: clock)
+
+        let recapture = scheduler.schedule(
+            terminalID: fixture.terminal.id,
+            paneID: "%7",
+            server: "tbd-recapture",
+            expectedIncarnationID: fixture.terminal.sessionIncarnationID)
+
+        await clock.advanceWhenSuspended(by: .seconds(5))
+        guard await waitUntil({ capture.isBlocked }) else {
+            capture.release()
+            Issue.record("recapture did not reach the detector")
+            return
+        }
+        let replacementToken = try #require(try await fixture.db.terminals.prepareProfileAgentRespawn(
+            id: fixture.terminal.id,
+            expectedState: TerminalReplacementSnapshot(terminal: fixture.terminal),
+            sessionID: "replacement-session",
+            transcriptPath: "/tmp/replacement-session.jsonl",
+            profileID: nil,
+            at: Date(timeIntervalSinceReferenceDate: 20)))
+        capture.release()
+        await recapture.value
+
+        let stored = try #require(try await fixture.db.terminals.get(id: fixture.terminal.id))
+        #expect(stored.sessionIncarnationID == replacementToken)
+        #expect(stored.claudeSessionID == "replacement-session")
+        #expect(stored.transcriptPath == "/tmp/replacement-session.jsonl")
+    }
+
+    @Test func ignoresCaptureWhileHibernationReplacementIsPending() async throws {
+        let fixture = try await makeFixture()
+        let clock = TestClock<Duration>()
+        let capture = BlockingSessionCapture(result: "stale-captured-session")
+        let scheduler = SessionRecaptureScheduler(
+            db: fixture.db,
+            tmux: TmuxManager(dryRun: true),
+            captureSessionID: { _, _ in capture.capture() },
+            clock: clock)
+
+        let recapture = scheduler.schedule(
+            terminalID: fixture.terminal.id,
+            paneID: "%7",
+            server: "tbd-recapture",
+            expectedIncarnationID: fixture.terminal.sessionIncarnationID)
+
+        await clock.advanceWhenSuspended(by: .seconds(5))
+        guard await waitUntil({ capture.isBlocked }) else {
+            capture.release()
+            await recapture.value
+            Issue.record("recapture did not reach the detector")
+            return
+        }
+        let current = try #require(try await fixture.db.terminals.get(
+            id: fixture.terminal.id))
+        _ = try #require(try await fixture.db.terminals.beginHibernatedShellRespawn(
+            id: fixture.terminal.id,
+            expectedState: TerminalHibernationSnapshot(terminal: current),
+            reason: .manual,
+            at: Date(timeIntervalSinceReferenceDate: 20)))
+        capture.release()
+        await recapture.value
+
+        let stored = try #require(try await fixture.db.terminals.get(id: fixture.terminal.id))
+        #expect(stored.pendingSessionIncarnationID != nil)
+        #expect(stored.claudeSessionID == fixture.sourceSessionID)
     }
 
     private func makeFixture() async throws -> (
@@ -84,5 +162,30 @@ struct SessionRecaptureSchedulerTests {
             kind: .claude
         )
         return (db, terminal, sourceSessionID)
+    }
+}
+
+private final class BlockingSessionCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private let releaseGate = DispatchSemaphore(value: 0)
+    private let result: String
+    private var blocked = false
+
+    init(result: String) {
+        self.result = result
+    }
+
+    var isBlocked: Bool {
+        lock.withLock { blocked }
+    }
+
+    func capture() -> String {
+        lock.withLock { blocked = true }
+        releaseGate.waitForGate("session recapture")
+        return result
+    }
+
+    func release() {
+        releaseGate.signal()
     }
 }

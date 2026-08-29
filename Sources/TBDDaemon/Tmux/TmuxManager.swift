@@ -1093,7 +1093,9 @@ public struct TmuxManager: Sendable {
         )
         if dryRun {
             dryRunRecorder?(args)
-            if let error = dryRunRespawnWindowError?(windowID) { throw error }
+            if let error = dryRunRespawnWindowError?(windowID) {
+                throw error
+            }
             await stampTerminalID(
                 server: server, target: windowID, env: env, sensitiveEnv: sensitiveEnv)
             return

@@ -1512,7 +1512,8 @@ extension WorktreeLifecycle {
             SessionRecaptureScheduler(db: db, tmux: tmux).schedule(
                 terminalID: plannedTerminalID1,
                 paneID: window1.paneID,
-                server: tmuxServer
+                server: tmuxServer,
+                expectedIncarnationID: nil
             )
         }
         var createdTerminals: [(id: UUID, label: String)] = [

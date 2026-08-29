@@ -16,13 +16,15 @@ extension TBDHomeSerialized {
         let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         let hooks = parsed?["hooks"] as? [String: Any]
         #expect(hooks != nil)
-        // SessionStart entry registers `tbd session-event` with a `*` matcher.
+        // SessionStart prefers the daemon-matched CLI and retains a PATH
+        // fallback, with a `*` matcher.
         let sessionStart = hooks?["SessionStart"] as? [[String: Any]]
         let matcher0 = sessionStart?.first?["matcher"] as? String
         #expect(matcher0 == "*")
         let inner = sessionStart?.first?["hooks"] as? [[String: Any]]
         let cmd0 = inner?.first?["command"] as? String
-        #expect(cmd0?.contains("tbd session-event") == true)
+        #expect(cmd0?.contains("TBD_CLI_PATH-tbd") == true)
+        #expect(cmd0?.contains("session-event") == true)
 
         // Stop entry registers `tbd notify` as the first matcher and
         // `tbd hooks stop-rename-check` as a sibling matcher.
@@ -36,6 +38,44 @@ extension TBDHomeSerialized {
             return inner.compactMap { $0["command"] as? String }
         }
         #expect(allStopCommands.contains(where: { $0.contains("stop-rename-check") }))
+    }
+
+    @Test func sessionStartUsesQuotedMatchedCLIAndFallsBackToPath() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-claude-session-hook-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let matched = directory.appendingPathComponent("matched tbd cli")
+        let fallback = directory.appendingPathComponent("tbd")
+        let marker = directory.appendingPathComponent("marker")
+        let matchedScript = "#!/bin/sh\nprintf 'matched:%s\\n' \"$1\" >> \"$TBD_CLI_MARKER\"\n"
+        let fallbackScript = "#!/bin/sh\nprintf 'fallback:%s\\n' \"$1\" >> \"$TBD_CLI_MARKER\"\n"
+        try matchedScript.write(to: matched, atomically: true, encoding: .utf8)
+        try fallbackScript.write(to: fallback, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: matched.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fallback.path)
+
+        func run(matchedPath: String?) throws -> String {
+            try? FileManager.default.removeItem(at: marker)
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/sh")
+            process.arguments = ["-c", ClaudeHookOverlay.sessionStartCommand]
+            var environment = ProcessInfo.processInfo.environment
+            environment["PATH"] = "\(directory.path):/usr/bin:/bin"
+            environment["TBD_CLI_MARKER"] = marker.path
+            environment["TBD_CLI_PATH"] = matchedPath
+            process.environment = environment
+            process.standardInput = Pipe()
+            process.standardOutput = Pipe()
+            process.standardError = Pipe()
+            try process.run()
+            process.waitUntilExit()
+            #expect(process.terminationStatus == 0)
+            return try String(contentsOf: marker, encoding: .utf8)
+        }
+
+        #expect(try run(matchedPath: matched.path) == "matched:session-event\nmatched:terminal-activity\n")
+        #expect(try run(matchedPath: nil) == "fallback:session-event\nfallback:terminal-activity\n")
     }
 
     @Test func postToolUseBashHookBindsPRsAndKeepsAskUserQuestion() throws {
