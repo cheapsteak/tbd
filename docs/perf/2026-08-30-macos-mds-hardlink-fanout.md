@@ -174,6 +174,87 @@ Two things to fix alongside it, or the change will be undone by its own guardrai
 The fix preserves every checkout. Nothing here requires reducing how many
 parallel checkouts you keep.
 
+## Converting existing environments
+
+Changing the setting only affects environments built after it. Existing ones
+keep their link counts until rebuilt, and since the fan-out is driven by the
+link count, nothing improves until enough of them are converted.
+
+Reinstalling (`uv sync --reinstall`) is the obvious route, but it needs the
+network and the lockfile, and it rewrites environments other sessions may be
+using. Converting in place is cheaper and content-preserving: cloning a file
+from itself produces an independent inode that still shares every block.
+
+Three approaches, because the differences matter more than they look:
+
+- **`cp -c` per file, spawned from `find`/`xargs`** — correct but slow, ~120
+  files/sec. The cost is process spawn, not cloning; a virtualenv of ~45,000
+  files takes several minutes.
+- **`cp -cR` on the whole tree, then swap the directory** — ~1,400 files/sec,
+  but it renames the live directory, so there is a brief window in which
+  `lib/` does not exist. A lazy import landing in that window fails. Fine for
+  idle checkouts, not for ones with running processes.
+- **`clonefile(2)` per file from a single process, replaced atomically** — the
+  one to use. It has the speed of the recursive copy (~855 files/sec measured)
+  without the window: each file is swapped with `os.replace()`, so a reader
+  sees either the old inode or the new one and never a missing path. Safe to
+  run against checkouts with live sessions.
+
+The third, in full:
+
+```python
+"""Convert hardlinked files to APFS clones in place. Content is byte-identical
+and blocks stay shared, so this costs no real disk -- it only breaks the link
+count that macOS `mds` fans out across."""
+import ctypes, ctypes.util, os, sys
+
+libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+libc.clonefile.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
+libc.clonefile.restype = ctypes.c_int
+
+def convert(root):
+    done = failed = 0
+    for dirpath, _dirs, files in os.walk(root):
+        for name in files:
+            p = os.path.join(dirpath, name)
+            try:
+                st = os.lstat(p)
+                if not os.path.isfile(p) or os.path.islink(p) or st.st_nlink <= 1:
+                    continue
+                tmp = os.path.join(dirpath, f".__cl{os.getpid()}_{name}")
+                try:
+                    if libc.clonefile(p.encode(), tmp.encode(), 0) != 0:
+                        raise OSError(ctypes.get_errno(), p)
+                    os.chmod(tmp, st.st_mode & 0o7777)
+                    os.utime(tmp, (st.st_atime, st.st_mtime))
+                    os.replace(tmp, p)          # atomic; p is never absent
+                    done += 1
+                except Exception:
+                    try: os.unlink(tmp)
+                    except OSError: pass
+                    failed += 1
+            except OSError:
+                failed += 1
+    return done, failed
+
+if __name__ == "__main__":
+    print("cloned=%d failed=%d" % convert(sys.argv[1]))
+```
+
+Two things to check before running it against a live checkout:
+
+- **No installer is mid-flight.** A running `uv sync` or `pip install` writing
+  into the tree is the one case that genuinely loses data. Everything else is
+  safe, including processes with open file descriptors — POSIX keeps the inode
+  alive across replace and unlink, so anything already executing is unaffected.
+- **Verify afterwards**, since a silent partial conversion looks like success:
+  the interpreter still starts, a few third-party imports resolve, the
+  site-packages count is unchanged, and `find <venv> -type f -links +1` is
+  empty.
+
+Expect language servers to re-index the tree afterwards; they observe a mass
+delete-and-create. That churn is transient.
+
 ## What does not work
 
 - **`.metadata_never_index`** — the traditional marker file is
