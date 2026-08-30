@@ -1,7 +1,7 @@
 # Remote peer messaging
 
 **Date:** 2026-08-29
-**Status:** Approved, not yet built.
+**Status:** Approved, built.
 **Depends on:** [`docs/remote-provider-contract.md`](../remote-provider-contract.md)
 (capability negotiation, the Session object, and the `events` verb this design's
 verb is modelled on), [`docs/cross-session-messaging.md`](../cross-session-messaging.md)
