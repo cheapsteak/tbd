@@ -275,3 +275,191 @@ struct PendingQuestionDeltaOrderingTests {
         #expect(legacyDelta.terminalID == terminalID)
     }
 }
+
+/// The app-side read path's other half: with `appSideTranscriptRead` on the
+/// daemon's `terminal.transcript` handler never runs, so the app is the only
+/// party that can see a capture's `tool_use` line land — and it owes the
+/// daemon a report, or the answered card lingers until
+/// `PendingQuestionExpirySweep` reaps it up to fifteen minutes later.
+///
+/// Every case drives a real `AskUserQuestionMerger.merge` result rather than a
+/// hand-built id list, so a change to what the merger considers satisfied
+/// reaches these assertions.
+@Suite("ask user question satisfaction reporter")
+struct AskUserQuestionSatisfactionReporterTests {
+
+    /// Records what the reporter asked the daemon to clear.
+    private actor Recorder {
+        private(set) var calls: [(terminalID: UUID, toolUseIDs: [String])] = []
+        func record(_ terminalID: UUID, _ toolUseIDs: [String]) {
+            calls.append((terminalID, toolUseIDs))
+        }
+    }
+
+    private func pending(_ toolUseID: String) -> PendingAskUserQuestion {
+        PendingAskUserQuestion(
+            toolUseID: toolUseID,
+            inputJSON: #"{"questions":[]}"#,
+            timestamp: Date(timeIntervalSince1970: 1000))
+    }
+
+    private func jsonlToolCall(_ toolUseID: String) -> TranscriptItem {
+        .toolCall(
+            id: toolUseID, name: "AskUserQuestion", inputJSON: #"{"questions":[]}"#,
+            inputTruncatedTo: nil, result: nil, subagent: nil,
+            timestamp: Date(timeIntervalSince1970: 1001), usage: nil)
+    }
+
+    private func makeReporter(
+        _ recorder: Recorder
+    ) -> AskUserQuestionSatisfactionReporter {
+        AskUserQuestionSatisfactionReporter { terminalID, toolUseIDs in
+            await recorder.record(terminalID, toolUseIDs)
+        }
+    }
+
+    @Test("a merge that reports satisfied ids asks the daemon to clear them")
+    func satisfiedIsReported() async {
+        let recorder = Recorder()
+        let reporter = makeReporter(recorder)
+        let terminalID = UUID()
+        let entries = [pending("toolu_a")]
+        let merged = AskUserQuestionMerger.merge(
+            jsonlItems: [jsonlToolCall("toolu_a")], pending: entries)
+
+        await reporter.report(
+            terminalID: terminalID,
+            pendingToolUseIDs: Set(entries.map(\.toolUseID)),
+            satisfiedToolUseIDs: merged.satisfiedToolUseIDs)
+
+        let calls = await recorder.calls
+        #expect(calls.count == 1)
+        #expect(calls.first?.terminalID == terminalID)
+        #expect(calls.first?.toolUseIDs == ["toolu_a"])
+    }
+
+    @Test("a merge that reports nothing satisfied sends no RPC")
+    func unsatisfiedSendsNothing() async {
+        let recorder = Recorder()
+        let reporter = makeReporter(recorder)
+        let entries = [pending("toolu_a")]
+        let merged = AskUserQuestionMerger.merge(jsonlItems: [], pending: entries)
+        #expect(merged.satisfiedToolUseIDs.isEmpty, "guards the case this test is about")
+
+        await reporter.report(
+            terminalID: UUID(),
+            pendingToolUseIDs: Set(entries.map(\.toolUseID)),
+            satisfiedToolUseIDs: merged.satisfiedToolUseIDs)
+
+        #expect(await recorder.calls.isEmpty)
+    }
+
+    /// The merge runs on every publish, so the same id is satisfied on every
+    /// tick until the daemon's retraction delta arrives. Only the first tick
+    /// may reach the socket.
+    @Test("a repeated satisfied id is reported exactly once")
+    func repeatIsSuppressed() async {
+        let recorder = Recorder()
+        let reporter = makeReporter(recorder)
+        let terminalID = UUID()
+        let entries = [pending("toolu_a")]
+        let ids = Set(entries.map(\.toolUseID))
+        let merged = AskUserQuestionMerger.merge(
+            jsonlItems: [jsonlToolCall("toolu_a")], pending: entries)
+
+        for _ in 0..<5 {
+            await reporter.report(
+                terminalID: terminalID, pendingToolUseIDs: ids,
+                satisfiedToolUseIDs: merged.satisfiedToolUseIDs)
+        }
+
+        #expect(await recorder.calls.count == 1)
+    }
+
+    @Test("a second capture on the same terminal is reported on its own")
+    func newIDStillReported() async {
+        let recorder = Recorder()
+        let reporter = makeReporter(recorder)
+        let terminalID = UUID()
+        let entries = [pending("toolu_a"), pending("toolu_b")]
+        let ids = Set(entries.map(\.toolUseID))
+
+        let first = AskUserQuestionMerger.merge(
+            jsonlItems: [jsonlToolCall("toolu_a")], pending: entries)
+        await reporter.report(
+            terminalID: terminalID, pendingToolUseIDs: ids,
+            satisfiedToolUseIDs: first.satisfiedToolUseIDs)
+
+        let second = AskUserQuestionMerger.merge(
+            jsonlItems: [jsonlToolCall("toolu_a"), jsonlToolCall("toolu_b")],
+            pending: entries)
+        await reporter.report(
+            terminalID: terminalID, pendingToolUseIDs: ids,
+            satisfiedToolUseIDs: second.satisfiedToolUseIDs)
+
+        let calls = await recorder.calls
+        #expect(calls.map(\.toolUseIDs) == [["toolu_a"], ["toolu_b"]],
+                "the already-reported id must not ride along a second time")
+    }
+
+    /// Memory of a report is scoped to the capture set it was made against, so
+    /// a daemon that raises a fresh question under an id it previously held —
+    /// after an expiry reap, say — gets told about it again.
+    @Test("an id the daemon no longer holds is forgotten, not remembered forever")
+    func memoryIsBoundedByTheCaptureSet() async {
+        let recorder = Recorder()
+        let reporter = makeReporter(recorder)
+        let terminalID = UUID()
+        let entries = [pending("toolu_a")]
+        let merged = AskUserQuestionMerger.merge(
+            jsonlItems: [jsonlToolCall("toolu_a")], pending: entries)
+
+        await reporter.report(
+            terminalID: terminalID, pendingToolUseIDs: ["toolu_a"],
+            satisfiedToolUseIDs: merged.satisfiedToolUseIDs)
+        // The retraction lands: the terminal's capture set is empty for a
+        // while, and only then does the same id come back.
+        await reporter.report(
+            terminalID: terminalID, pendingToolUseIDs: [], satisfiedToolUseIDs: [])
+        await reporter.report(
+            terminalID: terminalID, pendingToolUseIDs: ["toolu_a"],
+            satisfiedToolUseIDs: merged.satisfiedToolUseIDs)
+
+        #expect(await recorder.calls.count == 2)
+    }
+}
+
+/// `AppState`'s session-to-terminal join, which is what lets the app name the
+/// terminal whose capture the JSONL satisfied — the daemon's store is keyed on
+/// terminal, the poll scheduler on Claude session id.
+@MainActor
+@Suite("pending question capture lookup")
+struct PendingQuestionCaptureLookupTests {
+
+    @Test("the capture lookup returns the owning terminal alongside its entries")
+    func lookupCarriesTerminalID() {
+        let suiteName = "TBDAppTests.PendingQuestionCapture.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let state = AppState(userDefaults: defaults)
+
+        let worktreeID = UUID()
+        let terminalID = UUID()
+        state.terminals[worktreeID] = [
+            Terminal(
+                id: terminalID, worktreeID: worktreeID, tmuxWindowID: "@1",
+                tmuxPaneID: "%1", claudeSessionID: "session-a")
+        ]
+        state.handleDelta(.terminalPendingQuestionsChanged(
+            TerminalPendingQuestionsDelta(
+                terminalID: terminalID,
+                pending: [PendingQuestionPayload(
+                    toolUseID: "toolu_01", inputJSON: #"{"questions":[]}"#,
+                    timestamp: Date(timeIntervalSince1970: 1000))])))
+
+        let capture = state.pendingQuestionCaptureForSession("session-a")
+        #expect(capture?.terminalID == terminalID)
+        #expect(capture?.entries.map(\.toolUseID) == ["toolu_01"])
+        #expect(state.pendingQuestionCaptureForSession("session-b") == nil)
+    }
+}

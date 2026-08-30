@@ -1235,15 +1235,26 @@ final class AppState {
     /// The empty store — overwhelmingly the common case — short-circuits
     /// before any scan.
     func pendingQuestionsForSession(_ sessionID: String) -> [PendingAskUserQuestion] {
-        guard !pendingQuestions.isEmpty else { return [] }
+        pendingQuestionCaptureForSession(sessionID)?.entries ?? []
+    }
+
+    /// As `pendingQuestionsForSession`, but keeps the owning terminal id.
+    ///
+    /// The app-side read path needs it: the daemon's store is keyed on
+    /// terminal, so telling it which captures the JSONL has satisfied means
+    /// naming the terminal the session belongs to.
+    func pendingQuestionCaptureForSession(
+        _ sessionID: String
+    ) -> (terminalID: UUID, entries: [PendingAskUserQuestion])? {
+        guard !pendingQuestions.isEmpty else { return nil }
         for rows in terminals.values {
             for terminal in rows where terminal.claudeSessionID == sessionID {
                 if let entries = pendingQuestions[terminal.id], !entries.isEmpty {
-                    return entries
+                    return (terminal.id, entries)
                 }
             }
         }
-        return []
+        return nil
     }
 
     /// Selected archived worktree per repo (left rail of the archived view's nested master-detail).
@@ -1317,6 +1328,15 @@ final class AppState {
     /// state, so it stays out of Observation: a view that renders
     /// `pendingQuestions` must not also re-render on this.
     @ObservationIgnored var pendingQuestionRevisions: [UUID: UInt64] = [:]
+    /// Reports app-observed satisfied captures back to the daemon, which owns
+    /// the store. Only the `appSideTranscriptRead` path drives it — with the
+    /// flag off `terminal.transcript` still clears off its own parse. Lazy so
+    /// an app that never opens a transcript pane never builds it.
+    @ObservationIgnored lazy var askUserQuestionSatisfaction =
+        AskUserQuestionSatisfactionReporter { [daemonClient] terminalID, toolUseIDs in
+            try? await daemonClient.terminalAskUserQuestionSatisfied(
+                terminalID: terminalID, toolUseIDs: toolUseIDs)
+        }
     /// Drives `transcriptSource` at the cadence each registered pane declares.
     /// Lazy so the (equally inert) scheduler is not built for app launches that
     /// never open a transcript pane.

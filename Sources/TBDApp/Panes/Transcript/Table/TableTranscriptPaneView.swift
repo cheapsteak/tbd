@@ -347,15 +347,8 @@ struct TableTranscriptPaneView: View {
         await scheduler.setOnChange { [weak state] sessionID in
             guard let state else { return }
             let raw = await source.items(sessionID: sessionID)
-            // A question the PreToolUse hook captured renders before its
-            // `tool_use` line reaches the JSONL. The daemon did this inside
-            // `terminal.transcript`; on this path nobody else will. Skipping
-            // the merge on an empty set keeps the common tick off the (cheap
-            // but non-zero) index build.
-            let pending = await MainActor.run { state.pendingQuestionsForSession(sessionID) }
-            let items = pending.isEmpty
-                ? raw
-                : AskUserQuestionMerger.merge(jsonlItems: raw, pending: pending).items
+            let items = await Self.mergePendingQuestions(
+                sessionID: sessionID, raw: raw, state: state)
             await MainActor.run {
                 state.sessionTranscripts[sessionID] = items
                 state.touchSessionTranscript(sessionID)
@@ -368,10 +361,8 @@ struct TableTranscriptPaneView: View {
         // Publish once immediately so the pane is not blank until the first tick.
         await source.refresh(sessionID: sid, path: path)
         let raw = await source.items(sessionID: sid)
-        let pending = appState.pendingQuestionsForSession(sid)
-        let items = pending.isEmpty
-            ? raw
-            : AskUserQuestionMerger.merge(jsonlItems: raw, pending: pending).items
+        let items = await Self.mergePendingQuestions(
+            sessionID: sid, raw: raw, state: appState)
         appState.sessionTranscripts[sid] = items
         appState.touchSessionTranscript(sid)
         if !items.isEmpty { hasShownInitialMessages = true }
@@ -383,6 +374,41 @@ struct TableTranscriptPaneView: View {
             try? await clock.sleep(for: .seconds(1))
         }
         await scheduler.deregister(sessionID: sid)
+    }
+
+    /// Folds the daemon's pending `AskUserQuestion` captures into a freshly
+    /// read transcript, and reports back whichever the JSONL has now caught up
+    /// with.
+    ///
+    /// A question the `PreToolUse` hook captured renders before its `tool_use`
+    /// line reaches the file, so the merge is what makes the card appear at
+    /// all. The report is the other half of that same call: on the RPC path
+    /// `terminal.transcript` clears a satisfied capture off its own parse, and
+    /// here nobody else parses the file, so without it the card would keep
+    /// rendering an answered question until the expiry sweep reaped it.
+    ///
+    /// Skipping both on an empty capture set keeps the common tick off the
+    /// (cheap but non-zero) index build and off the socket entirely.
+    /// `nonisolated` on purpose: `View` carries `@MainActor`, and inheriting it
+    /// here would drag the merge's index build onto the main actor. Only the
+    /// `AppState` read needs main, and it says so.
+    private nonisolated static func mergePendingQuestions(
+        sessionID: String,
+        raw: [TranscriptItem],
+        state: AppState
+    ) async -> [TranscriptItem] {
+        let capture = await MainActor.run {
+            state.pendingQuestionCaptureForSession(sessionID).map {
+                ($0.terminalID, $0.entries, state.askUserQuestionSatisfaction)
+            }
+        }
+        guard let (terminalID, pending, reporter) = capture else { return raw }
+        let merged = AskUserQuestionMerger.merge(jsonlItems: raw, pending: pending)
+        await reporter.report(
+            terminalID: terminalID,
+            pendingToolUseIDs: Set(pending.map(\.toolUseID)),
+            satisfiedToolUseIDs: merged.satisfiedToolUseIDs)
+        return merged.items
     }
 
     private func pollOnce(failureCount: inout Int) async {

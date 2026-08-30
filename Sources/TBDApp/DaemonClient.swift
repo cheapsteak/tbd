@@ -1959,6 +1959,21 @@ actor DaemonClient {
         )
     }
 
+    /// Tell the daemon that these pending `AskUserQuestion` captures now have a
+    /// matching `tool_use` line in the JSONL, so it can drop them from
+    /// `PendingQuestionStore` and retract them from every subscriber.
+    ///
+    /// Only the `appSideTranscriptRead` path calls this. With the flag off the
+    /// daemon's own `terminal.transcript` handler still does the clearing off
+    /// its own parse, exactly as before.
+    func terminalAskUserQuestionSatisfied(terminalID: UUID, toolUseIDs: [String]) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.terminalAskUserQuestionSatisfied,
+            params: TerminalAskUserQuestionSatisfiedParams(
+                terminalID: terminalID, toolUseIDs: toolUseIDs)
+        )
+    }
+
     /// Notify the daemon whether the app is in the foreground (drives usage poller).
     func setAppForegroundState(isForeground: Bool) async throws {
         try await callVoidAsync(

@@ -149,6 +149,24 @@ locally through `AskUserQuestionMerger`. The expiry sweep moves to its own timer
 with an injected clock. Keeping the state daemon-side means an app restart
 re-syncs on reconnect, which a pure relay would not.
 
+The clear-on-satisfied cannot move to a timer, because it is not a deadline —
+it is an observation, and on this path only the app makes it. The merge already
+reports which captures the JSONL has caught up with; the app relays that set
+over `terminal.askUserQuestionSatisfied`, and the daemon drops those entries and
+broadcasts the retraction. Without the relay an answered question would render
+until the expiry sweep reaped it a quarter of an hour later.
+
+That is a separate RPC from the `PostToolUse` bridge,
+`terminal.askUserQuestionCleared`, and deliberately so. The bridge fires on the
+hook, which returns *before* Claude flushes the matching JSONL line, so
+clearing on it takes the card away and the next merge puts it straight back.
+The relay fires *because* the line is already there.
+
+The report is deduplicated per capture in the app: the merge runs on every
+publish and would otherwise re-send the same id on every tick until the
+retraction delta arrives. Memory of a report is scoped to the capture set it
+was made against, so it cannot outgrow the daemon's own store.
+
 ### Failure handling
 
 - A read failure or a vanished file never replaces a non-empty transcript with

@@ -106,6 +106,28 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Clears captures the app has seen satisfied in the JSONL.
+    ///
+    /// `handleTerminalTranscript` does this for itself off its own parse, but
+    /// with `appSideTranscriptRead` on that handler never runs and the app is
+    /// the only party parsing the file. Without this call the entry would sit
+    /// in the store until `PendingQuestionExpirySweep` reaped it — up to
+    /// fifteen minutes of the card rendering a question already answered.
+    ///
+    /// One broadcast for the whole batch, and none at all for an empty list:
+    /// the app calls this only when its merge reported something, but a
+    /// malformed or duplicated request must not cost subscribers a delta.
+    func handleTerminalAskUserQuestionSatisfied(_ paramsData: Data) async throws -> RPCResponse {
+        let p = try decoder.decode(TerminalAskUserQuestionSatisfiedParams.self, from: paramsData)
+        guard !p.toolUseIDs.isEmpty else { return .ok() }
+        for toolUseID in p.toolUseIDs {
+            await pendingQuestions.clear(terminalID: p.terminalID, toolUseID: toolUseID)
+        }
+        await broadcastPendingQuestions(terminalID: p.terminalID)
+        askUserQuestionLog.debug("satisfied cleared terminalID=\(p.terminalID.uuidString, privacy: .public) count=\(p.toolUseIDs.count, privacy: .public)")
+        return .ok()
+    }
+
     /// Extracts a banner-friendly message from the raw AskUserQuestion
     /// `tool_input` JSON. The shape is
     /// `{"questions":[{"question":"...","header":"...","options":[...]}, ...]}`
