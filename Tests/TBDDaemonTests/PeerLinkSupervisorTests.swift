@@ -669,7 +669,13 @@ struct PeerLinkSupervisorTests {
                 let b = await betaOutcome.finished
                 return "alphaFinished=\(a) betaFinished=\(b)"
             }
-        ) { (await alphaOutcome.finished) || (await betaOutcome.finished) }
+        ) {
+            // Hoisted: `||` takes its right operand as a NON-async autoclosure,
+            // so an `await` there does not compile.
+            let alphaDone = await alphaOutcome.finished
+            let betaDone = await betaOutcome.finished
+            return alphaDone || betaDone
+        }
         let alphaWasRefused = await alphaOutcome.finished
         let betaWasRefused = await betaOutcome.finished
         #expect(
@@ -696,7 +702,13 @@ struct PeerLinkSupervisorTests {
                 let b = await betaOutcome.finished
                 return "alphaFinished=\(a) betaFinished=\(b) bytes=\(stub.stdinByteCount())"
             }
-        ) { (await alphaOutcome.finished) && (await betaOutcome.finished) }
+        ) {
+            // Hoisted for the same reason as above: `&&`'s right operand is a
+            // non-async autoclosure.
+            let alphaDone = await alphaOutcome.finished
+            let betaDone = await betaOutcome.finished
+            return alphaDone && betaDone
+        }
         await alphaSender.value
         await betaSender.value
         _ = try await waitFor(
